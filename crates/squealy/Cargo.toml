@@ -1,0 +1,9 @@
+[package]
+name = "squealy"
+version = "0.1.0"
+edition = "2024"
+description = "SQL ORM for Rust"
+license = "MIT"
+
+[dependencies]
+squealy-macros = { path = "../squealy-macros" }

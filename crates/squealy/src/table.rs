@@ -1,0 +1,106 @@
+use crate::Expr;
+
+/// Controls how table fields are represented.
+pub trait TableMode {
+    type T<'scope, U>;
+}
+
+/// Table fields are typed SQL expressions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExprMode {}
+
+impl TableMode for ExprMode {
+    type T<'scope, U> = Expr<'scope, U>;
+}
+
+/// Table fields are database column names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NameMode {}
+
+impl TableMode for NameMode {
+    type T<'scope, U> = &'static str;
+}
+
+/// Table fields are plain Rust values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ValueMode {}
+
+impl TableMode for ValueMode {
+    type T<'scope, U> = U;
+}
+
+/// A selected SQL expression and its output alias.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectColumn {
+    pub expr: String,
+    pub alias: &'static str,
+}
+
+impl SelectColumn {
+    pub fn new(expr: impl Into<String>, alias: &'static str) -> Self {
+        Self {
+            expr: expr.into(),
+            alias,
+        }
+    }
+}
+
+/// A table-shaped value whose expression columns can be projected or rebound to a SQL alias.
+pub trait Projectable: Clone {
+    fn project(&self) -> Vec<SelectColumn>;
+
+    fn re_alias(&self, alias: &str) -> Self;
+}
+
+impl<L, R> Projectable for (L, R)
+where
+    L: Projectable,
+    R: Projectable,
+{
+    fn project(&self) -> Vec<SelectColumn> {
+        let mut columns = Vec::new();
+        columns.extend(
+            self.0
+                .project()
+                .into_iter()
+                .map(|column| SelectColumn::new(column.expr, prefix_alias("left", column.alias))),
+        );
+        columns.extend(
+            self.1
+                .project()
+                .into_iter()
+                .map(|column| SelectColumn::new(column.expr, prefix_alias("right", column.alias))),
+        );
+        columns
+    }
+
+    fn re_alias(&self, alias: &str) -> Self {
+        (self.0.re_alias(alias), self.1.re_alias(alias))
+    }
+}
+
+fn prefix_alias(prefix: &str, alias: &str) -> &'static str {
+    Box::leak(format!("{prefix}_{alias}").into_boxed_str())
+}
+
+/// A database table model.
+pub trait Table {
+    type WithMode<'scope, Mode: TableMode>
+    where
+        Mode: 'scope;
+
+    /// Returns the default table name for this model.
+    fn table_name() -> &'static str;
+
+    /// Build expression-mode fields that refer to the supplied SQL alias.
+    fn columns<'scope>(
+        alias: &str,
+        columns: &Self::WithMode<'static, NameMode>,
+    ) -> Self::WithMode<'scope, ExprMode>;
+}
+
+/// Database schema metadata for a table-shaped value.
+pub struct TableSchema<S: Table> {
+    pub name: &'static str,
+    pub columns: S::WithMode<'static, NameMode>,
+}
