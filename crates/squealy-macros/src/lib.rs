@@ -33,31 +33,14 @@ impl TableStruct {
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
-        let columns = field_names
+        let fields = field_names
             .iter()
-            .map(|field| format!("{field}: ::squealy::Expr::column(alias, columns.{field})"))
-            .collect::<Vec<_>>()
-            .join(", ")
-            .parse::<proc_macro2::TokenStream>()
-            .expect("generated column initializers should parse");
-        let projections = field_names
+            .map(|field| proc_macro2::Ident::new(field, Span::call_site()))
+            .collect::<Vec<_>>();
+        let field_literals = field_names
             .iter()
-            .map(|field| {
-                format!(
-                    "::squealy::SelectColumn::new(self.{field}.to_sql().to_owned(), \"{field}\")"
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-            .parse::<proc_macro2::TokenStream>()
-            .expect("generated projections should parse");
-        let realias = field_names
-            .iter()
-            .map(|field| format!("{field}: ::squealy::Expr::column(alias, \"{field}\")"))
-            .collect::<Vec<_>>()
-            .join(", ")
-            .parse::<proc_macro2::TokenStream>()
-            .expect("generated alias initializers should parse");
+            .map(|field| Literal::string(field))
+            .collect::<Vec<_>>();
 
         quote::quote! {
             impl<'scope, Mode: ::squealy::TableMode> ::squealy::Table for #ident <'scope, Mode> {
@@ -69,21 +52,25 @@ impl TableStruct {
                     #table_name
                 }
 
-                fn columns<'next_scope>(
+                fn column_names() -> Self::WithMode<'static, ::squealy::NameMode> {
+                    #ident { #( #fields: #field_literals, )* }
+                }
+
+                fn columns_from<'next_scope>(
                     alias: &str,
                     columns: &Self::WithMode<'static, ::squealy::NameMode>,
                 ) -> Self::WithMode<'next_scope, ::squealy::ExprMode> {
-                    #ident { #columns }
+                    #ident { #( #fields: ::squealy::Expr::column(alias, columns.#fields), )* }
                 }
             }
 
             impl<'scope> ::squealy::Projectable for #ident <'scope, ::squealy::ExprMode> {
                 fn project(&self) -> ::std::vec::Vec<::squealy::SelectColumn> {
-                    ::std::vec![#projections]
+                    ::std::vec![#( ::squealy::SelectColumn::new(self.#fields.to_sql().to_owned(), #field_literals), )*]
                 }
 
                 fn re_alias(&self, alias: &str) -> Self {
-                    #ident { #realias }
+                    #ident { #( #fields: ::squealy::Expr::column(alias, #field_literals), )* }
                 }
             }
         }
