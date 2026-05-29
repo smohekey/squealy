@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::io::{self, Write};
 use std::marker::PhantomData;
 
 use crate::{Predicate, Projectable, SchemaTable, SelectColumn};
@@ -25,6 +26,11 @@ impl<T> Query<T> {
     /// Render this query to SQL.
     pub fn to_sql(&self) -> &str {
         &self.sql
+    }
+
+    /// Write this query's SQL to a writer.
+    pub fn write_sql(&self, writer: &mut impl Write) -> io::Result<()> {
+        self.select.write_sql(writer)
     }
 }
 
@@ -77,11 +83,18 @@ impl Select {
     }
 
     fn to_sql(&self) -> String {
-        let select = render_select(&self.columns);
-        let from = render_sources(&self.sources);
-        let filters = render_filters(&self.filters);
+        let mut sql = Vec::new();
+        self.write_sql(&mut sql)
+            .expect("writing SQL to a Vec should not fail");
+        String::from_utf8(sql).expect("generated SQL should be valid UTF-8")
+    }
 
-        format!("SELECT {select} {from}{filters}")
+    fn write_sql(&self, writer: &mut impl Write) -> io::Result<()> {
+        writer.write_all(b"SELECT ")?;
+        write_select(writer, &self.columns)?;
+        writer.write_all(b" ")?;
+        write_sources(writer, &self.sources)?;
+        write_filters(writer, &self.filters)
     }
 }
 
@@ -109,27 +122,35 @@ impl Source {
         }
     }
 
-    fn to_sql(&self, position: usize) -> String {
+    fn write_sql(&self, writer: &mut impl Write, position: usize) -> io::Result<()> {
         match (&self.kind, &self.target, position) {
             (SourceKind::From, SourceTarget::Table(table), _) => {
-                format!("FROM {table} AS {}", self.alias)
+                write!(writer, "FROM {table} AS {}", self.alias)
             }
             (SourceKind::From, SourceTarget::Query(query), _) => {
-                format!("FROM ({}) AS {}", query.to_sql(), self.alias)
+                writer.write_all(b"FROM (")?;
+                query.write_sql(writer)?;
+                write!(writer, ") AS {}", self.alias)
             }
             (SourceKind::InnerLateral, SourceTarget::Query(query), 0) => {
-                format!("FROM ({}) AS {}", query.to_sql(), self.alias)
+                writer.write_all(b"FROM (")?;
+                query.write_sql(writer)?;
+                write!(writer, ") AS {}", self.alias)
             }
-            (SourceKind::InnerLateral, SourceTarget::Query(query), _) => format!(
-                "INNER JOIN LATERAL ({}) AS {} ON TRUE",
-                query.to_sql(),
-                self.alias
-            ),
+            (SourceKind::InnerLateral, SourceTarget::Query(query), _) => {
+                writer.write_all(b"INNER JOIN LATERAL (")?;
+                query.write_sql(writer)?;
+                write!(writer, ") AS {} ON TRUE", self.alias)
+            }
             (SourceKind::InnerLateral, SourceTarget::Table(table), 0) => {
-                format!("FROM {table} AS {}", self.alias)
+                write!(writer, "FROM {table} AS {}", self.alias)
             }
             (SourceKind::InnerLateral, SourceTarget::Table(table), _) => {
-                format!("INNER JOIN LATERAL {table} AS {} ON TRUE", self.alias)
+                write!(
+                    writer,
+                    "INNER JOIN LATERAL {table} AS {} ON TRUE",
+                    self.alias
+                )
             }
         }
     }
@@ -245,34 +266,40 @@ where
     })
 }
 
-fn render_select(columns: &[SelectColumn]) -> String {
-    columns
-        .iter()
-        .map(|column| format!("{} AS {}", column.expr, column.alias))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn render_sources(sources: &[Source]) -> String {
-    sources
-        .iter()
-        .enumerate()
-        .map(|(index, source)| source.to_sql(index))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn render_filters(filters: &[Filter]) -> String {
-    if filters.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " WHERE {}",
-            filters
-                .iter()
-                .map(|filter| filter.predicate.as_str())
-                .collect::<Vec<_>>()
-                .join(" AND ")
-        )
+fn write_select(writer: &mut impl Write, columns: &[SelectColumn]) -> io::Result<()> {
+    for (index, column) in columns.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        write!(writer, "{} AS {}", column.expr, column.alias)?;
     }
+
+    Ok(())
+}
+
+fn write_sources(writer: &mut impl Write, sources: &[Source]) -> io::Result<()> {
+    for (index, source) in sources.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b" ")?;
+        }
+        source.write_sql(writer, index)?;
+    }
+
+    Ok(())
+}
+
+fn write_filters(writer: &mut impl Write, filters: &[Filter]) -> io::Result<()> {
+    if filters.is_empty() {
+        return Ok(());
+    }
+
+    writer.write_all(b" WHERE ")?;
+    for (index, filter) in filters.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b" AND ")?;
+        }
+        writer.write_all(filter.predicate.as_bytes())?;
+    }
+
+    Ok(())
 }
