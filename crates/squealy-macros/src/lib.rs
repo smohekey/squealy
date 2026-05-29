@@ -22,7 +22,7 @@ impl TableStruct {
     fn expand(&self) -> TokenStream {
         if !self.has_scope_and_mode {
             return compile_error(
-                "Table currently requires structs shaped like `Type<'scope, Mode: Column = ColumnExpr>`",
+                "Table currently requires structs shaped like `Type<'scope, Col: Column = ColumnExpr>`",
             );
         }
 
@@ -43,23 +43,23 @@ impl TableStruct {
             .collect::<Vec<_>>();
 
         quote::quote! {
-            impl<'scope, Mode: ::squealy::Column> ::squealy::Table for #ident <'scope, Mode> {
-                type WithMode<'next_scope, NextMode: ::squealy::Column> = #ident <'next_scope, NextMode>
+            impl<'scope, Col: ::squealy::Column> ::squealy::Table for #ident <'scope, Col> {
+                type WithColumn<'next_scope, NextColumn: ::squealy::Column> = #ident <'next_scope, NextColumn>
                 where
-                    NextMode: 'next_scope;
+                    NextColumn: 'next_scope;
 
                 fn name() -> &'static str {
                     #name
                 }
 
-                fn column_names() -> Self::WithMode<'static, ::squealy::ColumnName> {
+                fn column_names() -> Self::WithColumn<'static, ::squealy::ColumnName> {
                     #ident { #( #fields: #field_literals, )* }
                 }
 
                 fn columns_from<'next_scope>(
                     alias: &str,
-                    columns: &Self::WithMode<'static, ::squealy::ColumnName>,
-                ) -> Self::WithMode<'next_scope, ::squealy::ColumnExpr> {
+                    columns: &Self::WithColumn<'static, ::squealy::ColumnName>,
+                ) -> Self::WithColumn<'next_scope, ::squealy::ColumnExpr> {
                     #ident { #( #fields: ::squealy::Expr::column(alias, columns.#fields), )* }
                 }
             }
@@ -102,7 +102,7 @@ fn table_struct(input: TokenStream) -> Result<TableStruct, String> {
         .iter()
         .map(ToString::to_string)
         .collect::<String>()
-        .contains("'scope,Mode:");
+        .contains("'scope,Col:");
 
     let fields = match &tokens[body_index] {
         TokenTree::Group(group) => named_fields(group)?,

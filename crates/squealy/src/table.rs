@@ -85,24 +85,24 @@ fn prefix_alias(prefix: &str, alias: &str) -> &'static str {
 
 /// A database table model.
 pub trait Table {
-    type WithMode<'scope, Mode: Column>
+    type WithColumn<'scope, Col: Column>
     where
-        Mode: 'scope;
+        Col: 'scope;
 
     /// Returns the default table name for this model.
     fn name() -> &'static str;
 
     /// Returns the database column names for this model.
-    fn column_names() -> Self::WithMode<'static, ColumnName>;
+    fn column_names() -> Self::WithColumn<'static, ColumnName>;
 
     /// Build expression-mode fields that refer to the supplied SQL alias.
-    fn columns<'scope>(alias: &str) -> Self::WithMode<'scope, ColumnExpr> {
+    fn columns<'scope>(alias: &str) -> Self::WithColumn<'scope, ColumnExpr> {
         Self::columns_from(alias, &Self::column_names())
     }
 
     /// Build expression-mode fields from explicit database column names.
     fn columns_from<'scope>(
         alias: &str,
-        columns: &Self::WithMode<'static, ColumnName>,
-    ) -> Self::WithMode<'scope, ColumnExpr>;
+        columns: &Self::WithColumn<'static, ColumnName>,
+    ) -> Self::WithColumn<'scope, ColumnExpr>;
 }
