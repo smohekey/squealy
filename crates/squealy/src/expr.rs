@@ -32,8 +32,8 @@ impl<'scope, T> Expr<'scope, T> {
     }
 
     /// SQL equality.
-    pub fn equals(self, other: Self) -> Expr<'scope, bool> {
-        Expr::new(format!("({} = {})", self.sql, other.sql))
+    pub fn equals(self, other: Self) -> Predicate<'scope> {
+        Predicate::new(format!("({} = {})", self.sql, other.sql))
     }
 
     /// SQL numeric addition.
@@ -43,6 +43,43 @@ impl<'scope, T> Expr<'scope, T> {
 }
 
 impl<'scope, T> Clone for Expr<'scope, T> {
+    fn clone(&self) -> Self {
+        Self::new(self.sql.clone())
+    }
+}
+
+/// A typed SQL boolean predicate scoped to a query builder invocation.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Predicate<'scope> {
+    sql: String,
+    _phantom: PhantomData<&'scope ()>,
+}
+
+impl<'scope> Predicate<'scope> {
+    pub(crate) fn new(sql: impl Into<String>) -> Self {
+        Self {
+            sql: sql.into(),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Render this predicate as SQL.
+    pub fn to_sql(&self) -> &str {
+        &self.sql
+    }
+
+    /// SQL conjunction.
+    pub fn and(self, other: Self) -> Self {
+        Self::new(format!("({} AND {})", self.sql, other.sql))
+    }
+
+    /// SQL disjunction.
+    pub fn or(self, other: Self) -> Self {
+        Self::new(format!("({} OR {})", self.sql, other.sql))
+    }
+}
+
+impl<'scope> Clone for Predicate<'scope> {
     fn clone(&self) -> Self {
         Self::new(self.sql.clone())
     }
