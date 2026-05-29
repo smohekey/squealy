@@ -40,7 +40,7 @@ mod tests {
     fn derive_table_populates_table_metadata() {
         let columns = <User as Table>::column_names();
 
-        assert_eq!(<User as Table>::table_name(), "users");
+        assert_eq!(<User as Table>::name(), "users");
         assert_eq!(columns.id, "id");
         assert_eq!(columns.name, "name");
     }
