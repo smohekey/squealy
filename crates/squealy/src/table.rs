@@ -74,6 +74,10 @@ pub trait Column: Sync {
 
 /// Database schema metadata for a foreign-key reference.
 pub trait ForeignKey: Sync {
+    fn schema_name(&self) -> Option<&'static str> {
+        None
+    }
+
     fn table(&self) -> &'static str;
 
     fn column(&self) -> &'static str;
@@ -154,14 +158,44 @@ fn prefix_alias(prefix: &str, alias: &str) -> String {
     format!("{prefix}_{alias}")
 }
 
+/// A database schema namespace that can contain tables.
+pub trait Schema {
+    fn name() -> Option<&'static str>;
+}
+
+/// The default schema namespace for backends that do not need explicit qualification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DefaultSchema {}
+
+impl Schema for DefaultSchema {
+    fn name() -> Option<&'static str> {
+        None
+    }
+}
+
 /// A database table model.
 pub trait Table {
+    type Schema: Schema;
+
     type WithColumn<'scope, C: ColumnMode>
     where
         C: 'scope;
 
+    /// Returns the containing schema namespace for this model, if one is configured.
+    fn schema_name() -> Option<&'static str> {
+        <Self::Schema as Schema>::name()
+    }
+
     /// Returns the default table name for this model.
     fn name() -> &'static str;
+
+    /// Returns the schema-qualified table name for this model.
+    fn qualified_name() -> Cow<'static, str> {
+        match Self::schema_name() {
+            Some(schema) => Cow::Owned(format!("{schema}.{}", Self::name())),
+            None => Cow::Borrowed(Self::name()),
+        }
+    }
 
     /// Returns the table's database column schema metadata.
     fn columns() -> &'static [&'static dyn Column];

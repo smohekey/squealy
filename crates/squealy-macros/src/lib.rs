@@ -18,7 +18,8 @@ use proc_macro2::{Literal, Span};
         db_type,
         references,
         check,
-        column_name
+        column_name,
+        schema
     )
 )]
 pub fn derive_table(input: TokenStream) -> TokenStream {
@@ -32,6 +33,7 @@ struct TableStruct {
     ident: Ident,
     fields: Vec<Field>,
     indexes: Vec<IndexAttrs>,
+    schema: Option<proc_macro2::TokenStream>,
     has_scope_and_mode: bool,
 }
 
@@ -44,6 +46,12 @@ struct IndexAttrs {
     name: Option<String>,
     columns: Vec<Ident>,
     unique: bool,
+}
+
+#[derive(Default)]
+struct TableAttrs {
+    indexes: Vec<IndexAttrs>,
+    schema: Option<proc_macro2::TokenStream>,
 }
 
 #[derive(Default)]
@@ -62,8 +70,8 @@ struct FieldAttrs {
 
 #[derive(Default)]
 struct ForeignKeyAttrs {
-    table: Option<String>,
-    column: Option<String>,
+    table: Option<Ident>,
+    column: Option<Ident>,
     on_delete: Option<String>,
     on_update: Option<String>,
 }
@@ -138,6 +146,10 @@ impl TableStruct {
         let indexes_static = generated_ident(&ident, "indexes", "Static");
         let columns_len = Literal::usize_unsuffixed(column_idents.len());
         let indexes_len = Literal::usize_unsuffixed(index_idents.len());
+        let schema = self
+            .schema
+            .clone()
+            .unwrap_or_else(|| quote::quote! { ::squealy::DefaultSchema });
 
         quote::quote! {
             #(#foreign_key_defs)*
@@ -148,6 +160,8 @@ impl TableStruct {
             static #indexes_static: [&'static dyn ::squealy::Index; #indexes_len] = [#( &#index_idents, )*];
 
             impl<'scope, C: ::squealy::ColumnMode> ::squealy::Table for #ident <'scope, C> {
+                type Schema = #schema;
+
                 type WithColumn<'next_scope, NextC: ::squealy::ColumnMode> = #ident <'next_scope, NextC>
                 where
                     NextC: 'next_scope;
@@ -305,8 +319,22 @@ impl Field {
     ) -> Option<proc_macro2::TokenStream> {
         let references = self.attrs.references.as_ref()?;
         let foreign_key_ident = foreign_key_ident(column_ident);
-        let table = Literal::string(references.table.as_deref().unwrap_or(""));
-        let column = Literal::string(references.column.as_deref().unwrap_or("id"));
+        let table = proc_macro2::Ident::new(
+            &references
+                .table
+                .as_ref()
+                .expect("foreign keys should have a table before code generation")
+                .to_string(),
+            Span::call_site(),
+        );
+        let column = proc_macro2::Ident::new(
+            &references
+                .column
+                .as_ref()
+                .expect("foreign keys should have a column before code generation")
+                .to_string(),
+            Span::call_site(),
+        );
         let on_delete = option_literal(references.on_delete.as_deref());
         let on_update = option_literal(references.on_update.as_deref());
 
@@ -314,8 +342,17 @@ impl Field {
             struct #foreign_key_ident;
 
             impl ::squealy::ForeignKey for #foreign_key_ident {
-                fn table(&self) -> &'static str { #table }
-                fn column(&self) -> &'static str { #column }
+                fn schema_name(&self) -> Option<&'static str> {
+                    <#table <'static, ::squealy::ColumnName> as ::squealy::Table>::schema_name()
+                }
+
+                fn table(&self) -> &'static str {
+                    <#table <'static, ::squealy::ColumnName> as ::squealy::Table>::name()
+                }
+
+                fn column(&self) -> &'static str {
+                    <#table <'static, ::squealy::ColumnName> as ::squealy::Table>::column_names().#column
+                }
                 fn on_delete(&self) -> Option<&'static str> { #on_delete }
                 fn on_update(&self) -> Option<&'static str> { #on_update }
             }
@@ -402,19 +439,20 @@ fn table_struct(input: TokenStream) -> Result<TableStruct, String> {
         TokenTree::Group(group) => named_fields(group)?,
         _ => unreachable!(),
     };
-    let indexes = table_indexes(&tokens[..struct_index])?;
-    validate_index_columns(&indexes, &fields)?;
+    let table_attrs = table_attributes(&tokens[..struct_index])?;
+    validate_index_columns(&table_attrs.indexes, &fields)?;
 
     Ok(TableStruct {
         ident,
         fields,
-        indexes,
+        indexes: table_attrs.indexes,
+        schema: table_attrs.schema,
         has_scope_and_mode,
     })
 }
 
-fn table_indexes(tokens: &[TokenTree]) -> Result<Vec<IndexAttrs>, String> {
-    let mut indexes = Vec::new();
+fn table_attributes(tokens: &[TokenTree]) -> Result<TableAttrs, String> {
+    let mut attrs = TableAttrs::default();
     let mut iter = tokens.iter();
 
     while let Some(token) = iter.next() {
@@ -425,33 +463,47 @@ fn table_indexes(tokens: &[TokenTree]) -> Result<Vec<IndexAttrs>, String> {
         let Some(TokenTree::Group(attr)) = iter.next() else {
             return Err("Table attribute is missing its bracketed body".to_owned());
         };
-        let Some(index) = table_index(attr)? else {
-            continue;
-        };
-        indexes.push(index);
+        apply_table_attribute(attr, &mut attrs)?;
     }
 
-    Ok(indexes)
+    Ok(attrs)
 }
 
-fn table_index(group: &Group) -> Result<Option<IndexAttrs>, String> {
+fn apply_table_attribute(group: &Group, attrs: &mut TableAttrs) -> Result<(), String> {
     if group.delimiter() != Delimiter::Bracket {
         return Err("Table attributes must use square brackets".to_owned());
     }
 
     let mut tokens = group.stream().into_iter();
     let Some(TokenTree::Ident(attr_name)) = tokens.next() else {
-        return Ok(None);
+        return Ok(());
     };
-    if attr_name.to_string() != "index" {
-        return Ok(None);
+
+    match attr_name.to_string().as_str() {
+        "index" => {
+            let Some(TokenTree::Group(meta)) = tokens.next() else {
+                return Err(
+                    "table-level #[index(...)] requires metadata inside parentheses".to_owned(),
+                );
+            };
+            attrs
+                .indexes
+                .push(parse_index(meta.stream().into_iter().collect::<Vec<_>>())?);
+        }
+        "schema" => {
+            let Some(TokenTree::Group(schema)) = tokens.next() else {
+                return Err("table-level #[schema(...)] requires a schema type".to_owned());
+            };
+            let schema_tokens = schema.stream();
+            if schema_tokens.is_empty() {
+                return Err("table-level #[schema(...)] requires a schema type".to_owned());
+            }
+            attrs.schema = Some(proc_macro2::TokenStream::from(schema_tokens));
+        }
+        _ => {}
     }
 
-    let Some(TokenTree::Group(meta)) = tokens.next() else {
-        return Err("table-level #[index(...)] requires metadata inside parentheses".to_owned());
-    };
-
-    parse_index(meta.stream().into_iter().collect::<Vec<_>>()).map(Some)
+    Ok(())
 }
 
 fn parse_index(tokens: Vec<TokenTree>) -> Result<IndexAttrs, String> {
@@ -658,15 +710,13 @@ fn parse_meta_item(
 
 fn parse_references(value_tokens: &[TokenTree]) -> Result<ForeignKeyAttrs, String> {
     let Some(TokenTree::Group(group)) = value_tokens.first() else {
-        return Err(
-            "references requires metadata like references(table = \"users\", column = \"id\")"
-                .to_owned(),
-        );
+        return Err("references requires metadata like references(User::id)".to_owned());
     };
 
     let mut references = ForeignKeyAttrs::default();
-    let mut index = 0;
     let tokens = group.stream().into_iter().collect::<Vec<_>>();
+    let mut index = parse_reference_target(&tokens, &mut references)?;
+
     while index < tokens.len() {
         while matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == ',') {
             index += 1;
@@ -693,19 +743,47 @@ fn parse_references(value_tokens: &[TokenTree]) -> Result<ForeignKeyAttrs, Strin
         index += 1;
 
         match name.as_str() {
-            "table" => references.table = Some(value),
-            "column" => references.column = Some(value),
             "on_delete" => references.on_delete = Some(value),
             "on_update" => references.on_update = Some(value),
             _ => return Err(format!("unsupported references option `{name}`")),
         }
     }
 
-    if references.table.is_none() {
-        return Err("references requires `table = \"...\"`".to_owned());
+    if references.table.is_none() || references.column.is_none() {
+        return Err("references requires a table field path like `User::id`".to_owned());
     }
 
     Ok(references)
+}
+
+fn parse_reference_target(
+    tokens: &[TokenTree],
+    references: &mut ForeignKeyAttrs,
+) -> Result<usize, String> {
+    let target_end = tokens
+        .iter()
+        .position(|token| matches!(token, TokenTree::Punct(punct) if punct.as_char() == ','))
+        .unwrap_or(tokens.len());
+    let target = &tokens[..target_end];
+
+    let [
+        TokenTree::Ident(table),
+        TokenTree::Punct(first_colon),
+        TokenTree::Punct(second_colon),
+        TokenTree::Ident(column),
+    ] = target
+    else {
+        return Err("references requires a table field path like `User::id`".to_owned());
+    };
+
+    if first_colon.as_char() != ':' || second_colon.as_char() != ':' {
+        return Err("references requires a table field path like `User::id`".to_owned());
+    }
+
+    references.table = Some(table.clone());
+    references.column = Some(column.clone());
+
+    Ok(target_end)
 }
 
 fn required_literal(name: &str, value_tokens: &[TokenTree]) -> Result<String, String> {
