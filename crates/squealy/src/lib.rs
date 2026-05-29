@@ -44,53 +44,84 @@ mod tests {
     struct TestGenerator;
 
     impl Generator for TestGenerator {
-        fn create_table_statement(&self, schema: &TableSchema) -> String {
-            let columns = schema
-                .columns
-                .iter()
-                .map(|column| self.column_definition(column))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("CREATE TABLE {} ({columns})", schema.name)
+        fn write_create_table_statement(
+            &self,
+            schema: &TableSchema,
+            writer: &mut impl std::io::Write,
+        ) -> std::io::Result<()> {
+            write!(writer, "CREATE TABLE {} (", schema.name)?;
+            for (index, column) in schema.columns.iter().enumerate() {
+                if index > 0 {
+                    writer.write_all(b", ")?;
+                }
+                self.write_column_definition(column, writer)?;
+            }
+            writer.write_all(b")")
         }
 
-        fn create_index_statement(&self, table: &TableSchema, index: &IndexSchema) -> String {
+        fn write_create_index_statement(
+            &self,
+            table: &TableSchema,
+            index: &IndexSchema,
+            writer: &mut impl std::io::Write,
+        ) -> std::io::Result<()> {
             let unique = if index.unique { "UNIQUE " } else { "" };
             let name = index.name.unwrap_or("unnamed_idx");
             let columns = index.columns.join(", ");
-            format!("CREATE {unique}INDEX {name} ON {} ({columns})", table.name)
+            write!(
+                writer,
+                "CREATE {unique}INDEX {name} ON {} ({columns})",
+                table.name
+            )
         }
 
-        fn column_definition(&self, column: &ColumnSchema) -> String {
-            let mut definition = format!("{} {}", column.name, column.db_type.unwrap_or("text"));
+        fn write_column_definition(
+            &self,
+            column: &ColumnSchema,
+            writer: &mut impl std::io::Write,
+        ) -> std::io::Result<()> {
+            write!(
+                writer,
+                "{} {}",
+                column.name,
+                column.db_type.unwrap_or("text")
+            )?;
             if column.primary_key {
-                definition.push_str(" PRIMARY KEY");
+                writer.write_all(b" PRIMARY KEY")?;
             }
             if column.auto_increment {
-                definition.push_str(" AUTOINCREMENT");
+                writer.write_all(b" AUTOINCREMENT")?;
             }
             if !column.nullable {
-                definition.push_str(" NOT NULL");
+                writer.write_all(b" NOT NULL")?;
             }
             if let Some(default) = column.default {
-                definition.push_str(&format!(" DEFAULT {default}"));
+                write!(writer, " DEFAULT {default}")?;
             }
             if let Some(reference) = column.references {
-                definition.push(' ');
-                definition.push_str(&self.foreign_key_reference(&reference));
+                writer.write_all(b" ")?;
+                self.write_foreign_key_reference(&reference, writer)?;
             }
-            definition
+            Ok(())
         }
 
-        fn foreign_key_reference(&self, reference: &ForeignKeySchema) -> String {
-            let mut sql = format!("REFERENCES {}({})", reference.table, reference.column);
+        fn write_foreign_key_reference(
+            &self,
+            reference: &ForeignKeySchema,
+            writer: &mut impl std::io::Write,
+        ) -> std::io::Result<()> {
+            write!(
+                writer,
+                "REFERENCES {}({})",
+                reference.table, reference.column
+            )?;
             if let Some(on_delete) = reference.on_delete {
-                sql.push_str(&format!(" ON DELETE {on_delete}"));
+                write!(writer, " ON DELETE {on_delete}")?;
             }
             if let Some(on_update) = reference.on_update {
-                sql.push_str(&format!(" ON UPDATE {on_update}"));
+                write!(writer, " ON UPDATE {on_update}")?;
             }
-            sql
+            Ok(())
         }
     }
 
@@ -139,16 +170,16 @@ mod tests {
 
     #[test]
     fn generator_creates_schema_sql() {
-        let statements = TestGenerator.create_table(&<User as Table>::schema());
+        let mut sql = Vec::new();
+        TestGenerator
+            .create_table(&<User as Table>::schema(), &mut sql)
+            .unwrap();
+        let sql = String::from_utf8(sql).unwrap();
 
-        assert_eq!(
-            statements[0],
+        assert!(sql.contains(
             "CREATE TABLE users (id text PRIMARY KEY AUTOINCREMENT NOT NULL, name text DEFAULT anonymous)"
-        );
-        assert_eq!(
-            statements[3],
-            "CREATE UNIQUE INDEX users_name_id_idx ON users (name, id)"
-        );
+        ));
+        assert!(sql.contains("CREATE UNIQUE INDEX users_name_id_idx ON users (name, id)"));
     }
 
     #[test]
