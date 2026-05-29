@@ -22,7 +22,7 @@ impl TableStruct {
     fn expand(&self) -> TokenStream {
         if !self.has_scope_and_mode {
             return compile_error(
-                "Table currently requires structs shaped like `Type<'scope, Col: Column = ColumnExpr>`",
+                "Table currently requires structs shaped like `Type<'scope, Column: crate::Column = ColumnExpr>`",
             );
         }
 
@@ -43,7 +43,7 @@ impl TableStruct {
             .collect::<Vec<_>>();
 
         quote::quote! {
-            impl<'scope, Col: ::squealy::Column> ::squealy::Table for #ident <'scope, Col> {
+            impl<'scope, Column: ::squealy::Column> ::squealy::Table for #ident <'scope, Column> {
                 type WithColumn<'next_scope, NextColumn: ::squealy::Column> = #ident <'next_scope, NextColumn>
                 where
                     NextColumn: 'next_scope;
@@ -102,7 +102,7 @@ fn table_struct(input: TokenStream) -> Result<TableStruct, String> {
         .iter()
         .map(ToString::to_string)
         .collect::<String>()
-        .contains("'scope,Col:");
+        .contains("'scope,Column:");
 
     let fields = match &tokens[body_index] {
         TokenTree::Group(group) => named_fields(group)?,
