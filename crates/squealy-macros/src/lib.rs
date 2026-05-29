@@ -1,10 +1,26 @@
 //! Procedural macros for squealy.
 
-use proc_macro::{Delimiter, Group, Ident, TokenStream, TokenTree};
+use proc_macro::{Delimiter, Group, Ident, Literal as ProcLiteral, TokenStream, TokenTree};
 use proc_macro2::{Literal, Span};
 
 /// Derives squealy table metadata for generic table-mode structs.
-#[proc_macro_derive(Table)]
+#[proc_macro_derive(
+    Table,
+    attributes(
+        squealy,
+        primary_key,
+        index,
+        unique,
+        nullable,
+        not_null,
+        auto_increment,
+        default,
+        db_type,
+        references,
+        check,
+        column_name
+    )
+)]
 pub fn derive_table(input: TokenStream) -> TokenStream {
     match table_struct(input) {
         Ok(table) => table.expand(),
@@ -14,8 +30,35 @@ pub fn derive_table(input: TokenStream) -> TokenStream {
 
 struct TableStruct {
     ident: Ident,
-    fields: Vec<Ident>,
+    fields: Vec<Field>,
     has_scope_and_mode: bool,
+}
+
+struct Field {
+    ident: Ident,
+    attrs: FieldAttrs,
+}
+
+#[derive(Default)]
+struct FieldAttrs {
+    column_name: Option<String>,
+    primary_key: bool,
+    index: bool,
+    unique: bool,
+    nullable: Option<bool>,
+    auto_increment: bool,
+    default: Option<String>,
+    db_type: Option<String>,
+    check: Option<String>,
+    references: Option<ForeignKeyAttrs>,
+}
+
+#[derive(Default)]
+struct ForeignKeyAttrs {
+    table: Option<String>,
+    column: Option<String>,
+    on_delete: Option<String>,
+    on_update: Option<String>,
 }
 
 impl TableStruct {
@@ -28,18 +71,26 @@ impl TableStruct {
 
         let ident = proc_macro2::Ident::new(&self.ident.to_string(), Span::call_site());
         let name = Literal::string(&to_snake_plural(&ident.to_string()));
-        let field_names = self
+        let fields = self
             .fields
             .iter()
-            .map(ToString::to_string)
+            .map(|field| proc_macro2::Ident::new(&field.ident.to_string(), Span::call_site()))
             .collect::<Vec<_>>();
-        let fields = field_names
+        let field_literals = self
+            .fields
             .iter()
-            .map(|field| proc_macro2::Ident::new(field, Span::call_site()))
+            .map(|field| Literal::string(&field.column_name()))
             .collect::<Vec<_>>();
-        let field_literals = field_names
+        let schema_columns = self
+            .fields
             .iter()
-            .map(|field| Literal::string(field))
+            .map(Field::schema_column_tokens)
+            .collect::<Vec<_>>();
+        let schema_indexes = self
+            .fields
+            .iter()
+            .filter(|field| field.attrs.index)
+            .map(Field::schema_index_tokens)
             .collect::<Vec<_>>();
 
         quote::quote! {
@@ -50,6 +101,14 @@ impl TableStruct {
 
                 fn name() -> &'static str {
                     #name
+                }
+
+                fn schema() -> ::squealy::TableSchema {
+                    ::squealy::TableSchema {
+                        name: #name,
+                        columns: &[#( #schema_columns, )*],
+                        indexes: &[#( #schema_indexes, )*],
+                    }
                 }
 
                 fn column_names() -> Self::WithColumn<'static, ::squealy::ColumnName> {
@@ -75,6 +134,77 @@ impl TableStruct {
             }
         }
         .into()
+    }
+}
+
+impl Field {
+    fn column_name(&self) -> String {
+        self.attrs
+            .column_name
+            .clone()
+            .unwrap_or_else(|| self.ident.to_string())
+    }
+
+    fn schema_column_tokens(&self) -> proc_macro2::TokenStream {
+        let name = Literal::string(&self.column_name());
+        let primary_key = bool_tokens(self.attrs.primary_key);
+        let indexed = bool_tokens(self.attrs.index);
+        let unique = bool_tokens(self.attrs.unique);
+        let nullable = bool_tokens(self.attrs.nullable.unwrap_or(false));
+        let auto_increment = bool_tokens(self.attrs.auto_increment);
+        let default = option_literal(self.attrs.default.as_deref());
+        let db_type = option_literal(self.attrs.db_type.as_deref());
+        let check = option_literal(self.attrs.check.as_deref());
+        let references = self.references_tokens();
+
+        quote::quote! {
+            ::squealy::ColumnSchema {
+                name: #name,
+                primary_key: #primary_key,
+                indexed: #indexed,
+                unique: #unique,
+                nullable: #nullable,
+                auto_increment: #auto_increment,
+                default: #default,
+                db_type: #db_type,
+                check: #check,
+                references: #references,
+            }
+        }
+    }
+
+    fn schema_index_tokens(&self) -> proc_macro2::TokenStream {
+        let name = option_literal(None);
+        let column_name = Literal::string(&self.column_name());
+        let unique = bool_tokens(self.attrs.unique);
+
+        quote::quote! {
+            ::squealy::IndexSchema {
+                name: #name,
+                columns: &[#column_name],
+                unique: #unique,
+            }
+        }
+    }
+
+    fn references_tokens(&self) -> proc_macro2::TokenStream {
+        let Some(references) = &self.attrs.references else {
+            return quote::quote! { None };
+        };
+
+        let table = Literal::string(references.table.as_deref().unwrap_or(""));
+        let column = Literal::string(references.column.as_deref().unwrap_or("id"));
+        let on_delete = option_literal(references.on_delete.as_deref());
+        let on_update = option_literal(references.on_update.as_deref());
+
+        quote::quote! {
+            Some(::squealy::ForeignKeySchema {
+                table: #table,
+                column: #column,
+                on_delete: #on_delete,
+                on_update: #on_update,
+            })
+        }
     }
 }
 
@@ -116,18 +246,30 @@ fn table_struct(input: TokenStream) -> Result<TableStruct, String> {
     })
 }
 
-fn named_fields(group: &Group) -> Result<Vec<Ident>, String> {
+fn named_fields(group: &Group) -> Result<Vec<Field>, String> {
     let mut fields = Vec::new();
+    let mut pending_attrs = FieldAttrs::default();
     let mut iter = group.stream().into_iter().peekable();
 
     while let Some(token) = iter.next() {
+        if is_attribute_start(&token) {
+            let Some(TokenTree::Group(attr)) = iter.next() else {
+                return Err("Table field attribute is missing its bracketed body".to_owned());
+            };
+            apply_attribute(&attr, &mut pending_attrs)?;
+            continue;
+        }
+
         let TokenTree::Ident(ident) = token else {
             continue;
         };
 
         if let Some(TokenTree::Punct(punct)) = iter.peek() {
             if punct.as_char() == ':' && punct.spacing() == proc_macro::Spacing::Alone {
-                fields.push(ident);
+                fields.push(Field {
+                    ident,
+                    attrs: std::mem::take(&mut pending_attrs),
+                });
             }
         }
     }
@@ -137,6 +279,180 @@ fn named_fields(group: &Group) -> Result<Vec<Ident>, String> {
     } else {
         Ok(fields)
     }
+}
+
+fn apply_attribute(group: &Group, attrs: &mut FieldAttrs) -> Result<(), String> {
+    if group.delimiter() != Delimiter::Bracket {
+        return Err("Table field attributes must use square brackets".to_owned());
+    }
+
+    let mut tokens = group.stream().into_iter();
+    let Some(TokenTree::Ident(attr_name)) = tokens.next() else {
+        return Ok(());
+    };
+    let attr_name = attr_name.to_string();
+    let rest = tokens.collect::<Vec<_>>();
+
+    if attr_name == "squealy" {
+        let Some(TokenTree::Group(meta)) = rest.first() else {
+            return Err("#[squealy(...)] requires metadata inside parentheses".to_owned());
+        };
+        parse_meta_items(meta.stream().into_iter().collect::<Vec<_>>(), attrs)
+    } else if matches!(rest.first(), Some(TokenTree::Punct(punct)) if punct.as_char() == '=') {
+        parse_meta_item(&attr_name, &rest[1..], attrs)
+    } else {
+        parse_meta_item(&attr_name, &rest, attrs)
+    }
+}
+
+fn parse_meta_items(tokens: Vec<TokenTree>, attrs: &mut FieldAttrs) -> Result<(), String> {
+    let mut index = 0;
+    while index < tokens.len() {
+        while matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == ',') {
+            index += 1;
+        }
+
+        let Some(TokenTree::Ident(name)) = tokens.get(index) else {
+            break;
+        };
+        let name = name.to_string();
+        index += 1;
+
+        let mut value_tokens = Vec::new();
+        if matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '=') {
+            index += 1;
+            while index < tokens.len()
+                && !matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == ',')
+            {
+                value_tokens.push(tokens[index].clone());
+                index += 1;
+            }
+        } else if let Some(TokenTree::Group(group)) = tokens.get(index) {
+            value_tokens.push(TokenTree::Group(group.clone()));
+            index += 1;
+        }
+
+        parse_meta_item(&name, &value_tokens, attrs)?;
+    }
+
+    Ok(())
+}
+
+fn parse_meta_item(
+    name: &str,
+    value_tokens: &[TokenTree],
+    attrs: &mut FieldAttrs,
+) -> Result<(), String> {
+    match name {
+        "primary_key" => attrs.primary_key = true,
+        "index" => attrs.index = true,
+        "unique" => attrs.unique = true,
+        "nullable" => attrs.nullable = Some(true),
+        "not_null" => attrs.nullable = Some(false),
+        "auto_increment" => attrs.auto_increment = true,
+        "default" => attrs.default = Some(required_literal(name, value_tokens)?),
+        "db_type" => attrs.db_type = Some(required_literal(name, value_tokens)?),
+        "check" => attrs.check = Some(required_literal(name, value_tokens)?),
+        "column_name" | "name" => attrs.column_name = Some(required_literal(name, value_tokens)?),
+        "references" => attrs.references = Some(parse_references(value_tokens)?),
+        _ => return Err(format!("unsupported Table field attribute `{name}`")),
+    }
+
+    Ok(())
+}
+
+fn parse_references(value_tokens: &[TokenTree]) -> Result<ForeignKeyAttrs, String> {
+    let Some(TokenTree::Group(group)) = value_tokens.first() else {
+        return Err(
+            "references requires metadata like references(table = \"users\", column = \"id\")"
+                .to_owned(),
+        );
+    };
+
+    let mut references = ForeignKeyAttrs::default();
+    let mut index = 0;
+    let tokens = group.stream().into_iter().collect::<Vec<_>>();
+    while index < tokens.len() {
+        while matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == ',') {
+            index += 1;
+        }
+
+        let Some(TokenTree::Ident(name)) = tokens.get(index) else {
+            break;
+        };
+        let name = name.to_string();
+        index += 1;
+
+        if !matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '=') {
+            return Err(format!(
+                "references option `{name}` requires a string value"
+            ));
+        }
+        index += 1;
+
+        let value = match tokens.get(index) {
+            Some(TokenTree::Literal(literal)) => literal_string(literal),
+            Some(token) => token.to_string(),
+            None => return Err(format!("references option `{name}` is missing a value")),
+        };
+        index += 1;
+
+        match name.as_str() {
+            "table" => references.table = Some(value),
+            "column" => references.column = Some(value),
+            "on_delete" => references.on_delete = Some(value),
+            "on_update" => references.on_update = Some(value),
+            _ => return Err(format!("unsupported references option `{name}`")),
+        }
+    }
+
+    if references.table.is_none() {
+        return Err("references requires `table = \"...\"`".to_owned());
+    }
+
+    Ok(references)
+}
+
+fn required_literal(name: &str, value_tokens: &[TokenTree]) -> Result<String, String> {
+    let Some(token) = value_tokens.first() else {
+        return Err(format!("attribute `{name}` requires a string value"));
+    };
+
+    Ok(match token {
+        TokenTree::Literal(literal) => literal_string(literal),
+        token => token.to_string(),
+    })
+}
+
+fn literal_string(literal: &ProcLiteral) -> String {
+    let value = literal.to_string();
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(&value)
+        .to_owned()
+}
+
+fn bool_tokens(value: bool) -> proc_macro2::TokenStream {
+    if value {
+        quote::quote! { true }
+    } else {
+        quote::quote! { false }
+    }
+}
+
+fn option_literal(value: Option<&str>) -> proc_macro2::TokenStream {
+    match value {
+        Some(value) => {
+            let value = Literal::string(value);
+            quote::quote! { Some(#value) }
+        }
+        None => quote::quote! { None },
+    }
+}
+
+fn is_attribute_start(token: &TokenTree) -> bool {
+    matches!(token, TokenTree::Punct(punct) if punct.as_char() == '#')
 }
 
 fn matches_ident(token: &TokenTree, expected: &str) -> bool {

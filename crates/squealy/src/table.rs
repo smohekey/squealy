@@ -29,6 +29,46 @@ impl Column for ColumnValue {
     type Type<'scope, U> = U;
 }
 
+/// Database schema metadata for a table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableSchema {
+    pub name: &'static str,
+    pub columns: &'static [ColumnSchema],
+    pub indexes: &'static [IndexSchema],
+}
+
+/// Database schema metadata for a single column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColumnSchema {
+    pub name: &'static str,
+    pub primary_key: bool,
+    pub indexed: bool,
+    pub unique: bool,
+    pub nullable: bool,
+    pub auto_increment: bool,
+    pub default: Option<&'static str>,
+    pub db_type: Option<&'static str>,
+    pub check: Option<&'static str>,
+    pub references: Option<ForeignKeySchema>,
+}
+
+/// Database schema metadata for a foreign-key reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForeignKeySchema {
+    pub table: &'static str,
+    pub column: &'static str,
+    pub on_delete: Option<&'static str>,
+    pub on_update: Option<&'static str>,
+}
+
+/// Database schema metadata for an index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IndexSchema {
+    pub name: Option<&'static str>,
+    pub columns: &'static [&'static str],
+    pub unique: bool,
+}
+
 /// A selected SQL expression and its output alias.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectColumn {
@@ -91,6 +131,9 @@ pub trait Table {
 
     /// Returns the default table name for this model.
     fn name() -> &'static str;
+
+    /// Returns the database schema for this model.
+    fn schema() -> TableSchema;
 
     /// Returns the database column names for this model.
     fn column_names() -> Self::WithColumn<'static, ColumnName>;
