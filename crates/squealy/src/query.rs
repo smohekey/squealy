@@ -42,7 +42,10 @@ impl Query<()> {
     {
         let project = S::column_exprs("t0");
         let select = render_select(project.project());
-        Query::new(format!("SELECT {select} FROM {} AS t0", S::name()), project)
+        Query::new(
+            format!("SELECT {select} FROM {} AS t0", S::qualified_name()),
+            project,
+        )
     }
 }
 

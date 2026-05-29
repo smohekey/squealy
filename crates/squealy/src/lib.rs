@@ -12,15 +12,24 @@ pub use generator::Generator;
 pub use query::{Q, Query, query};
 pub use squealy_macros::Table;
 pub use table::{
-    Column, ColumnExpr, ColumnMode, ColumnName, ColumnValue, ForeignKey, Index, Projectable,
-    SelectColumn, Table,
+    Column, ColumnExpr, ColumnMode, ColumnName, ColumnValue, DefaultSchema, ForeignKey, Index,
+    Projectable, Schema, SelectColumn, Table,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    enum Public {}
+
+    impl Schema for Public {
+        fn name() -> Option<&'static str> {
+            Some("public")
+        }
+    }
+
     #[derive(Clone, Debug, PartialEq, Table)]
+    #[schema(Public)]
     #[index(name = "users_name_id_idx", columns = [name, id], unique)]
     struct User<'scope, C: ColumnMode = ColumnExpr> {
         #[column(primary_key, auto_increment, index)]
@@ -33,10 +42,7 @@ mod tests {
     struct Post<'scope, C: ColumnMode = ColumnExpr> {
         #[column(primary_key)]
         id: C::Type<'scope, i32>,
-        #[column(
-            index,
-            references(table = "users", column = "id", on_delete = "cascade")
-        )]
+        #[column(index, references(User::id, on_delete = "cascade"))]
         user_id: C::Type<'scope, i32>,
         body: C::Type<'scope, String>,
     }
@@ -45,7 +51,7 @@ mod tests {
 
     impl Generator for TestGenerator {
         fn write_table<T: Table>(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-            write!(writer, "CREATE TABLE {} (", T::name())?;
+            write!(writer, "CREATE TABLE {} (", T::qualified_name())?;
             for (index, column) in T::columns().iter().enumerate() {
                 if index > 0 {
                     writer.write_all(b", ")?;
@@ -71,7 +77,11 @@ mod tests {
                 if let Some(reference) = column.references() {
                     write!(
                         writer,
-                        " REFERENCES {}({})",
+                        " REFERENCES {}{}({})",
+                        reference
+                            .schema_name()
+                            .map(|schema| format!("{schema}."))
+                            .unwrap_or_default(),
                         reference.table(),
                         reference.column()
                     )?;
@@ -92,7 +102,7 @@ mod tests {
                 write!(
                     writer,
                     "\nCREATE {unique}INDEX {name} ON {} ({columns})",
-                    T::name()
+                    T::qualified_name()
                 )?;
             }
 
@@ -114,7 +124,11 @@ mod tests {
         let column_metadata = <User as Table>::columns();
         let indexes = <User as Table>::indexes();
 
+        assert_eq!(<User as Table>::schema_name(), Some("public"));
         assert_eq!(<User as Table>::name(), "users");
+        assert_eq!(<User as Table>::qualified_name(), "public.users");
+        assert_eq!(<Post as Table>::schema_name(), None);
+        assert_eq!(<Post as Table>::qualified_name(), "posts");
         assert_eq!(columns.id, "id");
         assert_eq!(columns.name, "name");
         assert_eq!(column_metadata.len(), 2);
@@ -140,6 +154,7 @@ mod tests {
             .expect("user_id should reference users");
 
         assert!(user_id.indexed());
+        assert_eq!(references.schema_name(), Some("public"));
         assert_eq!(references.table(), "users");
         assert_eq!(references.column(), "id");
         assert_eq!(references.on_delete(), Some("cascade"));
@@ -152,9 +167,15 @@ mod tests {
         let sql = String::from_utf8(sql).unwrap();
 
         assert!(sql.contains(
-            "CREATE TABLE users (id text PRIMARY KEY AUTOINCREMENT NOT NULL, name text DEFAULT anonymous)"
+            "CREATE TABLE public.users (id text PRIMARY KEY AUTOINCREMENT NOT NULL, name text DEFAULT anonymous)"
         ));
-        assert!(sql.contains("CREATE UNIQUE INDEX users_name_id_idx ON users (name, id)"));
+        assert!(sql.contains("CREATE UNIQUE INDEX users_name_id_idx ON public.users (name, id)"));
+
+        let mut sql = Vec::new();
+        TestGenerator.write_table::<Post>(&mut sql).unwrap();
+        let sql = String::from_utf8(sql).unwrap();
+
+        assert!(sql.contains("REFERENCES public.users(id) ON DELETE cascade"));
     }
 
     #[test]
@@ -163,7 +184,7 @@ mod tests {
 
         assert_eq!(
             users.to_sql(),
-            r#"SELECT t0.id AS id, t0.name AS name FROM users AS t0"#
+            r#"SELECT t0.id AS id, t0.name AS name FROM public.users AS t0"#
         );
     }
 
@@ -177,7 +198,7 @@ mod tests {
 
         assert_eq!(
             users_and_posts.to_sql(),
-            r#"SELECT q0_0.id AS left_id, q0_0.name AS left_name, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM (SELECT t0.id AS id, t0.name AS name FROM users AS t0) AS q0_0 INNER JOIN LATERAL (SELECT q1_0.id AS id, q1_0.user_id AS user_id, q1_0.body AS body FROM (SELECT t0.id AS id, t0.user_id AS user_id, t0.body AS body FROM posts AS t0) AS q1_0 WHERE (q1_0.user_id = q0_0.id)) AS q0_1 ON TRUE"#
+            r#"SELECT q0_0.id AS left_id, q0_0.name AS left_name, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM (SELECT t0.id AS id, t0.name AS name FROM public.users AS t0) AS q0_0 INNER JOIN LATERAL (SELECT q1_0.id AS id, q1_0.user_id AS user_id, q1_0.body AS body FROM (SELECT t0.id AS id, t0.user_id AS user_id, t0.body AS body FROM posts AS t0) AS q1_0 WHERE (q1_0.user_id = q0_0.id)) AS q0_1 ON TRUE"#
         );
     }
 }
