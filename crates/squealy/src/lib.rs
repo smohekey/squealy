@@ -10,23 +10,15 @@ mod table;
 pub use expr::Expr;
 pub use generator::Generator;
 pub use query::{Q, Query, query};
-pub use squealy_macros::Table;
+pub use squealy_macros::{Schema, Table};
 pub use table::{
     Column, ColumnExpr, ColumnMode, ColumnName, ColumnValue, DefaultSchema, ForeignKey, Index,
-    Projectable, Schema, SelectColumn, Table,
+    Projectable, Schema, SchemaTable, SelectColumn, Table,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    enum Public {}
-
-    impl Schema for Public {
-        fn name() -> Option<&'static str> {
-            Some("public")
-        }
-    }
 
     #[derive(Clone, Debug, PartialEq, Table)]
     #[schema(Public)]
@@ -39,12 +31,20 @@ mod tests {
     }
 
     #[derive(Clone, Debug, PartialEq, Table)]
+    #[schema(Public)]
     struct Post<'scope, C: ColumnMode = ColumnExpr> {
         #[column(primary_key)]
         id: C::Type<'scope, i32>,
         #[column(index, references(User::id, on_delete = "cascade"))]
         user_id: C::Type<'scope, i32>,
         body: C::Type<'scope, String>,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Schema)]
+    struct Public {
+        users: User<'static, ColumnName>,
+        posts: Post<'static, ColumnName>,
     }
 
     struct TestGenerator;
@@ -127,8 +127,13 @@ mod tests {
         assert_eq!(<User as Table>::schema_name(), Some("public"));
         assert_eq!(<User as Table>::name(), "users");
         assert_eq!(<User as Table>::qualified_name(), "public.users");
-        assert_eq!(<Post as Table>::schema_name(), None);
-        assert_eq!(<Post as Table>::qualified_name(), "posts");
+        assert_eq!(<Post as Table>::schema_name(), Some("public"));
+        assert_eq!(<Post as Table>::qualified_name(), "public.posts");
+        assert_eq!(<Public as Schema>::name(), Some("public"));
+        let schema_tables = <Public as Schema>::tables().collect::<Vec<_>>();
+        assert_eq!(schema_tables.len(), 2);
+        assert_eq!(schema_tables[0].qualified_name(), "public.users");
+        assert_eq!(schema_tables[1].qualified_name(), "public.posts");
         assert_eq!(columns.id, "id");
         assert_eq!(columns.name, "name");
         assert_eq!(column_metadata.len(), 2);
@@ -198,7 +203,7 @@ mod tests {
 
         assert_eq!(
             users_and_posts.to_sql(),
-            r#"SELECT q0_0.id AS left_id, q0_0.name AS left_name, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM (SELECT t0.id AS id, t0.name AS name FROM public.users AS t0) AS q0_0 INNER JOIN LATERAL (SELECT q1_0.id AS id, q1_0.user_id AS user_id, q1_0.body AS body FROM (SELECT t0.id AS id, t0.user_id AS user_id, t0.body AS body FROM posts AS t0) AS q1_0 WHERE (q1_0.user_id = q0_0.id)) AS q0_1 ON TRUE"#
+            r#"SELECT q0_0.id AS left_id, q0_0.name AS left_name, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM (SELECT t0.id AS id, t0.name AS name FROM public.users AS t0) AS q0_0 INNER JOIN LATERAL (SELECT q1_0.id AS id, q1_0.user_id AS user_id, q1_0.body AS body FROM (SELECT t0.id AS id, t0.user_id AS user_id, t0.body AS body FROM public.posts AS t0) AS q1_0 WHERE (q1_0.user_id = q0_0.id)) AS q0_1 ON TRUE"#
         );
     }
 }
