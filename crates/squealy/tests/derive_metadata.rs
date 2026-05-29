@@ -195,6 +195,16 @@ fn each_selects_from_derived_table_metadata() {
 }
 
 #[test]
+fn query_can_select_scoped_table_sources_directly() {
+    let users = query(|q| q.each::<User>());
+
+    assert_eq!(
+        users.to_sql(),
+        r#"SELECT q0_0.id AS id, q0_0.name AS name FROM public.users AS q0_0"#
+    );
+}
+
+#[test]
 fn query_composes_subqueries_with_lateral_joins() {
     let users_and_posts = query(|q| {
         let user = q.q(Query::each::<User>());
