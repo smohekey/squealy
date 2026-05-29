@@ -36,6 +36,31 @@ impl<'scope, T> Expr<'scope, T> {
         Predicate::new(format!("({} = {})", self.sql, other.sql))
     }
 
+    /// SQL inequality.
+    pub fn not_equals(self, other: Self) -> Predicate<'scope> {
+        Predicate::new(format!("({} <> {})", self.sql, other.sql))
+    }
+
+    /// SQL less-than comparison.
+    pub fn less_than(self, other: Self) -> Predicate<'scope> {
+        Predicate::new(format!("({} < {})", self.sql, other.sql))
+    }
+
+    /// SQL less-than-or-equal comparison.
+    pub fn less_than_or_equals(self, other: Self) -> Predicate<'scope> {
+        Predicate::new(format!("({} <= {})", self.sql, other.sql))
+    }
+
+    /// SQL greater-than comparison.
+    pub fn greater_than(self, other: Self) -> Predicate<'scope> {
+        Predicate::new(format!("({} > {})", self.sql, other.sql))
+    }
+
+    /// SQL greater-than-or-equal comparison.
+    pub fn greater_than_or_equals(self, other: Self) -> Predicate<'scope> {
+        Predicate::new(format!("({} >= {})", self.sql, other.sql))
+    }
+
     /// SQL numeric addition.
     pub fn add(self, other: Self) -> Self {
         Self::new(format!("({} + {})", self.sql, other.sql))
@@ -76,6 +101,11 @@ impl<'scope> Predicate<'scope> {
     /// SQL disjunction.
     pub fn or(self, other: Self) -> Self {
         Self::new(format!("({} OR {})", self.sql, other.sql))
+    }
+
+    /// SQL negation.
+    pub fn not_(self) -> Self {
+        Self::new(format!("(NOT {})", self.sql))
     }
 }
 
