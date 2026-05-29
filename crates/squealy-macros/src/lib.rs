@@ -1,6 +1,7 @@
 //! Procedural macros for squealy.
 
 use proc_macro::{Delimiter, Group, Ident, TokenStream, TokenTree};
+use proc_macro2::{Literal, Span};
 
 /// Derives squealy table metadata for generic table-mode structs.
 #[proc_macro_derive(Table)]
@@ -25,8 +26,8 @@ impl TableStruct {
             );
         }
 
-        let ident = self.ident.to_string();
-        let table_name = to_string_literal(&to_snake_plural(&ident));
+        let ident = proc_macro2::Ident::new(&self.ident.to_string(), Span::call_site());
+        let table_name = Literal::string(&to_snake_plural(&ident.to_string()));
         let field_names = self
             .fields
             .iter()
@@ -36,7 +37,9 @@ impl TableStruct {
             .iter()
             .map(|field| format!("{field}: ::squealy::Expr::column(alias, columns.{field})"))
             .collect::<Vec<_>>()
-            .join(", ");
+            .join(", ")
+            .parse::<proc_macro2::TokenStream>()
+            .expect("generated column initializers should parse");
         let projections = field_names
             .iter()
             .map(|field| {
@@ -45,12 +48,16 @@ impl TableStruct {
                 )
             })
             .collect::<Vec<_>>()
-            .join(", ");
+            .join(", ")
+            .parse::<proc_macro2::TokenStream>()
+            .expect("generated projections should parse");
         let realias = field_names
             .iter()
             .map(|field| format!("{field}: ::squealy::Expr::column(alias, \"{field}\")"))
             .collect::<Vec<_>>()
-            .join(", ");
+            .join(", ")
+            .parse::<proc_macro2::TokenStream>()
+            .expect("generated alias initializers should parse");
 
         quote::quote! {
             impl<'scope, Mode: ::squealy::TableMode> ::squealy::Table for #ident <'scope, Mode> {
@@ -80,6 +87,7 @@ impl TableStruct {
                 }
             }
         }
+        .into()
     }
 }
 
@@ -165,12 +173,9 @@ fn to_snake_plural(name: &str) -> String {
 }
 
 fn compile_error(message: &str) -> TokenStream {
-    let message = to_string_literal(message);
+    let message = Literal::string(message);
     quote::quote! {
         compile_error!(#message);
     }
-}
-
-fn to_string_literal(value: &str) -> String {
-    format!("{value:?}")
+    .into()
 }
