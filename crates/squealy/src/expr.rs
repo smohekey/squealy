@@ -73,6 +73,16 @@ impl<'scope, T> Expr<'scope, T> {
     pub fn greater_than_or_equals(self, other: Self) -> Predicate<'scope> {
         Predicate::new(format!("({} >= {})", self.sql, other.sql))
     }
+
+    /// Sort by this expression in ascending order.
+    pub fn asc(self) -> Order<'scope> {
+        Order::new(format!("{} ASC", self.sql))
+    }
+
+    /// Sort by this expression in descending order.
+    pub fn desc(self) -> Order<'scope> {
+        Order::new(format!("{} DESC", self.sql))
+    }
 }
 
 impl<'scope, T> Expr<'scope, T>
@@ -91,6 +101,33 @@ where
 }
 
 impl<'scope, T> Clone for Expr<'scope, T> {
+    fn clone(&self) -> Self {
+        Self::new(self.sql.clone())
+    }
+}
+
+/// A typed SQL ordering expression scoped to a query builder invocation.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Order<'scope> {
+    sql: String,
+    _phantom: PhantomData<&'scope ()>,
+}
+
+impl<'scope> Order<'scope> {
+    pub(crate) fn new(sql: impl Into<String>) -> Self {
+        Self {
+            sql: sql.into(),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Render this ordering as SQL.
+    pub fn to_sql(&self) -> &str {
+        &self.sql
+    }
+}
+
+impl<'scope> Clone for Order<'scope> {
     fn clone(&self) -> Self {
         Self::new(self.sql.clone())
     }

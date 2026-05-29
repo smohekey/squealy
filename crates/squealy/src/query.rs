@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::io::{self, Write};
 use std::marker::PhantomData;
 
-use crate::{Predicate, Projectable, SchemaTable, SelectColumn};
+use crate::{Order, Predicate, Projectable, SchemaTable, SelectColumn};
 
 /// A SQL select statement that produces rows with shape `T`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +66,7 @@ struct Select {
     columns: Vec<SelectColumn>,
     sources: Vec<Source>,
     filters: Vec<Filter>,
+    orders: Vec<Sort>,
 }
 
 impl Select {
@@ -74,11 +75,17 @@ impl Select {
             columns,
             sources,
             filters: Vec::new(),
+            orders: Vec::new(),
         }
     }
 
     fn with_filters(mut self, filters: Vec<Filter>) -> Self {
         self.filters = filters;
+        self
+    }
+
+    fn with_orders(mut self, orders: Vec<Sort>) -> Self {
+        self.orders = orders;
         self
     }
 
@@ -94,7 +101,8 @@ impl Select {
         write_select(writer, &self.columns)?;
         writer.write_all(b" ")?;
         write_sources(writer, &self.sources)?;
-        write_filters(writer, &self.filters)
+        write_filters(writer, &self.filters)?;
+        write_orders(writer, &self.orders)
     }
 }
 
@@ -181,11 +189,25 @@ impl Filter {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Sort {
+    order: String,
+}
+
+impl Sort {
+    fn new(order: impl Into<String>) -> Self {
+        Self {
+            order: order.into(),
+        }
+    }
+}
+
 /// Scoped query builder. Each `q` call adds a lateral-capable subquery.
 pub struct Q<'scope> {
     depth: usize,
     sources: Vec<Source>,
     filters: Vec<Filter>,
+    orders: Vec<Sort>,
     _phantom: PhantomData<&'scope ()>,
 }
 
@@ -195,6 +217,7 @@ impl<'scope> Q<'scope> {
             depth,
             sources: Vec::new(),
             filters: Vec::new(),
+            orders: Vec::new(),
             _phantom: PhantomData,
         }
     }
@@ -240,6 +263,11 @@ impl<'scope> Q<'scope> {
     pub fn where_(&mut self, predicate: Predicate<'scope>) {
         self.filters.push(Filter::new(predicate.to_sql()));
     }
+
+    /// Add an `ORDER BY` expression to the query currently being built.
+    pub fn order_by(&mut self, order: Order<'scope>) {
+        self.orders.push(Sort::new(order.to_sql()));
+    }
 }
 
 thread_local! {
@@ -260,7 +288,9 @@ where
 
         depth.set(current_depth);
 
-        let select = Select::new(output.project(), q.sources).with_filters(q.filters);
+        let select = Select::new(output.project(), q.sources)
+            .with_filters(q.filters)
+            .with_orders(q.orders);
 
         Query::new(select, output)
     })
@@ -299,6 +329,22 @@ fn write_filters(writer: &mut impl Write, filters: &[Filter]) -> io::Result<()> 
             writer.write_all(b" AND ")?;
         }
         writer.write_all(filter.predicate.as_bytes())?;
+    }
+
+    Ok(())
+}
+
+fn write_orders(writer: &mut impl Write, orders: &[Sort]) -> io::Result<()> {
+    if orders.is_empty() {
+        return Ok(());
+    }
+
+    writer.write_all(b" ORDER BY ")?;
+    for (index, order) in orders.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        writer.write_all(order.order.as_bytes())?;
     }
 
     Ok(())

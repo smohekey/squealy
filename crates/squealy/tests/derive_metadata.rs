@@ -205,6 +205,21 @@ fn query_can_select_scoped_table_sources_directly() {
 }
 
 #[test]
+fn query_can_order_by_typed_expressions() {
+    let users = query(|q| {
+        let user = q.each::<User>();
+        q.order_by(user.name.clone().desc());
+        q.order_by(user.id.clone().asc());
+        user
+    });
+
+    assert_eq!(
+        users.to_sql(),
+        r#"SELECT q0_0.id AS id, q0_0.name AS name FROM public.users AS q0_0 ORDER BY q0_0.name DESC, q0_0.id ASC"#
+    );
+}
+
+#[test]
 fn query_writes_sql_to_writer() {
     let users = query(|q| q.each::<User>());
     let mut sql = Vec::new();
