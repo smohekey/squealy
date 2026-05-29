@@ -19,6 +19,7 @@ mod tests {
     use super::*;
 
     #[derive(Clone, Debug, PartialEq, Table)]
+    #[index(name = "users_name_id_idx", columns = [name, id], unique)]
     struct User<'scope, C: Column = ColumnExpr> {
         #[column(primary_key, auto_increment, index)]
         id: C::Type<'scope, i32>,
@@ -63,7 +64,10 @@ mod tests {
         assert!(schema.columns[1].nullable);
         assert_eq!(schema.columns[1].default, Some("anonymous"));
         assert_eq!(schema.columns[1].db_type, Some("text"));
-        assert_eq!(schema.indexes.len(), 2);
+        assert_eq!(schema.indexes.len(), 3);
+        assert_eq!(schema.indexes[2].name, Some("users_name_id_idx"));
+        assert_eq!(schema.indexes[2].columns, &["name", "id"]);
+        assert!(schema.indexes[2].unique);
     }
 
     #[test]

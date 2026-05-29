@@ -31,12 +31,19 @@ pub fn derive_table(input: TokenStream) -> TokenStream {
 struct TableStruct {
     ident: Ident,
     fields: Vec<Field>,
+    indexes: Vec<IndexAttrs>,
     has_scope_and_mode: bool,
 }
 
 struct Field {
     ident: Ident,
     attrs: FieldAttrs,
+}
+
+struct IndexAttrs {
+    name: Option<String>,
+    columns: Vec<Ident>,
+    unique: bool,
 }
 
 #[derive(Default)]
@@ -86,12 +93,17 @@ impl TableStruct {
             .iter()
             .map(Field::schema_column_tokens)
             .collect::<Vec<_>>();
-        let schema_indexes = self
+        let mut schema_indexes = self
             .fields
             .iter()
             .filter(|field| field.attrs.index)
             .map(Field::schema_index_tokens)
             .collect::<Vec<_>>();
+        schema_indexes.extend(
+            self.indexes
+                .iter()
+                .map(|index| index.schema_index_tokens(&self.fields)),
+        );
 
         quote::quote! {
             impl<'scope, C: ::squealy::Column> ::squealy::Table for #ident <'scope, C> {
@@ -134,6 +146,33 @@ impl TableStruct {
             }
         }
         .into()
+    }
+}
+
+impl IndexAttrs {
+    fn schema_index_tokens(&self, fields: &[Field]) -> proc_macro2::TokenStream {
+        let name = option_literal(self.name.as_deref());
+        let columns = self
+            .columns
+            .iter()
+            .map(|column| {
+                let column = column.to_string();
+                let field = fields
+                    .iter()
+                    .find(|field| field.ident.to_string() == column)
+                    .expect("index fields should be validated before code generation");
+                Literal::string(&field.column_name())
+            })
+            .collect::<Vec<_>>();
+        let unique = bool_tokens(self.unique);
+
+        quote::quote! {
+            ::squealy::IndexSchema {
+                name: #name,
+                columns: &[#( #columns, )*],
+                unique: #unique,
+            }
+        }
     }
 }
 
@@ -238,12 +277,141 @@ fn table_struct(input: TokenStream) -> Result<TableStruct, String> {
         TokenTree::Group(group) => named_fields(group)?,
         _ => unreachable!(),
     };
+    let indexes = table_indexes(&tokens[..struct_index])?;
+    validate_index_columns(&indexes, &fields)?;
 
     Ok(TableStruct {
         ident,
         fields,
+        indexes,
         has_scope_and_mode,
     })
+}
+
+fn table_indexes(tokens: &[TokenTree]) -> Result<Vec<IndexAttrs>, String> {
+    let mut indexes = Vec::new();
+    let mut iter = tokens.iter();
+
+    while let Some(token) = iter.next() {
+        if !is_attribute_start(token) {
+            continue;
+        }
+
+        let Some(TokenTree::Group(attr)) = iter.next() else {
+            return Err("Table attribute is missing its bracketed body".to_owned());
+        };
+        let Some(index) = table_index(attr)? else {
+            continue;
+        };
+        indexes.push(index);
+    }
+
+    Ok(indexes)
+}
+
+fn table_index(group: &Group) -> Result<Option<IndexAttrs>, String> {
+    if group.delimiter() != Delimiter::Bracket {
+        return Err("Table attributes must use square brackets".to_owned());
+    }
+
+    let mut tokens = group.stream().into_iter();
+    let Some(TokenTree::Ident(attr_name)) = tokens.next() else {
+        return Ok(None);
+    };
+    if attr_name.to_string() != "index" {
+        return Ok(None);
+    }
+
+    let Some(TokenTree::Group(meta)) = tokens.next() else {
+        return Err("table-level #[index(...)] requires metadata inside parentheses".to_owned());
+    };
+
+    parse_index(meta.stream().into_iter().collect::<Vec<_>>()).map(Some)
+}
+
+fn parse_index(tokens: Vec<TokenTree>) -> Result<IndexAttrs, String> {
+    let mut index = 0;
+    let mut attrs = IndexAttrs {
+        name: None,
+        columns: Vec::new(),
+        unique: false,
+    };
+
+    while index < tokens.len() {
+        while matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == ',') {
+            index += 1;
+        }
+
+        let Some(TokenTree::Ident(name)) = tokens.get(index) else {
+            break;
+        };
+        let name = name.to_string();
+        index += 1;
+
+        match name.as_str() {
+            "unique" => attrs.unique = true,
+            "name" => {
+                if !matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '=')
+                {
+                    return Err("index option `name` requires a string value".to_owned());
+                }
+                index += 1;
+                attrs.name = Some(match tokens.get(index) {
+                    Some(TokenTree::Literal(literal)) => literal_string(literal),
+                    Some(token) => token.to_string(),
+                    None => return Err("index option `name` is missing a value".to_owned()),
+                });
+                index += 1;
+            }
+            "columns" => {
+                if !matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '=')
+                {
+                    return Err("index option `columns` requires a bracketed field list".to_owned());
+                }
+                index += 1;
+                let Some(TokenTree::Group(columns)) = tokens.get(index) else {
+                    return Err("index option `columns` requires a bracketed field list".to_owned());
+                };
+                if columns.delimiter() != Delimiter::Bracket {
+                    return Err("index option `columns` requires square brackets".to_owned());
+                }
+                attrs.columns = parse_index_columns(columns)?;
+                index += 1;
+            }
+            _ => return Err(format!("unsupported index option `{name}`")),
+        }
+    }
+
+    if attrs.columns.is_empty() {
+        return Err("table-level indexes require at least one column".to_owned());
+    }
+
+    Ok(attrs)
+}
+
+fn parse_index_columns(group: &Group) -> Result<Vec<Ident>, String> {
+    let mut columns = Vec::new();
+    for token in group.stream() {
+        match token {
+            TokenTree::Ident(ident) => columns.push(ident),
+            TokenTree::Punct(punct) if punct.as_char() == ',' => {}
+            _ => return Err("index columns must be field identifiers".to_owned()),
+        }
+    }
+    Ok(columns)
+}
+
+fn validate_index_columns(indexes: &[IndexAttrs], fields: &[Field]) -> Result<(), String> {
+    for index in indexes {
+        for column in &index.columns {
+            let column = column.to_string();
+            if !fields.iter().any(|field| field.ident.to_string() == column) {
+                return Err(format!("index references unknown field `{column}`"));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn named_fields(group: &Group) -> Result<Vec<Field>, String> {
