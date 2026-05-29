@@ -67,6 +67,8 @@ struct Select {
     sources: Vec<Source>,
     filters: Vec<Filter>,
     orders: Vec<Sort>,
+    limit: Option<usize>,
+    offset: Option<usize>,
 }
 
 impl Select {
@@ -76,6 +78,8 @@ impl Select {
             sources,
             filters: Vec::new(),
             orders: Vec::new(),
+            limit: None,
+            offset: None,
         }
     }
 
@@ -86,6 +90,16 @@ impl Select {
 
     fn with_orders(mut self, orders: Vec<Sort>) -> Self {
         self.orders = orders;
+        self
+    }
+
+    fn with_limit(mut self, limit: Option<usize>) -> Self {
+        self.limit = limit;
+        self
+    }
+
+    fn with_offset(mut self, offset: Option<usize>) -> Self {
+        self.offset = offset;
         self
     }
 
@@ -102,7 +116,9 @@ impl Select {
         writer.write_all(b" ")?;
         write_sources(writer, &self.sources)?;
         write_filters(writer, &self.filters)?;
-        write_orders(writer, &self.orders)
+        write_orders(writer, &self.orders)?;
+        write_limit(writer, self.limit)?;
+        write_offset(writer, self.offset)
     }
 }
 
@@ -208,6 +224,8 @@ pub struct Q<'scope> {
     sources: Vec<Source>,
     filters: Vec<Filter>,
     orders: Vec<Sort>,
+    limit: Option<usize>,
+    offset: Option<usize>,
     _phantom: PhantomData<&'scope ()>,
 }
 
@@ -218,6 +236,8 @@ impl<'scope> Q<'scope> {
             sources: Vec::new(),
             filters: Vec::new(),
             orders: Vec::new(),
+            limit: None,
+            offset: None,
             _phantom: PhantomData,
         }
     }
@@ -268,6 +288,16 @@ impl<'scope> Q<'scope> {
     pub fn order_by(&mut self, order: Order<'scope>) {
         self.orders.push(Sort::new(order.to_sql()));
     }
+
+    /// Add a SQL `LIMIT` row count to the query currently being built.
+    pub fn limit(&mut self, rows: usize) {
+        self.limit = Some(rows);
+    }
+
+    /// Add a SQL `OFFSET` row count to the query currently being built.
+    pub fn offset(&mut self, rows: usize) {
+        self.offset = Some(rows);
+    }
 }
 
 thread_local! {
@@ -290,7 +320,9 @@ where
 
         let select = Select::new(output.project(), q.sources)
             .with_filters(q.filters)
-            .with_orders(q.orders);
+            .with_orders(q.orders)
+            .with_limit(q.limit)
+            .with_offset(q.offset);
 
         Query::new(select, output)
     })
@@ -345,6 +377,22 @@ fn write_orders(writer: &mut impl Write, orders: &[Sort]) -> io::Result<()> {
             writer.write_all(b", ")?;
         }
         writer.write_all(order.order.as_bytes())?;
+    }
+
+    Ok(())
+}
+
+fn write_limit(writer: &mut impl Write, limit: Option<usize>) -> io::Result<()> {
+    if let Some(limit) = limit {
+        write!(writer, " LIMIT {limit}")?;
+    }
+
+    Ok(())
+}
+
+fn write_offset(writer: &mut impl Write, offset: Option<usize>) -> io::Result<()> {
+    if let Some(offset) = offset {
+        write!(writer, " OFFSET {offset}")?;
     }
 
     Ok(())
