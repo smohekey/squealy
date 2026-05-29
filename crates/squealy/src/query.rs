@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::marker::PhantomData;
 
-use crate::{Expr, Projectable, SchemaTable, SelectColumn};
+use crate::{Predicate, Projectable, SchemaTable, SelectColumn};
 
 /// A SQL select statement that produces rows with shape `T`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -216,8 +216,8 @@ impl<'scope> Q<'scope> {
     }
 
     /// Add a SQL `WHERE` predicate to the query currently being built.
-    pub fn where_(&mut self, expr: Expr<'scope, bool>) {
-        self.filters.push(Filter::new(expr.to_sql()));
+    pub fn where_(&mut self, predicate: Predicate<'scope>) {
+        self.filters.push(Filter::new(predicate.to_sql()));
     }
 }
 

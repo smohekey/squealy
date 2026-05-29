@@ -15,7 +15,7 @@ mod table;
 
 pub use column::{Column, ColumnExpr, ColumnMode, ColumnName, ColumnValue};
 pub use database::Database;
-pub use expr::Expr;
+pub use expr::{Expr, Predicate};
 pub use foreign_key::ForeignKey;
 pub use generator::Generator;
 pub use index::Index;
