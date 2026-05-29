@@ -1,7 +1,7 @@
 use crate::Expr;
 
 /// Controls how table fields are represented.
-pub trait Column {
+pub trait ColumnType {
     type T<'scope, U>;
 }
 
@@ -9,7 +9,7 @@ pub trait Column {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColumnExpr {}
 
-impl Column for ColumnExpr {
+impl ColumnType for ColumnExpr {
     type T<'scope, U> = Expr<'scope, U>;
 }
 
@@ -17,7 +17,7 @@ impl Column for ColumnExpr {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColumnName {}
 
-impl Column for ColumnName {
+impl ColumnType for ColumnName {
     type T<'scope, U> = &'static str;
 }
 
@@ -25,7 +25,7 @@ impl Column for ColumnName {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColumnValue {}
 
-impl Column for ColumnValue {
+impl ColumnType for ColumnValue {
     type T<'scope, U> = U;
 }
 
@@ -85,7 +85,7 @@ fn prefix_alias(prefix: &str, alias: &str) -> &'static str {
 
 /// A database table model.
 pub trait Table {
-    type WithColumn<'scope, Column: crate::Column>
+    type WithColumn<'scope, Column: crate::ColumnType>
     where
         Column: 'scope;
 
