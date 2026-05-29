@@ -178,15 +178,41 @@ impl<'scope> Q<'scope> {
         }
     }
 
+    /// Add a table source and return its expression columns in this query scope.
+    pub fn each<S>(&mut self) -> <S as SchemaTable>::WithColumn<'scope, crate::ColumnExpr>
+    where
+        S: SchemaTable,
+        <S as SchemaTable>::WithColumn<'scope, crate::ColumnExpr>: Projectable,
+    {
+        let alias = self.next_alias();
+        self.sources.push(Source::table(
+            alias.clone(),
+            <S as SchemaTable>::qualified_name(),
+        ));
+        S::column_exprs(&alias)
+    }
+
+    /// Add a subquery as a lateral source and return its projected expression columns in this query scope.
+    pub fn lateral<T>(&mut self, query: Query<T>) -> T::Rebound<'scope>
+    where
+        T: Projectable,
+    {
+        let alias = self.next_alias();
+        self.sources
+            .push(Source::lateral(alias.clone(), query.select));
+        query.project.re_alias(&alias)
+    }
+
     /// Add a subquery and return its projected expression columns in this query scope.
     pub fn q<T>(&mut self, query: Query<T>) -> T::Rebound<'scope>
     where
         T: Projectable,
     {
-        let alias = format!("q{}_{}", self.depth, self.sources.len());
-        self.sources
-            .push(Source::lateral(alias.clone(), query.select));
-        query.project.re_alias(&alias)
+        self.lateral(query)
+    }
+
+    fn next_alias(&self) -> String {
+        format!("q{}_{}", self.depth, self.sources.len())
     }
 
     /// Add a SQL `WHERE` predicate to the query currently being built.
