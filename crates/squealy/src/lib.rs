@@ -9,7 +9,10 @@ mod table;
 pub use expr::Expr;
 pub use query::{Q, Query, query};
 pub use squealy_macros::Table;
-pub use table::{Column, ColumnExpr, ColumnName, ColumnValue, Projectable, SelectColumn, Table};
+pub use table::{
+    Column, ColumnExpr, ColumnName, ColumnSchema, ColumnValue, ForeignKeySchema, IndexSchema,
+    Projectable, SelectColumn, Table, TableSchema,
+};
 
 #[cfg(test)]
 mod tests {
@@ -17,13 +20,20 @@ mod tests {
 
     #[derive(Clone, Debug, PartialEq, Table)]
     struct User<'scope, C: Column = ColumnExpr> {
+        #[squealy(primary_key, auto_increment, index)]
         id: C::Type<'scope, i32>,
+        #[squealy(index, nullable, default = "anonymous", db_type = "text")]
         name: C::Type<'scope, String>,
     }
 
     #[derive(Clone, Debug, PartialEq, Table)]
     struct Post<'scope, C: Column = ColumnExpr> {
+        #[primary_key]
         id: C::Type<'scope, i32>,
+        #[squealy(
+            index,
+            references(table = "users", column = "id", on_delete = "cascade")
+        )]
         user_id: C::Type<'scope, i32>,
         body: C::Type<'scope, String>,
     }
@@ -39,10 +49,33 @@ mod tests {
     #[test]
     fn derive_table_populates_table_metadata() {
         let columns = <User as Table>::column_names();
+        let schema = <User as Table>::schema();
 
         assert_eq!(<User as Table>::name(), "users");
         assert_eq!(columns.id, "id");
         assert_eq!(columns.name, "name");
+        assert_eq!(schema.name, "users");
+        assert_eq!(schema.columns.len(), 2);
+        assert!(schema.columns[0].primary_key);
+        assert!(schema.columns[0].indexed);
+        assert!(schema.columns[0].auto_increment);
+        assert!(schema.columns[1].indexed);
+        assert!(schema.columns[1].nullable);
+        assert_eq!(schema.columns[1].default, Some("anonymous"));
+        assert_eq!(schema.columns[1].db_type, Some("text"));
+        assert_eq!(schema.indexes.len(), 2);
+    }
+
+    #[test]
+    fn derive_table_populates_foreign_key_metadata() {
+        let schema = <Post as Table>::schema();
+        let user_id = &schema.columns[1];
+        let references = user_id.references.expect("user_id should reference users");
+
+        assert!(user_id.indexed);
+        assert_eq!(references.table, "users");
+        assert_eq!(references.column, "id");
+        assert_eq!(references.on_delete, Some("cascade"));
     }
 
     #[test]
