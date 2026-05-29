@@ -92,15 +92,17 @@ pub trait Table {
     /// Returns the default table name for this model.
     fn table_name() -> &'static str;
 
+    /// Returns the database column names for this model.
+    fn column_names() -> Self::WithMode<'static, NameMode>;
+
     /// Build expression-mode fields that refer to the supplied SQL alias.
-    fn columns<'scope>(
+    fn columns<'scope>(alias: &str) -> Self::WithMode<'scope, ExprMode> {
+        Self::columns_from(alias, &Self::column_names())
+    }
+
+    /// Build expression-mode fields from explicit database column names.
+    fn columns_from<'scope>(
         alias: &str,
         columns: &Self::WithMode<'static, NameMode>,
     ) -> Self::WithMode<'scope, ExprMode>;
-}
-
-/// Database schema metadata for a table-shaped value.
-pub struct TableSchema<S: Table> {
-    pub name: &'static str,
-    pub columns: S::WithMode<'static, NameMode>,
 }

@@ -9,9 +9,7 @@ mod table;
 pub use expr::Expr;
 pub use query::{Q, Query, query};
 pub use squealy_macros::Table;
-pub use table::{
-    ExprMode, NameMode, Projectable, SelectColumn, Table, TableMode, TableSchema, ValueMode,
-};
+pub use table::{ExprMode, NameMode, Projectable, SelectColumn, Table, TableMode, ValueMode};
 
 #[cfg(test)]
 mod tests {
@@ -30,34 +28,26 @@ mod tests {
         body: Mode::T<'scope, String>,
     }
 
-    const USERS: TableSchema<User<'static, NameMode>> = TableSchema {
-        name: "users",
-        columns: User {
-            id: "id",
-            name: "name",
-        },
-    };
-
-    const POSTS: TableSchema<Post<'static, NameMode>> = TableSchema {
-        name: "posts",
-        columns: Post {
-            id: "id",
-            user_id: "user_id",
-            body: "body",
-        },
-    };
-
     fn posts_of_user(user_id: Expr<'static, i32>) -> Query<Post<'static, ExprMode>> {
         query(|q| {
-            let post = q.q(Query::each(&POSTS));
+            let post = q.q(Query::each::<Post>());
             q.where_(post.user_id.clone().equals(user_id));
             post
         })
     }
 
     #[test]
-    fn each_selects_from_schema() {
-        let users = Query::each(&USERS);
+    fn derive_table_populates_table_metadata() {
+        let columns = <User as Table>::column_names();
+
+        assert_eq!(<User as Table>::table_name(), "users");
+        assert_eq!(columns.id, "id");
+        assert_eq!(columns.name, "name");
+    }
+
+    #[test]
+    fn each_selects_from_derived_table_metadata() {
+        let users = Query::each::<User>();
 
         assert_eq!(
             users.to_sql(),
@@ -68,7 +58,7 @@ mod tests {
     #[test]
     fn query_composes_subqueries_with_lateral_joins() {
         let users_and_posts = query(|q| {
-            let user = q.q(Query::each(&USERS));
+            let user = q.q(Query::each::<User>());
             let post = q.q(posts_of_user(user.id.clone()));
             (user, post)
         });
