@@ -22,7 +22,7 @@ impl TableStruct {
     fn expand(&self) -> TokenStream {
         if !self.has_scope_and_mode {
             return compile_error(
-                "Table currently requires structs shaped like `Type<'scope, Mode: TableMode = ExprMode>`",
+                "Table currently requires structs shaped like `Type<'scope, Mode: Column = ColumnExpr>`",
             );
         }
 
@@ -43,8 +43,8 @@ impl TableStruct {
             .collect::<Vec<_>>();
 
         quote::quote! {
-            impl<'scope, Mode: ::squealy::TableMode> ::squealy::Table for #ident <'scope, Mode> {
-                type WithMode<'next_scope, NextMode: ::squealy::TableMode> = #ident <'next_scope, NextMode>
+            impl<'scope, Mode: ::squealy::Column> ::squealy::Table for #ident <'scope, Mode> {
+                type WithMode<'next_scope, NextMode: ::squealy::Column> = #ident <'next_scope, NextMode>
                 where
                     NextMode: 'next_scope;
 
@@ -52,19 +52,19 @@ impl TableStruct {
                     #name
                 }
 
-                fn column_names() -> Self::WithMode<'static, ::squealy::NameMode> {
+                fn column_names() -> Self::WithMode<'static, ::squealy::ColumnName> {
                     #ident { #( #fields: #field_literals, )* }
                 }
 
                 fn columns_from<'next_scope>(
                     alias: &str,
-                    columns: &Self::WithMode<'static, ::squealy::NameMode>,
-                ) -> Self::WithMode<'next_scope, ::squealy::ExprMode> {
+                    columns: &Self::WithMode<'static, ::squealy::ColumnName>,
+                ) -> Self::WithMode<'next_scope, ::squealy::ColumnExpr> {
                     #ident { #( #fields: ::squealy::Expr::column(alias, columns.#fields), )* }
                 }
             }
 
-            impl<'scope> ::squealy::Projectable for #ident <'scope, ::squealy::ExprMode> {
+            impl<'scope> ::squealy::Projectable for #ident <'scope, ::squealy::ColumnExpr> {
                 fn project(&self) -> ::std::vec::Vec<::squealy::SelectColumn> {
                     ::std::vec![#( ::squealy::SelectColumn::new(self.#fields.to_sql().to_owned(), #field_literals), )*]
                 }

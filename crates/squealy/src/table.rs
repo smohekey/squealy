@@ -1,31 +1,31 @@
 use crate::Expr;
 
 /// Controls how table fields are represented.
-pub trait TableMode {
+pub trait Column {
     type T<'scope, U>;
 }
 
 /// Table fields are typed SQL expressions.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExprMode {}
+pub enum ColumnExpr {}
 
-impl TableMode for ExprMode {
+impl Column for ColumnExpr {
     type T<'scope, U> = Expr<'scope, U>;
 }
 
 /// Table fields are database column names.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NameMode {}
+pub enum ColumnName {}
 
-impl TableMode for NameMode {
+impl Column for ColumnName {
     type T<'scope, U> = &'static str;
 }
 
 /// Table fields are plain Rust values.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ValueMode {}
+pub enum ColumnValue {}
 
-impl TableMode for ValueMode {
+impl Column for ColumnValue {
     type T<'scope, U> = U;
 }
 
@@ -85,7 +85,7 @@ fn prefix_alias(prefix: &str, alias: &str) -> &'static str {
 
 /// A database table model.
 pub trait Table {
-    type WithMode<'scope, Mode: TableMode>
+    type WithMode<'scope, Mode: Column>
     where
         Mode: 'scope;
 
@@ -93,16 +93,16 @@ pub trait Table {
     fn name() -> &'static str;
 
     /// Returns the database column names for this model.
-    fn column_names() -> Self::WithMode<'static, NameMode>;
+    fn column_names() -> Self::WithMode<'static, ColumnName>;
 
     /// Build expression-mode fields that refer to the supplied SQL alias.
-    fn columns<'scope>(alias: &str) -> Self::WithMode<'scope, ExprMode> {
+    fn columns<'scope>(alias: &str) -> Self::WithMode<'scope, ColumnExpr> {
         Self::columns_from(alias, &Self::column_names())
     }
 
     /// Build expression-mode fields from explicit database column names.
     fn columns_from<'scope>(
         alias: &str,
-        columns: &Self::WithMode<'static, NameMode>,
-    ) -> Self::WithMode<'scope, ExprMode>;
+        columns: &Self::WithMode<'static, ColumnName>,
+    ) -> Self::WithMode<'scope, ColumnExpr>;
 }
