@@ -9,26 +9,26 @@ mod table;
 pub use expr::Expr;
 pub use query::{Q, Query, query};
 pub use squealy_macros::Table;
-pub use table::{ExprMode, NameMode, Projectable, SelectColumn, Table, TableMode, ValueMode};
+pub use table::{Column, ColumnExpr, ColumnName, ColumnValue, Projectable, SelectColumn, Table};
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[derive(Clone, Debug, PartialEq, Table)]
-    struct User<'scope, Mode: TableMode = ExprMode> {
+    struct User<'scope, Mode: Column = ColumnExpr> {
         id: Mode::T<'scope, i32>,
         name: Mode::T<'scope, String>,
     }
 
     #[derive(Clone, Debug, PartialEq, Table)]
-    struct Post<'scope, Mode: TableMode = ExprMode> {
+    struct Post<'scope, Mode: Column = ColumnExpr> {
         id: Mode::T<'scope, i32>,
         user_id: Mode::T<'scope, i32>,
         body: Mode::T<'scope, String>,
     }
 
-    fn posts_of_user(user_id: Expr<'static, i32>) -> Query<Post<'static, ExprMode>> {
+    fn posts_of_user(user_id: Expr<'static, i32>) -> Query<Post<'static, ColumnExpr>> {
         query(|q| {
             let post = q.q(Query::each::<Post>());
             q.where_(post.user_id.clone().equals(user_id));
