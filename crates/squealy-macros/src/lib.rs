@@ -22,7 +22,7 @@ impl TableStruct {
     fn expand(&self) -> TokenStream {
         if !self.has_scope_and_mode {
             return compile_error(
-                "Table currently requires structs shaped like `Type<'scope, Column: crate::ColumnType = ColumnExpr>`",
+                "Table currently requires structs shaped like `Type<'scope, Column: ColumnType = ColumnExpr>`",
             );
         }
 

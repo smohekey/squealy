@@ -85,7 +85,7 @@ fn prefix_alias(prefix: &str, alias: &str) -> &'static str {
 
 /// A database table model.
 pub trait Table {
-    type WithColumn<'scope, Column: crate::ColumnType>
+    type WithColumn<'scope, Column: ColumnType>
     where
         Column: 'scope;
 
