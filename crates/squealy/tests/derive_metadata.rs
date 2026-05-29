@@ -220,6 +220,22 @@ fn query_can_order_by_typed_expressions() {
 }
 
 #[test]
+fn query_can_limit_and_offset_rows() {
+    let users = query(|q| {
+        let user = q.each::<User>();
+        q.order_by(user.id.clone().asc());
+        q.limit(10);
+        q.offset(20);
+        user
+    });
+
+    assert_eq!(
+        users.to_sql(),
+        r#"SELECT q0_0.id AS id, q0_0.name AS name FROM public.users AS q0_0 ORDER BY q0_0.id ASC LIMIT 10 OFFSET 20"#
+    );
+}
+
+#[test]
 fn query_writes_sql_to_writer() {
     let users = query(|q| q.each::<User>());
     let mut sql = Vec::new();
