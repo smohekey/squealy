@@ -3,10 +3,12 @@
 extern crate self as squealy;
 
 mod expr;
+mod generator;
 mod query;
 mod table;
 
 pub use expr::Expr;
+pub use generator::Generator;
 pub use query::{Q, Query, query};
 pub use squealy_macros::Table;
 pub use table::{
@@ -37,6 +39,59 @@ mod tests {
         )]
         user_id: C::Type<'scope, i32>,
         body: C::Type<'scope, String>,
+    }
+
+    struct TestGenerator;
+
+    impl Generator for TestGenerator {
+        fn create_table_statement(&self, schema: &TableSchema) -> String {
+            let columns = schema
+                .columns
+                .iter()
+                .map(|column| self.column_definition(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("CREATE TABLE {} ({columns})", schema.name)
+        }
+
+        fn create_index_statement(&self, table: &TableSchema, index: &IndexSchema) -> String {
+            let unique = if index.unique { "UNIQUE " } else { "" };
+            let name = index.name.unwrap_or("unnamed_idx");
+            let columns = index.columns.join(", ");
+            format!("CREATE {unique}INDEX {name} ON {} ({columns})", table.name)
+        }
+
+        fn column_definition(&self, column: &ColumnSchema) -> String {
+            let mut definition = format!("{} {}", column.name, column.db_type.unwrap_or("text"));
+            if column.primary_key {
+                definition.push_str(" PRIMARY KEY");
+            }
+            if column.auto_increment {
+                definition.push_str(" AUTOINCREMENT");
+            }
+            if !column.nullable {
+                definition.push_str(" NOT NULL");
+            }
+            if let Some(default) = column.default {
+                definition.push_str(&format!(" DEFAULT {default}"));
+            }
+            if let Some(reference) = column.references {
+                definition.push(' ');
+                definition.push_str(&self.foreign_key_reference(&reference));
+            }
+            definition
+        }
+
+        fn foreign_key_reference(&self, reference: &ForeignKeySchema) -> String {
+            let mut sql = format!("REFERENCES {}({})", reference.table, reference.column);
+            if let Some(on_delete) = reference.on_delete {
+                sql.push_str(&format!(" ON DELETE {on_delete}"));
+            }
+            if let Some(on_update) = reference.on_update {
+                sql.push_str(&format!(" ON UPDATE {on_update}"));
+            }
+            sql
+        }
     }
 
     fn posts_of_user(user_id: Expr<'static, i32>) -> Query<Post<'static, ColumnExpr>> {
@@ -80,6 +135,20 @@ mod tests {
         assert_eq!(references.table, "users");
         assert_eq!(references.column, "id");
         assert_eq!(references.on_delete, Some("cascade"));
+    }
+
+    #[test]
+    fn generator_creates_schema_sql() {
+        let statements = TestGenerator.create_table(&<User as Table>::schema());
+
+        assert_eq!(
+            statements[0],
+            "CREATE TABLE users (id text PRIMARY KEY AUTOINCREMENT NOT NULL, name text DEFAULT anonymous)"
+        );
+        assert_eq!(
+            statements[3],
+            "CREATE UNIQUE INDEX users_name_id_idx ON users (name, id)"
+        );
     }
 
     #[test]
