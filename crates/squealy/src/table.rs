@@ -1,32 +1,32 @@
 use crate::Expr;
 
 /// Controls how table fields are represented.
-pub trait ColumnType {
-    type T<'scope, U>;
+pub trait Column {
+    type Type<'scope, U>;
 }
 
 /// Table fields are typed SQL expressions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColumnExpr {}
 
-impl ColumnType for ColumnExpr {
-    type T<'scope, U> = Expr<'scope, U>;
+impl Column for ColumnExpr {
+    type Type<'scope, U> = Expr<'scope, U>;
 }
 
 /// Table fields are database column names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColumnName {}
 
-impl ColumnType for ColumnName {
-    type T<'scope, U> = &'static str;
+impl Column for ColumnName {
+    type Type<'scope, U> = &'static str;
 }
 
 /// Table fields are plain Rust values.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColumnValue {}
 
-impl ColumnType for ColumnValue {
-    type T<'scope, U> = U;
+impl Column for ColumnValue {
+    type Type<'scope, U> = U;
 }
 
 /// A selected SQL expression and its output alias.
@@ -85,9 +85,9 @@ fn prefix_alias(prefix: &str, alias: &str) -> &'static str {
 
 /// A database table model.
 pub trait Table {
-    type WithColumn<'scope, Column: ColumnType>
+    type WithColumn<'scope, C: Column>
     where
-        Column: 'scope;
+        C: 'scope;
 
     /// Returns the default table name for this model.
     fn name() -> &'static str;
