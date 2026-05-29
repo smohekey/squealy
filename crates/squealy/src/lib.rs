@@ -20,9 +20,14 @@ mod tests {
 
     #[derive(Clone, Debug, PartialEq, Table)]
     struct User<'scope, C: Column = ColumnExpr> {
-        #[squealy(primary_key, auto_increment, index)]
+        #[primary_key]
+        #[auto_increment]
+        #[index]
         id: C::Type<'scope, i32>,
-        #[squealy(index, nullable, default = "anonymous", db_type = "text")]
+        #[index]
+        #[nullable]
+        #[default = "anonymous"]
+        #[db_type = "text"]
         name: C::Type<'scope, String>,
     }
 
@@ -30,10 +35,8 @@ mod tests {
     struct Post<'scope, C: Column = ColumnExpr> {
         #[primary_key]
         id: C::Type<'scope, i32>,
-        #[squealy(
-            index,
-            references(table = "users", column = "id", on_delete = "cascade")
-        )]
+        #[index]
+        #[references(table = "users", column = "id", on_delete = "cascade")]
         user_id: C::Type<'scope, i32>,
         body: C::Type<'scope, String>,
     }

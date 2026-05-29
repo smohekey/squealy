@@ -7,7 +7,6 @@ use proc_macro2::{Literal, Span};
 #[proc_macro_derive(
     Table,
     attributes(
-        squealy,
         primary_key,
         index,
         unique,
@@ -293,49 +292,13 @@ fn apply_attribute(group: &Group, attrs: &mut FieldAttrs) -> Result<(), String> 
     let attr_name = attr_name.to_string();
     let rest = tokens.collect::<Vec<_>>();
 
-    if attr_name == "squealy" {
-        let Some(TokenTree::Group(meta)) = rest.first() else {
-            return Err("#[squealy(...)] requires metadata inside parentheses".to_owned());
-        };
-        parse_meta_items(meta.stream().into_iter().collect::<Vec<_>>(), attrs)
-    } else if matches!(rest.first(), Some(TokenTree::Punct(punct)) if punct.as_char() == '=') {
+    if matches!(rest.first(), Some(TokenTree::Punct(punct)) if punct.as_char() == '=') {
         parse_meta_item(&attr_name, &rest[1..], attrs)
+    } else if let Some(TokenTree::Group(meta)) = rest.first() {
+        parse_meta_item(&attr_name, &[TokenTree::Group(meta.clone())], attrs)
     } else {
         parse_meta_item(&attr_name, &rest, attrs)
     }
-}
-
-fn parse_meta_items(tokens: Vec<TokenTree>, attrs: &mut FieldAttrs) -> Result<(), String> {
-    let mut index = 0;
-    while index < tokens.len() {
-        while matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == ',') {
-            index += 1;
-        }
-
-        let Some(TokenTree::Ident(name)) = tokens.get(index) else {
-            break;
-        };
-        let name = name.to_string();
-        index += 1;
-
-        let mut value_tokens = Vec::new();
-        if matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '=') {
-            index += 1;
-            while index < tokens.len()
-                && !matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == ',')
-            {
-                value_tokens.push(tokens[index].clone());
-                index += 1;
-            }
-        } else if let Some(TokenTree::Group(group)) = tokens.get(index) {
-            value_tokens.push(TokenTree::Group(group.clone()));
-            index += 1;
-        }
-
-        parse_meta_item(&name, &value_tokens, attrs)?;
-    }
-
-    Ok(())
 }
 
 fn parse_meta_item(
