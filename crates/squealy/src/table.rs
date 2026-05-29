@@ -158,8 +158,8 @@ fn prefix_alias(prefix: &str, alias: &str) -> String {
     format!("{prefix}_{alias}")
 }
 
-/// Table metadata exposed through schema membership.
-pub trait SchemaTable: Sync {
+/// Object-safe table metadata exposed through schema membership.
+pub trait Table {
     fn schema_name(&self) -> Option<&'static str>;
 
     fn name(&self) -> &'static str;
@@ -176,27 +176,8 @@ pub trait SchemaTable: Sync {
     fn indexes(&self) -> &'static [&'static dyn Index];
 }
 
-/// A database schema namespace that can contain tables.
-pub trait Schema {
-    fn name() -> Option<&'static str>;
-
-    fn tables() -> impl Iterator<Item = &'static dyn SchemaTable> {
-        [].into_iter()
-    }
-}
-
-/// The default schema namespace for backends that do not need explicit qualification.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DefaultSchema {}
-
-impl Schema for DefaultSchema {
-    fn name() -> Option<&'static str> {
-        None
-    }
-}
-
-/// A database table model.
-pub trait Table {
+/// A typed table model that can also project expression columns.
+pub trait SchemaTable: Table {
     type Schema: Schema;
 
     type WithColumn<'scope, C: ColumnMode>
@@ -204,26 +185,38 @@ pub trait Table {
         C: 'scope;
 
     /// Returns the containing schema namespace for this model, if one is configured.
-    fn schema_name() -> Option<&'static str> {
+    fn schema_name() -> Option<&'static str>
+    where
+        Self: Sized,
+    {
         <Self::Schema as Schema>::name()
     }
 
     /// Returns the default table name for this model.
-    fn name() -> &'static str;
+    fn name() -> &'static str
+    where
+        Self: Sized;
 
     /// Returns the schema-qualified table name for this model.
-    fn qualified_name() -> Cow<'static, str> {
-        match Self::schema_name() {
-            Some(schema) => Cow::Owned(format!("{schema}.{}", Self::name())),
-            None => Cow::Borrowed(Self::name()),
+    fn qualified_name() -> Cow<'static, str>
+    where
+        Self: Sized,
+    {
+        match <Self as SchemaTable>::schema_name() {
+            Some(schema) => Cow::Owned(format!("{schema}.{}", <Self as SchemaTable>::name())),
+            None => Cow::Borrowed(<Self as SchemaTable>::name()),
         }
     }
 
     /// Returns the table's database column schema metadata.
-    fn columns() -> &'static [&'static dyn Column];
+    fn columns() -> &'static [&'static dyn Column]
+    where
+        Self: Sized;
 
     /// Returns the table's database index schema metadata.
-    fn indexes() -> &'static [&'static dyn Index];
+    fn indexes() -> &'static [&'static dyn Index]
+    where
+        Self: Sized;
 
     /// Returns the database column names for this model.
     fn column_names() -> Self::WithColumn<'static, ColumnName>;
@@ -238,4 +231,23 @@ pub trait Table {
         alias: &str,
         columns: &Self::WithColumn<'static, ColumnName>,
     ) -> Self::WithColumn<'scope, ColumnExpr>;
+}
+
+/// A database schema namespace that can contain tables.
+pub trait Schema {
+    fn name() -> Option<&'static str>;
+
+    fn tables() -> impl Iterator<Item = &'static (dyn Table + Sync)> {
+        [].into_iter()
+    }
+}
+
+/// The default schema namespace for backends that do not need explicit qualification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DefaultSchema {}
+
+impl Schema for DefaultSchema {
+    fn name() -> Option<&'static str> {
+        None
+    }
 }

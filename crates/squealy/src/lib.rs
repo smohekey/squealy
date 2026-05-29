@@ -50,9 +50,16 @@ mod tests {
     struct TestGenerator;
 
     impl Generator for TestGenerator {
-        fn write_table<T: Table>(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-            write!(writer, "CREATE TABLE {} (", T::qualified_name())?;
-            for (index, column) in T::columns().iter().enumerate() {
+        fn write_table<T: SchemaTable>(
+            &self,
+            writer: &mut impl std::io::Write,
+        ) -> std::io::Result<()> {
+            write!(
+                writer,
+                "CREATE TABLE {} (",
+                <T as SchemaTable>::qualified_name()
+            )?;
+            for (index, column) in <T as SchemaTable>::columns().iter().enumerate() {
                 if index > 0 {
                     writer.write_all(b", ")?;
                 }
@@ -95,14 +102,14 @@ mod tests {
             }
             writer.write_all(b")")?;
 
-            for index in T::indexes() {
+            for index in <T as SchemaTable>::indexes() {
                 let unique = if index.unique() { "UNIQUE " } else { "" };
                 let name = index.name().unwrap_or("unnamed_idx");
                 let columns = index.columns().join(", ");
                 write!(
                     writer,
                     "\nCREATE {unique}INDEX {name} ON {} ({columns})",
-                    T::qualified_name()
+                    <T as SchemaTable>::qualified_name()
                 )?;
             }
 
@@ -120,15 +127,15 @@ mod tests {
 
     #[test]
     fn derive_table_populates_table_metadata() {
-        let columns = <User as Table>::column_names();
-        let column_metadata = <User as Table>::columns();
-        let indexes = <User as Table>::indexes();
+        let columns = <User as SchemaTable>::column_names();
+        let column_metadata = <User as SchemaTable>::columns();
+        let indexes = <User as SchemaTable>::indexes();
 
-        assert_eq!(<User as Table>::schema_name(), Some("public"));
-        assert_eq!(<User as Table>::name(), "users");
-        assert_eq!(<User as Table>::qualified_name(), "public.users");
-        assert_eq!(<Post as Table>::schema_name(), Some("public"));
-        assert_eq!(<Post as Table>::qualified_name(), "public.posts");
+        assert_eq!(<User as SchemaTable>::schema_name(), Some("public"));
+        assert_eq!(<User as SchemaTable>::name(), "users");
+        assert_eq!(<User as SchemaTable>::qualified_name(), "public.users");
+        assert_eq!(<Post as SchemaTable>::schema_name(), Some("public"));
+        assert_eq!(<Post as SchemaTable>::qualified_name(), "public.posts");
         assert_eq!(<Public as Schema>::name(), Some("public"));
         let schema_tables = <Public as Schema>::tables().collect::<Vec<_>>();
         assert_eq!(schema_tables.len(), 2);
@@ -152,7 +159,7 @@ mod tests {
 
     #[test]
     fn derive_table_populates_foreign_key_metadata() {
-        let columns = <Post as Table>::columns();
+        let columns = <Post as SchemaTable>::columns();
         let user_id = &columns[1];
         let references = user_id
             .references()

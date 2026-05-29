@@ -116,21 +116,21 @@ impl SchemaStruct {
                 quote::quote! {
                     struct #table_ident;
 
-                    impl ::squealy::SchemaTable for #table_ident {
+                    impl ::squealy::Table for #table_ident {
                         fn schema_name(&self) -> Option<&'static str> {
-                            <#table_type as ::squealy::Table>::schema_name()
+                            <#table_type as ::squealy::SchemaTable>::schema_name()
                         }
 
                         fn name(&self) -> &'static str {
-                            <#table_type as ::squealy::Table>::name()
+                            <#table_type as ::squealy::SchemaTable>::name()
                         }
 
                         fn columns(&self) -> &'static [&'static dyn ::squealy::Column] {
-                            <#table_type as ::squealy::Table>::columns()
+                            <#table_type as ::squealy::SchemaTable>::columns()
                         }
 
                         fn indexes(&self) -> &'static [&'static dyn ::squealy::Index] {
-                            <#table_type as ::squealy::Table>::indexes()
+                            <#table_type as ::squealy::SchemaTable>::indexes()
                         }
                     }
                 }
@@ -142,14 +142,14 @@ impl SchemaStruct {
         quote::quote! {
             #(#table_defs)*
 
-            static #tables_static: [&'static dyn ::squealy::SchemaTable; #tables_len] = [#( &#table_idents, )*];
+            static #tables_static: [&'static (dyn ::squealy::Table + Sync); #tables_len] = [#( &#table_idents, )*];
 
             impl ::squealy::Schema for #ident {
                 fn name() -> Option<&'static str> {
                     Some(#name)
                 }
 
-                fn tables() -> impl Iterator<Item = &'static dyn ::squealy::SchemaTable> {
+                fn tables() -> impl Iterator<Item = &'static (dyn ::squealy::Table + Sync)> {
                     #tables_static.into_iter()
                 }
             }
@@ -242,6 +242,24 @@ impl TableStruct {
             static #indexes_static: [&'static dyn ::squealy::Index; #indexes_len] = [#( &#index_idents, )*];
 
             impl<'scope, C: ::squealy::ColumnMode> ::squealy::Table for #ident <'scope, C> {
+                fn schema_name(&self) -> Option<&'static str> {
+                    <Self as ::squealy::SchemaTable>::schema_name()
+                }
+
+                fn name(&self) -> &'static str {
+                    <Self as ::squealy::SchemaTable>::name()
+                }
+
+                fn columns(&self) -> &'static [&'static dyn ::squealy::Column] {
+                    <Self as ::squealy::SchemaTable>::columns()
+                }
+
+                fn indexes(&self) -> &'static [&'static dyn ::squealy::Index] {
+                    <Self as ::squealy::SchemaTable>::indexes()
+                }
+            }
+
+            impl<'scope, C: ::squealy::ColumnMode> ::squealy::SchemaTable for #ident <'scope, C> {
                 type Schema = #schema;
 
                 type WithColumn<'next_scope, NextC: ::squealy::ColumnMode> = #ident <'next_scope, NextC>
@@ -425,15 +443,15 @@ impl Field {
 
             impl ::squealy::ForeignKey for #foreign_key_ident {
                 fn schema_name(&self) -> Option<&'static str> {
-                    <#table <'static, ::squealy::ColumnName> as ::squealy::Table>::schema_name()
+                    <#table <'static, ::squealy::ColumnName> as ::squealy::SchemaTable>::schema_name()
                 }
 
                 fn table(&self) -> &'static str {
-                    <#table <'static, ::squealy::ColumnName> as ::squealy::Table>::name()
+                    <#table <'static, ::squealy::ColumnName> as ::squealy::SchemaTable>::name()
                 }
 
                 fn column(&self) -> &'static str {
-                    <#table <'static, ::squealy::ColumnName> as ::squealy::Table>::column_names().#column
+                    <#table <'static, ::squealy::ColumnName> as ::squealy::SchemaTable>::column_names().#column
                 }
                 fn on_delete(&self) -> Option<&'static str> { #on_delete }
                 fn on_update(&self) -> Option<&'static str> { #on_update }

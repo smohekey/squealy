@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::marker::PhantomData;
 
-use crate::{Expr, Projectable, SelectColumn, Table};
+use crate::{Expr, Projectable, SchemaTable, SelectColumn};
 
 /// A SQL select statement that produces rows with shape `T`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,15 +35,18 @@ where
 
 impl Query<()> {
     /// Select every row from a table.
-    pub fn each<S>() -> Query<<S as Table>::WithColumn<'static, crate::ColumnExpr>>
+    pub fn each<S>() -> Query<<S as SchemaTable>::WithColumn<'static, crate::ColumnExpr>>
     where
-        S: Table,
-        <S as Table>::WithColumn<'static, crate::ColumnExpr>: Projectable,
+        S: SchemaTable,
+        <S as SchemaTable>::WithColumn<'static, crate::ColumnExpr>: Projectable,
     {
         let project = S::column_exprs("t0");
         let select = render_select(project.project());
         Query::new(
-            format!("SELECT {select} FROM {} AS t0", S::qualified_name()),
+            format!(
+                "SELECT {select} FROM {} AS t0",
+                <S as SchemaTable>::qualified_name()
+            ),
             project,
         )
     }
