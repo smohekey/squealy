@@ -205,6 +205,19 @@ fn query_can_select_scoped_table_sources_directly() {
 }
 
 #[test]
+fn query_writes_sql_to_writer() {
+    let users = query(|q| q.each::<User>());
+    let mut sql = Vec::new();
+
+    users.write_sql(&mut sql).unwrap();
+
+    assert_eq!(
+        String::from_utf8(sql).unwrap(),
+        r#"SELECT q0_0.id AS id, q0_0.name AS name FROM public.users AS q0_0"#
+    );
+}
+
+#[test]
 fn query_composes_subqueries_with_lateral_joins() {
     let users_and_posts = query(|q| {
         let user = q.q(Query::each::<User>());
