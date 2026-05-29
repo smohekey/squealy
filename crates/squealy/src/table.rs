@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::Expr;
 
 /// Controls how table fields are represented.
@@ -102,14 +104,14 @@ pub trait Index: Sync {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectColumn {
     pub expr: String,
-    pub alias: &'static str,
+    pub alias: Cow<'static, str>,
 }
 
 impl SelectColumn {
-    pub fn new(expr: impl Into<String>, alias: &'static str) -> Self {
+    pub fn new(expr: impl Into<String>, alias: impl Into<Cow<'static, str>>) -> Self {
         Self {
             expr: expr.into(),
-            alias,
+            alias: alias.into(),
         }
     }
 }
@@ -132,13 +134,13 @@ where
             self.0
                 .project()
                 .into_iter()
-                .map(|column| SelectColumn::new(column.expr, prefix_alias("left", column.alias))),
+                .map(|column| SelectColumn::new(column.expr, prefix_alias("left", &column.alias))),
         );
         columns.extend(
             self.1
                 .project()
                 .into_iter()
-                .map(|column| SelectColumn::new(column.expr, prefix_alias("right", column.alias))),
+                .map(|column| SelectColumn::new(column.expr, prefix_alias("right", &column.alias))),
         );
         columns
     }
@@ -148,8 +150,8 @@ where
     }
 }
 
-fn prefix_alias(prefix: &str, alias: &str) -> &'static str {
-    Box::leak(format!("{prefix}_{alias}").into_boxed_str())
+fn prefix_alias(prefix: &str, alias: &str) -> String {
+    format!("{prefix}_{alias}")
 }
 
 /// A database table model.
