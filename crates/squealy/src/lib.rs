@@ -16,16 +16,16 @@ mod tests {
     use super::*;
 
     #[derive(Clone, Debug, PartialEq, Table)]
-    struct User<'scope, Mode: Column = ColumnExpr> {
-        id: Mode::T<'scope, i32>,
-        name: Mode::T<'scope, String>,
+    struct User<'scope, Col: Column = ColumnExpr> {
+        id: Col::T<'scope, i32>,
+        name: Col::T<'scope, String>,
     }
 
     #[derive(Clone, Debug, PartialEq, Table)]
-    struct Post<'scope, Mode: Column = ColumnExpr> {
-        id: Mode::T<'scope, i32>,
-        user_id: Mode::T<'scope, i32>,
-        body: Mode::T<'scope, String>,
+    struct Post<'scope, Col: Column = ColumnExpr> {
+        id: Col::T<'scope, i32>,
+        user_id: Col::T<'scope, i32>,
+        body: Col::T<'scope, String>,
     }
 
     fn posts_of_user(user_id: Expr<'static, i32>) -> Query<Post<'static, ColumnExpr>> {

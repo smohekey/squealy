@@ -35,10 +35,10 @@ where
 
 impl Query<()> {
     /// Select every row from a table.
-    pub fn each<S>() -> Query<<S as Table>::WithMode<'static, crate::ColumnExpr>>
+    pub fn each<S>() -> Query<<S as Table>::WithColumn<'static, crate::ColumnExpr>>
     where
         S: Table,
-        <S as Table>::WithMode<'static, crate::ColumnExpr>: Projectable,
+        <S as Table>::WithColumn<'static, crate::ColumnExpr>: Projectable,
     {
         let project = S::columns("t0");
         let select = render_select(project.project());
