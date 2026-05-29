@@ -18,13 +18,13 @@ mod tests {
     use super::*;
 
     #[derive(Clone, Debug, PartialEq, Table)]
-    struct User<'scope, Column: crate::ColumnType = ColumnExpr> {
+    struct User<'scope, Column: ColumnType = ColumnExpr> {
         id: Column::T<'scope, i32>,
         name: Column::T<'scope, String>,
     }
 
     #[derive(Clone, Debug, PartialEq, Table)]
-    struct Post<'scope, Column: crate::ColumnType = ColumnExpr> {
+    struct Post<'scope, Column: ColumnType = ColumnExpr> {
         id: Column::T<'scope, i32>,
         user_id: Column::T<'scope, i32>,
         body: Column::T<'scope, String>,
