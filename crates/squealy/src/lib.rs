@@ -10,10 +10,10 @@ mod table;
 pub use expr::Expr;
 pub use generator::Generator;
 pub use query::{Q, Query, query};
-pub use squealy_macros::{Schema, Table};
+pub use squealy_macros::{Database, Schema, Table};
 pub use table::{
-    Column, ColumnExpr, ColumnMode, ColumnName, ColumnValue, DefaultSchema, ForeignKey, Index,
-    Projectable, Schema, SchemaTable, SelectColumn, Table,
+    Column, ColumnExpr, ColumnMode, ColumnName, ColumnValue, Database, DatabaseSchema,
+    DefaultSchema, ForeignKey, Index, Projectable, Schema, SchemaTable, SelectColumn, Table,
 };
 
 #[cfg(test)]
@@ -45,6 +45,12 @@ mod tests {
     struct Public {
         users: User<'static, ColumnName>,
         posts: Post<'static, ColumnName>,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Database)]
+    struct AppDatabase {
+        public: Public,
     }
 
     struct TestGenerator;
@@ -141,6 +147,13 @@ mod tests {
         assert_eq!(schema_tables.len(), 2);
         assert_eq!(schema_tables[0].qualified_name(), "public.users");
         assert_eq!(schema_tables[1].qualified_name(), "public.posts");
+        let database_schemas = <AppDatabase as Database>::schemas().collect::<Vec<_>>();
+        assert_eq!(database_schemas.len(), 1);
+        assert_eq!(database_schemas[0].name(), Some("public"));
+        let database_schema_tables = database_schemas[0].tables().collect::<Vec<_>>();
+        assert_eq!(database_schema_tables.len(), 2);
+        assert_eq!(database_schema_tables[0].qualified_name(), "public.users");
+        assert_eq!(database_schema_tables[1].qualified_name(), "public.posts");
         assert_eq!(columns.id, "id");
         assert_eq!(columns.name, "name");
         assert_eq!(column_metadata.len(), 2);

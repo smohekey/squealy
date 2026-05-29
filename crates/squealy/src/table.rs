@@ -242,6 +242,20 @@ pub trait Schema {
     }
 }
 
+/// Object-safe schema metadata exposed through database membership.
+pub trait DatabaseSchema: Sync {
+    fn name(&self) -> Option<&'static str>;
+
+    fn tables(&self) -> Box<dyn Iterator<Item = &'static (dyn Table + Sync)> + '_>;
+}
+
+/// A database that can contain schemas.
+pub trait Database {
+    fn schemas() -> impl Iterator<Item = &'static (dyn DatabaseSchema + Sync)> {
+        [].into_iter()
+    }
+}
+
 /// The default schema namespace for backends that do not need explicit qualification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DefaultSchema {}
