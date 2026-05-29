@@ -85,9 +85,9 @@ fn prefix_alias(prefix: &str, alias: &str) -> &'static str {
 
 /// A database table model.
 pub trait Table {
-    type WithColumn<'scope, Col: Column>
+    type WithColumn<'scope, Column: crate::Column>
     where
-        Col: 'scope;
+        Column: 'scope;
 
     /// Returns the default table name for this model.
     fn name() -> &'static str;
