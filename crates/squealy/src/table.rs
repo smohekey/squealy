@@ -158,9 +158,31 @@ fn prefix_alias(prefix: &str, alias: &str) -> String {
     format!("{prefix}_{alias}")
 }
 
+/// Table metadata exposed through schema membership.
+pub trait SchemaTable: Sync {
+    fn schema_name(&self) -> Option<&'static str>;
+
+    fn name(&self) -> &'static str;
+
+    fn qualified_name(&self) -> Cow<'static, str> {
+        match self.schema_name() {
+            Some(schema) => Cow::Owned(format!("{schema}.{}", self.name())),
+            None => Cow::Borrowed(self.name()),
+        }
+    }
+
+    fn columns(&self) -> &'static [&'static dyn Column];
+
+    fn indexes(&self) -> &'static [&'static dyn Index];
+}
+
 /// A database schema namespace that can contain tables.
 pub trait Schema {
     fn name() -> Option<&'static str>;
+
+    fn tables() -> impl Iterator<Item = &'static dyn SchemaTable> {
+        [].into_iter()
+    }
 }
 
 /// The default schema namespace for backends that do not need explicit qualification.

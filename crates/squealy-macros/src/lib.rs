@@ -29,6 +29,25 @@ pub fn derive_table(input: TokenStream) -> TokenStream {
     }
 }
 
+/// Derives squealy schema metadata from fields containing table types.
+#[proc_macro_derive(Schema)]
+pub fn derive_schema(input: TokenStream) -> TokenStream {
+    match schema_struct(input) {
+        Ok(schema) => schema.expand(),
+        Err(message) => compile_error(&message),
+    }
+}
+
+struct SchemaStruct {
+    ident: Ident,
+    fields: Vec<SchemaField>,
+}
+
+struct SchemaField {
+    ident: Ident,
+    ty: proc_macro2::TokenStream,
+}
+
 struct TableStruct {
     ident: Ident,
     fields: Vec<Field>,
@@ -74,6 +93,69 @@ struct ForeignKeyAttrs {
     column: Option<Ident>,
     on_delete: Option<String>,
     on_update: Option<String>,
+}
+
+impl SchemaStruct {
+    fn expand(&self) -> TokenStream {
+        let ident = proc_macro2::Ident::new(&self.ident.to_string(), Span::call_site());
+        let name = Literal::string(&to_snake(&ident.to_string()));
+        let table_idents = self
+            .fields
+            .iter()
+            .map(|field| generated_ident(&ident, &field.ident.to_string(), "SchemaTable"))
+            .collect::<Vec<_>>();
+        let table_types = self
+            .fields
+            .iter()
+            .map(|field| &field.ty)
+            .collect::<Vec<_>>();
+        let table_defs = table_idents
+            .iter()
+            .zip(table_types.iter())
+            .map(|(table_ident, table_type)| {
+                quote::quote! {
+                    struct #table_ident;
+
+                    impl ::squealy::SchemaTable for #table_ident {
+                        fn schema_name(&self) -> Option<&'static str> {
+                            <#table_type as ::squealy::Table>::schema_name()
+                        }
+
+                        fn name(&self) -> &'static str {
+                            <#table_type as ::squealy::Table>::name()
+                        }
+
+                        fn columns(&self) -> &'static [&'static dyn ::squealy::Column] {
+                            <#table_type as ::squealy::Table>::columns()
+                        }
+
+                        fn indexes(&self) -> &'static [&'static dyn ::squealy::Index] {
+                            <#table_type as ::squealy::Table>::indexes()
+                        }
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        let tables_static = generated_ident(&ident, "tables", "Static");
+        let tables_len = Literal::usize_unsuffixed(table_idents.len());
+
+        quote::quote! {
+            #(#table_defs)*
+
+            static #tables_static: [&'static dyn ::squealy::SchemaTable; #tables_len] = [#( &#table_idents, )*];
+
+            impl ::squealy::Schema for #ident {
+                fn name() -> Option<&'static str> {
+                    Some(#name)
+                }
+
+                fn tables() -> impl Iterator<Item = &'static dyn ::squealy::SchemaTable> {
+                    #tables_static.into_iter()
+                }
+            }
+        }
+        .into()
+    }
 }
 
 impl TableStruct {
@@ -407,6 +489,92 @@ fn to_pascal(name: &str) -> String {
     } else {
         output
     }
+}
+
+fn schema_struct(input: TokenStream) -> Result<SchemaStruct, String> {
+    let tokens = input.into_iter().collect::<Vec<_>>();
+    let struct_index = tokens
+        .iter()
+        .position(|token| matches_ident(token, "struct"))
+        .ok_or_else(|| "Schema can only be derived for structs".to_owned())?;
+
+    let ident = tokens
+        .get(struct_index + 1)
+        .and_then(|token| match token {
+            TokenTree::Ident(ident) => Some(ident.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| "Schema derive could not find the struct name".to_owned())?;
+
+    let body_index = tokens
+        .iter()
+        .position(|token| matches!(token, TokenTree::Group(group) if group.delimiter() == Delimiter::Brace))
+        .ok_or_else(|| "Schema requires a named-field struct".to_owned())?;
+
+    let fields = match &tokens[body_index] {
+        TokenTree::Group(group) => schema_fields(group)?,
+        _ => unreachable!(),
+    };
+
+    Ok(SchemaStruct { ident, fields })
+}
+
+fn schema_fields(group: &Group) -> Result<Vec<SchemaField>, String> {
+    let tokens = group.stream().into_iter().collect::<Vec<_>>();
+    let mut fields = Vec::new();
+    let mut index = 0;
+
+    while index < tokens.len() {
+        if is_attribute_start(&tokens[index]) {
+            index += 2;
+            continue;
+        }
+
+        let TokenTree::Ident(ident) = &tokens[index] else {
+            index += 1;
+            continue;
+        };
+
+        if !matches!(tokens.get(index + 1), Some(TokenTree::Punct(punct)) if punct.as_char() == ':')
+        {
+            index += 1;
+            continue;
+        }
+
+        let mut type_tokens = Vec::new();
+        let mut angle_depth = 0usize;
+        index += 2;
+
+        while index < tokens.len() {
+            match &tokens[index] {
+                TokenTree::Punct(punct) if punct.as_char() == '<' => {
+                    angle_depth += 1;
+                    type_tokens.push(tokens[index].clone());
+                }
+                TokenTree::Punct(punct) if punct.as_char() == '>' => {
+                    angle_depth = angle_depth.saturating_sub(1);
+                    type_tokens.push(tokens[index].clone());
+                }
+                TokenTree::Punct(punct) if punct.as_char() == ',' && angle_depth == 0 => {
+                    break;
+                }
+                token => type_tokens.push(token.clone()),
+            }
+            index += 1;
+        }
+
+        if type_tokens.is_empty() {
+            return Err(format!("schema field `{ident}` is missing a table type"));
+        }
+
+        fields.push(SchemaField {
+            ident: ident.clone(),
+            ty: proc_macro2::TokenStream::from(TokenStream::from_iter(type_tokens)),
+        });
+        index += 1;
+    }
+
+    Ok(fields)
 }
 
 fn table_struct(input: TokenStream) -> Result<TableStruct, String> {
@@ -830,6 +998,21 @@ fn is_attribute_start(token: &TokenTree) -> bool {
 
 fn matches_ident(token: &TokenTree, expected: &str) -> bool {
     matches!(token, TokenTree::Ident(ident) if ident.to_string() == expected)
+}
+
+fn to_snake(name: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn to_snake_plural(name: &str) -> String {
