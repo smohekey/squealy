@@ -1,7 +1,7 @@
 use crate::Expr;
 
 /// Controls how table fields are represented.
-pub trait Column {
+pub trait ColumnMode {
     type Type<'scope, U>;
 }
 
@@ -9,7 +9,7 @@ pub trait Column {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColumnExpr {}
 
-impl Column for ColumnExpr {
+impl ColumnMode for ColumnExpr {
     type Type<'scope, U> = Expr<'scope, U>;
 }
 
@@ -17,7 +17,7 @@ impl Column for ColumnExpr {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColumnName {}
 
-impl Column for ColumnName {
+impl ColumnMode for ColumnName {
     type Type<'scope, U> = &'static str;
 }
 
@@ -25,40 +25,77 @@ impl Column for ColumnName {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColumnValue {}
 
-impl Column for ColumnValue {
+impl ColumnMode for ColumnValue {
     type Type<'scope, U> = U;
 }
 
 /// Database schema metadata for a single column.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ColumnSchema {
-    pub name: &'static str,
-    pub primary_key: bool,
-    pub indexed: bool,
-    pub unique: bool,
-    pub nullable: bool,
-    pub auto_increment: bool,
-    pub default: Option<&'static str>,
-    pub db_type: Option<&'static str>,
-    pub check: Option<&'static str>,
-    pub references: Option<ForeignKeySchema>,
+pub trait Column: Sync {
+    fn name(&self) -> &'static str;
+
+    fn primary_key(&self) -> bool {
+        false
+    }
+
+    fn indexed(&self) -> bool {
+        false
+    }
+
+    fn unique(&self) -> bool {
+        false
+    }
+
+    fn nullable(&self) -> bool {
+        false
+    }
+
+    fn auto_increment(&self) -> bool {
+        false
+    }
+
+    fn default(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn db_type(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn check(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn references(&self) -> Option<&'static dyn ForeignKey> {
+        None
+    }
 }
 
 /// Database schema metadata for a foreign-key reference.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ForeignKeySchema {
-    pub table: &'static str,
-    pub column: &'static str,
-    pub on_delete: Option<&'static str>,
-    pub on_update: Option<&'static str>,
+pub trait ForeignKey: Sync {
+    fn table(&self) -> &'static str;
+
+    fn column(&self) -> &'static str;
+
+    fn on_delete(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn on_update(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Database schema metadata for an index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct IndexSchema {
-    pub name: Option<&'static str>,
-    pub columns: &'static [&'static str],
-    pub unique: bool,
+pub trait Index: Sync {
+    fn name(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn columns(&self) -> &'static [&'static str];
+
+    fn unique(&self) -> bool {
+        false
+    }
 }
 
 /// A selected SQL expression and its output alias.
@@ -117,7 +154,7 @@ fn prefix_alias(prefix: &str, alias: &str) -> &'static str {
 
 /// A database table model.
 pub trait Table {
-    type WithColumn<'scope, C: Column>
+    type WithColumn<'scope, C: ColumnMode>
     where
         C: 'scope;
 
@@ -125,10 +162,10 @@ pub trait Table {
     fn name() -> &'static str;
 
     /// Returns the table's database column schema metadata.
-    fn columns() -> &'static [ColumnSchema];
+    fn columns() -> &'static [&'static dyn Column];
 
     /// Returns the table's database index schema metadata.
-    fn indexes() -> &'static [IndexSchema];
+    fn indexes() -> &'static [&'static dyn Index];
 
     /// Returns the database column names for this model.
     fn column_names() -> Self::WithColumn<'static, ColumnName>;

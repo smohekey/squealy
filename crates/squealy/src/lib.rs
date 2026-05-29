@@ -12,8 +12,8 @@ pub use generator::Generator;
 pub use query::{Q, Query, query};
 pub use squealy_macros::Table;
 pub use table::{
-    Column, ColumnExpr, ColumnName, ColumnSchema, ColumnValue, ForeignKeySchema, IndexSchema,
-    Projectable, SelectColumn, Table,
+    Column, ColumnExpr, ColumnMode, ColumnName, ColumnValue, ForeignKey, Index, Projectable,
+    SelectColumn, Table,
 };
 
 #[cfg(test)]
@@ -22,7 +22,7 @@ mod tests {
 
     #[derive(Clone, Debug, PartialEq, Table)]
     #[index(name = "users_name_id_idx", columns = [name, id], unique)]
-    struct User<'scope, C: Column = ColumnExpr> {
+    struct User<'scope, C: ColumnMode = ColumnExpr> {
         #[column(primary_key, auto_increment, index)]
         id: C::Type<'scope, i32>,
         #[column(index, nullable, default = "anonymous", db_type = "text")]
@@ -30,7 +30,7 @@ mod tests {
     }
 
     #[derive(Clone, Debug, PartialEq, Table)]
-    struct Post<'scope, C: Column = ColumnExpr> {
+    struct Post<'scope, C: ColumnMode = ColumnExpr> {
         #[column(primary_key)]
         id: C::Type<'scope, i32>,
         #[column(
@@ -53,31 +53,32 @@ mod tests {
                 write!(
                     writer,
                     "{} {}",
-                    column.name,
-                    column.db_type.unwrap_or("text")
+                    column.name(),
+                    column.db_type().unwrap_or("text")
                 )?;
-                if column.primary_key {
+                if column.primary_key() {
                     writer.write_all(b" PRIMARY KEY")?;
                 }
-                if column.auto_increment {
+                if column.auto_increment() {
                     writer.write_all(b" AUTOINCREMENT")?;
                 }
-                if !column.nullable {
+                if !column.nullable() {
                     writer.write_all(b" NOT NULL")?;
                 }
-                if let Some(default) = column.default {
+                if let Some(default) = column.default() {
                     write!(writer, " DEFAULT {default}")?;
                 }
-                if let Some(reference) = column.references {
+                if let Some(reference) = column.references() {
                     write!(
                         writer,
                         " REFERENCES {}({})",
-                        reference.table, reference.column
+                        reference.table(),
+                        reference.column()
                     )?;
-                    if let Some(on_delete) = reference.on_delete {
+                    if let Some(on_delete) = reference.on_delete() {
                         write!(writer, " ON DELETE {on_delete}")?;
                     }
-                    if let Some(on_update) = reference.on_update {
+                    if let Some(on_update) = reference.on_update() {
                         write!(writer, " ON UPDATE {on_update}")?;
                     }
                 }
@@ -85,9 +86,9 @@ mod tests {
             writer.write_all(b")")?;
 
             for index in T::indexes() {
-                let unique = if index.unique { "UNIQUE " } else { "" };
-                let name = index.name.unwrap_or("unnamed_idx");
-                let columns = index.columns.join(", ");
+                let unique = if index.unique() { "UNIQUE " } else { "" };
+                let name = index.name().unwrap_or("unnamed_idx");
+                let columns = index.columns().join(", ");
                 write!(
                     writer,
                     "\nCREATE {unique}INDEX {name} ON {} ({columns})",
@@ -110,36 +111,38 @@ mod tests {
     #[test]
     fn derive_table_populates_table_metadata() {
         let columns = <User as Table>::column_names();
-        let column_schema = <User as Table>::columns();
+        let column_metadata = <User as Table>::columns();
         let indexes = <User as Table>::indexes();
 
         assert_eq!(<User as Table>::name(), "users");
         assert_eq!(columns.id, "id");
         assert_eq!(columns.name, "name");
-        assert_eq!(column_schema.len(), 2);
-        assert!(column_schema[0].primary_key);
-        assert!(column_schema[0].indexed);
-        assert!(column_schema[0].auto_increment);
-        assert!(column_schema[1].indexed);
-        assert!(column_schema[1].nullable);
-        assert_eq!(column_schema[1].default, Some("anonymous"));
-        assert_eq!(column_schema[1].db_type, Some("text"));
+        assert_eq!(column_metadata.len(), 2);
+        assert!(column_metadata[0].primary_key());
+        assert!(column_metadata[0].indexed());
+        assert!(column_metadata[0].auto_increment());
+        assert!(column_metadata[1].indexed());
+        assert!(column_metadata[1].nullable());
+        assert_eq!(column_metadata[1].default(), Some("anonymous"));
+        assert_eq!(column_metadata[1].db_type(), Some("text"));
         assert_eq!(indexes.len(), 3);
-        assert_eq!(indexes[2].name, Some("users_name_id_idx"));
-        assert_eq!(indexes[2].columns, &["name", "id"]);
-        assert!(indexes[2].unique);
+        assert_eq!(indexes[2].name(), Some("users_name_id_idx"));
+        assert_eq!(indexes[2].columns(), &["name", "id"]);
+        assert!(indexes[2].unique());
     }
 
     #[test]
     fn derive_table_populates_foreign_key_metadata() {
         let columns = <Post as Table>::columns();
         let user_id = &columns[1];
-        let references = user_id.references.expect("user_id should reference users");
+        let references = user_id
+            .references()
+            .expect("user_id should reference users");
 
-        assert!(user_id.indexed);
-        assert_eq!(references.table, "users");
-        assert_eq!(references.column, "id");
-        assert_eq!(references.on_delete, Some("cascade"));
+        assert!(user_id.indexed());
+        assert_eq!(references.table(), "users");
+        assert_eq!(references.column(), "id");
+        assert_eq!(references.on_delete(), Some("cascade"));
     }
 
     #[test]
