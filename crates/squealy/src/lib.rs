@@ -20,23 +20,20 @@ mod tests {
 
     #[derive(Clone, Debug, PartialEq, Table)]
     struct User<'scope, C: Column = ColumnExpr> {
-        #[primary_key]
-        #[auto_increment]
-        #[index]
+        #[column(primary_key, auto_increment, index)]
         id: C::Type<'scope, i32>,
-        #[index]
-        #[nullable]
-        #[default = "anonymous"]
-        #[db_type = "text"]
+        #[column(index, nullable, default = "anonymous", db_type = "text")]
         name: C::Type<'scope, String>,
     }
 
     #[derive(Clone, Debug, PartialEq, Table)]
     struct Post<'scope, C: Column = ColumnExpr> {
-        #[primary_key]
+        #[column(primary_key)]
         id: C::Type<'scope, i32>,
-        #[index]
-        #[references(table = "users", column = "id", on_delete = "cascade")]
+        #[column(
+            index,
+            references(table = "users", column = "id", on_delete = "cascade")
+        )]
         user_id: C::Type<'scope, i32>,
         body: C::Type<'scope, String>,
     }
