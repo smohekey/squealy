@@ -13,7 +13,7 @@ pub use query::{Q, Query, query};
 pub use squealy_macros::Table;
 pub use table::{
     Column, ColumnExpr, ColumnName, ColumnSchema, ColumnValue, ForeignKeySchema, IndexSchema,
-    Projectable, SelectColumn, Table, TableSchema,
+    Projectable, SelectColumn, Table,
 };
 
 #[cfg(test)]
@@ -44,13 +44,9 @@ mod tests {
     struct TestGenerator;
 
     impl Generator for TestGenerator {
-        fn write_table(
-            &self,
-            schema: &TableSchema,
-            writer: &mut impl std::io::Write,
-        ) -> std::io::Result<()> {
-            write!(writer, "CREATE TABLE {} (", schema.name)?;
-            for (index, column) in schema.columns.iter().enumerate() {
+        fn write_table<T: Table>(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+            write!(writer, "CREATE TABLE {} (", T::name())?;
+            for (index, column) in T::columns().iter().enumerate() {
                 if index > 0 {
                     writer.write_all(b", ")?;
                 }
@@ -88,14 +84,14 @@ mod tests {
             }
             writer.write_all(b")")?;
 
-            for index in schema.indexes {
+            for index in T::indexes() {
                 let unique = if index.unique { "UNIQUE " } else { "" };
                 let name = index.name.unwrap_or("unnamed_idx");
                 let columns = index.columns.join(", ");
                 write!(
                     writer,
                     "\nCREATE {unique}INDEX {name} ON {} ({columns})",
-                    schema.name
+                    T::name()
                 )?;
             }
 
@@ -114,30 +110,30 @@ mod tests {
     #[test]
     fn derive_table_populates_table_metadata() {
         let columns = <User as Table>::column_names();
-        let schema = <User as Table>::schema();
+        let column_schema = <User as Table>::columns();
+        let indexes = <User as Table>::indexes();
 
         assert_eq!(<User as Table>::name(), "users");
         assert_eq!(columns.id, "id");
         assert_eq!(columns.name, "name");
-        assert_eq!(schema.name, "users");
-        assert_eq!(schema.columns.len(), 2);
-        assert!(schema.columns[0].primary_key);
-        assert!(schema.columns[0].indexed);
-        assert!(schema.columns[0].auto_increment);
-        assert!(schema.columns[1].indexed);
-        assert!(schema.columns[1].nullable);
-        assert_eq!(schema.columns[1].default, Some("anonymous"));
-        assert_eq!(schema.columns[1].db_type, Some("text"));
-        assert_eq!(schema.indexes.len(), 3);
-        assert_eq!(schema.indexes[2].name, Some("users_name_id_idx"));
-        assert_eq!(schema.indexes[2].columns, &["name", "id"]);
-        assert!(schema.indexes[2].unique);
+        assert_eq!(column_schema.len(), 2);
+        assert!(column_schema[0].primary_key);
+        assert!(column_schema[0].indexed);
+        assert!(column_schema[0].auto_increment);
+        assert!(column_schema[1].indexed);
+        assert!(column_schema[1].nullable);
+        assert_eq!(column_schema[1].default, Some("anonymous"));
+        assert_eq!(column_schema[1].db_type, Some("text"));
+        assert_eq!(indexes.len(), 3);
+        assert_eq!(indexes[2].name, Some("users_name_id_idx"));
+        assert_eq!(indexes[2].columns, &["name", "id"]);
+        assert!(indexes[2].unique);
     }
 
     #[test]
     fn derive_table_populates_foreign_key_metadata() {
-        let schema = <Post as Table>::schema();
-        let user_id = &schema.columns[1];
+        let columns = <Post as Table>::columns();
+        let user_id = &columns[1];
         let references = user_id.references.expect("user_id should reference users");
 
         assert!(user_id.indexed);
@@ -149,9 +145,7 @@ mod tests {
     #[test]
     fn generator_creates_schema_sql() {
         let mut sql = Vec::new();
-        TestGenerator
-            .write_table(&<User as Table>::schema(), &mut sql)
-            .unwrap();
+        TestGenerator.write_table::<User>(&mut sql).unwrap();
         let sql = String::from_utf8(sql).unwrap();
 
         assert!(sql.contains(
