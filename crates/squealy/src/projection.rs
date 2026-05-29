@@ -18,9 +18,11 @@ impl SelectColumn {
 
 /// A table-shaped value whose expression columns can be projected or rebound to a SQL alias.
 pub trait Projectable: Clone {
+    type Rebound<'scope>: Projectable;
+
     fn project(&self) -> Vec<SelectColumn>;
 
-    fn re_alias(&self, alias: &str) -> Self;
+    fn re_alias<'scope>(&self, alias: &str) -> Self::Rebound<'scope>;
 }
 
 impl<L, R> Projectable for (L, R)
@@ -28,6 +30,8 @@ where
     L: Projectable,
     R: Projectable,
 {
+    type Rebound<'scope> = (L::Rebound<'scope>, R::Rebound<'scope>);
+
     fn project(&self) -> Vec<SelectColumn> {
         let mut columns = Vec::new();
         columns.extend(
@@ -45,7 +49,7 @@ where
         columns
     }
 
-    fn re_alias(&self, alias: &str) -> Self {
+    fn re_alias<'scope>(&self, alias: &str) -> Self::Rebound<'scope> {
         (self.0.re_alias(alias), self.1.re_alias(alias))
     }
 }
