@@ -27,7 +27,7 @@ impl TableStruct {
         }
 
         let ident = proc_macro2::Ident::new(&self.ident.to_string(), Span::call_site());
-        let table_name = Literal::string(&to_snake_plural(&ident.to_string()));
+        let name = Literal::string(&to_snake_plural(&ident.to_string()));
         let field_names = self
             .fields
             .iter()
@@ -48,8 +48,8 @@ impl TableStruct {
                 where
                     NextMode: 'next_scope;
 
-                fn table_name() -> &'static str {
-                    #table_name
+                fn name() -> &'static str {
+                    #name
                 }
 
                 fn column_names() -> Self::WithMode<'static, ::squealy::NameMode> {

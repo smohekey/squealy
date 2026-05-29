@@ -90,7 +90,7 @@ pub trait Table {
         Mode: 'scope;
 
     /// Returns the default table name for this model.
-    fn table_name() -> &'static str;
+    fn name() -> &'static str;
 
     /// Returns the database column names for this model.
     fn column_names() -> Self::WithMode<'static, NameMode>;
