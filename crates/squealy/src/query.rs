@@ -179,7 +179,7 @@ impl<'scope> Q<'scope> {
     }
 
     /// Add a subquery and return its projected expression columns in this query scope.
-    pub fn q<T>(&mut self, query: Query<T>) -> T
+    pub fn q<T>(&mut self, query: Query<T>) -> T::Rebound<'scope>
     where
         T: Projectable,
     {
