@@ -212,7 +212,8 @@ fn query_composes_subqueries_with_lateral_joins() {
         q.where_(
             user.id
                 .clone()
-                .equals(Expr::lit(1))
+                .greater_than(Expr::lit(0))
+                .and(user.id.clone().not_equals(Expr::lit(42)).not_())
                 .or(user.name.clone().equals(Expr::lit("Bob"))),
         );
         (user, post)
@@ -220,6 +221,6 @@ fn query_composes_subqueries_with_lateral_joins() {
 
     assert_eq!(
         users_and_posts.to_sql(),
-        r#"SELECT q0_0.id AS left_id, q0_0.name AS left_name, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM (SELECT t0.id AS id, t0.name AS name FROM public.users AS t0) AS q0_0 INNER JOIN LATERAL (SELECT q1_0.id AS id, q1_0.user_id AS user_id, q1_0.body AS body FROM (SELECT t0.id AS id, t0.user_id AS user_id, t0.body AS body FROM public.posts AS t0) AS q1_0 WHERE (q1_0.user_id = q0_0.id)) AS q0_1 ON TRUE WHERE ((q0_0.id = 1) OR (q0_0.name = Bob))"#
+        r#"SELECT q0_0.id AS left_id, q0_0.name AS left_name, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM (SELECT t0.id AS id, t0.name AS name FROM public.users AS t0) AS q0_0 INNER JOIN LATERAL (SELECT q1_0.id AS id, q1_0.user_id AS user_id, q1_0.body AS body FROM (SELECT t0.id AS id, t0.user_id AS user_id, t0.body AS body FROM public.posts AS t0) AS q1_0 WHERE (q1_0.user_id = q0_0.id)) AS q0_1 ON TRUE WHERE (((q0_0.id > 0) AND (NOT (q0_0.id <> 42))) OR (q0_0.name = Bob))"#
     );
 }
