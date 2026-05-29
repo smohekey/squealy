@@ -72,7 +72,7 @@ impl TableStruct {
     fn expand(&self) -> TokenStream {
         if !self.has_scope_and_mode {
             return compile_error(
-                "Table currently requires structs shaped like `Type<'scope, C: Column = ColumnExpr>`",
+                "Table currently requires structs shaped like `Type<'scope, C: ColumnMode = ColumnExpr>`",
             );
         }
 
@@ -88,26 +88,67 @@ impl TableStruct {
             .iter()
             .map(|field| Literal::string(&field.column_name()))
             .collect::<Vec<_>>();
-        let schema_columns = self
+        let column_idents = self
             .fields
             .iter()
-            .map(Field::schema_column_tokens)
+            .map(|field| generated_ident(&ident, &field.ident.to_string(), "Column"))
             .collect::<Vec<_>>();
-        let mut schema_indexes = self
+        let field_indexes = self
             .fields
             .iter()
             .filter(|field| field.attrs.index)
-            .map(Field::schema_index_tokens)
+            .map(|field| {
+                (
+                    field,
+                    generated_ident(&ident, &field.ident.to_string(), "Index"),
+                )
+            })
             .collect::<Vec<_>>();
-        schema_indexes.extend(
+        let mut index_idents = field_indexes
+            .iter()
+            .map(|(_, ident)| ident.clone())
+            .collect::<Vec<_>>();
+        index_idents.extend(
             self.indexes
                 .iter()
-                .map(|index| index.schema_index_tokens(&self.fields)),
+                .enumerate()
+                .map(|(index, _)| generated_ident(&ident, &index.to_string(), "Index")),
         );
+        let column_defs = self
+            .fields
+            .iter()
+            .zip(column_idents.iter())
+            .map(|(field, ident)| field.column_definition_tokens(ident))
+            .collect::<Vec<_>>();
+        let foreign_key_defs = self
+            .fields
+            .iter()
+            .zip(column_idents.iter())
+            .filter_map(|(field, ident)| field.foreign_key_definition_tokens(ident))
+            .collect::<Vec<_>>();
+        let mut index_defs = field_indexes
+            .iter()
+            .map(|(field, ident)| field.index_definition_tokens(ident))
+            .collect::<Vec<_>>();
+        let field_index_count = index_defs.len();
+        index_defs.extend(self.indexes.iter().enumerate().map(|(index, attrs)| {
+            attrs.index_definition_tokens(&index_idents[field_index_count + index], &self.fields)
+        }));
+        let columns_static = generated_ident(&ident, "columns", "Static");
+        let indexes_static = generated_ident(&ident, "indexes", "Static");
+        let columns_len = Literal::usize_unsuffixed(column_idents.len());
+        let indexes_len = Literal::usize_unsuffixed(index_idents.len());
 
         quote::quote! {
-            impl<'scope, C: ::squealy::Column> ::squealy::Table for #ident <'scope, C> {
-                type WithColumn<'next_scope, NextC: ::squealy::Column> = #ident <'next_scope, NextC>
+            #(#foreign_key_defs)*
+            #(#column_defs)*
+            #(#index_defs)*
+
+            static #columns_static: [&'static dyn ::squealy::Column; #columns_len] = [#( &#column_idents, )*];
+            static #indexes_static: [&'static dyn ::squealy::Index; #indexes_len] = [#( &#index_idents, )*];
+
+            impl<'scope, C: ::squealy::ColumnMode> ::squealy::Table for #ident <'scope, C> {
+                type WithColumn<'next_scope, NextC: ::squealy::ColumnMode> = #ident <'next_scope, NextC>
                 where
                     NextC: 'next_scope;
 
@@ -115,12 +156,12 @@ impl TableStruct {
                     #name
                 }
 
-                fn columns() -> &'static [::squealy::ColumnSchema] {
-                    &[#( #schema_columns, )*]
+                fn columns() -> &'static [&'static dyn ::squealy::Column] {
+                    &#columns_static
                 }
 
-                fn indexes() -> &'static [::squealy::IndexSchema] {
-                    &[#( #schema_indexes, )*]
+                fn indexes() -> &'static [&'static dyn ::squealy::Index] {
+                    &#indexes_static
                 }
 
                 fn column_names() -> Self::WithColumn<'static, ::squealy::ColumnName> {
@@ -150,7 +191,11 @@ impl TableStruct {
 }
 
 impl IndexAttrs {
-    fn schema_index_tokens(&self, fields: &[Field]) -> proc_macro2::TokenStream {
+    fn index_definition_tokens(
+        &self,
+        index_ident: &proc_macro2::Ident,
+        fields: &[Field],
+    ) -> proc_macro2::TokenStream {
         let name = option_literal(self.name.as_deref());
         let columns = self
             .columns
@@ -167,10 +212,20 @@ impl IndexAttrs {
         let unique = bool_tokens(self.unique);
 
         quote::quote! {
-            ::squealy::IndexSchema {
-                name: #name,
-                columns: &[#( #columns, )*],
-                unique: #unique,
+            struct #index_ident;
+
+            impl ::squealy::Index for #index_ident {
+                fn name(&self) -> Option<&'static str> {
+                    #name
+                }
+
+                fn columns(&self) -> &'static [&'static str] {
+                    &[#( #columns, )*]
+                }
+
+                fn unique(&self) -> bool {
+                    #unique
+                }
             }
         }
     }
@@ -184,7 +239,10 @@ impl Field {
             .unwrap_or_else(|| self.ident.to_string())
     }
 
-    fn schema_column_tokens(&self) -> proc_macro2::TokenStream {
+    fn column_definition_tokens(
+        &self,
+        column_ident: &proc_macro2::Ident,
+    ) -> proc_macro2::TokenStream {
         let name = Literal::string(&self.column_name());
         let primary_key = bool_tokens(self.attrs.primary_key);
         let indexed = bool_tokens(self.attrs.index);
@@ -194,56 +252,123 @@ impl Field {
         let default = option_literal(self.attrs.default.as_deref());
         let db_type = option_literal(self.attrs.db_type.as_deref());
         let check = option_literal(self.attrs.check.as_deref());
-        let references = self.references_tokens();
+        let references = self.references_tokens(column_ident);
 
         quote::quote! {
-            ::squealy::ColumnSchema {
-                name: #name,
-                primary_key: #primary_key,
-                indexed: #indexed,
-                unique: #unique,
-                nullable: #nullable,
-                auto_increment: #auto_increment,
-                default: #default,
-                db_type: #db_type,
-                check: #check,
-                references: #references,
+            struct #column_ident;
+
+            impl ::squealy::Column for #column_ident {
+                fn name(&self) -> &'static str { #name }
+                fn primary_key(&self) -> bool { #primary_key }
+                fn indexed(&self) -> bool { #indexed }
+                fn unique(&self) -> bool { #unique }
+                fn nullable(&self) -> bool { #nullable }
+                fn auto_increment(&self) -> bool { #auto_increment }
+                fn default(&self) -> Option<&'static str> { #default }
+                fn db_type(&self) -> Option<&'static str> { #db_type }
+                fn check(&self) -> Option<&'static str> { #check }
+                fn references(&self) -> Option<&'static dyn ::squealy::ForeignKey> { #references }
             }
         }
     }
 
-    fn schema_index_tokens(&self) -> proc_macro2::TokenStream {
+    fn index_definition_tokens(
+        &self,
+        index_ident: &proc_macro2::Ident,
+    ) -> proc_macro2::TokenStream {
         let name = option_literal(None);
         let column_name = Literal::string(&self.column_name());
         let unique = bool_tokens(self.attrs.unique);
 
         quote::quote! {
-            ::squealy::IndexSchema {
-                name: #name,
-                columns: &[#column_name],
-                unique: #unique,
+            struct #index_ident;
+
+            impl ::squealy::Index for #index_ident {
+                fn name(&self) -> Option<&'static str> {
+                    #name
+                }
+
+                fn columns(&self) -> &'static [&'static str] {
+                    &[#column_name]
+                }
+
+                fn unique(&self) -> bool {
+                    #unique
+                }
             }
         }
     }
 
-    fn references_tokens(&self) -> proc_macro2::TokenStream {
-        let Some(references) = &self.attrs.references else {
-            return quote::quote! { None };
-        };
-
+    fn foreign_key_definition_tokens(
+        &self,
+        column_ident: &proc_macro2::Ident,
+    ) -> Option<proc_macro2::TokenStream> {
+        let references = self.attrs.references.as_ref()?;
+        let foreign_key_ident = foreign_key_ident(column_ident);
         let table = Literal::string(references.table.as_deref().unwrap_or(""));
         let column = Literal::string(references.column.as_deref().unwrap_or("id"));
         let on_delete = option_literal(references.on_delete.as_deref());
         let on_update = option_literal(references.on_update.as_deref());
 
-        quote::quote! {
-            Some(::squealy::ForeignKeySchema {
-                table: #table,
-                column: #column,
-                on_delete: #on_delete,
-                on_update: #on_update,
-            })
+        Some(quote::quote! {
+            struct #foreign_key_ident;
+
+            impl ::squealy::ForeignKey for #foreign_key_ident {
+                fn table(&self) -> &'static str { #table }
+                fn column(&self) -> &'static str { #column }
+                fn on_delete(&self) -> Option<&'static str> { #on_delete }
+                fn on_update(&self) -> Option<&'static str> { #on_update }
+            }
+        })
+    }
+
+    fn references_tokens(&self, column_ident: &proc_macro2::Ident) -> proc_macro2::TokenStream {
+        if self.attrs.references.is_none() {
+            return quote::quote! { None };
         }
+
+        let foreign_key_ident = foreign_key_ident(column_ident);
+        quote::quote! { Some(&#foreign_key_ident) }
+    }
+}
+
+fn generated_ident(
+    table_ident: &proc_macro2::Ident,
+    name: &str,
+    suffix: &str,
+) -> proc_macro2::Ident {
+    proc_macro2::Ident::new(
+        &format!("__Squealy{}{}{}", table_ident, to_pascal(name), suffix),
+        Span::call_site(),
+    )
+}
+
+fn foreign_key_ident(column_ident: &proc_macro2::Ident) -> proc_macro2::Ident {
+    proc_macro2::Ident::new(&format!("{column_ident}ForeignKey"), Span::call_site())
+}
+
+fn to_pascal(name: &str) -> String {
+    let mut output = String::new();
+    let mut capitalize_next = true;
+
+    for character in name.chars() {
+        if character == '_' || !character.is_alphanumeric() {
+            capitalize_next = true;
+            continue;
+        }
+
+        if capitalize_next {
+            output.extend(character.to_uppercase());
+            capitalize_next = false;
+        } else {
+            output.push(character);
+        }
+    }
+
+    if output.is_empty() {
+        "Generated".to_owned()
+    } else {
+        output
     }
 }
 
