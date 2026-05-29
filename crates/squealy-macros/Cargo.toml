@@ -9,4 +9,4 @@ license = "MIT"
 proc-macro = true
 
 [dependencies]
-quote = { path = "../../vendor/quote" }
+quote = "1.0"
