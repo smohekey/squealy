@@ -29,14 +29,6 @@ impl Column for ColumnValue {
     type Type<'scope, U> = U;
 }
 
-/// Database schema metadata for a table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TableSchema {
-    pub name: &'static str,
-    pub columns: &'static [ColumnSchema],
-    pub indexes: &'static [IndexSchema],
-}
-
 /// Database schema metadata for a single column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ColumnSchema {
@@ -132,19 +124,22 @@ pub trait Table {
     /// Returns the default table name for this model.
     fn name() -> &'static str;
 
-    /// Returns the database schema for this model.
-    fn schema() -> TableSchema;
+    /// Returns the table's database column schema metadata.
+    fn columns() -> &'static [ColumnSchema];
+
+    /// Returns the table's database index schema metadata.
+    fn indexes() -> &'static [IndexSchema];
 
     /// Returns the database column names for this model.
     fn column_names() -> Self::WithColumn<'static, ColumnName>;
 
     /// Build expression-mode fields that refer to the supplied SQL alias.
-    fn columns<'scope>(alias: &str) -> Self::WithColumn<'scope, ColumnExpr> {
-        Self::columns_from(alias, &Self::column_names())
+    fn column_exprs<'scope>(alias: &str) -> Self::WithColumn<'scope, ColumnExpr> {
+        Self::column_exprs_from(alias, &Self::column_names())
     }
 
     /// Build expression-mode fields from explicit database column names.
-    fn columns_from<'scope>(
+    fn column_exprs_from<'scope>(
         alias: &str,
         columns: &Self::WithColumn<'static, ColumnName>,
     ) -> Self::WithColumn<'scope, ColumnExpr>;

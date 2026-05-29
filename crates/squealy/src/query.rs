@@ -40,7 +40,7 @@ impl Query<()> {
         S: Table,
         <S as Table>::WithColumn<'static, crate::ColumnExpr>: Projectable,
     {
-        let project = S::columns("t0");
+        let project = S::column_exprs("t0");
         let select = render_select(project.project());
         Query::new(format!("SELECT {select} FROM {} AS t0", S::name()), project)
     }

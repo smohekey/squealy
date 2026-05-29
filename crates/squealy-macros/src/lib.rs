@@ -115,19 +115,19 @@ impl TableStruct {
                     #name
                 }
 
-                fn schema() -> ::squealy::TableSchema {
-                    ::squealy::TableSchema {
-                        name: #name,
-                        columns: &[#( #schema_columns, )*],
-                        indexes: &[#( #schema_indexes, )*],
-                    }
+                fn columns() -> &'static [::squealy::ColumnSchema] {
+                    &[#( #schema_columns, )*]
+                }
+
+                fn indexes() -> &'static [::squealy::IndexSchema] {
+                    &[#( #schema_indexes, )*]
                 }
 
                 fn column_names() -> Self::WithColumn<'static, ::squealy::ColumnName> {
                     #ident { #( #fields: #field_literals, )* }
                 }
 
-                fn columns_from<'next_scope>(
+                fn column_exprs_from<'next_scope>(
                     alias: &str,
                     columns: &Self::WithColumn<'static, ::squealy::ColumnName>,
                 ) -> Self::WithColumn<'next_scope, ::squealy::ColumnExpr> {
