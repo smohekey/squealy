@@ -44,7 +44,7 @@ mod tests {
     struct TestGenerator;
 
     impl Generator for TestGenerator {
-        fn write_create_table_statement(
+        fn write_table(
             &self,
             schema: &TableSchema,
             writer: &mut impl std::io::Write,
@@ -54,73 +54,51 @@ mod tests {
                 if index > 0 {
                     writer.write_all(b", ")?;
                 }
-                self.write_column_definition(column, writer)?;
+                write!(
+                    writer,
+                    "{} {}",
+                    column.name,
+                    column.db_type.unwrap_or("text")
+                )?;
+                if column.primary_key {
+                    writer.write_all(b" PRIMARY KEY")?;
+                }
+                if column.auto_increment {
+                    writer.write_all(b" AUTOINCREMENT")?;
+                }
+                if !column.nullable {
+                    writer.write_all(b" NOT NULL")?;
+                }
+                if let Some(default) = column.default {
+                    write!(writer, " DEFAULT {default}")?;
+                }
+                if let Some(reference) = column.references {
+                    write!(
+                        writer,
+                        " REFERENCES {}({})",
+                        reference.table, reference.column
+                    )?;
+                    if let Some(on_delete) = reference.on_delete {
+                        write!(writer, " ON DELETE {on_delete}")?;
+                    }
+                    if let Some(on_update) = reference.on_update {
+                        write!(writer, " ON UPDATE {on_update}")?;
+                    }
+                }
             }
-            writer.write_all(b")")
-        }
+            writer.write_all(b")")?;
 
-        fn write_create_index_statement(
-            &self,
-            table: &TableSchema,
-            index: &IndexSchema,
-            writer: &mut impl std::io::Write,
-        ) -> std::io::Result<()> {
-            let unique = if index.unique { "UNIQUE " } else { "" };
-            let name = index.name.unwrap_or("unnamed_idx");
-            let columns = index.columns.join(", ");
-            write!(
-                writer,
-                "CREATE {unique}INDEX {name} ON {} ({columns})",
-                table.name
-            )
-        }
+            for index in schema.indexes {
+                let unique = if index.unique { "UNIQUE " } else { "" };
+                let name = index.name.unwrap_or("unnamed_idx");
+                let columns = index.columns.join(", ");
+                write!(
+                    writer,
+                    "\nCREATE {unique}INDEX {name} ON {} ({columns})",
+                    schema.name
+                )?;
+            }
 
-        fn write_column_definition(
-            &self,
-            column: &ColumnSchema,
-            writer: &mut impl std::io::Write,
-        ) -> std::io::Result<()> {
-            write!(
-                writer,
-                "{} {}",
-                column.name,
-                column.db_type.unwrap_or("text")
-            )?;
-            if column.primary_key {
-                writer.write_all(b" PRIMARY KEY")?;
-            }
-            if column.auto_increment {
-                writer.write_all(b" AUTOINCREMENT")?;
-            }
-            if !column.nullable {
-                writer.write_all(b" NOT NULL")?;
-            }
-            if let Some(default) = column.default {
-                write!(writer, " DEFAULT {default}")?;
-            }
-            if let Some(reference) = column.references {
-                writer.write_all(b" ")?;
-                self.write_foreign_key_reference(&reference, writer)?;
-            }
-            Ok(())
-        }
-
-        fn write_foreign_key_reference(
-            &self,
-            reference: &ForeignKeySchema,
-            writer: &mut impl std::io::Write,
-        ) -> std::io::Result<()> {
-            write!(
-                writer,
-                "REFERENCES {}({})",
-                reference.table, reference.column
-            )?;
-            if let Some(on_delete) = reference.on_delete {
-                write!(writer, " ON DELETE {on_delete}")?;
-            }
-            if let Some(on_update) = reference.on_update {
-                write!(writer, " ON UPDATE {on_update}")?;
-            }
             Ok(())
         }
     }
@@ -172,7 +150,7 @@ mod tests {
     fn generator_creates_schema_sql() {
         let mut sql = Vec::new();
         TestGenerator
-            .create_table(&<User as Table>::schema(), &mut sql)
+            .write_table(&<User as Table>::schema(), &mut sql)
             .unwrap();
         let sql = String::from_utf8(sql).unwrap();
 
