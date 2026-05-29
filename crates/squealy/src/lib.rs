@@ -56,16 +56,13 @@ mod tests {
     struct TestGenerator;
 
     impl Generator for TestGenerator {
-        fn write_table<T: SchemaTable>(
+        fn write_table(
             &self,
+            table: &(dyn Table + Sync),
             writer: &mut impl std::io::Write,
         ) -> std::io::Result<()> {
-            write!(
-                writer,
-                "CREATE TABLE {} (",
-                <T as SchemaTable>::qualified_name()
-            )?;
-            for (index, column) in <T as SchemaTable>::columns().iter().enumerate() {
+            write!(writer, "CREATE TABLE {} (", table.qualified_name())?;
+            for (index, column) in table.columns().iter().enumerate() {
                 if index > 0 {
                     writer.write_all(b", ")?;
                 }
@@ -108,14 +105,14 @@ mod tests {
             }
             writer.write_all(b")")?;
 
-            for index in <T as SchemaTable>::indexes() {
+            for index in table.indexes() {
                 let unique = if index.unique() { "UNIQUE " } else { "" };
                 let name = index.name().unwrap_or("unnamed_idx");
                 let columns = index.columns().join(", ");
                 write!(
                     writer,
                     "\nCREATE {unique}INDEX {name} ON {} ({columns})",
-                    <T as SchemaTable>::qualified_name()
+                    table.qualified_name()
                 )?;
             }
 
@@ -134,19 +131,17 @@ mod tests {
     #[test]
     fn derive_table_populates_table_metadata() {
         let columns = <User as SchemaTable>::column_names();
-        let column_metadata = <User as SchemaTable>::columns();
-        let indexes = <User as SchemaTable>::indexes();
 
-        assert_eq!(<User as SchemaTable>::schema_name(), Some("public"));
-        assert_eq!(<User as SchemaTable>::name(), "users");
-        assert_eq!(<User as SchemaTable>::qualified_name(), "public.users");
-        assert_eq!(<Post as SchemaTable>::schema_name(), Some("public"));
-        assert_eq!(<Post as SchemaTable>::qualified_name(), "public.posts");
         assert_eq!(<Public as Schema>::name(), Some("public"));
         let schema_tables = <Public as Schema>::tables().collect::<Vec<_>>();
         assert_eq!(schema_tables.len(), 2);
+        assert_eq!(schema_tables[0].schema_name(), Some("public"));
+        assert_eq!(schema_tables[0].name(), "users");
         assert_eq!(schema_tables[0].qualified_name(), "public.users");
+        assert_eq!(schema_tables[1].schema_name(), Some("public"));
         assert_eq!(schema_tables[1].qualified_name(), "public.posts");
+        let column_metadata = schema_tables[0].columns();
+        let indexes = schema_tables[0].indexes();
         let database_schemas = <AppDatabase as Database>::schemas().collect::<Vec<_>>();
         assert_eq!(database_schemas.len(), 1);
         assert_eq!(database_schemas[0].name(), Some("public"));
@@ -172,7 +167,8 @@ mod tests {
 
     #[test]
     fn derive_table_populates_foreign_key_metadata() {
-        let columns = <Post as SchemaTable>::columns();
+        let schema_tables = <Public as Schema>::tables().collect::<Vec<_>>();
+        let columns = schema_tables[1].columns();
         let user_id = &columns[1];
         let references = user_id
             .references()
@@ -188,7 +184,10 @@ mod tests {
     #[test]
     fn generator_creates_schema_sql() {
         let mut sql = Vec::new();
-        TestGenerator.write_table::<User>(&mut sql).unwrap();
+        let schema_tables = <Public as Schema>::tables().collect::<Vec<_>>();
+        TestGenerator
+            .write_table(schema_tables[0], &mut sql)
+            .unwrap();
         let sql = String::from_utf8(sql).unwrap();
 
         assert!(sql.contains(
@@ -197,7 +196,9 @@ mod tests {
         assert!(sql.contains("CREATE UNIQUE INDEX users_name_id_idx ON public.users (name, id)"));
 
         let mut sql = Vec::new();
-        TestGenerator.write_table::<Post>(&mut sql).unwrap();
+        TestGenerator
+            .write_table(schema_tables[1], &mut sql)
+            .unwrap();
         let sql = String::from_utf8(sql).unwrap();
 
         assert!(sql.contains("REFERENCES public.users(id) ON DELETE cascade"));

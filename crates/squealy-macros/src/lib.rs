@@ -171,7 +171,7 @@ impl SchemaStruct {
         let table_idents = self
             .fields
             .iter()
-            .map(|field| generated_ident(&ident, &field.ident.to_string(), "SchemaTable"))
+            .map(|field| generated_ident(&ident, &field.ident.to_string(), "Table"))
             .collect::<Vec<_>>();
         let table_types = self
             .fields
