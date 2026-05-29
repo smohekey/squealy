@@ -1,6 +1,19 @@
 use std::fmt::Display;
 use std::marker::PhantomData;
 
+/// Marker trait for Rust types that can participate in numeric SQL operations.
+pub trait SqlNumber {}
+
+macro_rules! impl_sql_number {
+    ($($ty:ty),* $(,)?) => {
+        $(impl SqlNumber for $ty {})*
+    };
+}
+
+impl_sql_number!(i8, i16, i32, i64, i128, isize);
+impl_sql_number!(u8, u16, u32, u64, u128, usize);
+impl_sql_number!(f32, f64);
+
 /// A typed SQL scalar expression scoped to a query builder invocation.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Expr<'scope, T> {
@@ -60,10 +73,20 @@ impl<'scope, T> Expr<'scope, T> {
     pub fn greater_than_or_equals(self, other: Self) -> Predicate<'scope> {
         Predicate::new(format!("({} >= {})", self.sql, other.sql))
     }
+}
 
+impl<'scope, T> Expr<'scope, T>
+where
+    T: SqlNumber,
+{
     /// SQL numeric addition.
     pub fn add(self, other: Self) -> Self {
         Self::new(format!("({} + {})", self.sql, other.sql))
+    }
+
+    /// SQL numeric subtraction.
+    pub fn subtract(self, other: Self) -> Self {
+        Self::new(format!("({} - {})", self.sql, other.sql))
     }
 }
 
