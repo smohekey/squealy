@@ -1,0 +1,176 @@
+//! Procedural macros for squealy.
+
+use proc_macro::{Delimiter, Group, Ident, TokenStream, TokenTree};
+
+/// Derives squealy table metadata for generic table-mode structs.
+#[proc_macro_derive(Table)]
+pub fn derive_table(input: TokenStream) -> TokenStream {
+    match table_struct(input) {
+        Ok(table) => table.expand(),
+        Err(message) => compile_error(&message),
+    }
+}
+
+struct TableStruct {
+    ident: Ident,
+    fields: Vec<Ident>,
+    has_scope_and_mode: bool,
+}
+
+impl TableStruct {
+    fn expand(&self) -> TokenStream {
+        if !self.has_scope_and_mode {
+            return compile_error(
+                "Table currently requires structs shaped like `Type<'scope, Mode: TableMode = ExprMode>`",
+            );
+        }
+
+        let ident = self.ident.to_string();
+        let table_name = to_string_literal(&to_snake_plural(&ident));
+        let field_names = self
+            .fields
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let columns = field_names
+            .iter()
+            .map(|field| format!("{field}: ::squealy::Expr::column(alias, columns.{field})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let projections = field_names
+            .iter()
+            .map(|field| {
+                format!(
+                    "::squealy::SelectColumn::new(self.{field}.to_sql().to_owned(), \"{field}\")"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let realias = field_names
+            .iter()
+            .map(|field| format!("{field}: ::squealy::Expr::column(alias, \"{field}\")"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        quote::quote! {
+            impl<'scope, Mode: ::squealy::TableMode> ::squealy::Table for #ident <'scope, Mode> {
+                type WithMode<'next_scope, NextMode: ::squealy::TableMode> = #ident <'next_scope, NextMode>
+                where
+                    NextMode: 'next_scope;
+
+                fn table_name() -> &'static str {
+                    #table_name
+                }
+
+                fn columns<'next_scope>(
+                    alias: &str,
+                    columns: &Self::WithMode<'static, ::squealy::NameMode>,
+                ) -> Self::WithMode<'next_scope, ::squealy::ExprMode> {
+                    #ident { #columns }
+                }
+            }
+
+            impl<'scope> ::squealy::Projectable for #ident <'scope, ::squealy::ExprMode> {
+                fn project(&self) -> ::std::vec::Vec<::squealy::SelectColumn> {
+                    ::std::vec![#projections]
+                }
+
+                fn re_alias(&self, alias: &str) -> Self {
+                    #ident { #realias }
+                }
+            }
+        }
+    }
+}
+
+fn table_struct(input: TokenStream) -> Result<TableStruct, String> {
+    let tokens = input.into_iter().collect::<Vec<_>>();
+    let struct_index = tokens
+        .iter()
+        .position(|token| matches_ident(token, "struct"))
+        .ok_or_else(|| "Table can only be derived for structs".to_owned())?;
+
+    let ident = tokens
+        .get(struct_index + 1)
+        .and_then(|token| match token {
+            TokenTree::Ident(ident) => Some(ident.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| "Table derive could not find the struct name".to_owned())?;
+
+    let body_index = tokens
+        .iter()
+        .position(|token| matches!(token, TokenTree::Group(group) if group.delimiter() == Delimiter::Brace))
+        .ok_or_else(|| "Table requires a named-field struct".to_owned())?;
+
+    let has_scope_and_mode = tokens[struct_index + 2..body_index]
+        .iter()
+        .map(ToString::to_string)
+        .collect::<String>()
+        .contains("'scope,Mode:");
+
+    let fields = match &tokens[body_index] {
+        TokenTree::Group(group) => named_fields(group)?,
+        _ => unreachable!(),
+    };
+
+    Ok(TableStruct {
+        ident,
+        fields,
+        has_scope_and_mode,
+    })
+}
+
+fn named_fields(group: &Group) -> Result<Vec<Ident>, String> {
+    let mut fields = Vec::new();
+    let mut iter = group.stream().into_iter().peekable();
+
+    while let Some(token) = iter.next() {
+        let TokenTree::Ident(ident) = token else {
+            continue;
+        };
+
+        if let Some(TokenTree::Punct(punct)) = iter.peek() {
+            if punct.as_char() == ':' && punct.spacing() == proc_macro::Spacing::Alone {
+                fields.push(ident);
+            }
+        }
+    }
+
+    if fields.is_empty() {
+        Err("Table requires at least one named field".to_owned())
+    } else {
+        Ok(fields)
+    }
+}
+
+fn matches_ident(token: &TokenTree, expected: &str) -> bool {
+    matches!(token, TokenTree::Ident(ident) if ident.to_string() == expected)
+}
+
+fn to_snake_plural(name: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('s');
+    out
+}
+
+fn compile_error(message: &str) -> TokenStream {
+    let message = to_string_literal(message);
+    quote::quote! {
+        compile_error!(#message);
+    }
+}
+
+fn to_string_literal(value: &str) -> String {
+    format!("{value:?}")
+}

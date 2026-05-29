@@ -1,0 +1,12 @@
+[package]
+name = "squealy-macros"
+version = "0.1.0"
+edition = "2024"
+description = "Derive macros for squealy"
+license = "MIT"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = { path = "../../vendor/quote" }

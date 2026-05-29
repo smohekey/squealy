@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/squealy", "crates/squealy-macros"]
+resolver = "3"
