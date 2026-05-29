@@ -9,20 +9,22 @@ mod table;
 pub use expr::Expr;
 pub use query::{Q, Query, query};
 pub use squealy_macros::Table;
-pub use table::{Column, ColumnExpr, ColumnName, ColumnValue, Projectable, SelectColumn, Table};
+pub use table::{
+    ColumnExpr, ColumnName, ColumnType, ColumnValue, Projectable, SelectColumn, Table,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[derive(Clone, Debug, PartialEq, Table)]
-    struct User<'scope, Column: crate::Column = ColumnExpr> {
+    struct User<'scope, Column: crate::ColumnType = ColumnExpr> {
         id: Column::T<'scope, i32>,
         name: Column::T<'scope, String>,
     }
 
     #[derive(Clone, Debug, PartialEq, Table)]
-    struct Post<'scope, Column: crate::Column = ColumnExpr> {
+    struct Post<'scope, Column: crate::ColumnType = ColumnExpr> {
         id: Column::T<'scope, i32>,
         user_id: Column::T<'scope, i32>,
         body: Column::T<'scope, String>,
