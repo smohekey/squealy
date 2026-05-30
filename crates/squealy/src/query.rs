@@ -349,9 +349,7 @@ where
     Conn: Connection + 'conn,
     S: TableProjection + 'conn,
 {
-    pub fn execute(
-        self,
-    ) -> impl Future<Output = Result<u64, <Conn as Connection>::Error>> + 'conn {
+    pub fn execute(self) -> impl Future<Output = Result<u64, <Conn as Connection>::Error>> + 'conn {
         let query = Connection::delete_query::<S>(self.connection, self.alias(), self.filters);
         async move { DeleteQuery::execute(&query).await }
     }

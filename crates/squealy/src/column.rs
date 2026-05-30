@@ -61,6 +61,18 @@ pub trait Column: Sync {
         false
     }
 
+    fn generated(&self) -> bool {
+        false
+    }
+
+    fn insertable(&self) -> bool {
+        !self.generated() && !self.auto_increment()
+    }
+
+    fn updateable(&self) -> bool {
+        !self.generated() && !self.auto_increment()
+    }
+
     fn default(&self) -> Option<&'static str> {
         None
     }
