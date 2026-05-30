@@ -87,6 +87,7 @@ impl TableStruct {
             .map(|field| generated_ident(&ident, &field.ident.to_string(), "Column"))
             .collect::<Vec<_>>();
         let exprs_ident = generated_ident(&ident, "exprs", "Projection");
+        let rebound_exprs_ident = generated_ident(&ident, "exprs", "ReboundProjection");
         let expr_kind_idents = self
             .fields
             .iter()
@@ -166,17 +167,27 @@ impl TableStruct {
                 }
 
                 impl ::squealy::ProjectionShape for #expr_kind_idents {
-                    type Exprs<'scope> = ::squealy::Expr<'scope, #expr_kind_idents>;
+                    type Exprs<'scope> = ::squealy::ColumnRef<'scope, #expr_kind_idents>;
+                    type ReboundExprs<'scope> = ::squealy::Expr<'scope, #expr_kind_idents>;
                     type Row = #field_value_tys;
 
                     fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
+                        ::squealy::ColumnRef::column(alias, #field_literals)
+                    }
+
+                    fn rebound_exprs<'scope>(alias: &str) -> Self::ReboundExprs<'scope> {
                         ::squealy::Expr::column(alias, #field_literals)
                     }
                 }
             )*
 
-            #[derive(Clone, Debug, PartialEq)]
+            #[derive(Clone, Copy, Debug, PartialEq, Eq)]
             pub struct #exprs_ident <'scope> {
+                #( pub #fields: ::squealy::ColumnRef<'scope, #expr_kind_idents>, )*
+            }
+
+            #[derive(Clone, Debug, PartialEq)]
+            pub struct #rebound_exprs_ident <'scope> {
                 #( pub #fields: ::squealy::Expr<'scope, #expr_kind_idents>, )*
             }
 
@@ -230,12 +241,41 @@ impl TableStruct {
                     alias: &str,
                     columns: &Self::WithColumn<'static, ::squealy::ColumnName>,
                 ) -> Self::Exprs<'next_scope> {
-                    #exprs_ident { #( #fields: ::squealy::Expr::column(alias, columns.#fields), )* }
+                    #exprs_ident { #( #fields: ::squealy::ColumnRef::column(alias, columns.#fields), )* }
                 }
             }
 
             impl<'scope> ::squealy::Projectable for #exprs_ident <'scope> {
-                type Rebound<'next_scope> = #exprs_ident <'next_scope>;
+                type Rebound<'next_scope> = #rebound_exprs_ident <'next_scope>;
+
+                fn project(&self) -> ::std::vec::Vec<::squealy::SelectColumn> {
+                    ::std::vec![
+                        #(
+                            ::squealy::SelectColumn::new(
+                                self.#fields.node(),
+                                #field_literals,
+                            ),
+                        )*
+                    ]
+                }
+
+                fn re_alias<'next_scope>(&self, alias: &str) -> Self::Rebound<'next_scope> {
+                    #rebound_exprs_ident { #( #fields: ::squealy::Expr::column(alias, #field_literals), )* }
+                }
+
+                fn re_alias_with_prefix<'next_scope>(
+                    &self,
+                    alias: &str,
+                    prefix: &str,
+                ) -> Self::Rebound<'next_scope> {
+                    #rebound_exprs_ident {
+                        #( #fields: ::squealy::Expr::column(alias, &::std::format!("{prefix}_{}", #field_literals)), )*
+                    }
+                }
+            }
+
+            impl<'scope> ::squealy::Projectable for #rebound_exprs_ident <'scope> {
+                type Rebound<'next_scope> = #rebound_exprs_ident <'next_scope>;
 
                 fn project(&self) -> ::std::vec::Vec<::squealy::SelectColumn> {
                     ::std::vec![
@@ -249,7 +289,7 @@ impl TableStruct {
                 }
 
                 fn re_alias<'next_scope>(&self, alias: &str) -> Self::Rebound<'next_scope> {
-                    #exprs_ident { #( #fields: ::squealy::Expr::column(alias, #field_literals), )* }
+                    #rebound_exprs_ident { #( #fields: ::squealy::Expr::column(alias, #field_literals), )* }
                 }
 
                 fn re_alias_with_prefix<'next_scope>(
@@ -257,7 +297,7 @@ impl TableStruct {
                     alias: &str,
                     prefix: &str,
                 ) -> Self::Rebound<'next_scope> {
-                    #exprs_ident {
+                    #rebound_exprs_ident {
                         #( #fields: ::squealy::Expr::column(alias, &::std::format!("{prefix}_{}", #field_literals)), )*
                     }
                 }

@@ -179,6 +179,198 @@ pub struct Expr<'scope, K> {
     _phantom: PhantomData<(&'scope (), K)>,
 }
 
+/// A copyable reference to a source column scoped to a query builder invocation.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ColumnRef<'scope, K> {
+    alias: SourceAlias,
+    column: &'static str,
+    project_alias: &'static str,
+    _phantom: PhantomData<(&'scope (), K)>,
+}
+
+impl<'scope, K> Clone for ColumnRef<'scope, K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'scope, K> Copy for ColumnRef<'scope, K> {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceAlias {
+    depth: usize,
+    index: usize,
+}
+
+impl SourceAlias {
+    fn parse(alias: &str) -> Self {
+        let Some(alias) = alias.strip_prefix('q') else {
+            panic!("squealy source aliases must start with `q`");
+        };
+        let Some((depth, index)) = alias.split_once('_') else {
+            panic!("squealy source aliases must contain `_`");
+        };
+
+        Self {
+            depth: depth
+                .parse()
+                .expect("squealy source alias depth must be numeric"),
+            index: index
+                .parse()
+                .expect("squealy source alias index must be numeric"),
+        }
+    }
+
+    fn name(self) -> String {
+        format!("q{}_{}", self.depth, self.index)
+    }
+}
+
+impl<'scope, K> ColumnRef<'scope, K>
+where
+    K: ExprKind,
+{
+    #[doc(hidden)]
+    pub fn column(alias: &str, column: &'static str) -> Self {
+        Self::column_with_project_alias(alias, column, column)
+    }
+
+    #[doc(hidden)]
+    pub fn column_with_project_alias(
+        alias: &str,
+        column: &'static str,
+        project_alias: &'static str,
+    ) -> Self {
+        Self {
+            alias: SourceAlias::parse(alias),
+            column,
+            project_alias,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Materialize this column reference as owned expression IR.
+    pub fn into_expr(self) -> Expr<'scope, K> {
+        Expr::column_with_project_alias(&self.alias.name(), self.column, self.project_alias)
+    }
+
+    /// The core-owned expression IR node for this column.
+    pub fn node(self) -> ExprNode {
+        self.into_expr().node
+    }
+
+    /// The default output alias when this column is selected directly.
+    pub fn project_alias(self) -> &'static str {
+        self.project_alias
+    }
+
+    /// SQL equality.
+    pub fn equals<'other, R>(self, other: R) -> Predicate<'scope>
+    where
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
+    {
+        self.into_expr().equals(other)
+    }
+
+    /// SQL inequality.
+    pub fn not_equals<'other, R>(self, other: R) -> Predicate<'scope>
+    where
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
+    {
+        self.into_expr().not_equals(other)
+    }
+
+    /// SQL less-than comparison.
+    pub fn less_than<'other, R>(self, other: R) -> Predicate<'scope>
+    where
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
+    {
+        self.into_expr().less_than(other)
+    }
+
+    /// SQL less-than-or-equal comparison.
+    pub fn less_than_or_equals<'other, R>(self, other: R) -> Predicate<'scope>
+    where
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
+    {
+        self.into_expr().less_than_or_equals(other)
+    }
+
+    /// SQL greater-than comparison.
+    pub fn greater_than<'other, R>(self, other: R) -> Predicate<'scope>
+    where
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
+    {
+        self.into_expr().greater_than(other)
+    }
+
+    /// SQL greater-than-or-equal comparison.
+    pub fn greater_than_or_equals<'other, R>(self, other: R) -> Predicate<'scope>
+    where
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
+    {
+        self.into_expr().greater_than_or_equals(other)
+    }
+
+    /// Sort by this column in ascending order.
+    pub fn asc(self) -> Order<'scope> {
+        self.into_expr().asc()
+    }
+
+    /// Sort by this column in descending order.
+    pub fn desc(self) -> Order<'scope> {
+        self.into_expr().desc()
+    }
+}
+
+impl<'scope, K> ColumnRef<'scope, K>
+where
+    K: ExprKind,
+    K::Value: SqlNumber,
+{
+    /// SQL numeric addition.
+    pub fn add<R>(self, other: R) -> Expr<'scope, AddExpr<K, R::Kind>>
+    where
+        R: IntoExpr<'scope>,
+        R::Kind: ExprKind<Value = K::Value>,
+    {
+        self.into_expr() + other
+    }
+
+    /// SQL numeric subtraction.
+    pub fn subtract<R>(self, other: R) -> Expr<'scope, SubtractExpr<K, R::Kind>>
+    where
+        R: IntoExpr<'scope>,
+        R::Kind: ExprKind<Value = K::Value>,
+    {
+        self.into_expr() - other
+    }
+
+    /// SQL numeric multiplication.
+    pub fn multiply<R>(self, other: R) -> Expr<'scope, MultiplyExpr<K, R::Kind>>
+    where
+        R: IntoExpr<'scope>,
+        R::Kind: ExprKind<Value = K::Value>,
+    {
+        self.into_expr() * other
+    }
+
+    /// SQL numeric division.
+    pub fn divide<R>(self, other: R) -> Expr<'scope, DivideExpr<K, R::Kind>>
+    where
+        R: IntoExpr<'scope>,
+        R::Kind: ExprKind<Value = K::Value>,
+    {
+        self.into_expr() / other
+    }
+}
+
 impl<'scope, K> Expr<'scope, K>
 where
     K: ExprKind,
@@ -423,6 +615,34 @@ where
     }
 }
 
+impl<'scope, K, R> Add<R> for ColumnRef<'scope, K>
+where
+    K: ExprKind,
+    K::Value: SqlNumber,
+    R: IntoExpr<'scope>,
+    R::Kind: ExprKind<Value = K::Value>,
+{
+    type Output = Expr<'scope, AddExpr<K, R::Kind>>;
+
+    fn add(self, other: R) -> Self::Output {
+        self.into_expr() + other
+    }
+}
+
+impl<'scope, K, R> Add<R> for &ColumnRef<'scope, K>
+where
+    K: ExprKind,
+    K::Value: SqlNumber,
+    R: IntoExpr<'scope>,
+    R::Kind: ExprKind<Value = K::Value>,
+{
+    type Output = Expr<'scope, AddExpr<K, R::Kind>>;
+
+    fn add(self, other: R) -> Self::Output {
+        (*self).into_expr() + other
+    }
+}
+
 impl<'scope, K, R> Sub<R> for Expr<'scope, K>
 where
     K: ExprKind,
@@ -456,6 +676,34 @@ where
             ArithmeticOp::Subtract,
             other.into_expr().node,
         )
+    }
+}
+
+impl<'scope, K, R> Sub<R> for ColumnRef<'scope, K>
+where
+    K: ExprKind,
+    K::Value: SqlNumber,
+    R: IntoExpr<'scope>,
+    R::Kind: ExprKind<Value = K::Value>,
+{
+    type Output = Expr<'scope, SubtractExpr<K, R::Kind>>;
+
+    fn sub(self, other: R) -> Self::Output {
+        self.into_expr() - other
+    }
+}
+
+impl<'scope, K, R> Sub<R> for &ColumnRef<'scope, K>
+where
+    K: ExprKind,
+    K::Value: SqlNumber,
+    R: IntoExpr<'scope>,
+    R::Kind: ExprKind<Value = K::Value>,
+{
+    type Output = Expr<'scope, SubtractExpr<K, R::Kind>>;
+
+    fn sub(self, other: R) -> Self::Output {
+        (*self).into_expr() - other
     }
 }
 
@@ -495,6 +743,34 @@ where
     }
 }
 
+impl<'scope, K, R> Mul<R> for ColumnRef<'scope, K>
+where
+    K: ExprKind,
+    K::Value: SqlNumber,
+    R: IntoExpr<'scope>,
+    R::Kind: ExprKind<Value = K::Value>,
+{
+    type Output = Expr<'scope, MultiplyExpr<K, R::Kind>>;
+
+    fn mul(self, other: R) -> Self::Output {
+        self.into_expr() * other
+    }
+}
+
+impl<'scope, K, R> Mul<R> for &ColumnRef<'scope, K>
+where
+    K: ExprKind,
+    K::Value: SqlNumber,
+    R: IntoExpr<'scope>,
+    R::Kind: ExprKind<Value = K::Value>,
+{
+    type Output = Expr<'scope, MultiplyExpr<K, R::Kind>>;
+
+    fn mul(self, other: R) -> Self::Output {
+        (*self).into_expr() * other
+    }
+}
+
 impl<'scope, K, R> Div<R> for Expr<'scope, K>
 where
     K: ExprKind,
@@ -531,6 +807,34 @@ where
     }
 }
 
+impl<'scope, K, R> Div<R> for ColumnRef<'scope, K>
+where
+    K: ExprKind,
+    K::Value: SqlNumber,
+    R: IntoExpr<'scope>,
+    R::Kind: ExprKind<Value = K::Value>,
+{
+    type Output = Expr<'scope, DivideExpr<K, R::Kind>>;
+
+    fn div(self, other: R) -> Self::Output {
+        self.into_expr() / other
+    }
+}
+
+impl<'scope, K, R> Div<R> for &ColumnRef<'scope, K>
+where
+    K: ExprKind,
+    K::Value: SqlNumber,
+    R: IntoExpr<'scope>,
+    R::Kind: ExprKind<Value = K::Value>,
+{
+    type Output = Expr<'scope, DivideExpr<K, R::Kind>>;
+
+    fn div(self, other: R) -> Self::Output {
+        (*self).into_expr() / other
+    }
+}
+
 macro_rules! impl_primitive_left_arithmetic {
     ($($ty:ty),* $(,)?) => {
         $(
@@ -552,6 +856,28 @@ macro_rules! impl_primitive_left_arithmetic {
                 type Output = Expr<'scope, AddExpr<$ty, K>>;
 
                 fn add(self, other: &Expr<'scope, K>) -> Self::Output {
+                    Expr::lit(self) + other
+                }
+            }
+
+            impl<'scope, K> Add<ColumnRef<'scope, K>> for $ty
+            where
+                K: ExprKind<Value = $ty>,
+            {
+                type Output = Expr<'scope, AddExpr<$ty, K>>;
+
+                fn add(self, other: ColumnRef<'scope, K>) -> Self::Output {
+                    Expr::lit(self) + other
+                }
+            }
+
+            impl<'scope, K> Add<&ColumnRef<'scope, K>> for $ty
+            where
+                K: ExprKind<Value = $ty>,
+            {
+                type Output = Expr<'scope, AddExpr<$ty, K>>;
+
+                fn add(self, other: &ColumnRef<'scope, K>) -> Self::Output {
                     Expr::lit(self) + other
                 }
             }
@@ -578,6 +904,28 @@ macro_rules! impl_primitive_left_arithmetic {
                 }
             }
 
+            impl<'scope, K> Sub<ColumnRef<'scope, K>> for $ty
+            where
+                K: ExprKind<Value = $ty>,
+            {
+                type Output = Expr<'scope, SubtractExpr<$ty, K>>;
+
+                fn sub(self, other: ColumnRef<'scope, K>) -> Self::Output {
+                    Expr::lit(self) - other
+                }
+            }
+
+            impl<'scope, K> Sub<&ColumnRef<'scope, K>> for $ty
+            where
+                K: ExprKind<Value = $ty>,
+            {
+                type Output = Expr<'scope, SubtractExpr<$ty, K>>;
+
+                fn sub(self, other: &ColumnRef<'scope, K>) -> Self::Output {
+                    Expr::lit(self) - other
+                }
+            }
+
             impl<'scope, K> Mul<Expr<'scope, K>> for $ty
             where
                 K: ExprKind<Value = $ty>,
@@ -600,6 +948,28 @@ macro_rules! impl_primitive_left_arithmetic {
                 }
             }
 
+            impl<'scope, K> Mul<ColumnRef<'scope, K>> for $ty
+            where
+                K: ExprKind<Value = $ty>,
+            {
+                type Output = Expr<'scope, MultiplyExpr<$ty, K>>;
+
+                fn mul(self, other: ColumnRef<'scope, K>) -> Self::Output {
+                    Expr::lit(self) * other
+                }
+            }
+
+            impl<'scope, K> Mul<&ColumnRef<'scope, K>> for $ty
+            where
+                K: ExprKind<Value = $ty>,
+            {
+                type Output = Expr<'scope, MultiplyExpr<$ty, K>>;
+
+                fn mul(self, other: &ColumnRef<'scope, K>) -> Self::Output {
+                    Expr::lit(self) * other
+                }
+            }
+
             impl<'scope, K> Div<Expr<'scope, K>> for $ty
             where
                 K: ExprKind<Value = $ty>,
@@ -618,6 +988,28 @@ macro_rules! impl_primitive_left_arithmetic {
                 type Output = Expr<'scope, DivideExpr<$ty, K>>;
 
                 fn div(self, other: &Expr<'scope, K>) -> Self::Output {
+                    Expr::lit(self) / other
+                }
+            }
+
+            impl<'scope, K> Div<ColumnRef<'scope, K>> for $ty
+            where
+                K: ExprKind<Value = $ty>,
+            {
+                type Output = Expr<'scope, DivideExpr<$ty, K>>;
+
+                fn div(self, other: ColumnRef<'scope, K>) -> Self::Output {
+                    Expr::lit(self) / other
+                }
+            }
+
+            impl<'scope, K> Div<&ColumnRef<'scope, K>> for $ty
+            where
+                K: ExprKind<Value = $ty>,
+            {
+                type Output = Expr<'scope, DivideExpr<$ty, K>>;
+
+                fn div(self, other: &ColumnRef<'scope, K>) -> Self::Output {
                     Expr::lit(self) / other
                 }
             }
@@ -655,6 +1047,28 @@ where
 
     fn into_expr(self) -> Expr<'scope, Self::Kind> {
         self.clone()
+    }
+}
+
+impl<'scope, K> IntoExpr<'scope> for ColumnRef<'scope, K>
+where
+    K: ExprKind,
+{
+    type Kind = K;
+
+    fn into_expr(self) -> Expr<'scope, Self::Kind> {
+        self.into_expr()
+    }
+}
+
+impl<'scope, K> IntoExpr<'scope> for &ColumnRef<'scope, K>
+where
+    K: ExprKind,
+{
+    type Kind = K;
+
+    fn into_expr(self) -> Expr<'scope, Self::Kind> {
+        (*self).into_expr()
     }
 }
 
