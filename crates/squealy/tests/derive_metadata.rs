@@ -1,4 +1,5 @@
 use squealy::*;
+use std::marker::PhantomData;
 
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(Public)]
@@ -33,9 +34,53 @@ struct AppDatabase {
     public: Public,
 }
 
-struct TestGenerator;
+struct TestConnection;
 
-impl Generator for TestGenerator {
+struct TestQuery<Shape> {
+    select: Select,
+    _shape: PhantomData<Shape>,
+}
+
+impl<Shape> Query for TestQuery<Shape>
+where
+    Shape: ProjectionShape,
+{
+    type Connection = TestConnection;
+    type Shape = Shape;
+
+    fn ir(&self) -> &Select {
+        &self.select
+    }
+}
+
+impl<Shape> TestQuery<Shape>
+where
+    Shape: ProjectionShape,
+{
+    fn to_sql(&self) -> String {
+        let mut sql = Vec::new();
+        write_select_sql(&self.select, &mut sql).unwrap();
+        String::from_utf8(sql).unwrap()
+    }
+
+    fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+        TestConnection.write_query(self, writer)
+    }
+
+    fn params(&self) -> Vec<BindValue> {
+        select_params(&self.select)
+    }
+}
+
+impl Backend for TestConnection {
+    fn write_query<Q>(&self, query: &Q, writer: &mut impl std::io::Write) -> std::io::Result<()>
+    where
+        Self: Connection,
+        Q: Query<Connection = Self>,
+    {
+        write_select_sql(query.ir(), writer)
+    }
+
     fn write_table(
         &self,
         table: &(dyn Table + Sync),
@@ -100,10 +145,329 @@ impl Generator for TestGenerator {
     }
 }
 
-fn posts_of_user<'scope>(user_id: Expr<'scope, i32>) -> Query<Post<'static, ColumnExpr>> {
-    query::<Post>(|q| {
-        let post = q.q(Query::each::<Post>());
-        q.where_(post.user_id.clone().equals(user_id));
+fn write_select_sql(select: &Select, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    writer.write_all(b"SELECT ")?;
+    write_select_columns(select.columns(), writer)?;
+    writer.write_all(b" ")?;
+    write_sources(select.sources(), writer)?;
+    write_filters(select.filters(), writer)?;
+    write_orders(select.orders(), writer)?;
+    if let Some(limit) = select.limit() {
+        write!(writer, " LIMIT {limit}")?;
+    }
+    if let Some(offset) = select.offset() {
+        write!(writer, " OFFSET {offset}")?;
+    }
+    Ok(())
+}
+
+fn write_select_columns(
+    columns: &[SelectColumn],
+    writer: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    for (index, column) in columns.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        write!(writer, "{} AS {}", render_expr(&column.expr), column.alias)?;
+    }
+    Ok(())
+}
+
+fn write_sources(sources: &[Source], writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    for (index, source) in sources.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b" ")?;
+        }
+        write_source(source, index, writer)?;
+    }
+    Ok(())
+}
+
+fn write_source(
+    source: &Source,
+    position: usize,
+    writer: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    match (source.kind(), source.target(), position) {
+        (SourceKind::From, SourceTarget::Table(table), _) => {
+            write!(writer, "FROM {table} AS {}", source.alias())
+        }
+        (SourceKind::From, SourceTarget::Query(query), _) => {
+            writer.write_all(b"FROM (")?;
+            write_select_sql(query, writer)?;
+            write!(writer, ") AS {}", source.alias())
+        }
+        (SourceKind::InnerLateral, SourceTarget::Query(query), 0) => {
+            writer.write_all(b"FROM (")?;
+            write_select_sql(query, writer)?;
+            write!(writer, ") AS {}", source.alias())
+        }
+        (SourceKind::InnerLateral, SourceTarget::Query(query), _) => {
+            writer.write_all(b"INNER JOIN LATERAL (")?;
+            write_select_sql(query, writer)?;
+            write!(writer, ") AS {} ON TRUE", source.alias())
+        }
+        (SourceKind::InnerLateral, SourceTarget::Table(table), 0) => {
+            write!(writer, "FROM {table} AS {}", source.alias())
+        }
+        (SourceKind::InnerLateral, SourceTarget::Table(table), _) => {
+            write!(
+                writer,
+                "INNER JOIN LATERAL {table} AS {} ON TRUE",
+                source.alias()
+            )
+        }
+        (SourceKind::InnerJoin { on: _ }, SourceTarget::Table(table), 0) => {
+            write!(writer, "FROM {table} AS {}", source.alias())
+        }
+        (SourceKind::InnerJoin { on }, SourceTarget::Table(table), _) => {
+            write!(
+                writer,
+                "INNER JOIN {table} AS {} ON {}",
+                source.alias(),
+                render_predicate(on)
+            )
+        }
+        (SourceKind::InnerJoin { on: _ }, SourceTarget::Query(query), 0) => {
+            writer.write_all(b"FROM (")?;
+            write_select_sql(query, writer)?;
+            write!(writer, ") AS {}", source.alias())
+        }
+        (SourceKind::InnerJoin { on }, SourceTarget::Query(query), _) => {
+            writer.write_all(b"INNER JOIN (")?;
+            write_select_sql(query, writer)?;
+            write!(
+                writer,
+                ") AS {} ON {}",
+                source.alias(),
+                render_predicate(on)
+            )
+        }
+        (SourceKind::LeftJoin { on: _ }, SourceTarget::Table(table), 0) => {
+            write!(writer, "FROM {table} AS {}", source.alias())
+        }
+        (SourceKind::LeftJoin { on }, SourceTarget::Table(table), _) => {
+            write!(
+                writer,
+                "LEFT JOIN {table} AS {} ON {}",
+                source.alias(),
+                render_predicate(on)
+            )
+        }
+        (SourceKind::LeftJoin { on: _ }, SourceTarget::Query(query), 0) => {
+            writer.write_all(b"FROM (")?;
+            write_select_sql(query, writer)?;
+            write!(writer, ") AS {}", source.alias())
+        }
+        (SourceKind::LeftJoin { on }, SourceTarget::Query(query), _) => {
+            writer.write_all(b"LEFT JOIN (")?;
+            write_select_sql(query, writer)?;
+            write!(
+                writer,
+                ") AS {} ON {}",
+                source.alias(),
+                render_predicate(on)
+            )
+        }
+    }
+}
+
+fn write_filters(filters: &[Filter], writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    if filters.is_empty() {
+        return Ok(());
+    }
+
+    writer.write_all(b" WHERE ")?;
+    for (index, filter) in filters.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b" AND ")?;
+        }
+        writer.write_all(render_predicate(filter.predicate()).as_bytes())?;
+    }
+    Ok(())
+}
+
+fn write_orders(orders: &[Sort], writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    if orders.is_empty() {
+        return Ok(());
+    }
+
+    writer.write_all(b" ORDER BY ")?;
+    for (index, order) in orders.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        writer.write_all(render_order(order.order()).as_bytes())?;
+    }
+    Ok(())
+}
+
+fn render_expr(expr: &ExprNode) -> String {
+    match expr {
+        ExprNode::Column { alias, column } => format!("{alias}.{column}"),
+        ExprNode::Literal(_) => "?".to_owned(),
+        ExprNode::Binary { left, op, right } => {
+            format!(
+                "({} {} {})",
+                render_expr(left),
+                render_arithmetic_op(*op),
+                render_expr(right)
+            )
+        }
+    }
+}
+
+fn render_predicate(predicate: &PredicateNode) -> String {
+    match predicate {
+        PredicateNode::Compare { left, op, right } => {
+            format!(
+                "({} {} {})",
+                render_expr(left),
+                render_compare_op(*op),
+                render_expr(right)
+            )
+        }
+        PredicateNode::And { left, right } => {
+            format!(
+                "({} AND {})",
+                render_predicate(left),
+                render_predicate(right)
+            )
+        }
+        PredicateNode::Or { left, right } => {
+            format!(
+                "({} OR {})",
+                render_predicate(left),
+                render_predicate(right)
+            )
+        }
+        PredicateNode::Not(predicate) => format!("(NOT {})", render_predicate(predicate)),
+    }
+}
+
+fn render_order(order: &OrderNode) -> String {
+    format!(
+        "{} {}",
+        render_expr(&order.expr),
+        render_order_direction(order.direction)
+    )
+}
+
+fn render_arithmetic_op(op: ArithmeticOp) -> &'static str {
+    match op {
+        ArithmeticOp::Add => "+",
+        ArithmeticOp::Subtract => "-",
+    }
+}
+
+fn render_compare_op(op: CompareOp) -> &'static str {
+    match op {
+        CompareOp::Equals => "=",
+        CompareOp::NotEquals => "<>",
+        CompareOp::LessThan => "<",
+        CompareOp::LessThanOrEquals => "<=",
+        CompareOp::GreaterThan => ">",
+        CompareOp::GreaterThanOrEquals => ">=",
+    }
+}
+
+fn render_order_direction(direction: OrderDirection) -> &'static str {
+    match direction {
+        OrderDirection::Asc => "ASC",
+        OrderDirection::Desc => "DESC",
+    }
+}
+
+fn select_params(select: &Select) -> Vec<BindValue> {
+    let mut params = Vec::new();
+    for column in select.columns() {
+        collect_expr_params(&column.expr, &mut params);
+    }
+    for (position, source) in select.sources().iter().enumerate() {
+        collect_source_params(source, position, &mut params);
+    }
+    for filter in select.filters() {
+        collect_predicate_params(filter.predicate(), &mut params);
+    }
+    for order in select.orders() {
+        collect_order_params(order.order(), &mut params);
+    }
+    params
+}
+
+fn collect_source_params(source: &Source, position: usize, params: &mut Vec<BindValue>) {
+    if let SourceTarget::Query(query) = source.target() {
+        params.extend(select_params(query));
+    }
+
+    if position > 0 {
+        match source.kind() {
+            SourceKind::InnerJoin { on } | SourceKind::LeftJoin { on } => {
+                collect_predicate_params(on, params)
+            }
+            SourceKind::From | SourceKind::InnerLateral => {}
+        }
+    }
+}
+
+fn collect_expr_params(expr: &ExprNode, params: &mut Vec<BindValue>) {
+    match expr {
+        ExprNode::Column { .. } => {}
+        ExprNode::Literal(value) => params.push(value.clone()),
+        ExprNode::Binary { left, right, .. } => {
+            collect_expr_params(left, params);
+            collect_expr_params(right, params);
+        }
+    }
+}
+
+fn collect_predicate_params(predicate: &PredicateNode, params: &mut Vec<BindValue>) {
+    match predicate {
+        PredicateNode::Compare { left, right, .. } => {
+            collect_expr_params(left, params);
+            collect_expr_params(right, params);
+        }
+        PredicateNode::And { left, right } | PredicateNode::Or { left, right } => {
+            collect_predicate_params(left, params);
+            collect_predicate_params(right, params);
+        }
+        PredicateNode::Not(predicate) => collect_predicate_params(predicate, params),
+    }
+}
+
+fn collect_order_params(order: &OrderNode, params: &mut Vec<BindValue>) {
+    collect_expr_params(&order.expr, params);
+}
+
+impl Connection for TestConnection {
+    type Query<Shape>
+        = TestQuery<Shape>
+    where
+        Shape: ProjectionShape;
+
+    fn query<Shape>(
+        &self,
+        f: impl for<'scope> FnOnce(&mut Q<'scope, Self>) -> <Shape as ProjectionShape>::Exprs<'scope>,
+    ) -> Self::Query<Shape>
+    where
+        Shape: ProjectionShape,
+    {
+        TestQuery {
+            select: build_select::<Self, Shape>(f),
+            _shape: PhantomData,
+        }
+    }
+}
+
+fn posts_of_user<'scope>(
+    connection: &TestConnection,
+    user_id: &Expr<'scope, i32>,
+) -> TestQuery<Post<'static, ColumnExpr>> {
+    connection.query::<Post>(|q| {
+        let posts = connection.query::<Post>(|q| q.each::<Post>());
+        let post = q.q(&posts);
+        q.where_(post.user_id.equals(user_id));
         post
     })
 }
@@ -162,10 +526,10 @@ fn derive_table_populates_foreign_key_metadata() {
 }
 
 #[test]
-fn generator_creates_schema_sql() {
+fn backend_creates_schema_sql() {
     let mut sql = Vec::new();
     let schema_tables = <Public as Schema>::tables().collect::<Vec<_>>();
-    TestGenerator
+    TestConnection
         .write_table(schema_tables[0], &mut sql)
         .unwrap();
     let sql = String::from_utf8(sql).unwrap();
@@ -176,7 +540,7 @@ fn generator_creates_schema_sql() {
     assert!(sql.contains("CREATE UNIQUE INDEX users_name_id_idx ON public.users (name, id)"));
 
     let mut sql = Vec::new();
-    TestGenerator
+    TestConnection
         .write_table(schema_tables[1], &mut sql)
         .unwrap();
     let sql = String::from_utf8(sql).unwrap();
@@ -186,30 +550,31 @@ fn generator_creates_schema_sql() {
 
 #[test]
 fn each_selects_from_derived_table_metadata() {
-    let users = Query::each::<User>();
+    let users = TestConnection.query::<User>(|q| q.each::<User>());
 
     assert_eq!(
         users.to_sql(),
-        r#"SELECT t0.id AS id, t0.name AS name FROM public.users AS t0"#
+        r#"SELECT q0_0.id AS id, q0_0.name AS name FROM public.users AS q0_0"#
     );
 }
 
-fn assert_table_query_shape<S>(_: &Query<S>)
+fn assert_table_query_shape<Qry, S>(_: &Qry)
 where
+    Qry: Query<Shape = S>,
     S: TableProjection,
 {
 }
 
 #[test]
 fn each_query_carries_table_projection_shape() {
-    let users = Query::each::<User>();
+    let users = TestConnection.query::<User>(|q| q.each::<User>());
 
-    assert_table_query_shape::<User>(&users);
+    assert_table_query_shape::<_, User>(&users);
 }
 
 #[test]
 fn query_can_select_scoped_table_sources_directly() {
-    let users = query::<User>(|q| q.each::<User>());
+    let users = TestConnection.query::<User>(|q| q.each::<User>());
 
     assert_eq!(
         users.to_sql(),
@@ -219,10 +584,10 @@ fn query_can_select_scoped_table_sources_directly() {
 
 #[test]
 fn query_can_order_by_typed_expressions() {
-    let users = query::<User>(|q| {
+    let users = TestConnection.query::<User>(|q| {
         let user = q.each::<User>();
-        q.order_by(user.name.clone().desc());
-        q.order_by(user.id.clone().asc());
+        q.order_by(user.name.desc());
+        q.order_by(user.id.asc());
         user
     });
 
@@ -234,9 +599,9 @@ fn query_can_order_by_typed_expressions() {
 
 #[test]
 fn query_can_limit_and_offset_rows() {
-    let users = query::<User>(|q| {
+    let users = TestConnection.query::<User>(|q| {
         let user = q.each::<User>();
-        q.order_by(user.id.clone().asc());
+        q.order_by(user.id.asc());
         q.limit(10);
         q.offset(20);
         user
@@ -250,9 +615,9 @@ fn query_can_limit_and_offset_rows() {
 
 #[test]
 fn query_can_inner_join_tables_with_typed_predicates() {
-    let users_and_posts = query::<(User, Post)>(|q| {
+    let users_and_posts = TestConnection.query::<(User, Post)>(|q| {
         let user = q.each::<User>();
-        let post = q.join::<Post>(|post| post.user_id.clone().equals(user.id.clone()));
+        let post = q.join::<Post>(|post| post.user_id.equals(&user.id));
         (user, post)
     });
 
@@ -264,9 +629,9 @@ fn query_can_inner_join_tables_with_typed_predicates() {
 
 #[test]
 fn query_can_left_join_tables_with_typed_predicates() {
-    let users_and_posts = query::<(User, Post)>(|q| {
+    let users_and_posts = TestConnection.query::<(User, Post)>(|q| {
         let user = q.each::<User>();
-        let post = q.left_join::<Post>(|post| post.user_id.clone().equals(user.id.clone()));
+        let post = q.left_join::<Post>(|post| post.user_id.equals(&user.id));
         (user, post)
     });
 
@@ -278,7 +643,7 @@ fn query_can_left_join_tables_with_typed_predicates() {
 
 #[test]
 fn query_writes_sql_to_writer() {
-    let users = query::<User>(|q| q.each::<User>());
+    let users = TestConnection.query::<User>(|q| q.each::<User>());
     let mut sql = Vec::new();
 
     users.write_sql(&mut sql).unwrap();
@@ -291,42 +656,110 @@ fn query_writes_sql_to_writer() {
 
 #[test]
 fn query_composes_subqueries_with_lateral_joins() {
-    let users_and_posts = query::<(User, Post)>(|q| {
-        let user = q.q(Query::each::<User>());
-        let post = q.q(posts_of_user(user.id.clone()));
+    let users_and_posts = TestConnection.query::<(User, Post)>(|q| {
+        let users = TestConnection.query::<User>(|q| q.each::<User>());
+        let user = q.q(&users);
+        let posts = posts_of_user(&TestConnection, &user.id);
+        let post = q.q(&posts);
         q.where_(
-            user.id
-                .clone()
-                .add(Expr::lit(1))
-                .subtract(Expr::lit(1))
-                .greater_than(Expr::lit(0))
-                .and(user.id.clone().not_equals(Expr::lit(42)).not_())
-                .or(user.name.clone().equals(Expr::lit("Bob"))),
+            (&user.id + 1 - 1)
+                .greater_than(0)
+                .and(user.id.not_equals(42).not_())
+                .or(user.name.equals("Bob")),
         );
         (user, post)
     });
 
     assert_eq!(
         users_and_posts.to_sql(),
-        r#"SELECT q0_0.id AS left_id, q0_0.name AS left_name, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM (SELECT t0.id AS id, t0.name AS name FROM public.users AS t0) AS q0_0 INNER JOIN LATERAL (SELECT q1_0.id AS id, q1_0.user_id AS user_id, q1_0.body AS body FROM (SELECT t0.id AS id, t0.user_id AS user_id, t0.body AS body FROM public.posts AS t0) AS q1_0 WHERE (q1_0.user_id = q0_0.id)) AS q0_1 ON TRUE WHERE (((((q0_0.id + 1) - 1) > 0) AND (NOT (q0_0.id <> 42))) OR (q0_0.name = Bob))"#
+        r#"SELECT q0_0.id AS left_id, q0_0.name AS left_name, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM (SELECT q1_0.id AS id, q1_0.name AS name FROM public.users AS q1_0) AS q0_0 INNER JOIN LATERAL (SELECT q1_0.id AS id, q1_0.user_id AS user_id, q1_0.body AS body FROM (SELECT q2_0.id AS id, q2_0.user_id AS user_id, q2_0.body AS body FROM public.posts AS q2_0) AS q1_0 WHERE (q1_0.user_id = q0_0.id)) AS q0_1 ON TRUE WHERE (((((q0_0.id + ?) - ?) > ?) AND (NOT (q0_0.id <> ?))) OR (q0_0.name = ?))"#
+    );
+    assert_eq!(
+        users_and_posts.params(),
+        vec![
+            BindValue::Int(1),
+            BindValue::Int(1),
+            BindValue::Int(0),
+            BindValue::Int(42),
+            BindValue::Text("Bob".to_owned()),
+        ]
     );
 }
 
 #[test]
 fn query_rebinds_tuple_subquery_shape_through_output_aliases() {
-    let users_and_posts = query::<(User, Post)>(|q| {
-        let pair = q.q(query::<(User, Post)>(|q| {
+    let users_and_posts = TestConnection.query::<(User, Post)>(|q| {
+        let pair_query = TestConnection.query::<(User, Post)>(|q| {
             let user = q.each::<User>();
-            let post = q.join::<Post>(|post| post.user_id.clone().equals(user.id.clone()));
+            let post = q.join::<Post>(|post| post.user_id.equals(&user.id));
             (user, post)
-        }));
+        });
+        let pair = q.q(&pair_query);
 
-        q.where_(pair.0.id.clone().equals(pair.1.user_id.clone()));
+        q.where_(pair.0.id.equals(&pair.1.user_id));
         pair
     });
 
     assert_eq!(
         users_and_posts.to_sql(),
         r#"SELECT q0_0.left_id AS left_id, q0_0.left_name AS left_name, q0_0.right_id AS right_id, q0_0.right_user_id AS right_user_id, q0_0.right_body AS right_body FROM (SELECT q1_0.id AS left_id, q1_0.name AS left_name, q1_1.id AS right_id, q1_1.user_id AS right_user_id, q1_1.body AS right_body FROM public.users AS q1_0 INNER JOIN public.posts AS q1_1 ON (q1_1.user_id = q1_0.id)) AS q0_0 WHERE (q0_0.left_id = q0_0.right_user_id)"#
+    );
+}
+
+#[test]
+fn query_accepts_primitive_literals_and_expression_operators() {
+    let users = TestConnection.query::<User>(|q| {
+        let user = q.each::<User>();
+        q.where_(
+            ((&user.id + 1 - 1).greater_than(0) & !user.id.not_equals(42))
+                | user.name.equals("Bob"),
+        );
+        q.where_((1 + &user.id).less_than(100));
+        user
+    });
+
+    assert_eq!(
+        users.to_sql(),
+        r#"SELECT q0_0.id AS id, q0_0.name AS name FROM public.users AS q0_0 WHERE (((((q0_0.id + ?) - ?) > ?) AND (NOT (q0_0.id <> ?))) OR (q0_0.name = ?)) AND ((? + q0_0.id) < ?)"#
+    );
+    assert_eq!(
+        users.params(),
+        vec![
+            BindValue::Int(1),
+            BindValue::Int(1),
+            BindValue::Int(0),
+            BindValue::Int(42),
+            BindValue::Text("Bob".to_owned()),
+            BindValue::Int(1),
+            BindValue::Int(100),
+        ]
+    );
+}
+
+#[test]
+fn query_collects_source_and_filter_params_in_sql_order() {
+    let users_and_posts = TestConnection.query::<(User, Post)>(|q| {
+        let user_query = TestConnection.query::<User>(|q| {
+            let user = q.each::<User>();
+            q.where_(user.id.greater_than(10));
+            user
+        });
+        let user = q.q(&user_query);
+        let post = q.join::<Post>(|post| post.user_id.equals(7));
+        q.where_(user.name.equals("Ada"));
+        (user, post)
+    });
+
+    assert_eq!(
+        users_and_posts.to_sql(),
+        r#"SELECT q0_0.id AS left_id, q0_0.name AS left_name, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM (SELECT q1_0.id AS id, q1_0.name AS name FROM public.users AS q1_0 WHERE (q1_0.id > ?)) AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = ?) WHERE (q0_0.name = ?)"#
+    );
+    assert_eq!(
+        users_and_posts.params(),
+        vec![
+            BindValue::Int(10),
+            BindValue::Int(7),
+            BindValue::Text("Ada".to_owned()),
+        ]
     );
 }

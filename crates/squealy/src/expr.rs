@@ -1,5 +1,79 @@
-use std::fmt::Display;
 use std::marker::PhantomData;
+use std::ops::{Add, BitAnd, BitOr, Not, Sub};
+
+/// A SQL bind parameter value collected while rendering expressions.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BindValue {
+    Int(i128),
+    UInt(u128),
+    Float(f64),
+    Text(String),
+    Bool(bool),
+    Null,
+}
+
+/// Converts Rust values into SQL bind parameter values.
+pub trait IntoBindValue {
+    fn into_bind_value(self) -> BindValue;
+}
+
+macro_rules! impl_signed_bind_value {
+    ($($ty:ty),* $(,)?) => {
+        $(impl IntoBindValue for $ty {
+            fn into_bind_value(self) -> BindValue {
+                BindValue::Int(self as i128)
+            }
+        })*
+    };
+}
+
+macro_rules! impl_unsigned_bind_value {
+    ($($ty:ty),* $(,)?) => {
+        $(impl IntoBindValue for $ty {
+            fn into_bind_value(self) -> BindValue {
+                BindValue::UInt(self as u128)
+            }
+        })*
+    };
+}
+
+macro_rules! impl_float_bind_value {
+    ($($ty:ty),* $(,)?) => {
+        $(impl IntoBindValue for $ty {
+            fn into_bind_value(self) -> BindValue {
+                BindValue::Float(self as f64)
+            }
+        })*
+    };
+}
+
+impl_signed_bind_value!(i8, i16, i32, i64, i128, isize);
+impl_unsigned_bind_value!(u8, u16, u32, u64, u128, usize);
+impl_float_bind_value!(f32, f64);
+
+impl IntoBindValue for String {
+    fn into_bind_value(self) -> BindValue {
+        BindValue::Text(self)
+    }
+}
+
+impl IntoBindValue for &str {
+    fn into_bind_value(self) -> BindValue {
+        BindValue::Text(self.to_owned())
+    }
+}
+
+impl IntoBindValue for &String {
+    fn into_bind_value(self) -> BindValue {
+        BindValue::Text(self.clone())
+    }
+}
+
+impl IntoBindValue for bool {
+    fn into_bind_value(self) -> BindValue {
+        BindValue::Bool(self)
+    }
+}
 
 /// Marker trait for Rust types that can participate in numeric SQL operations.
 ///
@@ -26,73 +100,108 @@ impl_sql_number!(u8, u16, u32, u64, u128, usize);
 impl_sql_number!(f32, f64);
 
 /// A typed SQL scalar expression scoped to a query builder invocation.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct Expr<'scope, T> {
-    sql: String,
+    node: ExprNode,
     _phantom: PhantomData<(&'scope (), T)>,
 }
 
 impl<'scope, T> Expr<'scope, T> {
-    pub(crate) fn new(sql: impl Into<String>) -> Self {
+    fn from_node(node: ExprNode) -> Self {
         Self {
-            sql: sql.into(),
+            node,
             _phantom: PhantomData,
         }
     }
 
     #[doc(hidden)]
     pub fn column(alias: &str, column: &str) -> Self {
-        Self::new(format!("{alias}.{column}"))
+        Self::from_node(ExprNode::Column {
+            alias: alias.to_owned(),
+            column: column.to_owned(),
+        })
     }
 
     /// Construct a SQL literal expression.
-    pub fn lit(value: impl Display) -> Self {
-        Self::new(value.to_string())
+    pub fn lit(value: impl IntoBindValue) -> Self {
+        Self::from_node(ExprNode::Literal(value.into_bind_value()))
     }
 
-    /// Render this expression as SQL.
-    pub fn to_sql(&self) -> &str {
-        &self.sql
+    /// The core-owned expression IR node.
+    pub fn node(&self) -> &ExprNode {
+        &self.node
     }
 
     /// SQL equality.
-    pub fn equals<'other>(self, other: Expr<'other, T>) -> Predicate<'scope> {
-        Predicate::new(format!("({} = {})", self.sql, other.sql))
+    pub fn equals<'other, R>(&self, other: R) -> Predicate<'scope>
+    where
+        R: IntoExpr<'other, T>,
+    {
+        Predicate::compare(&self.node, CompareOp::Equals, other.into_expr().node)
     }
 
     /// SQL inequality.
-    pub fn not_equals<'other>(self, other: Expr<'other, T>) -> Predicate<'scope> {
-        Predicate::new(format!("({} <> {})", self.sql, other.sql))
+    pub fn not_equals<'other, R>(&self, other: R) -> Predicate<'scope>
+    where
+        R: IntoExpr<'other, T>,
+    {
+        Predicate::compare(&self.node, CompareOp::NotEquals, other.into_expr().node)
     }
 
     /// SQL less-than comparison.
-    pub fn less_than<'other>(self, other: Expr<'other, T>) -> Predicate<'scope> {
-        Predicate::new(format!("({} < {})", self.sql, other.sql))
+    pub fn less_than<'other, R>(&self, other: R) -> Predicate<'scope>
+    where
+        R: IntoExpr<'other, T>,
+    {
+        Predicate::compare(&self.node, CompareOp::LessThan, other.into_expr().node)
     }
 
     /// SQL less-than-or-equal comparison.
-    pub fn less_than_or_equals<'other>(self, other: Expr<'other, T>) -> Predicate<'scope> {
-        Predicate::new(format!("({} <= {})", self.sql, other.sql))
+    pub fn less_than_or_equals<'other, R>(&self, other: R) -> Predicate<'scope>
+    where
+        R: IntoExpr<'other, T>,
+    {
+        Predicate::compare(
+            &self.node,
+            CompareOp::LessThanOrEquals,
+            other.into_expr().node,
+        )
     }
 
     /// SQL greater-than comparison.
-    pub fn greater_than<'other>(self, other: Expr<'other, T>) -> Predicate<'scope> {
-        Predicate::new(format!("({} > {})", self.sql, other.sql))
+    pub fn greater_than<'other, R>(&self, other: R) -> Predicate<'scope>
+    where
+        R: IntoExpr<'other, T>,
+    {
+        Predicate::compare(&self.node, CompareOp::GreaterThan, other.into_expr().node)
     }
 
     /// SQL greater-than-or-equal comparison.
-    pub fn greater_than_or_equals<'other>(self, other: Expr<'other, T>) -> Predicate<'scope> {
-        Predicate::new(format!("({} >= {})", self.sql, other.sql))
+    pub fn greater_than_or_equals<'other, R>(&self, other: R) -> Predicate<'scope>
+    where
+        R: IntoExpr<'other, T>,
+    {
+        Predicate::compare(
+            &self.node,
+            CompareOp::GreaterThanOrEquals,
+            other.into_expr().node,
+        )
     }
 
     /// Sort by this expression in ascending order.
-    pub fn asc(self) -> Order<'scope> {
-        Order::new(format!("{} ASC", self.sql))
+    pub fn asc(&self) -> Order<'scope> {
+        Order::new(OrderNode {
+            expr: self.node.clone(),
+            direction: OrderDirection::Asc,
+        })
     }
 
     /// Sort by this expression in descending order.
-    pub fn desc(self) -> Order<'scope> {
-        Order::new(format!("{} DESC", self.sql))
+    pub fn desc(&self) -> Order<'scope> {
+        Order::new(OrderNode {
+            expr: self.node.clone(),
+            direction: OrderDirection::Desc,
+        })
     }
 }
 
@@ -101,46 +210,194 @@ where
     T: SqlNumber,
 {
     /// SQL numeric addition.
-    pub fn add(self, other: Self) -> Self {
-        Self::new(format!("({} + {})", self.sql, other.sql))
+    pub fn add<'other, R>(&self, other: R) -> Self
+    where
+        R: IntoExpr<'other, T>,
+    {
+        Self::binary(&self.node, ArithmeticOp::Add, other.into_expr().node)
     }
 
     /// SQL numeric subtraction.
-    pub fn subtract(self, other: Self) -> Self {
-        Self::new(format!("({} - {})", self.sql, other.sql))
+    pub fn subtract<'other, R>(&self, other: R) -> Self
+    where
+        R: IntoExpr<'other, T>,
+    {
+        Self::binary(&self.node, ArithmeticOp::Subtract, other.into_expr().node)
+    }
+
+    fn binary(left: &ExprNode, op: ArithmeticOp, right: ExprNode) -> Self {
+        Self::from_node(ExprNode::Binary {
+            left: Box::new(left.clone()),
+            op,
+            right: Box::new(right),
+        })
     }
 }
 
 impl<'scope, T> Clone for Expr<'scope, T> {
     fn clone(&self) -> Self {
-        Self::new(self.sql.clone())
+        Self {
+            node: self.node.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<'scope, T, R> Add<R> for Expr<'scope, T>
+where
+    T: SqlNumber,
+    R: IntoExpr<'scope, T>,
+{
+    type Output = Self;
+
+    fn add(self, other: R) -> Self::Output {
+        Expr::binary(&self.node, ArithmeticOp::Add, other.into_expr().node)
+    }
+}
+
+impl<'scope, T, R> Add<R> for &Expr<'scope, T>
+where
+    T: SqlNumber,
+    R: IntoExpr<'scope, T>,
+{
+    type Output = Expr<'scope, T>;
+
+    fn add(self, other: R) -> Self::Output {
+        Expr::binary(&self.node, ArithmeticOp::Add, other.into_expr().node)
+    }
+}
+
+impl<'scope, T, R> Sub<R> for Expr<'scope, T>
+where
+    T: SqlNumber,
+    R: IntoExpr<'scope, T>,
+{
+    type Output = Self;
+
+    fn sub(self, other: R) -> Self::Output {
+        Expr::binary(&self.node, ArithmeticOp::Subtract, other.into_expr().node)
+    }
+}
+
+impl<'scope, T, R> Sub<R> for &Expr<'scope, T>
+where
+    T: SqlNumber,
+    R: IntoExpr<'scope, T>,
+{
+    type Output = Expr<'scope, T>;
+
+    fn sub(self, other: R) -> Self::Output {
+        Expr::binary(&self.node, ArithmeticOp::Subtract, other.into_expr().node)
+    }
+}
+
+macro_rules! impl_primitive_left_arithmetic {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl<'scope> Add<Expr<'scope, $ty>> for $ty {
+                type Output = Expr<'scope, $ty>;
+
+                fn add(self, other: Expr<'scope, $ty>) -> Self::Output {
+                    Expr::lit(self) + other
+                }
+            }
+
+            impl<'scope> Add<&Expr<'scope, $ty>> for $ty {
+                type Output = Expr<'scope, $ty>;
+
+                fn add(self, other: &Expr<'scope, $ty>) -> Self::Output {
+                    Expr::lit(self) + other
+                }
+            }
+
+            impl<'scope> Sub<Expr<'scope, $ty>> for $ty {
+                type Output = Expr<'scope, $ty>;
+
+                fn sub(self, other: Expr<'scope, $ty>) -> Self::Output {
+                    Expr::lit(self) - other
+                }
+            }
+
+            impl<'scope> Sub<&Expr<'scope, $ty>> for $ty {
+                type Output = Expr<'scope, $ty>;
+
+                fn sub(self, other: &Expr<'scope, $ty>) -> Self::Output {
+                    Expr::lit(self) - other
+                }
+            }
+        )*
+    };
+}
+
+impl_primitive_left_arithmetic!(i8, i16, i32, i64, i128, isize);
+impl_primitive_left_arithmetic!(u8, u16, u32, u64, u128, usize);
+impl_primitive_left_arithmetic!(f32, f64);
+
+/// Converts Rust values into scoped SQL expressions.
+pub trait IntoExpr<'scope, T> {
+    fn into_expr(self) -> Expr<'scope, T>;
+}
+
+impl<'scope, T> IntoExpr<'scope, T> for Expr<'scope, T> {
+    fn into_expr(self) -> Expr<'scope, T> {
+        self
+    }
+}
+
+impl<'scope, T> IntoExpr<'scope, T> for &Expr<'scope, T> {
+    fn into_expr(self) -> Expr<'scope, T> {
+        self.clone()
+    }
+}
+
+impl<'scope, T> IntoExpr<'scope, T> for T
+where
+    T: IntoBindValue,
+{
+    fn into_expr(self) -> Expr<'scope, T> {
+        Expr::lit(self)
+    }
+}
+
+impl<'scope> IntoExpr<'scope, String> for &str {
+    fn into_expr(self) -> Expr<'scope, String> {
+        Expr::lit(self)
+    }
+}
+
+impl<'scope> IntoExpr<'scope, String> for &String {
+    fn into_expr(self) -> Expr<'scope, String> {
+        Expr::lit(self)
     }
 }
 
 /// A typed SQL ordering expression scoped to a query builder invocation.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct Order<'scope> {
-    sql: String,
+    node: OrderNode,
     _phantom: PhantomData<&'scope ()>,
 }
 
 impl<'scope> Order<'scope> {
-    pub(crate) fn new(sql: impl Into<String>) -> Self {
+    fn new(node: OrderNode) -> Self {
         Self {
-            sql: sql.into(),
+            node,
             _phantom: PhantomData,
         }
     }
 
-    /// Render this ordering as SQL.
-    pub fn to_sql(&self) -> &str {
-        &self.sql
+    /// The core-owned ordering IR node.
+    pub fn node(&self) -> &OrderNode {
+        &self.node
     }
 }
 
 impl<'scope> Clone for Order<'scope> {
     fn clone(&self) -> Self {
-        Self::new(self.sql.clone())
+        Self {
+            node: self.node.clone(),
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -150,55 +407,274 @@ impl<'scope> Clone for Order<'scope> {
 ///
 /// ```compile_fail
 /// use squealy::*;
+/// # use std::{io, marker::PhantomData};
 ///
 /// #[derive(Clone, Table)]
 /// struct User<'scope, C: ColumnMode = ColumnExpr> {
 ///     id: C::Type<'scope, i32>,
 /// }
+/// #
+/// # struct DocConnection;
+/// #
+/// # struct DocQuery<Shape> {
+/// #     select: Select,
+/// #     _shape: PhantomData<Shape>,
+/// # }
+/// #
+/// # impl<Shape> Query for DocQuery<Shape>
+/// # where
+/// #     Shape: ProjectionShape,
+/// # {
+/// #     type Connection = DocConnection;
+/// #     type Shape = Shape;
+/// #
+/// #     fn ir(&self) -> &Select {
+/// #         &self.select
+/// #     }
+/// # }
+/// #
+/// # impl Backend for DocConnection {
+/// #     fn write_query<Qry>(&self, _query: &Qry, _writer: &mut impl io::Write) -> io::Result<()>
+/// #     where
+/// #         Self: Connection,
+/// #         Qry: Query<Connection = Self>,
+/// #     {
+/// #         Ok(())
+/// #     }
+/// #
+/// #     fn write_table(
+/// #         &self,
+/// #         _table: &(dyn Table + Sync),
+/// #         _writer: &mut impl io::Write,
+/// #     ) -> io::Result<()> {
+/// #         Ok(())
+/// #     }
+/// # }
+/// #
+/// # impl Connection for DocConnection {
+/// #     type Query<Shape> = DocQuery<Shape>
+/// #     where
+/// #         Shape: ProjectionShape;
+/// #
+/// #     fn query<Shape>(
+/// #         &self,
+/// #         f: impl for<'scope> FnOnce(
+/// #             &mut ::squealy::Q<'scope, Self>,
+/// #         ) -> <Shape as ProjectionShape>::Exprs<'scope>,
+/// #     ) -> Self::Query<Shape>
+/// #     where
+/// #         Shape: ProjectionShape,
+/// #     {
+/// #         DocQuery {
+/// #             select: build_select::<Self, Shape>(f),
+/// #             _shape: PhantomData,
+/// #         }
+/// #     }
+/// # }
 ///
-/// let _ = query::<User>(|q| {
+/// let conn = DocConnection;
+/// let _ = conn.query::<User>(|q| {
 ///     let user = q.each::<User>();
 ///     q.where_(user.id.clone());
 ///     user
 /// });
 /// ```
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct Predicate<'scope> {
-    sql: String,
+    node: PredicateNode,
     _phantom: PhantomData<&'scope ()>,
 }
 
 impl<'scope> Predicate<'scope> {
-    pub(crate) fn new(sql: impl Into<String>) -> Self {
+    fn from_node(node: PredicateNode) -> Self {
         Self {
-            sql: sql.into(),
+            node,
             _phantom: PhantomData,
         }
     }
 
-    /// Render this predicate as SQL.
-    pub fn to_sql(&self) -> &str {
-        &self.sql
+    fn compare(left: &ExprNode, op: CompareOp, right: ExprNode) -> Self {
+        Self::from_node(PredicateNode::Compare {
+            left: left.clone(),
+            op,
+            right,
+        })
+    }
+
+    /// The core-owned predicate IR node.
+    pub fn node(&self) -> &PredicateNode {
+        &self.node
     }
 
     /// SQL conjunction.
-    pub fn and<'other>(self, other: Predicate<'other>) -> Self {
-        Self::new(format!("({} AND {})", self.sql, other.sql))
+    pub fn and<'other>(&self, other: Predicate<'other>) -> Self {
+        Self::from_node(PredicateNode::And {
+            left: Box::new(self.node.clone()),
+            right: Box::new(other.node),
+        })
     }
 
     /// SQL disjunction.
-    pub fn or<'other>(self, other: Predicate<'other>) -> Self {
-        Self::new(format!("({} OR {})", self.sql, other.sql))
+    pub fn or<'other>(&self, other: Predicate<'other>) -> Self {
+        Self::from_node(PredicateNode::Or {
+            left: Box::new(self.node.clone()),
+            right: Box::new(other.node),
+        })
     }
 
     /// SQL negation.
-    pub fn not_(self) -> Self {
-        Self::new(format!("(NOT {})", self.sql))
+    pub fn not_(&self) -> Self {
+        Self::from_node(PredicateNode::Not(Box::new(self.node.clone())))
     }
 }
 
 impl<'scope> Clone for Predicate<'scope> {
     fn clone(&self) -> Self {
-        Self::new(self.sql.clone())
+        Self {
+            node: self.node.clone(),
+            _phantom: PhantomData,
+        }
     }
+}
+
+impl<'scope> BitAnd for Predicate<'scope> {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self::from_node(PredicateNode::And {
+            left: Box::new(self.node),
+            right: Box::new(rhs.node),
+        })
+    }
+}
+
+impl<'scope, 'rhs> BitAnd<&Predicate<'rhs>> for Predicate<'scope> {
+    type Output = Self;
+
+    fn bitand(self, rhs: &Predicate<'rhs>) -> Self::Output {
+        Self::from_node(PredicateNode::And {
+            left: Box::new(self.node),
+            right: Box::new(rhs.node.clone()),
+        })
+    }
+}
+
+impl<'scope, 'lhs> BitAnd<Predicate<'scope>> for &Predicate<'lhs> {
+    type Output = Predicate<'scope>;
+
+    fn bitand(self, rhs: Predicate<'scope>) -> Self::Output {
+        Predicate::from_node(PredicateNode::And {
+            left: Box::new(self.node.clone()),
+            right: Box::new(rhs.node),
+        })
+    }
+}
+
+impl<'scope> BitOr for Predicate<'scope> {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self::from_node(PredicateNode::Or {
+            left: Box::new(self.node),
+            right: Box::new(rhs.node),
+        })
+    }
+}
+
+impl<'scope, 'rhs> BitOr<&Predicate<'rhs>> for Predicate<'scope> {
+    type Output = Self;
+
+    fn bitor(self, rhs: &Predicate<'rhs>) -> Self::Output {
+        Self::from_node(PredicateNode::Or {
+            left: Box::new(self.node),
+            right: Box::new(rhs.node.clone()),
+        })
+    }
+}
+
+impl<'scope, 'lhs> BitOr<Predicate<'scope>> for &Predicate<'lhs> {
+    type Output = Predicate<'scope>;
+
+    fn bitor(self, rhs: Predicate<'scope>) -> Self::Output {
+        Predicate::from_node(PredicateNode::Or {
+            left: Box::new(self.node.clone()),
+            right: Box::new(rhs.node),
+        })
+    }
+}
+
+impl<'scope> Not for Predicate<'scope> {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        Self::from_node(PredicateNode::Not(Box::new(self.node)))
+    }
+}
+
+impl<'scope> Not for &Predicate<'scope> {
+    type Output = Predicate<'scope>;
+
+    fn not(self) -> Self::Output {
+        Predicate::from_node(PredicateNode::Not(Box::new(self.node.clone())))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExprNode {
+    Column {
+        alias: String,
+        column: String,
+    },
+    Literal(BindValue),
+    Binary {
+        left: Box<ExprNode>,
+        op: ArithmeticOp,
+        right: Box<ExprNode>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArithmeticOp {
+    Add,
+    Subtract,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PredicateNode {
+    Compare {
+        left: ExprNode,
+        op: CompareOp,
+        right: ExprNode,
+    },
+    And {
+        left: Box<PredicateNode>,
+        right: Box<PredicateNode>,
+    },
+    Or {
+        left: Box<PredicateNode>,
+        right: Box<PredicateNode>,
+    },
+    Not(Box<PredicateNode>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompareOp {
+    Equals,
+    NotEquals,
+    LessThan,
+    LessThanOrEquals,
+    GreaterThan,
+    GreaterThanOrEquals,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OrderNode {
+    pub expr: ExprNode,
+    pub direction: OrderDirection,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderDirection {
+    Asc,
+    Desc,
 }

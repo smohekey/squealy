@@ -1,65 +1,21 @@
 use std::cell::Cell;
-use std::io::{self, Write};
 use std::marker::PhantomData;
 
-use crate::{Order, Predicate, Projectable, ProjectionShape, SelectColumn, TableProjection};
+use crate::{
+    Connection, Order, OrderNode, Predicate, PredicateNode, Projectable, ProjectionShape,
+    SelectColumn, TableProjection,
+};
 
-/// A SQL select statement that produces rows with projection shape `Shape`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Query<Shape = ()> {
-    select: Select,
-    sql: String,
-    _shape: PhantomData<Shape>,
+/// A backend-specific query object backed by core-owned select IR.
+pub trait Query {
+    type Connection: Connection;
+    type Shape: ProjectionShape;
+
+    fn ir(&self) -> &Select;
 }
 
-impl<Shape> Query<Shape> {
-    fn new(select: Select) -> Self {
-        let sql = select.to_sql();
-
-        Self {
-            select,
-            sql,
-            _shape: PhantomData,
-        }
-    }
-
-    /// Render this query to SQL.
-    pub fn to_sql(&self) -> &str {
-        &self.sql
-    }
-
-    /// Write this query's SQL to a writer.
-    pub fn write_sql(&self, writer: &mut impl Write) -> io::Result<()> {
-        self.select.write_sql(writer)
-    }
-}
-
-impl<Shape> Query<Shape>
-where
-    Shape: ProjectionShape,
-{
-    /// Build expressions that reference this query's output columns through a SQL alias.
-    pub fn project<'scope>(&self, alias: &str) -> Shape::Exprs<'scope> {
-        Shape::exprs(alias)
-    }
-}
-
-impl Query<()> {
-    /// Select every row from a table.
-    pub fn each<S>() -> Query<S>
-    where
-        S: TableProjection,
-    {
-        let project = S::exprs("t0");
-        Query::new(Select::new(
-            S::select(&project),
-            vec![Source::table("t0", S::qualified_name())],
-        ))
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Select {
+#[derive(Clone, Debug, PartialEq)]
+pub struct Select {
     columns: Vec<SelectColumn>,
     sources: Vec<Source>,
     filters: Vec<Filter>,
@@ -100,27 +56,33 @@ impl Select {
         self
     }
 
-    fn to_sql(&self) -> String {
-        let mut sql = Vec::new();
-        self.write_sql(&mut sql)
-            .expect("writing SQL to a Vec should not fail");
-        String::from_utf8(sql).expect("generated SQL should be valid UTF-8")
+    pub fn columns(&self) -> &[SelectColumn] {
+        &self.columns
     }
 
-    fn write_sql(&self, writer: &mut impl Write) -> io::Result<()> {
-        writer.write_all(b"SELECT ")?;
-        write_select(writer, &self.columns)?;
-        writer.write_all(b" ")?;
-        write_sources(writer, &self.sources)?;
-        write_filters(writer, &self.filters)?;
-        write_orders(writer, &self.orders)?;
-        write_limit(writer, self.limit)?;
-        write_offset(writer, self.offset)
+    pub fn sources(&self) -> &[Source] {
+        &self.sources
+    }
+
+    pub fn filters(&self) -> &[Filter] {
+        &self.filters
+    }
+
+    pub fn orders(&self) -> &[Sort] {
+        &self.orders
+    }
+
+    pub fn limit(&self) -> Option<usize> {
+        self.limit
+    }
+
+    pub fn offset(&self) -> Option<usize> {
+        self.offset
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Source {
+#[derive(Clone, Debug, PartialEq)]
+pub struct Source {
     alias: String,
     kind: SourceKind,
     target: SourceTarget,
@@ -143,140 +105,102 @@ impl Source {
         }
     }
 
-    fn join(alias: impl Into<String>, table: impl ToString, on: impl Into<String>) -> Self {
+    fn join(alias: impl Into<String>, table: impl ToString, on: Predicate<'_>) -> Self {
         Self {
             alias: alias.into(),
-            kind: SourceKind::InnerJoin { on: on.into() },
+            kind: SourceKind::InnerJoin {
+                on: on.node().clone(),
+            },
             target: SourceTarget::Table(table.to_string()),
         }
     }
 
-    fn left_join(alias: impl Into<String>, table: impl ToString, on: impl Into<String>) -> Self {
+    fn left_join(alias: impl Into<String>, table: impl ToString, on: Predicate<'_>) -> Self {
         Self {
             alias: alias.into(),
-            kind: SourceKind::LeftJoin { on: on.into() },
+            kind: SourceKind::LeftJoin {
+                on: on.node().clone(),
+            },
             target: SourceTarget::Table(table.to_string()),
         }
     }
 
-    fn write_sql(&self, writer: &mut impl Write, position: usize) -> io::Result<()> {
-        match (&self.kind, &self.target, position) {
-            (SourceKind::From, SourceTarget::Table(table), _) => {
-                write!(writer, "FROM {table} AS {}", self.alias)
-            }
-            (SourceKind::From, SourceTarget::Query(query), _) => {
-                writer.write_all(b"FROM (")?;
-                query.write_sql(writer)?;
-                write!(writer, ") AS {}", self.alias)
-            }
-            (SourceKind::InnerLateral, SourceTarget::Query(query), 0) => {
-                writer.write_all(b"FROM (")?;
-                query.write_sql(writer)?;
-                write!(writer, ") AS {}", self.alias)
-            }
-            (SourceKind::InnerLateral, SourceTarget::Query(query), _) => {
-                writer.write_all(b"INNER JOIN LATERAL (")?;
-                query.write_sql(writer)?;
-                write!(writer, ") AS {} ON TRUE", self.alias)
-            }
-            (SourceKind::InnerLateral, SourceTarget::Table(table), 0) => {
-                write!(writer, "FROM {table} AS {}", self.alias)
-            }
-            (SourceKind::InnerLateral, SourceTarget::Table(table), _) => {
-                write!(
-                    writer,
-                    "INNER JOIN LATERAL {table} AS {} ON TRUE",
-                    self.alias
-                )
-            }
-            (SourceKind::InnerJoin { on: _ }, SourceTarget::Table(table), 0) => {
-                write!(writer, "FROM {table} AS {}", self.alias)
-            }
-            (SourceKind::InnerJoin { on }, SourceTarget::Table(table), _) => {
-                write!(writer, "INNER JOIN {table} AS {} ON {on}", self.alias)
-            }
-            (SourceKind::InnerJoin { on: _ }, SourceTarget::Query(query), 0) => {
-                writer.write_all(b"FROM (")?;
-                query.write_sql(writer)?;
-                write!(writer, ") AS {}", self.alias)
-            }
-            (SourceKind::InnerJoin { on }, SourceTarget::Query(query), _) => {
-                writer.write_all(b"INNER JOIN (")?;
-                query.write_sql(writer)?;
-                write!(writer, ") AS {} ON {on}", self.alias)
-            }
-            (SourceKind::LeftJoin { on: _ }, SourceTarget::Table(table), 0) => {
-                write!(writer, "FROM {table} AS {}", self.alias)
-            }
-            (SourceKind::LeftJoin { on }, SourceTarget::Table(table), _) => {
-                write!(writer, "LEFT JOIN {table} AS {} ON {on}", self.alias)
-            }
-            (SourceKind::LeftJoin { on: _ }, SourceTarget::Query(query), 0) => {
-                writer.write_all(b"FROM (")?;
-                query.write_sql(writer)?;
-                write!(writer, ") AS {}", self.alias)
-            }
-            (SourceKind::LeftJoin { on }, SourceTarget::Query(query), _) => {
-                writer.write_all(b"LEFT JOIN (")?;
-                query.write_sql(writer)?;
-                write!(writer, ") AS {} ON {on}", self.alias)
-            }
-        }
+    pub fn alias(&self) -> &str {
+        &self.alias
+    }
+
+    pub fn kind(&self) -> &SourceKind {
+        &self.kind
+    }
+
+    pub fn target(&self) -> &SourceTarget {
+        &self.target
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum SourceKind {
+#[derive(Clone, Debug, PartialEq)]
+pub enum SourceKind {
     From,
     InnerLateral,
-    InnerJoin { on: String },
-    LeftJoin { on: String },
+    InnerJoin { on: PredicateNode },
+    LeftJoin { on: PredicateNode },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum SourceTarget {
+#[derive(Clone, Debug, PartialEq)]
+pub enum SourceTarget {
     Table(String),
     Query(Box<Select>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Filter {
-    predicate: String,
+#[derive(Clone, Debug, PartialEq)]
+pub struct Filter {
+    predicate: PredicateNode,
 }
 
 impl Filter {
-    fn new(predicate: impl Into<String>) -> Self {
+    fn new(predicate: Predicate<'_>) -> Self {
         Self {
-            predicate: predicate.into(),
+            predicate: predicate.node().clone(),
         }
+    }
+
+    pub fn predicate(&self) -> &PredicateNode {
+        &self.predicate
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Sort {
-    order: String,
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sort {
+    order: OrderNode,
 }
 
 impl Sort {
-    fn new(order: impl Into<String>) -> Self {
+    fn new(order: Order<'_>) -> Self {
         Self {
-            order: order.into(),
+            order: order.node().clone(),
         }
+    }
+
+    pub fn order(&self) -> &OrderNode {
+        &self.order
     }
 }
 
 /// Scoped query builder. Each `q` call adds a lateral-capable subquery.
-pub struct Q<'scope> {
+pub struct Q<'scope, Conn: Connection> {
     depth: usize,
     sources: Vec<Source>,
     filters: Vec<Filter>,
     orders: Vec<Sort>,
     limit: Option<usize>,
     offset: Option<usize>,
-    _phantom: PhantomData<&'scope ()>,
+    _phantom: PhantomData<(&'scope (), Conn)>,
 }
 
-impl<'scope> Q<'scope> {
+impl<'scope, Conn> Q<'scope, Conn>
+where
+    Conn: Connection,
+{
     fn new(depth: usize) -> Self {
         Self {
             depth,
@@ -312,7 +236,7 @@ impl<'scope> Q<'scope> {
         let projection = S::exprs(&alias);
         let predicate = on(&projection);
         self.sources
-            .push(Source::join(alias, S::qualified_name(), predicate.to_sql()));
+            .push(Source::join(alias, S::qualified_name(), predicate));
         projection
     }
 
@@ -327,29 +251,26 @@ impl<'scope> Q<'scope> {
         let alias = self.next_alias();
         let projection = S::exprs(&alias);
         let predicate = on(&projection);
-        self.sources.push(Source::left_join(
-            alias,
-            S::qualified_name(),
-            predicate.to_sql(),
-        ));
+        self.sources
+            .push(Source::left_join(alias, S::qualified_name(), predicate));
         projection
     }
 
     /// Add a subquery as a lateral source and return its projected expression columns in this query scope.
-    pub fn lateral<Shape>(&mut self, query: Query<Shape>) -> Shape::Exprs<'scope>
+    pub fn lateral<Qry>(&mut self, query: &Qry) -> <Qry::Shape as ProjectionShape>::Exprs<'scope>
     where
-        Shape: ProjectionShape,
+        Qry: Query<Connection = Conn>,
     {
         let alias = self.next_alias();
         self.sources
-            .push(Source::lateral(alias.clone(), query.select));
-        Shape::exprs(&alias)
+            .push(Source::lateral(alias.clone(), query.ir().clone()));
+        Qry::Shape::exprs(&alias)
     }
 
     /// Add a subquery and return its projected expression columns in this query scope.
-    pub fn q<Shape>(&mut self, query: Query<Shape>) -> Shape::Exprs<'scope>
+    pub fn q<Qry>(&mut self, query: &Qry) -> <Qry::Shape as ProjectionShape>::Exprs<'scope>
     where
-        Shape: ProjectionShape,
+        Qry: Query<Connection = Conn>,
     {
         self.lateral(query)
     }
@@ -360,12 +281,12 @@ impl<'scope> Q<'scope> {
 
     /// Add a SQL `WHERE` predicate to the query currently being built.
     pub fn where_(&mut self, predicate: Predicate<'scope>) {
-        self.filters.push(Filter::new(predicate.to_sql()));
+        self.filters.push(Filter::new(predicate));
     }
 
     /// Add an `ORDER BY` expression to the query currently being built.
     pub fn order_by(&mut self, order: Order<'scope>) {
-        self.orders.push(Sort::new(order.to_sql()));
+        self.orders.push(Sort::new(order));
     }
 
     /// Add a SQL `LIMIT` row count to the query currently being built.
@@ -383,31 +304,92 @@ thread_local! {
     static QUERY_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
-/// Build a query from a scoped query builder closure.
+/// Build select IR from a scoped query builder closure.
 ///
 /// Expressions created by the builder are scoped to that builder invocation and cannot be
 /// smuggled out as reusable values:
 ///
 /// ```compile_fail
 /// use squealy::*;
+/// # use std::{io, marker::PhantomData};
 ///
 /// #[derive(Clone, Table)]
 /// struct User<'scope, C: ColumnMode = ColumnExpr> {
 ///     id: C::Type<'scope, i32>,
 /// }
+/// #
+/// # struct DocConnection;
+/// #
+/// # struct DocQuery<Shape> {
+/// #     select: Select,
+/// #     _shape: PhantomData<Shape>,
+/// # }
+/// #
+/// # impl<Shape> Query for DocQuery<Shape>
+/// # where
+/// #     Shape: ProjectionShape,
+/// # {
+/// #     type Connection = DocConnection;
+/// #     type Shape = Shape;
+/// #
+/// #     fn ir(&self) -> &Select {
+/// #         &self.select
+/// #     }
+/// # }
+/// #
+/// # impl Backend for DocConnection {
+/// #     fn write_query<Qry>(&self, _query: &Qry, _writer: &mut impl io::Write) -> io::Result<()>
+/// #     where
+/// #         Self: Connection,
+/// #         Qry: Query<Connection = Self>,
+/// #     {
+/// #         Ok(())
+/// #     }
+/// #
+/// #     fn write_table(
+/// #         &self,
+/// #         _table: &(dyn Table + Sync),
+/// #         _writer: &mut impl io::Write,
+/// #     ) -> io::Result<()> {
+/// #         Ok(())
+/// #     }
+/// # }
+/// #
+/// # impl Connection for DocConnection {
+/// #     type Query<Shape> = DocQuery<Shape>
+/// #     where
+/// #         Shape: ProjectionShape;
+/// #
+/// #     fn query<Shape>(
+/// #         &self,
+/// #         f: impl for<'scope> FnOnce(
+/// #             &mut ::squealy::Q<'scope, Self>,
+/// #         ) -> <Shape as ProjectionShape>::Exprs<'scope>,
+/// #     ) -> Self::Query<Shape>
+/// #     where
+/// #         Shape: ProjectionShape,
+/// #     {
+/// #         DocQuery {
+/// #             select: build_select::<Self, Shape>(f),
+/// #             _shape: PhantomData,
+/// #         }
+/// #     }
+/// # }
 ///
+/// let conn = DocConnection;
 /// let mut leaked = None;
-/// let _ = query::<User>(|q| {
+/// let _ = conn.query::<User>(|q| {
 ///     let user = q.each::<User>();
 ///     leaked = Some(user.clone());
 ///     user
 /// });
 /// let _ = leaked.unwrap();
 /// ```
-pub fn query<Shape>(
-    f: impl for<'scope> FnOnce(&mut Q<'scope>) -> <Shape as ProjectionShape>::Exprs<'scope>,
-) -> Query<Shape>
+pub fn build_select<Conn, Shape>(
+    f: impl for<'scope> FnOnce(&mut Q<'scope, Conn>) -> <Shape as ProjectionShape>::Exprs<'scope>,
+) -> Select
 where
+    Conn: Connection,
     Shape: ProjectionShape,
 {
     QUERY_DEPTH.with(|depth| {
@@ -425,76 +407,6 @@ where
             .with_limit(q.limit)
             .with_offset(q.offset);
 
-        Query::new(select)
+        select
     })
-}
-
-fn write_select(writer: &mut impl Write, columns: &[SelectColumn]) -> io::Result<()> {
-    for (index, column) in columns.iter().enumerate() {
-        if index > 0 {
-            writer.write_all(b", ")?;
-        }
-        write!(writer, "{} AS {}", column.expr, column.alias)?;
-    }
-
-    Ok(())
-}
-
-fn write_sources(writer: &mut impl Write, sources: &[Source]) -> io::Result<()> {
-    for (index, source) in sources.iter().enumerate() {
-        if index > 0 {
-            writer.write_all(b" ")?;
-        }
-        source.write_sql(writer, index)?;
-    }
-
-    Ok(())
-}
-
-fn write_filters(writer: &mut impl Write, filters: &[Filter]) -> io::Result<()> {
-    if filters.is_empty() {
-        return Ok(());
-    }
-
-    writer.write_all(b" WHERE ")?;
-    for (index, filter) in filters.iter().enumerate() {
-        if index > 0 {
-            writer.write_all(b" AND ")?;
-        }
-        writer.write_all(filter.predicate.as_bytes())?;
-    }
-
-    Ok(())
-}
-
-fn write_orders(writer: &mut impl Write, orders: &[Sort]) -> io::Result<()> {
-    if orders.is_empty() {
-        return Ok(());
-    }
-
-    writer.write_all(b" ORDER BY ")?;
-    for (index, order) in orders.iter().enumerate() {
-        if index > 0 {
-            writer.write_all(b", ")?;
-        }
-        writer.write_all(order.order.as_bytes())?;
-    }
-
-    Ok(())
-}
-
-fn write_limit(writer: &mut impl Write, limit: Option<usize>) -> io::Result<()> {
-    if let Some(limit) = limit {
-        write!(writer, " LIMIT {limit}")?;
-    }
-
-    Ok(())
-}
-
-fn write_offset(writer: &mut impl Write, offset: Option<usize>) -> io::Result<()> {
-    if let Some(offset) = offset {
-        write!(writer, " OFFSET {offset}")?;
-    }
-
-    Ok(())
 }

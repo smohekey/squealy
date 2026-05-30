@@ -196,7 +196,14 @@ impl TableStruct {
                 type Rebound<'next_scope> = #ident <'next_scope, ::squealy::ColumnExpr>;
 
                 fn project(&self) -> ::std::vec::Vec<::squealy::SelectColumn> {
-                    ::std::vec![#( ::squealy::SelectColumn::new(self.#fields.to_sql().to_owned(), #field_literals), )*]
+                    ::std::vec![
+                        #(
+                            ::squealy::SelectColumn::new(
+                                self.#fields.node().clone(),
+                                #field_literals,
+                            ),
+                        )*
+                    ]
                 }
 
                 fn re_alias<'next_scope>(&self, alias: &str) -> Self::Rebound<'next_scope> {
