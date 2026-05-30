@@ -1,8 +1,11 @@
+use std::fmt;
+
 use squealy::{
-    Backend, Connection, Decode, InsertableTable, ProjectionShape, Returning, SelectBuilder, Table,
-    TableProjection, UpdateableTable, build_delete, build_delete_returning, build_insert,
-    build_insert_returning, build_select, build_update, build_update_returning,
+    Backend, BindValue, Connection, Decode, InsertableTable, ProjectionShape, Returning,
+    SelectBuilder, Table, TableProjection, UpdateableTable, build_delete, build_delete_returning,
+    build_insert, build_insert_returning, build_select, build_update, build_update_returning,
 };
+use tokio_postgres::Client;
 
 mod query;
 mod sql;
@@ -11,13 +14,58 @@ pub use query::{
     EmptyRows, PostgresDelete, PostgresInsert, PostgresRowReader, PostgresSelect, PostgresUpdate,
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PostgresConnection;
+pub struct PostgresConnection {
+    client: Option<Client>,
+}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl PostgresConnection {
+    pub fn new(client: Client) -> Self {
+        Self {
+            client: Some(client),
+        }
+    }
+
+    pub const fn no_driver() -> Self {
+        Self { client: None }
+    }
+
+    pub(crate) fn client(&self) -> Result<&Client, PostgresError> {
+        self.client.as_ref().ok_or(PostgresError::NoDriver)
+    }
+}
+
+impl Default for PostgresConnection {
+    fn default() -> Self {
+        Self::no_driver()
+    }
+}
+
+impl fmt::Debug for PostgresConnection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PostgresConnection")
+            .field("has_client", &self.client.is_some())
+            .finish()
+    }
+}
+
+#[allow(non_upper_case_globals)]
+pub const PostgresConnection: PostgresConnection = PostgresConnection::no_driver();
+
+#[derive(Debug)]
 pub enum PostgresError {
     NoDriver,
     NoRows,
+    UnsupportedBind(BindValue),
+    Database(tokio_postgres::Error),
+    Decode(tokio_postgres::Error),
+    Conversion(&'static str),
+}
+
+impl From<tokio_postgres::Error> for PostgresError {
+    fn from(error: tokio_postgres::Error) -> Self {
+        Self::Database(error)
+    }
 }
 
 impl Backend for PostgresConnection {

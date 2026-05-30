@@ -1,4 +1,5 @@
-use std::future::{Future, Ready, ready};
+use std::collections::VecDeque;
+use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -9,10 +10,11 @@ use squealy::{
     BindValue, Connection, Decode, Delete, DeleteQuery, Insert, InsertQuery, InsertableTable,
     ProjectionShape, Select, SelectQuery, TableProjection, Update, UpdateQuery, UpdateableTable,
 };
+use tokio_postgres::types::{FromSqlOwned, ToSql};
 
 use crate::{PostgresConnection, PostgresError, sql};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct EmptyRows<Row> {
     error: Option<PostgresError>,
     _row: PhantomData<Row>,
@@ -37,9 +39,28 @@ impl<Row> Stream for EmptyRows<Row> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct PostgresRowReader<'row> {
-    _row: PhantomData<&'row ()>,
+    row: &'row tokio_postgres::Row,
+    index: usize,
+}
+
+impl<'row> PostgresRowReader<'row> {
+    fn new(row: &'row tokio_postgres::Row) -> Self {
+        Self { row, index: 0 }
+    }
+
+    fn take<T>(&mut self) -> Result<T, PostgresError>
+    where
+        T: FromSqlOwned,
+    {
+        let value = self
+            .row
+            .try_get(self.index)
+            .map_err(PostgresError::Decode)?;
+        self.index += 1;
+        Ok(value)
+    }
 }
 
 impl squealy::RowReader for PostgresRowReader<'_> {
@@ -53,73 +74,279 @@ impl squealy::RowReader for PostgresRowReader<'_> {
     }
 }
 
-macro_rules! impl_postgres_decode_no_driver {
+macro_rules! impl_postgres_decode_direct {
     ($($ty:ty),* $(,)?) => {
         $(impl Decode<PostgresConnection> for $ty {
             fn decode(
-                _row: &mut <PostgresConnection as Connection>::RowReader<'_>,
+                row: &mut <PostgresConnection as Connection>::RowReader<'_>,
             ) -> Result<Self, PostgresError> {
-                Err(PostgresError::NoDriver)
+                row.take()
             }
         })*
     };
 }
 
-impl_postgres_decode_no_driver!(i8, i16, i32, i64, i128, isize);
-impl_postgres_decode_no_driver!(u8, u16, u32, u64, u128, usize);
-impl_postgres_decode_no_driver!(f32, f64);
-impl_postgres_decode_no_driver!(String, bool);
+macro_rules! impl_postgres_decode_from_i64 {
+    ($($ty:ty),* $(,)?) => {
+        $(impl Decode<PostgresConnection> for $ty {
+            fn decode(
+                row: &mut <PostgresConnection as Connection>::RowReader<'_>,
+            ) -> Result<Self, PostgresError> {
+                let value = row.take::<i64>()?;
+                <$ty>::try_from(value).map_err(|_| PostgresError::Conversion(stringify!($ty)))
+            }
+        })*
+    };
+}
+
+impl_postgres_decode_direct!(i16, i32, i64, f32, f64, String, bool);
+impl_postgres_decode_from_i64!(i8, i128, isize, u8, u16, u32, u64, u128, usize);
 
 impl<T> Decode<PostgresConnection> for Option<T>
 where
-    T: Decode<PostgresConnection>,
+    T: FromSqlOwned,
 {
     fn decode(
-        _row: &mut <PostgresConnection as Connection>::RowReader<'_>,
+        row: &mut <PostgresConnection as Connection>::RowReader<'_>,
     ) -> Result<Self, PostgresError> {
-        Err(PostgresError::NoDriver)
+        row.take()
     }
+}
+
+pub struct PostgresRows<'query, Row> {
+    state: PostgresRowsState<'query>,
+    _row: PhantomData<Row>,
+}
+
+enum PostgresRowsState<'query> {
+    Pending(
+        Pin<
+            Box<
+                dyn Future<Output = Result<VecDeque<tokio_postgres::Row>, PostgresError>>
+                    + Send
+                    + 'query,
+            >,
+        >,
+    ),
+    Rows(VecDeque<tokio_postgres::Row>),
+    Error(Option<PostgresError>),
+    Done,
+}
+
+impl<Row> PostgresRows<'_, Row> {
+    fn error(error: PostgresError) -> Self {
+        Self {
+            state: PostgresRowsState::Error(Some(error)),
+            _row: PhantomData,
+        }
+    }
+}
+
+impl<'query, Row> PostgresRows<'query, Row> {
+    fn query(
+        client: Result<&'query tokio_postgres::Client, PostgresError>,
+        sql: String,
+        params: Vec<BindValue>,
+    ) -> Self {
+        let Ok(client) = client else {
+            return Self::error(PostgresError::NoDriver);
+        };
+
+        Self {
+            state: PostgresRowsState::Pending(Box::pin(async move {
+                let params = postgres_params(params)?;
+                let params = params.iter().map(PostgresParam::as_sql).collect::<Vec<_>>();
+                client
+                    .query(&sql, &params)
+                    .await
+                    .map(VecDeque::from)
+                    .map_err(PostgresError::Database)
+            })),
+            _row: PhantomData,
+        }
+    }
+}
+
+impl<Row> Stream for PostgresRows<'_, Row>
+where
+    Row: Decode<PostgresConnection>,
+{
+    type Item = Result<Row, PostgresError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+
+        loop {
+            match &mut this.state {
+                PostgresRowsState::Pending(future) => {
+                    let rows = match future.as_mut().poll(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Ok(rows)) => rows,
+                        Poll::Ready(Err(error)) => {
+                            this.state = PostgresRowsState::Done;
+                            return Poll::Ready(Some(Err(error)));
+                        }
+                    };
+                    this.state = PostgresRowsState::Rows(rows);
+                }
+                PostgresRowsState::Rows(rows) => {
+                    let Some(row) = rows.pop_front() else {
+                        this.state = PostgresRowsState::Done;
+                        return Poll::Ready(None);
+                    };
+                    let mut row = PostgresRowReader::new(&row);
+                    return Poll::Ready(Some(Row::decode(&mut row)));
+                }
+                PostgresRowsState::Error(error) => {
+                    return Poll::Ready(error.take().map(Err));
+                }
+                PostgresRowsState::Done => return Poll::Ready(None),
+            }
+        }
+    }
+}
+
+impl<Row> Unpin for PostgresRows<'_, Row> {}
+
+enum PostgresParam {
+    Int(i64),
+    Float(f64),
+    Text(String),
+    Bool(bool),
+}
+
+impl PostgresParam {
+    fn as_sql(&self) -> &(dyn ToSql + Sync) {
+        match self {
+            Self::Int(value) => value,
+            Self::Float(value) => value,
+            Self::Text(value) => value,
+            Self::Bool(value) => value,
+        }
+    }
+}
+
+fn postgres_params(params: Vec<BindValue>) -> Result<Vec<PostgresParam>, PostgresError> {
+    params
+        .into_iter()
+        .map(|param| match param {
+            BindValue::Int(value) => i64::try_from(value)
+                .map(PostgresParam::Int)
+                .map_err(|_| PostgresError::UnsupportedBind(BindValue::Int(value))),
+            BindValue::UInt(value) => i64::try_from(value)
+                .map(PostgresParam::Int)
+                .map_err(|_| PostgresError::UnsupportedBind(BindValue::UInt(value))),
+            BindValue::Float(value) => Ok(PostgresParam::Float(value)),
+            BindValue::Text(value) => Ok(PostgresParam::Text(value)),
+            BindValue::Bool(value) => Ok(PostgresParam::Bool(value)),
+            BindValue::Null => Err(PostgresError::UnsupportedBind(BindValue::Null)),
+        })
+        .collect()
+}
+
+async fn execute_sql(
+    client: Result<&tokio_postgres::Client, PostgresError>,
+    sql: String,
+    params: Vec<BindValue>,
+) -> Result<u64, PostgresError> {
+    let client = client?;
+    let params = postgres_params(params)?;
+    let params = params.iter().map(PostgresParam::as_sql).collect::<Vec<_>>();
+    client
+        .execute(&sql, &params)
+        .await
+        .map_err(PostgresError::Database)
+}
+
+fn render_select(select: &Select) -> String {
+    let mut sql = Vec::new();
+    sql::write_select(select, &mut sql).unwrap();
+    String::from_utf8(sql).unwrap()
+}
+
+fn render_insert(insert: &Insert) -> String {
+    let mut sql = Vec::new();
+    sql::write_insert(insert, &mut sql).unwrap();
+    String::from_utf8(sql).unwrap()
+}
+
+fn render_delete(delete: &Delete) -> String {
+    let mut sql = Vec::new();
+    sql::write_delete(delete, &mut sql).unwrap();
+    String::from_utf8(sql).unwrap()
+}
+
+fn render_update(update: &Update) -> String {
+    let mut sql = Vec::new();
+    sql::write_update(update, &mut sql).unwrap();
+    String::from_utf8(sql).unwrap()
 }
 
 impl PostgresConnection {
-    pub(crate) fn fetch_select<Row>(&self, _select: &Select) -> EmptyRows<Row> {
-        error_rows(PostgresError::NoDriver)
+    pub(crate) fn fetch_select<Row>(&self, select: &Select) -> PostgresRows<'_, Row> {
+        PostgresRows::query(
+            self.client(),
+            render_select(select),
+            sql::select_params(select),
+        )
     }
 
-    pub(crate) fn execute_insert(&self, _insert: &Insert) -> Ready<Result<u64, PostgresError>> {
-        no_driver()
+    pub(crate) fn execute_insert(
+        &self,
+        insert: &Insert,
+    ) -> impl Future<Output = Result<u64, PostgresError>> + Send + '_ {
+        execute_sql(
+            self.client(),
+            render_insert(insert),
+            sql::insert_params(insert),
+        )
     }
 
-    pub(crate) fn fetch_insert<Row>(&self, _insert: &Insert) -> EmptyRows<Row> {
-        error_rows(PostgresError::NoDriver)
+    pub(crate) fn fetch_insert<Row>(&self, insert: &Insert) -> PostgresRows<'_, Row> {
+        PostgresRows::query(
+            self.client(),
+            render_insert(insert),
+            sql::insert_params(insert),
+        )
     }
 
-    pub(crate) fn execute_delete(&self, _delete: &Delete) -> Ready<Result<u64, PostgresError>> {
-        no_driver()
+    pub(crate) fn execute_delete(
+        &self,
+        delete: &Delete,
+    ) -> impl Future<Output = Result<u64, PostgresError>> + Send + '_ {
+        execute_sql(
+            self.client(),
+            render_delete(delete),
+            sql::delete_params(delete),
+        )
     }
 
-    pub(crate) fn fetch_delete<Row>(&self, _delete: &Delete) -> EmptyRows<Row> {
-        error_rows(PostgresError::NoDriver)
+    pub(crate) fn fetch_delete<Row>(&self, delete: &Delete) -> PostgresRows<'_, Row> {
+        PostgresRows::query(
+            self.client(),
+            render_delete(delete),
+            sql::delete_params(delete),
+        )
     }
 
-    pub(crate) fn execute_update(&self, _update: &Update) -> Ready<Result<u64, PostgresError>> {
-        no_driver()
+    pub(crate) fn execute_update(
+        &self,
+        update: &Update,
+    ) -> impl Future<Output = Result<u64, PostgresError>> + Send + '_ {
+        execute_sql(
+            self.client(),
+            render_update(update),
+            sql::update_params(update),
+        )
     }
 
-    pub(crate) fn fetch_update<Row>(&self, _update: &Update) -> EmptyRows<Row> {
-        error_rows(PostgresError::NoDriver)
+    pub(crate) fn fetch_update<Row>(&self, update: &Update) -> PostgresRows<'_, Row> {
+        PostgresRows::query(
+            self.client(),
+            render_update(update),
+            sql::update_params(update),
+        )
     }
-}
-
-fn error_rows<Row>(error: PostgresError) -> EmptyRows<Row> {
-    EmptyRows {
-        error: Some(error),
-        _row: PhantomData,
-    }
-}
-
-fn no_driver<T>() -> Ready<Result<T, PostgresError>> {
-    ready(Err(PostgresError::NoDriver))
 }
 
 #[derive(Clone, Debug)]
@@ -236,7 +463,7 @@ where
     type Row = Shape::Row;
 
     type RowStream<'query>
-        = EmptyRows<Self::Row>
+        = PostgresRows<'query, Self::Row>
     where
         Self: 'query;
 
@@ -261,7 +488,7 @@ where
     type Row = Shape::Row;
 
     type RowStream<'query>
-        = EmptyRows<Self::Row>
+        = PostgresRows<'query, Self::Row>
     where
         Self: 'query;
 
@@ -293,7 +520,7 @@ where
     type Row = Shape::Row;
 
     type RowStream<'query>
-        = EmptyRows<Self::Row>
+        = PostgresRows<'query, Self::Row>
     where
         Self: 'query;
 
@@ -325,7 +552,7 @@ where
     type Row = Shape::Row;
 
     type RowStream<'query>
-        = EmptyRows<Self::Row>
+        = PostgresRows<'query, Self::Row>
     where
         Self: 'query;
 
@@ -350,9 +577,7 @@ where
     Shape: ProjectionShape,
 {
     pub fn to_sql(&self) -> String {
-        let mut sql = Vec::new();
-        sql::write_select(&self.select, &mut sql).unwrap();
-        String::from_utf8(sql).unwrap()
+        render_select(&self.select)
     }
 
     pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
@@ -370,9 +595,7 @@ where
     Shape: ProjectionShape,
 {
     pub fn to_sql(&self) -> String {
-        let mut sql = Vec::new();
-        sql::write_insert(&self.insert, &mut sql).unwrap();
-        String::from_utf8(sql).unwrap()
+        render_insert(&self.insert)
     }
 
     pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
@@ -390,9 +613,7 @@ where
     Shape: ProjectionShape,
 {
     pub fn to_sql(&self) -> String {
-        let mut sql = Vec::new();
-        sql::write_delete(&self.delete, &mut sql).unwrap();
-        String::from_utf8(sql).unwrap()
+        render_delete(&self.delete)
     }
 
     pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
@@ -410,9 +631,7 @@ where
     Shape: ProjectionShape,
 {
     pub fn to_sql(&self) -> String {
-        let mut sql = Vec::new();
-        sql::write_update(&self.update, &mut sql).unwrap();
-        String::from_utf8(sql).unwrap()
+        render_update(&self.update)
     }
 
     pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
