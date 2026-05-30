@@ -6,15 +6,16 @@ use futures_core::Stream;
 
 use crate::ir::{Delete, Filter, Insert, InsertColumn, Select, Sort, Source, Update, UpdateColumn};
 use crate::{
-    ColumnRef, Connection, Expr, ExprKind, InsertableTable, IntoBindValue, Maybe, Order, Predicate,
-    Projectable, ProjectionShape, SchemaTable, SelectColumn, TableProjection, UpdateableTable,
+    ColumnRef, Connection, Decode, Expr, ExprKind, InsertableTable, IntoBindValue, Maybe, Order,
+    Predicate, Projectable, ProjectionShape, SchemaTable, SelectColumn, TableProjection,
+    UpdateableTable,
 };
 
 /// A backend-specific select query object backed by core-owned select IR.
 pub trait SelectQuery<'conn> {
     type Connection: Connection + 'conn;
     type Shape: ProjectionShape;
-    type Row: Send;
+    type Row: Decode<Self::Connection> + Send;
 
     type RowStream<'query>: Stream<Item = Result<Self::Row, <Self::Connection as Connection>::Error>>
         + Send
@@ -46,7 +47,7 @@ pub trait InsertQuery<'conn> {
     type Connection: Connection + 'conn;
     type Table: InsertableTable;
     type Shape: ProjectionShape;
-    type Row: Send;
+    type Row: Decode<Self::Connection> + Send;
 
     type RowStream<'query>: Stream<Item = Result<Self::Row, <Self::Connection as Connection>::Error>>
         + Send
@@ -82,7 +83,7 @@ pub trait UpdateQuery<'conn> {
     type Connection: Connection + 'conn;
     type Table: UpdateableTable;
     type Shape: ProjectionShape;
-    type Row: Send;
+    type Row: Decode<Self::Connection> + Send;
 
     type RowStream<'query>: Stream<Item = Result<Self::Row, <Self::Connection as Connection>::Error>>
         + Send
@@ -118,7 +119,7 @@ pub trait DeleteQuery<'conn> {
     type Connection: Connection + 'conn;
     type Table: TableProjection;
     type Shape: ProjectionShape;
-    type Row: Send;
+    type Row: Decode<Self::Connection> + Send;
 
     type RowStream<'query>: Stream<Item = Result<Self::Row, <Self::Connection as Connection>::Error>>
         + Send
@@ -432,6 +433,7 @@ where
     ) -> Conn::Delete<'conn, S, <P as ReturningProjection<'static>>::Shape>
     where
         P: ReturningProjection<'static>,
+        <P::Shape as ProjectionShape>::Row: Decode<Conn>,
     {
         let table = S::exprs(&self.alias());
         let projection = projection(table);

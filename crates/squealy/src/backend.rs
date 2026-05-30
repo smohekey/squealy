@@ -6,6 +6,29 @@ use crate::{
     UpdateableTable, build_delete_builder,
 };
 
+/// Backend-specific row cursor used while decoding a projected row.
+pub trait RowReader: Sized {
+    type Connection: Connection;
+
+    fn read<T>(&mut self) -> Result<T, <Self::Connection as Connection>::Error>
+    where
+        T: Decode<Self::Connection>;
+}
+
+/// Decode a Rust value from a backend row reader.
+pub trait Decode<Conn: Connection>: Sized {
+    fn decode(row: &mut Conn::RowReader<'_>) -> Result<Self, Conn::Error>;
+}
+
+impl<Conn> Decode<Conn> for ()
+where
+    Conn: Connection,
+{
+    fn decode(_row: &mut Conn::RowReader<'_>) -> Result<Self, Conn::Error> {
+        Ok(())
+    }
+}
+
 /// Backend-specific DDL generation.
 pub trait Backend: Sized {
     /// Generate backend-specific SQL for a table.
@@ -16,35 +39,44 @@ pub trait Backend: Sized {
 pub trait Connection: Sized {
     type Error;
 
+    type RowReader<'row>: RowReader<Connection = Self>
+    where
+        Self: 'row;
+
     type Select<'conn, Shape>: SelectQuery<'conn, Connection = Self, Shape = Shape>
     where
         Self: 'conn,
-        Shape: ProjectionShape;
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
 
     type Insert<'conn, S, Shape>: InsertQuery<'conn, Connection = Self, Table = S, Shape = Shape>
     where
         Self: 'conn,
         S: InsertableTable,
-        Shape: ProjectionShape;
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
 
     type Update<'conn, S, Shape>: UpdateQuery<'conn, Connection = Self, Table = S, Shape = Shape>
     where
         Self: 'conn,
         S: UpdateableTable,
-        Shape: ProjectionShape;
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
 
     type Delete<'conn, S, Shape>: DeleteQuery<'conn, Connection = Self, Table = S, Shape = Shape>
     where
         Self: 'conn,
         S: TableProjection,
-        Shape: ProjectionShape;
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
 
     fn select<Shape>(
         &self,
         f: impl for<'scope> FnOnce(&mut crate::SelectBuilder<'_, 'scope, Self>) -> Returning<Shape>,
     ) -> Self::Select<'_, Shape>
     where
-        Shape: ProjectionShape;
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
 
     fn insert<S>(&self) -> S::InsertBuilder<'_, Self>
     where
@@ -64,7 +96,8 @@ pub trait Connection: Sized {
     ) -> Self::Insert<'_, S, Shape>
     where
         S: InsertableTable,
-        Shape: ProjectionShape;
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
 
     fn update<S>(&self) -> S::UpdateBuilder<'_, Self>
     where
@@ -91,7 +124,8 @@ pub trait Connection: Sized {
     ) -> Self::Update<'_, S, Shape>
     where
         S: UpdateableTable,
-        Shape: ProjectionShape;
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
 
     fn delete<'conn, S>(&'conn self) -> DeleteBuilder<'conn, 'static, Self, S>
     where
@@ -112,5 +146,6 @@ pub trait Connection: Sized {
     ) -> Self::Delete<'_, S, Shape>
     where
         S: TableProjection,
-        Shape: ProjectionShape;
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
 }

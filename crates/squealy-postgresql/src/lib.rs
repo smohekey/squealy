@@ -1,5 +1,5 @@
 use squealy::{
-    Backend, Connection, InsertableTable, ProjectionShape, Returning, SelectBuilder, Table,
+    Backend, Connection, Decode, InsertableTable, ProjectionShape, Returning, SelectBuilder, Table,
     TableProjection, UpdateableTable, build_delete, build_delete_returning, build_insert,
     build_insert_returning, build_select, build_update, build_update_returning,
 };
@@ -7,7 +7,9 @@ use squealy::{
 mod query;
 mod sql;
 
-pub use query::{EmptyRows, PostgresDelete, PostgresInsert, PostgresSelect, PostgresUpdate};
+pub use query::{
+    EmptyRows, PostgresDelete, PostgresInsert, PostgresRowReader, PostgresSelect, PostgresUpdate,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PostgresConnection;
@@ -30,32 +32,41 @@ impl Backend for PostgresConnection {
 impl Connection for PostgresConnection {
     type Error = PostgresError;
 
+    type RowReader<'row>
+        = PostgresRowReader<'row>
+    where
+        Self: 'row;
+
     type Select<'conn, Shape>
         = PostgresSelect<'conn, Shape>
     where
         Self: 'conn,
-        Shape: ProjectionShape;
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
 
     type Insert<'conn, S, Shape>
         = PostgresInsert<'conn, S, Shape>
     where
         Self: 'conn,
         S: InsertableTable,
-        Shape: ProjectionShape;
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
 
     type Update<'conn, S, Shape>
         = PostgresUpdate<'conn, S, Shape>
     where
         Self: 'conn,
         S: UpdateableTable,
-        Shape: ProjectionShape;
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
 
     type Delete<'conn, S, Shape>
         = PostgresDelete<'conn, S, Shape>
     where
         Self: 'conn,
         S: TableProjection,
-        Shape: ProjectionShape;
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
 
     fn select<Shape>(
         &self,
@@ -63,6 +74,7 @@ impl Connection for PostgresConnection {
     ) -> Self::Select<'_, Shape>
     where
         Shape: ProjectionShape,
+        Shape::Row: Decode<Self>,
     {
         PostgresSelect::new(build_select::<Self, Shape>(f))
     }
@@ -82,6 +94,7 @@ impl Connection for PostgresConnection {
     where
         S: InsertableTable,
         Shape: ProjectionShape,
+        Shape::Row: Decode<Self>,
     {
         PostgresInsert::new(build_insert_returning::<S>(columns, returning))
     }
@@ -108,6 +121,7 @@ impl Connection for PostgresConnection {
     where
         S: UpdateableTable,
         Shape: ProjectionShape,
+        Shape::Row: Decode<Self>,
     {
         PostgresUpdate::new(build_update_returning::<S>(
             alias, columns, filters, returning,
@@ -134,6 +148,7 @@ impl Connection for PostgresConnection {
     where
         S: TableProjection,
         Shape: ProjectionShape,
+        Shape::Row: Decode<Self>,
     {
         PostgresDelete::new(build_delete_returning::<S>(alias, filters, returning))
     }

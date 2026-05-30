@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 use futures_core::Stream;
 
 use squealy::{
-    BindValue, Connection, Delete, DeleteQuery, Insert, InsertQuery, InsertableTable,
+    BindValue, Connection, Decode, Delete, DeleteQuery, Insert, InsertQuery, InsertableTable,
     ProjectionShape, Select, SelectQuery, TableProjection, Update, UpdateQuery, UpdateableTable,
 };
 
@@ -28,6 +28,48 @@ impl<Row> Stream for EmptyRows<Row> {
 
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Ready(None)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestRowReader<'row> {
+    _row: PhantomData<&'row ()>,
+}
+
+impl squealy::RowReader for TestRowReader<'_> {
+    type Connection = TestConnection;
+
+    fn read<T>(&mut self) -> Result<T, TestError>
+    where
+        T: Decode<TestConnection>,
+    {
+        T::decode(self)
+    }
+}
+
+macro_rules! impl_test_decode_no_rows {
+    ($($ty:ty),* $(,)?) => {
+        $(impl Decode<TestConnection> for $ty {
+            fn decode(
+                _row: &mut <TestConnection as Connection>::RowReader<'_>,
+            ) -> Result<Self, TestError> {
+                Err(TestError::NoRows)
+            }
+        })*
+    };
+}
+
+impl_test_decode_no_rows!(i8, i16, i32, i64, i128, isize);
+impl_test_decode_no_rows!(u8, u16, u32, u64, u128, usize);
+impl_test_decode_no_rows!(f32, f64);
+impl_test_decode_no_rows!(String, bool);
+
+impl<T> Decode<TestConnection> for Option<T>
+where
+    T: Decode<TestConnection>,
+{
+    fn decode(_row: &mut <TestConnection as Connection>::RowReader<'_>) -> Result<Self, TestError> {
+        Ok(None)
     }
 }
 
@@ -150,6 +192,7 @@ where
 impl<'conn, Shape> SelectQuery<'conn> for TestSelect<'conn, Shape>
 where
     Shape: ProjectionShape,
+    Shape::Row: Decode<TestConnection>,
 {
     type Connection = TestConnection;
     type Shape = Shape;
@@ -195,6 +238,7 @@ impl<'conn, S, Shape> InsertQuery<'conn> for TestInsert<'conn, S, Shape>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
+    Shape::Row: Decode<TestConnection>,
 {
     type Connection = TestConnection;
     type Table = S;
@@ -248,6 +292,7 @@ impl<'conn, S, Shape> DeleteQuery<'conn> for TestDelete<'conn, S, Shape>
 where
     S: TableProjection,
     Shape: ProjectionShape,
+    Shape::Row: Decode<TestConnection>,
 {
     type Connection = TestConnection;
     type Table = S;
@@ -301,6 +346,7 @@ impl<'conn, S, Shape> UpdateQuery<'conn> for TestUpdate<'conn, S, Shape>
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
+    Shape::Row: Decode<TestConnection>,
 {
     type Connection = TestConnection;
     type Table = S;

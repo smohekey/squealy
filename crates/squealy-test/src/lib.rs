@@ -1,5 +1,5 @@
 use squealy::{
-    Backend, Connection, InsertableTable, ProjectionShape, Returning, SelectBuilder, Table,
+    Backend, Connection, Decode, InsertableTable, ProjectionShape, Returning, SelectBuilder, Table,
     TableProjection, UpdateableTable, build_delete, build_delete_returning, build_insert,
     build_insert_returning, build_select, build_update, build_update_returning,
 };
@@ -7,7 +7,7 @@ use squealy::{
 mod query;
 mod sql;
 
-pub use query::{EmptyRows, TestDelete, TestInsert, TestSelect, TestUpdate};
+pub use query::{EmptyRows, TestDelete, TestInsert, TestRowReader, TestSelect, TestUpdate};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TestConnection;
@@ -30,32 +30,41 @@ impl Backend for TestConnection {
 impl Connection for TestConnection {
     type Error = TestError;
 
+    type RowReader<'row>
+        = TestRowReader<'row>
+    where
+        Self: 'row;
+
     type Select<'conn, Shape>
         = TestSelect<'conn, Shape>
     where
         Self: 'conn,
-        Shape: ProjectionShape;
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
 
     type Insert<'conn, S, Shape>
         = TestInsert<'conn, S, Shape>
     where
         Self: 'conn,
         S: InsertableTable,
-        Shape: ProjectionShape;
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
 
     type Update<'conn, S, Shape>
         = TestUpdate<'conn, S, Shape>
     where
         Self: 'conn,
         S: UpdateableTable,
-        Shape: ProjectionShape;
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
 
     type Delete<'conn, S, Shape>
         = TestDelete<'conn, S, Shape>
     where
         Self: 'conn,
         S: TableProjection,
-        Shape: ProjectionShape;
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
 
     fn select<Shape>(
         &self,
@@ -63,6 +72,7 @@ impl Connection for TestConnection {
     ) -> Self::Select<'_, Shape>
     where
         Shape: ProjectionShape,
+        Shape::Row: Decode<Self>,
     {
         TestSelect::new(build_select::<Self, Shape>(f))
     }
@@ -82,6 +92,7 @@ impl Connection for TestConnection {
     where
         S: InsertableTable,
         Shape: ProjectionShape,
+        Shape::Row: Decode<Self>,
     {
         TestInsert::new(build_insert_returning::<S>(columns, returning))
     }
@@ -108,6 +119,7 @@ impl Connection for TestConnection {
     where
         S: UpdateableTable,
         Shape: ProjectionShape,
+        Shape::Row: Decode<Self>,
     {
         TestUpdate::new(build_update_returning::<S>(
             alias, columns, filters, returning,
@@ -134,6 +146,7 @@ impl Connection for TestConnection {
     where
         S: TableProjection,
         Shape: ProjectionShape,
+        Shape::Row: Decode<Self>,
     {
         TestDelete::new(build_delete_returning::<S>(alias, filters, returning))
     }
