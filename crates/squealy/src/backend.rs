@@ -43,6 +43,8 @@ pub trait Connection: Sized {
     where
         Self: 'row;
 
+    fn no_rows_error() -> Self::Error;
+
     type Select<'conn, Shape>: SelectQuery<'conn, Connection = Self, Shape = Shape>
     where
         Self: 'conn,
