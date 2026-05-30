@@ -32,6 +32,18 @@ pub trait SelectQuery<'conn> {
 
     fn fetch<'query>(&'query self) -> Self::RowStream<'query>;
 
+    fn collect<'query>(
+        &'query self,
+    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>>
+    + Send
+    + 'query
+    where
+        'conn: 'query,
+    {
+        let rows = self.fetch();
+        collect_rows::<Self::Connection, Self::Row, _>(rows)
+    }
+
     fn fetch_one<'query>(
         &'query self,
     ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + 'query
@@ -80,7 +92,19 @@ pub trait InsertQuery<'conn> {
 
     fn fetch<'query>(&'query self) -> Self::RowStream<'query>;
 
-    fn fetch_all_with_affected<'query>(
+    fn collect<'query>(
+        &'query self,
+    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>>
+    + Send
+    + 'query
+    where
+        'conn: 'query,
+    {
+        let rows = self.fetch();
+        collect_rows::<Self::Connection, Self::Row, _>(rows)
+    }
+
+    fn collect_with_affected<'query>(
         &'query self,
     ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), <Self::Connection as Connection>::Error>>
     + Send
@@ -169,7 +193,19 @@ pub trait UpdateQuery<'conn> {
 
     fn fetch<'query>(&'query self) -> Self::RowStream<'query>;
 
-    fn fetch_all_with_affected<'query>(
+    fn collect<'query>(
+        &'query self,
+    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>>
+    + Send
+    + 'query
+    where
+        'conn: 'query,
+    {
+        let rows = self.fetch();
+        collect_rows::<Self::Connection, Self::Row, _>(rows)
+    }
+
+    fn collect_with_affected<'query>(
         &'query self,
     ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), <Self::Connection as Connection>::Error>>
     + Send
@@ -258,7 +294,19 @@ pub trait DeleteQuery<'conn> {
 
     fn fetch<'query>(&'query self) -> Self::RowStream<'query>;
 
-    fn fetch_all_with_affected<'query>(
+    fn collect<'query>(
+        &'query self,
+    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>>
+    + Send
+    + 'query
+    where
+        'conn: 'query,
+    {
+        let rows = self.fetch();
+        collect_rows::<Self::Connection, Self::Row, _>(rows)
+    }
+
+    fn collect_with_affected<'query>(
         &'query self,
     ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), <Self::Connection as Connection>::Error>>
     + Send
@@ -323,6 +371,19 @@ pub trait DeleteQuery<'conn> {
         let rows = self.fetch();
         fetch_optional_row::<Self::Connection, Self::Row, _>(rows)
     }
+}
+
+async fn collect_rows<Conn, Row, Rows>(rows: Rows) -> Result<Vec<Row>, Conn::Error>
+where
+    Conn: Connection,
+    Rows: Stream<Item = Result<Row, Conn::Error>> + Send,
+{
+    let mut rows = Box::pin(rows);
+    let mut output = Vec::new();
+    while let Some(row) = poll_fn(|cx| rows.as_mut().poll_next(cx)).await {
+        output.push(row?);
+    }
+    Ok(output)
 }
 
 async fn collect_rows_with_affected<Conn, Row, Rows>(
