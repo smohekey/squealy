@@ -14,7 +14,7 @@ use squealy::{
 };
 use tokio_postgres::types::{FromSqlOwned, IsNull, ToSql, Type, to_sql_checked};
 
-use crate::{PostgresConnection, PostgresError, sql};
+use crate::{PostgresConnection, PostgresError, PostgresTransaction, sql};
 
 #[derive(Debug)]
 pub struct EmptyRows<Row> {
@@ -42,17 +42,24 @@ impl<Row> Stream for EmptyRows<Row> {
 }
 
 #[derive(Debug)]
-pub struct PostgresRowReader<'row> {
+pub struct PostgresRowReader<'row, Conn = PostgresConnection> {
     row: &'row tokio_postgres::Row,
     index: usize,
+    _connection: PhantomData<fn() -> Conn>,
 }
 
-impl<'row> PostgresRowReader<'row> {
+impl<'row, Conn> PostgresRowReader<'row, Conn> {
     fn new(row: &'row tokio_postgres::Row) -> Self {
-        Self { row, index: 0 }
+        Self {
+            row,
+            index: 0,
+            _connection: PhantomData,
+        }
     }
+}
 
-    fn take<T>(&mut self) -> Result<T, PostgresError>
+impl<Conn> PostgresRowReader<'_, Conn> {
+    fn take_sql<T>(&mut self) -> Result<T, PostgresError>
     where
         T: FromSqlOwned,
     {
@@ -76,33 +83,83 @@ impl squealy::RowReader for PostgresRowReader<'_> {
     }
 }
 
+impl<'conn> squealy::RowReader for PostgresRowReader<'_, PostgresTransaction<'conn>> {
+    type Connection = PostgresTransaction<'conn>;
+
+    fn read<T>(&mut self) -> Result<T, PostgresError>
+    where
+        T: Decode<PostgresTransaction<'conn>>,
+    {
+        T::decode(self)
+    }
+}
+
 macro_rules! impl_postgres_decode_direct {
-    ($($ty:ty),* $(,)?) => {
-        $(impl Decode<PostgresConnection> for $ty {
+    ($conn:ty; $($ty:ty),* $(,)?) => {
+        $(impl Decode<$conn> for $ty {
             fn decode(
-                row: &mut <PostgresConnection as Connection>::RowReader<'_>,
+                row: &mut <$conn as Connection>::RowReader<'_>,
             ) -> Result<Self, PostgresError> {
-                row.take()
+                row.take_sql()
             }
         })*
     };
 }
 
 macro_rules! impl_postgres_decode_from_i64 {
-    ($($ty:ty),* $(,)?) => {
-        $(impl Decode<PostgresConnection> for $ty {
+    ($conn:ty; $($ty:ty),* $(,)?) => {
+        $(impl Decode<$conn> for $ty {
             fn decode(
-                row: &mut <PostgresConnection as Connection>::RowReader<'_>,
+                row: &mut <$conn as Connection>::RowReader<'_>,
             ) -> Result<Self, PostgresError> {
-                let value = row.take::<i64>()?;
+                let value = row.take_sql::<i64>()?;
                 <$ty>::try_from(value).map_err(|_| PostgresError::Conversion(stringify!($ty)))
             }
         })*
     };
 }
 
-impl_postgres_decode_direct!(i16, i32, i64, f32, f64, String, bool);
-impl_postgres_decode_from_i64!(i8, i128, isize, u8, u16, u32, u64, u128, usize);
+impl_postgres_decode_direct!(PostgresConnection; i16, i32, i64, f32, f64, String, bool);
+impl_postgres_decode_from_i64!(
+    PostgresConnection;
+    i8,
+    i128,
+    isize,
+    u8,
+    u16,
+    u32,
+    u64,
+    u128,
+    usize
+);
+
+macro_rules! impl_postgres_transaction_decode_direct {
+    ($($ty:ty),* $(,)?) => {
+        $(impl<'tx> Decode<PostgresTransaction<'tx>> for $ty {
+            fn decode(
+                row: &mut <PostgresTransaction<'tx> as Connection>::RowReader<'_>,
+            ) -> Result<Self, PostgresError> {
+                row.take_sql()
+            }
+        })*
+    };
+}
+
+macro_rules! impl_postgres_transaction_decode_from_i64 {
+    ($($ty:ty),* $(,)?) => {
+        $(impl<'tx> Decode<PostgresTransaction<'tx>> for $ty {
+            fn decode(
+                row: &mut <PostgresTransaction<'tx> as Connection>::RowReader<'_>,
+            ) -> Result<Self, PostgresError> {
+                let value = row.take_sql::<i64>()?;
+                <$ty>::try_from(value).map_err(|_| PostgresError::Conversion(stringify!($ty)))
+            }
+        })*
+    };
+}
+
+impl_postgres_transaction_decode_direct!(i16, i32, i64, f32, f64, String, bool);
+impl_postgres_transaction_decode_from_i64!(i8, i128, isize, u8, u16, u32, u64, u128, usize);
 
 impl<T> Decode<PostgresConnection> for Option<T>
 where
@@ -111,14 +168,47 @@ where
     fn decode(
         row: &mut <PostgresConnection as Connection>::RowReader<'_>,
     ) -> Result<Self, PostgresError> {
-        row.take()
+        row.take_sql()
     }
 }
 
-pub struct PostgresRows<'query, Row> {
+impl<'tx, T> Decode<PostgresTransaction<'tx>> for Option<T>
+where
+    T: FromSqlOwned,
+{
+    fn decode(
+        row: &mut <PostgresTransaction<'tx> as Connection>::RowReader<'_>,
+    ) -> Result<Self, PostgresError> {
+        row.take_sql()
+    }
+}
+
+#[doc(hidden)]
+pub trait PostgresExecutor: Connection<Error = PostgresError> {
+    fn decode_row<Row>(row: &tokio_postgres::Row) -> Result<Row, PostgresError>
+    where
+        Row: Decode<Self>;
+
+    fn query_raw<'query>(
+        &'query self,
+        sql: String,
+        params: Vec<BindValue>,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<tokio_postgres::RowStream, PostgresError>> + Send + 'query>,
+    >;
+
+    fn execute_sql<'query>(
+        &'query self,
+        sql: String,
+        params: Vec<BindValue>,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, PostgresError>> + Send + 'query>>;
+}
+
+pub struct PostgresRows<'query, Row, Conn = PostgresConnection> {
     state: PostgresRowsState<'query>,
     affected_rows: Option<u64>,
     _row: PhantomData<Row>,
+    _connection: PhantomData<fn() -> Conn>,
 }
 
 enum PostgresRowsState<'query> {
@@ -132,48 +222,27 @@ enum PostgresRowsState<'query> {
         >,
     ),
     Rows(Pin<Box<tokio_postgres::RowStream>>),
-    Error(Option<PostgresError>),
     Done,
 }
 
-impl<Row> PostgresRows<'_, Row> {
-    fn error(error: PostgresError) -> Self {
-        Self {
-            state: PostgresRowsState::Error(Some(error)),
-            affected_rows: None,
-            _row: PhantomData,
-        }
-    }
-}
-
-impl<'query, Row> PostgresRows<'query, Row> {
-    fn query(
-        client: Result<&'query tokio_postgres::Client, PostgresError>,
-        sql: String,
-        params: Vec<BindValue>,
-    ) -> Self {
-        let Ok(client) = client else {
-            return Self::error(PostgresError::NoDriver);
-        };
-
-        Self {
-            state: PostgresRowsState::Pending(Box::pin(async move {
-                let params = postgres_params(params)?;
-                let params = params.iter().map(PostgresParam::as_sql).collect::<Vec<_>>();
-                client
-                    .query_raw(&sql, params)
-                    .await
-                    .map_err(PostgresError::Database)
-            })),
-            affected_rows: None,
-            _row: PhantomData,
-        }
-    }
-}
-
-impl<Row> Stream for PostgresRows<'_, Row>
+impl<'query, Row, Conn> PostgresRows<'query, Row, Conn>
 where
-    Row: Decode<PostgresConnection>,
+    Conn: PostgresExecutor,
+{
+    fn query(connection: &'query Conn, sql: String, params: Vec<BindValue>) -> Self {
+        Self {
+            state: PostgresRowsState::Pending(connection.query_raw(sql, params)),
+            affected_rows: None,
+            _row: PhantomData,
+            _connection: PhantomData,
+        }
+    }
+}
+
+impl<Row, Conn> Stream for PostgresRows<'_, Row, Conn>
+where
+    Conn: PostgresExecutor,
+    Row: Decode<Conn>,
 {
     type Item = Result<Row, PostgresError>;
 
@@ -207,11 +276,7 @@ where
                             return Poll::Ready(None);
                         }
                     };
-                    let mut row = PostgresRowReader::new(&row);
-                    return Poll::Ready(Some(Row::decode(&mut row)));
-                }
-                PostgresRowsState::Error(error) => {
-                    return Poll::Ready(error.take().map(Err));
+                    return Poll::Ready(Some(Conn::decode_row(&row)));
                 }
                 PostgresRowsState::Done => return Poll::Ready(None),
             }
@@ -219,9 +284,9 @@ where
     }
 }
 
-impl<Row> Unpin for PostgresRows<'_, Row> {}
+impl<Row, Conn> Unpin for PostgresRows<'_, Row, Conn> {}
 
-impl<Row> RowsAffected for PostgresRows<'_, Row> {
+impl<Row, Conn> RowsAffected for PostgresRows<'_, Row, Conn> {
     fn rows_affected(&self) -> Option<u64> {
         self.affected_rows
     }
@@ -320,20 +385,6 @@ fn postgres_float(value: f64, width: FloatWidth) -> Result<PostgresParam, Postgr
     }
 }
 
-async fn execute_sql(
-    client: Result<&tokio_postgres::Client, PostgresError>,
-    sql: String,
-    params: Vec<BindValue>,
-) -> Result<u64, PostgresError> {
-    let client = client?;
-    let params = postgres_params(params)?;
-    let params = params.iter().map(PostgresParam::as_sql).collect::<Vec<_>>();
-    client
-        .execute(&sql, &params)
-        .await
-        .map_err(PostgresError::Database)
-}
-
 fn render_select(select: &Select) -> String {
     let mut sql = Vec::new();
     sql::write_select(select, &mut sql).unwrap();
@@ -358,124 +409,150 @@ fn render_update(update: &Update) -> String {
     String::from_utf8(sql).unwrap()
 }
 
-impl PostgresConnection {
-    pub(crate) fn fetch_select<Row>(&self, select: &Select) -> PostgresRows<'_, Row> {
-        PostgresRows::query(
-            self.client(),
-            render_select(select),
-            sql::select_params(select),
-        )
+impl PostgresExecutor for PostgresConnection {
+    fn decode_row<Row>(row: &tokio_postgres::Row) -> Result<Row, PostgresError>
+    where
+        Row: Decode<Self>,
+    {
+        let mut row = PostgresRowReader::new(row);
+        Row::decode(&mut row)
     }
 
-    pub(crate) fn execute_insert(
-        &self,
-        insert: &Insert,
-    ) -> impl Future<Output = Result<u64, PostgresError>> + Send + '_ {
-        execute_sql(
-            self.client(),
-            render_insert(insert),
-            sql::insert_params(insert),
-        )
+    fn query_raw<'query>(
+        &'query self,
+        sql: String,
+        params: Vec<BindValue>,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<tokio_postgres::RowStream, PostgresError>> + Send + 'query>,
+    > {
+        let client = self.client();
+        Box::pin(async move {
+            let client = client?;
+            let params = postgres_params(params)?;
+            let params = params.iter().map(PostgresParam::as_sql).collect::<Vec<_>>();
+            client
+                .query_raw(&sql, params)
+                .await
+                .map_err(PostgresError::Database)
+        })
     }
 
-    pub(crate) fn fetch_insert<Row>(&self, insert: &Insert) -> PostgresRows<'_, Row> {
-        PostgresRows::query(
-            self.client(),
-            render_insert(insert),
-            sql::insert_params(insert),
-        )
+    fn execute_sql<'query>(
+        &'query self,
+        sql: String,
+        params: Vec<BindValue>,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, PostgresError>> + Send + 'query>> {
+        let client = self.client();
+        Box::pin(async move {
+            let client = client?;
+            let params = postgres_params(params)?;
+            let params = params.iter().map(PostgresParam::as_sql).collect::<Vec<_>>();
+            client
+                .execute(&sql, &params)
+                .await
+                .map_err(PostgresError::Database)
+        })
+    }
+}
+
+impl PostgresExecutor for PostgresTransaction<'_> {
+    fn decode_row<Row>(row: &tokio_postgres::Row) -> Result<Row, PostgresError>
+    where
+        Row: Decode<Self>,
+    {
+        let mut row = PostgresRowReader::<Self>::new(row);
+        Row::decode(&mut row)
     }
 
-    pub(crate) fn execute_delete(
-        &self,
-        delete: &Delete,
-    ) -> impl Future<Output = Result<u64, PostgresError>> + Send + '_ {
-        execute_sql(
-            self.client(),
-            render_delete(delete),
-            sql::delete_params(delete),
-        )
+    fn query_raw<'query>(
+        &'query self,
+        sql: String,
+        params: Vec<BindValue>,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<tokio_postgres::RowStream, PostgresError>> + Send + 'query>,
+    > {
+        Box::pin(async move {
+            let params = postgres_params(params)?;
+            let params = params.iter().map(PostgresParam::as_sql).collect::<Vec<_>>();
+            self.transaction
+                .query_raw(&sql, params)
+                .await
+                .map_err(PostgresError::Database)
+        })
     }
 
-    pub(crate) fn fetch_delete<Row>(&self, delete: &Delete) -> PostgresRows<'_, Row> {
-        PostgresRows::query(
-            self.client(),
-            render_delete(delete),
-            sql::delete_params(delete),
-        )
-    }
-
-    pub(crate) fn execute_update(
-        &self,
-        update: &Update,
-    ) -> impl Future<Output = Result<u64, PostgresError>> + Send + '_ {
-        execute_sql(
-            self.client(),
-            render_update(update),
-            sql::update_params(update),
-        )
-    }
-
-    pub(crate) fn fetch_update<Row>(&self, update: &Update) -> PostgresRows<'_, Row> {
-        PostgresRows::query(
-            self.client(),
-            render_update(update),
-            sql::update_params(update),
-        )
+    fn execute_sql<'query>(
+        &'query self,
+        sql: String,
+        params: Vec<BindValue>,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, PostgresError>> + Send + 'query>> {
+        Box::pin(async move {
+            let params = postgres_params(params)?;
+            let params = params.iter().map(PostgresParam::as_sql).collect::<Vec<_>>();
+            self.transaction
+                .execute(&sql, &params)
+                .await
+                .map_err(PostgresError::Database)
+        })
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct PostgresSelect<'conn, Shape>
+pub struct PostgresSelect<'conn, Shape, Conn = PostgresConnection>
 where
     Shape: ProjectionShape,
+    Conn: PostgresExecutor,
 {
-    connection: &'conn PostgresConnection,
+    connection: &'conn Conn,
     select: Select,
     _shape: PhantomData<Shape>,
 }
 
 #[derive(Clone, Debug)]
-pub struct PostgresInsert<'conn, S, Shape = ()>
+pub struct PostgresInsert<'conn, S, Shape = (), Conn = PostgresConnection>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
+    Conn: PostgresExecutor,
 {
-    connection: &'conn PostgresConnection,
+    connection: &'conn Conn,
     insert: Insert,
     _table: PhantomData<S>,
     _shape: PhantomData<Shape>,
 }
 
 #[derive(Clone, Debug)]
-pub struct PostgresDelete<'conn, S, Shape = ()>
+pub struct PostgresDelete<'conn, S, Shape = (), Conn = PostgresConnection>
 where
     S: TableProjection,
     Shape: ProjectionShape,
+    Conn: PostgresExecutor,
 {
-    connection: &'conn PostgresConnection,
+    connection: &'conn Conn,
     delete: Delete,
     _table: PhantomData<S>,
     _shape: PhantomData<Shape>,
 }
 
 #[derive(Clone, Debug)]
-pub struct PostgresUpdate<'conn, S, Shape = ()>
+pub struct PostgresUpdate<'conn, S, Shape = (), Conn = PostgresConnection>
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
+    Conn: PostgresExecutor,
 {
-    connection: &'conn PostgresConnection,
+    connection: &'conn Conn,
     update: Update,
     _table: PhantomData<S>,
     _shape: PhantomData<Shape>,
 }
 
-impl<'conn, Shape> PostgresSelect<'conn, Shape>
+impl<'conn, Shape, Conn> PostgresSelect<'conn, Shape, Conn>
 where
     Shape: ProjectionShape,
+    Conn: PostgresExecutor,
 {
-    pub(crate) fn new(connection: &'conn PostgresConnection, select: Select) -> Self {
+    pub(crate) fn new(connection: &'conn Conn, select: Select) -> Self {
         Self {
             connection,
             select,
@@ -484,12 +561,13 @@ where
     }
 }
 
-impl<'conn, S, Shape> PostgresInsert<'conn, S, Shape>
+impl<'conn, S, Shape, Conn> PostgresInsert<'conn, S, Shape, Conn>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
+    Conn: PostgresExecutor,
 {
-    pub(crate) fn new(connection: &'conn PostgresConnection, insert: Insert) -> Self {
+    pub(crate) fn new(connection: &'conn Conn, insert: Insert) -> Self {
         Self {
             connection,
             insert,
@@ -499,12 +577,13 @@ where
     }
 }
 
-impl<'conn, S, Shape> PostgresDelete<'conn, S, Shape>
+impl<'conn, S, Shape, Conn> PostgresDelete<'conn, S, Shape, Conn>
 where
     S: TableProjection,
     Shape: ProjectionShape,
+    Conn: PostgresExecutor,
 {
-    pub(crate) fn new(connection: &'conn PostgresConnection, delete: Delete) -> Self {
+    pub(crate) fn new(connection: &'conn Conn, delete: Delete) -> Self {
         Self {
             connection,
             delete,
@@ -514,12 +593,13 @@ where
     }
 }
 
-impl<'conn, S, Shape> PostgresUpdate<'conn, S, Shape>
+impl<'conn, S, Shape, Conn> PostgresUpdate<'conn, S, Shape, Conn>
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
+    Conn: PostgresExecutor,
 {
-    pub(crate) fn new(connection: &'conn PostgresConnection, update: Update) -> Self {
+    pub(crate) fn new(connection: &'conn Conn, update: Update) -> Self {
         Self {
             connection,
             update,
@@ -529,17 +609,18 @@ where
     }
 }
 
-impl<'conn, Shape> SelectQuery<'conn> for PostgresSelect<'conn, Shape>
+impl<'conn, Shape, Conn> SelectQuery<'conn> for PostgresSelect<'conn, Shape, Conn>
 where
     Shape: ProjectionShape,
-    Shape::Row: Decode<PostgresConnection>,
+    Conn: PostgresExecutor + 'conn,
+    Shape::Row: Decode<Conn>,
 {
-    type Connection = PostgresConnection;
+    type Connection = Conn;
     type Shape = Shape;
     type Row = Shape::Row;
 
     type RowStream<'query>
-        = PostgresRows<'query, Self::Row>
+        = PostgresRows<'query, Self::Row, Conn>
     where
         Self: 'query;
 
@@ -548,23 +629,28 @@ where
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        self.connection.fetch_select(&self.select)
+        PostgresRows::query(
+            self.connection,
+            render_select(&self.select),
+            sql::select_params(&self.select),
+        )
     }
 }
 
-impl<'conn, S, Shape> InsertQuery<'conn> for PostgresInsert<'conn, S, Shape>
+impl<'conn, S, Shape, Conn> InsertQuery<'conn> for PostgresInsert<'conn, S, Shape, Conn>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
-    Shape::Row: Decode<PostgresConnection>,
+    Conn: PostgresExecutor + 'conn,
+    Shape::Row: Decode<Conn>,
 {
-    type Connection = PostgresConnection;
+    type Connection = Conn;
     type Table = S;
     type Shape = Shape;
     type Row = Shape::Row;
 
     type RowStream<'query>
-        = PostgresRows<'query, Self::Row>
+        = PostgresRows<'query, Self::Row, Conn>
     where
         Self: 'query;
 
@@ -576,27 +662,35 @@ where
         &self,
     ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        self.connection.execute_insert(&self.insert)
+        self.connection.execute_sql(
+            render_insert(&self.insert),
+            sql::insert_params(&self.insert),
+        )
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        self.connection.fetch_insert(&self.insert)
+        PostgresRows::query(
+            self.connection,
+            render_insert(&self.insert),
+            sql::insert_params(&self.insert),
+        )
     }
 }
 
-impl<'conn, S, Shape> DeleteQuery<'conn> for PostgresDelete<'conn, S, Shape>
+impl<'conn, S, Shape, Conn> DeleteQuery<'conn> for PostgresDelete<'conn, S, Shape, Conn>
 where
     S: TableProjection,
     Shape: ProjectionShape,
-    Shape::Row: Decode<PostgresConnection>,
+    Conn: PostgresExecutor + 'conn,
+    Shape::Row: Decode<Conn>,
 {
-    type Connection = PostgresConnection;
+    type Connection = Conn;
     type Table = S;
     type Shape = Shape;
     type Row = Shape::Row;
 
     type RowStream<'query>
-        = PostgresRows<'query, Self::Row>
+        = PostgresRows<'query, Self::Row, Conn>
     where
         Self: 'query;
 
@@ -608,27 +702,35 @@ where
         &self,
     ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        self.connection.execute_delete(&self.delete)
+        self.connection.execute_sql(
+            render_delete(&self.delete),
+            sql::delete_params(&self.delete),
+        )
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        self.connection.fetch_delete(&self.delete)
+        PostgresRows::query(
+            self.connection,
+            render_delete(&self.delete),
+            sql::delete_params(&self.delete),
+        )
     }
 }
 
-impl<'conn, S, Shape> UpdateQuery<'conn> for PostgresUpdate<'conn, S, Shape>
+impl<'conn, S, Shape, Conn> UpdateQuery<'conn> for PostgresUpdate<'conn, S, Shape, Conn>
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
-    Shape::Row: Decode<PostgresConnection>,
+    Conn: PostgresExecutor + 'conn,
+    Shape::Row: Decode<Conn>,
 {
-    type Connection = PostgresConnection;
+    type Connection = Conn;
     type Table = S;
     type Shape = Shape;
     type Row = Shape::Row;
 
     type RowStream<'query>
-        = PostgresRows<'query, Self::Row>
+        = PostgresRows<'query, Self::Row, Conn>
     where
         Self: 'query;
 
@@ -640,17 +742,25 @@ where
         &self,
     ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        self.connection.execute_update(&self.update)
+        self.connection.execute_sql(
+            render_update(&self.update),
+            sql::update_params(&self.update),
+        )
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        self.connection.fetch_update(&self.update)
+        PostgresRows::query(
+            self.connection,
+            render_update(&self.update),
+            sql::update_params(&self.update),
+        )
     }
 }
 
-impl<Shape> PostgresSelect<'_, Shape>
+impl<Shape, Conn> PostgresSelect<'_, Shape, Conn>
 where
     Shape: ProjectionShape,
+    Conn: PostgresExecutor,
 {
     pub fn to_sql(&self) -> String {
         render_select(&self.select)
@@ -665,10 +775,11 @@ where
     }
 }
 
-impl<S, Shape> PostgresInsert<'_, S, Shape>
+impl<S, Shape, Conn> PostgresInsert<'_, S, Shape, Conn>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
+    Conn: PostgresExecutor,
 {
     pub fn to_sql(&self) -> String {
         render_insert(&self.insert)
@@ -683,10 +794,11 @@ where
     }
 }
 
-impl<S, Shape> PostgresDelete<'_, S, Shape>
+impl<S, Shape, Conn> PostgresDelete<'_, S, Shape, Conn>
 where
     S: TableProjection,
     Shape: ProjectionShape,
+    Conn: PostgresExecutor,
 {
     pub fn to_sql(&self) -> String {
         render_delete(&self.delete)
@@ -701,10 +813,11 @@ where
     }
 }
 
-impl<S, Shape> PostgresUpdate<'_, S, Shape>
+impl<S, Shape, Conn> PostgresUpdate<'_, S, Shape, Conn>
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
+    Conn: PostgresExecutor,
 {
     pub fn to_sql(&self) -> String {
         render_update(&self.update)
