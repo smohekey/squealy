@@ -2,6 +2,17 @@ use std::fmt::Display;
 use std::marker::PhantomData;
 
 /// Marker trait for Rust types that can participate in numeric SQL operations.
+///
+/// Non-numeric expressions intentionally do not expose numeric operators:
+///
+/// ```compile_fail
+/// use squealy::Expr;
+///
+/// let left: Expr<'static, String> = Expr::lit(String::from("Ada"));
+/// let right: Expr<'static, String> = Expr::lit(String::from("Lovelace"));
+///
+/// let _ = left.add(right);
+/// ```
 pub trait SqlNumber {}
 
 macro_rules! impl_sql_number {
@@ -134,6 +145,23 @@ impl<'scope> Clone for Order<'scope> {
 }
 
 /// A typed SQL boolean predicate scoped to a query builder invocation.
+///
+/// `WHERE` clauses require predicates rather than arbitrary scalar expressions:
+///
+/// ```compile_fail
+/// use squealy::*;
+///
+/// #[derive(Clone, Table)]
+/// struct User<'scope, C: ColumnMode = ColumnExpr> {
+///     id: C::Type<'scope, i32>,
+/// }
+///
+/// let _ = query(|q| {
+///     let user = q.each::<User>();
+///     q.where_(user.id.clone());
+///     user
+/// });
+/// ```
 #[derive(Debug, PartialEq, Eq)]
 pub struct Predicate<'scope> {
     sql: String,

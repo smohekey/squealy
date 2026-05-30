@@ -202,6 +202,16 @@ impl TableStruct {
                 fn re_alias<'next_scope>(&self, alias: &str) -> Self::Rebound<'next_scope> {
                     #ident { #( #fields: ::squealy::Expr::column(alias, #field_literals), )* }
                 }
+
+                fn re_alias_with_prefix<'next_scope>(
+                    &self,
+                    alias: &str,
+                    prefix: &str,
+                ) -> Self::Rebound<'next_scope> {
+                    #ident {
+                        #( #fields: ::squealy::Expr::column(alias, &::std::format!("{prefix}_{}", #field_literals)), )*
+                    }
+                }
             }
         }
         .into()
