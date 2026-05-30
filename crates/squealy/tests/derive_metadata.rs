@@ -354,7 +354,7 @@ fn insert_builder_can_return_projected_rows() {
     let insert = TestConnection
         .insert::<User>()
         .name("Ada")
-        .returning(|q, user| q.returning(user.id));
+        .returning(|user| user.id);
 
     assert_insert_i32_row(&insert);
     let _stream = insert.fetch();
@@ -423,7 +423,7 @@ fn update_builder_can_return_projected_rows() {
         .update::<User>()
         .name("Ada")
         .where_(|user| user.id.equals(1))
-        .returning(|q, user| q.returning((user.id, user.name)));
+        .returning(|user| (user.id, user.name));
 
     assert_update_id_name_row(&update);
     let _stream = update.fetch();
@@ -494,7 +494,7 @@ fn delete_builder_can_return_projected_rows() {
     let delete = TestConnection
         .delete::<User>()
         .where_(|user| user.id.equals(1))
-        .returning(|q, user| q.returning(user));
+        .returning(|user| user);
 
     assert_delete_user_row(&delete);
     let _stream = delete.fetch();

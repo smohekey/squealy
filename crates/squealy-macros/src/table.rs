@@ -593,23 +593,21 @@ impl TableStruct {
                     }
                 }
 
-                pub fn returning<Shape>(
+                pub fn returning<P>(
                     self,
-                    projection: impl for<'scope> ::std::ops::FnOnce(
-                        &mut ::squealy::MutationReturningBuilder<'scope>,
-                        <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'scope>,
-                    ) -> ::squealy::Returning<Shape>,
-                ) -> <Conn as ::squealy::Connection>::Insert<'conn, #table_ident <'static, ::squealy::ColumnExpr>, Shape>
+                    projection: impl ::std::ops::FnOnce(
+                        <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
+                    ) -> P,
+                ) -> <Conn as ::squealy::Connection>::Insert<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>
                 where
-                    Shape: ::squealy::ProjectionShape,
+                    P: ::squealy::ReturningProjection<'static>,
                 {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
-                    let mut returning_builder = ::squealy::MutationReturningBuilder::new();
-                    let returning = projection(&mut returning_builder, table);
-                    ::squealy::Connection::insert_returning_query::<#table_ident <'static, ::squealy::ColumnExpr>, Shape>(
+                    let projection = projection(table);
+                    ::squealy::Connection::insert_returning_query::<#table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>(
                         self.connection,
                         self.columns,
-                        returning.into_columns(),
+                        ::squealy::Projectable::project(&projection),
                     )
                 }
             }
@@ -854,25 +852,23 @@ impl TableStruct {
                     }
                 }
 
-                pub fn returning<Shape>(
+                pub fn returning<P>(
                     self,
-                    projection: impl for<'scope> ::std::ops::FnOnce(
-                        &mut ::squealy::MutationReturningBuilder<'scope>,
-                        <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'scope>,
-                    ) -> ::squealy::Returning<Shape>,
-                ) -> <Conn as ::squealy::Connection>::Update<'conn, #table_ident <'static, ::squealy::ColumnExpr>, Shape>
+                    projection: impl ::std::ops::FnOnce(
+                        <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
+                    ) -> P,
+                ) -> <Conn as ::squealy::Connection>::Update<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>
                 where
-                    Shape: ::squealy::ProjectionShape,
+                    P: ::squealy::ReturningProjection<'static>,
                 {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
-                    let mut returning_builder = ::squealy::MutationReturningBuilder::new();
-                    let returning = projection(&mut returning_builder, table);
-                    ::squealy::Connection::update_returning_query::<#table_ident <'static, ::squealy::ColumnExpr>, Shape>(
+                    let projection = projection(table);
+                    ::squealy::Connection::update_returning_query::<#table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>(
                         self.connection,
                         Self::ALIAS.to_owned(),
                         self.columns,
                         self.filters,
-                        returning.into_columns(),
+                        ::squealy::Projectable::project(&projection),
                     )
                 }
             }
