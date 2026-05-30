@@ -1,18 +1,18 @@
 use std::borrow::Cow;
 
-use crate::{ColumnExpr, SchemaTable};
+use crate::{ColumnExpr, ExprNode, SchemaTable};
 
 /// A selected SQL expression and its output alias.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SelectColumn {
-    pub expr: String,
+    pub expr: ExprNode,
     pub alias: Cow<'static, str>,
 }
 
 impl SelectColumn {
-    pub fn new(expr: impl Into<String>, alias: impl Into<Cow<'static, str>>) -> Self {
+    pub fn new(expr: ExprNode, alias: impl Into<Cow<'static, str>>) -> Self {
         Self {
-            expr: expr.into(),
+            expr,
             alias: alias.into(),
         }
     }
