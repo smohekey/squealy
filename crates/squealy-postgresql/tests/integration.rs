@@ -1,5 +1,5 @@
 use squealy::*;
-use squealy_postgresql::PostgresConnection;
+use squealy_postgresql::{PostgresConnection, PostgresError};
 use tokio_postgres::NoTls;
 
 #[derive(Clone, Debug, PartialEq, Table)]
@@ -27,6 +27,50 @@ struct IntegrationNullable<'scope, C: ColumnMode = ColumnExpr> {
     id: C::Type<'scope, i32>,
     #[column(nullable, db_type = "text")]
     note: C::Type<'scope, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct JoinUser<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment, db_type = "integer")]
+    id: C::Type<'scope, i32>,
+    #[column(db_type = "text")]
+    name: C::Type<'scope, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct JoinPost<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment, db_type = "integer")]
+    id: C::Type<'scope, i32>,
+    #[column(references(JoinUser::id), db_type = "integer")]
+    user_id: C::Type<'scope, i32>,
+    #[column(db_type = "text")]
+    title: C::Type<'scope, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct IntegrationTypes<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment, db_type = "integer")]
+    id: C::Type<'scope, i32>,
+    #[column(db_type = "smallint")]
+    small: C::Type<'scope, i16>,
+    #[column(db_type = "integer")]
+    medium: C::Type<'scope, i32>,
+    #[column(db_type = "bigint")]
+    large: C::Type<'scope, i64>,
+    #[column(db_type = "real")]
+    single: C::Type<'scope, f32>,
+    #[column(db_type = "double precision")]
+    double: C::Type<'scope, f64>,
+    #[column(db_type = "boolean")]
+    flag: C::Type<'scope, bool>,
+    #[column(db_type = "text")]
+    label: C::Type<'scope, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct MissingTable<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment, db_type = "integer")]
+    id: C::Type<'scope, i32>,
 }
 
 fn database_url() -> String {
@@ -156,6 +200,116 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
         .expect("update nullable record");
 
     assert_eq!(affected, 1);
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_inner_joins_across_tables() {
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS join_posts; DROP TABLE IF EXISTS join_users")
+        .await
+        .expect("drop old join tables");
+
+    let ddl_backend = PostgresConnection::default();
+    create_table::<JoinUser>(&client, &ddl_backend).await;
+    create_table::<JoinPost>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+
+    let ada = connection
+        .insert::<JoinUser>()
+        .name("Ada")
+        .returning(|user| user)
+        .fetch_one()
+        .await
+        .expect("insert Ada");
+
+    connection
+        .insert::<JoinPost>()
+        .user_id(ada.id)
+        .title("Notes on the Analytical Engine")
+        .execute()
+        .await
+        .expect("insert post");
+
+    let rows = connection
+        .select(|q| {
+            let user = q.from::<JoinUser>();
+            let post = q.join::<JoinPost>(|post| post.user_id.equals(user.id));
+            q.order_by(post.id.asc());
+            q.returning((user, post))
+        })
+        .fetch_all()
+        .await
+        .expect("fetch joined rows");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0.name, "Ada");
+    assert_eq!(rows[0].1.user_id, ada.id);
+    assert_eq!(rows[0].1.title, "Notes on the Analytical Engine");
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_round_trips_primitive_types() {
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS integration_typess")
+        .await
+        .expect("drop old types table");
+
+    let ddl_backend = PostgresConnection::default();
+    create_table::<IntegrationTypes>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+
+    let stored = connection
+        .insert::<IntegrationTypes>()
+        .small(7i16)
+        .medium(1_000i32)
+        .large(9_000_000_000i64)
+        .single(1.5f32)
+        .double(2.5f64)
+        .flag(true)
+        .label("mixed")
+        .returning(|record| record)
+        .fetch_one()
+        .await
+        .expect("insert typed record");
+
+    assert_eq!(stored.small, 7);
+    assert_eq!(stored.medium, 1_000);
+    assert_eq!(stored.large, 9_000_000_000);
+    assert_eq!(stored.single, 1.5);
+    assert_eq!(stored.double, 2.5);
+    assert!(stored.flag);
+    assert_eq!(stored.label, "mixed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_surfaces_database_errors() {
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS missing_tables")
+        .await
+        .expect("ensure table is absent");
+
+    let connection = PostgresConnection::new(client);
+
+    let result = connection
+        .select(|q| {
+            let row = q.from::<MissingTable>();
+            q.returning(row)
+        })
+        .fetch_all()
+        .await;
+
+    assert!(
+        matches!(result, Err(PostgresError::Database(_))),
+        "expected a database error, got {result:?}"
+    );
 }
 
 async fn create_table<S>(client: &tokio_postgres::Client, ddl_backend: &PostgresConnection)

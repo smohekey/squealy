@@ -193,3 +193,49 @@ pub(crate) fn compile_error(message: &str) -> TokenStream {
     }
     .into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_pascal_capitalizes_each_word() {
+        assert_eq!(to_pascal("user"), "User");
+        assert_eq!(to_pascal("user_name"), "UserName");
+        assert_eq!(to_pascal("current_timestamp"), "CurrentTimestamp");
+    }
+
+    #[test]
+    fn to_pascal_falls_back_to_generated_when_empty() {
+        assert_eq!(to_pascal(""), "Generated");
+        assert_eq!(to_pascal("_"), "Generated");
+    }
+
+    #[test]
+    fn to_snake_inserts_underscores_before_uppercase() {
+        assert_eq!(to_snake("User"), "user");
+        assert_eq!(to_snake("UserName"), "user_name");
+        assert_eq!(to_snake("HTTPServer"), "h_t_t_p_server");
+    }
+
+    #[test]
+    fn to_snake_plural_appends_trailing_s() {
+        assert_eq!(to_snake_plural("User"), "users");
+        assert_eq!(to_snake_plural("UserName"), "user_names");
+    }
+
+    #[test]
+    fn bool_tokens_render_literals() {
+        assert_eq!(bool_tokens(true).to_string(), "true");
+        assert_eq!(bool_tokens(false).to_string(), "false");
+    }
+
+    #[test]
+    fn option_literal_renders_some_and_none() {
+        assert_eq!(option_literal(None).to_string(), "None");
+
+        let some = option_literal(Some("anonymous")).to_string();
+        assert!(some.starts_with("Some"), "unexpected tokens: {some}");
+        assert!(some.contains("\"anonymous\""), "unexpected tokens: {some}");
+    }
+}

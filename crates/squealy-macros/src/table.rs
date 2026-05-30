@@ -1405,7 +1405,7 @@ fn named_fields(group: &Group) -> Result<Vec<Field>, String> {
             let Some(TokenTree::Group(attr)) = tokens.get(index + 1) else {
                 return Err("Table field attribute is missing its bracketed body".to_owned());
             };
-            apply_attribute(&attr, &mut pending_attrs)?;
+            apply_attribute(attr, &mut pending_attrs)?;
             index += 2;
             continue;
         }

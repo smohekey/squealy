@@ -702,3 +702,156 @@ where
         sql::update_params(&self.update)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use squealy::{ColumnExpr, ColumnMode, Table};
+
+    #[derive(Clone, Debug, PartialEq, Table)]
+    struct Widget<'scope, C: ColumnMode = ColumnExpr> {
+        #[column(primary_key, auto_increment, db_type = "integer")]
+        id: C::Type<'scope, i32>,
+        name: C::Type<'scope, String>,
+    }
+
+    #[test]
+    fn signed_widths_map_to_expected_param() {
+        assert!(matches!(
+            postgres_signed_int(7, IntWidth::I8),
+            Ok(PostgresParam::Int16(7))
+        ));
+        assert!(matches!(
+            postgres_signed_int(7, IntWidth::I16),
+            Ok(PostgresParam::Int16(7))
+        ));
+        assert!(matches!(
+            postgres_signed_int(7, IntWidth::I32),
+            Ok(PostgresParam::Int32(7))
+        ));
+        assert!(matches!(
+            postgres_signed_int(7, IntWidth::I64),
+            Ok(PostgresParam::Int64(7))
+        ));
+        assert!(matches!(
+            postgres_signed_int(7, IntWidth::I128),
+            Ok(PostgresParam::Int64(7))
+        ));
+        assert!(matches!(
+            postgres_signed_int(7, IntWidth::Isize),
+            Ok(PostgresParam::Int64(7))
+        ));
+    }
+
+    #[test]
+    fn signed_overflow_reports_unsupported_bind() {
+        let too_big_for_i16 = i64::from(i16::MAX) + 1;
+        assert!(matches!(
+            postgres_signed_int(too_big_for_i16 as i128, IntWidth::I16),
+            Err(PostgresError::UnsupportedBind(_))
+        ));
+
+        let too_big_for_i32 = i64::from(i32::MAX) + 1;
+        assert!(matches!(
+            postgres_signed_int(too_big_for_i32 as i128, IntWidth::I32),
+            Err(PostgresError::UnsupportedBind(_))
+        ));
+
+        let too_big_for_i64 = i128::from(i64::MAX) + 1;
+        assert!(matches!(
+            postgres_signed_int(too_big_for_i64, IntWidth::I64),
+            Err(PostgresError::UnsupportedBind(_))
+        ));
+    }
+
+    #[test]
+    fn unsigned_widths_map_to_expected_param() {
+        assert!(matches!(
+            postgres_unsigned_int(7, UIntWidth::U8),
+            Ok(PostgresParam::Int32(7))
+        ));
+        assert!(matches!(
+            postgres_unsigned_int(7, UIntWidth::U16),
+            Ok(PostgresParam::Int32(7))
+        ));
+        assert!(matches!(
+            postgres_unsigned_int(7, UIntWidth::U32),
+            Ok(PostgresParam::Int64(7))
+        ));
+        assert!(matches!(
+            postgres_unsigned_int(7, UIntWidth::U64),
+            Ok(PostgresParam::Int64(7))
+        ));
+        assert!(matches!(
+            postgres_unsigned_int(7, UIntWidth::U128),
+            Ok(PostgresParam::Int64(7))
+        ));
+        assert!(matches!(
+            postgres_unsigned_int(7, UIntWidth::Usize),
+            Ok(PostgresParam::Int64(7))
+        ));
+    }
+
+    #[test]
+    fn unsigned_overflow_reports_unsupported_bind() {
+        let too_big_for_i32 = u64::from(u32::MAX);
+        assert!(matches!(
+            postgres_unsigned_int(u128::from(too_big_for_i32), UIntWidth::U16),
+            Err(PostgresError::UnsupportedBind(_))
+        ));
+
+        let too_big_for_i64 = u128::from(u64::MAX);
+        assert!(matches!(
+            postgres_unsigned_int(too_big_for_i64, UIntWidth::U64),
+            Err(PostgresError::UnsupportedBind(_))
+        ));
+    }
+
+    #[test]
+    fn float_widths_preserve_precision() {
+        assert!(matches!(
+            postgres_float(1.5, FloatWidth::F32),
+            Ok(PostgresParam::Float32(value)) if value == 1.5
+        ));
+        assert!(matches!(
+            postgres_float(1.5, FloatWidth::F64),
+            Ok(PostgresParam::Float64(value)) if value == 1.5
+        ));
+    }
+
+    #[test]
+    fn params_pass_through_text_bool_and_null() {
+        let params = postgres_params(vec![
+            BindValue::text("Ada"),
+            BindValue::bool(true),
+            BindValue::Null,
+        ])
+        .expect("convert bind values");
+
+        assert!(matches!(&params[0], PostgresParam::Text(value) if value == "Ada"));
+        assert!(matches!(params[1], PostgresParam::Bool(true)));
+        assert!(matches!(params[2], PostgresParam::Null(_)));
+    }
+
+    #[tokio::test]
+    async fn select_without_driver_yields_no_driver_error() {
+        let connection = PostgresConnection::no_driver();
+        let result = connection
+            .select(|q| {
+                let widget = q.from::<Widget>();
+                q.returning(widget)
+            })
+            .fetch_all()
+            .await;
+
+        assert!(matches!(result, Err(PostgresError::NoDriver)));
+    }
+
+    #[tokio::test]
+    async fn insert_without_driver_yields_no_driver_error() {
+        let connection = PostgresConnection::no_driver();
+        let result = connection.insert::<Widget>().name("Ada").execute().await;
+
+        assert!(matches!(result, Err(PostgresError::NoDriver)));
+    }
+}

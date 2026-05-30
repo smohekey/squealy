@@ -11,3 +11,7 @@ proc-macro = true
 [dependencies]
 proc-macro2 = "1.0"
 quote = "1.0"
+
+[dev-dependencies]
+squealy = { path = "../squealy" }
+trybuild = "1.0"
