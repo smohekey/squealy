@@ -19,7 +19,7 @@ pub use expr::{Expr, Order, Predicate, SqlNumber};
 pub use foreign_key::ForeignKey;
 pub use generator::Generator;
 pub use index::Index;
-pub use projection::{Projectable, SelectColumn};
+pub use projection::{Projectable, ProjectionShape, SelectColumn, TableProjection};
 pub use query::{Q, Query, query};
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{Database, Schema, Table};

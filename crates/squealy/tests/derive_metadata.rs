@@ -194,6 +194,19 @@ fn each_selects_from_derived_table_metadata() {
     );
 }
 
+fn assert_table_query_shape<S>(_: &Query<S>)
+where
+    S: TableProjection,
+{
+}
+
+#[test]
+fn each_query_carries_table_projection_shape() {
+    let users = Query::each::<User>();
+
+    assert_table_query_shape::<User>(&users);
+}
+
 #[test]
 fn query_can_select_scoped_table_sources_directly() {
     let users = query(|q| q.each::<User>());
@@ -236,6 +249,34 @@ fn query_can_limit_and_offset_rows() {
 }
 
 #[test]
+fn query_can_inner_join_tables_with_typed_predicates() {
+    let users_and_posts = query(|q| {
+        let user = q.each::<User>();
+        let post = q.join::<Post>(|post| post.user_id.clone().equals(user.id.clone()));
+        (user, post)
+    });
+
+    assert_eq!(
+        users_and_posts.to_sql(),
+        r#"SELECT q0_0.id AS left_id, q0_0.name AS left_name, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM public.users AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id)"#
+    );
+}
+
+#[test]
+fn query_can_left_join_tables_with_typed_predicates() {
+    let users_and_posts = query(|q| {
+        let user = q.each::<User>();
+        let post = q.left_join::<Post>(|post| post.user_id.clone().equals(user.id.clone()));
+        (user, post)
+    });
+
+    assert_eq!(
+        users_and_posts.to_sql(),
+        r#"SELECT q0_0.id AS left_id, q0_0.name AS left_name, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM public.users AS q0_0 LEFT JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id)"#
+    );
+}
+
+#[test]
 fn query_writes_sql_to_writer() {
     let users = query(|q| q.each::<User>());
     let mut sql = Vec::new();
@@ -268,5 +309,24 @@ fn query_composes_subqueries_with_lateral_joins() {
     assert_eq!(
         users_and_posts.to_sql(),
         r#"SELECT q0_0.id AS left_id, q0_0.name AS left_name, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM (SELECT t0.id AS id, t0.name AS name FROM public.users AS t0) AS q0_0 INNER JOIN LATERAL (SELECT q1_0.id AS id, q1_0.user_id AS user_id, q1_0.body AS body FROM (SELECT t0.id AS id, t0.user_id AS user_id, t0.body AS body FROM public.posts AS t0) AS q1_0 WHERE (q1_0.user_id = q0_0.id)) AS q0_1 ON TRUE WHERE (((((q0_0.id + 1) - 1) > 0) AND (NOT (q0_0.id <> 42))) OR (q0_0.name = Bob))"#
+    );
+}
+
+#[test]
+fn query_rebinds_tuple_subquery_shape_through_output_aliases() {
+    let users_and_posts = query(|q| {
+        let pair = q.q(query(|q| {
+            let user = q.each::<User>();
+            let post = q.join::<Post>(|post| post.user_id.clone().equals(user.id.clone()));
+            (user, post)
+        }));
+
+        q.where_(pair.0.id.clone().equals(pair.1.user_id.clone()));
+        pair
+    });
+
+    assert_eq!(
+        users_and_posts.to_sql(),
+        r#"SELECT q0_0.left_id AS left_id, q0_0.left_name AS left_name, q0_0.right_id AS right_id, q0_0.right_user_id AS right_user_id, q0_0.right_body AS right_body FROM (SELECT q1_0.id AS left_id, q1_0.name AS left_name, q1_1.id AS right_id, q1_1.user_id AS right_user_id, q1_1.body AS right_body FROM public.users AS q1_0 INNER JOIN public.posts AS q1_1 ON (q1_1.user_id = q1_0.id)) AS q0_0 WHERE (q0_0.left_id = q0_0.right_user_id)"#
     );
 }

@@ -2,24 +2,24 @@ use std::cell::Cell;
 use std::io::{self, Write};
 use std::marker::PhantomData;
 
-use crate::{Order, Predicate, Projectable, SchemaTable, SelectColumn};
+use crate::{Order, Predicate, Projectable, ProjectionShape, SelectColumn, TableProjection};
 
-/// A SQL select statement that produces rows with shape `T`.
+/// A SQL select statement that produces rows with projection shape `Shape`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Query<T> {
+pub struct Query<Shape = ()> {
     select: Select,
     sql: String,
-    project: T,
+    _shape: PhantomData<Shape>,
 }
 
-impl<T> Query<T> {
-    fn new(select: Select, project: T) -> Self {
+impl<Shape> Query<Shape> {
+    fn new(select: Select) -> Self {
         let sql = select.to_sql();
 
         Self {
             select,
             sql,
-            project,
+            _shape: PhantomData,
         }
     }
 
@@ -34,30 +34,27 @@ impl<T> Query<T> {
     }
 }
 
-impl<S> Query<S>
+impl<Shape> Query<Shape>
 where
-    S: Projectable,
+    Shape: ProjectionShape,
 {
-    pub fn project(&self) -> &S {
-        &self.project
+    /// Build expressions that reference this query's output columns through a SQL alias.
+    pub fn project<'scope>(&self, alias: &str) -> Shape::Exprs<'scope> {
+        Shape::exprs(alias)
     }
 }
 
 impl Query<()> {
     /// Select every row from a table.
-    pub fn each<S>() -> Query<<S as SchemaTable>::WithColumn<'static, crate::ColumnExpr>>
+    pub fn each<S>() -> Query<S>
     where
-        S: SchemaTable,
-        <S as SchemaTable>::WithColumn<'static, crate::ColumnExpr>: Projectable,
+        S: TableProjection,
     {
-        let project = S::column_exprs("t0");
-        Query::new(
-            Select::new(
-                project.project(),
-                vec![Source::table("t0", <S as SchemaTable>::qualified_name())],
-            ),
-            project,
-        )
+        let project = S::exprs("t0");
+        Query::new(Select::new(
+            S::select(&project),
+            vec![Source::table("t0", S::qualified_name())],
+        ))
     }
 }
 
@@ -146,6 +143,22 @@ impl Source {
         }
     }
 
+    fn join(alias: impl Into<String>, table: impl ToString, on: impl Into<String>) -> Self {
+        Self {
+            alias: alias.into(),
+            kind: SourceKind::InnerJoin { on: on.into() },
+            target: SourceTarget::Table(table.to_string()),
+        }
+    }
+
+    fn left_join(alias: impl Into<String>, table: impl ToString, on: impl Into<String>) -> Self {
+        Self {
+            alias: alias.into(),
+            kind: SourceKind::LeftJoin { on: on.into() },
+            target: SourceTarget::Table(table.to_string()),
+        }
+    }
+
     fn write_sql(&self, writer: &mut impl Write, position: usize) -> io::Result<()> {
         match (&self.kind, &self.target, position) {
             (SourceKind::From, SourceTarget::Table(table), _) => {
@@ -176,6 +189,38 @@ impl Source {
                     self.alias
                 )
             }
+            (SourceKind::InnerJoin { on: _ }, SourceTarget::Table(table), 0) => {
+                write!(writer, "FROM {table} AS {}", self.alias)
+            }
+            (SourceKind::InnerJoin { on }, SourceTarget::Table(table), _) => {
+                write!(writer, "INNER JOIN {table} AS {} ON {on}", self.alias)
+            }
+            (SourceKind::InnerJoin { on: _ }, SourceTarget::Query(query), 0) => {
+                writer.write_all(b"FROM (")?;
+                query.write_sql(writer)?;
+                write!(writer, ") AS {}", self.alias)
+            }
+            (SourceKind::InnerJoin { on }, SourceTarget::Query(query), _) => {
+                writer.write_all(b"INNER JOIN (")?;
+                query.write_sql(writer)?;
+                write!(writer, ") AS {} ON {on}", self.alias)
+            }
+            (SourceKind::LeftJoin { on: _ }, SourceTarget::Table(table), 0) => {
+                write!(writer, "FROM {table} AS {}", self.alias)
+            }
+            (SourceKind::LeftJoin { on }, SourceTarget::Table(table), _) => {
+                write!(writer, "LEFT JOIN {table} AS {} ON {on}", self.alias)
+            }
+            (SourceKind::LeftJoin { on: _ }, SourceTarget::Query(query), 0) => {
+                writer.write_all(b"FROM (")?;
+                query.write_sql(writer)?;
+                write!(writer, ") AS {}", self.alias)
+            }
+            (SourceKind::LeftJoin { on }, SourceTarget::Query(query), _) => {
+                writer.write_all(b"LEFT JOIN (")?;
+                query.write_sql(writer)?;
+                write!(writer, ") AS {} ON {on}", self.alias)
+            }
         }
     }
 }
@@ -184,6 +229,8 @@ impl Source {
 enum SourceKind {
     From,
     InnerLateral,
+    InnerJoin { on: String },
+    LeftJoin { on: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -243,34 +290,66 @@ impl<'scope> Q<'scope> {
     }
 
     /// Add a table source and return its expression columns in this query scope.
-    pub fn each<S>(&mut self) -> <S as SchemaTable>::WithColumn<'scope, crate::ColumnExpr>
+    pub fn each<S>(&mut self) -> <S as ProjectionShape>::Exprs<'scope>
     where
-        S: SchemaTable,
-        <S as SchemaTable>::WithColumn<'scope, crate::ColumnExpr>: Projectable,
+        S: TableProjection,
     {
         let alias = self.next_alias();
-        self.sources.push(Source::table(
-            alias.clone(),
-            <S as SchemaTable>::qualified_name(),
+        self.sources
+            .push(Source::table(alias.clone(), S::qualified_name()));
+        S::exprs(&alias)
+    }
+
+    /// Add an inner-joined table source and return its expression columns in this query scope.
+    pub fn join<S>(
+        &mut self,
+        on: impl FnOnce(&<S as ProjectionShape>::Exprs<'scope>) -> Predicate<'scope>,
+    ) -> <S as ProjectionShape>::Exprs<'scope>
+    where
+        S: TableProjection,
+    {
+        let alias = self.next_alias();
+        let projection = S::exprs(&alias);
+        let predicate = on(&projection);
+        self.sources
+            .push(Source::join(alias, S::qualified_name(), predicate.to_sql()));
+        projection
+    }
+
+    /// Add a left-joined table source and return its expression columns in this query scope.
+    pub fn left_join<S>(
+        &mut self,
+        on: impl FnOnce(&<S as ProjectionShape>::Exprs<'scope>) -> Predicate<'scope>,
+    ) -> <S as ProjectionShape>::Exprs<'scope>
+    where
+        S: TableProjection,
+    {
+        let alias = self.next_alias();
+        let projection = S::exprs(&alias);
+        let predicate = on(&projection);
+        self.sources.push(Source::left_join(
+            alias,
+            S::qualified_name(),
+            predicate.to_sql(),
         ));
-        S::column_exprs(&alias)
+        projection
     }
 
     /// Add a subquery as a lateral source and return its projected expression columns in this query scope.
-    pub fn lateral<T>(&mut self, query: Query<T>) -> T::Rebound<'scope>
+    pub fn lateral<Shape>(&mut self, query: Query<Shape>) -> Shape::Exprs<'scope>
     where
-        T: Projectable,
+        Shape: ProjectionShape,
     {
         let alias = self.next_alias();
         self.sources
             .push(Source::lateral(alias.clone(), query.select));
-        query.project.re_alias(&alias)
+        Shape::exprs(&alias)
     }
 
     /// Add a subquery and return its projected expression columns in this query scope.
-    pub fn q<T>(&mut self, query: Query<T>) -> T::Rebound<'scope>
+    pub fn q<Shape>(&mut self, query: Query<Shape>) -> Shape::Exprs<'scope>
     where
-        T: Projectable,
+        Shape: ProjectionShape,
     {
         self.lateral(query)
     }
@@ -307,7 +386,7 @@ thread_local! {
 /// Build a query from a scoped query builder closure.
 pub fn query<T>(f: impl FnOnce(&mut Q<'static>) -> T) -> Query<T>
 where
-    T: Projectable,
+    T: Projectable + ProjectionShape,
 {
     QUERY_DEPTH.with(|depth| {
         let current_depth = depth.get();
@@ -324,7 +403,7 @@ where
             .with_limit(q.limit)
             .with_offset(q.offset);
 
-        Query::new(select, output)
+        Query::new(select)
     })
 }
 
