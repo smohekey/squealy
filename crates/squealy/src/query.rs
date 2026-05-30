@@ -128,6 +128,14 @@ where
     }
 }
 
+/// Marker for mutation builders that still need a filter or explicit all-rows intent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MutationUnfiltered {}
+
+/// Marker for mutation builders that are safe to execute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MutationFiltered {}
+
 /// Scoped select builder. Each `q` call adds a lateral-capable subquery.
 pub struct SelectBuilder<'conn, 'scope, Conn: Connection> {
     depth: usize,
@@ -140,10 +148,17 @@ pub struct SelectBuilder<'conn, 'scope, Conn: Connection> {
 }
 
 /// Scoped delete builder for filtering a single table delete.
-pub struct DeleteBuilder<'conn, 'scope, Conn: Connection, S: TableProjection> {
+pub struct DeleteBuilder<
+    'conn,
+    'scope,
+    Conn: Connection,
+    S: TableProjection,
+    FilterState = MutationUnfiltered,
+> {
+    connection: &'conn Conn,
     depth: usize,
     filters: Vec<Filter>,
-    _phantom: PhantomData<(&'conn Conn, &'scope (), S)>,
+    _phantom: PhantomData<(&'scope (), S, FilterState)>,
 }
 
 impl<'conn, 'scope, Conn> SelectBuilder<'conn, 'scope, Conn>
@@ -273,13 +288,14 @@ where
     }
 }
 
-impl<'conn, 'scope, Conn, S> DeleteBuilder<'conn, 'scope, Conn, S>
+impl<'conn, 'scope, Conn, S, FilterState> DeleteBuilder<'conn, 'scope, Conn, S, FilterState>
 where
     Conn: Connection + 'conn,
-    S: TableProjection,
+    S: TableProjection + 'conn,
 {
-    fn new(depth: usize) -> Self {
+    pub(crate) fn new(connection: &'conn Conn, depth: usize) -> Self {
         Self {
+            connection,
             depth,
             filters: Vec::new(),
             _phantom: PhantomData,
@@ -291,13 +307,53 @@ where
         S::exprs(&self.alias())
     }
 
-    /// Add a SQL `WHERE` predicate to the delete currently being built.
-    pub fn where_(&mut self, predicate: Predicate<'scope>) {
-        self.filters.push(Filter::new(predicate.node().clone()));
-    }
-
     fn alias(&self) -> String {
         format!("q{}_0", self.depth)
+    }
+}
+
+impl<'conn, Conn, S, FilterState> DeleteBuilder<'conn, 'static, Conn, S, FilterState>
+where
+    Conn: Connection + 'conn,
+    S: TableProjection + 'conn,
+{
+    /// Add a SQL `WHERE` predicate to the delete currently being built.
+    pub fn where_(
+        mut self,
+        predicate: impl FnOnce(&<S as ProjectionShape>::Exprs<'static>) -> Predicate<'static>,
+    ) -> DeleteBuilder<'conn, 'static, Conn, S, MutationFiltered> {
+        let table = S::exprs(&self.alias());
+        let predicate = predicate(&table);
+        self.filters.push(Filter::new(predicate.node().clone()));
+        DeleteBuilder {
+            connection: self.connection,
+            depth: self.depth,
+            filters: self.filters,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Explicitly mark this delete as intentionally affecting every row.
+    pub fn all(self) -> DeleteBuilder<'conn, 'static, Conn, S, MutationFiltered> {
+        DeleteBuilder {
+            connection: self.connection,
+            depth: self.depth,
+            filters: self.filters,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<'conn, Conn, S> DeleteBuilder<'conn, 'static, Conn, S, MutationFiltered>
+where
+    Conn: Connection + 'conn,
+    S: TableProjection + 'conn,
+{
+    pub fn execute(
+        self,
+    ) -> impl Future<Output = Result<u64, <Conn as Connection>::Error>> + 'conn {
+        let query = Connection::delete_query::<S>(self.connection, self.alias(), self.filters);
+        async move { DeleteQuery::execute(&query).await }
     }
 }
 
@@ -422,23 +478,27 @@ where
     )
 }
 
-/// Build delete IR from a scoped delete builder closure.
-pub fn build_delete<'conn, Conn, S>(
-    f: impl for<'scope> FnOnce(&mut DeleteBuilder<'conn, 'scope, Conn, S>),
-) -> Delete
+/// Build delete IR for a table, SQL alias, and filters.
+pub fn build_delete<S>(alias: impl Into<String>, filters: Vec<Filter>) -> Delete
+where
+    S: TableProjection,
+{
+    Delete::new(S::qualified_name(), alias).with_filters(filters)
+}
+
+/// Construct the initial delete builder.
+pub fn build_delete_builder<'conn, Conn, S>(
+    connection: &'conn Conn,
+) -> DeleteBuilder<'conn, 'static, Conn, S>
 where
     Conn: Connection + 'conn,
-    S: TableProjection,
+    S: TableProjection + 'conn,
 {
     QUERY_DEPTH.with(|depth| {
         let current_depth = depth.get();
         depth.set(current_depth + 1);
-
-        let mut q = DeleteBuilder::new(current_depth);
-        f(&mut q);
-
+        let builder = DeleteBuilder::new(connection, current_depth);
         depth.set(current_depth);
-
-        Delete::new(S::qualified_name(), q.alias()).with_filters(q.filters)
+        builder
     })
 }

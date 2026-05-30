@@ -30,8 +30,9 @@ pub use ir::{
 };
 pub use projection::{Maybe, Projectable, ProjectionShape, TableProjection};
 pub use query::{
-    DeleteBuilder, DeleteQuery, InsertQuery, Returning, ReturningProjection, SelectBuilder,
-    SelectQuery, UpdateQuery, build_delete, build_insert, build_select, build_update,
+    DeleteBuilder, DeleteQuery, InsertQuery, MutationFiltered, MutationUnfiltered, Returning,
+    ReturningProjection, SelectBuilder, SelectQuery, UpdateQuery, build_delete,
+    build_delete_builder, build_insert, build_select, build_update,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{Database, Schema, Table};

@@ -304,6 +304,11 @@ fn update_builder_executes_after_a_column_is_set() {
 }
 
 #[test]
+fn update_builder_can_explicitly_target_all_rows() {
+    let _execute = TestConnection.update::<User>().name("Ada").all().execute();
+}
+
+#[test]
 fn update_query_builds_column_bindings_and_filters() {
     let update = TestConnection.update_query::<User>(
         "q0_0".to_owned(),
@@ -331,11 +336,41 @@ fn update_query_builds_column_bindings_and_filters() {
 
 #[test]
 fn delete_builds_typed_table_filters() {
-    let delete = TestConnection.delete::<User>(|q| {
-        let user = q.table();
-        q.where_(user.id.equals(1));
-        q.where_(user.name.equals("Ada"));
-    });
+    let _execute = TestConnection
+        .delete::<User>()
+        .where_(|user| user.id.equals(1))
+        .where_(|user| user.name.equals("Ada"))
+        .execute();
+}
+
+#[test]
+fn delete_builder_can_explicitly_target_all_rows() {
+    let _execute = TestConnection.delete::<User>().all().execute();
+}
+
+#[test]
+fn delete_query_builds_typed_table_filters() {
+    let delete = TestConnection.delete_query::<User>(
+        "q0_0".to_owned(),
+        vec![
+            Filter::new(PredicateNode::Compare {
+                left: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "id".to_owned(),
+                },
+                op: CompareOp::Equals,
+                right: ExprNode::Literal(BindValue::Int(1)),
+            }),
+            Filter::new(PredicateNode::Compare {
+                left: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "name".to_owned(),
+                },
+                op: CompareOp::Equals,
+                right: ExprNode::Literal(BindValue::Text("Ada".to_owned())),
+            }),
+        ],
+    );
 
     let _execute = delete.execute();
     assert_eq!(

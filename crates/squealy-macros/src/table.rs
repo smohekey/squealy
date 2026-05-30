@@ -645,6 +645,10 @@ impl TableStruct {
             .zip(missing_idents.iter())
             .map(|(state, missing)| quote::quote! { #state = #missing })
             .collect::<Vec<_>>();
+        let state_params = state_idents
+            .iter()
+            .map(|state| quote::quote! { #state })
+            .collect::<Vec<_>>();
         let initial_states = missing_idents.iter().collect::<Vec<_>>();
         let state_tuple = if state_idents.is_empty() {
             quote::quote! { () }
@@ -709,14 +713,14 @@ impl TableStruct {
                     .collect::<Vec<_>>();
 
                 quote::quote! {
-                    impl<'conn, Conn, #(#impl_state_params),*> #builder_ident <'conn, Conn, #(#self_states),*>
+                    impl<'conn, Conn, FilterState, #(#impl_state_params),*> #builder_ident <'conn, Conn, FilterState, #(#self_states),*>
                     where
                         Conn: ::squealy::Connection + 'conn,
                     {
                         pub fn #field_ident(
                             mut self,
                             value: impl ::std::convert::Into<#field_ty>,
-                        ) -> #builder_ident <'conn, Conn, #(#return_states),*> {
+                        ) -> #builder_ident <'conn, Conn, FilterState, #(#return_states),*> {
                             self.columns.push(::squealy::UpdateColumn::new(
                                 #field_literal,
                                 ::squealy::IntoBindValue::into_bind_value(value.into()),
@@ -748,14 +752,14 @@ impl TableStruct {
             #(#ready_impls)*
 
             #[derive(Clone, Debug, PartialEq)]
-            struct #builder_ident <'conn, Conn: ::squealy::Connection + 'conn, #(#state_defaults),*> {
+            struct #builder_ident <'conn, Conn: ::squealy::Connection + 'conn, FilterState = ::squealy::MutationUnfiltered, #(#state_defaults),*> {
                 connection: &'conn Conn,
                 columns: ::std::vec::Vec<::squealy::UpdateColumn>,
                 filters: ::std::vec::Vec<::squealy::Filter>,
-                _state: ::std::marker::PhantomData<#state_tuple>,
+                _state: ::std::marker::PhantomData<(FilterState, #state_tuple)>,
             }
 
-            impl<'conn, Conn> #builder_ident <'conn, Conn, #(#initial_states),*>
+            impl<'conn, Conn> #builder_ident <'conn, Conn, ::squealy::MutationUnfiltered, #(#initial_states),*>
             where
                 Conn: ::squealy::Connection + 'conn,
             {
@@ -769,7 +773,7 @@ impl TableStruct {
                 }
             }
 
-            impl<'conn, Conn, #(#state_idents),*> #builder_ident <'conn, Conn, #(#state_idents),*>
+            impl<'conn, Conn, FilterState, #(#state_idents),*> #builder_ident <'conn, Conn, FilterState, #(#state_idents),*>
             where
                 Conn: ::squealy::Connection + 'conn,
             {
@@ -780,17 +784,31 @@ impl TableStruct {
                     predicate: impl ::std::ops::FnOnce(
                         &<#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
                     ) -> ::squealy::Predicate<'static>,
-                ) -> Self {
+                ) -> #builder_ident <'conn, Conn, ::squealy::MutationFiltered, #(#state_params),*> {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                     let predicate = predicate(&table);
                     self.filters.push(::squealy::Filter::new(predicate.node().clone()));
-                    self
+                    #builder_ident {
+                        connection: self.connection,
+                        columns: self.columns,
+                        filters: self.filters,
+                        _state: ::std::marker::PhantomData,
+                    }
+                }
+
+                pub fn all(self) -> #builder_ident <'conn, Conn, ::squealy::MutationFiltered, #(#state_params),*> {
+                    #builder_ident {
+                        connection: self.connection,
+                        columns: self.columns,
+                        filters: self.filters,
+                        _state: ::std::marker::PhantomData,
+                    }
                 }
             }
 
             #(#setters)*
 
-            impl<'conn, Conn, #(#state_idents),*> #builder_ident <'conn, Conn, #(#state_idents),*>
+            impl<'conn, Conn, #(#state_idents),*> #builder_ident <'conn, Conn, ::squealy::MutationFiltered, #(#state_idents),*>
             where
                 Conn: ::squealy::Connection + 'conn,
                 #state_tuple: #ready_ident,
