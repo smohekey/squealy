@@ -1,5 +1,5 @@
 use squealy::*;
-use squealy_postgresql::{Postgres, PostgresConnection};
+use squealy_postgresql::Postgres;
 
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(Public)]
@@ -23,8 +23,7 @@ struct Public {
 
 #[test]
 fn postgres_select_uses_numbered_placeholders() {
-    let connection = PostgresConnection::default();
-    let users = connection.select(|q| {
+    let users = Postgres.select(|q| {
         let user = q.from::<User>();
         q.where_(user.id.equals(1));
         q.returning(&user.id + 2)
@@ -39,13 +38,12 @@ fn postgres_select_uses_numbered_placeholders() {
 
 #[test]
 fn postgres_select_numbers_placeholders_across_subqueries() {
-    let connection = PostgresConnection::default();
-    let inner = connection.select(|q| {
+    let inner = Postgres.select(|q| {
         let user = q.from::<User>();
         q.where_(user.name.equals("Ada"));
         q.returning(user.id + 1)
     });
-    let outer = connection.select(|q| {
+    let outer = Postgres.select(|q| {
         let user_id = q.q(&inner);
         q.where_(user_id.equals(3));
         q.returning(&user_id + 4)
@@ -68,17 +66,16 @@ fn postgres_select_numbers_placeholders_across_subqueries() {
 
 #[test]
 fn postgres_insert_update_and_delete_render_returning() {
-    let connection = PostgresConnection::default();
-    let insert = connection
+    let insert = Postgres
         .insert::<User>()
         .name("Ada")
         .returning(|user| user.id);
-    let update = connection
+    let update = Postgres
         .update::<User>()
         .name("Ada")
         .where_(|user| user.id.equals(1))
         .returning(|user| (user.id, user.name));
-    let delete = connection
+    let delete = Postgres
         .delete::<User>()
         .where_(|user| user.id.equals(1))
         .returning(|user| user);
@@ -105,8 +102,7 @@ fn postgres_insert_update_and_delete_render_returning() {
 
 #[test]
 fn postgres_insert_can_use_default_values() {
-    let connection = PostgresConnection::default();
-    let insert = connection
+    let insert = Postgres
         .insert::<DefaultedRecord>()
         .returning(|record| record.id);
 
@@ -119,12 +115,11 @@ fn postgres_insert_can_use_default_values() {
 
 #[test]
 fn postgres_mutation_returning_expressions_continue_placeholder_numbering() {
-    let connection = PostgresConnection::default();
-    let insert = connection
+    let insert = Postgres
         .insert::<User>()
         .name("Ada")
         .returning(|user| user.id + 1);
-    let update = connection
+    let update = Postgres
         .update::<User>()
         .name("Ada")
         .where_(|user| user.id.equals(1))

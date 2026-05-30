@@ -339,6 +339,34 @@ fn render_update(update: &Update) -> String {
     String::from_utf8(sql).unwrap()
 }
 
+impl PostgresExecutor for Postgres {
+    fn decode_row<Row>(row: &tokio_postgres::Row) -> Result<Row, PostgresError>
+    where
+        Row: Decode<Postgres>,
+    {
+        let mut row = PostgresRowReader::new(row);
+        Row::decode(&mut row)
+    }
+
+    fn query_raw<'query>(
+        &'query self,
+        _sql: String,
+        _params: Vec<BindValue>,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<tokio_postgres::RowStream, PostgresError>> + Send + 'query>,
+    > {
+        Box::pin(async { Err(PostgresError::NoDriver) })
+    }
+
+    fn execute_sql<'query>(
+        &'query self,
+        _sql: String,
+        _params: Vec<BindValue>,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, PostgresError>> + Send + 'query>> {
+        Box::pin(async { Err(PostgresError::NoDriver) })
+    }
+}
+
 impl PostgresExecutor for PostgresConnection {
     fn decode_row<Row>(row: &tokio_postgres::Row) -> Result<Row, PostgresError>
     where
@@ -357,7 +385,6 @@ impl PostgresExecutor for PostgresConnection {
     > {
         let client = self.client();
         Box::pin(async move {
-            let client = client?;
             let params = postgres_params(params)?;
             let params = params.iter().map(PostgresParam::as_sql).collect::<Vec<_>>();
             client
@@ -374,7 +401,6 @@ impl PostgresExecutor for PostgresConnection {
     ) -> Pin<Box<dyn Future<Output = Result<u64, PostgresError>> + Send + 'query>> {
         let client = self.client();
         Box::pin(async move {
-            let client = client?;
             let params = postgres_params(params)?;
             let params = params.iter().map(PostgresParam::as_sql).collect::<Vec<_>>();
             client
@@ -899,9 +925,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn select_without_driver_yields_no_driver_error() {
-        let connection = PostgresConnection::no_driver();
-        let result = connection
+    async fn render_backend_select_fetch_yields_no_driver_error() {
+        let result = Postgres
             .select(|q| {
                 let widget = q.from::<Widget>();
                 q.returning(widget)
@@ -913,9 +938,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_without_driver_yields_no_driver_error() {
-        let connection = PostgresConnection::no_driver();
-        let result = connection.insert::<Widget>().name("Ada").execute().await;
+    async fn render_backend_insert_execute_yields_no_driver_error() {
+        let result = Postgres.insert::<Widget>().name("Ada").execute().await;
 
         assert!(matches!(result, Err(PostgresError::NoDriver)));
     }
