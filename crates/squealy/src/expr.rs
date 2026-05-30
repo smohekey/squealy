@@ -56,32 +56,32 @@ impl<'scope, T> Expr<'scope, T> {
     }
 
     /// SQL equality.
-    pub fn equals(self, other: Self) -> Predicate<'scope> {
+    pub fn equals<'other>(self, other: Expr<'other, T>) -> Predicate<'scope> {
         Predicate::new(format!("({} = {})", self.sql, other.sql))
     }
 
     /// SQL inequality.
-    pub fn not_equals(self, other: Self) -> Predicate<'scope> {
+    pub fn not_equals<'other>(self, other: Expr<'other, T>) -> Predicate<'scope> {
         Predicate::new(format!("({} <> {})", self.sql, other.sql))
     }
 
     /// SQL less-than comparison.
-    pub fn less_than(self, other: Self) -> Predicate<'scope> {
+    pub fn less_than<'other>(self, other: Expr<'other, T>) -> Predicate<'scope> {
         Predicate::new(format!("({} < {})", self.sql, other.sql))
     }
 
     /// SQL less-than-or-equal comparison.
-    pub fn less_than_or_equals(self, other: Self) -> Predicate<'scope> {
+    pub fn less_than_or_equals<'other>(self, other: Expr<'other, T>) -> Predicate<'scope> {
         Predicate::new(format!("({} <= {})", self.sql, other.sql))
     }
 
     /// SQL greater-than comparison.
-    pub fn greater_than(self, other: Self) -> Predicate<'scope> {
+    pub fn greater_than<'other>(self, other: Expr<'other, T>) -> Predicate<'scope> {
         Predicate::new(format!("({} > {})", self.sql, other.sql))
     }
 
     /// SQL greater-than-or-equal comparison.
-    pub fn greater_than_or_equals(self, other: Self) -> Predicate<'scope> {
+    pub fn greater_than_or_equals<'other>(self, other: Expr<'other, T>) -> Predicate<'scope> {
         Predicate::new(format!("({} >= {})", self.sql, other.sql))
     }
 
@@ -156,7 +156,7 @@ impl<'scope> Clone for Order<'scope> {
 ///     id: C::Type<'scope, i32>,
 /// }
 ///
-/// let _ = query(|q| {
+/// let _ = query::<User>(|q| {
 ///     let user = q.each::<User>();
 ///     q.where_(user.id.clone());
 ///     user
@@ -182,12 +182,12 @@ impl<'scope> Predicate<'scope> {
     }
 
     /// SQL conjunction.
-    pub fn and(self, other: Self) -> Self {
+    pub fn and<'other>(self, other: Predicate<'other>) -> Self {
         Self::new(format!("({} AND {})", self.sql, other.sql))
     }
 
     /// SQL disjunction.
-    pub fn or(self, other: Self) -> Self {
+    pub fn or<'other>(self, other: Predicate<'other>) -> Self {
         Self::new(format!("({} OR {})", self.sql, other.sql))
     }
 

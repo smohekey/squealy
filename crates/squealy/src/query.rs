@@ -384,9 +384,31 @@ thread_local! {
 }
 
 /// Build a query from a scoped query builder closure.
-pub fn query<T>(f: impl FnOnce(&mut Q<'static>) -> T) -> Query<T>
+///
+/// Expressions created by the builder are scoped to that builder invocation and cannot be
+/// smuggled out as reusable values:
+///
+/// ```compile_fail
+/// use squealy::*;
+///
+/// #[derive(Clone, Table)]
+/// struct User<'scope, C: ColumnMode = ColumnExpr> {
+///     id: C::Type<'scope, i32>,
+/// }
+///
+/// let mut leaked = None;
+/// let _ = query::<User>(|q| {
+///     let user = q.each::<User>();
+///     leaked = Some(user.clone());
+///     user
+/// });
+/// let _ = leaked.unwrap();
+/// ```
+pub fn query<Shape>(
+    f: impl for<'scope> FnOnce(&mut Q<'scope>) -> <Shape as ProjectionShape>::Exprs<'scope>,
+) -> Query<Shape>
 where
-    T: Projectable + ProjectionShape,
+    Shape: ProjectionShape,
 {
     QUERY_DEPTH.with(|depth| {
         let current_depth = depth.get();
