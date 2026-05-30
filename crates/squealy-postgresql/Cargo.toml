@@ -1,0 +1,10 @@
+[package]
+name = "squealy-postgresql"
+version = "0.1.0"
+edition = "2024"
+description = "PostgreSQL backend for squealy"
+license = "MIT"
+
+[dependencies]
+futures-core = "0.3"
+squealy = { path = "../squealy" }

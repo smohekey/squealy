@@ -44,6 +44,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "squealy-postgresql"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "squealy",
+]
+
+[[package]]
 name = "squealy-test"
 version = "0.1.0"
 dependencies = [
