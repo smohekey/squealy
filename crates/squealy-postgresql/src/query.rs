@@ -835,6 +835,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::TryStreamExt;
     use squealy::{ColumnExpr, ColumnMode, Table};
 
     #[derive(Clone, Debug, PartialEq, Table)]
@@ -970,7 +971,8 @@ mod tests {
                 let widget = q.from::<Widget>();
                 q.returning(widget)
             })
-            .fetch_all()
+            .fetch()
+            .try_collect::<Vec<_>>()
             .await;
 
         assert!(matches!(result, Err(PostgresError::NoDriver)));

@@ -1,6 +1,7 @@
 use std::future::poll_fn;
 
 use futures_core::Stream;
+use futures_util::TryStreamExt;
 use squealy::*;
 use squealy_postgresql::{PostgresConnection, PostgresError};
 use tokio_postgres::NoTls;
@@ -144,7 +145,8 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
             q.order_by(user.id.asc());
             q.returning(user)
         })
-        .fetch_all()
+        .fetch()
+        .try_collect::<Vec<_>>()
         .await
         .expect("fetch inserted users");
 
@@ -183,7 +185,8 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
             let user = q.from::<IntegrationUser>();
             q.returning(user)
         })
-        .fetch_all()
+        .fetch()
+        .try_collect::<Vec<_>>()
         .await
         .expect("fetch remaining users");
 
@@ -284,7 +287,8 @@ async fn postgres_inner_joins_across_tables() {
             q.order_by(post.id.asc());
             q.returning((user, post))
         })
-        .fetch_all()
+        .fetch()
+        .try_collect::<Vec<_>>()
         .await
         .expect("fetch joined rows");
 
@@ -347,7 +351,8 @@ async fn postgres_surfaces_database_errors() {
             let row = q.from::<MissingTable>();
             q.returning(row)
         })
-        .fetch_all()
+        .fetch()
+        .try_collect::<Vec<_>>()
         .await;
 
     assert!(
@@ -404,7 +409,8 @@ async fn postgres_runs_transaction_closures() {
             q.order_by(user.id.asc());
             q.returning(user.name)
         })
-        .fetch_all()
+        .fetch()
+        .try_collect::<Vec<_>>()
         .await
         .expect("fetch committed users");
 

@@ -10,4 +10,5 @@ futures-core = "0.3"
 squealy-macros = { path = "../squealy-macros" }
 
 [dev-dependencies]
+futures-util = "0.3"
 squealy-test = { path = "../squealy-test" }
