@@ -322,6 +322,12 @@ where
 
 fn assert_copy<T: Copy>(_: T) {}
 
+fn assert_decode<T>()
+where
+    T: Decode<TestConnection>,
+{
+}
+
 #[test]
 fn from_select_carries_table_projection_shape() {
     let users = TestConnection.select(|q| {
@@ -343,6 +349,16 @@ fn from_uses_generated_column_expression_kinds() {
         assert_copy(user.name);
         q.returning(user)
     });
+}
+
+#[test]
+fn table_rows_implement_backend_decode() {
+    assert_decode::<()>();
+    assert_decode::<i32>();
+    assert_decode::<Option<String>>();
+    assert_decode::<User<'static, ColumnValue>>();
+    assert_decode::<User<'static, ColumnNullableValue>>();
+    assert_decode::<(i32, User<'static, ColumnValue>)>();
 }
 
 #[test]

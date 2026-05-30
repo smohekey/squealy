@@ -296,6 +296,38 @@ impl TableStruct {
                 }
             }
 
+            impl<Conn> ::squealy::Decode<Conn> for #ident <'static, ::squealy::ColumnValue>
+            where
+                Conn: ::squealy::Connection,
+                #(#field_value_tys: ::squealy::Decode<Conn>,)*
+            {
+                fn decode(
+                    row: &mut <Conn as ::squealy::Connection>::RowReader<'_>,
+                ) -> ::std::result::Result<Self, <Conn as ::squealy::Connection>::Error> {
+                    Ok(#ident {
+                        #(
+                            #fields: ::squealy::RowReader::read::<#field_value_tys>(row)?,
+                        )*
+                    })
+                }
+            }
+
+            impl<Conn> ::squealy::Decode<Conn> for #ident <'static, ::squealy::ColumnNullableValue>
+            where
+                Conn: ::squealy::Connection,
+                #(::std::option::Option<#field_value_tys>: ::squealy::Decode<Conn>,)*
+            {
+                fn decode(
+                    row: &mut <Conn as ::squealy::Connection>::RowReader<'_>,
+                ) -> ::std::result::Result<Self, <Conn as ::squealy::Connection>::Error> {
+                    Ok(#ident {
+                        #(
+                            #fields: ::squealy::RowReader::read::<::std::option::Option<#field_value_tys>>(row)?,
+                        )*
+                    })
+                }
+            }
+
             #insert_table_impl
             #update_table_impl
 
@@ -618,6 +650,7 @@ impl TableStruct {
                 ) -> <Conn as ::squealy::Connection>::Insert<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>
                 where
                     P: ::squealy::ReturningProjection<'static>,
+                    <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<Conn>,
                 {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                     let projection = projection(table);
@@ -747,6 +780,7 @@ impl TableStruct {
                     ) -> <Conn as ::squealy::Connection>::Update<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>
                     where
                         P: ::squealy::ReturningProjection<'static>,
+                        <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<Conn>,
                     {
                         let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                         let projection = projection(table);

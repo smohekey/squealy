@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 use futures_core::Stream;
 
 use squealy::{
-    BindValue, Connection, Delete, DeleteQuery, Insert, InsertQuery, InsertableTable,
+    BindValue, Connection, Decode, Delete, DeleteQuery, Insert, InsertQuery, InsertableTable,
     ProjectionShape, Select, SelectQuery, TableProjection, Update, UpdateQuery, UpdateableTable,
 };
 
@@ -28,6 +28,50 @@ impl<Row> Stream for EmptyRows<Row> {
 
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Ready(None)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PostgresRowReader<'row> {
+    _row: PhantomData<&'row ()>,
+}
+
+impl squealy::RowReader for PostgresRowReader<'_> {
+    type Connection = PostgresConnection;
+
+    fn read<T>(&mut self) -> Result<T, PostgresError>
+    where
+        T: Decode<PostgresConnection>,
+    {
+        T::decode(self)
+    }
+}
+
+macro_rules! impl_postgres_decode_no_driver {
+    ($($ty:ty),* $(,)?) => {
+        $(impl Decode<PostgresConnection> for $ty {
+            fn decode(
+                _row: &mut <PostgresConnection as Connection>::RowReader<'_>,
+            ) -> Result<Self, PostgresError> {
+                Err(PostgresError::NoDriver)
+            }
+        })*
+    };
+}
+
+impl_postgres_decode_no_driver!(i8, i16, i32, i64, i128, isize);
+impl_postgres_decode_no_driver!(u8, u16, u32, u64, u128, usize);
+impl_postgres_decode_no_driver!(f32, f64);
+impl_postgres_decode_no_driver!(String, bool);
+
+impl<T> Decode<PostgresConnection> for Option<T>
+where
+    T: Decode<PostgresConnection>,
+{
+    fn decode(
+        _row: &mut <PostgresConnection as Connection>::RowReader<'_>,
+    ) -> Result<Self, PostgresError> {
+        Err(PostgresError::NoDriver)
     }
 }
 
@@ -146,6 +190,7 @@ where
 impl<'conn, Shape> SelectQuery<'conn> for PostgresSelect<'conn, Shape>
 where
     Shape: ProjectionShape,
+    Shape::Row: Decode<PostgresConnection>,
 {
     type Connection = PostgresConnection;
     type Shape = Shape;
@@ -191,6 +236,7 @@ impl<'conn, S, Shape> InsertQuery<'conn> for PostgresInsert<'conn, S, Shape>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
+    Shape::Row: Decode<PostgresConnection>,
 {
     type Connection = PostgresConnection;
     type Table = S;
@@ -244,6 +290,7 @@ impl<'conn, S, Shape> DeleteQuery<'conn> for PostgresDelete<'conn, S, Shape>
 where
     S: TableProjection,
     Shape: ProjectionShape,
+    Shape::Row: Decode<PostgresConnection>,
 {
     type Connection = PostgresConnection;
     type Table = S;
@@ -297,6 +344,7 @@ impl<'conn, S, Shape> UpdateQuery<'conn> for PostgresUpdate<'conn, S, Shape>
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
+    Shape::Row: Decode<PostgresConnection>,
 {
     type Connection = PostgresConnection;
     type Table = S;

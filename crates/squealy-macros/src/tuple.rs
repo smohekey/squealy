@@ -123,5 +123,19 @@ fn tuple_projection_shape(arity: usize) -> proc_macro2::TokenStream {
                 #(<#types as ReturningProjection<'scope>>::Shape,)*
             );
         }
+
+        impl<Conn, #(#types),*> Decode<Conn> for (#(#types,)*)
+        where
+            Conn: Connection,
+            #(#types: Decode<Conn>,)*
+        {
+            fn decode(
+                row: &mut <Conn as Connection>::RowReader<'_>,
+            ) -> Result<Self, <Conn as Connection>::Error> {
+                Ok((
+                    #(::squealy::RowReader::read::<#types>(row)?,)*
+                ))
+            }
+        }
     }
 }

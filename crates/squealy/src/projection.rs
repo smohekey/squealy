@@ -3,8 +3,9 @@ use std::marker::PhantomData;
 
 use crate::ir::SelectColumn;
 use crate::{
-    AddExpr, ColumnNullableValue, ColumnRef, ColumnValue, DivideExpr, Expr, ExprKind,
-    IntoBindValue, MultiplyExpr, Nullable, ReturningProjection, SchemaTable, SubtractExpr,
+    AddExpr, ColumnNullableValue, ColumnRef, ColumnValue, Connection, Decode, DivideExpr, Expr,
+    ExprKind, IntoBindValue, MultiplyExpr, Nullable, ReturningProjection, SchemaTable,
+    SubtractExpr,
 };
 
 /// A projection shape that can produce scoped expression values for a SQL alias.
