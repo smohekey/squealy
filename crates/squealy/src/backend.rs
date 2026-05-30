@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use crate::{
     DeleteBuilder, DeleteQuery, Filter, InsertColumn, InsertQuery, InsertableTable,
     ProjectionShape, Returning, SelectQuery, Table, TableProjection, UpdateColumn, UpdateQuery,
-    UpdateableTable,
+    UpdateableTable, build_delete_builder,
 };
 
 /// Backend-specific DDL generation.
@@ -70,10 +70,14 @@ pub trait Connection: Sized {
     where
         S: UpdateableTable;
 
-    fn delete<S>(
-        &self,
-        f: impl for<'scope> FnOnce(&mut DeleteBuilder<'_, 'scope, Self, S>),
-    ) -> Self::Delete<'_, S>
+    fn delete<'conn, S>(&'conn self) -> DeleteBuilder<'conn, 'static, Self, S>
+    where
+        S: TableProjection + 'conn,
+    {
+        build_delete_builder(self)
+    }
+
+    fn delete_query<S>(&self, alias: String, filters: Vec<Filter>) -> Self::Delete<'_, S>
     where
         S: TableProjection;
 }

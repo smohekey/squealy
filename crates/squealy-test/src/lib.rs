@@ -6,11 +6,11 @@ use std::task::{Context, Poll};
 use futures_core::Stream;
 
 use squealy::{
-    ArithmeticOp, Backend, BindValue, CompareOp, Connection, Delete, DeleteBuilder, DeleteQuery,
-    ExprNode, Insert, InsertQuery, InsertableTable, OrderDirection, OrderNode, PredicateNode,
-    ProjectionShape, Returning, Select, SelectBuilder, SelectColumn, SelectQuery, Sort, Source,
-    SourceKind, SourceTarget, Table, TableProjection, Update, UpdateQuery, UpdateableTable,
-    build_delete, build_insert, build_select, build_update,
+    ArithmeticOp, Backend, BindValue, CompareOp, Connection, Delete, DeleteQuery, ExprNode, Insert,
+    InsertQuery, InsertableTable, OrderDirection, OrderNode, PredicateNode, ProjectionShape,
+    Returning, Select, SelectBuilder, SelectColumn, SelectQuery, Sort, Source, SourceKind,
+    SourceTarget, Table, TableProjection, Update, UpdateQuery, UpdateableTable, build_delete,
+    build_insert, build_select, build_update,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -390,15 +390,12 @@ impl Connection for TestConnection {
         }
     }
 
-    fn delete<S>(
-        &self,
-        f: impl for<'scope> FnOnce(&mut DeleteBuilder<'_, 'scope, Self, S>),
-    ) -> Self::Delete<'_, S>
+    fn delete_query<S>(&self, alias: String, filters: Vec<squealy::Filter>) -> Self::Delete<'_, S>
     where
         S: TableProjection,
     {
         TestDelete {
-            delete: build_delete::<Self, S>(f),
+            delete: build_delete::<S>(alias, filters),
             _connection: PhantomData,
             _table: PhantomData,
         }
