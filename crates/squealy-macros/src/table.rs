@@ -694,9 +694,15 @@ impl TableStruct {
                 ) -> impl ::std::future::Future<
                     Output = ::std::result::Result<u64, <<Conn as ::squealy::Connection>::Backend as ::squealy::Backend>::Error>,
                 > + 'conn {
-                    let query = ::squealy::Connection::insert_query::<#table_ident <'static, ::squealy::ColumnExpr>>(
+                    let query = <<Conn as ::squealy::Connection>::Insert<
+                        'conn,
+                        #table_ident <'static, ::squealy::ColumnExpr>,
+                        (),
+                    > as ::squealy::InsertQuery<'conn>>::build(
                         self.connection,
-                        self.columns,
+                        ::squealy::build_insert::<#table_ident <'static, ::squealy::ColumnExpr>>(
+                            self.columns,
+                        ),
                     );
                     async move {
                         ::squealy::InsertQuery::execute(&query).await
@@ -715,10 +721,16 @@ impl TableStruct {
                 {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                     let projection = projection(table);
-                    ::squealy::Connection::insert_returning_query::<#table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>(
+                    <<Conn as ::squealy::Connection>::Insert<
+                        'conn,
+                        #table_ident <'static, ::squealy::ColumnExpr>,
+                        <P as ::squealy::ReturningProjection<'static>>::Shape,
+                    > as ::squealy::InsertQuery<'conn>>::build(
                         self.connection,
-                        self.columns,
-                        ::squealy::Projectable::project(&projection),
+                        ::squealy::build_insert_returning::<#table_ident <'static, ::squealy::ColumnExpr>>(
+                            self.columns,
+                            ::squealy::Projectable::project(&projection),
+                        ),
                     )
                 }
             }
@@ -822,11 +834,17 @@ impl TableStruct {
                     ) -> impl ::std::future::Future<
                         Output = ::std::result::Result<u64, <<Conn as ::squealy::Connection>::Backend as ::squealy::Backend>::Error>,
                     > + 'conn {
-                        let query = ::squealy::Connection::update_query::<#table_ident <'static, ::squealy::ColumnExpr>>(
+                        let query = <<Conn as ::squealy::Connection>::Update<
+                            'conn,
+                            #table_ident <'static, ::squealy::ColumnExpr>,
+                            (),
+                        > as ::squealy::UpdateQuery<'conn>>::build(
                             self.connection,
-                            Self::ALIAS.to_owned(),
-                            self.columns,
-                            self.filters,
+                            ::squealy::build_update::<#table_ident <'static, ::squealy::ColumnExpr>>(
+                                Self::ALIAS,
+                                self.columns,
+                                self.filters,
+                            ),
                         );
                         async move {
                             ::squealy::UpdateQuery::execute(&query).await
@@ -845,12 +863,18 @@ impl TableStruct {
                     {
                         let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                         let projection = projection(table);
-                        ::squealy::Connection::update_returning_query::<#table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>(
+                        <<Conn as ::squealy::Connection>::Update<
+                            'conn,
+                            #table_ident <'static, ::squealy::ColumnExpr>,
+                            <P as ::squealy::ReturningProjection<'static>>::Shape,
+                        > as ::squealy::UpdateQuery<'conn>>::build(
                             self.connection,
-                            Self::ALIAS.to_owned(),
-                            self.columns,
-                            self.filters,
-                            ::squealy::Projectable::project(&projection),
+                            ::squealy::build_update_returning::<#table_ident <'static, ::squealy::ColumnExpr>>(
+                                Self::ALIAS,
+                                self.columns,
+                                self.filters,
+                                ::squealy::Projectable::project(&projection),
+                            ),
                         )
                     }
                 }

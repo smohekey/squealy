@@ -32,6 +32,8 @@ pub trait SelectQuery<'conn> {
 
     fn ir(&self) -> &Select;
 
+    fn build(connection: &'conn Self::Connection, select: Select) -> Self;
+
     fn fetch<'query>(&'query self) -> Self::RowStream<'query>;
 
     fn collect<'query>(
@@ -83,6 +85,8 @@ pub trait InsertQuery<'conn> {
         Self: 'query;
 
     fn ir(&self) -> &Insert;
+
+    fn build(connection: &'conn Self::Connection, insert: Insert) -> Self;
 
     fn execute(&self) -> impl Future<Output = Result<u64, ErrorOf<Self::Connection>>> + Send + '_;
 
@@ -174,6 +178,8 @@ pub trait UpdateQuery<'conn> {
 
     fn ir(&self) -> &Update;
 
+    fn build(connection: &'conn Self::Connection, update: Update) -> Self;
+
     fn execute(&self) -> impl Future<Output = Result<u64, ErrorOf<Self::Connection>>> + Send + '_;
 
     fn fetch<'query>(&'query self) -> Self::RowStream<'query>;
@@ -263,6 +269,8 @@ pub trait DeleteQuery<'conn> {
         Self: 'query;
 
     fn ir(&self) -> &Delete;
+
+    fn build(connection: &'conn Self::Connection, delete: Delete) -> Self;
 
     fn execute(&self) -> impl Future<Output = Result<u64, ErrorOf<Self::Connection>>> + Send + '_;
 
@@ -669,7 +677,10 @@ where
     S: TableProjection + 'conn,
 {
     pub fn execute(self) -> impl Future<Output = Result<u64, ErrorOf<Conn>>> + 'conn {
-        let query = Connection::delete_query::<S>(self.connection, self.alias(), self.filters);
+        let query = <<Conn as Connection>::Delete<'conn, S, ()> as DeleteQuery<'conn>>::build(
+            self.connection,
+            build_delete::<S>(self.alias(), self.filters),
+        );
         async move { DeleteQuery::execute(&query).await }
     }
 
@@ -683,11 +694,13 @@ where
     {
         let table = S::exprs(&self.alias());
         let projection = projection(table);
-        Connection::delete_returning_query::<S, <P as ReturningProjection<'static>>::Shape>(
+        <<Conn as Connection>::Delete<
+            'conn,
+            S,
+            <P as ReturningProjection<'static>>::Shape,
+        > as DeleteQuery<'conn>>::build(
             self.connection,
-            self.alias(),
-            self.filters,
-            projection.project(),
+            build_delete_returning::<S>(self.alias(), self.filters, projection.project()),
         )
     }
 }
