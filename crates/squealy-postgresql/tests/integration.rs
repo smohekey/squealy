@@ -9,6 +9,18 @@ struct IntegrationUser<'scope, C: ColumnMode = ColumnExpr> {
     name: C::Type<'scope, String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+struct IntegrationDefaulted<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment, db_type = "integer")]
+    id: C::Type<'scope, i32>,
+    #[column(default = value("anonymous"), db_type = "text")]
+    name: C::Type<'scope, String>,
+    #[column(default = value(42), db_type = "integer")]
+    score: C::Type<'scope, i32>,
+    #[column(default = value(true), db_type = "boolean")]
+    active: C::Type<'scope, bool>,
+}
+
 fn database_url() -> String {
     std::env::var("SQUEALY_POSTGRES_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:55432/squealy_test".to_owned())
@@ -33,18 +45,15 @@ async fn connect() -> tokio_postgres::Client {
 async fn postgres_executes_insert_returning_and_selects_rows() {
     let client = connect().await;
     client
-        .batch_execute("DROP TABLE IF EXISTS integration_users")
+        .batch_execute(
+            "DROP TABLE IF EXISTS integration_users; DROP TABLE IF EXISTS integration_defaulteds",
+        )
         .await
-        .expect("drop old integration table");
+        .expect("drop old integration tables");
 
     let ddl_backend = PostgresConnection::default();
-    let mut ddl = Vec::new();
-    let table = <IntegrationUser<'static, ColumnExpr> as SchemaTable>::column_names();
-    ddl_backend
-        .write_table(&table, &mut ddl)
-        .expect("render integration table DDL");
-    let ddl = String::from_utf8(ddl).expect("DDL should be valid UTF-8");
-    client.batch_execute(&ddl).await.expect("create table");
+    create_table::<IntegrationUser>(&client, &ddl_backend).await;
+    create_table::<IntegrationDefaulted>(&client, &ddl_backend).await;
 
     let connection = PostgresConnection::new(client);
 
@@ -109,4 +118,29 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
         .expect("fetch remaining users");
 
     assert_eq!(remaining, vec![updated_ada]);
+
+    let defaulted = connection
+        .insert::<IntegrationDefaulted>()
+        .returning(|record| record)
+        .fetch_one()
+        .await
+        .expect("insert defaulted record");
+
+    assert_eq!(defaulted.name, "anonymous");
+    assert_eq!(defaulted.score, 42);
+    assert!(defaulted.active);
+}
+
+async fn create_table<S>(client: &tokio_postgres::Client, ddl_backend: &PostgresConnection)
+where
+    S: SchemaTable,
+    S::WithColumn<'static, ColumnName>: Table + Sync,
+{
+    let mut ddl = Vec::new();
+    let table = S::column_names();
+    ddl_backend
+        .write_table(&table, &mut ddl)
+        .expect("render integration table DDL");
+    let ddl = String::from_utf8(ddl).expect("DDL should be valid UTF-8");
+    client.batch_execute(&ddl).await.expect("create table");
 }
