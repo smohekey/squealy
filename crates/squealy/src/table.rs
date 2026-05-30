@@ -30,6 +30,8 @@ pub trait SchemaTable: Table {
 
     type Exprs<'scope>: Projectable;
 
+    type NullableExprs<'scope>: Projectable;
+
     /// Returns the containing schema namespace for this model, if one is configured.
     fn schema_name() -> Option<&'static str>
     where
@@ -77,4 +79,15 @@ pub trait SchemaTable: Table {
         alias: &str,
         columns: &Self::WithColumn<'static, ColumnName>,
     ) -> Self::Exprs<'scope>;
+
+    /// Build nullable expression-mode fields that refer to the supplied SQL alias.
+    fn nullable_column_exprs<'scope>(alias: &str) -> Self::NullableExprs<'scope> {
+        Self::nullable_column_exprs_from(alias, &Self::column_names())
+    }
+
+    /// Build nullable expression-mode fields from explicit database column names.
+    fn nullable_column_exprs_from<'scope>(
+        alias: &str,
+        columns: &Self::WithColumn<'static, ColumnName>,
+    ) -> Self::NullableExprs<'scope>;
 }

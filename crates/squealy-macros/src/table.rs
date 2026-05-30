@@ -88,6 +88,9 @@ impl TableStruct {
             .collect::<Vec<_>>();
         let exprs_ident = generated_ident(&ident, "exprs", "Projection");
         let rebound_exprs_ident = generated_ident(&ident, "exprs", "ReboundProjection");
+        let nullable_exprs_ident = generated_ident(&ident, "nullable_exprs", "Projection");
+        let nullable_rebound_exprs_ident =
+            generated_ident(&ident, "nullable_exprs", "ReboundProjection");
         let expr_kind_idents = self
             .fields
             .iter()
@@ -182,13 +185,23 @@ impl TableStruct {
             )*
 
             #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-            pub struct #exprs_ident <'scope> {
+            struct #exprs_ident <'scope> {
                 #( pub #fields: ::squealy::ColumnRef<'scope, #expr_kind_idents>, )*
             }
 
             #[derive(Clone, Debug, PartialEq)]
-            pub struct #rebound_exprs_ident <'scope> {
+            struct #rebound_exprs_ident <'scope> {
                 #( pub #fields: ::squealy::Expr<'scope, #expr_kind_idents>, )*
+            }
+
+            #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+            struct #nullable_exprs_ident <'scope> {
+                #( pub #fields: ::squealy::ColumnRef<'scope, ::squealy::Nullable<#expr_kind_idents>>, )*
+            }
+
+            #[derive(Clone, Debug, PartialEq)]
+            struct #nullable_rebound_exprs_ident <'scope> {
+                #( pub #fields: ::squealy::Expr<'scope, ::squealy::Nullable<#expr_kind_idents>>, )*
             }
 
             static #columns_static: [&'static dyn ::squealy::Column; #columns_len] = [#( &#column_idents, )*];
@@ -221,6 +234,8 @@ impl TableStruct {
 
                 type Exprs<'next_scope> = #exprs_ident <'next_scope>;
 
+                type NullableExprs<'next_scope> = #nullable_exprs_ident <'next_scope>;
+
                 fn name() -> &'static str {
                     #name
                 }
@@ -242,6 +257,13 @@ impl TableStruct {
                     columns: &Self::WithColumn<'static, ::squealy::ColumnName>,
                 ) -> Self::Exprs<'next_scope> {
                     #exprs_ident { #( #fields: ::squealy::ColumnRef::column(alias, columns.#fields), )* }
+                }
+
+                fn nullable_column_exprs_from<'next_scope>(
+                    alias: &str,
+                    columns: &Self::WithColumn<'static, ::squealy::ColumnName>,
+                ) -> Self::NullableExprs<'next_scope> {
+                    #nullable_exprs_ident { #( #fields: ::squealy::ColumnRef::column(alias, columns.#fields), )* }
                 }
             }
 
@@ -274,6 +296,10 @@ impl TableStruct {
                 }
             }
 
+            impl<'scope> ::squealy::SelectableProjection<'scope> for #exprs_ident <'scope> {
+                type Shape = #ident <'static, ::squealy::ColumnExpr>;
+            }
+
             impl<'scope> ::squealy::Projectable for #rebound_exprs_ident <'scope> {
                 type Rebound<'next_scope> = #rebound_exprs_ident <'next_scope>;
 
@@ -301,6 +327,76 @@ impl TableStruct {
                         #( #fields: ::squealy::Expr::column(alias, &::std::format!("{prefix}_{}", #field_literals)), )*
                     }
                 }
+            }
+
+            impl<'scope> ::squealy::SelectableProjection<'scope> for #rebound_exprs_ident <'scope> {
+                type Shape = #ident <'static, ::squealy::ColumnExpr>;
+            }
+
+            impl<'scope> ::squealy::Projectable for #nullable_exprs_ident <'scope> {
+                type Rebound<'next_scope> = #nullable_rebound_exprs_ident <'next_scope>;
+
+                fn project(&self) -> ::std::vec::Vec<::squealy::SelectColumn> {
+                    ::std::vec![
+                        #(
+                            ::squealy::SelectColumn::new(
+                                self.#fields.node(),
+                                #field_literals,
+                            ),
+                        )*
+                    ]
+                }
+
+                fn re_alias<'next_scope>(&self, alias: &str) -> Self::Rebound<'next_scope> {
+                    #nullable_rebound_exprs_ident { #( #fields: ::squealy::Expr::column(alias, #field_literals), )* }
+                }
+
+                fn re_alias_with_prefix<'next_scope>(
+                    &self,
+                    alias: &str,
+                    prefix: &str,
+                ) -> Self::Rebound<'next_scope> {
+                    #nullable_rebound_exprs_ident {
+                        #( #fields: ::squealy::Expr::column(alias, &::std::format!("{prefix}_{}", #field_literals)), )*
+                    }
+                }
+            }
+
+            impl<'scope> ::squealy::SelectableProjection<'scope> for #nullable_exprs_ident <'scope> {
+                type Shape = ::squealy::Maybe<#ident <'static, ::squealy::ColumnExpr>>;
+            }
+
+            impl<'scope> ::squealy::Projectable for #nullable_rebound_exprs_ident <'scope> {
+                type Rebound<'next_scope> = #nullable_rebound_exprs_ident <'next_scope>;
+
+                fn project(&self) -> ::std::vec::Vec<::squealy::SelectColumn> {
+                    ::std::vec![
+                        #(
+                            ::squealy::SelectColumn::new(
+                                self.#fields.node().clone(),
+                                #field_literals,
+                            ),
+                        )*
+                    ]
+                }
+
+                fn re_alias<'next_scope>(&self, alias: &str) -> Self::Rebound<'next_scope> {
+                    #nullable_rebound_exprs_ident { #( #fields: ::squealy::Expr::column(alias, #field_literals), )* }
+                }
+
+                fn re_alias_with_prefix<'next_scope>(
+                    &self,
+                    alias: &str,
+                    prefix: &str,
+                ) -> Self::Rebound<'next_scope> {
+                    #nullable_rebound_exprs_ident {
+                        #( #fields: ::squealy::Expr::column(alias, &::std::format!("{prefix}_{}", #field_literals)), )*
+                    }
+                }
+            }
+
+            impl<'scope> ::squealy::SelectableProjection<'scope> for #nullable_rebound_exprs_ident <'scope> {
+                type Shape = ::squealy::Maybe<#ident <'static, ::squealy::ColumnExpr>>;
             }
         }
         .into()
