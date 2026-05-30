@@ -120,16 +120,14 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
 
     let connection = PostgresConnection::new(client);
 
-    let (mut ada_rows, ada_count) = connection
+    let (ada, ada_count) = connection
         .insert::<IntegrationUser>()
         .name("Ada")
         .returning(|user| user)
-        .fetch_all_with_affected()
+        .fetch_one_with_affected()
         .await
         .expect("insert Ada");
     assert_eq!(ada_count, 1);
-    assert_eq!(ada_rows.len(), 1);
-    let ada = ada_rows.pop().unwrap();
     assert_eq!(ada.name, "Ada");
 
     let affected = connection

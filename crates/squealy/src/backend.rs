@@ -163,5 +163,6 @@ pub trait TransactionalConnection: Connection {
     ) -> impl Future<Output = Result<T, Self::Error>> + 'conn
     where
         T: 'conn,
-        F: for<'tx> AsyncFnOnce(&'tx Self::Transaction<'conn>) -> Result<T, Self::Error> + 'conn;
+        F: for<'tx> AsyncFnOnce(&'tx mut Self::Transaction<'conn>) -> Result<T, Self::Error>
+            + 'conn;
 }

@@ -446,7 +446,8 @@ impl TransactionalConnection for PostgresConnection {
     ) -> impl std::future::Future<Output = Result<T, Self::Error>> + 'conn
     where
         T: 'conn,
-        F: for<'tx> AsyncFnOnce(&'tx Self::Transaction<'conn>) -> Result<T, Self::Error> + 'conn,
+        F: for<'tx> AsyncFnOnce(&'tx mut Self::Transaction<'conn>) -> Result<T, Self::Error>
+            + 'conn,
     {
         async move {
             let transaction = self
@@ -454,9 +455,9 @@ impl TransactionalConnection for PostgresConnection {
                 .transaction()
                 .await
                 .map_err(PostgresError::Database)?;
-            let transaction: Self::Transaction<'conn> = PostgresTransaction { transaction };
+            let mut transaction: Self::Transaction<'conn> = PostgresTransaction { transaction };
 
-            match f(&transaction).await {
+            match f(&mut transaction).await {
                 Ok(value) => {
                     transaction
                         .transaction

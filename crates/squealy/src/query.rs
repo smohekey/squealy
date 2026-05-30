@@ -116,6 +116,35 @@ pub trait InsertQuery<'conn> {
         collect_rows_with_affected::<Self::Connection, Self::Row, _>(rows)
     }
 
+    fn fetch_one_with_affected<'query>(
+        &'query self,
+    ) -> impl Future<Output = Result<(Self::Row, u64), <Self::Connection as Connection>::Error>>
+    + Send
+    + 'query
+    where
+        'conn: 'query,
+    {
+        let row = fetch_optional_row_with_affected::<Self::Connection, Self::Row, _>(self.fetch());
+        async move {
+            let (row, affected) = row.await?;
+            let row = row.ok_or_else(<Self::Connection as Connection>::no_rows_error)?;
+            Ok((row, affected))
+        }
+    }
+
+    fn fetch_optional_with_affected<'query>(
+        &'query self,
+    ) -> impl Future<
+        Output = Result<(Option<Self::Row>, u64), <Self::Connection as Connection>::Error>,
+    > + Send
+    + 'query
+    where
+        'conn: 'query,
+    {
+        let rows = self.fetch();
+        fetch_optional_row_with_affected::<Self::Connection, Self::Row, _>(rows)
+    }
+
     fn fetch_one<'query>(
         &'query self,
     ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + 'query
@@ -186,6 +215,35 @@ pub trait UpdateQuery<'conn> {
     {
         let rows = self.fetch();
         collect_rows_with_affected::<Self::Connection, Self::Row, _>(rows)
+    }
+
+    fn fetch_one_with_affected<'query>(
+        &'query self,
+    ) -> impl Future<Output = Result<(Self::Row, u64), <Self::Connection as Connection>::Error>>
+    + Send
+    + 'query
+    where
+        'conn: 'query,
+    {
+        let row = fetch_optional_row_with_affected::<Self::Connection, Self::Row, _>(self.fetch());
+        async move {
+            let (row, affected) = row.await?;
+            let row = row.ok_or_else(<Self::Connection as Connection>::no_rows_error)?;
+            Ok((row, affected))
+        }
+    }
+
+    fn fetch_optional_with_affected<'query>(
+        &'query self,
+    ) -> impl Future<
+        Output = Result<(Option<Self::Row>, u64), <Self::Connection as Connection>::Error>,
+    > + Send
+    + 'query
+    where
+        'conn: 'query,
+    {
+        let rows = self.fetch();
+        fetch_optional_row_with_affected::<Self::Connection, Self::Row, _>(rows)
     }
 
     fn fetch_one<'query>(
@@ -260,6 +318,35 @@ pub trait DeleteQuery<'conn> {
         collect_rows_with_affected::<Self::Connection, Self::Row, _>(rows)
     }
 
+    fn fetch_one_with_affected<'query>(
+        &'query self,
+    ) -> impl Future<Output = Result<(Self::Row, u64), <Self::Connection as Connection>::Error>>
+    + Send
+    + 'query
+    where
+        'conn: 'query,
+    {
+        let row = fetch_optional_row_with_affected::<Self::Connection, Self::Row, _>(self.fetch());
+        async move {
+            let (row, affected) = row.await?;
+            let row = row.ok_or_else(<Self::Connection as Connection>::no_rows_error)?;
+            Ok((row, affected))
+        }
+    }
+
+    fn fetch_optional_with_affected<'query>(
+        &'query self,
+    ) -> impl Future<
+        Output = Result<(Option<Self::Row>, u64), <Self::Connection as Connection>::Error>,
+    > + Send
+    + 'query
+    where
+        'conn: 'query,
+    {
+        let rows = self.fetch();
+        fetch_optional_row_with_affected::<Self::Connection, Self::Row, _>(rows)
+    }
+
     fn fetch_one<'query>(
         &'query self,
     ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + 'query
@@ -313,6 +400,26 @@ where
     }
     let affected = rows.as_ref().get_ref().rows_affected().unwrap_or(0);
     Ok((output, affected))
+}
+
+async fn fetch_optional_row_with_affected<Conn, Row, Rows>(
+    rows: Rows,
+) -> Result<(Option<Row>, u64), Conn::Error>
+where
+    Conn: Connection,
+    Rows: Stream<Item = Result<Row, Conn::Error>> + RowsAffected + Send,
+{
+    let mut rows = Box::pin(rows);
+    let mut first = None;
+    while let Some(row) = poll_fn(|cx| rows.as_mut().poll_next(cx)).await {
+        if first.is_none() {
+            first = Some(row?);
+        } else {
+            row?;
+        }
+    }
+    let affected = rows.as_ref().get_ref().rows_affected().unwrap_or(0);
+    Ok((first, affected))
 }
 
 async fn fetch_optional_row<Conn, Row, Rows>(rows: Rows) -> Result<Option<Row>, Conn::Error>
