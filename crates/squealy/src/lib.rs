@@ -20,8 +20,8 @@ pub use column::{
 };
 pub use database::Database;
 pub use expr::{
-    AddExpr, ColumnRef, DivideExpr, Expr, ExprKind, IntoBindValue, IntoExpr, MultiplyExpr,
-    Nullable, Order, Predicate, SqlNumber, SubtractExpr,
+    AddExpr, ColumnRef, DivideExpr, Expr, ExprKind, IntoBindValue, IntoExpr, IntoNullableBindValue,
+    MultiplyExpr, Nullable, Order, Predicate, SqlNumber, SubtractExpr,
 };
 pub use foreign_key::ForeignKey;
 pub use index::Index;

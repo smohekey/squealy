@@ -535,6 +535,16 @@ impl TableStruct {
                     proc_macro2::Ident::new(&field.ident.to_string(), Span::call_site());
                 let field_literal = &field_literals[*field_index];
                 let field_ty = &field.value_ty;
+                let value_bound = if field.nullable() {
+                    quote::quote! { ::squealy::IntoNullableBindValue<#field_ty> }
+                } else {
+                    quote::quote! { ::std::convert::Into<#field_ty> }
+                };
+                let bind_value = if field.nullable() {
+                    quote::quote! { ::squealy::IntoNullableBindValue::into_nullable_bind_value(value) }
+                } else {
+                    quote::quote! { ::squealy::IntoBindValue::into_bind_value(value.into()) }
+                };
                 let missing = &missing_idents[setter_index];
                 let set = &set_idents[setter_index];
                 let impl_state_params = state_idents
@@ -572,11 +582,11 @@ impl TableStruct {
                     {
                         pub fn #field_ident(
                             mut self,
-                            value: impl ::std::convert::Into<#field_ty>,
+                            value: impl #value_bound,
                         ) -> #builder_ident <'conn, Conn, #(#return_states),*> {
                             self.columns.push(::squealy::InsertColumn::new(
                                 #field_literal,
-                                ::squealy::IntoBindValue::into_bind_value(value.into()),
+                                #bind_value,
                             ));
                             #builder_ident {
                                 connection: self.connection,
@@ -803,6 +813,16 @@ impl TableStruct {
                     proc_macro2::Ident::new(&field.ident.to_string(), Span::call_site());
                 let field_literal = &field_literals[*field_index];
                 let field_ty = &field.value_ty;
+                let value_bound = if field.nullable() {
+                    quote::quote! { ::squealy::IntoNullableBindValue<#field_ty> }
+                } else {
+                    quote::quote! { ::std::convert::Into<#field_ty> }
+                };
+                let bind_value = if field.nullable() {
+                    quote::quote! { ::squealy::IntoNullableBindValue::into_nullable_bind_value(value) }
+                } else {
+                    quote::quote! { ::squealy::IntoBindValue::into_bind_value(value.into()) }
+                };
                 let missing = &missing_idents[setter_index];
                 let set = &set_idents[setter_index];
                 let impl_state_params = state_idents
@@ -840,11 +860,11 @@ impl TableStruct {
                     {
                         pub fn #field_ident(
                             mut self,
-                            value: impl ::std::convert::Into<#field_ty>,
+                            value: impl #value_bound,
                         ) -> #builder_ident <'conn, Conn, FilterState, #(#return_states),*> {
                             self.columns.push(::squealy::UpdateColumn::new(
                                 #field_literal,
-                                ::squealy::IntoBindValue::into_bind_value(value.into()),
+                                #bind_value,
                             ));
                             #builder_ident {
                                 connection: self.connection,

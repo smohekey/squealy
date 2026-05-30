@@ -624,6 +624,7 @@ dependencies = [
 name = "squealy-postgresql"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures-core",
  "squealy",
  "tokio",

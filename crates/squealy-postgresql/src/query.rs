@@ -1,9 +1,11 @@
 use std::collections::VecDeque;
+use std::error::Error;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use bytes::BytesMut;
 use futures_core::Stream;
 
 use squealy::{
@@ -11,7 +13,7 @@ use squealy::{
     InsertQuery, InsertableTable, IntWidth, ProjectionShape, Select, SelectQuery, TableProjection,
     UIntWidth, Update, UpdateQuery, UpdateableTable,
 };
-use tokio_postgres::types::{FromSqlOwned, ToSql};
+use tokio_postgres::types::{FromSqlOwned, IsNull, ToSql, Type, to_sql_checked};
 
 use crate::{PostgresConnection, PostgresError, sql};
 
@@ -217,6 +219,7 @@ enum PostgresParam {
     Float64(f64),
     Text(String),
     Bool(bool),
+    Null(PostgresNull),
 }
 
 impl PostgresParam {
@@ -229,8 +232,28 @@ impl PostgresParam {
             Self::Float64(value) => value,
             Self::Text(value) => value,
             Self::Bool(value) => value,
+            Self::Null(value) => value,
         }
     }
+}
+
+#[derive(Debug)]
+struct PostgresNull;
+
+impl ToSql for PostgresNull {
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        _out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
+        Ok(IsNull::Yes)
+    }
+
+    fn accepts(_ty: &Type) -> bool {
+        true
+    }
+
+    to_sql_checked!();
 }
 
 fn postgres_params(params: Vec<BindValue>) -> Result<Vec<PostgresParam>, PostgresError> {
@@ -242,7 +265,7 @@ fn postgres_params(params: Vec<BindValue>) -> Result<Vec<PostgresParam>, Postgre
             BindValueKind::Float { value, width } => postgres_float(value, width),
             BindValueKind::Text(value) => Ok(PostgresParam::Text(value)),
             BindValueKind::Bool(value) => Ok(PostgresParam::Bool(value)),
-            BindValueKind::Null => Err(PostgresError::UnsupportedBind(BindValue::Null)),
+            BindValueKind::Null => Ok(PostgresParam::Null(PostgresNull)),
         })
         .collect()
 }
