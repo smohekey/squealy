@@ -115,12 +115,12 @@ fn tuple_projection_shape(arity: usize) -> proc_macro2::TokenStream {
             }
         }
 
-        impl<'scope, #(#types),*> SelectableProjection<'scope> for (#(#types,)*)
+        impl<'scope, #(#types),*> ReturningProjection<'scope> for (#(#types,)*)
         where
-            #(#types: SelectableProjection<'scope>,)*
+            #(#types: ReturningProjection<'scope>,)*
         {
             type Shape = (
-                #(<#types as SelectableProjection<'scope>>::Shape,)*
+                #(<#types as ReturningProjection<'scope>>::Shape,)*
             );
         }
     }

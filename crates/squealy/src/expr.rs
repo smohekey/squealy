@@ -1187,7 +1187,7 @@ impl<'scope> Clone for Order<'scope> {
 /// #         &self,
 /// #         f: impl for<'scope> FnOnce(
 /// #             &mut ::squealy::SelectBuilder<'_, 'scope, Self>,
-/// #         ) -> Selection<Shape>,
+/// #         ) -> Returning<Shape>,
 /// #     ) -> Self::Select<'_, Shape>
 /// #     where
 /// #         Shape: ProjectionShape,
