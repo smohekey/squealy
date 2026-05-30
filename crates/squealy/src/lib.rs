@@ -15,7 +15,9 @@ mod schema;
 mod table;
 
 pub use backend::{Backend, Connection};
-pub use column::{Column, ColumnExpr, ColumnMode, ColumnName, ColumnNullableValue, ColumnValue};
+pub use column::{
+    Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullableValue, ColumnValue,
+};
 pub use database::Database;
 pub use expr::{
     AddExpr, ColumnRef, DivideExpr, Expr, ExprKind, IntoBindValue, IntoExpr, MultiplyExpr,

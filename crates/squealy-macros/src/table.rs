@@ -50,10 +50,27 @@ struct FieldAttrs {
     generated: bool,
     insert: Option<bool>,
     update: Option<bool>,
-    default: Option<String>,
+    default: Option<DefaultAttrs>,
     db_type: Option<String>,
     check: Option<String>,
     references: Option<ForeignKeyAttrs>,
+}
+
+enum DefaultAttrs {
+    Literal(DefaultLiteral),
+    CurrentTimestamp,
+    CurrentDate,
+    CurrentTime,
+    Raw(String),
+}
+
+enum DefaultLiteral {
+    Null,
+    Int(i128),
+    UInt(u128),
+    Float(f64),
+    Text(String),
+    Bool(bool),
 }
 
 #[derive(Default)]
@@ -697,6 +714,53 @@ impl TableStruct {
                 }
             })
             .collect::<Vec<_>>();
+        let finalizers = if fields.is_empty() {
+            quote::quote! {}
+        } else {
+            quote::quote! {
+                impl<'conn, Conn, #(#state_idents),*> #builder_ident <'conn, Conn, ::squealy::MutationFiltered, #(#state_idents),*>
+                where
+                    Conn: ::squealy::Connection + 'conn,
+                    #state_tuple: #ready_ident,
+                {
+                    pub fn execute(
+                        self,
+                    ) -> impl ::std::future::Future<
+                        Output = ::std::result::Result<u64, <Conn as ::squealy::Connection>::Error>,
+                    > + 'conn {
+                        let query = ::squealy::Connection::update_query::<#table_ident <'static, ::squealy::ColumnExpr>>(
+                            self.connection,
+                            Self::ALIAS.to_owned(),
+                            self.columns,
+                            self.filters,
+                        );
+                        async move {
+                            ::squealy::UpdateQuery::execute(&query).await
+                        }
+                    }
+
+                    pub fn returning<P>(
+                        self,
+                        projection: impl ::std::ops::FnOnce(
+                            <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
+                        ) -> P,
+                    ) -> <Conn as ::squealy::Connection>::Update<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>
+                    where
+                        P: ::squealy::ReturningProjection<'static>,
+                    {
+                        let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
+                        let projection = projection(table);
+                        ::squealy::Connection::update_returning_query::<#table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>(
+                            self.connection,
+                            Self::ALIAS.to_owned(),
+                            self.columns,
+                            self.filters,
+                            ::squealy::Projectable::project(&projection),
+                        )
+                    }
+                }
+            }
+        };
         let setters = fields
             .iter()
             .enumerate()
@@ -831,47 +895,7 @@ impl TableStruct {
 
             #(#setters)*
 
-            impl<'conn, Conn, #(#state_idents),*> #builder_ident <'conn, Conn, ::squealy::MutationFiltered, #(#state_idents),*>
-            where
-                Conn: ::squealy::Connection + 'conn,
-                #state_tuple: #ready_ident,
-            {
-                pub fn execute(
-                    self,
-                ) -> impl ::std::future::Future<
-                    Output = ::std::result::Result<u64, <Conn as ::squealy::Connection>::Error>,
-                > + 'conn {
-                    let query = ::squealy::Connection::update_query::<#table_ident <'static, ::squealy::ColumnExpr>>(
-                        self.connection,
-                        Self::ALIAS.to_owned(),
-                        self.columns,
-                        self.filters,
-                    );
-                    async move {
-                        ::squealy::UpdateQuery::execute(&query).await
-                    }
-                }
-
-                pub fn returning<P>(
-                    self,
-                    projection: impl ::std::ops::FnOnce(
-                        <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
-                    ) -> P,
-                ) -> <Conn as ::squealy::Connection>::Update<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>
-                where
-                    P: ::squealy::ReturningProjection<'static>,
-                {
-                    let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
-                    let projection = projection(table);
-                    ::squealy::Connection::update_returning_query::<#table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>(
-                        self.connection,
-                        Self::ALIAS.to_owned(),
-                        self.columns,
-                        self.filters,
-                        ::squealy::Projectable::project(&projection),
-                    )
-                }
-            }
+            #finalizers
         };
 
         let table_impl = quote::quote! {
@@ -967,6 +991,50 @@ impl Field {
         self.attrs.nullable.unwrap_or(false)
     }
 
+    fn default_tokens(&self) -> proc_macro2::TokenStream {
+        let Some(default) = self.attrs.default.as_ref() else {
+            return quote::quote! { None };
+        };
+
+        let default = match default {
+            DefaultAttrs::Literal(DefaultLiteral::Null) => {
+                quote::quote! { ::squealy::ColumnDefault::Null }
+            }
+            DefaultAttrs::Literal(DefaultLiteral::Int(value)) => {
+                quote::quote! { ::squealy::ColumnDefault::Int(#value) }
+            }
+            DefaultAttrs::Literal(DefaultLiteral::UInt(value)) => {
+                quote::quote! { ::squealy::ColumnDefault::UInt(#value) }
+            }
+            DefaultAttrs::Literal(DefaultLiteral::Float(value)) => {
+                quote::quote! { ::squealy::ColumnDefault::Float(#value) }
+            }
+            DefaultAttrs::Literal(DefaultLiteral::Text(value)) => {
+                let value = Literal::string(value);
+                quote::quote! { ::squealy::ColumnDefault::Text(#value) }
+            }
+            DefaultAttrs::Literal(DefaultLiteral::Bool(value)) => {
+                let value = bool_tokens(*value);
+                quote::quote! { ::squealy::ColumnDefault::Bool(#value) }
+            }
+            DefaultAttrs::CurrentTimestamp => {
+                quote::quote! { ::squealy::ColumnDefault::CurrentTimestamp }
+            }
+            DefaultAttrs::CurrentDate => {
+                quote::quote! { ::squealy::ColumnDefault::CurrentDate }
+            }
+            DefaultAttrs::CurrentTime => {
+                quote::quote! { ::squealy::ColumnDefault::CurrentTime }
+            }
+            DefaultAttrs::Raw(value) => {
+                let value = Literal::string(value);
+                quote::quote! { ::squealy::ColumnDefault::Raw(#value) }
+            }
+        };
+
+        quote::quote! { Some(#default) }
+    }
+
     fn column_definition_tokens(
         &self,
         column_ident: &proc_macro2::Ident,
@@ -980,7 +1048,7 @@ impl Field {
         let generated = bool_tokens(self.attrs.generated);
         let insertable = bool_tokens(self.insertable());
         let updateable = bool_tokens(self.updateable());
-        let default = option_literal(self.attrs.default.as_deref());
+        let default = self.default_tokens();
         let db_type = option_literal(self.attrs.db_type.as_deref());
         let check = option_literal(self.attrs.check.as_deref());
         let references = self.references_tokens(column_ident);
@@ -998,7 +1066,7 @@ impl Field {
                 fn generated(&self) -> bool { #generated }
                 fn insertable(&self) -> bool { #insertable }
                 fn updateable(&self) -> bool { #updateable }
-                fn default(&self) -> Option<&'static str> { #default }
+                fn default(&self) -> Option<::squealy::ColumnDefault> { #default }
                 fn db_type(&self) -> Option<&'static str> { #db_type }
                 fn check(&self) -> Option<&'static str> { #check }
                 fn references(&self) -> Option<&'static dyn ::squealy::ForeignKey> { #references }
@@ -1447,7 +1515,10 @@ fn parse_meta_item(
         "generated" => attrs.generated = true,
         "insert" => attrs.insert = Some(required_bool(name, value_tokens)?),
         "update" => attrs.update = Some(required_bool(name, value_tokens)?),
-        "default" => attrs.default = Some(required_literal(name, value_tokens)?),
+        "default" => attrs.default = Some(parse_default(value_tokens)?),
+        "default_raw" => {
+            attrs.default = Some(DefaultAttrs::Raw(required_literal(name, value_tokens)?))
+        }
         "db_type" => attrs.db_type = Some(required_literal(name, value_tokens)?),
         "check" => attrs.check = Some(required_literal(name, value_tokens)?),
         "column_name" | "name" => attrs.column_name = Some(required_literal(name, value_tokens)?),
@@ -1456,6 +1527,118 @@ fn parse_meta_item(
     }
 
     Ok(())
+}
+
+fn parse_default(value_tokens: &[TokenTree]) -> Result<DefaultAttrs, String> {
+    let Some(token) = value_tokens.first() else {
+        return Err(
+            "attribute `default` requires `value(...)`, `current_timestamp`, `current_date`, or `current_time`"
+                .to_owned(),
+        );
+    };
+
+    if let TokenTree::Ident(ident) = token {
+        return match ident.to_string().as_str() {
+            "value" => {
+                let Some(TokenTree::Group(group)) = value_tokens.get(1) else {
+                    return Err("attribute `default = value(...)` requires a value".to_owned());
+                };
+                if group.delimiter() != Delimiter::Parenthesis {
+                    return Err("attribute `default = value(...)` requires parentheses".to_owned());
+                }
+                Ok(DefaultAttrs::Literal(parse_default_literal(
+                    &group.stream().into_iter().collect::<Vec<_>>(),
+                )?))
+            }
+            "current_timestamp" => Ok(DefaultAttrs::CurrentTimestamp),
+            "current_date" => Ok(DefaultAttrs::CurrentDate),
+            "current_time" => Ok(DefaultAttrs::CurrentTime),
+            _ => Err(format!(
+                "unsupported default `{ident}`; use `value(...)`, `current_timestamp`, `current_date`, or `current_time`"
+            )),
+        };
+    }
+
+    Err("attribute `default` uses portable defaults; use `default = value(...)` for literals or `default_raw = \"...\"` for backend-specific SQL".to_owned())
+}
+
+fn parse_default_literal(value_tokens: &[TokenTree]) -> Result<DefaultLiteral, String> {
+    let Some(token) = value_tokens.first() else {
+        return Err("attribute `default = value(...)` requires a literal value".to_owned());
+    };
+
+    if let TokenTree::Ident(ident) = token {
+        return match ident.to_string().as_str() {
+            "null" => Ok(DefaultLiteral::Null),
+            "true" => Ok(DefaultLiteral::Bool(true)),
+            "false" => Ok(DefaultLiteral::Bool(false)),
+            _ => Err(format!("unsupported default literal `{ident}`")),
+        };
+    }
+
+    let mut negative = false;
+    let token = if matches!(token, TokenTree::Punct(punct) if punct.as_char() == '-') {
+        negative = true;
+        value_tokens
+            .get(1)
+            .ok_or_else(|| "negative default value requires a numeric literal".to_owned())?
+    } else {
+        token
+    };
+
+    let TokenTree::Literal(literal_token) = token else {
+        return Err("attribute `default = value(...)` requires a literal value".to_owned());
+    };
+
+    let literal = literal_token.to_string();
+    if literal.starts_with('"') {
+        if negative {
+            return Err("string default values cannot be negative".to_owned());
+        }
+        return Ok(DefaultLiteral::Text(literal_string(literal_token)));
+    }
+
+    let literal = literal
+        .trim_end_matches("i8")
+        .trim_end_matches("i16")
+        .trim_end_matches("i32")
+        .trim_end_matches("i64")
+        .trim_end_matches("i128")
+        .trim_end_matches("isize")
+        .trim_end_matches("u8")
+        .trim_end_matches("u16")
+        .trim_end_matches("u32")
+        .trim_end_matches("u64")
+        .trim_end_matches("u128")
+        .trim_end_matches("usize")
+        .trim_end_matches("f32")
+        .trim_end_matches("f64");
+
+    if literal.contains('.') {
+        let mut value = literal
+            .parse::<f64>()
+            .map_err(|_| "float default value could not be parsed".to_owned())?;
+        if negative {
+            value = -value;
+        }
+        return Ok(DefaultLiteral::Float(value));
+    }
+
+    if negative {
+        let value = literal
+            .parse::<i128>()
+            .map_err(|_| "integer default value could not be parsed".to_owned())?;
+        Ok(DefaultLiteral::Int(-value))
+    } else {
+        if let Ok(value) = literal.parse::<i128>() {
+            Ok(DefaultLiteral::Int(value))
+        } else {
+            let value = literal
+                .parse::<u128>()
+                .map_err(|_| "integer default value could not be parsed".to_owned())?;
+            Ok(DefaultLiteral::UInt(value))
+        }
+    }
 }
 
 fn required_bool(name: &str, value_tokens: &[TokenTree]) -> Result<bool, String> {

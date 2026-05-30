@@ -1,4 +1,4 @@
-use std::future::{Future, ready};
+use std::future::{Future, Ready, ready};
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -29,6 +29,14 @@ impl<Row> Stream for EmptyRows<Row> {
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Ready(None)
     }
+}
+
+fn empty_rows<Row>() -> EmptyRows<Row> {
+    EmptyRows::default()
+}
+
+fn no_driver<T>() -> Ready<Result<T, PostgresError>> {
+    ready(Err(PostgresError::NoDriver))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -153,21 +161,21 @@ where
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        EmptyRows::default()
+        empty_rows()
     }
 
     fn fetch_all(
         &self,
     ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        ready(Err(PostgresError::NoDriver))
+        no_driver()
     }
 
     fn fetch_one(
         &self,
     ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        ready(Err(PostgresError::NoDriver))
+        no_driver()
     }
 
     fn fetch_optional(
@@ -175,7 +183,7 @@ where
     ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
     + Send
     + '_ {
-        ready(Err(PostgresError::NoDriver))
+        no_driver()
     }
 }
 
@@ -202,25 +210,25 @@ where
         &self,
     ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        ready(Err(PostgresError::NoDriver))
+        no_driver()
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        EmptyRows::default()
+        empty_rows()
     }
 
     fn fetch_all(
         &self,
     ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        ready(Err(PostgresError::NoDriver))
+        no_driver()
     }
 
     fn fetch_one(
         &self,
     ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        ready(Err(PostgresError::NoDriver))
+        no_driver()
     }
 
     fn fetch_optional(
@@ -228,7 +236,7 @@ where
     ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
     + Send
     + '_ {
-        ready(Err(PostgresError::NoDriver))
+        no_driver()
     }
 }
 
@@ -255,25 +263,25 @@ where
         &self,
     ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        ready(Err(PostgresError::NoDriver))
+        no_driver()
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        EmptyRows::default()
+        empty_rows()
     }
 
     fn fetch_all(
         &self,
     ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        ready(Err(PostgresError::NoDriver))
+        no_driver()
     }
 
     fn fetch_one(
         &self,
     ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        ready(Err(PostgresError::NoDriver))
+        no_driver()
     }
 
     fn fetch_optional(
@@ -281,7 +289,7 @@ where
     ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
     + Send
     + '_ {
-        ready(Err(PostgresError::NoDriver))
+        no_driver()
     }
 }
 
@@ -308,25 +316,25 @@ where
         &self,
     ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        ready(Err(PostgresError::NoDriver))
+        no_driver()
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        EmptyRows::default()
+        empty_rows()
     }
 
     fn fetch_all(
         &self,
     ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        ready(Err(PostgresError::NoDriver))
+        no_driver()
     }
 
     fn fetch_one(
         &self,
     ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        ready(Err(PostgresError::NoDriver))
+        no_driver()
     }
 
     fn fetch_optional(
@@ -334,7 +342,7 @@ where
     ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
     + Send
     + '_ {
-        ready(Err(PostgresError::NoDriver))
+        no_driver()
     }
 }
 

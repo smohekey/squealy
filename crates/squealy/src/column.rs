@@ -37,6 +37,21 @@ impl ColumnMode for ColumnNullableValue {
     type Type<'scope, U> = Option<U>;
 }
 
+/// A backend-agnostic column default.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ColumnDefault {
+    Null,
+    Int(i128),
+    UInt(u128),
+    Float(f64),
+    Text(&'static str),
+    Bool(bool),
+    CurrentTimestamp,
+    CurrentDate,
+    CurrentTime,
+    Raw(&'static str),
+}
+
 /// Database schema metadata for a single column.
 pub trait Column: Sync {
     fn name(&self) -> &'static str;
@@ -73,7 +88,7 @@ pub trait Column: Sync {
         !self.generated() && !self.auto_increment()
     }
 
-    fn default(&self) -> Option<&'static str> {
+    fn default(&self) -> Option<ColumnDefault> {
         None
     }
 
