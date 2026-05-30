@@ -160,6 +160,12 @@ where
 {
 }
 
+fn assert_user_id_name_and_post_row<'conn, Qry>(_: &'conn Qry)
+where
+    Qry: SelectQuery<'conn, Row = (i32, String, Post<'static, ColumnValue>)>,
+{
+}
+
 fn assert_expr_kind<'scope, K>(_: &Expr<'scope, K>)
 where
     K: ExprKind,
@@ -209,7 +215,43 @@ fn select_can_mix_column_and_table_projection_shapes() {
     assert_user_id_and_post_row(&user_ids_and_posts);
     assert_eq!(
         user_ids_and_posts.to_sql(),
-        r#"SELECT q0_0.id AS left_id, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM public.users AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id)"#
+        r#"SELECT q0_0.id AS t0_id, q0_1.id AS t1_id, q0_1.user_id AS t1_user_id, q0_1.body AS t1_body FROM public.users AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id)"#
+    );
+}
+
+#[test]
+fn select_can_project_three_part_tuple_shapes() {
+    let user_ids_names_and_posts = TestConnection.select::<(UserId, UserName, Post)>(|q| {
+        let user = q.from::<User>();
+        let post = q.join::<Post>(|post| post.user_id.equals(&user.id));
+        (user.id, user.name, post)
+    });
+
+    assert_user_id_name_and_post_row(&user_ids_names_and_posts);
+    assert_eq!(
+        user_ids_names_and_posts.to_sql(),
+        r#"SELECT q0_0.id AS t0_id, q0_0.name AS t1_name, q0_1.id AS t2_id, q0_1.user_id AS t2_user_id, q0_1.body AS t2_body FROM public.users AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id)"#
+    );
+}
+
+#[test]
+fn select_rebinds_three_part_tuple_subquery_shape() {
+    let rebound = TestConnection.select::<(UserId, UserName, Post)>(|q| {
+        let tuple_select = TestConnection.select::<(UserId, UserName, Post)>(|q| {
+            let user = q.from::<User>();
+            let post = q.join::<Post>(|post| post.user_id.equals(&user.id));
+            (user.id, user.name, post)
+        });
+        let tuple = q.q(&tuple_select);
+
+        q.where_(tuple.0.equals(&tuple.2.user_id));
+        tuple
+    });
+
+    assert_user_id_name_and_post_row(&rebound);
+    assert_eq!(
+        rebound.to_sql(),
+        r#"SELECT q0_0.t0_id AS t0_id, q0_0.t1_name AS t1_name, q0_0.t2_id AS t2_id, q0_0.t2_user_id AS t2_user_id, q0_0.t2_body AS t2_body FROM (SELECT q1_0.id AS t0_id, q1_0.name AS t1_name, q1_1.id AS t2_id, q1_1.user_id AS t2_user_id, q1_1.body AS t2_body FROM public.users AS q1_0 INNER JOIN public.posts AS q1_1 ON (q1_1.user_id = q1_0.id)) AS q0_0 WHERE (q0_0.t0_id = q0_0.t2_user_id)"#
     );
 }
 
@@ -311,7 +353,7 @@ fn select_can_inner_join_tables_with_typed_predicates() {
 
     assert_eq!(
         users_and_posts.to_sql(),
-        r#"SELECT q0_0.id AS left_id, q0_0.name AS left_name, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM public.users AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id)"#
+        r#"SELECT q0_0.id AS t0_id, q0_0.name AS t0_name, q0_1.id AS t1_id, q0_1.user_id AS t1_user_id, q0_1.body AS t1_body FROM public.users AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id)"#
     );
 }
 
@@ -325,7 +367,7 @@ fn select_can_left_join_tables_with_typed_predicates() {
 
     assert_eq!(
         users_and_posts.to_sql(),
-        r#"SELECT q0_0.id AS left_id, q0_0.name AS left_name, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM public.users AS q0_0 LEFT JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id)"#
+        r#"SELECT q0_0.id AS t0_id, q0_0.name AS t0_name, q0_1.id AS t1_id, q0_1.user_id AS t1_user_id, q0_1.body AS t1_body FROM public.users AS q0_0 LEFT JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id)"#
     );
 }
 
@@ -360,7 +402,7 @@ fn select_composes_subqueries_with_lateral_joins() {
 
     assert_eq!(
         users_and_posts.to_sql(),
-        r#"SELECT q0_0.id AS left_id, q0_0.name AS left_name, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM (SELECT q1_0.id AS id, q1_0.name AS name FROM public.users AS q1_0) AS q0_0 INNER JOIN LATERAL (SELECT q1_0.id AS id, q1_0.user_id AS user_id, q1_0.body AS body FROM (SELECT q2_0.id AS id, q2_0.user_id AS user_id, q2_0.body AS body FROM public.posts AS q2_0) AS q1_0 WHERE (q1_0.user_id = q0_0.id)) AS q0_1 ON TRUE WHERE (((((q0_0.id + ?) - ?) > ?) AND (NOT (q0_0.id <> ?))) OR (q0_0.name = ?))"#
+        r#"SELECT q0_0.id AS t0_id, q0_0.name AS t0_name, q0_1.id AS t1_id, q0_1.user_id AS t1_user_id, q0_1.body AS t1_body FROM (SELECT q1_0.id AS id, q1_0.name AS name FROM public.users AS q1_0) AS q0_0 INNER JOIN LATERAL (SELECT q1_0.id AS id, q1_0.user_id AS user_id, q1_0.body AS body FROM (SELECT q2_0.id AS id, q2_0.user_id AS user_id, q2_0.body AS body FROM public.posts AS q2_0) AS q1_0 WHERE (q1_0.user_id = q0_0.id)) AS q0_1 ON TRUE WHERE (((((q0_0.id + ?) - ?) > ?) AND (NOT (q0_0.id <> ?))) OR (q0_0.name = ?))"#
     );
     assert_eq!(
         users_and_posts.params(),
@@ -390,7 +432,7 @@ fn select_rebinds_tuple_subquery_shape_through_output_aliases() {
 
     assert_eq!(
         users_and_posts.to_sql(),
-        r#"SELECT q0_0.left_id AS left_id, q0_0.left_name AS left_name, q0_0.right_id AS right_id, q0_0.right_user_id AS right_user_id, q0_0.right_body AS right_body FROM (SELECT q1_0.id AS left_id, q1_0.name AS left_name, q1_1.id AS right_id, q1_1.user_id AS right_user_id, q1_1.body AS right_body FROM public.users AS q1_0 INNER JOIN public.posts AS q1_1 ON (q1_1.user_id = q1_0.id)) AS q0_0 WHERE (q0_0.left_id = q0_0.right_user_id)"#
+        r#"SELECT q0_0.t0_id AS t0_id, q0_0.t0_name AS t0_name, q0_0.t1_id AS t1_id, q0_0.t1_user_id AS t1_user_id, q0_0.t1_body AS t1_body FROM (SELECT q1_0.id AS t0_id, q1_0.name AS t0_name, q1_1.id AS t1_id, q1_1.user_id AS t1_user_id, q1_1.body AS t1_body FROM public.users AS q1_0 INNER JOIN public.posts AS q1_1 ON (q1_1.user_id = q1_0.id)) AS q0_0 WHERE (q0_0.t0_id = q0_0.t1_user_id)"#
     );
 }
 
@@ -450,7 +492,7 @@ fn select_collects_source_and_filter_params_in_sql_order() {
 
     assert_eq!(
         users_and_posts.to_sql(),
-        r#"SELECT q0_0.id AS left_id, q0_0.name AS left_name, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM (SELECT q1_0.id AS id, q1_0.name AS name FROM public.users AS q1_0 WHERE (q1_0.id > ?)) AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = ?) WHERE (q0_0.name = ?)"#
+        r#"SELECT q0_0.id AS t0_id, q0_0.name AS t0_name, q0_1.id AS t1_id, q0_1.user_id AS t1_user_id, q0_1.body AS t1_body FROM (SELECT q1_0.id AS id, q1_0.name AS name FROM public.users AS q1_0 WHERE (q1_0.id > ?)) AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = ?) WHERE (q0_0.name = ?)"#
     );
     assert_eq!(
         users_and_posts.params(),

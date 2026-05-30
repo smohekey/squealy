@@ -17,32 +17,6 @@ pub trait ProjectionShape {
     }
 }
 
-impl<L, R> ProjectionShape for (L, R)
-where
-    L: ProjectionShape,
-    R: ProjectionShape,
-    L::Row: Send,
-    R::Row: Send,
-    L::Exprs<'static>: Projectable,
-    R::Exprs<'static>: Projectable,
-{
-    type Exprs<'scope> = (
-        <L::Exprs<'static> as Projectable>::Rebound<'scope>,
-        <R::Exprs<'static> as Projectable>::Rebound<'scope>,
-    );
-    type Row = (L::Row, R::Row);
-
-    fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
-        let left = L::exprs(alias);
-        let right = R::exprs(alias);
-
-        (
-            left.re_alias_with_prefix(alias, "left"),
-            right.re_alias_with_prefix(alias, "right"),
-        )
-    }
-}
-
 macro_rules! impl_value_projection_shape {
     ($($ty:ty),* $(,)?) => {
         $(impl ProjectionShape for $ty {
@@ -123,46 +97,7 @@ pub trait Projectable: Clone {
     }
 }
 
-impl<L, R> Projectable for (L, R)
-where
-    L: Projectable,
-    R: Projectable,
-{
-    type Rebound<'scope> = (L::Rebound<'scope>, R::Rebound<'scope>);
-
-    fn project(&self) -> Vec<SelectColumn> {
-        let mut columns = Vec::new();
-        columns.extend(
-            self.0
-                .project()
-                .into_iter()
-                .map(|column| SelectColumn::new(column.expr, prefix_alias("left", &column.alias))),
-        );
-        columns.extend(
-            self.1
-                .project()
-                .into_iter()
-                .map(|column| SelectColumn::new(column.expr, prefix_alias("right", &column.alias))),
-        );
-        columns
-    }
-
-    fn re_alias<'scope>(&self, alias: &str) -> Self::Rebound<'scope> {
-        (
-            self.0.re_alias_with_prefix(alias, "left"),
-            self.1.re_alias_with_prefix(alias, "right"),
-        )
-    }
-
-    fn re_alias_with_prefix<'scope>(&self, alias: &str, prefix: &str) -> Self::Rebound<'scope> {
-        (
-            self.0
-                .re_alias_with_prefix(alias, &format!("{prefix}_left")),
-            self.1
-                .re_alias_with_prefix(alias, &format!("{prefix}_right")),
-        )
-    }
-}
+squealy_macros::tuple_projection_shapes!(32);
 
 impl<'expr, K> Projectable for Expr<'expr, K>
 where
@@ -173,29 +108,23 @@ where
     fn project(&self) -> Vec<SelectColumn> {
         vec![SelectColumn::new(
             self.node().clone(),
-            expression_alias(self),
+            self.project_alias().to_owned(),
         )]
     }
 
     fn re_alias<'scope>(&self, alias: &str) -> Self::Rebound<'scope> {
-        Expr::column(alias, &expression_alias(self))
+        Expr::column(alias, self.project_alias())
     }
 
     fn re_alias_with_prefix<'scope>(&self, alias: &str, prefix: &str) -> Self::Rebound<'scope> {
-        Expr::column(alias, &prefix_alias(prefix, &expression_alias(self)))
+        Expr::column_with_project_alias(
+            alias,
+            &prefix_alias(prefix, self.project_alias()),
+            self.project_alias().to_owned(),
+        )
     }
 }
 
 fn prefix_alias(prefix: &str, alias: &str) -> String {
     format!("{prefix}_{alias}")
-}
-
-fn expression_alias<K>(expr: &Expr<'_, K>) -> String
-where
-    K: ExprKind,
-{
-    match expr.node() {
-        crate::ExprNode::Column { column, .. } => column.clone(),
-        _ => "expr".to_owned(),
-    }
 }

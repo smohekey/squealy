@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::ops::{Add, BitAnd, BitOr, Div, Mul, Not, Sub};
 
@@ -174,6 +175,7 @@ where
 #[derive(Debug, PartialEq)]
 pub struct Expr<'scope, K> {
     node: ExprNode,
+    project_alias: Cow<'static, str>,
     _phantom: PhantomData<(&'scope (), K)>,
 }
 
@@ -181,29 +183,47 @@ impl<'scope, K> Expr<'scope, K>
 where
     K: ExprKind,
 {
-    fn from_node(node: ExprNode) -> Self {
+    fn from_node(node: ExprNode, project_alias: impl Into<Cow<'static, str>>) -> Self {
         Self {
             node,
+            project_alias: project_alias.into(),
             _phantom: PhantomData,
         }
     }
 
     #[doc(hidden)]
     pub fn column(alias: &str, column: &str) -> Self {
-        Self::from_node(ExprNode::Column {
-            alias: alias.to_owned(),
-            column: column.to_owned(),
-        })
+        Self::column_with_project_alias(alias, column, column.to_owned())
+    }
+
+    #[doc(hidden)]
+    pub fn column_with_project_alias(
+        alias: &str,
+        column: &str,
+        project_alias: impl Into<Cow<'static, str>>,
+    ) -> Self {
+        Self::from_node(
+            ExprNode::Column {
+                alias: alias.to_owned(),
+                column: column.to_owned(),
+            },
+            project_alias,
+        )
     }
 
     /// Construct a SQL literal expression.
     pub fn lit(value: impl IntoBindValue) -> Self {
-        Self::from_node(ExprNode::Literal(value.into_bind_value()))
+        Self::from_node(ExprNode::Literal(value.into_bind_value()), "expr")
     }
 
     /// The core-owned expression IR node.
     pub fn node(&self) -> &ExprNode {
         &self.node
+    }
+
+    /// The default output alias when this expression is selected directly.
+    pub fn project_alias(&self) -> &str {
+        &self.project_alias
     }
 
     /// SQL equality.
@@ -346,11 +366,14 @@ where
     where
         ResultKind: ExprKind,
     {
-        Expr::<ResultKind>::from_node(ExprNode::Binary {
-            left: Box::new(left.clone()),
-            op,
-            right: Box::new(right),
-        })
+        Expr::<ResultKind>::from_node(
+            ExprNode::Binary {
+                left: Box::new(left.clone()),
+                op,
+                right: Box::new(right),
+            },
+            "expr",
+        )
     }
 }
 
@@ -358,6 +381,7 @@ impl<'scope, K> Clone for Expr<'scope, K> {
     fn clone(&self) -> Self {
         Self {
             node: self.node.clone(),
+            project_alias: self.project_alias.clone(),
             _phantom: PhantomData,
         }
     }
