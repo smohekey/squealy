@@ -1190,7 +1190,7 @@ impl<'scope> Clone for Order<'scope> {
 /// let conn = DocConnection;
 /// let _ = conn.select::<User>(|q| {
 ///     let user = q.from::<User>();
-///     q.where_(user.id.clone());
+///     q.where_(user.id);
 ///     user
 /// });
 /// ```
