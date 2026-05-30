@@ -4,28 +4,28 @@ use std::marker::PhantomData;
 use crate::ir::{Filter, Select, Sort, Source};
 use crate::{Connection, Order, Predicate, Projectable, ProjectionShape, TableProjection};
 
-/// A backend-specific query object backed by core-owned select IR.
-pub trait Query {
-    type Connection: Connection;
+/// A backend-specific select query object backed by core-owned select IR.
+pub trait SelectQuery<'conn> {
+    type Connection: Connection + 'conn;
     type Shape: ProjectionShape;
 
     fn ir(&self) -> &Select;
 }
 
-/// Scoped query builder. Each `q` call adds a lateral-capable subquery.
-pub struct Q<'scope, Conn: Connection> {
+/// Scoped select builder. Each `q` call adds a lateral-capable subquery.
+pub struct SelectBuilder<'conn, 'scope, Conn: Connection> {
     depth: usize,
     sources: Vec<Source>,
     filters: Vec<Filter>,
     orders: Vec<Sort>,
     limit: Option<usize>,
     offset: Option<usize>,
-    _phantom: PhantomData<(&'scope (), Conn)>,
+    _phantom: PhantomData<(&'conn Conn, &'scope ())>,
 }
 
-impl<'scope, Conn> Q<'scope, Conn>
+impl<'conn, 'scope, Conn> SelectBuilder<'conn, 'scope, Conn>
 where
-    Conn: Connection,
+    Conn: Connection + 'conn,
 {
     fn new(depth: usize) -> Self {
         Self {
@@ -89,9 +89,12 @@ where
     }
 
     /// Add a subquery as a lateral source and return its projected expression columns in this query scope.
-    pub fn lateral<Qry>(&mut self, query: &Qry) -> <Qry::Shape as ProjectionShape>::Exprs<'scope>
+    pub fn lateral<'query, Qry>(
+        &mut self,
+        query: &Qry,
+    ) -> <Qry::Shape as ProjectionShape>::Exprs<'scope>
     where
-        Qry: Query<Connection = Conn>,
+        Qry: SelectQuery<'query, Connection = Conn>,
     {
         let alias = self.next_alias();
         self.sources
@@ -100,9 +103,9 @@ where
     }
 
     /// Add a subquery and return its projected expression columns in this query scope.
-    pub fn q<Qry>(&mut self, query: &Qry) -> <Qry::Shape as ProjectionShape>::Exprs<'scope>
+    pub fn q<'query, Qry>(&mut self, query: &Qry) -> <Qry::Shape as ProjectionShape>::Exprs<'scope>
     where
-        Qry: Query<Connection = Conn>,
+        Qry: SelectQuery<'query, Connection = Conn>,
     {
         self.lateral(query)
     }
@@ -143,7 +146,7 @@ thread_local! {
 ///
 /// ```compile_fail
 /// use squealy::*;
-/// # use std::{io, marker::PhantomData};
+/// # use std::marker::PhantomData;
 ///
 /// #[derive(Clone, Table)]
 /// struct User<'scope, C: ColumnMode = ColumnExpr> {
@@ -152,12 +155,13 @@ thread_local! {
 /// #
 /// # struct DocConnection;
 /// #
-/// # struct DocQuery<Shape> {
+/// # struct DocSelect<'conn, Shape> {
 /// #     select: Select,
+/// #     _connection: PhantomData<&'conn DocConnection>,
 /// #     _shape: PhantomData<Shape>,
 /// # }
 /// #
-/// # impl<Shape> Query for DocQuery<Shape>
+/// # impl<'conn, Shape> SelectQuery<'conn> for DocSelect<'conn, Shape>
 /// # where
 /// #     Shape: ProjectionShape,
 /// # {
@@ -169,40 +173,26 @@ thread_local! {
 /// #     }
 /// # }
 /// #
-/// # impl Backend for DocConnection {
-/// #     fn write_query<Qry>(&self, _query: &Qry, _writer: &mut impl io::Write) -> io::Result<()>
-/// #     where
-/// #         Self: Connection,
-/// #         Qry: Query<Connection = Self>,
-/// #     {
-/// #         Ok(())
-/// #     }
-/// #
-/// #     fn write_table(
-/// #         &self,
-/// #         _table: &(dyn Table + Sync),
-/// #         _writer: &mut impl io::Write,
-/// #     ) -> io::Result<()> {
-/// #         Ok(())
-/// #     }
-/// # }
-/// #
 /// # impl Connection for DocConnection {
-/// #     type Query<Shape> = DocQuery<Shape>
+/// #     type Error = ();
+/// #
+/// #     type Select<'conn, Shape> = DocSelect<'conn, Shape>
 /// #     where
+/// #         Self: 'conn,
 /// #         Shape: ProjectionShape;
 /// #
-/// #     fn query<Shape>(
+/// #     fn select<Shape>(
 /// #         &self,
 /// #         f: impl for<'scope> FnOnce(
-/// #             &mut ::squealy::Q<'scope, Self>,
+/// #             &mut ::squealy::SelectBuilder<'_, 'scope, Self>,
 /// #         ) -> <Shape as ProjectionShape>::Exprs<'scope>,
-/// #     ) -> Self::Query<Shape>
+/// #     ) -> Self::Select<'_, Shape>
 /// #     where
 /// #         Shape: ProjectionShape,
 /// #     {
-/// #         DocQuery {
+/// #         DocSelect {
 /// #             select: build_select::<Self, Shape>(f),
+/// #             _connection: PhantomData,
 /// #             _shape: PhantomData,
 /// #         }
 /// #     }
@@ -210,25 +200,27 @@ thread_local! {
 ///
 /// let conn = DocConnection;
 /// let mut leaked = None;
-/// let _ = conn.query::<User>(|q| {
+/// let _ = conn.select::<User>(|q| {
 ///     let user = q.each::<User>();
 ///     leaked = Some(user.clone());
 ///     user
 /// });
 /// let _ = leaked.unwrap();
 /// ```
-pub fn build_select<Conn, Shape>(
-    f: impl for<'scope> FnOnce(&mut Q<'scope, Conn>) -> <Shape as ProjectionShape>::Exprs<'scope>,
+pub fn build_select<'conn, Conn, Shape>(
+    f: impl for<'scope> FnOnce(
+        &mut SelectBuilder<'conn, 'scope, Conn>,
+    ) -> <Shape as ProjectionShape>::Exprs<'scope>,
 ) -> Select
 where
-    Conn: Connection,
+    Conn: Connection + 'conn,
     Shape: ProjectionShape,
 {
     QUERY_DEPTH.with(|depth| {
         let current_depth = depth.get();
         depth.set(current_depth + 1);
 
-        let mut q = Q::new(current_depth);
+        let mut q = SelectBuilder::new(current_depth);
         let output = f(&mut q);
 
         depth.set(current_depth);
