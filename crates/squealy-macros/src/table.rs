@@ -101,6 +101,11 @@ impl TableStruct {
             .iter()
             .map(|field| Literal::string(&field.column_name()))
             .collect::<Vec<_>>();
+        let select_column_tys = self
+            .fields
+            .iter()
+            .map(|_| quote::quote! { ::squealy::SelectColumn })
+            .collect::<Vec<_>>();
         let column_idents = self
             .fields
             .iter()
@@ -383,17 +388,18 @@ impl TableStruct {
             #update_table_impl
 
             impl<'scope> ::squealy::Projectable for #exprs_ident <'scope> {
+                type Columns = (#(#select_column_tys,)*);
                 type Rebound<'next_scope> = #rebound_exprs_ident <'next_scope>;
 
-                fn project(&self) -> ::std::vec::Vec<::squealy::SelectColumn> {
-                    ::std::vec![
+                fn project(&self) -> Self::Columns {
+                    (
                         #(
                             ::squealy::SelectColumn::new(
                                 self.#fields.node(),
                                 #field_literals,
                             ),
                         )*
-                    ]
+                    )
                 }
 
                 fn re_alias<'next_scope>(&self, alias: &str) -> Self::Rebound<'next_scope> {
@@ -416,17 +422,18 @@ impl TableStruct {
             }
 
             impl<'scope> ::squealy::Projectable for #rebound_exprs_ident <'scope> {
+                type Columns = (#(#select_column_tys,)*);
                 type Rebound<'next_scope> = #rebound_exprs_ident <'next_scope>;
 
-                fn project(&self) -> ::std::vec::Vec<::squealy::SelectColumn> {
-                    ::std::vec![
+                fn project(&self) -> Self::Columns {
+                    (
                         #(
                             ::squealy::SelectColumn::new(
                                 self.#fields.node().clone(),
                                 #field_literals,
                             ),
                         )*
-                    ]
+                    )
                 }
 
                 fn re_alias<'next_scope>(&self, alias: &str) -> Self::Rebound<'next_scope> {
@@ -449,17 +456,18 @@ impl TableStruct {
             }
 
             impl<'scope> ::squealy::Projectable for #nullable_exprs_ident <'scope> {
+                type Columns = (#(#select_column_tys,)*);
                 type Rebound<'next_scope> = #nullable_rebound_exprs_ident <'next_scope>;
 
-                fn project(&self) -> ::std::vec::Vec<::squealy::SelectColumn> {
-                    ::std::vec![
+                fn project(&self) -> Self::Columns {
+                    (
                         #(
                             ::squealy::SelectColumn::new(
                                 self.#fields.node(),
                                 #field_literals,
                             ),
                         )*
-                    ]
+                    )
                 }
 
                 fn re_alias<'next_scope>(&self, alias: &str) -> Self::Rebound<'next_scope> {
@@ -482,17 +490,18 @@ impl TableStruct {
             }
 
             impl<'scope> ::squealy::Projectable for #nullable_rebound_exprs_ident <'scope> {
+                type Columns = (#(#select_column_tys,)*);
                 type Rebound<'next_scope> = #nullable_rebound_exprs_ident <'next_scope>;
 
-                fn project(&self) -> ::std::vec::Vec<::squealy::SelectColumn> {
-                    ::std::vec![
+                fn project(&self) -> Self::Columns {
+                    (
                         #(
                             ::squealy::SelectColumn::new(
                                 self.#fields.node().clone(),
                                 #field_literals,
                             ),
                         )*
-                    ]
+                    )
                 }
 
                 fn re_alias<'next_scope>(&self, alias: &str) -> Self::Rebound<'next_scope> {
@@ -627,21 +636,22 @@ impl TableStruct {
                     .collect::<Vec<_>>();
 
                 quote::quote! {
-                    impl<'conn, Conn, #(#impl_state_params),*> #builder_ident <'conn, Conn, #(#self_states),*>
+                    impl<'conn, Conn, Columns, #(#impl_state_params),*> #builder_ident <'conn, Conn, Columns, #(#self_states),*>
                     where
                         Conn: ::squealy::QueryBuilder + 'conn,
+                        Columns: ::squealy::TupleAppend<::squealy::InsertColumn>,
                     {
                         pub fn #field_ident(
-                            mut self,
+                            self,
                             value: impl #value_bound,
-                        ) -> #builder_ident <'conn, Conn, #(#return_states),*> {
-                            self.columns.push(::squealy::InsertColumn::new(
+                        ) -> #builder_ident <'conn, Conn, <Columns as ::squealy::TupleAppend<::squealy::InsertColumn>>::Output, #(#return_states),*> {
+                            let columns = self.columns.append(::squealy::InsertColumn::new(
                                 #field_literal,
                                 #bind_value,
                             ));
                             #builder_ident {
                                 connection: self.connection,
-                                columns: self.columns,
+                                columns,
                                 _state: ::std::marker::PhantomData,
                             }
                         }
@@ -662,20 +672,20 @@ impl TableStruct {
             )*
 
             #[derive(Clone, Debug, PartialEq)]
-            struct #builder_ident <'conn, Conn: ::squealy::QueryBuilder + 'conn, #(#state_defaults),*> {
+            struct #builder_ident <'conn, Conn: ::squealy::QueryBuilder + 'conn, Columns = (), #(#state_defaults),*> {
                 connection: &'conn Conn,
-                columns: ::std::vec::Vec<::squealy::InsertColumn>,
+                columns: Columns,
                 _state: ::std::marker::PhantomData<#state_tuple>,
             }
 
-            impl<'conn, Conn> #builder_ident <'conn, Conn, #(#initial_states),*>
+            impl<'conn, Conn> #builder_ident <'conn, Conn, (), #(#initial_states),*>
             where
                 Conn: ::squealy::QueryBuilder + 'conn,
             {
                 fn new(connection: &'conn Conn) -> Self {
                     Self {
                         connection,
-                        columns: ::std::vec::Vec::new(),
+                        columns: (),
                         _state: ::std::marker::PhantomData,
                     }
                 }
@@ -683,9 +693,10 @@ impl TableStruct {
 
             #(#setters)*
 
-            impl<'conn, Conn, #(#execute_state_params),*> #builder_ident <'conn, Conn, #(#execute_states),*>
+            impl<'conn, Conn, Columns, #(#execute_state_params),*> #builder_ident <'conn, Conn, Columns, #(#execute_states),*>
             where
                 Conn: ::squealy::QueryBuilder + 'conn,
+                Columns: ::squealy::IrList<::squealy::InsertColumn>,
             {
                 const ALIAS: &'static str = "q0_0";
 
@@ -724,7 +735,7 @@ impl TableStruct {
                     ) -> P,
                 ) -> <Conn as ::squealy::QueryBuilder>::Insert<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>
                 where
-                    P: ::squealy::ReturningProjection<'static>,
+                    P: ::squealy::ReturningProjection<'static> + ::squealy::Projectable,
                     <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<<Conn as ::squealy::QueryBuilder>::Backend>,
                 {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
@@ -832,9 +843,10 @@ impl TableStruct {
             quote::quote! {}
         } else {
             quote::quote! {
-                impl<'conn, Conn, #(#state_idents),*> #builder_ident <'conn, Conn, ::squealy::MutationFiltered, #(#state_idents),*>
+                impl<'conn, Conn, Columns, #(#state_idents),*> #builder_ident <'conn, Conn, Columns, ::squealy::MutationFiltered, #(#state_idents),*>
                 where
                     Conn: ::squealy::QueryBuilder + 'conn,
+                    Columns: ::squealy::IrList<::squealy::UpdateColumn>,
                     #state_tuple: #ready_ident,
                 {
                     pub fn execute(
@@ -874,7 +886,7 @@ impl TableStruct {
                         ) -> P,
                     ) -> <Conn as ::squealy::QueryBuilder>::Update<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>
                     where
-                        P: ::squealy::ReturningProjection<'static>,
+                        P: ::squealy::ReturningProjection<'static> + ::squealy::Projectable,
                         <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<<Conn as ::squealy::QueryBuilder>::Backend>,
                     {
                         let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
@@ -945,21 +957,22 @@ impl TableStruct {
                     .collect::<Vec<_>>();
 
                 quote::quote! {
-                    impl<'conn, Conn, FilterState, #(#impl_state_params),*> #builder_ident <'conn, Conn, FilterState, #(#self_states),*>
+                    impl<'conn, Conn, Columns, FilterState, #(#impl_state_params),*> #builder_ident <'conn, Conn, Columns, FilterState, #(#self_states),*>
                     where
                         Conn: ::squealy::QueryBuilder + 'conn,
+                        Columns: ::squealy::TupleAppend<::squealy::UpdateColumn>,
                     {
                         pub fn #field_ident(
-                            mut self,
+                            self,
                             value: impl #value_bound,
-                        ) -> #builder_ident <'conn, Conn, FilterState, #(#return_states),*> {
-                            self.columns.push(::squealy::UpdateColumn::new(
+                        ) -> #builder_ident <'conn, Conn, <Columns as ::squealy::TupleAppend<::squealy::UpdateColumn>>::Output, FilterState, #(#return_states),*> {
+                            let columns = self.columns.append(::squealy::UpdateColumn::new(
                                 #field_literal,
                                 #bind_value,
                             ));
                             #builder_ident {
                                 connection: self.connection,
-                                columns: self.columns,
+                                columns,
                                 filters: self.filters,
                                 _state: ::std::marker::PhantomData,
                             }
@@ -984,28 +997,28 @@ impl TableStruct {
             #(#ready_impls)*
 
             #[derive(Clone, Debug, PartialEq)]
-            struct #builder_ident <'conn, Conn: ::squealy::QueryBuilder + 'conn, FilterState = ::squealy::MutationUnfiltered, #(#state_defaults),*> {
+            struct #builder_ident <'conn, Conn: ::squealy::QueryBuilder + 'conn, Columns = (), FilterState = ::squealy::MutationUnfiltered, #(#state_defaults),*> {
                 connection: &'conn Conn,
-                columns: ::std::vec::Vec<::squealy::UpdateColumn>,
+                columns: Columns,
                 filters: ::std::vec::Vec<::squealy::Filter>,
                 _state: ::std::marker::PhantomData<(FilterState, #state_tuple)>,
             }
 
-            impl<'conn, Conn> #builder_ident <'conn, Conn, ::squealy::MutationUnfiltered, #(#initial_states),*>
+            impl<'conn, Conn> #builder_ident <'conn, Conn, (), ::squealy::MutationUnfiltered, #(#initial_states),*>
             where
                 Conn: ::squealy::QueryBuilder + 'conn,
             {
                 fn new(connection: &'conn Conn) -> Self {
                     Self {
                         connection,
-                        columns: ::std::vec::Vec::new(),
+                        columns: (),
                         filters: ::std::vec::Vec::new(),
                         _state: ::std::marker::PhantomData,
                     }
                 }
             }
 
-            impl<'conn, Conn, FilterState, #(#state_idents),*> #builder_ident <'conn, Conn, FilterState, #(#state_idents),*>
+            impl<'conn, Conn, Columns, FilterState, #(#state_idents),*> #builder_ident <'conn, Conn, Columns, FilterState, #(#state_idents),*>
             where
                 Conn: ::squealy::QueryBuilder + 'conn,
             {
@@ -1016,7 +1029,7 @@ impl TableStruct {
                     predicate: impl ::std::ops::FnOnce(
                         &<#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
                     ) -> ::squealy::Predicate<'static>,
-                ) -> #builder_ident <'conn, Conn, ::squealy::MutationFiltered, #(#state_params),*> {
+                ) -> #builder_ident <'conn, Conn, Columns, ::squealy::MutationFiltered, #(#state_params),*> {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                     let predicate = predicate(&table);
                     self.filters.push(::squealy::Filter::new(predicate.node().clone()));
@@ -1028,7 +1041,7 @@ impl TableStruct {
                     }
                 }
 
-                pub fn all(self) -> #builder_ident <'conn, Conn, ::squealy::MutationFiltered, #(#state_params),*> {
+                pub fn all(self) -> #builder_ident <'conn, Conn, Columns, ::squealy::MutationFiltered, #(#state_params),*> {
                     #builder_ident {
                         connection: self.connection,
                         columns: self.columns,
