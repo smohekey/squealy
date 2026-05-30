@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use crate::{ProjectionShape, SelectQuery, Selection, Table};
+use crate::{ProjectionShape, Returning, SelectQuery, Table};
 
 /// Backend-specific DDL generation.
 pub trait Backend: Sized {
@@ -19,7 +19,7 @@ pub trait Connection: Sized {
 
     fn select<Shape>(
         &self,
-        f: impl for<'scope> FnOnce(&mut crate::SelectBuilder<'_, 'scope, Self>) -> Selection<Shape>,
+        f: impl for<'scope> FnOnce(&mut crate::SelectBuilder<'_, 'scope, Self>) -> Returning<Shape>,
     ) -> Self::Select<'_, Shape>
     where
         Shape: ProjectionShape;

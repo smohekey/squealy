@@ -296,7 +296,7 @@ impl TableStruct {
                 }
             }
 
-            impl<'scope> ::squealy::SelectableProjection<'scope> for #exprs_ident <'scope> {
+            impl<'scope> ::squealy::ReturningProjection<'scope> for #exprs_ident <'scope> {
                 type Shape = #ident <'static, ::squealy::ColumnExpr>;
             }
 
@@ -329,7 +329,7 @@ impl TableStruct {
                 }
             }
 
-            impl<'scope> ::squealy::SelectableProjection<'scope> for #rebound_exprs_ident <'scope> {
+            impl<'scope> ::squealy::ReturningProjection<'scope> for #rebound_exprs_ident <'scope> {
                 type Shape = #ident <'static, ::squealy::ColumnExpr>;
             }
 
@@ -362,7 +362,7 @@ impl TableStruct {
                 }
             }
 
-            impl<'scope> ::squealy::SelectableProjection<'scope> for #nullable_exprs_ident <'scope> {
+            impl<'scope> ::squealy::ReturningProjection<'scope> for #nullable_exprs_ident <'scope> {
                 type Shape = ::squealy::Maybe<#ident <'static, ::squealy::ColumnExpr>>;
             }
 
@@ -395,7 +395,7 @@ impl TableStruct {
                 }
             }
 
-            impl<'scope> ::squealy::SelectableProjection<'scope> for #nullable_rebound_exprs_ident <'scope> {
+            impl<'scope> ::squealy::ReturningProjection<'scope> for #nullable_rebound_exprs_ident <'scope> {
                 type Shape = ::squealy::Maybe<#ident <'static, ::squealy::ColumnExpr>>;
             }
         }

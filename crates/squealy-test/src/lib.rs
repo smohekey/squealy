@@ -7,7 +7,7 @@ use futures_core::Stream;
 
 use squealy::{
     ArithmeticOp, Backend, BindValue, CompareOp, Connection, ExprNode, OrderDirection, OrderNode,
-    PredicateNode, ProjectionShape, Select, SelectBuilder, SelectColumn, SelectQuery, Selection,
+    PredicateNode, ProjectionShape, Returning, Select, SelectBuilder, SelectColumn, SelectQuery,
     Sort, Source, SourceKind, SourceTarget, Table, build_select,
 };
 
@@ -187,7 +187,7 @@ impl Connection for TestConnection {
 
     fn select<Shape>(
         &self,
-        f: impl for<'scope> FnOnce(&mut SelectBuilder<'_, 'scope, Self>) -> Selection<Shape>,
+        f: impl for<'scope> FnOnce(&mut SelectBuilder<'_, 'scope, Self>) -> Returning<Shape>,
     ) -> Self::Select<'_, Shape>
     where
         Shape: ProjectionShape,

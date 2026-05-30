@@ -41,34 +41,34 @@ pub trait SelectQuery<'conn> {
     + '_;
 }
 
-/// A projection value that can identify the selected query shape it represents.
-pub trait SelectableProjection<'scope>: Projectable {
+/// A projection value that can identify the query shape returned by `returning`.
+pub trait ReturningProjection<'scope>: Projectable {
     type Shape: ProjectionShape;
 }
 
-impl<'scope, K> SelectableProjection<'scope> for Expr<'scope, K>
+impl<'scope, K> ReturningProjection<'scope> for Expr<'scope, K>
 where
     K: ExprKind + ProjectionShape,
 {
     type Shape = K;
 }
 
-impl<'scope, K> SelectableProjection<'scope> for ColumnRef<'scope, K>
+impl<'scope, K> ReturningProjection<'scope> for ColumnRef<'scope, K>
 where
     K: ExprKind + ProjectionShape,
 {
     type Shape = K;
 }
 
-impl<'scope, T> SelectableProjection<'scope> for T
+impl<'scope, T> ReturningProjection<'scope> for T
 where
     T: ExprKind + ProjectionShape + IntoBindValue + Clone,
 {
     type Shape = T;
 }
 
-/// A selected projection carrying the inferred projection shape.
-pub struct Selection<Shape>
+/// A `returning` projection carrying the inferred query shape.
+pub struct Returning<Shape>
 where
     Shape: ProjectionShape,
 {
@@ -76,7 +76,7 @@ where
     _shape: PhantomData<Shape>,
 }
 
-impl<Shape> Selection<Shape>
+impl<Shape> Returning<Shape>
 where
     Shape: ProjectionShape,
 {
@@ -198,11 +198,11 @@ where
     pub fn returning<P>(
         &mut self,
         projection: P,
-    ) -> Selection<<P as SelectableProjection<'scope>>::Shape>
+    ) -> Returning<<P as ReturningProjection<'scope>>::Shape>
     where
-        P: SelectableProjection<'scope>,
+        P: ReturningProjection<'scope>,
     {
-        Selection::new(projection.project())
+        Returning::new(projection.project())
     }
 
     fn next_alias(&self) -> String {
@@ -234,7 +234,7 @@ thread_local! {
     static QUERY_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
-/// Build select IR from a scoped query builder closure returning a shape-carrying selection.
+/// Build select IR from a scoped query builder closure returning a shape-carrying projection.
 ///
 /// Expressions created by the builder are scoped to that builder invocation and cannot be
 /// smuggled out as reusable values:
@@ -280,7 +280,7 @@ thread_local! {
 /// #         &self,
 /// #         f: impl for<'scope> FnOnce(
 /// #             &mut ::squealy::SelectBuilder<'_, 'scope, Self>,
-/// #         ) -> Selection<Shape>,
+/// #         ) -> Returning<Shape>,
 /// #     ) -> Self::Select<'_, Shape>
 /// #     where
 /// #         Shape: ProjectionShape,
@@ -303,7 +303,7 @@ thread_local! {
 /// let _ = leaked.unwrap();
 /// ```
 pub fn build_select<'conn, Conn, Shape>(
-    f: impl for<'scope> FnOnce(&mut SelectBuilder<'conn, 'scope, Conn>) -> Selection<Shape>,
+    f: impl for<'scope> FnOnce(&mut SelectBuilder<'conn, 'scope, Conn>) -> Returning<Shape>,
 ) -> Select
 where
     Conn: Connection + 'conn,
