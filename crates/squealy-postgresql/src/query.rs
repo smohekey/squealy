@@ -8,13 +8,13 @@ use bytes::BytesMut;
 use futures_core::Stream;
 
 use squealy::{
-    BindValue, BindValueKind, Connection, Decode, Delete, DeleteQuery, FloatWidth, Insert,
+    Backend, BindValue, BindValueKind, Connection, Decode, Delete, DeleteQuery, FloatWidth, Insert,
     InsertQuery, InsertableTable, IntWidth, ProjectionShape, RowsAffected, Select, SelectQuery,
     TableProjection, UIntWidth, Update, UpdateQuery, UpdateableTable,
 };
 use tokio_postgres::types::{FromSqlOwned, IsNull, ToSql, Type, to_sql_checked};
 
-use crate::{PostgresConnection, PostgresError, PostgresTransaction, sql};
+use crate::{Postgres, PostgresConnection, PostgresError, PostgresTransaction, sql};
 
 #[derive(Debug)]
 pub struct EmptyRows<Row> {
@@ -42,23 +42,16 @@ impl<Row> Stream for EmptyRows<Row> {
 }
 
 #[derive(Debug)]
-pub struct PostgresRowReader<'row, Conn = PostgresConnection> {
+pub struct PostgresRowReader<'row> {
     row: &'row tokio_postgres::Row,
     index: usize,
-    _connection: PhantomData<fn() -> Conn>,
 }
 
-impl<'row, Conn> PostgresRowReader<'row, Conn> {
+impl<'row> PostgresRowReader<'row> {
     fn new(row: &'row tokio_postgres::Row) -> Self {
-        Self {
-            row,
-            index: 0,
-            _connection: PhantomData,
-        }
+        Self { row, index: 0 }
     }
-}
 
-impl<Conn> PostgresRowReader<'_, Conn> {
     fn take_sql<T>(&mut self) -> Result<T, PostgresError>
     where
         T: FromSqlOwned,
@@ -73,32 +66,21 @@ impl<Conn> PostgresRowReader<'_, Conn> {
 }
 
 impl squealy::RowReader for PostgresRowReader<'_> {
-    type Connection = PostgresConnection;
+    type Backend = Postgres;
 
     fn read<T>(&mut self) -> Result<T, PostgresError>
     where
-        T: Decode<PostgresConnection>,
-    {
-        T::decode(self)
-    }
-}
-
-impl<'conn> squealy::RowReader for PostgresRowReader<'_, PostgresTransaction<'conn>> {
-    type Connection = PostgresTransaction<'conn>;
-
-    fn read<T>(&mut self) -> Result<T, PostgresError>
-    where
-        T: Decode<PostgresTransaction<'conn>>,
+        T: Decode<Postgres>,
     {
         T::decode(self)
     }
 }
 
 macro_rules! impl_postgres_decode_direct {
-    ($conn:ty; $($ty:ty),* $(,)?) => {
-        $(impl Decode<$conn> for $ty {
+    ($($ty:ty),* $(,)?) => {
+        $(impl Decode<Postgres> for $ty {
             fn decode(
-                row: &mut <$conn as Connection>::RowReader<'_>,
+                row: &mut <Postgres as Backend>::RowReader<'_>,
             ) -> Result<Self, PostgresError> {
                 row.take_sql()
             }
@@ -107,10 +89,10 @@ macro_rules! impl_postgres_decode_direct {
 }
 
 macro_rules! impl_postgres_decode_from_i64 {
-    ($conn:ty; $($ty:ty),* $(,)?) => {
-        $(impl Decode<$conn> for $ty {
+    ($($ty:ty),* $(,)?) => {
+        $(impl Decode<Postgres> for $ty {
             fn decode(
-                row: &mut <$conn as Connection>::RowReader<'_>,
+                row: &mut <Postgres as Backend>::RowReader<'_>,
             ) -> Result<Self, PostgresError> {
                 let value = row.take_sql::<i64>()?;
                 <$ty>::try_from(value).map_err(|_| PostgresError::Conversion(stringify!($ty)))
@@ -119,75 +101,23 @@ macro_rules! impl_postgres_decode_from_i64 {
     };
 }
 
-impl_postgres_decode_direct!(PostgresConnection; i16, i32, i64, f32, f64, String, bool);
-impl_postgres_decode_from_i64!(
-    PostgresConnection;
-    i8,
-    i128,
-    isize,
-    u8,
-    u16,
-    u32,
-    u64,
-    u128,
-    usize
-);
+impl_postgres_decode_direct!(i16, i32, i64, f32, f64, String, bool);
+impl_postgres_decode_from_i64!(i8, i128, isize, u8, u16, u32, u64, u128, usize);
 
-macro_rules! impl_postgres_transaction_decode_direct {
-    ($($ty:ty),* $(,)?) => {
-        $(impl<'tx> Decode<PostgresTransaction<'tx>> for $ty {
-            fn decode(
-                row: &mut <PostgresTransaction<'tx> as Connection>::RowReader<'_>,
-            ) -> Result<Self, PostgresError> {
-                row.take_sql()
-            }
-        })*
-    };
-}
-
-macro_rules! impl_postgres_transaction_decode_from_i64 {
-    ($($ty:ty),* $(,)?) => {
-        $(impl<'tx> Decode<PostgresTransaction<'tx>> for $ty {
-            fn decode(
-                row: &mut <PostgresTransaction<'tx> as Connection>::RowReader<'_>,
-            ) -> Result<Self, PostgresError> {
-                let value = row.take_sql::<i64>()?;
-                <$ty>::try_from(value).map_err(|_| PostgresError::Conversion(stringify!($ty)))
-            }
-        })*
-    };
-}
-
-impl_postgres_transaction_decode_direct!(i16, i32, i64, f32, f64, String, bool);
-impl_postgres_transaction_decode_from_i64!(i8, i128, isize, u8, u16, u32, u64, u128, usize);
-
-impl<T> Decode<PostgresConnection> for Option<T>
+impl<T> Decode<Postgres> for Option<T>
 where
     T: FromSqlOwned,
 {
-    fn decode(
-        row: &mut <PostgresConnection as Connection>::RowReader<'_>,
-    ) -> Result<Self, PostgresError> {
-        row.take_sql()
-    }
-}
-
-impl<'tx, T> Decode<PostgresTransaction<'tx>> for Option<T>
-where
-    T: FromSqlOwned,
-{
-    fn decode(
-        row: &mut <PostgresTransaction<'tx> as Connection>::RowReader<'_>,
-    ) -> Result<Self, PostgresError> {
+    fn decode(row: &mut <Postgres as Backend>::RowReader<'_>) -> Result<Self, PostgresError> {
         row.take_sql()
     }
 }
 
 #[doc(hidden)]
-pub trait PostgresExecutor: Connection<Error = PostgresError> {
+pub trait PostgresExecutor: Connection<Backend = Postgres> {
     fn decode_row<Row>(row: &tokio_postgres::Row) -> Result<Row, PostgresError>
     where
-        Row: Decode<Self>;
+        Row: Decode<Postgres>;
 
     fn query_raw<'query>(
         &'query self,
@@ -242,7 +172,7 @@ where
 impl<Row, Conn> Stream for PostgresRows<'_, Row, Conn>
 where
     Conn: PostgresExecutor,
-    Row: Decode<Conn>,
+    Row: Decode<Postgres>,
 {
     type Item = Result<Row, PostgresError>;
 
@@ -412,7 +342,7 @@ fn render_update(update: &Update) -> String {
 impl PostgresExecutor for PostgresConnection {
     fn decode_row<Row>(row: &tokio_postgres::Row) -> Result<Row, PostgresError>
     where
-        Row: Decode<Self>,
+        Row: Decode<Postgres>,
     {
         let mut row = PostgresRowReader::new(row);
         Row::decode(&mut row)
@@ -458,9 +388,9 @@ impl PostgresExecutor for PostgresConnection {
 impl PostgresExecutor for PostgresTransaction<'_> {
     fn decode_row<Row>(row: &tokio_postgres::Row) -> Result<Row, PostgresError>
     where
-        Row: Decode<Self>,
+        Row: Decode<Postgres>,
     {
-        let mut row = PostgresRowReader::<Self>::new(row);
+        let mut row = PostgresRowReader::new(row);
         Row::decode(&mut row)
     }
 
@@ -613,7 +543,7 @@ impl<'conn, Shape, Conn> SelectQuery<'conn> for PostgresSelect<'conn, Shape, Con
 where
     Shape: ProjectionShape,
     Conn: PostgresExecutor + 'conn,
-    Shape::Row: Decode<Conn>,
+    Shape::Row: Decode<Postgres>,
 {
     type Connection = Conn;
     type Shape = Shape;
@@ -642,7 +572,7 @@ where
     S: InsertableTable,
     Shape: ProjectionShape,
     Conn: PostgresExecutor + 'conn,
-    Shape::Row: Decode<Conn>,
+    Shape::Row: Decode<Postgres>,
 {
     type Connection = Conn;
     type Table = S;
@@ -660,8 +590,10 @@ where
 
     fn execute(
         &self,
-    ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
-    {
+    ) -> impl Future<
+        Output = Result<u64, <<Self::Connection as Connection>::Backend as Backend>::Error>,
+    > + Send
+    + '_ {
         self.connection.execute_sql(
             render_insert(&self.insert),
             sql::insert_params(&self.insert),
@@ -682,7 +614,7 @@ where
     S: TableProjection,
     Shape: ProjectionShape,
     Conn: PostgresExecutor + 'conn,
-    Shape::Row: Decode<Conn>,
+    Shape::Row: Decode<Postgres>,
 {
     type Connection = Conn;
     type Table = S;
@@ -700,8 +632,10 @@ where
 
     fn execute(
         &self,
-    ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
-    {
+    ) -> impl Future<
+        Output = Result<u64, <<Self::Connection as Connection>::Backend as Backend>::Error>,
+    > + Send
+    + '_ {
         self.connection.execute_sql(
             render_delete(&self.delete),
             sql::delete_params(&self.delete),
@@ -722,7 +656,7 @@ where
     S: UpdateableTable,
     Shape: ProjectionShape,
     Conn: PostgresExecutor + 'conn,
-    Shape::Row: Decode<Conn>,
+    Shape::Row: Decode<Postgres>,
 {
     type Connection = Conn;
     type Table = S;
@@ -740,8 +674,10 @@ where
 
     fn execute(
         &self,
-    ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
-    {
+    ) -> impl Future<
+        Output = Result<u64, <<Self::Connection as Connection>::Backend as Backend>::Error>,
+    > + Send
+    + '_ {
         self.connection.execute_sql(
             render_update(&self.update),
             sql::update_params(&self.update),

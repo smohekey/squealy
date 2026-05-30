@@ -6,12 +6,12 @@ use std::task::{Context, Poll};
 use futures_core::Stream;
 
 use squealy::{
-    BindValue, Connection, Decode, Delete, DeleteQuery, Insert, InsertQuery, InsertableTable,
-    ProjectionShape, RowsAffected, Select, SelectQuery, TableProjection, Update, UpdateQuery,
-    UpdateableTable,
+    Backend, BindValue, Connection, Decode, Delete, DeleteQuery, Insert, InsertQuery,
+    InsertableTable, ProjectionShape, RowsAffected, Select, SelectQuery, TableProjection, Update,
+    UpdateQuery, UpdateableTable,
 };
 
-use crate::{TestConnection, TestError, sql};
+use crate::{TestBackend, TestConnection, TestError, sql};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EmptyRows<Row> {
@@ -44,11 +44,11 @@ pub struct TestRowReader<'row> {
 }
 
 impl squealy::RowReader for TestRowReader<'_> {
-    type Connection = TestConnection;
+    type Backend = TestBackend;
 
     fn read<T>(&mut self) -> Result<T, TestError>
     where
-        T: Decode<TestConnection>,
+        T: Decode<TestBackend>,
     {
         T::decode(self)
     }
@@ -56,9 +56,9 @@ impl squealy::RowReader for TestRowReader<'_> {
 
 macro_rules! impl_test_decode_no_rows {
     ($($ty:ty),* $(,)?) => {
-        $(impl Decode<TestConnection> for $ty {
+        $(impl Decode<TestBackend> for $ty {
             fn decode(
-                _row: &mut <TestConnection as Connection>::RowReader<'_>,
+                _row: &mut <TestBackend as Backend>::RowReader<'_>,
             ) -> Result<Self, TestError> {
                 Err(TestError::NoRows)
             }
@@ -71,11 +71,11 @@ impl_test_decode_no_rows!(u8, u16, u32, u64, u128, usize);
 impl_test_decode_no_rows!(f32, f64);
 impl_test_decode_no_rows!(String, bool);
 
-impl<T> Decode<TestConnection> for Option<T>
+impl<T> Decode<TestBackend> for Option<T>
 where
-    T: Decode<TestConnection>,
+    T: Decode<TestBackend>,
 {
-    fn decode(_row: &mut <TestConnection as Connection>::RowReader<'_>) -> Result<Self, TestError> {
+    fn decode(_row: &mut <TestBackend as Backend>::RowReader<'_>) -> Result<Self, TestError> {
         Ok(None)
     }
 }
@@ -225,7 +225,7 @@ where
 impl<'conn, Shape> SelectQuery<'conn> for TestSelect<'conn, Shape>
 where
     Shape: ProjectionShape,
-    Shape::Row: Decode<TestConnection>,
+    Shape::Row: Decode<TestBackend>,
 {
     type Connection = TestConnection;
     type Shape = Shape;
@@ -249,7 +249,7 @@ impl<'conn, S, Shape> InsertQuery<'conn> for TestInsert<'conn, S, Shape>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
-    Shape::Row: Decode<TestConnection>,
+    Shape::Row: Decode<TestBackend>,
 {
     type Connection = TestConnection;
     type Table = S;
@@ -267,8 +267,10 @@ where
 
     fn execute(
         &self,
-    ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
-    {
+    ) -> impl Future<
+        Output = Result<u64, <<Self::Connection as Connection>::Backend as Backend>::Error>,
+    > + Send
+    + '_ {
         self.connection.execute_insert(&self.insert)
     }
 
@@ -281,7 +283,7 @@ impl<'conn, S, Shape> DeleteQuery<'conn> for TestDelete<'conn, S, Shape>
 where
     S: TableProjection,
     Shape: ProjectionShape,
-    Shape::Row: Decode<TestConnection>,
+    Shape::Row: Decode<TestBackend>,
 {
     type Connection = TestConnection;
     type Table = S;
@@ -299,8 +301,10 @@ where
 
     fn execute(
         &self,
-    ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
-    {
+    ) -> impl Future<
+        Output = Result<u64, <<Self::Connection as Connection>::Backend as Backend>::Error>,
+    > + Send
+    + '_ {
         self.connection.execute_delete(&self.delete)
     }
 
@@ -313,7 +317,7 @@ impl<'conn, S, Shape> UpdateQuery<'conn> for TestUpdate<'conn, S, Shape>
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
-    Shape::Row: Decode<TestConnection>,
+    Shape::Row: Decode<TestBackend>,
 {
     type Connection = TestConnection;
     type Table = S;
@@ -331,8 +335,10 @@ where
 
     fn execute(
         &self,
-    ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
-    {
+    ) -> impl Future<
+        Output = Result<u64, <<Self::Connection as Connection>::Backend as Backend>::Error>,
+    > + Send
+    + '_ {
         self.connection.execute_update(&self.update)
     }
 

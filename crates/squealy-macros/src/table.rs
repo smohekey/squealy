@@ -331,14 +331,14 @@ impl TableStruct {
                 }
             }
 
-            impl<Conn> ::squealy::Decode<Conn> for #ident <'static, ::squealy::ColumnValue>
+            impl<Backend> ::squealy::Decode<Backend> for #ident <'static, ::squealy::ColumnValue>
             where
-                Conn: ::squealy::Connection,
-                #(#field_value_tys: ::squealy::Decode<Conn>,)*
+                Backend: ::squealy::Backend,
+                #(#field_value_tys: ::squealy::Decode<Backend>,)*
             {
                 fn decode(
-                    row: &mut <Conn as ::squealy::Connection>::RowReader<'_>,
-                ) -> ::std::result::Result<Self, <Conn as ::squealy::Connection>::Error> {
+                    row: &mut <Backend as ::squealy::Backend>::RowReader<'_>,
+                ) -> ::std::result::Result<Self, <Backend as ::squealy::Backend>::Error> {
                     Ok(#ident {
                         #(
                             #fields: ::squealy::RowReader::read::<#field_value_tys>(row)?,
@@ -347,14 +347,14 @@ impl TableStruct {
                 }
             }
 
-            impl<Conn> ::squealy::Decode<Conn> for #row_shape_ident
+            impl<Backend> ::squealy::Decode<Backend> for #row_shape_ident
             where
-                Conn: ::squealy::Connection,
-                #(#row_field_value_tys: ::squealy::Decode<Conn>,)*
+                Backend: ::squealy::Backend,
+                #(#row_field_value_tys: ::squealy::Decode<Backend>,)*
             {
                 fn decode(
-                    row: &mut <Conn as ::squealy::Connection>::RowReader<'_>,
-                ) -> ::std::result::Result<Self, <Conn as ::squealy::Connection>::Error> {
+                    row: &mut <Backend as ::squealy::Backend>::RowReader<'_>,
+                ) -> ::std::result::Result<Self, <Backend as ::squealy::Backend>::Error> {
                     Ok(#row_shape_ident {
                         #(
                             #fields: ::squealy::RowReader::read::<#row_field_value_tys>(row)?,
@@ -363,14 +363,14 @@ impl TableStruct {
                 }
             }
 
-            impl<Conn> ::squealy::Decode<Conn> for #ident <'static, ::squealy::ColumnNullableValue>
+            impl<Backend> ::squealy::Decode<Backend> for #ident <'static, ::squealy::ColumnNullableValue>
             where
-                Conn: ::squealy::Connection,
-                #(::std::option::Option<#field_value_tys>: ::squealy::Decode<Conn>,)*
+                Backend: ::squealy::Backend,
+                #(::std::option::Option<#field_value_tys>: ::squealy::Decode<Backend>,)*
             {
                 fn decode(
-                    row: &mut <Conn as ::squealy::Connection>::RowReader<'_>,
-                ) -> ::std::result::Result<Self, <Conn as ::squealy::Connection>::Error> {
+                    row: &mut <Backend as ::squealy::Backend>::RowReader<'_>,
+                ) -> ::std::result::Result<Self, <Backend as ::squealy::Backend>::Error> {
                     Ok(#ident {
                         #(
                             #fields: ::squealy::RowReader::read::<::std::option::Option<#field_value_tys>>(row)?,
@@ -692,7 +692,7 @@ impl TableStruct {
                 pub fn execute(
                     self,
                 ) -> impl ::std::future::Future<
-                    Output = ::std::result::Result<u64, <Conn as ::squealy::Connection>::Error>,
+                    Output = ::std::result::Result<u64, <<Conn as ::squealy::Connection>::Backend as ::squealy::Backend>::Error>,
                 > + 'conn {
                     let query = ::squealy::Connection::insert_query::<#table_ident <'static, ::squealy::ColumnExpr>>(
                         self.connection,
@@ -711,7 +711,7 @@ impl TableStruct {
                 ) -> <Conn as ::squealy::Connection>::Insert<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>
                 where
                     P: ::squealy::ReturningProjection<'static>,
-                    <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<Conn>,
+                    <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<<Conn as ::squealy::Connection>::Backend>,
                 {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                     let projection = projection(table);
@@ -820,7 +820,7 @@ impl TableStruct {
                     pub fn execute(
                         self,
                     ) -> impl ::std::future::Future<
-                        Output = ::std::result::Result<u64, <Conn as ::squealy::Connection>::Error>,
+                        Output = ::std::result::Result<u64, <<Conn as ::squealy::Connection>::Backend as ::squealy::Backend>::Error>,
                     > + 'conn {
                         let query = ::squealy::Connection::update_query::<#table_ident <'static, ::squealy::ColumnExpr>>(
                             self.connection,
@@ -841,7 +841,7 @@ impl TableStruct {
                     ) -> <Conn as ::squealy::Connection>::Update<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>
                     where
                         P: ::squealy::ReturningProjection<'static>,
-                        <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<Conn>,
+                        <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<<Conn as ::squealy::Connection>::Backend>,
                     {
                         let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                         let projection = projection(table);

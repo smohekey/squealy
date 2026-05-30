@@ -1,5 +1,5 @@
 use squealy::*;
-use squealy_postgresql::PostgresConnection;
+use squealy_postgresql::{Postgres, PostgresConnection};
 
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(Public)]
@@ -154,10 +154,9 @@ fn postgres_mutation_returning_expressions_continue_placeholder_numbering() {
 
 #[test]
 fn postgres_backend_writes_table_ddl() {
-    let connection = PostgresConnection::default();
     let mut sql = Vec::new();
     let tables = <Public as Schema>::tables().collect::<Vec<_>>();
-    connection.write_table(tables[0], &mut sql).unwrap();
+    Postgres.write_table(tables[0], &mut sql).unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert_eq!(
