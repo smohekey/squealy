@@ -100,8 +100,8 @@ impl Generator for TestGenerator {
     }
 }
 
-fn posts_of_user(user_id: Expr<'static, i32>) -> Query<Post<'static, ColumnExpr>> {
-    query(|q| {
+fn posts_of_user<'scope>(user_id: Expr<'scope, i32>) -> Query<Post<'static, ColumnExpr>> {
+    query::<Post>(|q| {
         let post = q.q(Query::each::<Post>());
         q.where_(post.user_id.clone().equals(user_id));
         post
@@ -209,7 +209,7 @@ fn each_query_carries_table_projection_shape() {
 
 #[test]
 fn query_can_select_scoped_table_sources_directly() {
-    let users = query(|q| q.each::<User>());
+    let users = query::<User>(|q| q.each::<User>());
 
     assert_eq!(
         users.to_sql(),
@@ -219,7 +219,7 @@ fn query_can_select_scoped_table_sources_directly() {
 
 #[test]
 fn query_can_order_by_typed_expressions() {
-    let users = query(|q| {
+    let users = query::<User>(|q| {
         let user = q.each::<User>();
         q.order_by(user.name.clone().desc());
         q.order_by(user.id.clone().asc());
@@ -234,7 +234,7 @@ fn query_can_order_by_typed_expressions() {
 
 #[test]
 fn query_can_limit_and_offset_rows() {
-    let users = query(|q| {
+    let users = query::<User>(|q| {
         let user = q.each::<User>();
         q.order_by(user.id.clone().asc());
         q.limit(10);
@@ -250,7 +250,7 @@ fn query_can_limit_and_offset_rows() {
 
 #[test]
 fn query_can_inner_join_tables_with_typed_predicates() {
-    let users_and_posts = query(|q| {
+    let users_and_posts = query::<(User, Post)>(|q| {
         let user = q.each::<User>();
         let post = q.join::<Post>(|post| post.user_id.clone().equals(user.id.clone()));
         (user, post)
@@ -264,7 +264,7 @@ fn query_can_inner_join_tables_with_typed_predicates() {
 
 #[test]
 fn query_can_left_join_tables_with_typed_predicates() {
-    let users_and_posts = query(|q| {
+    let users_and_posts = query::<(User, Post)>(|q| {
         let user = q.each::<User>();
         let post = q.left_join::<Post>(|post| post.user_id.clone().equals(user.id.clone()));
         (user, post)
@@ -278,7 +278,7 @@ fn query_can_left_join_tables_with_typed_predicates() {
 
 #[test]
 fn query_writes_sql_to_writer() {
-    let users = query(|q| q.each::<User>());
+    let users = query::<User>(|q| q.each::<User>());
     let mut sql = Vec::new();
 
     users.write_sql(&mut sql).unwrap();
@@ -291,7 +291,7 @@ fn query_writes_sql_to_writer() {
 
 #[test]
 fn query_composes_subqueries_with_lateral_joins() {
-    let users_and_posts = query(|q| {
+    let users_and_posts = query::<(User, Post)>(|q| {
         let user = q.q(Query::each::<User>());
         let post = q.q(posts_of_user(user.id.clone()));
         q.where_(
@@ -314,8 +314,8 @@ fn query_composes_subqueries_with_lateral_joins() {
 
 #[test]
 fn query_rebinds_tuple_subquery_shape_through_output_aliases() {
-    let users_and_posts = query(|q| {
-        let pair = q.q(query(|q| {
+    let users_and_posts = query::<(User, Post)>(|q| {
+        let pair = q.q(query::<(User, Post)>(|q| {
             let user = q.each::<User>();
             let post = q.join::<Post>(|post| post.user_id.clone().equals(user.id.clone()));
             (user, post)
