@@ -78,4 +78,35 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
     assert_eq!(users.len(), 2);
     assert_eq!(users[0].name, "Ada");
     assert_eq!(users[1].name, "Grace");
+
+    let updated_ada = connection
+        .update::<IntegrationUser>()
+        .name("Ada Lovelace")
+        .where_(|user| user.id.equals(ada.id))
+        .returning(|user| user)
+        .fetch_one()
+        .await
+        .expect("update Ada");
+    assert_eq!(updated_ada.id, ada.id);
+    assert_eq!(updated_ada.name, "Ada Lovelace");
+
+    let deleted_grace = connection
+        .delete::<IntegrationUser>()
+        .where_(|user| user.name.equals("Grace"))
+        .returning(|user| user)
+        .fetch_one()
+        .await
+        .expect("delete Grace");
+    assert_eq!(deleted_grace.name, "Grace");
+
+    let remaining = connection
+        .select(|q| {
+            let user = q.from::<IntegrationUser>();
+            q.returning(user)
+        })
+        .fetch_all()
+        .await
+        .expect("fetch remaining users");
+
+    assert_eq!(remaining, vec![updated_ada]);
 }

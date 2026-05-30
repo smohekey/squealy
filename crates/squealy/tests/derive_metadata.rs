@@ -910,6 +910,38 @@ fn select_accepts_primitive_literals_and_expression_operators() {
 }
 
 #[test]
+fn primitive_literals_preserve_bind_value_widths() {
+    assert_eq!(
+        1_i16.into_bind_value().kind(),
+        &BindValueKind::Int {
+            value: 1,
+            width: IntWidth::I16,
+        }
+    );
+    assert_eq!(
+        1_i32.into_bind_value().kind(),
+        &BindValueKind::Int {
+            value: 1,
+            width: IntWidth::I32,
+        }
+    );
+    assert_eq!(
+        1_i64.into_bind_value().kind(),
+        &BindValueKind::Int {
+            value: 1,
+            width: IntWidth::I64,
+        }
+    );
+    assert_eq!(
+        1.0_f32.into_bind_value().kind(),
+        &BindValueKind::Float {
+            value: 1.0,
+            width: FloatWidth::F32,
+        }
+    );
+}
+
+#[test]
 fn select_collects_source_and_filter_params_in_sql_order() {
     let users_and_posts = TestConnection.select(|q| {
         let user_select = TestConnection.select(|q| {

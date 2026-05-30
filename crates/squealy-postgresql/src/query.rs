@@ -7,8 +7,9 @@ use std::task::{Context, Poll};
 use futures_core::Stream;
 
 use squealy::{
-    BindValue, Connection, Decode, Delete, DeleteQuery, Insert, InsertQuery, InsertableTable,
-    ProjectionShape, Select, SelectQuery, TableProjection, Update, UpdateQuery, UpdateableTable,
+    BindValue, BindValueKind, Connection, Decode, Delete, DeleteQuery, FloatWidth, Insert,
+    InsertQuery, InsertableTable, IntWidth, ProjectionShape, Select, SelectQuery, TableProjection,
+    UIntWidth, Update, UpdateQuery, UpdateableTable,
 };
 use tokio_postgres::types::{FromSqlOwned, ToSql};
 
@@ -209,8 +210,11 @@ where
 impl<Row> Unpin for PostgresRows<'_, Row> {}
 
 enum PostgresParam {
-    Int(i64),
-    Float(f64),
+    Int16(i16),
+    Int32(i32),
+    Int64(i64),
+    Float32(f32),
+    Float64(f64),
     Text(String),
     Bool(bool),
 }
@@ -218,8 +222,11 @@ enum PostgresParam {
 impl PostgresParam {
     fn as_sql(&self) -> &(dyn ToSql + Sync) {
         match self {
-            Self::Int(value) => value,
-            Self::Float(value) => value,
+            Self::Int16(value) => value,
+            Self::Int32(value) => value,
+            Self::Int64(value) => value,
+            Self::Float32(value) => value,
+            Self::Float64(value) => value,
             Self::Text(value) => value,
             Self::Bool(value) => value,
         }
@@ -229,19 +236,49 @@ impl PostgresParam {
 fn postgres_params(params: Vec<BindValue>) -> Result<Vec<PostgresParam>, PostgresError> {
     params
         .into_iter()
-        .map(|param| match param {
-            BindValue::Int(value) => i64::try_from(value)
-                .map(PostgresParam::Int)
-                .map_err(|_| PostgresError::UnsupportedBind(BindValue::Int(value))),
-            BindValue::UInt(value) => i64::try_from(value)
-                .map(PostgresParam::Int)
-                .map_err(|_| PostgresError::UnsupportedBind(BindValue::UInt(value))),
-            BindValue::Float(value) => Ok(PostgresParam::Float(value)),
-            BindValue::Text(value) => Ok(PostgresParam::Text(value)),
-            BindValue::Bool(value) => Ok(PostgresParam::Bool(value)),
-            BindValue::Null => Err(PostgresError::UnsupportedBind(BindValue::Null)),
+        .map(|param| match param.into_kind() {
+            BindValueKind::Int { value, width } => postgres_signed_int(value, width),
+            BindValueKind::UInt { value, width } => postgres_unsigned_int(value, width),
+            BindValueKind::Float { value, width } => postgres_float(value, width),
+            BindValueKind::Text(value) => Ok(PostgresParam::Text(value)),
+            BindValueKind::Bool(value) => Ok(PostgresParam::Bool(value)),
+            BindValueKind::Null => Err(PostgresError::UnsupportedBind(BindValue::Null)),
         })
         .collect()
+}
+
+fn postgres_signed_int(value: i128, width: IntWidth) -> Result<PostgresParam, PostgresError> {
+    match width {
+        IntWidth::I8 | IntWidth::I16 => i16::try_from(value)
+            .map(PostgresParam::Int16)
+            .map_err(|_| PostgresError::UnsupportedBind(BindValue::Int(value))),
+        IntWidth::I32 => i32::try_from(value)
+            .map(PostgresParam::Int32)
+            .map_err(|_| PostgresError::UnsupportedBind(BindValue::Int(value))),
+        IntWidth::I64 | IntWidth::I128 | IntWidth::Isize => i64::try_from(value)
+            .map(PostgresParam::Int64)
+            .map_err(|_| PostgresError::UnsupportedBind(BindValue::Int(value))),
+    }
+}
+
+fn postgres_unsigned_int(value: u128, width: UIntWidth) -> Result<PostgresParam, PostgresError> {
+    match width {
+        UIntWidth::U8 | UIntWidth::U16 => i32::try_from(value)
+            .map(PostgresParam::Int32)
+            .map_err(|_| PostgresError::UnsupportedBind(BindValue::UInt(value))),
+        UIntWidth::U32 | UIntWidth::U64 | UIntWidth::U128 | UIntWidth::Usize => {
+            i64::try_from(value)
+                .map(PostgresParam::Int64)
+                .map_err(|_| PostgresError::UnsupportedBind(BindValue::UInt(value)))
+        }
+    }
+}
+
+fn postgres_float(value: f64, width: FloatWidth) -> Result<PostgresParam, PostgresError> {
+    match width {
+        FloatWidth::F32 => Ok(PostgresParam::Float32(value as f32)),
+        FloatWidth::F64 => Ok(PostgresParam::Float64(value)),
+    }
 }
 
 async fn execute_sql(

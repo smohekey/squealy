@@ -1,14 +1,206 @@
 use std::borrow::Cow;
 
 /// A SQL bind parameter value.
+#[derive(Clone, Debug)]
+pub struct BindValue {
+    kind: BindValueKind,
+}
+
 #[derive(Clone, Debug, PartialEq)]
-pub enum BindValue {
-    Int(i128),
-    UInt(u128),
-    Float(f64),
+pub enum BindValueKind {
+    Int { value: i128, width: IntWidth },
+    UInt { value: u128, width: UIntWidth },
+    Float { value: f64, width: FloatWidth },
     Text(String),
     Bool(bool),
     Null,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntWidth {
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    Isize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UIntWidth {
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    Usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloatWidth {
+    F32,
+    F64,
+}
+
+impl BindValue {
+    #[allow(non_snake_case)]
+    pub const fn Int(value: i128) -> Self {
+        Self::int128(value)
+    }
+
+    #[allow(non_snake_case)]
+    pub const fn UInt(value: u128) -> Self {
+        Self::uint128(value)
+    }
+
+    #[allow(non_snake_case)]
+    pub const fn Float(value: f64) -> Self {
+        Self::float64(value)
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Text(value: String) -> Self {
+        Self::text(value)
+    }
+
+    #[allow(non_snake_case)]
+    pub const fn Bool(value: bool) -> Self {
+        Self::bool(value)
+    }
+
+    #[allow(non_upper_case_globals)]
+    pub const Null: Self = Self {
+        kind: BindValueKind::Null,
+    };
+
+    pub const fn int8(value: i8) -> Self {
+        Self::int(value as i128, IntWidth::I8)
+    }
+
+    pub const fn int16(value: i16) -> Self {
+        Self::int(value as i128, IntWidth::I16)
+    }
+
+    pub const fn int32(value: i32) -> Self {
+        Self::int(value as i128, IntWidth::I32)
+    }
+
+    pub const fn int64(value: i64) -> Self {
+        Self::int(value as i128, IntWidth::I64)
+    }
+
+    pub const fn int128(value: i128) -> Self {
+        Self::int(value, IntWidth::I128)
+    }
+
+    pub const fn isize(value: isize) -> Self {
+        Self::int(value as i128, IntWidth::Isize)
+    }
+
+    pub const fn uint8(value: u8) -> Self {
+        Self::uint(value as u128, UIntWidth::U8)
+    }
+
+    pub const fn uint16(value: u16) -> Self {
+        Self::uint(value as u128, UIntWidth::U16)
+    }
+
+    pub const fn uint32(value: u32) -> Self {
+        Self::uint(value as u128, UIntWidth::U32)
+    }
+
+    pub const fn uint64(value: u64) -> Self {
+        Self::uint(value as u128, UIntWidth::U64)
+    }
+
+    pub const fn uint128(value: u128) -> Self {
+        Self::uint(value, UIntWidth::U128)
+    }
+
+    pub const fn usize(value: usize) -> Self {
+        Self::uint(value as u128, UIntWidth::Usize)
+    }
+
+    pub const fn float32(value: f32) -> Self {
+        Self::float(value as f64, FloatWidth::F32)
+    }
+
+    pub const fn float64(value: f64) -> Self {
+        Self::float(value, FloatWidth::F64)
+    }
+
+    pub fn text(value: impl Into<String>) -> Self {
+        Self {
+            kind: BindValueKind::Text(value.into()),
+        }
+    }
+
+    pub const fn bool(value: bool) -> Self {
+        Self {
+            kind: BindValueKind::Bool(value),
+        }
+    }
+
+    pub const fn kind(&self) -> &BindValueKind {
+        &self.kind
+    }
+
+    pub fn into_kind(self) -> BindValueKind {
+        self.kind
+    }
+
+    const fn int(value: i128, width: IntWidth) -> Self {
+        Self {
+            kind: BindValueKind::Int { value, width },
+        }
+    }
+
+    const fn uint(value: u128, width: UIntWidth) -> Self {
+        Self {
+            kind: BindValueKind::UInt { value, width },
+        }
+    }
+
+    const fn float(value: f64, width: FloatWidth) -> Self {
+        Self {
+            kind: BindValueKind::Float { value, width },
+        }
+    }
+}
+
+impl PartialEq for BindValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.kind, &other.kind) {
+            (
+                BindValueKind::Int {
+                    value: left_value, ..
+                },
+                BindValueKind::Int {
+                    value: right_value, ..
+                },
+            ) => left_value == right_value,
+            (
+                BindValueKind::UInt {
+                    value: left_value, ..
+                },
+                BindValueKind::UInt {
+                    value: right_value, ..
+                },
+            ) => left_value == right_value,
+            (
+                BindValueKind::Float {
+                    value: left_value, ..
+                },
+                BindValueKind::Float {
+                    value: right_value, ..
+                },
+            ) => left_value == right_value,
+            (BindValueKind::Text(left), BindValueKind::Text(right)) => left == right,
+            (BindValueKind::Bool(left), BindValueKind::Bool(right)) => left == right,
+            (BindValueKind::Null, BindValueKind::Null) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
