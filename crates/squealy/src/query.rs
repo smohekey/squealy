@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use futures_core::Stream;
 
-use crate::ir::{Delete, Filter, Insert, Select, Sort, Source};
+use crate::ir::{Delete, Filter, Insert, InsertColumn, Select, Sort, Source};
 use crate::{
     ColumnRef, Connection, Expr, ExprKind, InsertableTable, IntoBindValue, Maybe, Order, Predicate,
     Projectable, ProjectionShape, SchemaTable, SelectColumn, TableProjection,
@@ -385,12 +385,12 @@ where
     })
 }
 
-/// Build insert IR for a table row.
-pub fn build_insert<S>(row: S::WithColumn<'static, crate::ColumnValue>) -> Insert
+/// Build insert IR for a table and ordered column bindings.
+pub fn build_insert<S>(columns: Vec<InsertColumn>) -> Insert
 where
     S: InsertableTable,
 {
-    Insert::new(<S as SchemaTable>::qualified_name(), S::insert_columns(row))
+    Insert::new(<S as SchemaTable>::qualified_name(), columns)
 }
 
 /// Build delete IR from a scoped delete builder closure.
