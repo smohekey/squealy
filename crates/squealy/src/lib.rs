@@ -24,11 +24,15 @@ pub use expr::{
 pub use foreign_key::ForeignKey;
 pub use index::Index;
 pub use ir::{
-    ArithmeticOp, BindValue, CompareOp, ExprNode, Filter, OrderDirection, OrderNode, PredicateNode,
-    Select, SelectColumn, Sort, Source, SourceKind, SourceTarget,
+    ArithmeticOp, BindValue, CompareOp, Delete, ExprNode, Filter, Insert, InsertColumn,
+    OrderDirection, OrderNode, PredicateNode, Select, SelectColumn, Sort, Source, SourceKind,
+    SourceTarget,
 };
 pub use projection::{Maybe, Projectable, ProjectionShape, TableProjection};
-pub use query::{Returning, ReturningProjection, SelectBuilder, SelectQuery, build_select};
+pub use query::{
+    DeleteBuilder, DeleteQuery, InsertQuery, Returning, ReturningProjection, SelectBuilder,
+    SelectQuery, build_delete, build_insert, build_select,
+};
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{Database, Schema, Table};
-pub use table::{SchemaTable, Table};
+pub use table::{InsertableTable, SchemaTable, Table};

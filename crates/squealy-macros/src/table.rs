@@ -267,6 +267,21 @@ impl TableStruct {
                 }
             }
 
+            impl ::squealy::InsertableTable for #ident <'static, ::squealy::ColumnExpr> {
+                fn insert_columns(
+                    row: Self::WithColumn<'static, ::squealy::ColumnValue>,
+                ) -> ::std::vec::Vec<::squealy::InsertColumn> {
+                    ::std::vec![
+                        #(
+                            ::squealy::InsertColumn::new(
+                                #field_literals,
+                                ::squealy::IntoBindValue::into_bind_value(row.#fields),
+                            ),
+                        )*
+                    ]
+                }
+            }
+
             impl<'scope> ::squealy::Projectable for #exprs_ident <'scope> {
                 type Rebound<'next_scope> = #rebound_exprs_ident <'next_scope>;
 

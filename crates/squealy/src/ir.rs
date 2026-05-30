@@ -157,6 +157,86 @@ impl Select {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct InsertColumn {
+    column: Cow<'static, str>,
+    value: BindValue,
+}
+
+impl InsertColumn {
+    pub fn new(column: impl Into<Cow<'static, str>>, value: BindValue) -> Self {
+        Self {
+            column: column.into(),
+            value,
+        }
+    }
+
+    pub fn column(&self) -> &str {
+        &self.column
+    }
+
+    pub fn value(&self) -> &BindValue {
+        &self.value
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Insert {
+    table: String,
+    columns: Vec<InsertColumn>,
+}
+
+impl Insert {
+    pub(crate) fn new(table: impl ToString, columns: Vec<InsertColumn>) -> Self {
+        Self {
+            table: table.to_string(),
+            columns,
+        }
+    }
+
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    pub fn columns(&self) -> &[InsertColumn] {
+        &self.columns
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Delete {
+    table: String,
+    alias: String,
+    filters: Vec<Filter>,
+}
+
+impl Delete {
+    pub(crate) fn new(table: impl ToString, alias: impl Into<String>) -> Self {
+        Self {
+            table: table.to_string(),
+            alias: alias.into(),
+            filters: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_filters(mut self, filters: Vec<Filter>) -> Self {
+        self.filters = filters;
+        self
+    }
+
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    pub fn alias(&self) -> &str {
+        &self.alias
+    }
+
+    pub fn filters(&self) -> &[Filter] {
+        &self.filters
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Source {
     alias: String,
     kind: SourceKind,

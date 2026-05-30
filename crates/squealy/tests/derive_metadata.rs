@@ -265,6 +265,43 @@ fn from_uses_generated_column_expression_kinds() {
 }
 
 #[test]
+fn insert_builds_table_value_bindings() {
+    let insert = TestConnection.insert::<User>(User {
+        id: 1,
+        name: "Ada".to_owned(),
+    });
+
+    let _execute = insert.execute();
+    assert_eq!(
+        insert.to_sql(),
+        r#"INSERT INTO public.users (id, name) VALUES (?, ?)"#
+    );
+    assert_eq!(
+        insert.params(),
+        vec![BindValue::Int(1), BindValue::Text("Ada".to_owned())]
+    );
+}
+
+#[test]
+fn delete_builds_typed_table_filters() {
+    let delete = TestConnection.delete::<User>(|q| {
+        let user = q.table();
+        q.where_(user.id.equals(1));
+        q.where_(user.name.equals("Ada"));
+    });
+
+    let _execute = delete.execute();
+    assert_eq!(
+        delete.to_sql(),
+        r#"DELETE FROM public.users AS q0_0 WHERE (q0_0.id = ?) AND (q0_0.name = ?)"#
+    );
+    assert_eq!(
+        delete.params(),
+        vec![BindValue::Int(1), BindValue::Text("Ada".to_owned())]
+    );
+}
+
+#[test]
 fn select_can_project_a_generated_column_expression_kind() {
     let user_ids = TestConnection.select(|q| {
         let user = q.from::<User>();
