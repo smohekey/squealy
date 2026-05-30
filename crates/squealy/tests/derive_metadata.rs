@@ -21,6 +21,17 @@ struct Post<'scope, C: ColumnMode = ColumnExpr> {
     body: C::Type<'scope, String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+struct ComputedRecord<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    title: C::Type<'scope, String>,
+    #[column(insert = false, update = false)]
+    created_at: C::Type<'scope, String>,
+    #[column(generated)]
+    search_vector: C::Type<'scope, String>,
+}
+
 #[allow(dead_code)]
 #[derive(Schema)]
 struct Public {
@@ -99,6 +110,24 @@ fn derive_table_populates_foreign_key_metadata() {
     assert_eq!(references.table(), "users");
     assert_eq!(references.column(), "id");
     assert_eq!(references.on_delete(), Some("cascade"));
+}
+
+#[test]
+fn derive_table_populates_column_capability_metadata() {
+    let columns = <ComputedRecord as SchemaTable>::columns();
+
+    assert!(columns[0].auto_increment());
+    assert!(!columns[0].insertable());
+    assert!(!columns[0].updateable());
+    assert!(columns[1].insertable());
+    assert!(columns[1].updateable());
+    assert!(!columns[1].generated());
+    assert!(!columns[2].insertable());
+    assert!(!columns[2].updateable());
+    assert!(!columns[2].generated());
+    assert!(columns[3].generated());
+    assert!(!columns[3].insertable());
+    assert!(!columns[3].updateable());
 }
 
 #[test]
@@ -280,6 +309,14 @@ fn insert_builder_requires_required_columns() {
 }
 
 #[test]
+fn insert_builder_skips_non_insertable_columns() {
+    let _execute = TestConnection
+        .insert::<ComputedRecord>()
+        .title("Ada")
+        .execute();
+}
+
+#[test]
 fn insert_query_builds_column_bindings() {
     let insert = TestConnection.insert_query::<User>(vec![InsertColumn::new(
         "name",
@@ -306,6 +343,15 @@ fn update_builder_executes_after_a_column_is_set() {
 #[test]
 fn update_builder_can_explicitly_target_all_rows() {
     let _execute = TestConnection.update::<User>().name("Ada").all().execute();
+}
+
+#[test]
+fn update_builder_skips_non_updateable_columns() {
+    let _execute = TestConnection
+        .update::<ComputedRecord>()
+        .title("Ada")
+        .all()
+        .execute();
 }
 
 #[test]

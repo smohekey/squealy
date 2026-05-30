@@ -47,6 +47,9 @@ struct FieldAttrs {
     unique: bool,
     nullable: Option<bool>,
     auto_increment: bool,
+    generated: bool,
+    insert: Option<bool>,
+    update: Option<bool>,
     default: Option<String>,
     db_type: Option<String>,
     check: Option<String>,
@@ -905,7 +908,9 @@ impl Field {
     }
 
     fn insertable(&self) -> bool {
-        !self.attrs.auto_increment
+        self.attrs
+            .insert
+            .unwrap_or(!self.attrs.generated && !self.attrs.auto_increment)
     }
 
     fn required_insert(&self) -> bool {
@@ -913,7 +918,9 @@ impl Field {
     }
 
     fn updateable(&self) -> bool {
-        !self.attrs.auto_increment
+        self.attrs
+            .update
+            .unwrap_or(!self.attrs.generated && !self.attrs.auto_increment)
     }
 
     fn nullable(&self) -> bool {
@@ -930,6 +937,9 @@ impl Field {
         let unique = bool_tokens(self.attrs.unique);
         let nullable = bool_tokens(self.attrs.nullable.unwrap_or(false));
         let auto_increment = bool_tokens(self.attrs.auto_increment);
+        let generated = bool_tokens(self.attrs.generated);
+        let insertable = bool_tokens(self.insertable());
+        let updateable = bool_tokens(self.updateable());
         let default = option_literal(self.attrs.default.as_deref());
         let db_type = option_literal(self.attrs.db_type.as_deref());
         let check = option_literal(self.attrs.check.as_deref());
@@ -945,6 +955,9 @@ impl Field {
                 fn unique(&self) -> bool { #unique }
                 fn nullable(&self) -> bool { #nullable }
                 fn auto_increment(&self) -> bool { #auto_increment }
+                fn generated(&self) -> bool { #generated }
+                fn insertable(&self) -> bool { #insertable }
+                fn updateable(&self) -> bool { #updateable }
                 fn default(&self) -> Option<&'static str> { #default }
                 fn db_type(&self) -> Option<&'static str> { #db_type }
                 fn check(&self) -> Option<&'static str> { #check }
@@ -1391,6 +1404,9 @@ fn parse_meta_item(
         "nullable" => attrs.nullable = Some(true),
         "not_null" => attrs.nullable = Some(false),
         "auto_increment" => attrs.auto_increment = true,
+        "generated" => attrs.generated = true,
+        "insert" => attrs.insert = Some(required_bool(name, value_tokens)?),
+        "update" => attrs.update = Some(required_bool(name, value_tokens)?),
         "default" => attrs.default = Some(required_literal(name, value_tokens)?),
         "db_type" => attrs.db_type = Some(required_literal(name, value_tokens)?),
         "check" => attrs.check = Some(required_literal(name, value_tokens)?),
@@ -1400,6 +1416,18 @@ fn parse_meta_item(
     }
 
     Ok(())
+}
+
+fn required_bool(name: &str, value_tokens: &[TokenTree]) -> Result<bool, String> {
+    let Some(token) = value_tokens.first() else {
+        return Err(format!("attribute `{name}` requires a boolean value"));
+    };
+
+    match token.to_string().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!("attribute `{name}` requires a boolean value")),
+    }
 }
 
 fn parse_references(value_tokens: &[TokenTree]) -> Result<ForeignKeyAttrs, String> {
