@@ -20,6 +20,7 @@ mod tuple;
         not_null,
         auto_increment,
         default,
+        default_raw,
         db_type,
         references,
         check,

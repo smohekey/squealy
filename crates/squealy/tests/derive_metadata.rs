@@ -7,7 +7,7 @@ use squealy_test::{TestConnection, TestSelect};
 struct User<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key, auto_increment, index)]
     id: C::Type<'scope, i32>,
-    #[column(index, nullable, default = "anonymous", db_type = "text")]
+    #[column(index, nullable, default = value("anonymous"), db_type = "text")]
     name: C::Type<'scope, String>,
 }
 
@@ -30,6 +30,24 @@ struct ComputedRecord<'scope, C: ColumnMode = ColumnExpr> {
     created_at: C::Type<'scope, String>,
     #[column(generated)]
     search_vector: C::Type<'scope, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct DefaultedRecord<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct DefaultVariant<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(default = value(42))]
+    count: C::Type<'scope, i32>,
+    #[column(default = value(true))]
+    enabled: C::Type<'scope, bool>,
+    #[column(default = current_timestamp)]
+    created_at: C::Type<'scope, String>,
+    #[column(default_raw = "lower('ADA')")]
+    code: C::Type<'scope, String>,
 }
 
 #[allow(dead_code)]
@@ -88,7 +106,10 @@ fn derive_table_populates_table_metadata() {
     assert!(column_metadata[0].auto_increment());
     assert!(column_metadata[1].indexed());
     assert!(column_metadata[1].nullable());
-    assert_eq!(column_metadata[1].default(), Some("anonymous"));
+    assert_eq!(
+        column_metadata[1].default(),
+        Some(ColumnDefault::Text("anonymous"))
+    );
     assert_eq!(column_metadata[1].db_type(), Some("text"));
     assert_eq!(indexes.len(), 3);
     assert_eq!(indexes[2].name(), Some("users_name_id_idx"));
@@ -131,6 +152,19 @@ fn derive_table_populates_column_capability_metadata() {
 }
 
 #[test]
+fn derive_table_populates_typed_default_metadata() {
+    let columns = <DefaultVariant as SchemaTable>::columns();
+
+    assert_eq!(columns[0].default(), Some(ColumnDefault::Int(42)));
+    assert_eq!(columns[1].default(), Some(ColumnDefault::Bool(true)));
+    assert_eq!(columns[2].default(), Some(ColumnDefault::CurrentTimestamp));
+    assert_eq!(
+        columns[3].default(),
+        Some(ColumnDefault::Raw("lower('ADA')"))
+    );
+}
+
+#[test]
 fn backend_creates_schema_sql() {
     let mut sql = Vec::new();
     let schema_tables = <Public as Schema>::tables().collect::<Vec<_>>();
@@ -140,7 +174,7 @@ fn backend_creates_schema_sql() {
     let sql = String::from_utf8(sql).unwrap();
 
     assert!(sql.contains(
-            "CREATE TABLE public.users (id text PRIMARY KEY AUTOINCREMENT NOT NULL, name text DEFAULT anonymous)"
+            "CREATE TABLE public.users (id text PRIMARY KEY AUTOINCREMENT NOT NULL, name text DEFAULT 'anonymous')"
         ));
     assert!(sql.contains("CREATE UNIQUE INDEX users_name_id_idx ON public.users (name, id)"));
 
@@ -332,6 +366,19 @@ fn insert_builder_skips_non_insertable_columns() {
         .insert::<ComputedRecord>()
         .title("Ada")
         .execute();
+}
+
+#[test]
+fn insert_builder_can_use_default_values() {
+    let insert = TestConnection
+        .insert::<DefaultedRecord>()
+        .returning(|record| record.id);
+
+    assert_eq!(
+        insert.to_sql(),
+        r#"INSERT INTO defaulted_records DEFAULT VALUES RETURNING q0_0.id AS id"#
+    );
+    assert_eq!(insert.params(), Vec::<BindValue>::new());
 }
 
 #[test]

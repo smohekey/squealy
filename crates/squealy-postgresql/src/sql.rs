@@ -1,8 +1,9 @@
 use std::io::{self, Write};
 
 use squealy::{
-    ArithmeticOp, BindValue, CompareOp, Delete, ExprNode, Insert, OrderDirection, OrderNode,
-    PredicateNode, Select, SelectColumn, Sort, Source, SourceKind, SourceTarget, Table, Update,
+    ArithmeticOp, BindValue, ColumnDefault, CompareOp, Delete, ExprNode, Insert, OrderDirection,
+    OrderNode, PredicateNode, Select, SelectColumn, Sort, Source, SourceKind, SourceTarget, Table,
+    Update,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -39,7 +40,8 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
             writer.write_all(b" NOT NULL")?;
         }
         if let Some(default) = column.default() {
-            write!(writer, " DEFAULT {default}")?;
+            writer.write_all(b" DEFAULT ")?;
+            write_default(default, writer)?;
         }
         if let Some(reference) = column.references() {
             write!(
@@ -76,6 +78,22 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
     Ok(())
 }
 
+fn write_default(default: ColumnDefault, writer: &mut impl Write) -> io::Result<()> {
+    match default {
+        ColumnDefault::Null => writer.write_all(b"NULL"),
+        ColumnDefault::Int(value) => write!(writer, "{value}"),
+        ColumnDefault::UInt(value) => write!(writer, "{value}"),
+        ColumnDefault::Float(value) => write!(writer, "{value}"),
+        ColumnDefault::Text(value) => write!(writer, "'{}'", value.replace('\'', "''")),
+        ColumnDefault::Bool(true) => writer.write_all(b"TRUE"),
+        ColumnDefault::Bool(false) => writer.write_all(b"FALSE"),
+        ColumnDefault::CurrentTimestamp => writer.write_all(b"CURRENT_TIMESTAMP"),
+        ColumnDefault::CurrentDate => writer.write_all(b"CURRENT_DATE"),
+        ColumnDefault::CurrentTime => writer.write_all(b"CURRENT_TIME"),
+        ColumnDefault::Raw(value) => writer.write_all(value.as_bytes()),
+    }
+}
+
 pub(crate) fn write_select(select: &Select, writer: &mut impl Write) -> io::Result<()> {
     let mut renderer = Renderer::default();
     write_select_with_renderer(select, writer, &mut renderer)
@@ -83,21 +101,26 @@ pub(crate) fn write_select(select: &Select, writer: &mut impl Write) -> io::Resu
 
 pub(crate) fn write_insert(insert: &Insert, writer: &mut impl Write) -> io::Result<()> {
     let mut renderer = Renderer::default();
-    write!(writer, "INSERT INTO {} (", insert.table())?;
-    for (index, column) in insert.columns().iter().enumerate() {
-        if index > 0 {
-            writer.write_all(b", ")?;
+    write!(writer, "INSERT INTO {}", insert.table())?;
+    if insert.columns().is_empty() {
+        writer.write_all(b" DEFAULT VALUES")?;
+    } else {
+        writer.write_all(b" (")?;
+        for (index, column) in insert.columns().iter().enumerate() {
+            if index > 0 {
+                writer.write_all(b", ")?;
+            }
+            writer.write_all(column.column().as_bytes())?;
         }
-        writer.write_all(column.column().as_bytes())?;
-    }
-    writer.write_all(b") VALUES (")?;
-    for index in 0..insert.columns().len() {
-        if index > 0 {
-            writer.write_all(b", ")?;
+        writer.write_all(b") VALUES (")?;
+        for index in 0..insert.columns().len() {
+            if index > 0 {
+                writer.write_all(b", ")?;
+            }
+            writer.write_all(renderer.placeholder().as_bytes())?;
         }
-        writer.write_all(renderer.placeholder().as_bytes())?;
+        writer.write_all(b")")?;
     }
-    writer.write_all(b")")?;
     write_returning(insert.returning(), writer, &mut renderer)?;
     Ok(())
 }

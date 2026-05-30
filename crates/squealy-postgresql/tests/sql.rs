@@ -9,6 +9,12 @@ struct User<'scope, C: ColumnMode = ColumnExpr> {
     name: C::Type<'scope, String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+struct DefaultedRecord<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment, db_type = "integer")]
+    id: C::Type<'scope, i32>,
+}
+
 #[allow(dead_code)]
 #[derive(Schema)]
 struct Public {
@@ -92,6 +98,19 @@ fn postgres_insert_update_and_delete_render_returning() {
         vec![BindValue::Text("Ada".to_owned()), BindValue::Int(1)]
     );
     assert_eq!(delete.params(), vec![BindValue::Int(1)]);
+}
+
+#[test]
+fn postgres_insert_can_use_default_values() {
+    let insert = PostgresConnection
+        .insert::<DefaultedRecord>()
+        .returning(|record| record.id);
+
+    assert_eq!(
+        insert.to_sql(),
+        "INSERT INTO defaulted_records DEFAULT VALUES RETURNING q0_0.id AS id"
+    );
+    assert_eq!(insert.params(), Vec::<BindValue>::new());
 }
 
 #[test]
