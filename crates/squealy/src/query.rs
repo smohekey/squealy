@@ -1,10 +1,8 @@
 use std::cell::Cell;
 use std::marker::PhantomData;
 
-use crate::{
-    Connection, Order, OrderNode, Predicate, PredicateNode, Projectable, ProjectionShape,
-    SelectColumn, TableProjection,
-};
+use crate::ir::{Filter, Select, Sort, Source};
+use crate::{Connection, Order, Predicate, Projectable, ProjectionShape, TableProjection};
 
 /// A backend-specific query object backed by core-owned select IR.
 pub trait Query {
@@ -12,178 +10,6 @@ pub trait Query {
     type Shape: ProjectionShape;
 
     fn ir(&self) -> &Select;
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Select {
-    columns: Vec<SelectColumn>,
-    sources: Vec<Source>,
-    filters: Vec<Filter>,
-    orders: Vec<Sort>,
-    limit: Option<usize>,
-    offset: Option<usize>,
-}
-
-impl Select {
-    fn new(columns: Vec<SelectColumn>, sources: Vec<Source>) -> Self {
-        Self {
-            columns,
-            sources,
-            filters: Vec::new(),
-            orders: Vec::new(),
-            limit: None,
-            offset: None,
-        }
-    }
-
-    fn with_filters(mut self, filters: Vec<Filter>) -> Self {
-        self.filters = filters;
-        self
-    }
-
-    fn with_orders(mut self, orders: Vec<Sort>) -> Self {
-        self.orders = orders;
-        self
-    }
-
-    fn with_limit(mut self, limit: Option<usize>) -> Self {
-        self.limit = limit;
-        self
-    }
-
-    fn with_offset(mut self, offset: Option<usize>) -> Self {
-        self.offset = offset;
-        self
-    }
-
-    pub fn columns(&self) -> &[SelectColumn] {
-        &self.columns
-    }
-
-    pub fn sources(&self) -> &[Source] {
-        &self.sources
-    }
-
-    pub fn filters(&self) -> &[Filter] {
-        &self.filters
-    }
-
-    pub fn orders(&self) -> &[Sort] {
-        &self.orders
-    }
-
-    pub fn limit(&self) -> Option<usize> {
-        self.limit
-    }
-
-    pub fn offset(&self) -> Option<usize> {
-        self.offset
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Source {
-    alias: String,
-    kind: SourceKind,
-    target: SourceTarget,
-}
-
-impl Source {
-    fn table(alias: impl Into<String>, table: impl ToString) -> Self {
-        Self {
-            alias: alias.into(),
-            kind: SourceKind::From,
-            target: SourceTarget::Table(table.to_string()),
-        }
-    }
-
-    fn lateral(alias: impl Into<String>, query: Select) -> Self {
-        Self {
-            alias: alias.into(),
-            kind: SourceKind::InnerLateral,
-            target: SourceTarget::Query(Box::new(query)),
-        }
-    }
-
-    fn join(alias: impl Into<String>, table: impl ToString, on: Predicate<'_>) -> Self {
-        Self {
-            alias: alias.into(),
-            kind: SourceKind::InnerJoin {
-                on: on.node().clone(),
-            },
-            target: SourceTarget::Table(table.to_string()),
-        }
-    }
-
-    fn left_join(alias: impl Into<String>, table: impl ToString, on: Predicate<'_>) -> Self {
-        Self {
-            alias: alias.into(),
-            kind: SourceKind::LeftJoin {
-                on: on.node().clone(),
-            },
-            target: SourceTarget::Table(table.to_string()),
-        }
-    }
-
-    pub fn alias(&self) -> &str {
-        &self.alias
-    }
-
-    pub fn kind(&self) -> &SourceKind {
-        &self.kind
-    }
-
-    pub fn target(&self) -> &SourceTarget {
-        &self.target
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum SourceKind {
-    From,
-    InnerLateral,
-    InnerJoin { on: PredicateNode },
-    LeftJoin { on: PredicateNode },
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum SourceTarget {
-    Table(String),
-    Query(Box<Select>),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Filter {
-    predicate: PredicateNode,
-}
-
-impl Filter {
-    fn new(predicate: Predicate<'_>) -> Self {
-        Self {
-            predicate: predicate.node().clone(),
-        }
-    }
-
-    pub fn predicate(&self) -> &PredicateNode {
-        &self.predicate
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Sort {
-    order: OrderNode,
-}
-
-impl Sort {
-    fn new(order: Order<'_>) -> Self {
-        Self {
-            order: order.node().clone(),
-        }
-    }
-
-    pub fn order(&self) -> &OrderNode {
-        &self.order
-    }
 }
 
 /// Scoped query builder. Each `q` call adds a lateral-capable subquery.
@@ -235,8 +61,11 @@ where
         let alias = self.next_alias();
         let projection = S::exprs(&alias);
         let predicate = on(&projection);
-        self.sources
-            .push(Source::join(alias, S::qualified_name(), predicate));
+        self.sources.push(Source::join(
+            alias,
+            S::qualified_name(),
+            predicate.node().clone(),
+        ));
         projection
     }
 
@@ -251,8 +80,11 @@ where
         let alias = self.next_alias();
         let projection = S::exprs(&alias);
         let predicate = on(&projection);
-        self.sources
-            .push(Source::left_join(alias, S::qualified_name(), predicate));
+        self.sources.push(Source::left_join(
+            alias,
+            S::qualified_name(),
+            predicate.node().clone(),
+        ));
         projection
     }
 
@@ -281,12 +113,12 @@ where
 
     /// Add a SQL `WHERE` predicate to the query currently being built.
     pub fn where_(&mut self, predicate: Predicate<'scope>) {
-        self.filters.push(Filter::new(predicate));
+        self.filters.push(Filter::new(predicate.node().clone()));
     }
 
     /// Add an `ORDER BY` expression to the query currently being built.
     pub fn order_by(&mut self, order: Order<'scope>) {
-        self.orders.push(Sort::new(order));
+        self.orders.push(Sort::new(order.node().clone()));
     }
 
     /// Add a SQL `LIMIT` row count to the query currently being built.

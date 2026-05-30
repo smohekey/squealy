@@ -25,6 +25,7 @@ name = "squealy"
 version = "0.1.0"
 dependencies = [
  "squealy-macros",
+ "squealy-test",
 ]
 
 [[package]]
@@ -33,6 +34,13 @@ version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
+]
+
+[[package]]
+name = "squealy-test"
+version = "0.1.0"
+dependencies = [
+ "squealy",
 ]
 
 [[package]]
