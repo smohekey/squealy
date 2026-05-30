@@ -1,5 +1,5 @@
 use squealy::*;
-use squealy_test::{TestConnection, TestSelect};
+use squealy_test::{TestBackend, TestConnection, TestSelect};
 
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(Public)]
@@ -168,9 +168,7 @@ fn derive_table_populates_typed_default_metadata() {
 fn backend_creates_schema_sql() {
     let mut sql = Vec::new();
     let schema_tables = <Public as Schema>::tables().collect::<Vec<_>>();
-    TestConnection
-        .write_table(schema_tables[0], &mut sql)
-        .unwrap();
+    TestBackend.write_table(schema_tables[0], &mut sql).unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert!(sql.contains(
@@ -179,9 +177,7 @@ fn backend_creates_schema_sql() {
     assert!(sql.contains("CREATE UNIQUE INDEX users_name_id_idx ON public.users (name, id)"));
 
     let mut sql = Vec::new();
-    TestConnection
-        .write_table(schema_tables[1], &mut sql)
-        .unwrap();
+    TestBackend.write_table(schema_tables[1], &mut sql).unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert!(sql.contains("REFERENCES public.users(id) ON DELETE cascade"));
@@ -318,7 +314,7 @@ fn assert_copy<T: Copy>(_: T) {}
 
 fn assert_decode<T>()
 where
-    T: Decode<TestConnection>,
+    T: Decode<TestBackend>,
 {
 }
 

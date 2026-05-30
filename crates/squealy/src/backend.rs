@@ -9,67 +9,69 @@ use crate::{
 
 /// Backend-specific row cursor used while decoding a projected row.
 pub trait RowReader: Sized {
-    type Connection: Connection;
+    type Backend: Backend;
 
-    fn read<T>(&mut self) -> Result<T, <Self::Connection as Connection>::Error>
+    fn read<T>(&mut self) -> Result<T, <Self::Backend as Backend>::Error>
     where
-        T: Decode<Self::Connection>;
+        T: Decode<Self::Backend>;
 }
 
 /// Decode a Rust value from a backend row reader.
-pub trait Decode<Conn: Connection>: Sized {
-    fn decode(row: &mut Conn::RowReader<'_>) -> Result<Self, Conn::Error>;
+pub trait Decode<B: Backend>: Sized {
+    fn decode(row: &mut B::RowReader<'_>) -> Result<Self, B::Error>;
 }
 
-impl<Conn> Decode<Conn> for ()
+impl<B> Decode<B> for ()
 where
-    Conn: Connection,
+    B: Backend,
 {
-    fn decode(_row: &mut Conn::RowReader<'_>) -> Result<Self, Conn::Error> {
+    fn decode(_row: &mut B::RowReader<'_>) -> Result<Self, B::Error> {
         Ok(())
     }
 }
 
 /// Backend-specific DDL generation.
 pub trait Backend: Sized {
+    type Error;
+
+    type RowReader<'row>: RowReader<Backend = Self>;
+
+    fn no_rows_error() -> Self::Error;
+
     /// Generate backend-specific SQL for a table.
     fn write_table(&self, table: &(dyn Table + Sync), writer: &mut impl Write) -> io::Result<()>;
 }
 
 /// A backend connection that constructs select objects tied to that backend.
 pub trait Connection: Sized {
-    type Error;
-
-    type RowReader<'row>: RowReader<Connection = Self>;
-
-    fn no_rows_error() -> Self::Error;
+    type Backend: Backend;
 
     type Select<'conn, Shape>: SelectQuery<'conn, Connection = Self, Shape = Shape>
     where
         Self: 'conn,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>;
+        Shape::Row: Decode<Self::Backend>;
 
     type Insert<'conn, S, Shape>: InsertQuery<'conn, Connection = Self, Table = S, Shape = Shape>
     where
         Self: 'conn,
         S: InsertableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>;
+        Shape::Row: Decode<Self::Backend>;
 
     type Update<'conn, S, Shape>: UpdateQuery<'conn, Connection = Self, Table = S, Shape = Shape>
     where
         Self: 'conn,
         S: UpdateableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>;
+        Shape::Row: Decode<Self::Backend>;
 
     type Delete<'conn, S, Shape>: DeleteQuery<'conn, Connection = Self, Table = S, Shape = Shape>
     where
         Self: 'conn,
         S: TableProjection,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>;
+        Shape::Row: Decode<Self::Backend>;
 
     fn select<Shape>(
         &self,
@@ -77,7 +79,7 @@ pub trait Connection: Sized {
     ) -> Self::Select<'_, Shape>
     where
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>;
+        Shape::Row: Decode<Self::Backend>;
 
     fn insert<S>(&self) -> S::InsertBuilder<'_, Self>
     where
@@ -98,7 +100,7 @@ pub trait Connection: Sized {
     where
         S: InsertableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>;
+        Shape::Row: Decode<Self::Backend>;
 
     fn update<S>(&self) -> S::UpdateBuilder<'_, Self>
     where
@@ -126,7 +128,7 @@ pub trait Connection: Sized {
     where
         S: UpdateableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>;
+        Shape::Row: Decode<Self::Backend>;
 
     fn delete<'conn, S>(&'conn self) -> DeleteBuilder<'conn, 'static, Self, S>
     where
@@ -148,21 +150,23 @@ pub trait Connection: Sized {
     where
         S: TableProjection,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>;
+        Shape::Row: Decode<Self::Backend>;
 }
 
-/// A connection that can run a closure inside a backend-managed transaction.
-pub trait TransactionalConnection: Connection {
-    type Transaction<'conn>: Connection<Error = Self::Error>
+/// A root backend connection that can run a closure inside a backend-managed transaction.
+pub trait ConnectionWithTransaction: Connection {
+    type Transaction<'conn>: Connection<Backend = Self::Backend>
     where
         Self: 'conn;
 
     fn transaction<'conn, T, F>(
         &'conn mut self,
         f: F,
-    ) -> impl Future<Output = Result<T, Self::Error>> + 'conn
+    ) -> impl Future<Output = Result<T, <Self::Backend as Backend>::Error>> + 'conn
     where
         T: 'conn,
-        F: for<'tx> AsyncFnOnce(&'tx mut Self::Transaction<'conn>) -> Result<T, Self::Error>
+        F: for<'tx> AsyncFnOnce(
+                &'tx mut Self::Transaction<'conn>,
+            ) -> Result<T, <Self::Backend as Backend>::Error>
             + 'conn;
 }

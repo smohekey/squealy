@@ -14,7 +14,7 @@ mod query;
 mod schema;
 mod table;
 
-pub use backend::{Backend, Connection, Decode, RowReader, TransactionalConnection};
+pub use backend::{Backend, Connection, ConnectionWithTransaction, Decode, RowReader};
 pub use column::{
     Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullableValue, ColumnValue,
 };

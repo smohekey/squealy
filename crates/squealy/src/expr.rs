@@ -1188,59 +1188,14 @@ impl<'scope> Clone for Order<'scope> {
 ///
 /// ```compile_fail
 /// use squealy::*;
-/// # use std::marker::PhantomData;
+/// use squealy_test::TestConnection;
 ///
 /// #[derive(Clone, Table)]
 /// struct User<'scope, C: ColumnMode = ColumnExpr> {
 ///     id: C::Type<'scope, i32>,
 /// }
-/// #
-/// # struct DocConnection;
-/// #
-/// # struct DocSelect<'conn, Shape> {
-/// #     select: Select,
-/// #     _connection: PhantomData<&'conn DocConnection>,
-/// #     _shape: PhantomData<Shape>,
-/// # }
-/// #
-/// # impl<'conn, Shape> SelectQuery<'conn> for DocSelect<'conn, Shape>
-/// # where
-/// #     Shape: ProjectionShape,
-/// # {
-/// #     type Connection = DocConnection;
-/// #     type Shape = Shape;
-/// #
-/// #     fn ir(&self) -> &Select {
-/// #         &self.select
-/// #     }
-/// # }
-/// #
-/// # impl Connection for DocConnection {
-/// #     type Error = ();
-/// #
-/// #     type Select<'conn, Shape> = DocSelect<'conn, Shape>
-/// #     where
-/// #         Self: 'conn,
-/// #         Shape: ProjectionShape;
-/// #
-/// #     fn select<Shape>(
-/// #         &self,
-/// #         f: impl for<'scope> FnOnce(
-/// #             &mut ::squealy::SelectBuilder<'_, 'scope, Self>,
-/// #         ) -> Returning<Shape>,
-/// #     ) -> Self::Select<'_, Shape>
-/// #     where
-/// #         Shape: ProjectionShape,
-/// #     {
-/// #         DocSelect {
-/// #             select: build_select::<Self, Shape>(f),
-/// #             _connection: PhantomData,
-/// #             _shape: PhantomData,
-/// #         }
-/// #     }
-/// # }
 ///
-/// let conn = DocConnection;
+/// let conn = TestConnection;
 /// let _ = conn.select(|q| {
 ///     let user = q.from::<User>();
 ///     q.where_(user.id);

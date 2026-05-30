@@ -124,14 +124,14 @@ fn tuple_projection_shape(arity: usize) -> proc_macro2::TokenStream {
             );
         }
 
-        impl<Conn, #(#types),*> Decode<Conn> for (#(#types,)*)
+        impl<Backend, #(#types),*> Decode<Backend> for (#(#types,)*)
         where
-            Conn: Connection,
-            #(#types: Decode<Conn>,)*
+            Backend: ::squealy::Backend,
+            #(#types: Decode<Backend>,)*
         {
             fn decode(
-                row: &mut <Conn as Connection>::RowReader<'_>,
-            ) -> Result<Self, <Conn as Connection>::Error> {
+                row: &mut <Backend as ::squealy::Backend>::RowReader<'_>,
+            ) -> Result<Self, <Backend as ::squealy::Backend>::Error> {
                 Ok((
                     #(::squealy::RowReader::read::<#types>(row)?,)*
                 ))

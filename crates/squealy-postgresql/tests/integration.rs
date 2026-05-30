@@ -2,7 +2,7 @@ use std::future::poll_fn;
 
 use futures_core::Stream;
 use squealy::*;
-use squealy_postgresql::{PostgresConnection, PostgresError};
+use squealy_postgresql::{Postgres, PostgresConnection, PostgresError};
 use tokio_postgres::NoTls;
 
 #[derive(Clone, Debug, PartialEq, Table)]
@@ -113,7 +113,7 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
         .await
         .expect("drop old integration tables");
 
-    let ddl_backend = PostgresConnection::default();
+    let ddl_backend = Postgres;
     create_table::<IntegrationUser>(&client, &ddl_backend).await;
     create_table::<IntegrationDefaulted>(&client, &ddl_backend).await;
     create_table::<IntegrationNullable>(&client, &ddl_backend).await;
@@ -255,7 +255,7 @@ async fn postgres_inner_joins_across_tables() {
         .await
         .expect("drop old join tables");
 
-    let ddl_backend = PostgresConnection::default();
+    let ddl_backend = Postgres;
     create_table::<JoinUser>(&client, &ddl_backend).await;
     create_table::<JoinPost>(&client, &ddl_backend).await;
 
@@ -303,7 +303,7 @@ async fn postgres_round_trips_primitive_types() {
         .await
         .expect("drop old types table");
 
-    let ddl_backend = PostgresConnection::default();
+    let ddl_backend = Postgres;
     create_table::<IntegrationTypes>(&client, &ddl_backend).await;
 
     let connection = PostgresConnection::new(client);
@@ -365,7 +365,7 @@ async fn postgres_runs_transaction_closures() {
         .await
         .expect("drop old transaction table");
 
-    let ddl_backend = PostgresConnection::default();
+    let ddl_backend = Postgres;
     create_table::<TransactionUser>(&client, &ddl_backend).await;
 
     let mut connection = PostgresConnection::new(client);
@@ -411,7 +411,7 @@ async fn postgres_runs_transaction_closures() {
     assert_eq!(users, vec!["Committed".to_owned()]);
 }
 
-async fn create_table<S>(client: &tokio_postgres::Client, ddl_backend: &PostgresConnection)
+async fn create_table<S>(client: &tokio_postgres::Client, ddl_backend: &Postgres)
 where
     S: SchemaTable,
     S::WithColumn<'static, ColumnName>: Table + Sync,

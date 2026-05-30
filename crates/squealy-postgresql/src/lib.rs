@@ -1,10 +1,10 @@
 use std::fmt;
 
 use squealy::{
-    Backend, BindValue, Connection, Decode, InsertableTable, ProjectionShape, Returning,
-    SelectBuilder, Table, TableProjection, TransactionalConnection, UpdateableTable, build_delete,
-    build_delete_returning, build_insert, build_insert_returning, build_select, build_update,
-    build_update_returning,
+    Backend, BindValue, Connection, ConnectionWithTransaction, Decode, InsertableTable,
+    ProjectionShape, Returning, SelectBuilder, Table, TableProjection, UpdateableTable,
+    build_delete, build_delete_returning, build_insert, build_insert_returning, build_select,
+    build_update, build_update_returning,
 };
 use tokio_postgres::Client;
 
@@ -14,6 +14,9 @@ mod sql;
 pub use query::{
     EmptyRows, PostgresDelete, PostgresInsert, PostgresRowReader, PostgresSelect, PostgresUpdate,
 };
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Postgres;
 
 pub struct PostgresConnection {
     client: Option<Client>,
@@ -64,9 +67,6 @@ impl fmt::Debug for PostgresConnection {
     }
 }
 
-#[allow(non_upper_case_globals)]
-pub const PostgresConnection: PostgresConnection = PostgresConnection::no_driver();
-
 #[derive(Debug)]
 pub enum PostgresError {
     NoDriver,
@@ -83,7 +83,15 @@ impl From<tokio_postgres::Error> for PostgresError {
     }
 }
 
-impl Backend for PostgresConnection {
+impl Backend for Postgres {
+    type Error = PostgresError;
+
+    type RowReader<'row> = PostgresRowReader<'row>;
+
+    fn no_rows_error() -> Self::Error {
+        PostgresError::NoRows
+    }
+
     fn write_table(
         &self,
         table: &(dyn Table + Sync),
@@ -100,7 +108,7 @@ trait PostgresQueryBuilder: query::PostgresExecutor {
     ) -> PostgresSelect<'_, Shape, Self>
     where
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>,
+        Shape::Row: Decode<Self::Backend>,
     {
         PostgresSelect::new(self, build_select::<Self, Shape>(f))
     }
@@ -123,7 +131,7 @@ trait PostgresQueryBuilder: query::PostgresExecutor {
     where
         S: InsertableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>,
+        Shape::Row: Decode<Self::Backend>,
     {
         PostgresInsert::new(self, build_insert_returning::<S>(columns, returning))
     }
@@ -150,7 +158,7 @@ trait PostgresQueryBuilder: query::PostgresExecutor {
     where
         S: UpdateableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>,
+        Shape::Row: Decode<Self::Backend>,
     {
         PostgresUpdate::new(
             self,
@@ -178,7 +186,7 @@ trait PostgresQueryBuilder: query::PostgresExecutor {
     where
         S: TableProjection,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>,
+        Shape::Row: Decode<Self::Backend>,
     {
         PostgresDelete::new(self, build_delete_returning::<S>(alias, filters, returning))
     }
@@ -187,20 +195,14 @@ trait PostgresQueryBuilder: query::PostgresExecutor {
 impl<Conn> PostgresQueryBuilder for Conn where Conn: query::PostgresExecutor {}
 
 impl Connection for PostgresConnection {
-    type Error = PostgresError;
-
-    type RowReader<'row> = PostgresRowReader<'row>;
-
-    fn no_rows_error() -> Self::Error {
-        PostgresError::NoRows
-    }
+    type Backend = Postgres;
 
     type Select<'conn, Shape>
         = PostgresSelect<'conn, Shape, Self>
     where
         Self: 'conn,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>;
+        Shape::Row: Decode<Self::Backend>;
 
     type Insert<'conn, S, Shape>
         = PostgresInsert<'conn, S, Shape, Self>
@@ -208,7 +210,7 @@ impl Connection for PostgresConnection {
         Self: 'conn,
         S: InsertableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>;
+        Shape::Row: Decode<Self::Backend>;
 
     type Update<'conn, S, Shape>
         = PostgresUpdate<'conn, S, Shape, Self>
@@ -216,7 +218,7 @@ impl Connection for PostgresConnection {
         Self: 'conn,
         S: UpdateableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>;
+        Shape::Row: Decode<Self::Backend>;
 
     type Delete<'conn, S, Shape>
         = PostgresDelete<'conn, S, Shape, Self>
@@ -224,7 +226,7 @@ impl Connection for PostgresConnection {
         Self: 'conn,
         S: TableProjection,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>;
+        Shape::Row: Decode<Self::Backend>;
 
     fn select<Shape>(
         &self,
@@ -232,7 +234,7 @@ impl Connection for PostgresConnection {
     ) -> Self::Select<'_, Shape>
     where
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>,
+        Shape::Row: Decode<Self::Backend>,
     {
         self.build_select_query(f)
     }
@@ -252,7 +254,7 @@ impl Connection for PostgresConnection {
     where
         S: InsertableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>,
+        Shape::Row: Decode<Self::Backend>,
     {
         self.build_insert_returning_query(columns, returning)
     }
@@ -279,7 +281,7 @@ impl Connection for PostgresConnection {
     where
         S: UpdateableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>,
+        Shape::Row: Decode<Self::Backend>,
     {
         self.build_update_returning_query(alias, columns, filters, returning)
     }
@@ -304,27 +306,21 @@ impl Connection for PostgresConnection {
     where
         S: TableProjection,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>,
+        Shape::Row: Decode<Self::Backend>,
     {
         self.build_delete_returning_query(alias, filters, returning)
     }
 }
 
 impl Connection for PostgresTransaction<'_> {
-    type Error = PostgresError;
-
-    type RowReader<'row> = PostgresRowReader<'row, Self>;
-
-    fn no_rows_error() -> Self::Error {
-        PostgresError::NoRows
-    }
+    type Backend = Postgres;
 
     type Select<'conn, Shape>
         = PostgresSelect<'conn, Shape, Self>
     where
         Self: 'conn,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>;
+        Shape::Row: Decode<Self::Backend>;
 
     type Insert<'conn, S, Shape>
         = PostgresInsert<'conn, S, Shape, Self>
@@ -332,7 +328,7 @@ impl Connection for PostgresTransaction<'_> {
         Self: 'conn,
         S: InsertableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>;
+        Shape::Row: Decode<Self::Backend>;
 
     type Update<'conn, S, Shape>
         = PostgresUpdate<'conn, S, Shape, Self>
@@ -340,7 +336,7 @@ impl Connection for PostgresTransaction<'_> {
         Self: 'conn,
         S: UpdateableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>;
+        Shape::Row: Decode<Self::Backend>;
 
     type Delete<'conn, S, Shape>
         = PostgresDelete<'conn, S, Shape, Self>
@@ -348,7 +344,7 @@ impl Connection for PostgresTransaction<'_> {
         Self: 'conn,
         S: TableProjection,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>;
+        Shape::Row: Decode<Self::Backend>;
 
     fn select<Shape>(
         &self,
@@ -356,7 +352,7 @@ impl Connection for PostgresTransaction<'_> {
     ) -> Self::Select<'_, Shape>
     where
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>,
+        Shape::Row: Decode<Self::Backend>,
     {
         self.build_select_query(f)
     }
@@ -376,7 +372,7 @@ impl Connection for PostgresTransaction<'_> {
     where
         S: InsertableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>,
+        Shape::Row: Decode<Self::Backend>,
     {
         self.build_insert_returning_query(columns, returning)
     }
@@ -403,7 +399,7 @@ impl Connection for PostgresTransaction<'_> {
     where
         S: UpdateableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>,
+        Shape::Row: Decode<Self::Backend>,
     {
         self.build_update_returning_query(alias, columns, filters, returning)
     }
@@ -428,13 +424,13 @@ impl Connection for PostgresTransaction<'_> {
     where
         S: TableProjection,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self>,
+        Shape::Row: Decode<Self::Backend>,
     {
         self.build_delete_returning_query(alias, filters, returning)
     }
 }
 
-impl TransactionalConnection for PostgresConnection {
+impl ConnectionWithTransaction for PostgresConnection {
     type Transaction<'conn>
         = PostgresTransaction<'conn>
     where
@@ -443,10 +439,12 @@ impl TransactionalConnection for PostgresConnection {
     fn transaction<'conn, T, F>(
         &'conn mut self,
         f: F,
-    ) -> impl std::future::Future<Output = Result<T, Self::Error>> + 'conn
+    ) -> impl std::future::Future<Output = Result<T, <Self::Backend as Backend>::Error>> + 'conn
     where
         T: 'conn,
-        F: for<'tx> AsyncFnOnce(&'tx mut Self::Transaction<'conn>) -> Result<T, Self::Error>
+        F: for<'tx> AsyncFnOnce(
+                &'tx mut Self::Transaction<'conn>,
+            ) -> Result<T, <Self::Backend as Backend>::Error>
             + 'conn,
     {
         async move {
