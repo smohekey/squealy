@@ -166,6 +166,47 @@ where
 {
 }
 
+type ThirtyTwoI32s = (
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+);
+
+fn assert_thirty_two_i32_row<'conn, Qry>(_: &'conn Qry)
+where
+    Qry: SelectQuery<'conn, Row = ThirtyTwoI32s>,
+{
+}
+
 fn assert_expr_kind<'scope, K>(_: &Expr<'scope, K>)
 where
     K: ExprKind,
@@ -252,6 +293,56 @@ fn select_rebinds_three_part_tuple_subquery_shape() {
     assert_eq!(
         rebound.to_sql(),
         r#"SELECT q0_0.t0_id AS t0_id, q0_0.t1_name AS t1_name, q0_0.t2_id AS t2_id, q0_0.t2_user_id AS t2_user_id, q0_0.t2_body AS t2_body FROM (SELECT q1_0.id AS t0_id, q1_0.name AS t1_name, q1_1.id AS t2_id, q1_1.user_id AS t2_user_id, q1_1.body AS t2_body FROM public.users AS q1_0 INNER JOIN public.posts AS q1_1 ON (q1_1.user_id = q1_0.id)) AS q0_0 WHERE (q0_0.t0_id = q0_0.t2_user_id)"#
+    );
+}
+
+#[test]
+fn select_can_project_thirty_two_part_tuple_shapes() {
+    let values = TestConnection.select::<ThirtyTwoI32s>(|_q| {
+        (
+            Expr::lit(0),
+            Expr::lit(1),
+            Expr::lit(2),
+            Expr::lit(3),
+            Expr::lit(4),
+            Expr::lit(5),
+            Expr::lit(6),
+            Expr::lit(7),
+            Expr::lit(8),
+            Expr::lit(9),
+            Expr::lit(10),
+            Expr::lit(11),
+            Expr::lit(12),
+            Expr::lit(13),
+            Expr::lit(14),
+            Expr::lit(15),
+            Expr::lit(16),
+            Expr::lit(17),
+            Expr::lit(18),
+            Expr::lit(19),
+            Expr::lit(20),
+            Expr::lit(21),
+            Expr::lit(22),
+            Expr::lit(23),
+            Expr::lit(24),
+            Expr::lit(25),
+            Expr::lit(26),
+            Expr::lit(27),
+            Expr::lit(28),
+            Expr::lit(29),
+            Expr::lit(30),
+            Expr::lit(31),
+        )
+    });
+
+    assert_thirty_two_i32_row(&values);
+    assert_eq!(
+        values.to_sql(),
+        r#"SELECT ? AS t0_expr, ? AS t1_expr, ? AS t2_expr, ? AS t3_expr, ? AS t4_expr, ? AS t5_expr, ? AS t6_expr, ? AS t7_expr, ? AS t8_expr, ? AS t9_expr, ? AS t10_expr, ? AS t11_expr, ? AS t12_expr, ? AS t13_expr, ? AS t14_expr, ? AS t15_expr, ? AS t16_expr, ? AS t17_expr, ? AS t18_expr, ? AS t19_expr, ? AS t20_expr, ? AS t21_expr, ? AS t22_expr, ? AS t23_expr, ? AS t24_expr, ? AS t25_expr, ? AS t26_expr, ? AS t27_expr, ? AS t28_expr, ? AS t29_expr, ? AS t30_expr, ? AS t31_expr"#
+    );
+    assert_eq!(
+        values.params(),
+        (0..32).map(BindValue::Int).collect::<Vec<_>>()
     );
 }
 
