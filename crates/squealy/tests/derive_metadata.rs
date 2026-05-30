@@ -1,3 +1,4 @@
+use futures_util::TryStreamExt;
 use squealy::*;
 use squealy_test::{TestConnection, TestSelect};
 
@@ -425,7 +426,7 @@ fn insert_builder_can_return_projected_rows() {
 
     assert_insert_i32_row(&insert);
     let _stream = insert.fetch();
-    let _all = insert.fetch_all();
+    let _all = insert.fetch().try_collect::<Vec<_>>();
     let _all_with_affected = insert.fetch_all_with_affected();
     let _one_with_affected = insert.fetch_one_with_affected();
     let _optional_with_affected = insert.fetch_optional_with_affected();
@@ -511,7 +512,7 @@ fn update_builder_can_return_projected_rows() {
 
     assert_update_id_name_row(&update);
     let _stream = update.fetch();
-    let _all = update.fetch_all();
+    let _all = update.fetch().try_collect::<Vec<_>>();
     let _all_with_affected = update.fetch_all_with_affected();
     let _one_with_affected = update.fetch_one_with_affected();
     let _optional_with_affected = update.fetch_optional_with_affected();
@@ -600,7 +601,7 @@ fn delete_builder_can_return_projected_rows() {
 
     assert_delete_user_row(&delete);
     let _stream = delete.fetch();
-    let _all = delete.fetch_all();
+    let _all = delete.fetch().try_collect::<Vec<_>>();
     let _all_with_affected = delete.fetch_all_with_affected();
     let _one_with_affected = delete.fetch_one_with_affected();
     let _optional_with_affected = delete.fetch_optional_with_affected();
@@ -744,7 +745,7 @@ fn select_exposes_stream_and_convenience_fetch_methods() {
     });
 
     let _stream = users.fetch();
-    let _all = users.fetch_all();
+    let _all = users.fetch().try_collect::<Vec<_>>();
     let _one = users.fetch_one();
     let _optional = users.fetch_optional();
 }
