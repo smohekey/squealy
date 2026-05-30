@@ -13,6 +13,13 @@ struct IntegrationUser<'scope, C: ColumnMode = ColumnExpr> {
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
+struct TransactionUser<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment, db_type = "integer")]
+    id: C::Type<'scope, i32>,
+    name: C::Type<'scope, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Table)]
 struct IntegrationDefaulted<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key, auto_increment, db_type = "integer")]
     id: C::Type<'scope, i32>,
@@ -349,6 +356,61 @@ async fn postgres_surfaces_database_errors() {
         matches!(result, Err(PostgresError::Database(_))),
         "expected a database error, got {result:?}"
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_runs_transaction_closures() {
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS transaction_users")
+        .await
+        .expect("drop old transaction table");
+
+    let ddl_backend = PostgresConnection::default();
+    create_table::<TransactionUser>(&client, &ddl_backend).await;
+
+    let mut connection = PostgresConnection::new(client);
+
+    let committed_name = connection
+        .transaction(async |transaction| {
+            let user = transaction
+                .insert::<TransactionUser>()
+                .name("Committed")
+                .returning(|user| user)
+                .fetch_one()
+                .await?;
+            Ok(user.name)
+        })
+        .await
+        .expect("commit transaction");
+
+    assert_eq!(committed_name, "Committed");
+
+    let rolled_back: Result<(), PostgresError> = connection
+        .transaction(async |transaction| {
+            transaction
+                .insert::<TransactionUser>()
+                .name("Rolled back")
+                .execute()
+                .await?;
+            Err(PostgresError::NoRows)
+        })
+        .await;
+
+    assert!(matches!(rolled_back, Err(PostgresError::NoRows)));
+
+    let users = connection
+        .select(|q| {
+            let user = q.from::<TransactionUser>();
+            q.order_by(user.id.asc());
+            q.returning(user.name)
+        })
+        .fetch_all()
+        .await
+        .expect("fetch committed users");
+
+    assert_eq!(users, vec!["Committed".to_owned()]);
 }
 
 async fn create_table<S>(client: &tokio_postgres::Client, ddl_backend: &PostgresConnection)

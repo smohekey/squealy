@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::io::{self, Write};
 
 use crate::{
@@ -39,9 +40,7 @@ pub trait Backend: Sized {
 pub trait Connection: Sized {
     type Error;
 
-    type RowReader<'row>: RowReader<Connection = Self>
-    where
-        Self: 'row;
+    type RowReader<'row>: RowReader<Connection = Self>;
 
     fn no_rows_error() -> Self::Error;
 
@@ -150,4 +149,19 @@ pub trait Connection: Sized {
         S: TableProjection,
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>;
+}
+
+/// A connection that can run a closure inside a backend-managed transaction.
+pub trait TransactionalConnection: Connection {
+    type Transaction<'conn>: Connection<Error = Self::Error>
+    where
+        Self: 'conn;
+
+    fn transaction<'conn, T, F>(
+        &'conn mut self,
+        f: F,
+    ) -> impl Future<Output = Result<T, Self::Error>> + 'conn
+    where
+        T: 'conn,
+        F: for<'tx> AsyncFnOnce(&'tx Self::Transaction<'conn>) -> Result<T, Self::Error> + 'conn;
 }

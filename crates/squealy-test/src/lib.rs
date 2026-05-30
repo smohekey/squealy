@@ -30,10 +30,7 @@ impl Backend for TestConnection {
 impl Connection for TestConnection {
     type Error = TestError;
 
-    type RowReader<'row>
-        = TestRowReader<'row>
-    where
-        Self: 'row;
+    type RowReader<'row> = TestRowReader<'row>;
 
     fn no_rows_error() -> Self::Error {
         TestError::NoRows

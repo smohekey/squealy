@@ -2,8 +2,9 @@ use std::fmt;
 
 use squealy::{
     Backend, BindValue, Connection, Decode, InsertableTable, ProjectionShape, Returning,
-    SelectBuilder, Table, TableProjection, UpdateableTable, build_delete, build_delete_returning,
-    build_insert, build_insert_returning, build_select, build_update, build_update_returning,
+    SelectBuilder, Table, TableProjection, TransactionalConnection, UpdateableTable, build_delete,
+    build_delete_returning, build_insert, build_insert_returning, build_select, build_update,
+    build_update_returning,
 };
 use tokio_postgres::Client;
 
@@ -31,6 +32,20 @@ impl PostgresConnection {
 
     pub(crate) fn client(&self) -> Result<&Client, PostgresError> {
         self.client.as_ref().ok_or(PostgresError::NoDriver)
+    }
+
+    pub(crate) fn client_mut(&mut self) -> Result<&mut Client, PostgresError> {
+        self.client.as_mut().ok_or(PostgresError::NoDriver)
+    }
+}
+
+pub struct PostgresTransaction<'conn> {
+    pub(crate) transaction: tokio_postgres::Transaction<'conn>,
+}
+
+impl fmt::Debug for PostgresTransaction<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("PostgresTransaction").finish()
     }
 }
 
@@ -81,10 +96,7 @@ impl Backend for PostgresConnection {
 impl Connection for PostgresConnection {
     type Error = PostgresError;
 
-    type RowReader<'row>
-        = PostgresRowReader<'row>
-    where
-        Self: 'row;
+    type RowReader<'row> = PostgresRowReader<'row>;
 
     fn no_rows_error() -> Self::Error {
         PostgresError::NoRows
@@ -205,5 +217,176 @@ impl Connection for PostgresConnection {
         Shape::Row: Decode<Self>,
     {
         PostgresDelete::new(self, build_delete_returning::<S>(alias, filters, returning))
+    }
+}
+
+impl Connection for PostgresTransaction<'_> {
+    type Error = PostgresError;
+
+    type RowReader<'row> = PostgresRowReader<'row, Self>;
+
+    fn no_rows_error() -> Self::Error {
+        PostgresError::NoRows
+    }
+
+    type Select<'conn, Shape>
+        = PostgresSelect<'conn, Shape, Self>
+    where
+        Self: 'conn,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
+
+    type Insert<'conn, S, Shape>
+        = PostgresInsert<'conn, S, Shape, Self>
+    where
+        Self: 'conn,
+        S: InsertableTable,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
+
+    type Update<'conn, S, Shape>
+        = PostgresUpdate<'conn, S, Shape, Self>
+    where
+        Self: 'conn,
+        S: UpdateableTable,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
+
+    type Delete<'conn, S, Shape>
+        = PostgresDelete<'conn, S, Shape, Self>
+    where
+        Self: 'conn,
+        S: TableProjection,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>;
+
+    fn select<Shape>(
+        &self,
+        f: impl for<'scope> FnOnce(&mut SelectBuilder<'_, 'scope, Self>) -> Returning<Shape>,
+    ) -> Self::Select<'_, Shape>
+    where
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>,
+    {
+        PostgresSelect::new(self, build_select::<Self, Shape>(f))
+    }
+
+    fn insert_query<S>(&self, columns: Vec<squealy::InsertColumn>) -> Self::Insert<'_, S, ()>
+    where
+        S: InsertableTable,
+    {
+        PostgresInsert::new(self, build_insert::<S>(columns))
+    }
+
+    fn insert_returning_query<S, Shape>(
+        &self,
+        columns: Vec<squealy::InsertColumn>,
+        returning: Vec<squealy::SelectColumn>,
+    ) -> Self::Insert<'_, S, Shape>
+    where
+        S: InsertableTable,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>,
+    {
+        PostgresInsert::new(self, build_insert_returning::<S>(columns, returning))
+    }
+
+    fn update_query<S>(
+        &self,
+        alias: String,
+        columns: Vec<squealy::UpdateColumn>,
+        filters: Vec<squealy::Filter>,
+    ) -> Self::Update<'_, S, ()>
+    where
+        S: UpdateableTable,
+    {
+        PostgresUpdate::new(self, build_update::<S>(alias, columns, filters))
+    }
+
+    fn update_returning_query<S, Shape>(
+        &self,
+        alias: String,
+        columns: Vec<squealy::UpdateColumn>,
+        filters: Vec<squealy::Filter>,
+        returning: Vec<squealy::SelectColumn>,
+    ) -> Self::Update<'_, S, Shape>
+    where
+        S: UpdateableTable,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>,
+    {
+        PostgresUpdate::new(
+            self,
+            build_update_returning::<S>(alias, columns, filters, returning),
+        )
+    }
+
+    fn delete_query<S>(
+        &self,
+        alias: String,
+        filters: Vec<squealy::Filter>,
+    ) -> Self::Delete<'_, S, ()>
+    where
+        S: TableProjection,
+    {
+        PostgresDelete::new(self, build_delete::<S>(alias, filters))
+    }
+
+    fn delete_returning_query<S, Shape>(
+        &self,
+        alias: String,
+        filters: Vec<squealy::Filter>,
+        returning: Vec<squealy::SelectColumn>,
+    ) -> Self::Delete<'_, S, Shape>
+    where
+        S: TableProjection,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>,
+    {
+        PostgresDelete::new(self, build_delete_returning::<S>(alias, filters, returning))
+    }
+}
+
+impl TransactionalConnection for PostgresConnection {
+    type Transaction<'conn>
+        = PostgresTransaction<'conn>
+    where
+        Self: 'conn;
+
+    fn transaction<'conn, T, F>(
+        &'conn mut self,
+        f: F,
+    ) -> impl std::future::Future<Output = Result<T, Self::Error>> + 'conn
+    where
+        T: 'conn,
+        F: for<'tx> AsyncFnOnce(&'tx Self::Transaction<'conn>) -> Result<T, Self::Error> + 'conn,
+    {
+        async move {
+            let transaction = self
+                .client_mut()?
+                .transaction()
+                .await
+                .map_err(PostgresError::Database)?;
+            let transaction: Self::Transaction<'conn> = PostgresTransaction { transaction };
+
+            match f(&transaction).await {
+                Ok(value) => {
+                    transaction
+                        .transaction
+                        .commit()
+                        .await
+                        .map_err(PostgresError::Database)?;
+                    Ok(value)
+                }
+                Err(error) => {
+                    transaction
+                        .transaction
+                        .rollback()
+                        .await
+                        .map_err(PostgresError::Database)?;
+                    Err(error)
+                }
+            }
+        }
     }
 }
