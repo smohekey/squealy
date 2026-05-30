@@ -19,26 +19,20 @@ pub use query::{
 pub struct Postgres;
 
 pub struct PostgresConnection {
-    client: Option<Client>,
+    client: Client,
 }
 
 impl PostgresConnection {
     pub fn new(client: Client) -> Self {
-        Self {
-            client: Some(client),
-        }
+        Self { client }
     }
 
-    pub const fn no_driver() -> Self {
-        Self { client: None }
+    pub(crate) fn client(&self) -> &Client {
+        &self.client
     }
 
-    pub(crate) fn client(&self) -> Result<&Client, PostgresError> {
-        self.client.as_ref().ok_or(PostgresError::NoDriver)
-    }
-
-    pub(crate) fn client_mut(&mut self) -> Result<&mut Client, PostgresError> {
-        self.client.as_mut().ok_or(PostgresError::NoDriver)
+    pub(crate) fn client_mut(&mut self) -> &mut Client {
+        &mut self.client
     }
 }
 
@@ -52,18 +46,9 @@ impl fmt::Debug for PostgresTransaction<'_> {
     }
 }
 
-impl Default for PostgresConnection {
-    fn default() -> Self {
-        Self::no_driver()
-    }
-}
-
 impl fmt::Debug for PostgresConnection {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PostgresConnection")
-            .field("has_client", &self.client.is_some())
-            .finish()
+        formatter.debug_struct("PostgresConnection").finish()
     }
 }
 
@@ -193,6 +178,124 @@ trait PostgresQueryBuilder: query::PostgresExecutor {
 }
 
 impl<Conn> PostgresQueryBuilder for Conn where Conn: query::PostgresExecutor {}
+
+impl Connection for Postgres {
+    type Backend = Postgres;
+
+    type Select<'conn, Shape>
+        = PostgresSelect<'conn, Shape, Self>
+    where
+        Self: 'conn,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self::Backend>;
+
+    type Insert<'conn, S, Shape>
+        = PostgresInsert<'conn, S, Shape, Self>
+    where
+        Self: 'conn,
+        S: InsertableTable,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self::Backend>;
+
+    type Update<'conn, S, Shape>
+        = PostgresUpdate<'conn, S, Shape, Self>
+    where
+        Self: 'conn,
+        S: UpdateableTable,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self::Backend>;
+
+    type Delete<'conn, S, Shape>
+        = PostgresDelete<'conn, S, Shape, Self>
+    where
+        Self: 'conn,
+        S: TableProjection,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self::Backend>;
+
+    fn select<Shape>(
+        &self,
+        f: impl for<'scope> FnOnce(&mut SelectBuilder<'_, 'scope, Self>) -> Returning<Shape>,
+    ) -> Self::Select<'_, Shape>
+    where
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self::Backend>,
+    {
+        self.build_select_query(f)
+    }
+
+    fn insert_query<S>(&self, columns: Vec<squealy::InsertColumn>) -> Self::Insert<'_, S, ()>
+    where
+        S: InsertableTable,
+    {
+        self.build_insert_query(columns)
+    }
+
+    fn insert_returning_query<S, Shape>(
+        &self,
+        columns: Vec<squealy::InsertColumn>,
+        returning: Vec<squealy::SelectColumn>,
+    ) -> Self::Insert<'_, S, Shape>
+    where
+        S: InsertableTable,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self::Backend>,
+    {
+        self.build_insert_returning_query(columns, returning)
+    }
+
+    fn update_query<S>(
+        &self,
+        alias: String,
+        columns: Vec<squealy::UpdateColumn>,
+        filters: Vec<squealy::Filter>,
+    ) -> Self::Update<'_, S, ()>
+    where
+        S: UpdateableTable,
+    {
+        self.build_update_query(alias, columns, filters)
+    }
+
+    fn update_returning_query<S, Shape>(
+        &self,
+        alias: String,
+        columns: Vec<squealy::UpdateColumn>,
+        filters: Vec<squealy::Filter>,
+        returning: Vec<squealy::SelectColumn>,
+    ) -> Self::Update<'_, S, Shape>
+    where
+        S: UpdateableTable,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self::Backend>,
+    {
+        self.build_update_returning_query(alias, columns, filters, returning)
+    }
+
+    fn delete_query<S>(
+        &self,
+        alias: String,
+        filters: Vec<squealy::Filter>,
+    ) -> Self::Delete<'_, S, ()>
+    where
+        S: TableProjection,
+    {
+        self.build_delete_query(alias, filters)
+    }
+
+    fn delete_returning_query<S, Shape>(
+        &self,
+        alias: String,
+        filters: Vec<squealy::Filter>,
+        returning: Vec<squealy::SelectColumn>,
+    ) -> Self::Delete<'_, S, Shape>
+    where
+        S: TableProjection,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self::Backend>,
+    {
+        self.build_delete_returning_query(alias, filters, returning)
+    }
+}
 
 impl Connection for PostgresConnection {
     type Backend = Postgres;
@@ -449,7 +552,7 @@ impl ConnectionWithTransaction for PostgresConnection {
     {
         async move {
             let transaction = self
-                .client_mut()?
+                .client_mut()
                 .transaction()
                 .await
                 .map_err(PostgresError::Database)?;
