@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::{Column, ColumnMode, ColumnName, Index, InsertColumn, Projectable, Schema};
+use crate::{Column, ColumnMode, ColumnName, Connection, Index, Projectable, Schema};
 
 /// Object-safe table metadata exposed through schema membership.
 pub trait Table {
@@ -94,5 +94,11 @@ pub trait SchemaTable: Table {
 
 /// A table model whose value-mode fields can be inserted as bind parameters.
 pub trait InsertableTable: SchemaTable {
-    fn insert_columns(row: Self::WithColumn<'static, crate::ColumnValue>) -> Vec<InsertColumn>;
+    type InsertBuilder<'conn, Conn>
+    where
+        Conn: Connection + 'conn;
+
+    fn insert_builder<'conn, Conn>(connection: &'conn Conn) -> Self::InsertBuilder<'conn, Conn>
+    where
+        Conn: Connection + 'conn;
 }

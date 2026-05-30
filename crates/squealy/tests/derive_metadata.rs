@@ -265,21 +265,33 @@ fn from_uses_generated_column_expression_kinds() {
 }
 
 #[test]
-fn insert_builds_table_value_bindings() {
-    let insert = TestConnection.insert::<User>(User {
-        id: 1,
-        name: "Ada".to_owned(),
-    });
+fn insert_builder_executes_with_optional_columns() {
+    let _execute = TestConnection.insert::<User>().name("Ada").execute();
+}
+
+#[test]
+fn insert_builder_requires_required_columns() {
+    let _execute = TestConnection
+        .insert::<Post>()
+        .id(1)
+        .user_id(1)
+        .body("Hello")
+        .execute();
+}
+
+#[test]
+fn insert_query_builds_column_bindings() {
+    let insert = TestConnection.insert_query::<User>(vec![InsertColumn::new(
+        "name",
+        BindValue::Text("Ada".to_owned()),
+    )]);
 
     let _execute = insert.execute();
     assert_eq!(
         insert.to_sql(),
-        r#"INSERT INTO public.users (id, name) VALUES (?, ?)"#
+        r#"INSERT INTO public.users (name) VALUES (?)"#
     );
-    assert_eq!(
-        insert.params(),
-        vec![BindValue::Int(1), BindValue::Text("Ada".to_owned())]
-    );
+    assert_eq!(insert.params(), vec![BindValue::Text("Ada".to_owned())]);
 }
 
 #[test]

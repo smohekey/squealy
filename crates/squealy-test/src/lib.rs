@@ -308,12 +308,12 @@ impl Connection for TestConnection {
         }
     }
 
-    fn insert<S>(&self, row: S::WithColumn<'static, squealy::ColumnValue>) -> Self::Insert<'_, S>
+    fn insert_query<S>(&self, columns: Vec<squealy::InsertColumn>) -> Self::Insert<'_, S>
     where
         S: InsertableTable,
     {
         TestInsert {
-            insert: build_insert::<S>(row),
+            insert: build_insert::<S>(columns),
             _connection: PhantomData,
             _table: PhantomData,
         }

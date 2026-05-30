@@ -1,8 +1,8 @@
 use std::io::{self, Write};
 
 use crate::{
-    DeleteBuilder, DeleteQuery, InsertQuery, InsertableTable, ProjectionShape, Returning,
-    SelectQuery, Table, TableProjection,
+    DeleteBuilder, DeleteQuery, InsertColumn, InsertQuery, InsertableTable, ProjectionShape,
+    Returning, SelectQuery, Table, TableProjection,
 };
 
 /// Backend-specific DDL generation.
@@ -37,7 +37,14 @@ pub trait Connection: Sized {
     where
         Shape: ProjectionShape;
 
-    fn insert<S>(&self, row: S::WithColumn<'static, crate::ColumnValue>) -> Self::Insert<'_, S>
+    fn insert<S>(&self) -> S::InsertBuilder<'_, Self>
+    where
+        S: InsertableTable,
+    {
+        S::insert_builder(self)
+    }
+
+    fn insert_query<S>(&self, columns: Vec<InsertColumn>) -> Self::Insert<'_, S>
     where
         S: InsertableTable;
 

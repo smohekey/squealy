@@ -91,6 +91,7 @@ impl TableStruct {
         let nullable_exprs_ident = generated_ident(&ident, "nullable_exprs", "Projection");
         let nullable_rebound_exprs_ident =
             generated_ident(&ident, "nullable_exprs", "ReboundProjection");
+        let insert_builder_ident = generated_ident(&ident, "insert", "Builder");
         let expr_kind_idents = self
             .fields
             .iter()
@@ -155,6 +156,113 @@ impl TableStruct {
             .schema
             .clone()
             .unwrap_or_else(|| quote::quote! { ::squealy::DefaultSchema });
+        let insertable_fields = self
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| field.insertable())
+            .collect::<Vec<_>>();
+        let insert_state_idents = insertable_fields
+            .iter()
+            .map(|(_, field)| generated_ident(&ident, &field.ident.to_string(), "InsertState"))
+            .collect::<Vec<_>>();
+        let insert_missing_idents = insertable_fields
+            .iter()
+            .map(|(_, field)| generated_ident(&ident, &field.ident.to_string(), "InsertMissing"))
+            .collect::<Vec<_>>();
+        let insert_set_idents = insertable_fields
+            .iter()
+            .map(|(_, field)| generated_ident(&ident, &field.ident.to_string(), "InsertSet"))
+            .collect::<Vec<_>>();
+        let insert_state_defaults = insert_state_idents
+            .iter()
+            .zip(insert_missing_idents.iter())
+            .map(|(state, missing)| quote::quote! { #state = #missing })
+            .collect::<Vec<_>>();
+        let insert_initial_states = insert_missing_idents.iter().collect::<Vec<_>>();
+        let insert_execute_states = insertable_fields
+            .iter()
+            .zip(insert_state_idents.iter())
+            .zip(insert_set_idents.iter())
+            .map(|(((_, field), state), set)| {
+                if field.required_insert() {
+                    quote::quote! { #set }
+                } else {
+                    quote::quote! { #state }
+                }
+            })
+            .collect::<Vec<_>>();
+        let insert_execute_state_params = insertable_fields
+            .iter()
+            .zip(insert_state_idents.iter())
+            .filter_map(|((_, field), state)| (!field.required_insert()).then_some(state))
+            .collect::<Vec<_>>();
+        let insert_state_tuple = if insert_state_idents.is_empty() {
+            quote::quote! { () }
+        } else {
+            quote::quote! { (#(#insert_state_idents,)*) }
+        };
+        let insert_setters = insertable_fields
+            .iter()
+            .enumerate()
+            .map(|(setter_index, (field_index, field))| {
+                let field_ident =
+                    proc_macro2::Ident::new(&field.ident.to_string(), Span::call_site());
+                let field_literal = &field_literals[*field_index];
+                let field_ty = &field.value_ty;
+                let missing = &insert_missing_idents[setter_index];
+                let set = &insert_set_idents[setter_index];
+                let impl_state_params = insert_state_idents
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, state)| (index != setter_index).then_some(state))
+                    .collect::<Vec<_>>();
+                let self_states = insert_state_idents
+                    .iter()
+                    .enumerate()
+                    .map(|(index, state)| {
+                        if index == setter_index {
+                            quote::quote! { #missing }
+                        } else {
+                            quote::quote! { #state }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let return_states = insert_state_idents
+                    .iter()
+                    .enumerate()
+                    .map(|(index, state)| {
+                        if index == setter_index {
+                            quote::quote! { #set }
+                        } else {
+                            quote::quote! { #state }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                quote::quote! {
+                    impl<'conn, Conn, #(#impl_state_params),*> #insert_builder_ident <'conn, Conn, #(#self_states),*>
+                    where
+                        Conn: ::squealy::Connection + 'conn,
+                    {
+                        pub fn #field_ident(
+                            mut self,
+                            value: impl ::std::convert::Into<#field_ty>,
+                        ) -> #insert_builder_ident <'conn, Conn, #(#return_states),*> {
+                            self.columns.push(::squealy::InsertColumn::new(
+                                #field_literal,
+                                ::squealy::IntoBindValue::into_bind_value(value.into()),
+                            ));
+                            #insert_builder_ident {
+                                connection: self.connection,
+                                columns: self.columns,
+                                _state: ::std::marker::PhantomData,
+                            }
+                        }
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
 
         quote::quote! {
             #(#foreign_key_defs)*
@@ -202,6 +310,57 @@ impl TableStruct {
             #[derive(Clone, Debug, PartialEq)]
             struct #nullable_rebound_exprs_ident <'scope> {
                 #( pub #fields: ::squealy::Expr<'scope, ::squealy::Nullable<#expr_kind_idents>>, )*
+            }
+
+            #(
+                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+                struct #insert_missing_idents;
+            )*
+
+            #(
+                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+                struct #insert_set_idents;
+            )*
+
+            #[derive(Clone, Debug, PartialEq)]
+            struct #insert_builder_ident <'conn, Conn: ::squealy::Connection + 'conn, #(#insert_state_defaults),*> {
+                connection: &'conn Conn,
+                columns: ::std::vec::Vec<::squealy::InsertColumn>,
+                _state: ::std::marker::PhantomData<#insert_state_tuple>,
+            }
+
+            impl<'conn, Conn> #insert_builder_ident <'conn, Conn, #(#insert_initial_states),*>
+            where
+                Conn: ::squealy::Connection + 'conn,
+            {
+                fn new(connection: &'conn Conn) -> Self {
+                    Self {
+                        connection,
+                        columns: ::std::vec::Vec::new(),
+                        _state: ::std::marker::PhantomData,
+                    }
+                }
+            }
+
+            #(#insert_setters)*
+
+            impl<'conn, Conn, #(#insert_execute_state_params),*> #insert_builder_ident <'conn, Conn, #(#insert_execute_states),*>
+            where
+                Conn: ::squealy::Connection + 'conn,
+            {
+                pub fn execute(
+                    self,
+                ) -> impl ::std::future::Future<
+                    Output = ::std::result::Result<u64, <Conn as ::squealy::Connection>::Error>,
+                > + 'conn {
+                    let query = ::squealy::Connection::insert_query::<#ident <'static, ::squealy::ColumnExpr>>(
+                        self.connection,
+                        self.columns,
+                    );
+                    async move {
+                        ::squealy::InsertQuery::execute(&query).await
+                    }
+                }
             }
 
             static #columns_static: [&'static dyn ::squealy::Column; #columns_len] = [#( &#column_idents, )*];
@@ -268,17 +427,17 @@ impl TableStruct {
             }
 
             impl ::squealy::InsertableTable for #ident <'static, ::squealy::ColumnExpr> {
-                fn insert_columns(
-                    row: Self::WithColumn<'static, ::squealy::ColumnValue>,
-                ) -> ::std::vec::Vec<::squealy::InsertColumn> {
-                    ::std::vec![
-                        #(
-                            ::squealy::InsertColumn::new(
-                                #field_literals,
-                                ::squealy::IntoBindValue::into_bind_value(row.#fields),
-                            ),
-                        )*
-                    ]
+                type InsertBuilder<'conn, Conn> = #insert_builder_ident <'conn, Conn>
+                where
+                    Conn: ::squealy::Connection + 'conn;
+
+                fn insert_builder<'conn, Conn>(
+                    connection: &'conn Conn,
+                ) -> Self::InsertBuilder<'conn, Conn>
+                where
+                    Conn: ::squealy::Connection + 'conn,
+                {
+                    #insert_builder_ident::new(connection)
                 }
             }
 
@@ -465,6 +624,18 @@ impl Field {
             .column_name
             .clone()
             .unwrap_or_else(|| self.ident.to_string())
+    }
+
+    fn insertable(&self) -> bool {
+        !self.attrs.auto_increment
+    }
+
+    fn required_insert(&self) -> bool {
+        self.insertable() && !self.nullable() && self.attrs.default.is_none()
+    }
+
+    fn nullable(&self) -> bool {
+        self.attrs.nullable.unwrap_or(false)
     }
 
     fn column_definition_tokens(
