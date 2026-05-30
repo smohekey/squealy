@@ -66,7 +66,7 @@ struct AppDatabase {
 fn posts_of_user<'conn, 'scope, K>(
     connection: &'conn TestConnection,
     user_id: &Expr<'scope, K>,
-) -> TestSelect<'conn, Post<'static, ColumnExpr>>
+) -> TestSelect<'conn, __SquealyPostRowShape>
 where
     K: ExprKind<Value = i32>,
 {
@@ -203,13 +203,13 @@ fn from_selects_from_derived_table_metadata() {
 fn assert_table_select_shape<'conn, Qry, S>(_: &'conn Qry)
 where
     Qry: SelectQuery<'conn, Shape = S>,
-    S: TableProjection,
+    S: ProjectionShape,
 {
 }
 
 fn assert_user_row<'conn, Qry>(_: &'conn Qry)
 where
-    Qry: SelectQuery<'conn, Row = User<'static, ColumnValue>>,
+    Qry: SelectQuery<'conn, Row = __SquealyUserRowShape>,
 {
 }
 
@@ -233,7 +233,7 @@ where
 
 fn assert_delete_user_row<'conn, Qry>(_: &'conn Qry)
 where
-    Qry: DeleteQuery<'conn, Row = User<'static, ColumnValue>>,
+    Qry: DeleteQuery<'conn, Row = __SquealyUserRowShape>,
 {
 }
 
@@ -245,25 +245,19 @@ where
 
 fn assert_user_id_and_post_row<'conn, Qry>(_: &'conn Qry)
 where
-    Qry: SelectQuery<'conn, Row = (i32, Post<'static, ColumnValue>)>,
+    Qry: SelectQuery<'conn, Row = (i32, __SquealyPostRowShape)>,
 {
 }
 
 fn assert_user_id_name_and_post_row<'conn, Qry>(_: &'conn Qry)
 where
-    Qry: SelectQuery<'conn, Row = (i32, String, Post<'static, ColumnValue>)>,
+    Qry: SelectQuery<'conn, Row = (i32, String, __SquealyPostRowShape)>,
 {
 }
 
 fn assert_user_and_maybe_post_row<'conn, Qry>(_: &'conn Qry)
 where
-    Qry: SelectQuery<
-            'conn,
-            Row = (
-                User<'static, ColumnValue>,
-                Post<'static, ColumnNullableValue>,
-            ),
-        >,
+    Qry: SelectQuery<'conn, Row = (__SquealyUserRowShape, Post<'static, ColumnNullableValue>)>,
 {
 }
 
@@ -335,7 +329,7 @@ fn from_select_carries_table_projection_shape() {
         q.returning(user)
     });
 
-    assert_table_select_shape::<_, User>(&users);
+    assert_table_select_shape::<_, __SquealyUserRowShape>(&users);
     assert_user_row(&users);
 }
 
@@ -358,7 +352,17 @@ fn table_rows_implement_backend_decode() {
     assert_decode::<Option<String>>();
     assert_decode::<User<'static, ColumnValue>>();
     assert_decode::<User<'static, ColumnNullableValue>>();
+    assert_decode::<__SquealyUserRowShape>();
     assert_decode::<(i32, User<'static, ColumnValue>)>();
+}
+
+#[test]
+fn table_row_shapes_respect_column_nullability() {
+    let row = __SquealyUserRowShape { id: 1, name: None };
+    let name: Option<String> = row.name;
+
+    assert_eq!(row.id, 1);
+    assert_eq!(name, None);
 }
 
 #[test]

@@ -217,6 +217,19 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
         .expect("update nullable record");
 
     assert_eq!(affected, 1);
+
+    let nullable_row = connection
+        .select(|q| {
+            let record = q.from::<IntegrationNullable>();
+            q.where_(record.id.equals(nullable_id));
+            q.returning(record)
+        })
+        .fetch_one()
+        .await
+        .expect("fetch nullable record");
+
+    assert_eq!(nullable_row.id, nullable_id);
+    assert_eq!(nullable_row.note, None);
 }
 
 #[tokio::test]

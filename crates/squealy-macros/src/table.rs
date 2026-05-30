@@ -111,6 +111,7 @@ impl TableStruct {
         let nullable_exprs_ident = generated_ident(&ident, "nullable_exprs", "Projection");
         let nullable_rebound_exprs_ident =
             generated_ident(&ident, "nullable_exprs", "ReboundProjection");
+        let row_shape_ident = generated_ident(&ident, "row", "Shape");
         let expr_kind_idents = self
             .fields
             .iter()
@@ -125,6 +126,18 @@ impl TableStruct {
             .fields
             .iter()
             .map(|field| field.value_ty.clone())
+            .collect::<Vec<_>>();
+        let row_field_value_tys = self
+            .fields
+            .iter()
+            .map(|field| {
+                let field_ty = field.value_ty.clone();
+                if field.nullable() {
+                    quote::quote! { ::std::option::Option<#field_ty> }
+                } else {
+                    field_ty
+                }
+            })
             .collect::<Vec<_>>();
         let field_indexes = self
             .fields
@@ -220,6 +233,11 @@ impl TableStruct {
                 #( pub #fields: ::squealy::Expr<'scope, #expr_kind_idents>, )*
             }
 
+            #[derive(Clone, Debug, PartialEq)]
+            struct #row_shape_ident {
+                #( pub #fields: #row_field_value_tys, )*
+            }
+
             #[derive(Clone, Copy, Debug, PartialEq, Eq)]
             struct #nullable_exprs_ident <'scope> {
                 #( pub #fields: ::squealy::ColumnRef<'scope, ::squealy::Nullable<#expr_kind_idents>>, )*
@@ -296,6 +314,23 @@ impl TableStruct {
                 }
             }
 
+            impl ::squealy::ProjectionShape for #row_shape_ident {
+                type Exprs<'scope> = #exprs_ident <'scope>;
+                type ReboundExprs<'scope> = #rebound_exprs_ident <'scope>;
+                type Row = #row_shape_ident;
+
+                fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
+                    <#ident <'static, ::squealy::ColumnExpr> as ::squealy::SchemaTable>::column_exprs(alias)
+                }
+
+                fn rebound_exprs<'scope>(alias: &str) -> Self::ReboundExprs<'scope> {
+                    ::squealy::Projectable::re_alias(
+                        &<#ident <'static, ::squealy::ColumnExpr> as ::squealy::SchemaTable>::column_exprs(alias),
+                        alias,
+                    )
+                }
+            }
+
             impl<Conn> ::squealy::Decode<Conn> for #ident <'static, ::squealy::ColumnValue>
             where
                 Conn: ::squealy::Connection,
@@ -307,6 +342,22 @@ impl TableStruct {
                     Ok(#ident {
                         #(
                             #fields: ::squealy::RowReader::read::<#field_value_tys>(row)?,
+                        )*
+                    })
+                }
+            }
+
+            impl<Conn> ::squealy::Decode<Conn> for #row_shape_ident
+            where
+                Conn: ::squealy::Connection,
+                #(#row_field_value_tys: ::squealy::Decode<Conn>,)*
+            {
+                fn decode(
+                    row: &mut <Conn as ::squealy::Connection>::RowReader<'_>,
+                ) -> ::std::result::Result<Self, <Conn as ::squealy::Connection>::Error> {
+                    Ok(#row_shape_ident {
+                        #(
+                            #fields: ::squealy::RowReader::read::<#row_field_value_tys>(row)?,
                         )*
                     })
                 }
@@ -361,7 +412,7 @@ impl TableStruct {
             }
 
             impl<'scope> ::squealy::ReturningProjection<'scope> for #exprs_ident <'scope> {
-                type Shape = #ident <'static, ::squealy::ColumnExpr>;
+                type Shape = #row_shape_ident;
             }
 
             impl<'scope> ::squealy::Projectable for #rebound_exprs_ident <'scope> {
@@ -394,7 +445,7 @@ impl TableStruct {
             }
 
             impl<'scope> ::squealy::ReturningProjection<'scope> for #rebound_exprs_ident <'scope> {
-                type Shape = #ident <'static, ::squealy::ColumnExpr>;
+                type Shape = #row_shape_ident;
             }
 
             impl<'scope> ::squealy::Projectable for #nullable_exprs_ident <'scope> {
