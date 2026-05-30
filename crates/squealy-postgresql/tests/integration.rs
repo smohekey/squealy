@@ -1,3 +1,6 @@
+use std::future::poll_fn;
+
+use futures_core::Stream;
 use squealy::*;
 use squealy_postgresql::{PostgresConnection, PostgresError};
 use tokio_postgres::NoTls;
@@ -171,6 +174,20 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
         .expect("fetch remaining users");
 
     assert_eq!(remaining, vec![updated_ada]);
+
+    let stream_query = connection.select(|q| {
+        let user = q.from::<IntegrationUser>();
+        q.returning(user.name)
+    });
+    let mut rows = Box::pin(stream_query.fetch());
+    let first = poll_fn(|cx| rows.as_mut().poll_next(cx))
+        .await
+        .expect("stream should yield one row")
+        .expect("stream row should decode");
+    let second = poll_fn(|cx| rows.as_mut().poll_next(cx)).await;
+
+    assert_eq!(first, "Ada Lovelace");
+    assert!(second.is_none());
 
     let defaulted = connection
         .insert::<IntegrationDefaulted>()

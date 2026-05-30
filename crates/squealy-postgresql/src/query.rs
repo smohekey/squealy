@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::error::Error;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -125,13 +124,13 @@ enum PostgresRowsState<'query> {
     Pending(
         Pin<
             Box<
-                dyn Future<Output = Result<VecDeque<tokio_postgres::Row>, PostgresError>>
+                dyn Future<Output = Result<tokio_postgres::RowStream, PostgresError>>
                     + Send
                     + 'query,
             >,
         >,
     ),
-    Rows(VecDeque<tokio_postgres::Row>),
+    Rows(Pin<Box<tokio_postgres::RowStream>>),
     Error(Option<PostgresError>),
     Done,
 }
@@ -160,9 +159,8 @@ impl<'query, Row> PostgresRows<'query, Row> {
                 let params = postgres_params(params)?;
                 let params = params.iter().map(PostgresParam::as_sql).collect::<Vec<_>>();
                 client
-                    .query(&sql, &params)
+                    .query_raw(&sql, params)
                     .await
-                    .map(VecDeque::from)
                     .map_err(PostgresError::Database)
             })),
             _row: PhantomData,
@@ -190,12 +188,20 @@ where
                             return Poll::Ready(Some(Err(error)));
                         }
                     };
-                    this.state = PostgresRowsState::Rows(rows);
+                    this.state = PostgresRowsState::Rows(Box::pin(rows));
                 }
                 PostgresRowsState::Rows(rows) => {
-                    let Some(row) = rows.pop_front() else {
-                        this.state = PostgresRowsState::Done;
-                        return Poll::Ready(None);
+                    let row = match rows.as_mut().poll_next(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Some(Ok(row))) => row,
+                        Poll::Ready(Some(Err(error))) => {
+                            this.state = PostgresRowsState::Done;
+                            return Poll::Ready(Some(Err(PostgresError::Database(error))));
+                        }
+                        Poll::Ready(None) => {
+                            this.state = PostgresRowsState::Done;
+                            return Poll::Ready(None);
+                        }
                     };
                     let mut row = PostgresRowReader::new(&row);
                     return Poll::Ready(Some(Row::decode(&mut row)));
