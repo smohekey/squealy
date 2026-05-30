@@ -85,7 +85,7 @@ fn postgres_insert_update_and_delete_render_returning() {
 
     assert_eq!(
         insert.to_sql(),
-        "INSERT INTO public.users (name) VALUES ($1) RETURNING q0_0.id AS id"
+        "INSERT INTO public.users (name) VALUES ($1) RETURNING id AS id"
     );
     assert_eq!(
         update.to_sql(),
@@ -112,7 +112,7 @@ fn postgres_insert_can_use_default_values() {
 
     assert_eq!(
         insert.to_sql(),
-        "INSERT INTO defaulted_records DEFAULT VALUES RETURNING q0_0.id AS id"
+        "INSERT INTO defaulted_records DEFAULT VALUES RETURNING id AS id"
     );
     assert_eq!(insert.params(), Vec::<BindValue>::new());
 }
@@ -132,7 +132,7 @@ fn postgres_mutation_returning_expressions_continue_placeholder_numbering() {
 
     assert_eq!(
         insert.to_sql(),
-        "INSERT INTO public.users (name) VALUES ($1) RETURNING (q0_0.id + $2) AS expr"
+        "INSERT INTO public.users (name) VALUES ($1) RETURNING (id + $2) AS expr"
     );
     assert_eq!(
         update.to_sql(),

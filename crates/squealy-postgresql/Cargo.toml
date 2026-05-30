@@ -9,3 +9,6 @@ license = "MIT"
 futures-core = "0.3"
 squealy = { path = "../squealy" }
 tokio-postgres = "0.7"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
