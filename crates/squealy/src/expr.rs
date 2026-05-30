@@ -1,16 +1,9 @@
 use std::marker::PhantomData;
 use std::ops::{Add, BitAnd, BitOr, Not, Sub};
 
-/// A SQL bind parameter value collected while rendering expressions.
-#[derive(Clone, Debug, PartialEq)]
-pub enum BindValue {
-    Int(i128),
-    UInt(u128),
-    Float(f64),
-    Text(String),
-    Bool(bool),
-    Null,
-}
+use crate::ir::{
+    ArithmeticOp, BindValue, CompareOp, ExprNode, OrderDirection, OrderNode, PredicateNode,
+};
 
 /// Converts Rust values into SQL bind parameter values.
 pub trait IntoBindValue {
@@ -617,64 +610,4 @@ impl<'scope> Not for &Predicate<'scope> {
     fn not(self) -> Self::Output {
         Predicate::from_node(PredicateNode::Not(Box::new(self.node.clone())))
     }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum ExprNode {
-    Column {
-        alias: String,
-        column: String,
-    },
-    Literal(BindValue),
-    Binary {
-        left: Box<ExprNode>,
-        op: ArithmeticOp,
-        right: Box<ExprNode>,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ArithmeticOp {
-    Add,
-    Subtract,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum PredicateNode {
-    Compare {
-        left: ExprNode,
-        op: CompareOp,
-        right: ExprNode,
-    },
-    And {
-        left: Box<PredicateNode>,
-        right: Box<PredicateNode>,
-    },
-    Or {
-        left: Box<PredicateNode>,
-        right: Box<PredicateNode>,
-    },
-    Not(Box<PredicateNode>),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompareOp {
-    Equals,
-    NotEquals,
-    LessThan,
-    LessThanOrEquals,
-    GreaterThan,
-    GreaterThanOrEquals,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct OrderNode {
-    pub expr: ExprNode,
-    pub direction: OrderDirection,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OrderDirection {
-    Asc,
-    Desc,
 }

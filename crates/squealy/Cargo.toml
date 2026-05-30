@@ -7,3 +7,6 @@ license = "MIT"
 
 [dependencies]
 squealy-macros = { path = "../squealy-macros" }
+
+[dev-dependencies]
+squealy-test = { path = "../squealy-test" }

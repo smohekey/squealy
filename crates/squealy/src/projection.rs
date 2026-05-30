@@ -1,22 +1,7 @@
 use std::borrow::Cow;
 
-use crate::{ColumnExpr, ExprNode, SchemaTable};
-
-/// A selected SQL expression and its output alias.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SelectColumn {
-    pub expr: ExprNode,
-    pub alias: Cow<'static, str>,
-}
-
-impl SelectColumn {
-    pub fn new(expr: ExprNode, alias: impl Into<Cow<'static, str>>) -> Self {
-        Self {
-            expr,
-            alias: alias.into(),
-        }
-    }
-}
+use crate::ir::SelectColumn;
+use crate::{ColumnExpr, SchemaTable};
 
 /// A projection shape that can produce scoped expression values for a SQL alias.
 pub trait ProjectionShape {
