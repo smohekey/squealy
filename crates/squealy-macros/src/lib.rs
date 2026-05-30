@@ -6,6 +6,7 @@ mod common;
 mod database;
 mod schema;
 mod table;
+mod tuple;
 
 /// Derives squealy table metadata for generic table-mode structs.
 #[proc_macro_derive(
@@ -40,4 +41,10 @@ pub fn derive_schema(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Database)]
 pub fn derive_database(input: TokenStream) -> TokenStream {
     database::derive(input)
+}
+
+/// Generates projection support for tuple shapes from arity 2 through the supplied maximum.
+#[proc_macro]
+pub fn tuple_projection_shapes(input: TokenStream) -> TokenStream {
+    tuple::projection_shapes(input)
 }
