@@ -113,13 +113,16 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
 
     let connection = PostgresConnection::new(client);
 
-    let ada = connection
+    let (mut ada_rows, ada_count) = connection
         .insert::<IntegrationUser>()
         .name("Ada")
         .returning(|user| user)
-        .fetch_one()
+        .fetch_all_with_affected()
         .await
         .expect("insert Ada");
+    assert_eq!(ada_count, 1);
+    assert_eq!(ada_rows.len(), 1);
+    let ada = ada_rows.pop().unwrap();
     assert_eq!(ada.name, "Ada");
 
     let affected = connection
@@ -144,24 +147,30 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
     assert_eq!(users[0].name, "Ada");
     assert_eq!(users[1].name, "Grace");
 
-    let updated_ada = connection
+    let (updated_rows, updated_count) = connection
         .update::<IntegrationUser>()
         .name("Ada Lovelace")
         .where_(|user| user.id.equals(ada.id))
         .returning(|user| user)
-        .fetch_one()
+        .fetch_all_with_affected()
         .await
         .expect("update Ada");
+    assert_eq!(updated_count, 1);
+    assert_eq!(updated_rows.len(), 1);
+    let updated_ada = updated_rows.into_iter().next().unwrap();
     assert_eq!(updated_ada.id, ada.id);
     assert_eq!(updated_ada.name, "Ada Lovelace");
 
-    let deleted_grace = connection
+    let (deleted_rows, deleted_count) = connection
         .delete::<IntegrationUser>()
         .where_(|user| user.name.equals("Grace"))
         .returning(|user| user)
-        .fetch_one()
+        .fetch_all_with_affected()
         .await
         .expect("delete Grace");
+    assert_eq!(deleted_count, 1);
+    assert_eq!(deleted_rows.len(), 1);
+    let deleted_grace = deleted_rows.into_iter().next().unwrap();
     assert_eq!(deleted_grace.name, "Grace");
 
     let remaining = connection
