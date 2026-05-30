@@ -22,6 +22,16 @@ pub trait ProjectionShape {
     }
 }
 
+impl ProjectionShape for () {
+    type Exprs<'scope> = ();
+    type ReboundExprs<'scope> = ();
+    type Row = ();
+
+    fn exprs<'scope>(_alias: &str) -> Self::Exprs<'scope> {}
+
+    fn rebound_exprs<'scope>(_alias: &str) -> Self::ReboundExprs<'scope> {}
+}
+
 macro_rules! impl_value_projection_shape {
     ($($ty:ty),* $(,)?) => {
         $(impl ProjectionShape for $ty {
@@ -160,6 +170,16 @@ pub trait Projectable: Clone {
     fn re_alias_with_prefix<'scope>(&self, alias: &str, _prefix: &str) -> Self::Rebound<'scope> {
         self.re_alias(alias)
     }
+}
+
+impl Projectable for () {
+    type Rebound<'scope> = ();
+
+    fn project(&self) -> Vec<SelectColumn> {
+        Vec::new()
+    }
+
+    fn re_alias<'scope>(&self, _alias: &str) -> Self::Rebound<'scope> {}
 }
 
 squealy_macros::tuple_projection_shapes!(32);

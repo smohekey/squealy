@@ -10,7 +10,8 @@ use squealy::{
     InsertQuery, InsertableTable, OrderDirection, OrderNode, PredicateNode, ProjectionShape,
     Returning, Select, SelectBuilder, SelectColumn, SelectQuery, Sort, Source, SourceKind,
     SourceTarget, Table, TableProjection, Update, UpdateQuery, UpdateableTable, build_delete,
-    build_insert, build_select, build_update,
+    build_delete_returning, build_insert, build_insert_returning, build_select, build_update,
+    build_update_returning,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,33 +52,39 @@ where
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TestInsert<'conn, S>
+pub struct TestInsert<'conn, S, Shape = ()>
 where
     S: InsertableTable,
+    Shape: ProjectionShape,
 {
     insert: Insert,
     _connection: PhantomData<&'conn TestConnection>,
     _table: PhantomData<S>,
+    _shape: PhantomData<Shape>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TestDelete<'conn, S>
+pub struct TestDelete<'conn, S, Shape = ()>
 where
     S: TableProjection,
+    Shape: ProjectionShape,
 {
     delete: Delete,
     _connection: PhantomData<&'conn TestConnection>,
     _table: PhantomData<S>,
+    _shape: PhantomData<Shape>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TestUpdate<'conn, S>
+pub struct TestUpdate<'conn, S, Shape = ()>
 where
     S: UpdateableTable,
+    Shape: ProjectionShape,
 {
     update: Update,
     _connection: PhantomData<&'conn TestConnection>,
     _table: PhantomData<S>,
+    _shape: PhantomData<Shape>,
 }
 
 impl<'conn, Shape> SelectQuery<'conn> for TestSelect<'conn, Shape>
@@ -124,12 +131,20 @@ where
     }
 }
 
-impl<'conn, S> InsertQuery<'conn> for TestInsert<'conn, S>
+impl<'conn, S, Shape> InsertQuery<'conn> for TestInsert<'conn, S, Shape>
 where
     S: InsertableTable,
+    Shape: ProjectionShape,
 {
     type Connection = TestConnection;
     type Table = S;
+    type Shape = Shape;
+    type Row = Shape::Row;
+
+    type RowStream<'query>
+        = EmptyRows<Self::Row>
+    where
+        Self: 'query;
 
     fn ir(&self) -> &Insert {
         &self.insert
@@ -141,14 +156,48 @@ where
     {
         ready(Ok(0))
     }
+
+    fn fetch(&self) -> Self::RowStream<'_> {
+        EmptyRows::default()
+    }
+
+    fn fetch_all(
+        &self,
+    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_
+    {
+        ready(Ok(Vec::new()))
+    }
+
+    fn fetch_one(
+        &self,
+    ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_
+    {
+        ready(Err(TestError::NoRows))
+    }
+
+    fn fetch_optional(
+        &self,
+    ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
+    + Send
+    + '_ {
+        ready(Ok(None))
+    }
 }
 
-impl<'conn, S> DeleteQuery<'conn> for TestDelete<'conn, S>
+impl<'conn, S, Shape> DeleteQuery<'conn> for TestDelete<'conn, S, Shape>
 where
     S: TableProjection,
+    Shape: ProjectionShape,
 {
     type Connection = TestConnection;
     type Table = S;
+    type Shape = Shape;
+    type Row = Shape::Row;
+
+    type RowStream<'query>
+        = EmptyRows<Self::Row>
+    where
+        Self: 'query;
 
     fn ir(&self) -> &Delete {
         &self.delete
@@ -160,14 +209,48 @@ where
     {
         ready(Ok(0))
     }
+
+    fn fetch(&self) -> Self::RowStream<'_> {
+        EmptyRows::default()
+    }
+
+    fn fetch_all(
+        &self,
+    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_
+    {
+        ready(Ok(Vec::new()))
+    }
+
+    fn fetch_one(
+        &self,
+    ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_
+    {
+        ready(Err(TestError::NoRows))
+    }
+
+    fn fetch_optional(
+        &self,
+    ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
+    + Send
+    + '_ {
+        ready(Ok(None))
+    }
 }
 
-impl<'conn, S> UpdateQuery<'conn> for TestUpdate<'conn, S>
+impl<'conn, S, Shape> UpdateQuery<'conn> for TestUpdate<'conn, S, Shape>
 where
     S: UpdateableTable,
+    Shape: ProjectionShape,
 {
     type Connection = TestConnection;
     type Table = S;
+    type Shape = Shape;
+    type Row = Shape::Row;
+
+    type RowStream<'query>
+        = EmptyRows<Self::Row>
+    where
+        Self: 'query;
 
     fn ir(&self) -> &Update {
         &self.update
@@ -178,6 +261,32 @@ where
     ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
     {
         ready(Ok(0))
+    }
+
+    fn fetch(&self) -> Self::RowStream<'_> {
+        EmptyRows::default()
+    }
+
+    fn fetch_all(
+        &self,
+    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_
+    {
+        ready(Ok(Vec::new()))
+    }
+
+    fn fetch_one(
+        &self,
+    ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_
+    {
+        ready(Err(TestError::NoRows))
+    }
+
+    fn fetch_optional(
+        &self,
+    ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
+    + Send
+    + '_ {
+        ready(Ok(None))
     }
 }
 
@@ -200,9 +309,10 @@ where
     }
 }
 
-impl<S> TestInsert<'_, S>
+impl<S, Shape> TestInsert<'_, S, Shape>
 where
     S: InsertableTable,
+    Shape: ProjectionShape,
 {
     pub fn to_sql(&self) -> String {
         let mut sql = Vec::new();
@@ -219,9 +329,10 @@ where
     }
 }
 
-impl<S> TestDelete<'_, S>
+impl<S, Shape> TestDelete<'_, S, Shape>
 where
     S: TableProjection,
+    Shape: ProjectionShape,
 {
     pub fn to_sql(&self) -> String {
         let mut sql = Vec::new();
@@ -238,9 +349,10 @@ where
     }
 }
 
-impl<S> TestUpdate<'_, S>
+impl<S, Shape> TestUpdate<'_, S, Shape>
 where
     S: UpdateableTable,
+    Shape: ProjectionShape,
 {
     pub fn to_sql(&self) -> String {
         let mut sql = Vec::new();
@@ -331,23 +443,26 @@ impl Connection for TestConnection {
         Self: 'conn,
         Shape: ProjectionShape;
 
-    type Insert<'conn, S>
-        = TestInsert<'conn, S>
+    type Insert<'conn, S, Shape>
+        = TestInsert<'conn, S, Shape>
     where
         Self: 'conn,
-        S: InsertableTable;
+        S: InsertableTable,
+        Shape: ProjectionShape;
 
-    type Update<'conn, S>
-        = TestUpdate<'conn, S>
+    type Update<'conn, S, Shape>
+        = TestUpdate<'conn, S, Shape>
     where
         Self: 'conn,
-        S: UpdateableTable;
+        S: UpdateableTable,
+        Shape: ProjectionShape;
 
-    type Delete<'conn, S>
-        = TestDelete<'conn, S>
+    type Delete<'conn, S, Shape>
+        = TestDelete<'conn, S, Shape>
     where
         Self: 'conn,
-        S: TableProjection;
+        S: TableProjection,
+        Shape: ProjectionShape;
 
     fn select<Shape>(
         &self,
@@ -363,7 +478,7 @@ impl Connection for TestConnection {
         }
     }
 
-    fn insert_query<S>(&self, columns: Vec<squealy::InsertColumn>) -> Self::Insert<'_, S>
+    fn insert_query<S>(&self, columns: Vec<squealy::InsertColumn>) -> Self::Insert<'_, S, ()>
     where
         S: InsertableTable,
     {
@@ -371,6 +486,24 @@ impl Connection for TestConnection {
             insert: build_insert::<S>(columns),
             _connection: PhantomData,
             _table: PhantomData,
+            _shape: PhantomData,
+        }
+    }
+
+    fn insert_returning_query<S, Shape>(
+        &self,
+        columns: Vec<squealy::InsertColumn>,
+        returning: Vec<squealy::SelectColumn>,
+    ) -> Self::Insert<'_, S, Shape>
+    where
+        S: InsertableTable,
+        Shape: ProjectionShape,
+    {
+        TestInsert {
+            insert: build_insert_returning::<S>(columns, returning),
+            _connection: PhantomData,
+            _table: PhantomData,
+            _shape: PhantomData,
         }
     }
 
@@ -379,7 +512,7 @@ impl Connection for TestConnection {
         alias: String,
         columns: Vec<squealy::UpdateColumn>,
         filters: Vec<squealy::Filter>,
-    ) -> Self::Update<'_, S>
+    ) -> Self::Update<'_, S, ()>
     where
         S: UpdateableTable,
     {
@@ -387,10 +520,34 @@ impl Connection for TestConnection {
             update: build_update::<S>(alias, columns, filters),
             _connection: PhantomData,
             _table: PhantomData,
+            _shape: PhantomData,
         }
     }
 
-    fn delete_query<S>(&self, alias: String, filters: Vec<squealy::Filter>) -> Self::Delete<'_, S>
+    fn update_returning_query<S, Shape>(
+        &self,
+        alias: String,
+        columns: Vec<squealy::UpdateColumn>,
+        filters: Vec<squealy::Filter>,
+        returning: Vec<squealy::SelectColumn>,
+    ) -> Self::Update<'_, S, Shape>
+    where
+        S: UpdateableTable,
+        Shape: ProjectionShape,
+    {
+        TestUpdate {
+            update: build_update_returning::<S>(alias, columns, filters, returning),
+            _connection: PhantomData,
+            _table: PhantomData,
+            _shape: PhantomData,
+        }
+    }
+
+    fn delete_query<S>(
+        &self,
+        alias: String,
+        filters: Vec<squealy::Filter>,
+    ) -> Self::Delete<'_, S, ()>
     where
         S: TableProjection,
     {
@@ -398,6 +555,25 @@ impl Connection for TestConnection {
             delete: build_delete::<S>(alias, filters),
             _connection: PhantomData,
             _table: PhantomData,
+            _shape: PhantomData,
+        }
+    }
+
+    fn delete_returning_query<S, Shape>(
+        &self,
+        alias: String,
+        filters: Vec<squealy::Filter>,
+        returning: Vec<squealy::SelectColumn>,
+    ) -> Self::Delete<'_, S, Shape>
+    where
+        S: TableProjection,
+        Shape: ProjectionShape,
+    {
+        TestDelete {
+            delete: build_delete_returning::<S>(alias, filters, returning),
+            _connection: PhantomData,
+            _table: PhantomData,
+            _shape: PhantomData,
         }
     }
 }
@@ -436,6 +612,7 @@ fn write_insert_sql(insert: &Insert, writer: &mut impl std::io::Write) -> std::i
         writer.write_all(b"?")?;
     }
     writer.write_all(b")")?;
+    write_returning(insert.returning(), writer)?;
     Ok(())
 }
 
@@ -453,6 +630,7 @@ fn write_update_sql(update: &Update, writer: &mut impl std::io::Write) -> std::i
         write!(writer, "{} = ?", column.column())?;
     }
     write_filters(update.filters(), writer)?;
+    write_returning(update.returning(), writer)?;
     Ok(())
 }
 
@@ -464,6 +642,18 @@ fn write_delete_sql(delete: &Delete, writer: &mut impl std::io::Write) -> std::i
         delete.alias()
     )?;
     write_filters(delete.filters(), writer)?;
+    write_returning(delete.returning(), writer)?;
+    Ok(())
+}
+
+fn write_returning(
+    columns: &[SelectColumn],
+    writer: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    if !columns.is_empty() {
+        writer.write_all(b" RETURNING ")?;
+        write_select_columns(columns, writer)?;
+    }
     Ok(())
 }
 
@@ -708,17 +898,24 @@ fn select_params(select: &Select) -> Vec<BindValue> {
 }
 
 fn insert_params(insert: &Insert) -> Vec<BindValue> {
-    insert
+    let mut params = insert
         .columns()
         .iter()
         .map(|column| column.value().clone())
-        .collect()
+        .collect::<Vec<_>>();
+    for column in insert.returning() {
+        collect_expr_params(&column.expr, &mut params);
+    }
+    params
 }
 
 fn delete_params(delete: &Delete) -> Vec<BindValue> {
     let mut params = Vec::new();
     for filter in delete.filters() {
         collect_predicate_params(filter.predicate(), &mut params);
+    }
+    for column in delete.returning() {
+        collect_expr_params(&column.expr, &mut params);
     }
     params
 }
@@ -731,6 +928,9 @@ fn update_params(update: &Update) -> Vec<BindValue> {
         .collect::<Vec<_>>();
     for filter in update.filters() {
         collect_predicate_params(filter.predicate(), &mut params);
+    }
+    for column in update.returning() {
+        collect_expr_params(&column.expr, &mut params);
     }
     params
 }
