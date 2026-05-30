@@ -4,6 +4,7 @@ extern crate self as squealy;
 
 mod backend;
 mod column;
+mod connection;
 mod database;
 mod expr;
 mod foreign_key;
@@ -14,10 +15,11 @@ mod query;
 mod schema;
 mod table;
 
-pub use backend::{Backend, Connection, ConnectionWithTransaction, Decode, RowReader};
+pub use backend::{Backend, Decode, RowReader};
 pub use column::{
     Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullableValue, ColumnValue,
 };
+pub use connection::{Connection, ConnectionWithTransaction};
 pub use database::Database;
 pub use expr::{
     AddExpr, ColumnRef, DivideExpr, Expr, ExprKind, IntoBindValue, IntoExpr, IntoNullableBindValue,
