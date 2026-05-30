@@ -427,6 +427,8 @@ fn insert_builder_can_return_projected_rows() {
     let _stream = insert.fetch();
     let _all = insert.fetch_all();
     let _all_with_affected = insert.fetch_all_with_affected();
+    let _one_with_affected = insert.fetch_one_with_affected();
+    let _optional_with_affected = insert.fetch_optional_with_affected();
     let _one = insert.fetch_one();
     let _optional = insert.fetch_optional();
     assert_eq!(
@@ -511,6 +513,8 @@ fn update_builder_can_return_projected_rows() {
     let _stream = update.fetch();
     let _all = update.fetch_all();
     let _all_with_affected = update.fetch_all_with_affected();
+    let _one_with_affected = update.fetch_one_with_affected();
+    let _optional_with_affected = update.fetch_optional_with_affected();
     let _one = update.fetch_one();
     let _optional = update.fetch_optional();
     assert_eq!(
@@ -598,6 +602,8 @@ fn delete_builder_can_return_projected_rows() {
     let _stream = delete.fetch();
     let _all = delete.fetch_all();
     let _all_with_affected = delete.fetch_all_with_affected();
+    let _one_with_affected = delete.fetch_one_with_affected();
+    let _optional_with_affected = delete.fetch_optional_with_affected();
     let _one = delete.fetch_one();
     let _optional = delete.fetch_optional();
     assert_eq!(
