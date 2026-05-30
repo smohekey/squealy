@@ -1,11 +1,12 @@
 use std::borrow::Cow;
 
 use crate::ir::SelectColumn;
-use crate::{ColumnExpr, SchemaTable};
+use crate::{ColumnExpr, ColumnValue, SchemaTable};
 
 /// A projection shape that can produce scoped expression values for a SQL alias.
 pub trait ProjectionShape {
     type Exprs<'scope>: Projectable;
+    type Row: Send;
 
     fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope>;
 
@@ -18,6 +19,8 @@ impl<L, R> ProjectionShape for (L, R)
 where
     L: ProjectionShape,
     R: ProjectionShape,
+    L::Row: Send,
+    R::Row: Send,
     L::Exprs<'static>: Projectable,
     R::Exprs<'static>: Projectable,
 {
@@ -25,6 +28,7 @@ where
         <L::Exprs<'static> as Projectable>::Rebound<'scope>,
         <R::Exprs<'static> as Projectable>::Rebound<'scope>,
     );
+    type Row = (L::Row, R::Row);
 
     fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
         let left = L::exprs(alias);
@@ -40,9 +44,11 @@ where
 impl<S> ProjectionShape for S
 where
     S: SchemaTable,
+    <S as SchemaTable>::WithColumn<'static, ColumnValue>: Send,
     for<'scope> <S as SchemaTable>::WithColumn<'scope, ColumnExpr>: Projectable,
 {
     type Exprs<'scope> = <S as SchemaTable>::WithColumn<'scope, ColumnExpr>;
+    type Row = <S as SchemaTable>::WithColumn<'static, ColumnValue>;
 
     fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
         S::column_exprs(alias)
@@ -57,6 +63,7 @@ pub trait TableProjection: ProjectionShape {
 impl<S> TableProjection for S
 where
     S: SchemaTable,
+    <S as SchemaTable>::WithColumn<'static, ColumnValue>: Send,
     for<'scope> <S as SchemaTable>::WithColumn<'scope, ColumnExpr>: Projectable,
 {
     fn qualified_name() -> Cow<'static, str> {

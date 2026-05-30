@@ -1,5 +1,8 @@
 use std::cell::Cell;
+use std::future::Future;
 use std::marker::PhantomData;
+
+use futures_core::Stream;
 
 use crate::ir::{Filter, Select, Sort, Source};
 use crate::{Connection, Order, Predicate, Projectable, ProjectionShape, TableProjection};
@@ -8,8 +11,31 @@ use crate::{Connection, Order, Predicate, Projectable, ProjectionShape, TablePro
 pub trait SelectQuery<'conn> {
     type Connection: Connection + 'conn;
     type Shape: ProjectionShape;
+    type Row: Send;
+
+    type RowStream<'query>: Stream<Item = Result<Self::Row, <Self::Connection as Connection>::Error>>
+        + Send
+        + 'query
+    where
+        Self: 'query;
 
     fn ir(&self) -> &Select;
+
+    fn fetch(&self) -> Self::RowStream<'_>;
+
+    fn fetch_all(
+        &self,
+    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_;
+
+    fn fetch_one(
+        &self,
+    ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_;
+
+    fn fetch_optional(
+        &self,
+    ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
+    + Send
+    + '_;
 }
 
 /// Scoped select builder. Each `q` call adds a lateral-capable subquery.
@@ -39,8 +65,8 @@ where
         }
     }
 
-    /// Add a table source and return its expression columns in this query scope.
-    pub fn each<S>(&mut self) -> <S as ProjectionShape>::Exprs<'scope>
+    /// Add a `FROM` table source and return its expression columns in this select scope.
+    pub fn from<S>(&mut self) -> <S as ProjectionShape>::Exprs<'scope>
     where
         S: TableProjection,
     {
@@ -201,7 +227,7 @@ thread_local! {
 /// let conn = DocConnection;
 /// let mut leaked = None;
 /// let _ = conn.select::<User>(|q| {
-///     let user = q.each::<User>();
+///     let user = q.from::<User>();
 ///     leaked = Some(user.clone());
 ///     user
 /// });

@@ -1,4 +1,9 @@
+use std::future::{Future, ready};
 use std::marker::PhantomData;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use futures_core::Stream;
 
 use squealy::{
     ArithmeticOp, Backend, BindValue, CompareOp, Connection, ExprNode, OrderDirection, OrderNode,
@@ -8,6 +13,30 @@ use squealy::{
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TestConnection;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TestError {
+    NoRows,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmptyRows<Row> {
+    _row: PhantomData<Row>,
+}
+
+impl<Row> Default for EmptyRows<Row> {
+    fn default() -> Self {
+        Self { _row: PhantomData }
+    }
+}
+
+impl<Row> Stream for EmptyRows<Row> {
+    type Item = Result<Row, TestError>;
+
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(None)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TestSelect<'conn, Shape>
@@ -25,9 +54,41 @@ where
 {
     type Connection = TestConnection;
     type Shape = Shape;
+    type Row = Shape::Row;
+
+    type RowStream<'query>
+        = EmptyRows<Self::Row>
+    where
+        Self: 'query;
 
     fn ir(&self) -> &Select {
         &self.select
+    }
+
+    fn fetch(&self) -> Self::RowStream<'_> {
+        EmptyRows::default()
+    }
+
+    fn fetch_all(
+        &self,
+    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_
+    {
+        ready(Ok(Vec::new()))
+    }
+
+    fn fetch_one(
+        &self,
+    ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_
+    {
+        ready(Err(TestError::NoRows))
+    }
+
+    fn fetch_optional(
+        &self,
+    ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
+    + Send
+    + '_ {
+        ready(Ok(None))
     }
 }
 
@@ -116,7 +177,7 @@ impl Backend for TestConnection {
 }
 
 impl Connection for TestConnection {
-    type Error = ();
+    type Error = TestError;
 
     type Select<'conn, Shape>
         = TestSelect<'conn, Shape>

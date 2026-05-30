@@ -6,6 +6,7 @@ description = "SQL ORM for Rust"
 license = "MIT"
 
 [dependencies]
+futures-core = "0.3"
 squealy-macros = { path = "../squealy-macros" }
 
 [dev-dependencies]
