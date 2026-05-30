@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::{Column, ColumnMode, ColumnName, Index, Projectable, Schema};
+use crate::{Column, ColumnMode, ColumnName, Index, InsertColumn, Projectable, Schema};
 
 /// Object-safe table metadata exposed through schema membership.
 pub trait Table {
@@ -90,4 +90,9 @@ pub trait SchemaTable: Table {
         alias: &str,
         columns: &Self::WithColumn<'static, ColumnName>,
     ) -> Self::NullableExprs<'scope>;
+}
+
+/// A table model whose value-mode fields can be inserted as bind parameters.
+pub trait InsertableTable: SchemaTable {
+    fn insert_columns(row: Self::WithColumn<'static, crate::ColumnValue>) -> Vec<InsertColumn>;
 }

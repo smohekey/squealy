@@ -6,9 +6,10 @@ use std::task::{Context, Poll};
 use futures_core::Stream;
 
 use squealy::{
-    ArithmeticOp, Backend, BindValue, CompareOp, Connection, ExprNode, OrderDirection, OrderNode,
-    PredicateNode, ProjectionShape, Returning, Select, SelectBuilder, SelectColumn, SelectQuery,
-    Sort, Source, SourceKind, SourceTarget, Table, build_select,
+    ArithmeticOp, Backend, BindValue, CompareOp, Connection, Delete, DeleteBuilder, DeleteQuery,
+    ExprNode, Insert, InsertQuery, InsertableTable, OrderDirection, OrderNode, PredicateNode,
+    ProjectionShape, Returning, Select, SelectBuilder, SelectColumn, SelectQuery, Sort, Source,
+    SourceKind, SourceTarget, Table, TableProjection, build_delete, build_insert, build_select,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -46,6 +47,26 @@ where
     select: Select,
     _connection: PhantomData<&'conn TestConnection>,
     _shape: PhantomData<Shape>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TestInsert<'conn, S>
+where
+    S: InsertableTable,
+{
+    insert: Insert,
+    _connection: PhantomData<&'conn TestConnection>,
+    _table: PhantomData<S>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TestDelete<'conn, S>
+where
+    S: TableProjection,
+{
+    delete: Delete,
+    _connection: PhantomData<&'conn TestConnection>,
+    _table: PhantomData<S>,
 }
 
 impl<'conn, Shape> SelectQuery<'conn> for TestSelect<'conn, Shape>
@@ -92,6 +113,44 @@ where
     }
 }
 
+impl<'conn, S> InsertQuery<'conn> for TestInsert<'conn, S>
+where
+    S: InsertableTable,
+{
+    type Connection = TestConnection;
+    type Table = S;
+
+    fn ir(&self) -> &Insert {
+        &self.insert
+    }
+
+    fn execute(
+        &self,
+    ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
+    {
+        ready(Ok(0))
+    }
+}
+
+impl<'conn, S> DeleteQuery<'conn> for TestDelete<'conn, S>
+where
+    S: TableProjection,
+{
+    type Connection = TestConnection;
+    type Table = S;
+
+    fn ir(&self) -> &Delete {
+        &self.delete
+    }
+
+    fn execute(
+        &self,
+    ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
+    {
+        ready(Ok(0))
+    }
+}
+
 impl<Shape> TestSelect<'_, Shape>
 where
     Shape: ProjectionShape,
@@ -108,6 +167,44 @@ where
 
     pub fn params(&self) -> Vec<BindValue> {
         select_params(&self.select)
+    }
+}
+
+impl<S> TestInsert<'_, S>
+where
+    S: InsertableTable,
+{
+    pub fn to_sql(&self) -> String {
+        let mut sql = Vec::new();
+        write_insert_sql(&self.insert, &mut sql).unwrap();
+        String::from_utf8(sql).unwrap()
+    }
+
+    pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+        write_insert_sql(&self.insert, writer)
+    }
+
+    pub fn params(&self) -> Vec<BindValue> {
+        insert_params(&self.insert)
+    }
+}
+
+impl<S> TestDelete<'_, S>
+where
+    S: TableProjection,
+{
+    pub fn to_sql(&self) -> String {
+        let mut sql = Vec::new();
+        write_delete_sql(&self.delete, &mut sql).unwrap();
+        String::from_utf8(sql).unwrap()
+    }
+
+    pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+        write_delete_sql(&self.delete, writer)
+    }
+
+    pub fn params(&self) -> Vec<BindValue> {
+        delete_params(&self.delete)
     }
 }
 
@@ -185,6 +282,18 @@ impl Connection for TestConnection {
         Self: 'conn,
         Shape: ProjectionShape;
 
+    type Insert<'conn, S>
+        = TestInsert<'conn, S>
+    where
+        Self: 'conn,
+        S: InsertableTable;
+
+    type Delete<'conn, S>
+        = TestDelete<'conn, S>
+    where
+        Self: 'conn,
+        S: TableProjection;
+
     fn select<Shape>(
         &self,
         f: impl for<'scope> FnOnce(&mut SelectBuilder<'_, 'scope, Self>) -> Returning<Shape>,
@@ -196,6 +305,31 @@ impl Connection for TestConnection {
             select: build_select::<Self, Shape>(f),
             _connection: PhantomData,
             _shape: PhantomData,
+        }
+    }
+
+    fn insert<S>(&self, row: S::WithColumn<'static, squealy::ColumnValue>) -> Self::Insert<'_, S>
+    where
+        S: InsertableTable,
+    {
+        TestInsert {
+            insert: build_insert::<S>(row),
+            _connection: PhantomData,
+            _table: PhantomData,
+        }
+    }
+
+    fn delete<S>(
+        &self,
+        f: impl for<'scope> FnOnce(&mut DeleteBuilder<'_, 'scope, Self, S>),
+    ) -> Self::Delete<'_, S>
+    where
+        S: TableProjection,
+    {
+        TestDelete {
+            delete: build_delete::<Self, S>(f),
+            _connection: PhantomData,
+            _table: PhantomData,
         }
     }
 }
@@ -215,6 +349,36 @@ fn write_select_sql(select: &Select, writer: &mut impl std::io::Write) -> std::i
     if let Some(offset) = select.offset() {
         write!(writer, " OFFSET {offset}")?;
     }
+    Ok(())
+}
+
+fn write_insert_sql(insert: &Insert, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    write!(writer, "INSERT INTO {} (", insert.table())?;
+    for (index, column) in insert.columns().iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        writer.write_all(column.column().as_bytes())?;
+    }
+    writer.write_all(b") VALUES (")?;
+    for index in 0..insert.columns().len() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        writer.write_all(b"?")?;
+    }
+    writer.write_all(b")")?;
+    Ok(())
+}
+
+fn write_delete_sql(delete: &Delete, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    write!(
+        writer,
+        "DELETE FROM {} AS {}",
+        delete.table(),
+        delete.alias()
+    )?;
+    write_filters(delete.filters(), writer)?;
     Ok(())
 }
 
@@ -454,6 +618,22 @@ fn select_params(select: &Select) -> Vec<BindValue> {
     }
     for order in select.orders() {
         collect_order_params(order.order(), &mut params);
+    }
+    params
+}
+
+fn insert_params(insert: &Insert) -> Vec<BindValue> {
+    insert
+        .columns()
+        .iter()
+        .map(|column| column.value().clone())
+        .collect()
+}
+
+fn delete_params(delete: &Delete) -> Vec<BindValue> {
+    let mut params = Vec::new();
+    for filter in delete.filters() {
+        collect_predicate_params(filter.predicate(), &mut params);
     }
     params
 }

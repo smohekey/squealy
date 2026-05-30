@@ -4,10 +4,10 @@ use std::marker::PhantomData;
 
 use futures_core::Stream;
 
-use crate::ir::{Filter, Select, Sort, Source};
+use crate::ir::{Delete, Filter, Insert, Select, Sort, Source};
 use crate::{
-    ColumnRef, Connection, Expr, ExprKind, IntoBindValue, Maybe, Order, Predicate, Projectable,
-    ProjectionShape, SelectColumn, TableProjection,
+    ColumnRef, Connection, Expr, ExprKind, InsertableTable, IntoBindValue, Maybe, Order, Predicate,
+    Projectable, ProjectionShape, SchemaTable, SelectColumn, TableProjection,
 };
 
 /// A backend-specific select query object backed by core-owned select IR.
@@ -39,6 +39,30 @@ pub trait SelectQuery<'conn> {
     ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
     + Send
     + '_;
+}
+
+/// A backend-specific insert query object backed by core-owned insert IR.
+pub trait InsertQuery<'conn> {
+    type Connection: Connection + 'conn;
+    type Table: InsertableTable;
+
+    fn ir(&self) -> &Insert;
+
+    fn execute(
+        &self,
+    ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_;
+}
+
+/// A backend-specific delete query object backed by core-owned delete IR.
+pub trait DeleteQuery<'conn> {
+    type Connection: Connection + 'conn;
+    type Table: TableProjection;
+
+    fn ir(&self) -> &Delete;
+
+    fn execute(
+        &self,
+    ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_;
 }
 
 /// A projection value that can identify the query shape returned by `returning`.
@@ -101,6 +125,13 @@ pub struct SelectBuilder<'conn, 'scope, Conn: Connection> {
     limit: Option<usize>,
     offset: Option<usize>,
     _phantom: PhantomData<(&'conn Conn, &'scope ())>,
+}
+
+/// Scoped delete builder for filtering a single table delete.
+pub struct DeleteBuilder<'conn, 'scope, Conn: Connection, S: TableProjection> {
+    depth: usize,
+    filters: Vec<Filter>,
+    _phantom: PhantomData<(&'conn Conn, &'scope (), S)>,
 }
 
 impl<'conn, 'scope, Conn> SelectBuilder<'conn, 'scope, Conn>
@@ -230,6 +261,34 @@ where
     }
 }
 
+impl<'conn, 'scope, Conn, S> DeleteBuilder<'conn, 'scope, Conn, S>
+where
+    Conn: Connection + 'conn,
+    S: TableProjection,
+{
+    fn new(depth: usize) -> Self {
+        Self {
+            depth,
+            filters: Vec::new(),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Return expression columns for the table being deleted.
+    pub fn table(&self) -> <S as ProjectionShape>::Exprs<'scope> {
+        S::exprs(&self.alias())
+    }
+
+    /// Add a SQL `WHERE` predicate to the delete currently being built.
+    pub fn where_(&mut self, predicate: Predicate<'scope>) {
+        self.filters.push(Filter::new(predicate.node().clone()));
+    }
+
+    fn alias(&self) -> String {
+        format!("q{}_0", self.depth)
+    }
+}
+
 thread_local! {
     static QUERY_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
@@ -323,5 +382,34 @@ where
             .with_orders(q.orders)
             .with_limit(q.limit)
             .with_offset(q.offset)
+    })
+}
+
+/// Build insert IR for a table row.
+pub fn build_insert<S>(row: S::WithColumn<'static, crate::ColumnValue>) -> Insert
+where
+    S: InsertableTable,
+{
+    Insert::new(<S as SchemaTable>::qualified_name(), S::insert_columns(row))
+}
+
+/// Build delete IR from a scoped delete builder closure.
+pub fn build_delete<'conn, Conn, S>(
+    f: impl for<'scope> FnOnce(&mut DeleteBuilder<'conn, 'scope, Conn, S>),
+) -> Delete
+where
+    Conn: Connection + 'conn,
+    S: TableProjection,
+{
+    QUERY_DEPTH.with(|depth| {
+        let current_depth = depth.get();
+        depth.set(current_depth + 1);
+
+        let mut q = DeleteBuilder::new(current_depth);
+        f(&mut q);
+
+        depth.set(current_depth);
+
+        Delete::new(S::qualified_name(), q.alias()).with_filters(q.filters)
     })
 }
