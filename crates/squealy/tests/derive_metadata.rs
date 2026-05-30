@@ -258,7 +258,7 @@ fn select_can_project_a_generated_column_expression_kind() {
 fn select_can_mix_column_and_table_projection_shapes() {
     let user_ids_and_posts = TestConnection.select::<(UserId, Post)>(|q| {
         let user = q.from::<User>();
-        let post = q.join::<Post>(|post| post.user_id.equals(&user.id));
+        let post = q.join::<Post>(|post| post.user_id.equals(user.id));
         (user.id, post)
     });
 
@@ -273,7 +273,7 @@ fn select_can_mix_column_and_table_projection_shapes() {
 fn select_can_project_three_part_tuple_shapes() {
     let user_ids_names_and_posts = TestConnection.select::<(UserId, UserName, Post)>(|q| {
         let user = q.from::<User>();
-        let post = q.join::<Post>(|post| post.user_id.equals(&user.id));
+        let post = q.join::<Post>(|post| post.user_id.equals(user.id));
         (user.id, user.name, post)
     });
 
@@ -289,7 +289,7 @@ fn select_rebinds_three_part_tuple_subquery_shape() {
     let rebound = TestConnection.select::<AddExpr<UserId, i32>>(|q| {
         let tuple_select = TestConnection.select::<(UserId, UserName, Post)>(|q| {
             let user = q.from::<User>();
-            let post = q.join::<Post>(|post| post.user_id.equals(&user.id));
+            let post = q.join::<Post>(|post| post.user_id.equals(user.id));
             (user.id, user.name, post)
         });
         let tuple = q.q(&tuple_select);
@@ -360,11 +360,11 @@ fn select_can_project_thirty_two_part_tuple_shapes() {
 fn select_can_project_arithmetic_expression_shapes() {
     let adjusted_ids = TestConnection.select::<AddExpr<UserId, i32>>(|q| {
         let user = q.from::<User>();
-        &user.id + 1
+        user.id + 1
     });
     let scaled_ids = TestConnection.select::<DivideExpr<MultiplyExpr<UserId, i32>, i32>>(|q| {
         let user = q.from::<User>();
-        (&user.id * 2) / 2
+        (user.id * 2) / 2
     });
 
     assert_i32_row(&adjusted_ids);
@@ -448,7 +448,7 @@ fn select_can_limit_and_offset_rows() {
 fn select_can_inner_join_tables_with_typed_predicates() {
     let users_and_posts = TestConnection.select::<(User, Post)>(|q| {
         let user = q.from::<User>();
-        let post = q.join::<Post>(|post| post.user_id.equals(&user.id));
+        let post = q.join::<Post>(|post| post.user_id.equals(user.id));
         (user, post)
     });
 
@@ -462,7 +462,7 @@ fn select_can_inner_join_tables_with_typed_predicates() {
 fn select_can_left_join_tables_with_typed_predicates() {
     let users_and_posts = TestConnection.select::<(User, Post)>(|q| {
         let user = q.from::<User>();
-        let post = q.left_join::<Post>(|post| post.user_id.equals(&user.id));
+        let post = q.left_join::<Post>(|post| post.user_id.equals(user.id));
         (user, post)
     });
 
@@ -523,7 +523,7 @@ fn select_rebinds_tuple_subquery_shape_through_output_aliases() {
     let users_and_posts = TestConnection.select::<AddExpr<UserId, i32>>(|q| {
         let pair_select = TestConnection.select::<(User, Post)>(|q| {
             let user = q.from::<User>();
-            let post = q.join::<Post>(|post| post.user_id.equals(&user.id));
+            let post = q.join::<Post>(|post| post.user_id.equals(user.id));
             (user, post)
         });
         let pair = q.q(&pair_select);
@@ -543,17 +543,16 @@ fn select_rebinds_tuple_subquery_shape_through_output_aliases() {
 fn select_accepts_primitive_literals_and_expression_operators() {
     let users = TestConnection.select::<User>(|q| {
         let user = q.from::<User>();
-        let adjusted_id = &user.id + 1;
-        let scaled_id = (&user.id * 2) / 2;
+        let adjusted_id = user.id + 1;
+        let scaled_id = (user.id * 2) / 2;
         assert_expr_kind::<AddExpr<UserId, i32>>(&adjusted_id);
         assert_expr_kind::<DivideExpr<MultiplyExpr<UserId, i32>, i32>>(&scaled_id);
         q.where_(
-            ((&user.id + 1 - 1).greater_than(0) & !user.id.not_equals(42))
-                | user.name.equals("Bob"),
+            ((user.id + 1 - 1).greater_than(0) & !user.id.not_equals(42)) | user.name.equals("Bob"),
         );
-        q.where_((1 + &user.id).less_than(100));
-        q.where_(scaled_id.equals(&user.id));
-        q.where_((2 * &user.id / 2).equals(&user.id));
+        q.where_((1 + user.id).less_than(100));
+        q.where_(scaled_id.equals(user.id));
+        q.where_((2 * user.id / 2).equals(user.id));
         user
     });
 
@@ -590,7 +589,7 @@ fn select_collects_source_and_filter_params_in_sql_order() {
         let user = q.q(&user_select);
         let post = q.join::<Post>(|post| post.user_id.equals(7));
         q.where_(user.name.equals("Ada"));
-        &user.id + &post.user_id
+        &user.id + post.user_id
     });
 
     assert_eq!(
