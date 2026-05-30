@@ -93,6 +93,99 @@ impl Backend for PostgresConnection {
     }
 }
 
+trait PostgresQueryBuilder: query::PostgresExecutor {
+    fn build_select_query<Shape>(
+        &self,
+        f: impl for<'scope> FnOnce(&mut SelectBuilder<'_, 'scope, Self>) -> Returning<Shape>,
+    ) -> PostgresSelect<'_, Shape, Self>
+    where
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>,
+    {
+        PostgresSelect::new(self, build_select::<Self, Shape>(f))
+    }
+
+    fn build_insert_query<S>(
+        &self,
+        columns: Vec<squealy::InsertColumn>,
+    ) -> PostgresInsert<'_, S, (), Self>
+    where
+        S: InsertableTable,
+    {
+        PostgresInsert::new(self, build_insert::<S>(columns))
+    }
+
+    fn build_insert_returning_query<S, Shape>(
+        &self,
+        columns: Vec<squealy::InsertColumn>,
+        returning: Vec<squealy::SelectColumn>,
+    ) -> PostgresInsert<'_, S, Shape, Self>
+    where
+        S: InsertableTable,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>,
+    {
+        PostgresInsert::new(self, build_insert_returning::<S>(columns, returning))
+    }
+
+    fn build_update_query<S>(
+        &self,
+        alias: String,
+        columns: Vec<squealy::UpdateColumn>,
+        filters: Vec<squealy::Filter>,
+    ) -> PostgresUpdate<'_, S, (), Self>
+    where
+        S: UpdateableTable,
+    {
+        PostgresUpdate::new(self, build_update::<S>(alias, columns, filters))
+    }
+
+    fn build_update_returning_query<S, Shape>(
+        &self,
+        alias: String,
+        columns: Vec<squealy::UpdateColumn>,
+        filters: Vec<squealy::Filter>,
+        returning: Vec<squealy::SelectColumn>,
+    ) -> PostgresUpdate<'_, S, Shape, Self>
+    where
+        S: UpdateableTable,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>,
+    {
+        PostgresUpdate::new(
+            self,
+            build_update_returning::<S>(alias, columns, filters, returning),
+        )
+    }
+
+    fn build_delete_query<S>(
+        &self,
+        alias: String,
+        filters: Vec<squealy::Filter>,
+    ) -> PostgresDelete<'_, S, (), Self>
+    where
+        S: TableProjection,
+    {
+        PostgresDelete::new(self, build_delete::<S>(alias, filters))
+    }
+
+    fn build_delete_returning_query<S, Shape>(
+        &self,
+        alias: String,
+        filters: Vec<squealy::Filter>,
+        returning: Vec<squealy::SelectColumn>,
+    ) -> PostgresDelete<'_, S, Shape, Self>
+    where
+        S: TableProjection,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self>,
+    {
+        PostgresDelete::new(self, build_delete_returning::<S>(alias, filters, returning))
+    }
+}
+
+impl<Conn> PostgresQueryBuilder for Conn where Conn: query::PostgresExecutor {}
+
 impl Connection for PostgresConnection {
     type Error = PostgresError;
 
@@ -103,14 +196,14 @@ impl Connection for PostgresConnection {
     }
 
     type Select<'conn, Shape>
-        = PostgresSelect<'conn, Shape>
+        = PostgresSelect<'conn, Shape, Self>
     where
         Self: 'conn,
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>;
 
     type Insert<'conn, S, Shape>
-        = PostgresInsert<'conn, S, Shape>
+        = PostgresInsert<'conn, S, Shape, Self>
     where
         Self: 'conn,
         S: InsertableTable,
@@ -118,7 +211,7 @@ impl Connection for PostgresConnection {
         Shape::Row: Decode<Self>;
 
     type Update<'conn, S, Shape>
-        = PostgresUpdate<'conn, S, Shape>
+        = PostgresUpdate<'conn, S, Shape, Self>
     where
         Self: 'conn,
         S: UpdateableTable,
@@ -126,7 +219,7 @@ impl Connection for PostgresConnection {
         Shape::Row: Decode<Self>;
 
     type Delete<'conn, S, Shape>
-        = PostgresDelete<'conn, S, Shape>
+        = PostgresDelete<'conn, S, Shape, Self>
     where
         Self: 'conn,
         S: TableProjection,
@@ -141,14 +234,14 @@ impl Connection for PostgresConnection {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>,
     {
-        PostgresSelect::new(self, build_select::<Self, Shape>(f))
+        self.build_select_query(f)
     }
 
     fn insert_query<S>(&self, columns: Vec<squealy::InsertColumn>) -> Self::Insert<'_, S, ()>
     where
         S: InsertableTable,
     {
-        PostgresInsert::new(self, build_insert::<S>(columns))
+        self.build_insert_query(columns)
     }
 
     fn insert_returning_query<S, Shape>(
@@ -161,7 +254,7 @@ impl Connection for PostgresConnection {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>,
     {
-        PostgresInsert::new(self, build_insert_returning::<S>(columns, returning))
+        self.build_insert_returning_query(columns, returning)
     }
 
     fn update_query<S>(
@@ -173,7 +266,7 @@ impl Connection for PostgresConnection {
     where
         S: UpdateableTable,
     {
-        PostgresUpdate::new(self, build_update::<S>(alias, columns, filters))
+        self.build_update_query(alias, columns, filters)
     }
 
     fn update_returning_query<S, Shape>(
@@ -188,10 +281,7 @@ impl Connection for PostgresConnection {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>,
     {
-        PostgresUpdate::new(
-            self,
-            build_update_returning::<S>(alias, columns, filters, returning),
-        )
+        self.build_update_returning_query(alias, columns, filters, returning)
     }
 
     fn delete_query<S>(
@@ -202,7 +292,7 @@ impl Connection for PostgresConnection {
     where
         S: TableProjection,
     {
-        PostgresDelete::new(self, build_delete::<S>(alias, filters))
+        self.build_delete_query(alias, filters)
     }
 
     fn delete_returning_query<S, Shape>(
@@ -216,7 +306,7 @@ impl Connection for PostgresConnection {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>,
     {
-        PostgresDelete::new(self, build_delete_returning::<S>(alias, filters, returning))
+        self.build_delete_returning_query(alias, filters, returning)
     }
 }
 
@@ -268,14 +358,14 @@ impl Connection for PostgresTransaction<'_> {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>,
     {
-        PostgresSelect::new(self, build_select::<Self, Shape>(f))
+        self.build_select_query(f)
     }
 
     fn insert_query<S>(&self, columns: Vec<squealy::InsertColumn>) -> Self::Insert<'_, S, ()>
     where
         S: InsertableTable,
     {
-        PostgresInsert::new(self, build_insert::<S>(columns))
+        self.build_insert_query(columns)
     }
 
     fn insert_returning_query<S, Shape>(
@@ -288,7 +378,7 @@ impl Connection for PostgresTransaction<'_> {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>,
     {
-        PostgresInsert::new(self, build_insert_returning::<S>(columns, returning))
+        self.build_insert_returning_query(columns, returning)
     }
 
     fn update_query<S>(
@@ -300,7 +390,7 @@ impl Connection for PostgresTransaction<'_> {
     where
         S: UpdateableTable,
     {
-        PostgresUpdate::new(self, build_update::<S>(alias, columns, filters))
+        self.build_update_query(alias, columns, filters)
     }
 
     fn update_returning_query<S, Shape>(
@@ -315,10 +405,7 @@ impl Connection for PostgresTransaction<'_> {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>,
     {
-        PostgresUpdate::new(
-            self,
-            build_update_returning::<S>(alias, columns, filters, returning),
-        )
+        self.build_update_returning_query(alias, columns, filters, returning)
     }
 
     fn delete_query<S>(
@@ -329,7 +416,7 @@ impl Connection for PostgresTransaction<'_> {
     where
         S: TableProjection,
     {
-        PostgresDelete::new(self, build_delete::<S>(alias, filters))
+        self.build_delete_query(alias, filters)
     }
 
     fn delete_returning_query<S, Shape>(
@@ -343,7 +430,7 @@ impl Connection for PostgresTransaction<'_> {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>,
     {
-        PostgresDelete::new(self, build_delete_returning::<S>(alias, filters, returning))
+        self.build_delete_returning_query(alias, filters, returning)
     }
 }
 
