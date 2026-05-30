@@ -121,7 +121,7 @@ pub(crate) fn write_insert(insert: &Insert, writer: &mut impl Write) -> io::Resu
         }
         writer.write_all(b")")?;
     }
-    write_returning(insert.returning(), writer, &mut renderer)?;
+    write_insert_returning(insert.returning(), writer, &mut renderer)?;
     Ok(())
 }
 
@@ -191,6 +191,18 @@ fn write_returning(
     Ok(())
 }
 
+fn write_insert_returning(
+    columns: &[SelectColumn],
+    writer: &mut impl Write,
+    renderer: &mut Renderer,
+) -> io::Result<()> {
+    if !columns.is_empty() {
+        writer.write_all(b" RETURNING ")?;
+        write_insert_returning_columns(columns, writer, renderer)?;
+    }
+    Ok(())
+}
+
 fn write_select_columns(
     columns: &[SelectColumn],
     writer: &mut impl Write,
@@ -204,6 +216,25 @@ fn write_select_columns(
             writer,
             "{} AS {}",
             render_expr(&column.expr, renderer),
+            column.alias
+        )?;
+    }
+    Ok(())
+}
+
+fn write_insert_returning_columns(
+    columns: &[SelectColumn],
+    writer: &mut impl Write,
+    renderer: &mut Renderer,
+) -> io::Result<()> {
+    for (index, column) in columns.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        write!(
+            writer,
+            "{} AS {}",
+            render_insert_returning_expr(&column.expr, renderer),
             column.alias
         )?;
     }
@@ -362,6 +393,21 @@ fn render_expr(expr: &ExprNode, renderer: &mut Renderer) -> String {
                 render_expr(left, renderer),
                 render_arithmetic_op(*op),
                 render_expr(right, renderer)
+            )
+        }
+    }
+}
+
+fn render_insert_returning_expr(expr: &ExprNode, renderer: &mut Renderer) -> String {
+    match expr {
+        ExprNode::Column { column, .. } => column.clone(),
+        ExprNode::Literal(_) => renderer.placeholder(),
+        ExprNode::Binary { left, op, right } => {
+            format!(
+                "({} {} {})",
+                render_insert_returning_expr(left, renderer),
+                render_arithmetic_op(*op),
+                render_insert_returning_expr(right, renderer)
             )
         }
     }
