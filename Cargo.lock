@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "futures-core"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -24,6 +30,7 @@ dependencies = [
 name = "squealy"
 version = "0.1.0"
 dependencies = [
+ "futures-core",
  "squealy-macros",
  "squealy-test",
 ]
@@ -40,6 +47,7 @@ dependencies = [
 name = "squealy-test"
 version = "0.1.0"
 dependencies = [
+ "futures-core",
  "squealy",
 ]
 

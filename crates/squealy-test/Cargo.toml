@@ -6,4 +6,5 @@ description = "Test backend for squealy"
 license = "MIT"
 
 [dependencies]
+futures-core = "0.3"
 squealy = { path = "../squealy" }

@@ -39,7 +39,7 @@ fn posts_of_user<'conn, 'scope>(
     user_id: &Expr<'scope, i32>,
 ) -> TestSelect<'conn, Post<'static, ColumnExpr>> {
     connection.select::<Post>(|q| {
-        let posts = connection.select::<Post>(|q| q.each::<Post>());
+        let posts = connection.select::<Post>(|q| q.from::<Post>());
         let post = q.q(&posts);
         q.where_(post.user_id.equals(user_id));
         post
@@ -123,8 +123,8 @@ fn backend_creates_schema_sql() {
 }
 
 #[test]
-fn each_selects_from_derived_table_metadata() {
-    let users = TestConnection.select::<User>(|q| q.each::<User>());
+fn from_selects_from_derived_table_metadata() {
+    let users = TestConnection.select::<User>(|q| q.from::<User>());
 
     assert_eq!(
         users.to_sql(),
@@ -139,16 +139,33 @@ where
 {
 }
 
+fn assert_user_row<'conn, Qry>(_: &'conn Qry)
+where
+    Qry: SelectQuery<'conn, Row = User<'static, ColumnValue>>,
+{
+}
+
 #[test]
-fn each_select_carries_table_projection_shape() {
-    let users = TestConnection.select::<User>(|q| q.each::<User>());
+fn from_select_carries_table_projection_shape() {
+    let users = TestConnection.select::<User>(|q| q.from::<User>());
 
     assert_table_select_shape::<_, User>(&users);
+    assert_user_row(&users);
+}
+
+#[test]
+fn select_exposes_stream_and_convenience_fetch_methods() {
+    let users = TestConnection.select::<User>(|q| q.from::<User>());
+
+    let _stream = users.fetch();
+    let _all = users.fetch_all();
+    let _one = users.fetch_one();
+    let _optional = users.fetch_optional();
 }
 
 #[test]
 fn select_can_use_scoped_table_sources_directly() {
-    let users = TestConnection.select::<User>(|q| q.each::<User>());
+    let users = TestConnection.select::<User>(|q| q.from::<User>());
 
     assert_eq!(
         users.to_sql(),
@@ -159,7 +176,7 @@ fn select_can_use_scoped_table_sources_directly() {
 #[test]
 fn select_can_order_by_typed_expressions() {
     let users = TestConnection.select::<User>(|q| {
-        let user = q.each::<User>();
+        let user = q.from::<User>();
         q.order_by(user.name.desc());
         q.order_by(user.id.asc());
         user
@@ -174,7 +191,7 @@ fn select_can_order_by_typed_expressions() {
 #[test]
 fn select_can_limit_and_offset_rows() {
     let users = TestConnection.select::<User>(|q| {
-        let user = q.each::<User>();
+        let user = q.from::<User>();
         q.order_by(user.id.asc());
         q.limit(10);
         q.offset(20);
@@ -190,7 +207,7 @@ fn select_can_limit_and_offset_rows() {
 #[test]
 fn select_can_inner_join_tables_with_typed_predicates() {
     let users_and_posts = TestConnection.select::<(User, Post)>(|q| {
-        let user = q.each::<User>();
+        let user = q.from::<User>();
         let post = q.join::<Post>(|post| post.user_id.equals(&user.id));
         (user, post)
     });
@@ -204,7 +221,7 @@ fn select_can_inner_join_tables_with_typed_predicates() {
 #[test]
 fn select_can_left_join_tables_with_typed_predicates() {
     let users_and_posts = TestConnection.select::<(User, Post)>(|q| {
-        let user = q.each::<User>();
+        let user = q.from::<User>();
         let post = q.left_join::<Post>(|post| post.user_id.equals(&user.id));
         (user, post)
     });
@@ -217,7 +234,7 @@ fn select_can_left_join_tables_with_typed_predicates() {
 
 #[test]
 fn select_writes_sql_to_writer() {
-    let users = TestConnection.select::<User>(|q| q.each::<User>());
+    let users = TestConnection.select::<User>(|q| q.from::<User>());
     let mut sql = Vec::new();
 
     users.write_sql(&mut sql).unwrap();
@@ -231,7 +248,7 @@ fn select_writes_sql_to_writer() {
 #[test]
 fn select_composes_subqueries_with_lateral_joins() {
     let users_and_posts = TestConnection.select::<(User, Post)>(|q| {
-        let users = TestConnection.select::<User>(|q| q.each::<User>());
+        let users = TestConnection.select::<User>(|q| q.from::<User>());
         let user = q.q(&users);
         let posts = posts_of_user(&TestConnection, &user.id);
         let post = q.q(&posts);
@@ -264,7 +281,7 @@ fn select_composes_subqueries_with_lateral_joins() {
 fn select_rebinds_tuple_subquery_shape_through_output_aliases() {
     let users_and_posts = TestConnection.select::<(User, Post)>(|q| {
         let pair_select = TestConnection.select::<(User, Post)>(|q| {
-            let user = q.each::<User>();
+            let user = q.from::<User>();
             let post = q.join::<Post>(|post| post.user_id.equals(&user.id));
             (user, post)
         });
@@ -283,7 +300,7 @@ fn select_rebinds_tuple_subquery_shape_through_output_aliases() {
 #[test]
 fn select_accepts_primitive_literals_and_expression_operators() {
     let users = TestConnection.select::<User>(|q| {
-        let user = q.each::<User>();
+        let user = q.from::<User>();
         q.where_(
             ((&user.id + 1 - 1).greater_than(0) & !user.id.not_equals(42))
                 | user.name.equals("Bob"),
@@ -314,7 +331,7 @@ fn select_accepts_primitive_literals_and_expression_operators() {
 fn select_collects_source_and_filter_params_in_sql_order() {
     let users_and_posts = TestConnection.select::<(User, Post)>(|q| {
         let user_select = TestConnection.select::<User>(|q| {
-            let user = q.each::<User>();
+            let user = q.from::<User>();
             q.where_(user.id.greater_than(10));
             user
         });
