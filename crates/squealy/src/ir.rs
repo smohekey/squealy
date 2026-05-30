@@ -29,6 +29,8 @@ pub enum ExprNode {
 pub enum ArithmeticOp {
     Add,
     Subtract,
+    Multiply,
+    Divide,
 }
 
 #[derive(Clone, Debug, PartialEq)]

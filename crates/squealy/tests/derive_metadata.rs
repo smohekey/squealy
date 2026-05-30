@@ -34,10 +34,13 @@ struct AppDatabase {
     public: Public,
 }
 
-fn posts_of_user<'conn, 'scope>(
+fn posts_of_user<'conn, 'scope, K>(
     connection: &'conn TestConnection,
-    user_id: &Expr<'scope, i32>,
-) -> TestSelect<'conn, Post<'static, ColumnExpr>> {
+    user_id: &Expr<'scope, K>,
+) -> TestSelect<'conn, Post<'static, ColumnExpr>>
+where
+    K: ExprKind<Value = i32>,
+{
     connection.select::<Post>(|q| {
         let posts = connection.select::<Post>(|q| q.from::<Post>());
         let post = q.q(&posts);
@@ -145,12 +148,106 @@ where
 {
 }
 
+fn assert_i32_row<'conn, Qry>(_: &'conn Qry)
+where
+    Qry: SelectQuery<'conn, Row = i32>,
+{
+}
+
+fn assert_user_id_and_post_row<'conn, Qry>(_: &'conn Qry)
+where
+    Qry: SelectQuery<'conn, Row = (i32, Post<'static, ColumnValue>)>,
+{
+}
+
+fn assert_expr_kind<'scope, K>(_: &Expr<'scope, K>)
+where
+    K: ExprKind,
+{
+}
+
 #[test]
 fn from_select_carries_table_projection_shape() {
     let users = TestConnection.select::<User>(|q| q.from::<User>());
 
     assert_table_select_shape::<_, User>(&users);
     assert_user_row(&users);
+}
+
+#[test]
+fn from_uses_generated_column_expression_kinds() {
+    let _users = TestConnection.select::<User>(|q| {
+        let user = q.from::<User>();
+        assert_expr_kind::<UserId>(&user.id);
+        assert_expr_kind::<UserName>(&user.name);
+        user
+    });
+}
+
+#[test]
+fn select_can_project_a_generated_column_expression_kind() {
+    let user_ids = TestConnection.select::<UserId>(|q| {
+        let user = q.from::<User>();
+        user.id
+    });
+
+    assert_i32_row(&user_ids);
+    assert_eq!(
+        user_ids.to_sql(),
+        r#"SELECT q0_0.id AS id FROM public.users AS q0_0"#
+    );
+}
+
+#[test]
+fn select_can_mix_column_and_table_projection_shapes() {
+    let user_ids_and_posts = TestConnection.select::<(UserId, Post)>(|q| {
+        let user = q.from::<User>();
+        let post = q.join::<Post>(|post| post.user_id.equals(&user.id));
+        (user.id, post)
+    });
+
+    assert_user_id_and_post_row(&user_ids_and_posts);
+    assert_eq!(
+        user_ids_and_posts.to_sql(),
+        r#"SELECT q0_0.id AS left_id, q0_1.id AS right_id, q0_1.user_id AS right_user_id, q0_1.body AS right_body FROM public.users AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id)"#
+    );
+}
+
+#[test]
+fn select_can_project_arithmetic_expression_shapes() {
+    let adjusted_ids = TestConnection.select::<AddExpr<UserId, i32>>(|q| {
+        let user = q.from::<User>();
+        &user.id + 1
+    });
+    let scaled_ids = TestConnection.select::<DivideExpr<MultiplyExpr<UserId, i32>, i32>>(|q| {
+        let user = q.from::<User>();
+        (&user.id * 2) / 2
+    });
+
+    assert_i32_row(&adjusted_ids);
+    assert_eq!(
+        adjusted_ids.to_sql(),
+        r#"SELECT (q0_0.id + ?) AS expr FROM public.users AS q0_0"#
+    );
+    assert_eq!(adjusted_ids.params(), vec![BindValue::Int(1)]);
+    assert_i32_row(&scaled_ids);
+    assert_eq!(
+        scaled_ids.to_sql(),
+        r#"SELECT ((q0_0.id * ?) / ?) AS expr FROM public.users AS q0_0"#
+    );
+    assert_eq!(
+        scaled_ids.params(),
+        vec![BindValue::Int(2), BindValue::Int(2)]
+    );
+}
+
+#[test]
+fn select_can_project_primitive_literal_shapes() {
+    let values = TestConnection.select::<i32>(|_q| Expr::lit(1));
+
+    assert_i32_row(&values);
+    assert_eq!(values.to_sql(), r#"SELECT ? AS expr"#);
+    assert_eq!(values.params(), vec![BindValue::Int(1)]);
 }
 
 #[test]
@@ -301,17 +398,23 @@ fn select_rebinds_tuple_subquery_shape_through_output_aliases() {
 fn select_accepts_primitive_literals_and_expression_operators() {
     let users = TestConnection.select::<User>(|q| {
         let user = q.from::<User>();
+        let adjusted_id = &user.id + 1;
+        let scaled_id = (&user.id * 2) / 2;
+        assert_expr_kind::<AddExpr<UserId, i32>>(&adjusted_id);
+        assert_expr_kind::<DivideExpr<MultiplyExpr<UserId, i32>, i32>>(&scaled_id);
         q.where_(
             ((&user.id + 1 - 1).greater_than(0) & !user.id.not_equals(42))
                 | user.name.equals("Bob"),
         );
         q.where_((1 + &user.id).less_than(100));
+        q.where_(scaled_id.equals(&user.id));
+        q.where_((2 * &user.id / 2).equals(&user.id));
         user
     });
 
     assert_eq!(
         users.to_sql(),
-        r#"SELECT q0_0.id AS id, q0_0.name AS name FROM public.users AS q0_0 WHERE (((((q0_0.id + ?) - ?) > ?) AND (NOT (q0_0.id <> ?))) OR (q0_0.name = ?)) AND ((? + q0_0.id) < ?)"#
+        r#"SELECT q0_0.id AS id, q0_0.name AS name FROM public.users AS q0_0 WHERE (((((q0_0.id + ?) - ?) > ?) AND (NOT (q0_0.id <> ?))) OR (q0_0.name = ?)) AND ((? + q0_0.id) < ?) AND (((q0_0.id * ?) / ?) = q0_0.id) AND (((? * q0_0.id) / ?) = q0_0.id)"#
     );
     assert_eq!(
         users.params(),
@@ -323,6 +426,10 @@ fn select_accepts_primitive_literals_and_expression_operators() {
             BindValue::Text("Bob".to_owned()),
             BindValue::Int(1),
             BindValue::Int(100),
+            BindValue::Int(2),
+            BindValue::Int(2),
+            BindValue::Int(2),
+            BindValue::Int(2),
         ]
     );
 }

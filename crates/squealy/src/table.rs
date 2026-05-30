@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::{Column, ColumnExpr, ColumnMode, ColumnName, Index, Schema};
+use crate::{Column, ColumnMode, ColumnName, Index, Projectable, Schema};
 
 /// Object-safe table metadata exposed through schema membership.
 pub trait Table {
@@ -27,6 +27,8 @@ pub trait SchemaTable: Table {
     type WithColumn<'scope, C: ColumnMode>
     where
         C: 'scope;
+
+    type Exprs<'scope>: Projectable;
 
     /// Returns the containing schema namespace for this model, if one is configured.
     fn schema_name() -> Option<&'static str>
@@ -66,7 +68,7 @@ pub trait SchemaTable: Table {
     fn column_names() -> Self::WithColumn<'static, ColumnName>;
 
     /// Build expression-mode fields that refer to the supplied SQL alias.
-    fn column_exprs<'scope>(alias: &str) -> Self::WithColumn<'scope, ColumnExpr> {
+    fn column_exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
         Self::column_exprs_from(alias, &Self::column_names())
     }
 
@@ -74,5 +76,5 @@ pub trait SchemaTable: Table {
     fn column_exprs_from<'scope>(
         alias: &str,
         columns: &Self::WithColumn<'static, ColumnName>,
-    ) -> Self::WithColumn<'scope, ColumnExpr>;
+    ) -> Self::Exprs<'scope>;
 }

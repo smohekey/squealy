@@ -17,7 +17,10 @@ mod table;
 pub use backend::{Backend, Connection};
 pub use column::{Column, ColumnExpr, ColumnMode, ColumnName, ColumnValue};
 pub use database::Database;
-pub use expr::{Expr, IntoBindValue, IntoExpr, Order, Predicate, SqlNumber};
+pub use expr::{
+    AddExpr, DivideExpr, Expr, ExprKind, IntoBindValue, IntoExpr, MultiplyExpr, Order, Predicate,
+    SqlNumber, SubtractExpr,
+};
 pub use foreign_key::ForeignKey;
 pub use index::Index;
 pub use ir::{
