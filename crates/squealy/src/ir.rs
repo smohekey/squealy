@@ -203,6 +203,69 @@ impl Insert {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct UpdateColumn {
+    column: Cow<'static, str>,
+    value: BindValue,
+}
+
+impl UpdateColumn {
+    pub fn new(column: impl Into<Cow<'static, str>>, value: BindValue) -> Self {
+        Self {
+            column: column.into(),
+            value,
+        }
+    }
+
+    pub fn column(&self) -> &str {
+        &self.column
+    }
+
+    pub fn value(&self) -> &BindValue {
+        &self.value
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Update {
+    table: String,
+    alias: String,
+    columns: Vec<UpdateColumn>,
+    filters: Vec<Filter>,
+}
+
+impl Update {
+    pub(crate) fn new(
+        table: impl ToString,
+        alias: impl Into<String>,
+        columns: Vec<UpdateColumn>,
+        filters: Vec<Filter>,
+    ) -> Self {
+        Self {
+            table: table.to_string(),
+            alias: alias.into(),
+            columns,
+            filters,
+        }
+    }
+
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    pub fn alias(&self) -> &str {
+        &self.alias
+    }
+
+    pub fn columns(&self) -> &[UpdateColumn] {
+        &self.columns
+    }
+
+    pub fn filters(&self) -> &[Filter] {
+        &self.filters
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Delete {
     table: String,
     alias: String,
@@ -313,7 +376,7 @@ pub struct Filter {
 }
 
 impl Filter {
-    pub(crate) fn new(predicate: PredicateNode) -> Self {
+    pub fn new(predicate: PredicateNode) -> Self {
         Self { predicate }
     }
 

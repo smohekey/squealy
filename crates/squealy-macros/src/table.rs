@@ -92,6 +92,8 @@ impl TableStruct {
         let nullable_rebound_exprs_ident =
             generated_ident(&ident, "nullable_exprs", "ReboundProjection");
         let insert_builder_ident = generated_ident(&ident, "insert", "Builder");
+        let update_builder_ident = generated_ident(&ident, "update", "Builder");
+        let update_ready_ident = generated_ident(&ident, "update", "Ready");
         let expr_kind_idents = self
             .fields
             .iter()
@@ -263,6 +265,116 @@ impl TableStruct {
                 }
             })
             .collect::<Vec<_>>();
+        let updateable_fields = self
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| field.updateable())
+            .collect::<Vec<_>>();
+        let update_state_idents = updateable_fields
+            .iter()
+            .map(|(_, field)| generated_ident(&ident, &field.ident.to_string(), "UpdateState"))
+            .collect::<Vec<_>>();
+        let update_missing_idents = updateable_fields
+            .iter()
+            .map(|(_, field)| generated_ident(&ident, &field.ident.to_string(), "UpdateMissing"))
+            .collect::<Vec<_>>();
+        let update_set_idents = updateable_fields
+            .iter()
+            .map(|(_, field)| generated_ident(&ident, &field.ident.to_string(), "UpdateSet"))
+            .collect::<Vec<_>>();
+        let update_state_defaults = update_state_idents
+            .iter()
+            .zip(update_missing_idents.iter())
+            .map(|(state, missing)| quote::quote! { #state = #missing })
+            .collect::<Vec<_>>();
+        let update_initial_states = update_missing_idents.iter().collect::<Vec<_>>();
+        let update_state_tuple = if update_state_idents.is_empty() {
+            quote::quote! { () }
+        } else {
+            quote::quote! { (#(#update_state_idents,)*) }
+        };
+        let update_ready_impls = (1usize..(1usize << updateable_fields.len()))
+            .map(|mask| {
+                let states = update_missing_idents
+                    .iter()
+                    .zip(update_set_idents.iter())
+                    .enumerate()
+                    .map(|(index, (missing, set))| {
+                        if (mask & (1usize << index)) == 0 {
+                            quote::quote! { #missing }
+                        } else {
+                            quote::quote! { #set }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                quote::quote! {
+                    impl #update_ready_ident for (#(#states,)*) {}
+                }
+            })
+            .collect::<Vec<_>>();
+        let update_setters = updateable_fields
+            .iter()
+            .enumerate()
+            .map(|(setter_index, (field_index, field))| {
+                let field_ident =
+                    proc_macro2::Ident::new(&field.ident.to_string(), Span::call_site());
+                let field_literal = &field_literals[*field_index];
+                let field_ty = &field.value_ty;
+                let missing = &update_missing_idents[setter_index];
+                let set = &update_set_idents[setter_index];
+                let impl_state_params = update_state_idents
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, state)| (index != setter_index).then_some(state))
+                    .collect::<Vec<_>>();
+                let self_states = update_state_idents
+                    .iter()
+                    .enumerate()
+                    .map(|(index, state)| {
+                        if index == setter_index {
+                            quote::quote! { #missing }
+                        } else {
+                            quote::quote! { #state }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let return_states = update_state_idents
+                    .iter()
+                    .enumerate()
+                    .map(|(index, state)| {
+                        if index == setter_index {
+                            quote::quote! { #set }
+                        } else {
+                            quote::quote! { #state }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                quote::quote! {
+                    impl<'conn, Conn, #(#impl_state_params),*> #update_builder_ident <'conn, Conn, #(#self_states),*>
+                    where
+                        Conn: ::squealy::Connection + 'conn,
+                    {
+                        pub fn #field_ident(
+                            mut self,
+                            value: impl ::std::convert::Into<#field_ty>,
+                        ) -> #update_builder_ident <'conn, Conn, #(#return_states),*> {
+                            self.columns.push(::squealy::UpdateColumn::new(
+                                #field_literal,
+                                ::squealy::IntoBindValue::into_bind_value(value.into()),
+                            ));
+                            #update_builder_ident {
+                                connection: self.connection,
+                                columns: self.columns,
+                                filters: self.filters,
+                                _state: ::std::marker::PhantomData,
+                            }
+                        }
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
 
         quote::quote! {
             #(#foreign_key_defs)*
@@ -322,6 +434,19 @@ impl TableStruct {
                 struct #insert_set_idents;
             )*
 
+            #(
+                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+                struct #update_missing_idents;
+            )*
+
+            #(
+                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+                struct #update_set_idents;
+            )*
+
+            trait #update_ready_ident {}
+            #(#update_ready_impls)*
+
             #[derive(Clone, Debug, PartialEq)]
             struct #insert_builder_ident <'conn, Conn: ::squealy::Connection + 'conn, #(#insert_state_defaults),*> {
                 connection: &'conn Conn,
@@ -359,6 +484,71 @@ impl TableStruct {
                     );
                     async move {
                         ::squealy::InsertQuery::execute(&query).await
+                    }
+                }
+            }
+
+            #[derive(Clone, Debug, PartialEq)]
+            struct #update_builder_ident <'conn, Conn: ::squealy::Connection + 'conn, #(#update_state_defaults),*> {
+                connection: &'conn Conn,
+                columns: ::std::vec::Vec<::squealy::UpdateColumn>,
+                filters: ::std::vec::Vec<::squealy::Filter>,
+                _state: ::std::marker::PhantomData<#update_state_tuple>,
+            }
+
+            impl<'conn, Conn> #update_builder_ident <'conn, Conn, #(#update_initial_states),*>
+            where
+                Conn: ::squealy::Connection + 'conn,
+            {
+                fn new(connection: &'conn Conn) -> Self {
+                    Self {
+                        connection,
+                        columns: ::std::vec::Vec::new(),
+                        filters: ::std::vec::Vec::new(),
+                        _state: ::std::marker::PhantomData,
+                    }
+                }
+            }
+
+            impl<'conn, Conn, #(#update_state_idents),*> #update_builder_ident <'conn, Conn, #(#update_state_idents),*>
+            where
+                Conn: ::squealy::Connection + 'conn,
+            {
+                const ALIAS: &'static str = "q0_0";
+
+                pub fn where_(
+                    mut self,
+                    predicate: impl ::std::ops::FnOnce(
+                        &<#ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
+                    ) -> ::squealy::Predicate<'static>,
+                ) -> Self {
+                    let table = <#ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
+                    let predicate = predicate(&table);
+                    self.filters.push(::squealy::Filter::new(predicate.node().clone()));
+                    self
+                }
+            }
+
+            #(#update_setters)*
+
+            impl<'conn, Conn, #(#update_state_idents),*> #update_builder_ident <'conn, Conn, #(#update_state_idents),*>
+            where
+                Conn: ::squealy::Connection + 'conn,
+                #update_state_tuple: #update_ready_ident,
+            {
+                pub fn execute(
+                    self,
+                ) -> impl ::std::future::Future<
+                    Output = ::std::result::Result<u64, <Conn as ::squealy::Connection>::Error>,
+                > + 'conn {
+                    let query = ::squealy::Connection::update_query::<#ident <'static, ::squealy::ColumnExpr>>(
+                        self.connection,
+                        Self::ALIAS.to_owned(),
+                        self.columns,
+                        self.filters,
+                    );
+                    async move {
+                        ::squealy::UpdateQuery::execute(&query).await
                     }
                 }
             }
@@ -438,6 +628,21 @@ impl TableStruct {
                     Conn: ::squealy::Connection + 'conn,
                 {
                     #insert_builder_ident::new(connection)
+                }
+            }
+
+            impl ::squealy::UpdateableTable for #ident <'static, ::squealy::ColumnExpr> {
+                type UpdateBuilder<'conn, Conn> = #update_builder_ident <'conn, Conn>
+                where
+                    Conn: ::squealy::Connection + 'conn;
+
+                fn update_builder<'conn, Conn>(
+                    connection: &'conn Conn,
+                ) -> Self::UpdateBuilder<'conn, Conn>
+                where
+                    Conn: ::squealy::Connection + 'conn,
+                {
+                    #update_builder_ident::new(connection)
                 }
             }
 
@@ -632,6 +837,10 @@ impl Field {
 
     fn required_insert(&self) -> bool {
         self.insertable() && !self.nullable() && self.attrs.default.is_none()
+    }
+
+    fn updateable(&self) -> bool {
+        !self.attrs.auto_increment
     }
 
     fn nullable(&self) -> bool {

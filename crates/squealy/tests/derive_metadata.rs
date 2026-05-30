@@ -295,6 +295,41 @@ fn insert_query_builds_column_bindings() {
 }
 
 #[test]
+fn update_builder_executes_after_a_column_is_set() {
+    let _execute = TestConnection
+        .update::<User>()
+        .name("Ada")
+        .where_(|user| user.id.equals(1))
+        .execute();
+}
+
+#[test]
+fn update_query_builds_column_bindings_and_filters() {
+    let update = TestConnection.update_query::<User>(
+        "q0_0".to_owned(),
+        vec![UpdateColumn::new("name", BindValue::Text("Ada".to_owned()))],
+        vec![Filter::new(PredicateNode::Compare {
+            left: ExprNode::Column {
+                alias: "q0_0".to_owned(),
+                column: "id".to_owned(),
+            },
+            op: CompareOp::Equals,
+            right: ExprNode::Literal(BindValue::Int(1)),
+        })],
+    );
+
+    let _execute = update.execute();
+    assert_eq!(
+        update.to_sql(),
+        r#"UPDATE public.users AS q0_0 SET name = ? WHERE (q0_0.id = ?)"#
+    );
+    assert_eq!(
+        update.params(),
+        vec![BindValue::Text("Ada".to_owned()), BindValue::Int(1)]
+    );
+}
+
+#[test]
 fn delete_builds_typed_table_filters() {
     let delete = TestConnection.delete::<User>(|q| {
         let user = q.table();

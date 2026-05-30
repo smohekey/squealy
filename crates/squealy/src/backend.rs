@@ -1,8 +1,9 @@
 use std::io::{self, Write};
 
 use crate::{
-    DeleteBuilder, DeleteQuery, InsertColumn, InsertQuery, InsertableTable, ProjectionShape,
-    Returning, SelectQuery, Table, TableProjection,
+    DeleteBuilder, DeleteQuery, Filter, InsertColumn, InsertQuery, InsertableTable,
+    ProjectionShape, Returning, SelectQuery, Table, TableProjection, UpdateColumn, UpdateQuery,
+    UpdateableTable,
 };
 
 /// Backend-specific DDL generation.
@@ -24,6 +25,11 @@ pub trait Connection: Sized {
     where
         Self: 'conn,
         S: InsertableTable;
+
+    type Update<'conn, S>: UpdateQuery<'conn, Connection = Self, Table = S>
+    where
+        Self: 'conn,
+        S: UpdateableTable;
 
     type Delete<'conn, S>: DeleteQuery<'conn, Connection = Self, Table = S>
     where
@@ -47,6 +53,22 @@ pub trait Connection: Sized {
     fn insert_query<S>(&self, columns: Vec<InsertColumn>) -> Self::Insert<'_, S>
     where
         S: InsertableTable;
+
+    fn update<S>(&self) -> S::UpdateBuilder<'_, Self>
+    where
+        S: UpdateableTable,
+    {
+        S::update_builder(self)
+    }
+
+    fn update_query<S>(
+        &self,
+        alias: String,
+        columns: Vec<UpdateColumn>,
+        filters: Vec<Filter>,
+    ) -> Self::Update<'_, S>
+    where
+        S: UpdateableTable;
 
     fn delete<S>(
         &self,
