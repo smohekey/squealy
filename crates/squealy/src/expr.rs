@@ -1,5 +1,5 @@
 use std::marker::PhantomData;
-use std::ops::{Add, BitAnd, BitOr, Not, Sub};
+use std::ops::{Add, BitAnd, BitOr, Div, Mul, Not, Sub};
 
 use crate::ir::{
     ArithmeticOp, BindValue, CompareOp, ExprNode, OrderDirection, OrderNode, PredicateNode,
@@ -92,14 +92,95 @@ impl_sql_number!(i8, i16, i32, i64, i128, isize);
 impl_sql_number!(u8, u16, u32, u64, u128, usize);
 impl_sql_number!(f32, f64);
 
-/// A typed SQL scalar expression scoped to a query builder invocation.
-#[derive(Debug, PartialEq)]
-pub struct Expr<'scope, T> {
-    node: ExprNode,
-    _phantom: PhantomData<(&'scope (), T)>,
+/// Type-level identity for a SQL expression.
+pub trait ExprKind {
+    type Value;
 }
 
-impl<'scope, T> Expr<'scope, T> {
+macro_rules! impl_value_expr_kind {
+    ($($ty:ty),* $(,)?) => {
+        $(impl ExprKind for $ty {
+            type Value = $ty;
+        })*
+    };
+}
+
+impl_value_expr_kind!(i8, i16, i32, i64, i128, isize);
+impl_value_expr_kind!(u8, u16, u32, u64, u128, usize);
+impl_value_expr_kind!(f32, f64);
+impl_value_expr_kind!(String, bool);
+
+/// Type-level identity for SQL addition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AddExpr<L, R> {
+    _Marker(PhantomData<(L, R)>),
+}
+
+impl<L, R> ExprKind for AddExpr<L, R>
+where
+    L: ExprKind,
+    R: ExprKind<Value = L::Value>,
+    L::Value: SqlNumber,
+{
+    type Value = L::Value;
+}
+
+/// Type-level identity for SQL subtraction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubtractExpr<L, R> {
+    _Marker(PhantomData<(L, R)>),
+}
+
+impl<L, R> ExprKind for SubtractExpr<L, R>
+where
+    L: ExprKind,
+    R: ExprKind<Value = L::Value>,
+    L::Value: SqlNumber,
+{
+    type Value = L::Value;
+}
+
+/// Type-level identity for SQL multiplication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MultiplyExpr<L, R> {
+    _Marker(PhantomData<(L, R)>),
+}
+
+impl<L, R> ExprKind for MultiplyExpr<L, R>
+where
+    L: ExprKind,
+    R: ExprKind<Value = L::Value>,
+    L::Value: SqlNumber,
+{
+    type Value = L::Value;
+}
+
+/// Type-level identity for SQL division.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DivideExpr<L, R> {
+    _Marker(PhantomData<(L, R)>),
+}
+
+impl<L, R> ExprKind for DivideExpr<L, R>
+where
+    L: ExprKind,
+    R: ExprKind<Value = L::Value>,
+    L::Value: SqlNumber,
+{
+    type Value = L::Value;
+}
+
+/// A typed SQL scalar expression scoped to a query builder invocation.
+#[derive(Debug, PartialEq)]
+pub struct Expr<'scope, K> {
+    node: ExprNode,
+    _phantom: PhantomData<(&'scope (), K)>,
+}
+
+impl<'scope, K> Expr<'scope, K>
+where
+    K: ExprKind,
+{
     fn from_node(node: ExprNode) -> Self {
         Self {
             node,
@@ -128,7 +209,8 @@ impl<'scope, T> Expr<'scope, T> {
     /// SQL equality.
     pub fn equals<'other, R>(&self, other: R) -> Predicate<'scope>
     where
-        R: IntoExpr<'other, T>,
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
     {
         Predicate::compare(&self.node, CompareOp::Equals, other.into_expr().node)
     }
@@ -136,7 +218,8 @@ impl<'scope, T> Expr<'scope, T> {
     /// SQL inequality.
     pub fn not_equals<'other, R>(&self, other: R) -> Predicate<'scope>
     where
-        R: IntoExpr<'other, T>,
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
     {
         Predicate::compare(&self.node, CompareOp::NotEquals, other.into_expr().node)
     }
@@ -144,7 +227,8 @@ impl<'scope, T> Expr<'scope, T> {
     /// SQL less-than comparison.
     pub fn less_than<'other, R>(&self, other: R) -> Predicate<'scope>
     where
-        R: IntoExpr<'other, T>,
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
     {
         Predicate::compare(&self.node, CompareOp::LessThan, other.into_expr().node)
     }
@@ -152,7 +236,8 @@ impl<'scope, T> Expr<'scope, T> {
     /// SQL less-than-or-equal comparison.
     pub fn less_than_or_equals<'other, R>(&self, other: R) -> Predicate<'scope>
     where
-        R: IntoExpr<'other, T>,
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
     {
         Predicate::compare(
             &self.node,
@@ -164,7 +249,8 @@ impl<'scope, T> Expr<'scope, T> {
     /// SQL greater-than comparison.
     pub fn greater_than<'other, R>(&self, other: R) -> Predicate<'scope>
     where
-        R: IntoExpr<'other, T>,
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
     {
         Predicate::compare(&self.node, CompareOp::GreaterThan, other.into_expr().node)
     }
@@ -172,7 +258,8 @@ impl<'scope, T> Expr<'scope, T> {
     /// SQL greater-than-or-equal comparison.
     pub fn greater_than_or_equals<'other, R>(&self, other: R) -> Predicate<'scope>
     where
-        R: IntoExpr<'other, T>,
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
     {
         Predicate::compare(
             &self.node,
@@ -198,28 +285,68 @@ impl<'scope, T> Expr<'scope, T> {
     }
 }
 
-impl<'scope, T> Expr<'scope, T>
+impl<'scope, K> Expr<'scope, K>
 where
-    T: SqlNumber,
+    K: ExprKind,
+    K::Value: SqlNumber,
 {
     /// SQL numeric addition.
-    pub fn add<'other, R>(&self, other: R) -> Self
+    pub fn add<'other, R>(&self, other: R) -> Expr<'scope, AddExpr<K, R::Kind>>
     where
-        R: IntoExpr<'other, T>,
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
     {
-        Self::binary(&self.node, ArithmeticOp::Add, other.into_expr().node)
+        Self::binary::<AddExpr<K, R::Kind>>(&self.node, ArithmeticOp::Add, other.into_expr().node)
     }
 
     /// SQL numeric subtraction.
-    pub fn subtract<'other, R>(&self, other: R) -> Self
+    pub fn subtract<'other, R>(&self, other: R) -> Expr<'scope, SubtractExpr<K, R::Kind>>
     where
-        R: IntoExpr<'other, T>,
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
     {
-        Self::binary(&self.node, ArithmeticOp::Subtract, other.into_expr().node)
+        Self::binary::<SubtractExpr<K, R::Kind>>(
+            &self.node,
+            ArithmeticOp::Subtract,
+            other.into_expr().node,
+        )
     }
 
-    fn binary(left: &ExprNode, op: ArithmeticOp, right: ExprNode) -> Self {
-        Self::from_node(ExprNode::Binary {
+    /// SQL numeric multiplication.
+    pub fn multiply<'other, R>(&self, other: R) -> Expr<'scope, MultiplyExpr<K, R::Kind>>
+    where
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
+    {
+        Self::binary::<MultiplyExpr<K, R::Kind>>(
+            &self.node,
+            ArithmeticOp::Multiply,
+            other.into_expr().node,
+        )
+    }
+
+    /// SQL numeric division.
+    pub fn divide<'other, R>(&self, other: R) -> Expr<'scope, DivideExpr<K, R::Kind>>
+    where
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
+    {
+        Self::binary::<DivideExpr<K, R::Kind>>(
+            &self.node,
+            ArithmeticOp::Divide,
+            other.into_expr().node,
+        )
+    }
+
+    fn binary<ResultKind>(
+        left: &ExprNode,
+        op: ArithmeticOp,
+        right: ExprNode,
+    ) -> Expr<'scope, ResultKind>
+    where
+        ResultKind: ExprKind,
+    {
+        Expr::<ResultKind>::from_node(ExprNode::Binary {
             left: Box::new(left.clone()),
             op,
             right: Box::new(right),
@@ -227,7 +354,7 @@ where
     }
 }
 
-impl<'scope, T> Clone for Expr<'scope, T> {
+impl<'scope, K> Clone for Expr<'scope, K> {
     fn clone(&self) -> Self {
         Self {
             node: self.node.clone(),
@@ -236,86 +363,238 @@ impl<'scope, T> Clone for Expr<'scope, T> {
     }
 }
 
-impl<'scope, T, R> Add<R> for Expr<'scope, T>
+impl<'scope, K, R> Add<R> for Expr<'scope, K>
 where
-    T: SqlNumber,
-    R: IntoExpr<'scope, T>,
+    K: ExprKind,
+    K::Value: SqlNumber,
+    R: IntoExpr<'scope>,
+    R::Kind: ExprKind<Value = K::Value>,
 {
-    type Output = Self;
+    type Output = Expr<'scope, AddExpr<K, R::Kind>>;
 
     fn add(self, other: R) -> Self::Output {
-        Expr::binary(&self.node, ArithmeticOp::Add, other.into_expr().node)
+        Expr::<K>::binary::<AddExpr<K, R::Kind>>(
+            &self.node,
+            ArithmeticOp::Add,
+            other.into_expr().node,
+        )
     }
 }
 
-impl<'scope, T, R> Add<R> for &Expr<'scope, T>
+impl<'scope, K, R> Add<R> for &Expr<'scope, K>
 where
-    T: SqlNumber,
-    R: IntoExpr<'scope, T>,
+    K: ExprKind,
+    K::Value: SqlNumber,
+    R: IntoExpr<'scope>,
+    R::Kind: ExprKind<Value = K::Value>,
 {
-    type Output = Expr<'scope, T>;
+    type Output = Expr<'scope, AddExpr<K, R::Kind>>;
 
     fn add(self, other: R) -> Self::Output {
-        Expr::binary(&self.node, ArithmeticOp::Add, other.into_expr().node)
+        Expr::<K>::binary::<AddExpr<K, R::Kind>>(
+            &self.node,
+            ArithmeticOp::Add,
+            other.into_expr().node,
+        )
     }
 }
 
-impl<'scope, T, R> Sub<R> for Expr<'scope, T>
+impl<'scope, K, R> Sub<R> for Expr<'scope, K>
 where
-    T: SqlNumber,
-    R: IntoExpr<'scope, T>,
+    K: ExprKind,
+    K::Value: SqlNumber,
+    R: IntoExpr<'scope>,
+    R::Kind: ExprKind<Value = K::Value>,
 {
-    type Output = Self;
+    type Output = Expr<'scope, SubtractExpr<K, R::Kind>>;
 
     fn sub(self, other: R) -> Self::Output {
-        Expr::binary(&self.node, ArithmeticOp::Subtract, other.into_expr().node)
+        Expr::<K>::binary::<SubtractExpr<K, R::Kind>>(
+            &self.node,
+            ArithmeticOp::Subtract,
+            other.into_expr().node,
+        )
     }
 }
 
-impl<'scope, T, R> Sub<R> for &Expr<'scope, T>
+impl<'scope, K, R> Sub<R> for &Expr<'scope, K>
 where
-    T: SqlNumber,
-    R: IntoExpr<'scope, T>,
+    K: ExprKind,
+    K::Value: SqlNumber,
+    R: IntoExpr<'scope>,
+    R::Kind: ExprKind<Value = K::Value>,
 {
-    type Output = Expr<'scope, T>;
+    type Output = Expr<'scope, SubtractExpr<K, R::Kind>>;
 
     fn sub(self, other: R) -> Self::Output {
-        Expr::binary(&self.node, ArithmeticOp::Subtract, other.into_expr().node)
+        Expr::<K>::binary::<SubtractExpr<K, R::Kind>>(
+            &self.node,
+            ArithmeticOp::Subtract,
+            other.into_expr().node,
+        )
+    }
+}
+
+impl<'scope, K, R> Mul<R> for Expr<'scope, K>
+where
+    K: ExprKind,
+    K::Value: SqlNumber,
+    R: IntoExpr<'scope>,
+    R::Kind: ExprKind<Value = K::Value>,
+{
+    type Output = Expr<'scope, MultiplyExpr<K, R::Kind>>;
+
+    fn mul(self, other: R) -> Self::Output {
+        Expr::<K>::binary::<MultiplyExpr<K, R::Kind>>(
+            &self.node,
+            ArithmeticOp::Multiply,
+            other.into_expr().node,
+        )
+    }
+}
+
+impl<'scope, K, R> Mul<R> for &Expr<'scope, K>
+where
+    K: ExprKind,
+    K::Value: SqlNumber,
+    R: IntoExpr<'scope>,
+    R::Kind: ExprKind<Value = K::Value>,
+{
+    type Output = Expr<'scope, MultiplyExpr<K, R::Kind>>;
+
+    fn mul(self, other: R) -> Self::Output {
+        Expr::<K>::binary::<MultiplyExpr<K, R::Kind>>(
+            &self.node,
+            ArithmeticOp::Multiply,
+            other.into_expr().node,
+        )
+    }
+}
+
+impl<'scope, K, R> Div<R> for Expr<'scope, K>
+where
+    K: ExprKind,
+    K::Value: SqlNumber,
+    R: IntoExpr<'scope>,
+    R::Kind: ExprKind<Value = K::Value>,
+{
+    type Output = Expr<'scope, DivideExpr<K, R::Kind>>;
+
+    fn div(self, other: R) -> Self::Output {
+        Expr::<K>::binary::<DivideExpr<K, R::Kind>>(
+            &self.node,
+            ArithmeticOp::Divide,
+            other.into_expr().node,
+        )
+    }
+}
+
+impl<'scope, K, R> Div<R> for &Expr<'scope, K>
+where
+    K: ExprKind,
+    K::Value: SqlNumber,
+    R: IntoExpr<'scope>,
+    R::Kind: ExprKind<Value = K::Value>,
+{
+    type Output = Expr<'scope, DivideExpr<K, R::Kind>>;
+
+    fn div(self, other: R) -> Self::Output {
+        Expr::<K>::binary::<DivideExpr<K, R::Kind>>(
+            &self.node,
+            ArithmeticOp::Divide,
+            other.into_expr().node,
+        )
     }
 }
 
 macro_rules! impl_primitive_left_arithmetic {
     ($($ty:ty),* $(,)?) => {
         $(
-            impl<'scope> Add<Expr<'scope, $ty>> for $ty {
-                type Output = Expr<'scope, $ty>;
+            impl<'scope, K> Add<Expr<'scope, K>> for $ty
+            where
+                K: ExprKind<Value = $ty>,
+            {
+                type Output = Expr<'scope, AddExpr<$ty, K>>;
 
-                fn add(self, other: Expr<'scope, $ty>) -> Self::Output {
+                fn add(self, other: Expr<'scope, K>) -> Self::Output {
                     Expr::lit(self) + other
                 }
             }
 
-            impl<'scope> Add<&Expr<'scope, $ty>> for $ty {
-                type Output = Expr<'scope, $ty>;
+            impl<'scope, K> Add<&Expr<'scope, K>> for $ty
+            where
+                K: ExprKind<Value = $ty>,
+            {
+                type Output = Expr<'scope, AddExpr<$ty, K>>;
 
-                fn add(self, other: &Expr<'scope, $ty>) -> Self::Output {
+                fn add(self, other: &Expr<'scope, K>) -> Self::Output {
                     Expr::lit(self) + other
                 }
             }
 
-            impl<'scope> Sub<Expr<'scope, $ty>> for $ty {
-                type Output = Expr<'scope, $ty>;
+            impl<'scope, K> Sub<Expr<'scope, K>> for $ty
+            where
+                K: ExprKind<Value = $ty>,
+            {
+                type Output = Expr<'scope, SubtractExpr<$ty, K>>;
 
-                fn sub(self, other: Expr<'scope, $ty>) -> Self::Output {
+                fn sub(self, other: Expr<'scope, K>) -> Self::Output {
                     Expr::lit(self) - other
                 }
             }
 
-            impl<'scope> Sub<&Expr<'scope, $ty>> for $ty {
-                type Output = Expr<'scope, $ty>;
+            impl<'scope, K> Sub<&Expr<'scope, K>> for $ty
+            where
+                K: ExprKind<Value = $ty>,
+            {
+                type Output = Expr<'scope, SubtractExpr<$ty, K>>;
 
-                fn sub(self, other: &Expr<'scope, $ty>) -> Self::Output {
+                fn sub(self, other: &Expr<'scope, K>) -> Self::Output {
                     Expr::lit(self) - other
+                }
+            }
+
+            impl<'scope, K> Mul<Expr<'scope, K>> for $ty
+            where
+                K: ExprKind<Value = $ty>,
+            {
+                type Output = Expr<'scope, MultiplyExpr<$ty, K>>;
+
+                fn mul(self, other: Expr<'scope, K>) -> Self::Output {
+                    Expr::lit(self) * other
+                }
+            }
+
+            impl<'scope, K> Mul<&Expr<'scope, K>> for $ty
+            where
+                K: ExprKind<Value = $ty>,
+            {
+                type Output = Expr<'scope, MultiplyExpr<$ty, K>>;
+
+                fn mul(self, other: &Expr<'scope, K>) -> Self::Output {
+                    Expr::lit(self) * other
+                }
+            }
+
+            impl<'scope, K> Div<Expr<'scope, K>> for $ty
+            where
+                K: ExprKind<Value = $ty>,
+            {
+                type Output = Expr<'scope, DivideExpr<$ty, K>>;
+
+                fn div(self, other: Expr<'scope, K>) -> Self::Output {
+                    Expr::lit(self) / other
+                }
+            }
+
+            impl<'scope, K> Div<&Expr<'scope, K>> for $ty
+            where
+                K: ExprKind<Value = $ty>,
+            {
+                type Output = Expr<'scope, DivideExpr<$ty, K>>;
+
+                fn div(self, other: &Expr<'scope, K>) -> Self::Output {
+                    Expr::lit(self) / other
                 }
             }
         )*
@@ -327,39 +606,57 @@ impl_primitive_left_arithmetic!(u8, u16, u32, u64, u128, usize);
 impl_primitive_left_arithmetic!(f32, f64);
 
 /// Converts Rust values into scoped SQL expressions.
-pub trait IntoExpr<'scope, T> {
-    fn into_expr(self) -> Expr<'scope, T>;
+pub trait IntoExpr<'scope> {
+    type Kind: ExprKind;
+
+    fn into_expr(self) -> Expr<'scope, Self::Kind>;
 }
 
-impl<'scope, T> IntoExpr<'scope, T> for Expr<'scope, T> {
-    fn into_expr(self) -> Expr<'scope, T> {
+impl<'scope, K> IntoExpr<'scope> for Expr<'scope, K>
+where
+    K: ExprKind,
+{
+    type Kind = K;
+
+    fn into_expr(self) -> Expr<'scope, Self::Kind> {
         self
     }
 }
 
-impl<'scope, T> IntoExpr<'scope, T> for &Expr<'scope, T> {
-    fn into_expr(self) -> Expr<'scope, T> {
+impl<'scope, K> IntoExpr<'scope> for &Expr<'scope, K>
+where
+    K: ExprKind,
+{
+    type Kind = K;
+
+    fn into_expr(self) -> Expr<'scope, Self::Kind> {
         self.clone()
     }
 }
 
-impl<'scope, T> IntoExpr<'scope, T> for T
+impl<'scope, T> IntoExpr<'scope> for T
 where
-    T: IntoBindValue,
+    T: ExprKind + IntoBindValue,
 {
-    fn into_expr(self) -> Expr<'scope, T> {
+    type Kind = T;
+
+    fn into_expr(self) -> Expr<'scope, Self::Kind> {
         Expr::lit(self)
     }
 }
 
-impl<'scope> IntoExpr<'scope, String> for &str {
-    fn into_expr(self) -> Expr<'scope, String> {
+impl<'scope> IntoExpr<'scope> for &str {
+    type Kind = String;
+
+    fn into_expr(self) -> Expr<'scope, Self::Kind> {
         Expr::lit(self)
     }
 }
 
-impl<'scope> IntoExpr<'scope, String> for &String {
-    fn into_expr(self) -> Expr<'scope, String> {
+impl<'scope> IntoExpr<'scope> for &String {
+    type Kind = String;
+
+    fn into_expr(self) -> Expr<'scope, Self::Kind> {
         Expr::lit(self)
     }
 }

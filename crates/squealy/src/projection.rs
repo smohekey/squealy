@@ -1,7 +1,9 @@
 use std::borrow::Cow;
 
 use crate::ir::SelectColumn;
-use crate::{ColumnExpr, ColumnValue, SchemaTable};
+use crate::{
+    AddExpr, ColumnValue, DivideExpr, Expr, ExprKind, MultiplyExpr, SchemaTable, SubtractExpr,
+};
 
 /// A projection shape that can produce scoped expression values for a SQL alias.
 pub trait ProjectionShape {
@@ -41,13 +43,50 @@ where
     }
 }
 
+macro_rules! impl_value_projection_shape {
+    ($($ty:ty),* $(,)?) => {
+        $(impl ProjectionShape for $ty {
+            type Exprs<'scope> = Expr<'scope, $ty>;
+            type Row = $ty;
+
+            fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
+                Expr::column(alias, "expr")
+            }
+        })*
+    };
+}
+
+impl_value_projection_shape!(i8, i16, i32, i64, i128, isize);
+impl_value_projection_shape!(u8, u16, u32, u64, u128, usize);
+impl_value_projection_shape!(f32, f64);
+impl_value_projection_shape!(String, bool);
+
+macro_rules! impl_binary_projection_shape {
+    ($($ty:ident),* $(,)?) => {
+        $(impl<L, R> ProjectionShape for $ty<L, R>
+        where
+            $ty<L, R>: ExprKind,
+            <$ty<L, R> as ExprKind>::Value: Send,
+        {
+            type Exprs<'scope> = Expr<'scope, $ty<L, R>>;
+            type Row = <$ty<L, R> as ExprKind>::Value;
+
+            fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
+                Expr::column(alias, "expr")
+            }
+        })*
+    };
+}
+
+impl_binary_projection_shape!(AddExpr, SubtractExpr, MultiplyExpr, DivideExpr);
+
 impl<S> ProjectionShape for S
 where
     S: SchemaTable,
     <S as SchemaTable>::WithColumn<'static, ColumnValue>: Send,
-    for<'scope> <S as SchemaTable>::WithColumn<'scope, ColumnExpr>: Projectable,
+    for<'scope> <S as SchemaTable>::Exprs<'scope>: Projectable,
 {
-    type Exprs<'scope> = <S as SchemaTable>::WithColumn<'scope, ColumnExpr>;
+    type Exprs<'scope> = <S as SchemaTable>::Exprs<'scope>;
     type Row = <S as SchemaTable>::WithColumn<'static, ColumnValue>;
 
     fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
@@ -64,7 +103,7 @@ impl<S> TableProjection for S
 where
     S: SchemaTable,
     <S as SchemaTable>::WithColumn<'static, ColumnValue>: Send,
-    for<'scope> <S as SchemaTable>::WithColumn<'scope, ColumnExpr>: Projectable,
+    for<'scope> <S as SchemaTable>::Exprs<'scope>: Projectable,
 {
     fn qualified_name() -> Cow<'static, str> {
         <S as SchemaTable>::qualified_name()
@@ -125,6 +164,38 @@ where
     }
 }
 
+impl<'expr, K> Projectable for Expr<'expr, K>
+where
+    K: ExprKind,
+{
+    type Rebound<'scope> = Expr<'scope, K>;
+
+    fn project(&self) -> Vec<SelectColumn> {
+        vec![SelectColumn::new(
+            self.node().clone(),
+            expression_alias(self),
+        )]
+    }
+
+    fn re_alias<'scope>(&self, alias: &str) -> Self::Rebound<'scope> {
+        Expr::column(alias, &expression_alias(self))
+    }
+
+    fn re_alias_with_prefix<'scope>(&self, alias: &str, prefix: &str) -> Self::Rebound<'scope> {
+        Expr::column(alias, &prefix_alias(prefix, &expression_alias(self)))
+    }
+}
+
 fn prefix_alias(prefix: &str, alias: &str) -> String {
     format!("{prefix}_{alias}")
+}
+
+fn expression_alias<K>(expr: &Expr<'_, K>) -> String
+where
+    K: ExprKind,
+{
+    match expr.node() {
+        crate::ExprNode::Column { column, .. } => column.clone(),
+        _ => "expr".to_owned(),
+    }
 }

@@ -205,8 +205,10 @@ impl Connection for TestConnection {
 fn write_select_sql(select: &Select, writer: &mut impl std::io::Write) -> std::io::Result<()> {
     writer.write_all(b"SELECT ")?;
     write_select_columns(select.columns(), writer)?;
-    writer.write_all(b" ")?;
-    write_sources(select.sources(), writer)?;
+    if !select.sources().is_empty() {
+        writer.write_all(b" ")?;
+        write_sources(select.sources(), writer)?;
+    }
     write_filters(select.filters(), writer)?;
     write_orders(select.orders(), writer)?;
     if let Some(limit) = select.limit() {
@@ -418,6 +420,8 @@ fn render_arithmetic_op(op: ArithmeticOp) -> &'static str {
     match op {
         ArithmeticOp::Add => "+",
         ArithmeticOp::Subtract => "-",
+        ArithmeticOp::Multiply => "*",
+        ArithmeticOp::Divide => "/",
     }
 }
 

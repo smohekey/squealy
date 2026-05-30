@@ -3,7 +3,7 @@ use proc_macro2::{Literal, Span};
 
 use crate::common::{
     bool_tokens, compile_error, foreign_key_ident, generated_ident, is_attribute_start,
-    literal_string, matches_ident, option_literal, required_literal, to_snake_plural,
+    literal_string, matches_ident, option_literal, required_literal, to_pascal, to_snake_plural,
 };
 
 pub(crate) fn derive(input: TokenStream) -> TokenStream {
@@ -23,6 +23,7 @@ struct TableStruct {
 
 struct Field {
     ident: Ident,
+    value_ty: proc_macro2::TokenStream,
     attrs: FieldAttrs,
 }
 
@@ -85,6 +86,22 @@ impl TableStruct {
             .iter()
             .map(|field| generated_ident(&ident, &field.ident.to_string(), "Column"))
             .collect::<Vec<_>>();
+        let exprs_ident = generated_ident(&ident, "exprs", "Projection");
+        let expr_kind_idents = self
+            .fields
+            .iter()
+            .map(|field| {
+                proc_macro2::Ident::new(
+                    &format!("{}{}", ident, to_pascal(&field.ident.to_string())),
+                    Span::call_site(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let field_value_tys = self
+            .fields
+            .iter()
+            .map(|field| field.value_ty.clone())
+            .collect::<Vec<_>>();
         let field_indexes = self
             .fields
             .iter()
@@ -140,6 +157,29 @@ impl TableStruct {
             #(#column_defs)*
             #(#index_defs)*
 
+            #(
+                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+                pub enum #expr_kind_idents {}
+
+                impl ::squealy::ExprKind for #expr_kind_idents {
+                    type Value = #field_value_tys;
+                }
+
+                impl ::squealy::ProjectionShape for #expr_kind_idents {
+                    type Exprs<'scope> = ::squealy::Expr<'scope, #expr_kind_idents>;
+                    type Row = #field_value_tys;
+
+                    fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
+                        ::squealy::Expr::column(alias, #field_literals)
+                    }
+                }
+            )*
+
+            #[derive(Clone, Debug, PartialEq)]
+            pub struct #exprs_ident <'scope> {
+                #( pub #fields: ::squealy::Expr<'scope, #expr_kind_idents>, )*
+            }
+
             static #columns_static: [&'static dyn ::squealy::Column; #columns_len] = [#( &#column_idents, )*];
             static #indexes_static: [&'static dyn ::squealy::Index; #indexes_len] = [#( &#index_idents, )*];
 
@@ -168,6 +208,8 @@ impl TableStruct {
                 where
                     NextC: 'next_scope;
 
+                type Exprs<'next_scope> = #exprs_ident <'next_scope>;
+
                 fn name() -> &'static str {
                     #name
                 }
@@ -187,13 +229,13 @@ impl TableStruct {
                 fn column_exprs_from<'next_scope>(
                     alias: &str,
                     columns: &Self::WithColumn<'static, ::squealy::ColumnName>,
-                ) -> Self::WithColumn<'next_scope, ::squealy::ColumnExpr> {
-                    #ident { #( #fields: ::squealy::Expr::column(alias, columns.#fields), )* }
+                ) -> Self::Exprs<'next_scope> {
+                    #exprs_ident { #( #fields: ::squealy::Expr::column(alias, columns.#fields), )* }
                 }
             }
 
-            impl<'scope> ::squealy::Projectable for #ident <'scope, ::squealy::ColumnExpr> {
-                type Rebound<'next_scope> = #ident <'next_scope, ::squealy::ColumnExpr>;
+            impl<'scope> ::squealy::Projectable for #exprs_ident <'scope> {
+                type Rebound<'next_scope> = #exprs_ident <'next_scope>;
 
                 fn project(&self) -> ::std::vec::Vec<::squealy::SelectColumn> {
                     ::std::vec![
@@ -207,7 +249,7 @@ impl TableStruct {
                 }
 
                 fn re_alias<'next_scope>(&self, alias: &str) -> Self::Rebound<'next_scope> {
-                    #ident { #( #fields: ::squealy::Expr::column(alias, #field_literals), )* }
+                    #exprs_ident { #( #fields: ::squealy::Expr::column(alias, #field_literals), )* }
                 }
 
                 fn re_alias_with_prefix<'next_scope>(
@@ -215,7 +257,7 @@ impl TableStruct {
                     alias: &str,
                     prefix: &str,
                 ) -> Self::Rebound<'next_scope> {
-                    #ident {
+                    #exprs_ident {
                         #( #fields: ::squealy::Expr::column(alias, &::std::format!("{prefix}_{}", #field_literals)), )*
                     }
                 }
@@ -575,29 +617,60 @@ fn validate_index_columns(indexes: &[IndexAttrs], fields: &[Field]) -> Result<()
 fn named_fields(group: &Group) -> Result<Vec<Field>, String> {
     let mut fields = Vec::new();
     let mut pending_attrs = FieldAttrs::default();
-    let mut iter = group.stream().into_iter().peekable();
+    let tokens = group.stream().into_iter().collect::<Vec<_>>();
+    let mut index = 0;
 
-    while let Some(token) = iter.next() {
+    while index < tokens.len() {
+        let token = tokens[index].clone();
         if is_attribute_start(&token) {
-            let Some(TokenTree::Group(attr)) = iter.next() else {
+            let Some(TokenTree::Group(attr)) = tokens.get(index + 1) else {
                 return Err("Table field attribute is missing its bracketed body".to_owned());
             };
             apply_attribute(&attr, &mut pending_attrs)?;
+            index += 2;
             continue;
         }
 
         let TokenTree::Ident(ident) = token else {
+            index += 1;
             continue;
         };
 
-        if let Some(TokenTree::Punct(punct)) = iter.peek() {
-            if punct.as_char() == ':' && punct.spacing() == proc_macro::Spacing::Alone {
-                fields.push(Field {
-                    ident,
-                    attrs: std::mem::take(&mut pending_attrs),
-                });
-            }
+        if !matches!(
+            tokens.get(index + 1),
+            Some(TokenTree::Punct(punct))
+                if punct.as_char() == ':' && punct.spacing() == proc_macro::Spacing::Alone
+        ) {
+            index += 1;
+            continue;
         }
+
+        index += 2;
+        let mut type_tokens = Vec::new();
+        let mut angle_depth = 0usize;
+
+        while index < tokens.len() {
+            match &tokens[index] {
+                TokenTree::Punct(punct) if punct.as_char() == '<' => {
+                    angle_depth += 1;
+                    type_tokens.push(tokens[index].clone());
+                }
+                TokenTree::Punct(punct) if punct.as_char() == '>' => {
+                    angle_depth = angle_depth.saturating_sub(1);
+                    type_tokens.push(tokens[index].clone());
+                }
+                TokenTree::Punct(punct) if punct.as_char() == ',' && angle_depth == 0 => break,
+                token => type_tokens.push(token.clone()),
+            }
+            index += 1;
+        }
+
+        fields.push(Field {
+            ident,
+            value_ty: column_value_type(&type_tokens)?,
+            attrs: std::mem::take(&mut pending_attrs),
+        });
+        index += 1;
     }
 
     if fields.is_empty() {
@@ -605,6 +678,42 @@ fn named_fields(group: &Group) -> Result<Vec<Field>, String> {
     } else {
         Ok(fields)
     }
+}
+
+fn column_value_type(type_tokens: &[TokenTree]) -> Result<proc_macro2::TokenStream, String> {
+    let mut angle_depth = 0usize;
+    let mut seen_first_argument = false;
+    let mut value_tokens = Vec::new();
+
+    for token in type_tokens {
+        match token {
+            TokenTree::Punct(punct) if punct.as_char() == '<' => {
+                angle_depth += 1;
+                if seen_first_argument {
+                    value_tokens.push(token.clone());
+                }
+            }
+            TokenTree::Punct(punct) if punct.as_char() == '>' => {
+                if seen_first_argument && angle_depth > 1 {
+                    value_tokens.push(token.clone());
+                }
+                angle_depth = angle_depth.saturating_sub(1);
+            }
+            TokenTree::Punct(punct) if punct.as_char() == ',' && angle_depth == 1 => {
+                seen_first_argument = true;
+            }
+            token if seen_first_argument => value_tokens.push(token.clone()),
+            _ => {}
+        }
+    }
+
+    if value_tokens.is_empty() {
+        return Err("Table fields must use `C::Type<'scope, Value>`".to_owned());
+    }
+
+    Ok(proc_macro2::TokenStream::from(TokenStream::from_iter(
+        value_tokens,
+    )))
 }
 
 fn apply_attribute(group: &Group, attrs: &mut FieldAttrs) -> Result<(), String> {
