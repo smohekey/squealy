@@ -183,13 +183,19 @@ impl InsertColumn {
 pub struct Insert {
     table: String,
     columns: Vec<InsertColumn>,
+    returning: Vec<SelectColumn>,
 }
 
 impl Insert {
-    pub(crate) fn new(table: impl ToString, columns: Vec<InsertColumn>) -> Self {
+    pub(crate) fn new(
+        table: impl ToString,
+        columns: Vec<InsertColumn>,
+        returning: Vec<SelectColumn>,
+    ) -> Self {
         Self {
             table: table.to_string(),
             columns,
+            returning,
         }
     }
 
@@ -199,6 +205,10 @@ impl Insert {
 
     pub fn columns(&self) -> &[InsertColumn] {
         &self.columns
+    }
+
+    pub fn returning(&self) -> &[SelectColumn] {
+        &self.returning
     }
 }
 
@@ -231,6 +241,7 @@ pub struct Update {
     alias: String,
     columns: Vec<UpdateColumn>,
     filters: Vec<Filter>,
+    returning: Vec<SelectColumn>,
 }
 
 impl Update {
@@ -239,12 +250,14 @@ impl Update {
         alias: impl Into<String>,
         columns: Vec<UpdateColumn>,
         filters: Vec<Filter>,
+        returning: Vec<SelectColumn>,
     ) -> Self {
         Self {
             table: table.to_string(),
             alias: alias.into(),
             columns,
             filters,
+            returning,
         }
     }
 
@@ -263,6 +276,10 @@ impl Update {
     pub fn filters(&self) -> &[Filter] {
         &self.filters
     }
+
+    pub fn returning(&self) -> &[SelectColumn] {
+        &self.returning
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -270,14 +287,20 @@ pub struct Delete {
     table: String,
     alias: String,
     filters: Vec<Filter>,
+    returning: Vec<SelectColumn>,
 }
 
 impl Delete {
-    pub(crate) fn new(table: impl ToString, alias: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        table: impl ToString,
+        alias: impl Into<String>,
+        returning: Vec<SelectColumn>,
+    ) -> Self {
         Self {
             table: table.to_string(),
             alias: alias.into(),
             filters: Vec::new(),
+            returning,
         }
     }
 
@@ -296,6 +319,10 @@ impl Delete {
 
     pub fn filters(&self) -> &[Filter] {
         &self.filters
+    }
+
+    pub fn returning(&self) -> &[SelectColumn] {
+        &self.returning
     }
 }
 

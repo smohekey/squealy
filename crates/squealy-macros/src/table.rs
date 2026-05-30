@@ -577,6 +577,8 @@ impl TableStruct {
             where
                 Conn: ::squealy::Connection + 'conn,
             {
+                const ALIAS: &'static str = "q0_0";
+
                 pub fn execute(
                     self,
                 ) -> impl ::std::future::Future<
@@ -589,6 +591,26 @@ impl TableStruct {
                     async move {
                         ::squealy::InsertQuery::execute(&query).await
                     }
+                }
+
+                pub fn returning<Shape>(
+                    self,
+                    projection: impl for<'scope> ::std::ops::FnOnce(
+                        &mut ::squealy::MutationReturningBuilder<'scope>,
+                        <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'scope>,
+                    ) -> ::squealy::Returning<Shape>,
+                ) -> <Conn as ::squealy::Connection>::Insert<'conn, #table_ident <'static, ::squealy::ColumnExpr>, Shape>
+                where
+                    Shape: ::squealy::ProjectionShape,
+                {
+                    let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
+                    let mut returning_builder = ::squealy::MutationReturningBuilder::new();
+                    let returning = projection(&mut returning_builder, table);
+                    ::squealy::Connection::insert_returning_query::<#table_ident <'static, ::squealy::ColumnExpr>, Shape>(
+                        self.connection,
+                        self.columns,
+                        returning.into_columns(),
+                    )
                 }
             }
         };
@@ -830,6 +852,28 @@ impl TableStruct {
                     async move {
                         ::squealy::UpdateQuery::execute(&query).await
                     }
+                }
+
+                pub fn returning<Shape>(
+                    self,
+                    projection: impl for<'scope> ::std::ops::FnOnce(
+                        &mut ::squealy::MutationReturningBuilder<'scope>,
+                        <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'scope>,
+                    ) -> ::squealy::Returning<Shape>,
+                ) -> <Conn as ::squealy::Connection>::Update<'conn, #table_ident <'static, ::squealy::ColumnExpr>, Shape>
+                where
+                    Shape: ::squealy::ProjectionShape,
+                {
+                    let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
+                    let mut returning_builder = ::squealy::MutationReturningBuilder::new();
+                    let returning = projection(&mut returning_builder, table);
+                    ::squealy::Connection::update_returning_query::<#table_ident <'static, ::squealy::ColumnExpr>, Shape>(
+                        self.connection,
+                        Self::ALIAS.to_owned(),
+                        self.columns,
+                        self.filters,
+                        returning.into_columns(),
+                    )
                 }
             }
         };

@@ -185,6 +185,24 @@ where
 {
 }
 
+fn assert_insert_i32_row<'conn, Qry>(_: &'conn Qry)
+where
+    Qry: InsertQuery<'conn, Row = i32>,
+{
+}
+
+fn assert_update_id_name_row<'conn, Qry>(_: &'conn Qry)
+where
+    Qry: UpdateQuery<'conn, Row = (i32, String)>,
+{
+}
+
+fn assert_delete_user_row<'conn, Qry>(_: &'conn Qry)
+where
+    Qry: DeleteQuery<'conn, Row = User<'static, ColumnValue>>,
+{
+}
+
 fn assert_optional_i32_row<'conn, Qry>(_: &'conn Qry)
 where
     Qry: SelectQuery<'conn, Row = Option<i32>>,
@@ -332,6 +350,25 @@ fn insert_query_builds_column_bindings() {
 }
 
 #[test]
+fn insert_builder_can_return_projected_rows() {
+    let insert = TestConnection
+        .insert::<User>()
+        .name("Ada")
+        .returning(|q, user| q.returning(user.id));
+
+    assert_insert_i32_row(&insert);
+    let _stream = insert.fetch();
+    let _all = insert.fetch_all();
+    let _one = insert.fetch_one();
+    let _optional = insert.fetch_optional();
+    assert_eq!(
+        insert.to_sql(),
+        r#"INSERT INTO public.users (name) VALUES (?) RETURNING q0_0.id AS id"#
+    );
+    assert_eq!(insert.params(), vec![BindValue::Text("Ada".to_owned())]);
+}
+
+#[test]
 fn update_builder_executes_after_a_column_is_set() {
     let _execute = TestConnection
         .update::<User>()
@@ -373,6 +410,29 @@ fn update_query_builds_column_bindings_and_filters() {
     assert_eq!(
         update.to_sql(),
         r#"UPDATE public.users AS q0_0 SET name = ? WHERE (q0_0.id = ?)"#
+    );
+    assert_eq!(
+        update.params(),
+        vec![BindValue::Text("Ada".to_owned()), BindValue::Int(1)]
+    );
+}
+
+#[test]
+fn update_builder_can_return_projected_rows() {
+    let update = TestConnection
+        .update::<User>()
+        .name("Ada")
+        .where_(|user| user.id.equals(1))
+        .returning(|q, user| q.returning((user.id, user.name)));
+
+    assert_update_id_name_row(&update);
+    let _stream = update.fetch();
+    let _all = update.fetch_all();
+    let _one = update.fetch_one();
+    let _optional = update.fetch_optional();
+    assert_eq!(
+        update.to_sql(),
+        r#"UPDATE public.users AS q0_0 SET name = ? WHERE (q0_0.id = ?) RETURNING q0_0.id AS t0_id, q0_0.name AS t1_name"#
     );
     assert_eq!(
         update.params(),
@@ -427,6 +487,25 @@ fn delete_query_builds_typed_table_filters() {
         delete.params(),
         vec![BindValue::Int(1), BindValue::Text("Ada".to_owned())]
     );
+}
+
+#[test]
+fn delete_builder_can_return_projected_rows() {
+    let delete = TestConnection
+        .delete::<User>()
+        .where_(|user| user.id.equals(1))
+        .returning(|q, user| q.returning(user));
+
+    assert_delete_user_row(&delete);
+    let _stream = delete.fetch();
+    let _all = delete.fetch_all();
+    let _one = delete.fetch_one();
+    let _optional = delete.fetch_optional();
+    assert_eq!(
+        delete.to_sql(),
+        r#"DELETE FROM public.users AS q0_0 WHERE (q0_0.id = ?) RETURNING q0_0.id AS id, q0_0.name AS name"#
+    );
+    assert_eq!(delete.params(), vec![BindValue::Int(1)]);
 }
 
 #[test]

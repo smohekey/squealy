@@ -45,36 +45,108 @@ pub trait SelectQuery<'conn> {
 pub trait InsertQuery<'conn> {
     type Connection: Connection + 'conn;
     type Table: InsertableTable;
+    type Shape: ProjectionShape;
+    type Row: Send;
+
+    type RowStream<'query>: Stream<Item = Result<Self::Row, <Self::Connection as Connection>::Error>>
+        + Send
+        + 'query
+    where
+        Self: 'query;
 
     fn ir(&self) -> &Insert;
 
     fn execute(
         &self,
     ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_;
+
+    fn fetch(&self) -> Self::RowStream<'_>;
+
+    fn fetch_all(
+        &self,
+    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_;
+
+    fn fetch_one(
+        &self,
+    ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_;
+
+    fn fetch_optional(
+        &self,
+    ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
+    + Send
+    + '_;
 }
 
 /// A backend-specific update query object backed by core-owned update IR.
 pub trait UpdateQuery<'conn> {
     type Connection: Connection + 'conn;
     type Table: UpdateableTable;
+    type Shape: ProjectionShape;
+    type Row: Send;
+
+    type RowStream<'query>: Stream<Item = Result<Self::Row, <Self::Connection as Connection>::Error>>
+        + Send
+        + 'query
+    where
+        Self: 'query;
 
     fn ir(&self) -> &Update;
 
     fn execute(
         &self,
     ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_;
+
+    fn fetch(&self) -> Self::RowStream<'_>;
+
+    fn fetch_all(
+        &self,
+    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_;
+
+    fn fetch_one(
+        &self,
+    ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_;
+
+    fn fetch_optional(
+        &self,
+    ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
+    + Send
+    + '_;
 }
 
 /// A backend-specific delete query object backed by core-owned delete IR.
 pub trait DeleteQuery<'conn> {
     type Connection: Connection + 'conn;
     type Table: TableProjection;
+    type Shape: ProjectionShape;
+    type Row: Send;
+
+    type RowStream<'query>: Stream<Item = Result<Self::Row, <Self::Connection as Connection>::Error>>
+        + Send
+        + 'query
+    where
+        Self: 'query;
 
     fn ir(&self) -> &Delete;
 
     fn execute(
         &self,
     ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_;
+
+    fn fetch(&self) -> Self::RowStream<'_>;
+
+    fn fetch_all(
+        &self,
+    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_;
+
+    fn fetch_one(
+        &self,
+    ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_;
+
+    fn fetch_optional(
+        &self,
+    ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
+    + Send
+    + '_;
 }
 
 /// A projection value that can identify the query shape returned by `returning`.
@@ -123,8 +195,33 @@ where
         }
     }
 
-    fn into_columns(self) -> Vec<SelectColumn> {
+    #[doc(hidden)]
+    pub fn into_columns(self) -> Vec<SelectColumn> {
         self.columns
+    }
+}
+
+/// Scoped helper for building mutation `RETURNING` projections.
+pub struct MutationReturningBuilder<'scope> {
+    _phantom: PhantomData<&'scope ()>,
+}
+
+impl<'scope> MutationReturningBuilder<'scope> {
+    #[doc(hidden)]
+    pub fn new() -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn returning<P>(
+        &mut self,
+        projection: P,
+    ) -> Returning<<P as ReturningProjection<'scope>>::Shape>
+    where
+        P: ReturningProjection<'scope>,
+    {
+        Returning::new(projection.project())
     }
 }
 
@@ -353,6 +450,27 @@ where
         let query = Connection::delete_query::<S>(self.connection, self.alias(), self.filters);
         async move { DeleteQuery::execute(&query).await }
     }
+
+    pub fn returning<Shape>(
+        self,
+        projection: impl for<'scope> FnOnce(
+            &mut MutationReturningBuilder<'scope>,
+            <S as ProjectionShape>::Exprs<'scope>,
+        ) -> Returning<Shape>,
+    ) -> Conn::Delete<'conn, S, Shape>
+    where
+        Shape: ProjectionShape,
+    {
+        let table = S::exprs(&self.alias());
+        let mut q = MutationReturningBuilder::new();
+        let returning = projection(&mut q, table);
+        Connection::delete_returning_query::<S, Shape>(
+            self.connection,
+            self.alias(),
+            self.filters,
+            returning.into_columns(),
+        )
+    }
 }
 
 thread_local! {
@@ -456,7 +574,15 @@ pub fn build_insert<S>(columns: Vec<InsertColumn>) -> Insert
 where
     S: InsertableTable,
 {
-    Insert::new(<S as SchemaTable>::qualified_name(), columns)
+    build_insert_returning::<S>(columns, Vec::new())
+}
+
+/// Build insert IR for a table, ordered column bindings, and returned columns.
+pub fn build_insert_returning<S>(columns: Vec<InsertColumn>, returning: Vec<SelectColumn>) -> Insert
+where
+    S: InsertableTable,
+{
+    Insert::new(<S as SchemaTable>::qualified_name(), columns, returning)
 }
 
 /// Build update IR for a table, ordered column bindings, and filters.
@@ -468,11 +594,25 @@ pub fn build_update<S>(
 where
     S: UpdateableTable,
 {
+    build_update_returning::<S>(alias, columns, filters, Vec::new())
+}
+
+/// Build update IR for a table, ordered column bindings, filters, and returned columns.
+pub fn build_update_returning<S>(
+    alias: impl Into<String>,
+    columns: Vec<UpdateColumn>,
+    filters: Vec<Filter>,
+    returning: Vec<SelectColumn>,
+) -> Update
+where
+    S: UpdateableTable,
+{
     Update::new(
         <S as SchemaTable>::qualified_name(),
         alias,
         columns,
         filters,
+        returning,
     )
 }
 
@@ -481,7 +621,19 @@ pub fn build_delete<S>(alias: impl Into<String>, filters: Vec<Filter>) -> Delete
 where
     S: TableProjection,
 {
-    Delete::new(S::qualified_name(), alias).with_filters(filters)
+    build_delete_returning::<S>(alias, filters, Vec::new())
+}
+
+/// Build delete IR for a table, SQL alias, filters, and returned columns.
+pub fn build_delete_returning<S>(
+    alias: impl Into<String>,
+    filters: Vec<Filter>,
+    returning: Vec<SelectColumn>,
+) -> Delete
+where
+    S: TableProjection,
+{
+    Delete::new(S::qualified_name(), alias, returning).with_filters(filters)
 }
 
 /// Construct the initial delete builder.
