@@ -9,8 +9,8 @@ use futures_core::Stream;
 
 use squealy::{
     BindValue, BindValueKind, Connection, Decode, Delete, DeleteQuery, FloatWidth, Insert,
-    InsertQuery, InsertableTable, IntWidth, ProjectionShape, Select, SelectQuery, TableProjection,
-    UIntWidth, Update, UpdateQuery, UpdateableTable,
+    InsertQuery, InsertableTable, IntWidth, ProjectionShape, RowsAffected, Select, SelectQuery,
+    TableProjection, UIntWidth, Update, UpdateQuery, UpdateableTable,
 };
 use tokio_postgres::types::{FromSqlOwned, IsNull, ToSql, Type, to_sql_checked};
 
@@ -117,6 +117,7 @@ where
 
 pub struct PostgresRows<'query, Row> {
     state: PostgresRowsState<'query>,
+    affected_rows: Option<u64>,
     _row: PhantomData<Row>,
 }
 
@@ -139,6 +140,7 @@ impl<Row> PostgresRows<'_, Row> {
     fn error(error: PostgresError) -> Self {
         Self {
             state: PostgresRowsState::Error(Some(error)),
+            affected_rows: None,
             _row: PhantomData,
         }
     }
@@ -163,6 +165,7 @@ impl<'query, Row> PostgresRows<'query, Row> {
                     .await
                     .map_err(PostgresError::Database)
             })),
+            affected_rows: None,
             _row: PhantomData,
         }
     }
@@ -199,6 +202,7 @@ where
                             return Poll::Ready(Some(Err(PostgresError::Database(error))));
                         }
                         Poll::Ready(None) => {
+                            this.affected_rows = rows.rows_affected();
                             this.state = PostgresRowsState::Done;
                             return Poll::Ready(None);
                         }
@@ -216,6 +220,12 @@ where
 }
 
 impl<Row> Unpin for PostgresRows<'_, Row> {}
+
+impl<Row> RowsAffected for PostgresRows<'_, Row> {
+    fn rows_affected(&self) -> Option<u64> {
+        self.affected_rows
+    }
+}
 
 enum PostgresParam {
     Int16(i16),

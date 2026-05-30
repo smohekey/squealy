@@ -7,7 +7,8 @@ use futures_core::Stream;
 
 use squealy::{
     BindValue, Connection, Decode, Delete, DeleteQuery, Insert, InsertQuery, InsertableTable,
-    ProjectionShape, Select, SelectQuery, TableProjection, Update, UpdateQuery, UpdateableTable,
+    ProjectionShape, RowsAffected, Select, SelectQuery, TableProjection, Update, UpdateQuery,
+    UpdateableTable,
 };
 
 use crate::{TestConnection, TestError, sql};
@@ -28,6 +29,12 @@ impl<Row> Stream for EmptyRows<Row> {
 
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Ready(None)
+    }
+}
+
+impl<Row> RowsAffected for EmptyRows<Row> {
+    fn rows_affected(&self) -> Option<u64> {
+        Some(0)
     }
 }
 

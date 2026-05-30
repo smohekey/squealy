@@ -33,7 +33,7 @@ pub use ir::{
 pub use projection::{Maybe, Projectable, ProjectionShape, TableProjection};
 pub use query::{
     DeleteBuilder, DeleteQuery, InsertQuery, MutationFiltered, MutationUnfiltered, Returning,
-    ReturningProjection, SelectBuilder, SelectQuery, UpdateQuery, build_delete,
+    ReturningProjection, RowsAffected, SelectBuilder, SelectQuery, UpdateQuery, build_delete,
     build_delete_builder, build_delete_returning, build_insert, build_insert_returning,
     build_select, build_update, build_update_returning,
 };

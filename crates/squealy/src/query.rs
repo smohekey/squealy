@@ -11,6 +11,11 @@ use crate::{
     UpdateableTable,
 };
 
+/// A row stream that can report affected rows after it is exhausted.
+pub trait RowsAffected {
+    fn rows_affected(&self) -> Option<u64>;
+}
+
 /// A backend-specific select query object backed by core-owned select IR.
 pub trait SelectQuery<'conn> {
     type Connection: Connection + 'conn;
@@ -74,6 +79,7 @@ pub trait InsertQuery<'conn> {
 
     type RowStream<'query>: Stream<Item = Result<Self::Row, <Self::Connection as Connection>::Error>>
         + Send
+        + RowsAffected
         + 'query
     where
         Self: 'query;
@@ -96,6 +102,18 @@ pub trait InsertQuery<'conn> {
     {
         let rows = self.fetch();
         collect_rows::<Self::Connection, Self::Row, _>(rows)
+    }
+
+    fn fetch_all_with_affected<'query>(
+        &'query self,
+    ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), <Self::Connection as Connection>::Error>>
+    + Send
+    + 'query
+    where
+        'conn: 'query,
+    {
+        let rows = self.fetch();
+        collect_rows_with_affected::<Self::Connection, Self::Row, _>(rows)
     }
 
     fn fetch_one<'query>(
@@ -133,6 +151,7 @@ pub trait UpdateQuery<'conn> {
 
     type RowStream<'query>: Stream<Item = Result<Self::Row, <Self::Connection as Connection>::Error>>
         + Send
+        + RowsAffected
         + 'query
     where
         Self: 'query;
@@ -155,6 +174,18 @@ pub trait UpdateQuery<'conn> {
     {
         let rows = self.fetch();
         collect_rows::<Self::Connection, Self::Row, _>(rows)
+    }
+
+    fn fetch_all_with_affected<'query>(
+        &'query self,
+    ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), <Self::Connection as Connection>::Error>>
+    + Send
+    + 'query
+    where
+        'conn: 'query,
+    {
+        let rows = self.fetch();
+        collect_rows_with_affected::<Self::Connection, Self::Row, _>(rows)
     }
 
     fn fetch_one<'query>(
@@ -192,6 +223,7 @@ pub trait DeleteQuery<'conn> {
 
     type RowStream<'query>: Stream<Item = Result<Self::Row, <Self::Connection as Connection>::Error>>
         + Send
+        + RowsAffected
         + 'query
     where
         Self: 'query;
@@ -214,6 +246,18 @@ pub trait DeleteQuery<'conn> {
     {
         let rows = self.fetch();
         collect_rows::<Self::Connection, Self::Row, _>(rows)
+    }
+
+    fn fetch_all_with_affected<'query>(
+        &'query self,
+    ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), <Self::Connection as Connection>::Error>>
+    + Send
+    + 'query
+    where
+        'conn: 'query,
+    {
+        let rows = self.fetch();
+        collect_rows_with_affected::<Self::Connection, Self::Row, _>(rows)
     }
 
     fn fetch_one<'query>(
@@ -253,6 +297,22 @@ where
         output.push(row?);
     }
     Ok(output)
+}
+
+async fn collect_rows_with_affected<Conn, Row, Rows>(
+    rows: Rows,
+) -> Result<(Vec<Row>, u64), Conn::Error>
+where
+    Conn: Connection,
+    Rows: Stream<Item = Result<Row, Conn::Error>> + RowsAffected + Send,
+{
+    let mut rows = Box::pin(rows);
+    let mut output = Vec::new();
+    while let Some(row) = poll_fn(|cx| rows.as_mut().poll_next(cx)).await {
+        output.push(row?);
+    }
+    let affected = rows.as_ref().get_ref().rows_affected().unwrap_or(0);
+    Ok((output, affected))
 }
 
 async fn fetch_optional_row<Conn, Row, Rows>(rows: Rows) -> Result<Option<Row>, Conn::Error>
