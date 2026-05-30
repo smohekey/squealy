@@ -31,6 +31,34 @@ fn postgres_select_uses_numbered_placeholders() {
 }
 
 #[test]
+fn postgres_select_numbers_placeholders_across_subqueries() {
+    let inner = PostgresConnection.select(|q| {
+        let user = q.from::<User>();
+        q.where_(user.name.equals("Ada"));
+        q.returning(user.id + 1)
+    });
+    let outer = PostgresConnection.select(|q| {
+        let user_id = q.q(&inner);
+        q.where_(user_id.equals(3));
+        q.returning(&user_id + 4)
+    });
+
+    assert_eq!(
+        outer.to_sql(),
+        "SELECT (q0_0.expr + $1) AS expr FROM (SELECT (q0_0.id + $2) AS expr FROM public.users AS q0_0 WHERE (q0_0.name = $3)) AS q0_0 WHERE (q0_0.expr = $4)"
+    );
+    assert_eq!(
+        outer.params(),
+        vec![
+            BindValue::Int(4),
+            BindValue::Int(1),
+            BindValue::Text("Ada".to_owned()),
+            BindValue::Int(3),
+        ]
+    );
+}
+
+#[test]
 fn postgres_insert_update_and_delete_render_returning() {
     let insert = PostgresConnection
         .insert::<User>()
@@ -64,6 +92,40 @@ fn postgres_insert_update_and_delete_render_returning() {
         vec![BindValue::Text("Ada".to_owned()), BindValue::Int(1)]
     );
     assert_eq!(delete.params(), vec![BindValue::Int(1)]);
+}
+
+#[test]
+fn postgres_mutation_returning_expressions_continue_placeholder_numbering() {
+    let insert = PostgresConnection
+        .insert::<User>()
+        .name("Ada")
+        .returning(|user| user.id + 1);
+    let update = PostgresConnection
+        .update::<User>()
+        .name("Ada")
+        .where_(|user| user.id.equals(1))
+        .returning(|user| user.id + 2);
+
+    assert_eq!(
+        insert.to_sql(),
+        "INSERT INTO public.users (name) VALUES ($1) RETURNING (q0_0.id + $2) AS expr"
+    );
+    assert_eq!(
+        update.to_sql(),
+        "UPDATE public.users AS q0_0 SET name = $1 WHERE (q0_0.id = $2) RETURNING (q0_0.id + $3) AS expr"
+    );
+    assert_eq!(
+        insert.params(),
+        vec![BindValue::Text("Ada".to_owned()), BindValue::Int(1)]
+    );
+    assert_eq!(
+        update.params(),
+        vec![
+            BindValue::Text("Ada".to_owned()),
+            BindValue::Int(1),
+            BindValue::Int(2),
+        ]
+    );
 }
 
 #[test]
