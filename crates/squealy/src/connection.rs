@@ -1,8 +1,8 @@
 use std::future::Future;
 
 use crate::{
-    Backend, Decode, DeleteBuilder, DeleteQuery, From, InsertQuery, InsertableTable, IrList,
-    ProjectionShape, Returning, RootSource, SelectColumn, SelectQuery, TableProjection,
+    Backend, Decode, DeleteBuilder, DeleteQuery, From, HCons, HNil, InsertQuery, InsertableTable,
+    IrList, ProjectionShape, Returning, RootSource, SelectColumn, SelectQuery, TableProjection,
     UpdateQuery, UpdateableTable, build_delete_builder, build_select,
 };
 
@@ -56,7 +56,13 @@ pub trait QueryBuilder: Sized {
 
     fn from<S>(
         &self,
-    ) -> From<'_, '_, Self, 1, (<S as ProjectionShape>::Exprs<'_>,), (RootSource<S>,), ()>
+    ) -> From<
+        '_,
+        '_,
+        Self,
+        HCons<<S as ProjectionShape>::Exprs<'_>, HNil>,
+        HCons<RootSource<S>, HNil>,
+    >
     where
         S: TableProjection,
     {

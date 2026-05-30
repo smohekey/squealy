@@ -33,13 +33,14 @@ pub use ir::{
     Insert, InsertColumn, IntWidth, OrderDirection, OrderNode, PredicateNode, Select, SelectColumn,
     Sort, Source, SourceKind, SourceTarget, UIntWidth, Update, UpdateColumn,
 };
-pub use list::{IrList, TupleAppend, TupleConcat, TupleLen, TuplePush};
+pub use list::{HCons, HList, HNil, IrList, PushBack, ToTuple, TupleAppend, TupleConcat};
 pub use projection::{Maybe, Projectable, ProjectionShape, TableProjection};
 pub use query::{
     DeleteBuilder, DeleteQuery, ExecutableDeleteQuery, ExecutableInsertQuery,
-    ExecutableSelectQuery, ExecutableUpdateQuery, From, InnerJoinSource, InsertQuery,
-    MutationFiltered, MutationUnfiltered, Returning, ReturningProjection, RootSource, RowsAffected,
-    SelectBuilder, SelectQuery, UpdateQuery, build_delete, build_delete_builder,
+    ExecutableSelectQuery, ExecutableUpdateQuery, From, InnerJoinSource, InsertQuery, Join,
+    LeftJoin, LeftJoinSource, Limited, MutationFiltered, MutationUnfiltered, Offset, OrderBy,
+    Returning, ReturningProjection, RootSource, RowsAffected, SelectAst, SelectBuilder,
+    SelectQuery, SourceQuery, UpdateQuery, Where, build_delete, build_delete_builder,
     build_delete_returning, build_from_builder, build_insert, build_insert_returning, build_select,
     build_update, build_update_returning,
 };
