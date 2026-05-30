@@ -400,7 +400,7 @@ impl<'scope> Clone for Order<'scope> {
 ///
 /// ```compile_fail
 /// use squealy::*;
-/// # use std::{io, marker::PhantomData};
+/// # use std::marker::PhantomData;
 ///
 /// #[derive(Clone, Table)]
 /// struct User<'scope, C: ColumnMode = ColumnExpr> {
@@ -409,12 +409,13 @@ impl<'scope> Clone for Order<'scope> {
 /// #
 /// # struct DocConnection;
 /// #
-/// # struct DocQuery<Shape> {
+/// # struct DocSelect<'conn, Shape> {
 /// #     select: Select,
+/// #     _connection: PhantomData<&'conn DocConnection>,
 /// #     _shape: PhantomData<Shape>,
 /// # }
 /// #
-/// # impl<Shape> Query for DocQuery<Shape>
+/// # impl<'conn, Shape> SelectQuery<'conn> for DocSelect<'conn, Shape>
 /// # where
 /// #     Shape: ProjectionShape,
 /// # {
@@ -426,47 +427,33 @@ impl<'scope> Clone for Order<'scope> {
 /// #     }
 /// # }
 /// #
-/// # impl Backend for DocConnection {
-/// #     fn write_query<Qry>(&self, _query: &Qry, _writer: &mut impl io::Write) -> io::Result<()>
-/// #     where
-/// #         Self: Connection,
-/// #         Qry: Query<Connection = Self>,
-/// #     {
-/// #         Ok(())
-/// #     }
-/// #
-/// #     fn write_table(
-/// #         &self,
-/// #         _table: &(dyn Table + Sync),
-/// #         _writer: &mut impl io::Write,
-/// #     ) -> io::Result<()> {
-/// #         Ok(())
-/// #     }
-/// # }
-/// #
 /// # impl Connection for DocConnection {
-/// #     type Query<Shape> = DocQuery<Shape>
+/// #     type Error = ();
+/// #
+/// #     type Select<'conn, Shape> = DocSelect<'conn, Shape>
 /// #     where
+/// #         Self: 'conn,
 /// #         Shape: ProjectionShape;
 /// #
-/// #     fn query<Shape>(
+/// #     fn select<Shape>(
 /// #         &self,
 /// #         f: impl for<'scope> FnOnce(
-/// #             &mut ::squealy::Q<'scope, Self>,
+/// #             &mut ::squealy::SelectBuilder<'_, 'scope, Self>,
 /// #         ) -> <Shape as ProjectionShape>::Exprs<'scope>,
-/// #     ) -> Self::Query<Shape>
+/// #     ) -> Self::Select<'_, Shape>
 /// #     where
 /// #         Shape: ProjectionShape,
 /// #     {
-/// #         DocQuery {
+/// #         DocSelect {
 /// #             select: build_select::<Self, Shape>(f),
+/// #             _connection: PhantomData,
 /// #             _shape: PhantomData,
 /// #         }
 /// #     }
 /// # }
 ///
 /// let conn = DocConnection;
-/// let _ = conn.query::<User>(|q| {
+/// let _ = conn.select::<User>(|q| {
 ///     let user = q.each::<User>();
 ///     q.where_(user.id.clone());
 ///     user

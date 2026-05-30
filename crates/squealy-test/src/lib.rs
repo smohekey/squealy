@@ -2,23 +2,24 @@ use std::marker::PhantomData;
 
 use squealy::{
     ArithmeticOp, Backend, BindValue, CompareOp, Connection, ExprNode, OrderDirection, OrderNode,
-    PredicateNode, ProjectionShape, Q, Query, Select, SelectColumn, Sort, Source, SourceKind,
-    SourceTarget, Table, build_select,
+    PredicateNode, ProjectionShape, Select, SelectBuilder, SelectColumn, SelectQuery, Sort, Source,
+    SourceKind, SourceTarget, Table, build_select,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TestConnection;
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TestQuery<Shape>
+pub struct TestSelect<'conn, Shape>
 where
     Shape: ProjectionShape,
 {
     select: Select,
+    _connection: PhantomData<&'conn TestConnection>,
     _shape: PhantomData<Shape>,
 }
 
-impl<Shape> Query for TestQuery<Shape>
+impl<'conn, Shape> SelectQuery<'conn> for TestSelect<'conn, Shape>
 where
     Shape: ProjectionShape,
 {
@@ -30,18 +31,18 @@ where
     }
 }
 
-impl<Shape> TestQuery<Shape>
+impl<Shape> TestSelect<'_, Shape>
 where
     Shape: ProjectionShape,
 {
     pub fn to_sql(&self) -> String {
         let mut sql = Vec::new();
-        TestConnection.write_query(self, &mut sql).unwrap();
+        write_select_sql(&self.select, &mut sql).unwrap();
         String::from_utf8(sql).unwrap()
     }
 
     pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-        TestConnection.write_query(self, writer)
+        write_select_sql(&self.select, writer)
     }
 
     pub fn params(&self) -> Vec<BindValue> {
@@ -50,14 +51,6 @@ where
 }
 
 impl Backend for TestConnection {
-    fn write_query<Qry>(&self, query: &Qry, writer: &mut impl std::io::Write) -> std::io::Result<()>
-    where
-        Self: Connection,
-        Qry: Query<Connection = Self>,
-    {
-        write_select_sql(query.ir(), writer)
-    }
-
     fn write_table(
         &self,
         table: &(dyn Table + Sync),
@@ -123,20 +116,26 @@ impl Backend for TestConnection {
 }
 
 impl Connection for TestConnection {
-    type Query<Shape>
-        = TestQuery<Shape>
+    type Error = ();
+
+    type Select<'conn, Shape>
+        = TestSelect<'conn, Shape>
     where
+        Self: 'conn,
         Shape: ProjectionShape;
 
-    fn query<Shape>(
+    fn select<Shape>(
         &self,
-        f: impl for<'scope> FnOnce(&mut Q<'scope, Self>) -> <Shape as ProjectionShape>::Exprs<'scope>,
-    ) -> Self::Query<Shape>
+        f: impl for<'scope> FnOnce(
+            &mut SelectBuilder<'_, 'scope, Self>,
+        ) -> <Shape as ProjectionShape>::Exprs<'scope>,
+    ) -> Self::Select<'_, Shape>
     where
         Shape: ProjectionShape,
     {
-        TestQuery {
+        TestSelect {
             select: build_select::<Self, Shape>(f),
+            _connection: PhantomData,
             _shape: PhantomData,
         }
     }

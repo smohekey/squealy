@@ -25,7 +25,7 @@ pub use ir::{
     Select, SelectColumn, Sort, Source, SourceKind, SourceTarget,
 };
 pub use projection::{Projectable, ProjectionShape, TableProjection};
-pub use query::{Q, Query, build_select};
+pub use query::{SelectBuilder, SelectQuery, build_select};
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{Database, Schema, Table};
 pub use table::{SchemaTable, Table};
