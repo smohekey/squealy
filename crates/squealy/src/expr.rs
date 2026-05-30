@@ -11,6 +11,11 @@ pub trait IntoBindValue {
     fn into_bind_value(self) -> BindValue;
 }
 
+/// Converts Rust values, including `None`, into nullable SQL bind parameters.
+pub trait IntoNullableBindValue<T> {
+    fn into_nullable_bind_value(self) -> BindValue;
+}
+
 macro_rules! impl_bind_value {
     ($($ty:ty => $constructor:ident),* $(,)?) => {
         $(impl IntoBindValue for $ty {
@@ -59,6 +64,48 @@ impl IntoBindValue for &String {
 impl IntoBindValue for bool {
     fn into_bind_value(self) -> BindValue {
         BindValue::Bool(self)
+    }
+}
+
+impl<T> IntoNullableBindValue<T> for T
+where
+    T: IntoBindValue,
+{
+    fn into_nullable_bind_value(self) -> BindValue {
+        self.into_bind_value()
+    }
+}
+
+impl IntoNullableBindValue<String> for &str {
+    fn into_nullable_bind_value(self) -> BindValue {
+        self.into_bind_value()
+    }
+}
+
+impl IntoNullableBindValue<String> for &String {
+    fn into_nullable_bind_value(self) -> BindValue {
+        self.into_bind_value()
+    }
+}
+
+impl<T> IntoNullableBindValue<T> for Option<T>
+where
+    T: IntoBindValue,
+{
+    fn into_nullable_bind_value(self) -> BindValue {
+        self.map_or(BindValue::Null, IntoBindValue::into_bind_value)
+    }
+}
+
+impl IntoNullableBindValue<String> for Option<&str> {
+    fn into_nullable_bind_value(self) -> BindValue {
+        self.map_or(BindValue::Null, IntoBindValue::into_bind_value)
+    }
+}
+
+impl IntoNullableBindValue<String> for Option<&String> {
+    fn into_nullable_bind_value(self) -> BindValue {
+        self.map_or(BindValue::Null, IntoBindValue::into_bind_value)
     }
 }
 

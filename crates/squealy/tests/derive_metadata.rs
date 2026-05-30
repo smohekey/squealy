@@ -432,6 +432,20 @@ fn insert_builder_can_return_projected_rows() {
 }
 
 #[test]
+fn insert_builder_accepts_null_for_nullable_columns() {
+    let insert = TestConnection
+        .insert::<User>()
+        .name(None::<String>)
+        .returning(|user| user.id);
+
+    assert_eq!(
+        insert.to_sql(),
+        r#"INSERT INTO public.users (name) VALUES (?) RETURNING q0_0.id AS id"#
+    );
+    assert_eq!(insert.params(), vec![BindValue::Null]);
+}
+
+#[test]
 fn update_builder_executes_after_a_column_is_set() {
     let _execute = TestConnection
         .update::<User>()
@@ -501,6 +515,21 @@ fn update_builder_can_return_projected_rows() {
         update.params(),
         vec![BindValue::Text("Ada".to_owned()), BindValue::Int(1)]
     );
+}
+
+#[test]
+fn update_builder_accepts_null_for_nullable_columns() {
+    let update = TestConnection
+        .update::<User>()
+        .name(None::<String>)
+        .where_(|user| user.id.equals(1))
+        .returning(|user| user.id);
+
+    assert_eq!(
+        update.to_sql(),
+        r#"UPDATE public.users AS q0_0 SET name = ? WHERE (q0_0.id = ?) RETURNING q0_0.id AS id"#
+    );
+    assert_eq!(update.params(), vec![BindValue::Null, BindValue::Int(1)]);
 }
 
 #[test]

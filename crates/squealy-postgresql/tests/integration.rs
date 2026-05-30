@@ -21,6 +21,14 @@ struct IntegrationDefaulted<'scope, C: ColumnMode = ColumnExpr> {
     active: C::Type<'scope, bool>,
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+struct IntegrationNullable<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment, db_type = "integer")]
+    id: C::Type<'scope, i32>,
+    #[column(nullable, db_type = "text")]
+    note: C::Type<'scope, String>,
+}
+
 fn database_url() -> String {
     std::env::var("SQUEALY_POSTGRES_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:55432/squealy_test".to_owned())
@@ -46,7 +54,7 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
     let client = connect().await;
     client
         .batch_execute(
-            "DROP TABLE IF EXISTS integration_users; DROP TABLE IF EXISTS integration_defaulteds",
+            "DROP TABLE IF EXISTS integration_users; DROP TABLE IF EXISTS integration_defaulteds; DROP TABLE IF EXISTS integration_nullables",
         )
         .await
         .expect("drop old integration tables");
@@ -54,6 +62,7 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
     let ddl_backend = PostgresConnection::default();
     create_table::<IntegrationUser>(&client, &ddl_backend).await;
     create_table::<IntegrationDefaulted>(&client, &ddl_backend).await;
+    create_table::<IntegrationNullable>(&client, &ddl_backend).await;
 
     let connection = PostgresConnection::new(client);
 
@@ -129,6 +138,24 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
     assert_eq!(defaulted.name, "anonymous");
     assert_eq!(defaulted.score, 42);
     assert!(defaulted.active);
+
+    let nullable_id = connection
+        .insert::<IntegrationNullable>()
+        .note(None::<String>)
+        .returning(|record| record.id)
+        .fetch_one()
+        .await
+        .expect("insert nullable record");
+
+    let affected = connection
+        .update::<IntegrationNullable>()
+        .note(None::<String>)
+        .where_(|record| record.id.equals(nullable_id))
+        .execute()
+        .await
+        .expect("update nullable record");
+
+    assert_eq!(affected, 1);
 }
 
 async fn create_table<S>(client: &tokio_postgres::Client, ddl_backend: &PostgresConnection)
