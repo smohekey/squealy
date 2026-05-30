@@ -1,7 +1,6 @@
 use std::future::poll_fn;
 
 use futures_core::Stream;
-use futures_util::TryStreamExt;
 use squealy::*;
 use squealy_postgresql::{PostgresConnection, PostgresError};
 use tokio_postgres::NoTls;
@@ -145,8 +144,7 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
             q.order_by(user.id.asc());
             q.returning(user)
         })
-        .fetch()
-        .try_collect::<Vec<_>>()
+        .collect()
         .await
         .expect("fetch inserted users");
 
@@ -159,7 +157,7 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
         .name("Ada Lovelace")
         .where_(|user| user.id.equals(ada.id))
         .returning(|user| user)
-        .fetch_all_with_affected()
+        .collect_with_affected()
         .await
         .expect("update Ada");
     assert_eq!(updated_count, 1);
@@ -172,7 +170,7 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
         .delete::<IntegrationUser>()
         .where_(|user| user.name.equals("Grace"))
         .returning(|user| user)
-        .fetch_all_with_affected()
+        .collect_with_affected()
         .await
         .expect("delete Grace");
     assert_eq!(deleted_count, 1);
@@ -185,8 +183,7 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
             let user = q.from::<IntegrationUser>();
             q.returning(user)
         })
-        .fetch()
-        .try_collect::<Vec<_>>()
+        .collect()
         .await
         .expect("fetch remaining users");
 
@@ -287,8 +284,7 @@ async fn postgres_inner_joins_across_tables() {
             q.order_by(post.id.asc());
             q.returning((user, post))
         })
-        .fetch()
-        .try_collect::<Vec<_>>()
+        .collect()
         .await
         .expect("fetch joined rows");
 
@@ -351,8 +347,7 @@ async fn postgres_surfaces_database_errors() {
             let row = q.from::<MissingTable>();
             q.returning(row)
         })
-        .fetch()
-        .try_collect::<Vec<_>>()
+        .collect()
         .await;
 
     assert!(
@@ -409,8 +404,7 @@ async fn postgres_runs_transaction_closures() {
             q.order_by(user.id.asc());
             q.returning(user.name)
         })
-        .fetch()
-        .try_collect::<Vec<_>>()
+        .collect()
         .await
         .expect("fetch committed users");
 
