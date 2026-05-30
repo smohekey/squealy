@@ -35,6 +35,10 @@ impl Connection for TestConnection {
     where
         Self: 'row;
 
+    fn no_rows_error() -> Self::Error {
+        TestError::NoRows
+    }
+
     type Select<'conn, Shape>
         = TestSelect<'conn, Shape>
     where

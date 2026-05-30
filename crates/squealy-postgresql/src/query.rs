@@ -14,20 +14,26 @@ use crate::{PostgresConnection, PostgresError, sql};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EmptyRows<Row> {
+    error: Option<PostgresError>,
     _row: PhantomData<Row>,
 }
 
 impl<Row> Default for EmptyRows<Row> {
     fn default() -> Self {
-        Self { _row: PhantomData }
+        Self {
+            error: None,
+            _row: PhantomData,
+        }
     }
 }
+
+impl<Row> Unpin for EmptyRows<Row> {}
 
 impl<Row> Stream for EmptyRows<Row> {
     type Item = Result<Row, PostgresError>;
 
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(None)
+        Poll::Ready(self.get_mut().error.take().map(Err))
     }
 }
 
@@ -75,8 +81,11 @@ where
     }
 }
 
-fn empty_rows<Row>() -> EmptyRows<Row> {
-    EmptyRows::default()
+fn error_rows<Row>(error: PostgresError) -> EmptyRows<Row> {
+    EmptyRows {
+        error: Some(error),
+        _row: PhantomData,
+    }
 }
 
 fn no_driver<T>() -> Ready<Result<T, PostgresError>> {
@@ -206,29 +215,7 @@ where
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        empty_rows()
-    }
-
-    fn fetch_all(
-        &self,
-    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_
-    {
-        no_driver()
-    }
-
-    fn fetch_one(
-        &self,
-    ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_
-    {
-        no_driver()
-    }
-
-    fn fetch_optional(
-        &self,
-    ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
-    + Send
-    + '_ {
-        no_driver()
+        error_rows(PostgresError::NoDriver)
     }
 }
 
@@ -260,29 +247,7 @@ where
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        empty_rows()
-    }
-
-    fn fetch_all(
-        &self,
-    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_
-    {
-        no_driver()
-    }
-
-    fn fetch_one(
-        &self,
-    ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_
-    {
-        no_driver()
-    }
-
-    fn fetch_optional(
-        &self,
-    ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
-    + Send
-    + '_ {
-        no_driver()
+        error_rows(PostgresError::NoDriver)
     }
 }
 
@@ -314,29 +279,7 @@ where
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        empty_rows()
-    }
-
-    fn fetch_all(
-        &self,
-    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_
-    {
-        no_driver()
-    }
-
-    fn fetch_one(
-        &self,
-    ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_
-    {
-        no_driver()
-    }
-
-    fn fetch_optional(
-        &self,
-    ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
-    + Send
-    + '_ {
-        no_driver()
+        error_rows(PostgresError::NoDriver)
     }
 }
 
@@ -368,29 +311,7 @@ where
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        empty_rows()
-    }
-
-    fn fetch_all(
-        &self,
-    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_
-    {
-        no_driver()
-    }
-
-    fn fetch_one(
-        &self,
-    ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_
-    {
-        no_driver()
-    }
-
-    fn fetch_optional(
-        &self,
-    ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
-    + Send
-    + '_ {
-        no_driver()
+        error_rows(PostgresError::NoDriver)
     }
 }
 

@@ -81,10 +81,6 @@ fn ok<T>(value: T) -> Ready<Result<T, TestError>> {
     ready(Ok(value))
 }
 
-fn no_rows<T>() -> Ready<Result<T, TestError>> {
-    ready(Err(TestError::NoRows))
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct TestSelect<'conn, Shape>
 where
@@ -210,28 +206,6 @@ where
     fn fetch(&self) -> Self::RowStream<'_> {
         empty_rows()
     }
-
-    fn fetch_all(
-        &self,
-    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_
-    {
-        ok(Vec::new())
-    }
-
-    fn fetch_one(
-        &self,
-    ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_
-    {
-        no_rows()
-    }
-
-    fn fetch_optional(
-        &self,
-    ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
-    + Send
-    + '_ {
-        ok(None)
-    }
 }
 
 impl<'conn, S, Shape> InsertQuery<'conn> for TestInsert<'conn, S, Shape>
@@ -263,28 +237,6 @@ where
 
     fn fetch(&self) -> Self::RowStream<'_> {
         empty_rows()
-    }
-
-    fn fetch_all(
-        &self,
-    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_
-    {
-        ok(Vec::new())
-    }
-
-    fn fetch_one(
-        &self,
-    ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_
-    {
-        no_rows()
-    }
-
-    fn fetch_optional(
-        &self,
-    ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
-    + Send
-    + '_ {
-        ok(None)
     }
 }
 
@@ -318,28 +270,6 @@ where
     fn fetch(&self) -> Self::RowStream<'_> {
         empty_rows()
     }
-
-    fn fetch_all(
-        &self,
-    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_
-    {
-        ok(Vec::new())
-    }
-
-    fn fetch_one(
-        &self,
-    ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_
-    {
-        no_rows()
-    }
-
-    fn fetch_optional(
-        &self,
-    ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
-    + Send
-    + '_ {
-        ok(None)
-    }
 }
 
 impl<'conn, S, Shape> UpdateQuery<'conn> for TestUpdate<'conn, S, Shape>
@@ -371,28 +301,6 @@ where
 
     fn fetch(&self) -> Self::RowStream<'_> {
         empty_rows()
-    }
-
-    fn fetch_all(
-        &self,
-    ) -> impl Future<Output = Result<Vec<Self::Row>, <Self::Connection as Connection>::Error>> + Send + '_
-    {
-        ok(Vec::new())
-    }
-
-    fn fetch_one(
-        &self,
-    ) -> impl Future<Output = Result<Self::Row, <Self::Connection as Connection>::Error>> + Send + '_
-    {
-        no_rows()
-    }
-
-    fn fetch_optional(
-        &self,
-    ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
-    + Send
-    + '_ {
-        ok(None)
     }
 }
 

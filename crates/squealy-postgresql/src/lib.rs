@@ -17,6 +17,7 @@ pub struct PostgresConnection;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PostgresError {
     NoDriver,
+    NoRows,
 }
 
 impl Backend for PostgresConnection {
@@ -36,6 +37,10 @@ impl Connection for PostgresConnection {
         = PostgresRowReader<'row>
     where
         Self: 'row;
+
+    fn no_rows_error() -> Self::Error {
+        PostgresError::NoRows
+    }
 
     type Select<'conn, Shape>
         = PostgresSelect<'conn, Shape>
