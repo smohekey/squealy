@@ -42,8 +42,7 @@ where
     K: ExprKind<Value = i32>,
 {
     connection.select::<Post>(|q| {
-        let posts = connection.select::<Post>(|q| q.from::<Post>());
-        let post = q.q(&posts);
+        let post = q.from::<Post>();
         q.where_(post.user_id.equals(user_id));
         post
     })
@@ -213,6 +212,14 @@ where
 {
 }
 
+fn assert_column_kind<'scope, K>(_: ColumnRef<'scope, K>)
+where
+    K: ExprKind,
+{
+}
+
+fn assert_copy<T: Copy>(_: T) {}
+
 #[test]
 fn from_select_carries_table_projection_shape() {
     let users = TestConnection.select::<User>(|q| q.from::<User>());
@@ -225,8 +232,10 @@ fn from_select_carries_table_projection_shape() {
 fn from_uses_generated_column_expression_kinds() {
     let _users = TestConnection.select::<User>(|q| {
         let user = q.from::<User>();
-        assert_expr_kind::<UserId>(&user.id);
-        assert_expr_kind::<UserName>(&user.name);
+        assert_column_kind::<UserId>(user.id);
+        assert_column_kind::<UserName>(user.name);
+        assert_copy(user.id);
+        assert_copy(user.name);
         user
     });
 }
@@ -277,7 +286,7 @@ fn select_can_project_three_part_tuple_shapes() {
 
 #[test]
 fn select_rebinds_three_part_tuple_subquery_shape() {
-    let rebound = TestConnection.select::<(UserId, UserName, Post)>(|q| {
+    let rebound = TestConnection.select::<AddExpr<UserId, i32>>(|q| {
         let tuple_select = TestConnection.select::<(UserId, UserName, Post)>(|q| {
             let user = q.from::<User>();
             let post = q.join::<Post>(|post| post.user_id.equals(&user.id));
@@ -286,14 +295,15 @@ fn select_rebinds_three_part_tuple_subquery_shape() {
         let tuple = q.q(&tuple_select);
 
         q.where_(tuple.0.equals(&tuple.2.user_id));
-        tuple
+        &tuple.0 + 0
     });
 
-    assert_user_id_name_and_post_row(&rebound);
+    assert_i32_row(&rebound);
     assert_eq!(
         rebound.to_sql(),
-        r#"SELECT q0_0.t0_id AS t0_id, q0_0.t1_name AS t1_name, q0_0.t2_id AS t2_id, q0_0.t2_user_id AS t2_user_id, q0_0.t2_body AS t2_body FROM (SELECT q1_0.id AS t0_id, q1_0.name AS t1_name, q1_1.id AS t2_id, q1_1.user_id AS t2_user_id, q1_1.body AS t2_body FROM public.users AS q1_0 INNER JOIN public.posts AS q1_1 ON (q1_1.user_id = q1_0.id)) AS q0_0 WHERE (q0_0.t0_id = q0_0.t2_user_id)"#
+        r#"SELECT (q0_0.t0_id + ?) AS expr FROM (SELECT q1_0.id AS t0_id, q1_0.name AS t1_name, q1_1.id AS t2_id, q1_1.user_id AS t2_user_id, q1_1.body AS t2_body FROM public.users AS q1_0 INNER JOIN public.posts AS q1_1 ON (q1_1.user_id = q1_0.id)) AS q0_0 WHERE (q0_0.t0_id = q0_0.t2_user_id)"#
     );
+    assert_eq!(rebound.params(), vec![BindValue::Int(0)]);
 }
 
 #[test]
@@ -477,7 +487,7 @@ fn select_writes_sql_to_writer() {
 
 #[test]
 fn select_composes_subqueries_with_lateral_joins() {
-    let users_and_posts = TestConnection.select::<(User, Post)>(|q| {
+    let users_and_posts = TestConnection.select::<AddExpr<PostUserId, i32>>(|q| {
         let users = TestConnection.select::<User>(|q| q.from::<User>());
         let user = q.q(&users);
         let posts = posts_of_user(&TestConnection, &user.id);
@@ -488,16 +498,17 @@ fn select_composes_subqueries_with_lateral_joins() {
                 .and(user.id.not_equals(42).not_())
                 .or(user.name.equals("Bob")),
         );
-        (user, post)
+        &post.user_id + 0
     });
 
     assert_eq!(
         users_and_posts.to_sql(),
-        r#"SELECT q0_0.id AS t0_id, q0_0.name AS t0_name, q0_1.id AS t1_id, q0_1.user_id AS t1_user_id, q0_1.body AS t1_body FROM (SELECT q1_0.id AS id, q1_0.name AS name FROM public.users AS q1_0) AS q0_0 INNER JOIN LATERAL (SELECT q1_0.id AS id, q1_0.user_id AS user_id, q1_0.body AS body FROM (SELECT q2_0.id AS id, q2_0.user_id AS user_id, q2_0.body AS body FROM public.posts AS q2_0) AS q1_0 WHERE (q1_0.user_id = q0_0.id)) AS q0_1 ON TRUE WHERE (((((q0_0.id + ?) - ?) > ?) AND (NOT (q0_0.id <> ?))) OR (q0_0.name = ?))"#
+        r#"SELECT (q0_1.user_id + ?) AS expr FROM (SELECT q1_0.id AS id, q1_0.name AS name FROM public.users AS q1_0) AS q0_0 INNER JOIN LATERAL (SELECT q1_0.id AS id, q1_0.user_id AS user_id, q1_0.body AS body FROM public.posts AS q1_0 WHERE (q1_0.user_id = q0_0.id)) AS q0_1 ON TRUE WHERE (((((q0_0.id + ?) - ?) > ?) AND (NOT (q0_0.id <> ?))) OR (q0_0.name = ?))"#
     );
     assert_eq!(
         users_and_posts.params(),
         vec![
+            BindValue::Int(0),
             BindValue::Int(1),
             BindValue::Int(1),
             BindValue::Int(0),
@@ -509,7 +520,7 @@ fn select_composes_subqueries_with_lateral_joins() {
 
 #[test]
 fn select_rebinds_tuple_subquery_shape_through_output_aliases() {
-    let users_and_posts = TestConnection.select::<(User, Post)>(|q| {
+    let users_and_posts = TestConnection.select::<AddExpr<UserId, i32>>(|q| {
         let pair_select = TestConnection.select::<(User, Post)>(|q| {
             let user = q.from::<User>();
             let post = q.join::<Post>(|post| post.user_id.equals(&user.id));
@@ -518,13 +529,14 @@ fn select_rebinds_tuple_subquery_shape_through_output_aliases() {
         let pair = q.q(&pair_select);
 
         q.where_(pair.0.id.equals(&pair.1.user_id));
-        pair
+        &pair.0.id + 0
     });
 
     assert_eq!(
         users_and_posts.to_sql(),
-        r#"SELECT q0_0.t0_id AS t0_id, q0_0.t0_name AS t0_name, q0_0.t1_id AS t1_id, q0_0.t1_user_id AS t1_user_id, q0_0.t1_body AS t1_body FROM (SELECT q1_0.id AS t0_id, q1_0.name AS t0_name, q1_1.id AS t1_id, q1_1.user_id AS t1_user_id, q1_1.body AS t1_body FROM public.users AS q1_0 INNER JOIN public.posts AS q1_1 ON (q1_1.user_id = q1_0.id)) AS q0_0 WHERE (q0_0.t0_id = q0_0.t1_user_id)"#
+        r#"SELECT (q0_0.t0_id + ?) AS expr FROM (SELECT q1_0.id AS t0_id, q1_0.name AS t0_name, q1_1.id AS t1_id, q1_1.user_id AS t1_user_id, q1_1.body AS t1_body FROM public.users AS q1_0 INNER JOIN public.posts AS q1_1 ON (q1_1.user_id = q1_0.id)) AS q0_0 WHERE (q0_0.t0_id = q0_0.t1_user_id)"#
     );
+    assert_eq!(users_and_posts.params(), vec![BindValue::Int(0)]);
 }
 
 #[test]
@@ -569,7 +581,7 @@ fn select_accepts_primitive_literals_and_expression_operators() {
 
 #[test]
 fn select_collects_source_and_filter_params_in_sql_order() {
-    let users_and_posts = TestConnection.select::<(User, Post)>(|q| {
+    let users_and_posts = TestConnection.select::<AddExpr<UserId, PostUserId>>(|q| {
         let user_select = TestConnection.select::<User>(|q| {
             let user = q.from::<User>();
             q.where_(user.id.greater_than(10));
@@ -578,12 +590,12 @@ fn select_collects_source_and_filter_params_in_sql_order() {
         let user = q.q(&user_select);
         let post = q.join::<Post>(|post| post.user_id.equals(7));
         q.where_(user.name.equals("Ada"));
-        (user, post)
+        &user.id + &post.user_id
     });
 
     assert_eq!(
         users_and_posts.to_sql(),
-        r#"SELECT q0_0.id AS t0_id, q0_0.name AS t0_name, q0_1.id AS t1_id, q0_1.user_id AS t1_user_id, q0_1.body AS t1_body FROM (SELECT q1_0.id AS id, q1_0.name AS name FROM public.users AS q1_0 WHERE (q1_0.id > ?)) AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = ?) WHERE (q0_0.name = ?)"#
+        r#"SELECT (q0_0.id + q0_1.user_id) AS expr FROM (SELECT q1_0.id AS id, q1_0.name AS name FROM public.users AS q1_0 WHERE (q1_0.id > ?)) AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = ?) WHERE (q0_0.name = ?)"#
     );
     assert_eq!(
         users_and_posts.params(),

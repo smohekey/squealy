@@ -118,18 +118,21 @@ where
     pub fn lateral<'query, Qry>(
         &mut self,
         query: &Qry,
-    ) -> <Qry::Shape as ProjectionShape>::Exprs<'scope>
+    ) -> <Qry::Shape as ProjectionShape>::ReboundExprs<'scope>
     where
         Qry: SelectQuery<'query, Connection = Conn>,
     {
         let alias = self.next_alias();
         self.sources
             .push(Source::lateral(alias.clone(), query.ir().clone()));
-        Qry::Shape::exprs(&alias)
+        Qry::Shape::rebound_exprs(&alias)
     }
 
     /// Add a subquery and return its projected expression columns in this query scope.
-    pub fn q<'query, Qry>(&mut self, query: &Qry) -> <Qry::Shape as ProjectionShape>::Exprs<'scope>
+    pub fn q<'query, Qry>(
+        &mut self,
+        query: &Qry,
+    ) -> <Qry::Shape as ProjectionShape>::ReboundExprs<'scope>
     where
         Qry: SelectQuery<'query, Connection = Conn>,
     {

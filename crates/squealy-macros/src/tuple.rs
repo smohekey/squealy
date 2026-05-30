@@ -40,12 +40,17 @@ fn tuple_projection_shape(arity: usize) -> proc_macro2::TokenStream {
             #(
                 #types: ProjectionShape,
                 <#types as ProjectionShape>::Row: Send,
-                <#types as ProjectionShape>::Exprs<'static>: Projectable,
+                for<'any> <#types as ProjectionShape>::Exprs<'any>: Projectable,
             )*
         {
             type Exprs<'scope> = (
                 #(
-                    <<#types as ProjectionShape>::Exprs<'static> as Projectable>::Rebound<'scope>,
+                    <#types as ProjectionShape>::Exprs<'scope>,
+                )*
+            );
+            type ReboundExprs<'scope> = (
+                #(
+                    <<#types as ProjectionShape>::Exprs<'scope> as Projectable>::Rebound<'scope>,
                 )*
             );
             type Row = (
@@ -53,6 +58,13 @@ fn tuple_projection_shape(arity: usize) -> proc_macro2::TokenStream {
             );
 
             fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
+                _ = alias;
+                (
+                    #(#types::exprs(alias),)*
+                )
+            }
+
+            fn rebound_exprs<'scope>(alias: &str) -> Self::ReboundExprs<'scope> {
                 #(
                     let #exprs = #types::exprs(alias);
                 )*
