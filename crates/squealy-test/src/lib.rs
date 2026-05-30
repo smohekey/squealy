@@ -9,7 +9,8 @@ use squealy::{
     ArithmeticOp, Backend, BindValue, CompareOp, Connection, Delete, DeleteBuilder, DeleteQuery,
     ExprNode, Insert, InsertQuery, InsertableTable, OrderDirection, OrderNode, PredicateNode,
     ProjectionShape, Returning, Select, SelectBuilder, SelectColumn, SelectQuery, Sort, Source,
-    SourceKind, SourceTarget, Table, TableProjection, build_delete, build_insert, build_select,
+    SourceKind, SourceTarget, Table, TableProjection, Update, UpdateQuery, UpdateableTable,
+    build_delete, build_insert, build_select, build_update,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -65,6 +66,16 @@ where
     S: TableProjection,
 {
     delete: Delete,
+    _connection: PhantomData<&'conn TestConnection>,
+    _table: PhantomData<S>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TestUpdate<'conn, S>
+where
+    S: UpdateableTable,
+{
+    update: Update,
     _connection: PhantomData<&'conn TestConnection>,
     _table: PhantomData<S>,
 }
@@ -151,6 +162,25 @@ where
     }
 }
 
+impl<'conn, S> UpdateQuery<'conn> for TestUpdate<'conn, S>
+where
+    S: UpdateableTable,
+{
+    type Connection = TestConnection;
+    type Table = S;
+
+    fn ir(&self) -> &Update {
+        &self.update
+    }
+
+    fn execute(
+        &self,
+    ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
+    {
+        ready(Ok(0))
+    }
+}
+
 impl<Shape> TestSelect<'_, Shape>
 where
     Shape: ProjectionShape,
@@ -205,6 +235,25 @@ where
 
     pub fn params(&self) -> Vec<BindValue> {
         delete_params(&self.delete)
+    }
+}
+
+impl<S> TestUpdate<'_, S>
+where
+    S: UpdateableTable,
+{
+    pub fn to_sql(&self) -> String {
+        let mut sql = Vec::new();
+        write_update_sql(&self.update, &mut sql).unwrap();
+        String::from_utf8(sql).unwrap()
+    }
+
+    pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+        write_update_sql(&self.update, writer)
+    }
+
+    pub fn params(&self) -> Vec<BindValue> {
+        update_params(&self.update)
     }
 }
 
@@ -288,6 +337,12 @@ impl Connection for TestConnection {
         Self: 'conn,
         S: InsertableTable;
 
+    type Update<'conn, S>
+        = TestUpdate<'conn, S>
+    where
+        Self: 'conn,
+        S: UpdateableTable;
+
     type Delete<'conn, S>
         = TestDelete<'conn, S>
     where
@@ -314,6 +369,22 @@ impl Connection for TestConnection {
     {
         TestInsert {
             insert: build_insert::<S>(columns),
+            _connection: PhantomData,
+            _table: PhantomData,
+        }
+    }
+
+    fn update_query<S>(
+        &self,
+        alias: String,
+        columns: Vec<squealy::UpdateColumn>,
+        filters: Vec<squealy::Filter>,
+    ) -> Self::Update<'_, S>
+    where
+        S: UpdateableTable,
+    {
+        TestUpdate {
+            update: build_update::<S>(alias, columns, filters),
             _connection: PhantomData,
             _table: PhantomData,
         }
@@ -368,6 +439,23 @@ fn write_insert_sql(insert: &Insert, writer: &mut impl std::io::Write) -> std::i
         writer.write_all(b"?")?;
     }
     writer.write_all(b")")?;
+    Ok(())
+}
+
+fn write_update_sql(update: &Update, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    write!(
+        writer,
+        "UPDATE {} AS {} SET ",
+        update.table(),
+        update.alias()
+    )?;
+    for (index, column) in update.columns().iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        write!(writer, "{} = ?", column.column())?;
+    }
+    write_filters(update.filters(), writer)?;
     Ok(())
 }
 
@@ -633,6 +721,18 @@ fn insert_params(insert: &Insert) -> Vec<BindValue> {
 fn delete_params(delete: &Delete) -> Vec<BindValue> {
     let mut params = Vec::new();
     for filter in delete.filters() {
+        collect_predicate_params(filter.predicate(), &mut params);
+    }
+    params
+}
+
+fn update_params(update: &Update) -> Vec<BindValue> {
+    let mut params = update
+        .columns()
+        .iter()
+        .map(|column| column.value().clone())
+        .collect::<Vec<_>>();
+    for filter in update.filters() {
         collect_predicate_params(filter.predicate(), &mut params);
     }
     params

@@ -26,13 +26,13 @@ pub use index::Index;
 pub use ir::{
     ArithmeticOp, BindValue, CompareOp, Delete, ExprNode, Filter, Insert, InsertColumn,
     OrderDirection, OrderNode, PredicateNode, Select, SelectColumn, Sort, Source, SourceKind,
-    SourceTarget,
+    SourceTarget, Update, UpdateColumn,
 };
 pub use projection::{Maybe, Projectable, ProjectionShape, TableProjection};
 pub use query::{
     DeleteBuilder, DeleteQuery, InsertQuery, Returning, ReturningProjection, SelectBuilder,
-    SelectQuery, build_delete, build_insert, build_select,
+    SelectQuery, UpdateQuery, build_delete, build_insert, build_select, build_update,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{Database, Schema, Table};
-pub use table::{InsertableTable, SchemaTable, Table};
+pub use table::{InsertableTable, SchemaTable, Table, UpdateableTable};

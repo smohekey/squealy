@@ -102,3 +102,14 @@ pub trait InsertableTable: SchemaTable {
     where
         Conn: Connection + 'conn;
 }
+
+/// A table model that can generate a typed update builder.
+pub trait UpdateableTable: SchemaTable {
+    type UpdateBuilder<'conn, Conn>
+    where
+        Conn: Connection + 'conn;
+
+    fn update_builder<'conn, Conn>(connection: &'conn Conn) -> Self::UpdateBuilder<'conn, Conn>
+    where
+        Conn: Connection + 'conn;
+}

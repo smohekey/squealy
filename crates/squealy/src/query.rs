@@ -4,10 +4,10 @@ use std::marker::PhantomData;
 
 use futures_core::Stream;
 
-use crate::ir::{Delete, Filter, Insert, InsertColumn, Select, Sort, Source};
+use crate::ir::{Delete, Filter, Insert, InsertColumn, Select, Sort, Source, Update, UpdateColumn};
 use crate::{
     ColumnRef, Connection, Expr, ExprKind, InsertableTable, IntoBindValue, Maybe, Order, Predicate,
-    Projectable, ProjectionShape, SchemaTable, SelectColumn, TableProjection,
+    Projectable, ProjectionShape, SchemaTable, SelectColumn, TableProjection, UpdateableTable,
 };
 
 /// A backend-specific select query object backed by core-owned select IR.
@@ -47,6 +47,18 @@ pub trait InsertQuery<'conn> {
     type Table: InsertableTable;
 
     fn ir(&self) -> &Insert;
+
+    fn execute(
+        &self,
+    ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_;
+}
+
+/// A backend-specific update query object backed by core-owned update IR.
+pub trait UpdateQuery<'conn> {
+    type Connection: Connection + 'conn;
+    type Table: UpdateableTable;
+
+    fn ir(&self) -> &Update;
 
     fn execute(
         &self,
@@ -391,6 +403,23 @@ where
     S: InsertableTable,
 {
     Insert::new(<S as SchemaTable>::qualified_name(), columns)
+}
+
+/// Build update IR for a table, ordered column bindings, and filters.
+pub fn build_update<S>(
+    alias: impl Into<String>,
+    columns: Vec<UpdateColumn>,
+    filters: Vec<Filter>,
+) -> Update
+where
+    S: UpdateableTable,
+{
+    Update::new(
+        <S as SchemaTable>::qualified_name(),
+        alias,
+        columns,
+        filters,
+    )
 }
 
 /// Build delete IR from a scoped delete builder closure.
