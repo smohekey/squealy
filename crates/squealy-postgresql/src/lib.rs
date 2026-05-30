@@ -2,7 +2,7 @@ use std::fmt;
 
 use squealy::{
     Backend, BindValue, Connection, ConnectionWithTransaction, Decode, InsertableTable,
-    ProjectionShape, Table, TableProjection, UpdateableTable,
+    ProjectionShape, QueryBuilder, Table, TableProjection, UpdateableTable,
 };
 use tokio_postgres::Client;
 
@@ -52,7 +52,6 @@ impl fmt::Debug for PostgresConnection {
 
 #[derive(Debug)]
 pub enum PostgresError {
-    NoDriver,
     NoRows,
     UnsupportedBind(BindValue),
     Database(tokio_postgres::Error),
@@ -84,7 +83,7 @@ impl Backend for Postgres {
     }
 }
 
-impl Connection for Postgres {
+impl QueryBuilder for Postgres {
     type Backend = Postgres;
 
     type Select<'conn, Shape>
@@ -119,7 +118,7 @@ impl Connection for Postgres {
         Shape::Row: Decode<Self::Backend>;
 }
 
-impl Connection for PostgresConnection {
+impl QueryBuilder for PostgresConnection {
     type Backend = Postgres;
 
     type Select<'conn, Shape>
@@ -154,7 +153,7 @@ impl Connection for PostgresConnection {
         Shape::Row: Decode<Self::Backend>;
 }
 
-impl Connection for PostgresTransaction<'_> {
+impl QueryBuilder for PostgresTransaction<'_> {
     type Backend = Postgres;
 
     type Select<'conn, Shape>
@@ -188,6 +187,10 @@ impl Connection for PostgresTransaction<'_> {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self::Backend>;
 }
+
+impl Connection for PostgresConnection {}
+
+impl Connection for PostgresTransaction<'_> {}
 
 impl ConnectionWithTransaction for PostgresConnection {
     type Transaction<'conn>

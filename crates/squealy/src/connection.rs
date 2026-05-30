@@ -6,33 +6,33 @@ use crate::{
     build_select,
 };
 
-/// A backend connection that constructs query objects tied to that backend.
-pub trait Connection: Sized {
+/// A backend-specific handle that constructs query objects.
+pub trait QueryBuilder: Sized {
     type Backend: Backend;
 
-    type Select<'conn, Shape>: SelectQuery<'conn, Connection = Self, Shape = Shape>
+    type Select<'builder, Shape>: SelectQuery<'builder, Builder = Self, Shape = Shape>
     where
-        Self: 'conn,
+        Self: 'builder,
         Shape: ProjectionShape,
         Shape::Row: Decode<Self::Backend>;
 
-    type Insert<'conn, S, Shape>: InsertQuery<'conn, Connection = Self, Table = S, Shape = Shape>
+    type Insert<'builder, S, Shape>: InsertQuery<'builder, Builder = Self, Table = S, Shape = Shape>
     where
-        Self: 'conn,
+        Self: 'builder,
         S: InsertableTable,
         Shape: ProjectionShape,
         Shape::Row: Decode<Self::Backend>;
 
-    type Update<'conn, S, Shape>: UpdateQuery<'conn, Connection = Self, Table = S, Shape = Shape>
+    type Update<'builder, S, Shape>: UpdateQuery<'builder, Builder = Self, Table = S, Shape = Shape>
     where
-        Self: 'conn,
+        Self: 'builder,
         S: UpdateableTable,
         Shape: ProjectionShape,
         Shape::Row: Decode<Self::Backend>;
 
-    type Delete<'conn, S, Shape>: DeleteQuery<'conn, Connection = Self, Table = S, Shape = Shape>
+    type Delete<'builder, S, Shape>: DeleteQuery<'builder, Builder = Self, Table = S, Shape = Shape>
     where
-        Self: 'conn,
+        Self: 'builder,
         S: TableProjection,
         Shape: ProjectionShape,
         Shape::Row: Decode<Self::Backend>;
@@ -69,6 +69,9 @@ pub trait Connection: Sized {
         build_delete_builder(self)
     }
 }
+
+/// A backend query builder that can execute the query objects it constructs.
+pub trait Connection: QueryBuilder {}
 
 /// A root backend connection that can run a closure inside a backend-managed transaction.
 pub trait ConnectionWithTransaction: Connection {

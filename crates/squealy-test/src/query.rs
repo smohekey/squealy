@@ -6,8 +6,9 @@ use std::task::{Context, Poll};
 use futures_core::Stream;
 
 use squealy::{
-    Backend, BindValue, Connection, Decode, Delete, DeleteQuery, Insert, InsertQuery,
-    InsertableTable, ProjectionShape, RowsAffected, Select, SelectQuery, TableProjection, Update,
+    Backend, BindValue, Decode, Delete, DeleteQuery, ExecutableDeleteQuery, ExecutableInsertQuery,
+    ExecutableSelectQuery, ExecutableUpdateQuery, Insert, InsertQuery, InsertableTable,
+    ProjectionShape, QueryBuilder, RowsAffected, Select, SelectQuery, TableProjection, Update,
     UpdateQuery, UpdateableTable,
 };
 
@@ -227,22 +228,28 @@ where
     Shape: ProjectionShape,
     Shape::Row: Decode<TestBackend>,
 {
-    type Connection = TestConnection;
+    type Builder = TestConnection;
     type Shape = Shape;
     type Row = Shape::Row;
-
-    type RowStream<'query>
-        = EmptyRows<Self::Row>
-    where
-        Self: 'query;
 
     fn ir(&self) -> &Select {
         &self.select
     }
 
-    fn build(connection: &'conn Self::Connection, select: Select) -> Self {
+    fn build(connection: &'conn Self::Builder, select: Select) -> Self {
         Self::new(connection, select)
     }
+}
+
+impl<'conn, Shape> ExecutableSelectQuery<'conn> for TestSelect<'conn, Shape>
+where
+    Shape: ProjectionShape,
+    Shape::Row: Decode<TestBackend>,
+{
+    type RowStream<'query>
+        = EmptyRows<Self::Row>
+    where
+        Self: 'query;
 
     fn fetch(&self) -> Self::RowStream<'_> {
         self.connection.fetch_select(&self.select)
@@ -255,28 +262,35 @@ where
     Shape: ProjectionShape,
     Shape::Row: Decode<TestBackend>,
 {
-    type Connection = TestConnection;
+    type Builder = TestConnection;
     type Table = S;
     type Shape = Shape;
     type Row = Shape::Row;
-
-    type RowStream<'query>
-        = EmptyRows<Self::Row>
-    where
-        Self: 'query;
 
     fn ir(&self) -> &Insert {
         &self.insert
     }
 
-    fn build(connection: &'conn Self::Connection, insert: Insert) -> Self {
+    fn build(connection: &'conn Self::Builder, insert: Insert) -> Self {
         Self::new(connection, insert)
     }
+}
+
+impl<'conn, S, Shape> ExecutableInsertQuery<'conn> for TestInsert<'conn, S, Shape>
+where
+    S: InsertableTable,
+    Shape: ProjectionShape,
+    Shape::Row: Decode<TestBackend>,
+{
+    type RowStream<'query>
+        = EmptyRows<Self::Row>
+    where
+        Self: 'query;
 
     fn execute(
         &self,
     ) -> impl Future<
-        Output = Result<u64, <<Self::Connection as Connection>::Backend as Backend>::Error>,
+        Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>,
     > + Send
     + '_ {
         self.connection.execute_insert(&self.insert)
@@ -293,28 +307,35 @@ where
     Shape: ProjectionShape,
     Shape::Row: Decode<TestBackend>,
 {
-    type Connection = TestConnection;
+    type Builder = TestConnection;
     type Table = S;
     type Shape = Shape;
     type Row = Shape::Row;
-
-    type RowStream<'query>
-        = EmptyRows<Self::Row>
-    where
-        Self: 'query;
 
     fn ir(&self) -> &Delete {
         &self.delete
     }
 
-    fn build(connection: &'conn Self::Connection, delete: Delete) -> Self {
+    fn build(connection: &'conn Self::Builder, delete: Delete) -> Self {
         Self::new(connection, delete)
     }
+}
+
+impl<'conn, S, Shape> ExecutableDeleteQuery<'conn> for TestDelete<'conn, S, Shape>
+where
+    S: TableProjection,
+    Shape: ProjectionShape,
+    Shape::Row: Decode<TestBackend>,
+{
+    type RowStream<'query>
+        = EmptyRows<Self::Row>
+    where
+        Self: 'query;
 
     fn execute(
         &self,
     ) -> impl Future<
-        Output = Result<u64, <<Self::Connection as Connection>::Backend as Backend>::Error>,
+        Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>,
     > + Send
     + '_ {
         self.connection.execute_delete(&self.delete)
@@ -331,28 +352,35 @@ where
     Shape: ProjectionShape,
     Shape::Row: Decode<TestBackend>,
 {
-    type Connection = TestConnection;
+    type Builder = TestConnection;
     type Table = S;
     type Shape = Shape;
     type Row = Shape::Row;
-
-    type RowStream<'query>
-        = EmptyRows<Self::Row>
-    where
-        Self: 'query;
 
     fn ir(&self) -> &Update {
         &self.update
     }
 
-    fn build(connection: &'conn Self::Connection, update: Update) -> Self {
+    fn build(connection: &'conn Self::Builder, update: Update) -> Self {
         Self::new(connection, update)
     }
+}
+
+impl<'conn, S, Shape> ExecutableUpdateQuery<'conn> for TestUpdate<'conn, S, Shape>
+where
+    S: UpdateableTable,
+    Shape: ProjectionShape,
+    Shape::Row: Decode<TestBackend>,
+{
+    type RowStream<'query>
+        = EmptyRows<Self::Row>
+    where
+        Self: 'query;
 
     fn execute(
         &self,
     ) -> impl Future<
-        Output = Result<u64, <<Self::Connection as Connection>::Backend as Backend>::Error>,
+        Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>,
     > + Send
     + '_ {
         self.connection.execute_update(&self.update)
