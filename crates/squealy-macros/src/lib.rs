@@ -56,20 +56,8 @@ pub fn tuple_ir_lists(input: TokenStream) -> TokenStream {
     tuple::ir_lists(input)
 }
 
-/// Generates tuple length markers for tuple arities from 1 through the supplied maximum.
+/// Generates conversions from HLists to tuples from arity 1 through the supplied maximum.
 #[proc_macro]
-pub fn tuple_lens(input: TokenStream) -> TokenStream {
-    tuple::lens(input)
-}
-
-/// Generates heterogeneous tuple push support for tuple arities from 1 through the supplied maximum.
-#[proc_macro]
-pub fn tuple_pushes(input: TokenStream) -> TokenStream {
-    tuple::pushes(input)
-}
-
-/// Generates typed source-list support for tuple arities from 1 through the supplied maximum.
-#[proc_macro]
-pub fn tuple_source_spec_lists(input: TokenStream) -> TokenStream {
-    tuple::source_spec_lists(input)
+pub fn hlist_tuples(input: TokenStream) -> TokenStream {
+    tuple::hlist_tuples(input)
 }

@@ -257,6 +257,12 @@ where
 {
 }
 
+fn assert_user_id_post_id_title_default_id_row<'conn, Qry>(_: &'conn Qry)
+where
+    Qry: SelectQuery<'conn, Row = (i32, i32, String, i32)>,
+{
+}
+
 fn assert_user_and_maybe_post_row<'conn, Qry>(_: &'conn Qry)
 where
     Qry: SelectQuery<'conn, Row = (__SquealyUserRowShape, Post<'static, ColumnNullableValue>)>,
@@ -339,9 +345,9 @@ fn from_select_carries_table_projection_shape() {
 fn source_chain_selects_from_typed_root_and_join() {
     let posts = TestConnection
         .from::<User>()
-        .where_(|user| user.name.equals("John"))
-        .join::<Post>(|user, post| post.user_id.equals(user.id))
-        .select(|user, post| (user.id, post.id, post.body));
+        .where_(|(user,)| user.name.equals("John"))
+        .join::<Post>(|(user,), post| post.user_id.equals(user.id))
+        .select(|(user, post)| (user.id, post.id, post.body));
 
     assert_user_id_post_id_title_row(&posts);
     assert_eq!(
@@ -355,14 +361,61 @@ fn source_chain_selects_from_typed_root_and_join() {
 fn source_chain_can_append_multiple_typed_joins() {
     let rows = TestConnection
         .from::<User>()
-        .join::<Post>(|user, post| post.user_id.equals(user.id))
-        .join::<ComputedRecord>(|_user, post, record| record.id.equals(post.id))
-        .select(|user, post, record| (user.id, post.id, record.title));
+        .join::<Post>(|(user,), post| post.user_id.equals(user.id))
+        .join::<ComputedRecord>(|(_user, post), record| record.id.equals(post.id))
+        .select(|(user, post, record)| (user.id, post.id, record.title));
 
     assert_user_id_post_id_title_row(&rows);
     assert_eq!(
         rows.to_sql(),
         r#"SELECT q0_0.id AS t0_id, q0_1.id AS t1_id, q0_2.title AS t2_title FROM public.users AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id) INNER JOIN computed_records AS q0_2 ON (q0_2.id = q0_1.id)"#
+    );
+}
+
+#[test]
+fn source_chain_join_grows_through_hlist_push_back() {
+    let rows = TestConnection
+        .from::<User>()
+        .join::<Post>(|(user,), post| post.user_id.equals(user.id))
+        .join::<ComputedRecord>(|(_user, post), record| record.id.equals(post.id))
+        .join::<DefaultedRecord>(|(_user, _post, record), defaulted| defaulted.id.equals(record.id))
+        .select(|(user, post, record, defaulted)| (user.id, post.id, record.title, defaulted.id));
+
+    assert_user_id_post_id_title_default_id_row(&rows);
+    assert_eq!(
+        rows.to_sql(),
+        r#"SELECT q0_0.id AS t0_id, q0_1.id AS t1_id, q0_2.title AS t2_title, q0_3.id AS t3_id FROM public.users AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id) INNER JOIN computed_records AS q0_2 ON (q0_2.id = q0_1.id) INNER JOIN defaulted_records AS q0_3 ON (q0_3.id = q0_2.id)"#
+    );
+}
+
+#[test]
+fn source_chain_can_left_join_nullable_table_shapes() {
+    let rows = TestConnection
+        .from::<User>()
+        .left_join::<Post>(|(user,), post| post.user_id.equals(user.id))
+        .select(|(user, post)| (user, post));
+
+    assert_user_and_maybe_post_row(&rows);
+    assert_eq!(
+        rows.to_sql(),
+        r#"SELECT q0_0.id AS t0_id, q0_0.name AS t0_name, q0_1.id AS t1_id, q0_1.user_id AS t1_user_id, q0_1.body AS t1_body FROM public.users AS q0_0 LEFT JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id)"#
+    );
+}
+
+#[test]
+fn source_chain_can_order_limit_and_offset_rows() {
+    let users = TestConnection
+        .from::<User>()
+        .order_by(|(user,)| user.name.desc())
+        .order_by(|(user,)| user.id.asc())
+        .limit(10)
+        .offset(20)
+        .select(|(user,)| user);
+
+    assert_user_row(&users);
+    assert_eq!(
+        users.to_sql(),
+        r#"SELECT q0_0.id AS id, q0_0.name AS name FROM public.users AS q0_0 ORDER BY q0_0.name DESC, q0_0.id ASC LIMIT 10 OFFSET 20"#
     );
 }
 

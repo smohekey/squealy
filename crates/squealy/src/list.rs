@@ -30,16 +30,34 @@ where
     fn concat(self, rhs: Rhs) -> Self::Output;
 }
 
-/// Append a value to a heterogeneous tuple.
-pub trait TuplePush<T>: Sized {
-    type Output;
+/// Empty heterogeneous list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HNil;
 
-    fn push(self, value: T) -> Self::Output;
+/// Non-empty heterogeneous list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HCons<Head, Tail> {
+    pub head: Head,
+    pub tail: Tail,
 }
 
-/// Marker for heterogeneous tuples whose width is known in the type system.
-pub trait TupleLen<const N: usize> {
-    const LEN: usize = N;
+/// A heterogeneous list whose width is known in the type system.
+pub trait HList {
+    const LEN: usize;
+}
+
+/// Append a value to the end of a heterogeneous list.
+pub trait PushBack<T>: HList + Sized {
+    type Output: HList;
+
+    fn push_back(self, value: T) -> Self::Output;
+}
+
+/// Convert a heterogeneous list to a same-order tuple.
+pub trait ToTuple {
+    type Tuple;
+
+    fn to_tuple(self) -> Self::Tuple;
 }
 
 impl<T> IrList<T> for () {
@@ -75,15 +93,47 @@ where
     }
 }
 
-impl<T> TuplePush<T> for () {
-    type Output = (T,);
+impl HList for HNil {
+    const LEN: usize = 0;
+}
 
-    fn push(self, value: T) -> Self::Output {
-        (value,)
+impl<Head, Tail> HList for HCons<Head, Tail>
+where
+    Tail: HList,
+{
+    const LEN: usize = Tail::LEN + 1;
+}
+
+impl<T> PushBack<T> for HNil {
+    type Output = HCons<T, HNil>;
+
+    fn push_back(self, value: T) -> Self::Output {
+        HCons {
+            head: value,
+            tail: HNil,
+        }
     }
 }
 
-impl TupleLen<0> for () {}
+impl<Head, Tail, T> PushBack<T> for HCons<Head, Tail>
+where
+    Tail: PushBack<T>,
+{
+    type Output = HCons<Head, <Tail as PushBack<T>>::Output>;
+
+    fn push_back(self, value: T) -> Self::Output {
+        HCons {
+            head: self.head,
+            tail: self.tail.push_back(value),
+        }
+    }
+}
+
+impl ToTuple for HNil {
+    type Tuple = ();
+
+    fn to_tuple(self) -> Self::Tuple {}
+}
 
 impl<T> IrList<T> for Vec<T> {
     fn len(&self) -> usize {
@@ -124,5 +174,4 @@ where
 }
 
 squealy_macros::tuple_ir_lists!(32);
-squealy_macros::tuple_lens!(32);
-squealy_macros::tuple_pushes!(32);
+squealy_macros::hlist_tuples!(32);

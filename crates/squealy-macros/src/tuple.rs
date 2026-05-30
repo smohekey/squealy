@@ -44,56 +44,18 @@ pub(crate) fn ir_lists(input: TokenStream) -> TokenStream {
     .into()
 }
 
-pub(crate) fn source_spec_lists(input: TokenStream) -> TokenStream {
+pub(crate) fn hlist_tuples(input: TokenStream) -> TokenStream {
     let max_arity = match input.to_string().trim().parse::<usize>() {
         Ok(max_arity) if max_arity >= 1 => max_arity,
         _ => {
             return quote::quote! {
-                compile_error!("tuple_source_spec_lists! expects a maximum arity of at least 1");
+                compile_error!("hlist_tuples! expects a maximum arity of at least 1");
             }
             .into();
         }
     };
 
-    let impls = (1..=max_arity).map(tuple_source_spec_list);
-
-    quote::quote! {
-        #(#impls)*
-    }
-    .into()
-}
-
-pub(crate) fn pushes(input: TokenStream) -> TokenStream {
-    let max_arity = match input.to_string().trim().parse::<usize>() {
-        Ok(max_arity) if max_arity >= 1 => max_arity,
-        _ => {
-            return quote::quote! {
-                compile_error!("tuple_pushes! expects a maximum arity of at least 1");
-            }
-            .into();
-        }
-    };
-
-    let impls = (1..max_arity).map(tuple_push);
-
-    quote::quote! {
-        #(#impls)*
-    }
-    .into()
-}
-
-pub(crate) fn lens(input: TokenStream) -> TokenStream {
-    let max_arity = match input.to_string().trim().parse::<usize>() {
-        Ok(max_arity) if max_arity >= 1 => max_arity,
-        _ => {
-            return quote::quote! {
-                compile_error!("tuple_lens! expects a maximum arity of at least 1");
-            }
-            .into();
-        }
-    };
-
-    let impls = (1..=max_arity).map(tuple_len);
+    let impls = (1..=max_arity).map(hlist_tuple);
 
     quote::quote! {
         #(#impls)*
@@ -187,58 +149,47 @@ fn tuple_ir_concat(left_arity: usize, right_arity: usize) -> proc_macro2::TokenS
     }
 }
 
-fn tuple_source_spec_list(arity: usize) -> proc_macro2::TokenStream {
-    let fields = (0..arity)
-        .map(Literal::usize_unsuffixed)
-        .collect::<Vec<_>>();
-    let types = (0..arity)
-        .map(|index| Ident::new(&format!("Source{index}"), Span::call_site()))
-        .collect::<Vec<_>>();
-
-    quote::quote! {
-        impl<#(#types),*> SourceSpecList for (#(#types,)*)
-        where
-            #(#types: SourceSpec,)*
-        {
-            fn into_sources(self) -> Vec<Source> {
-                vec![
-                    #(self.#fields.into_source(),)*
-                ]
-            }
-        }
-    }
-}
-
-fn tuple_len(arity: usize) -> proc_macro2::TokenStream {
+fn hlist_tuple(arity: usize) -> proc_macro2::TokenStream {
     let types = (0..arity)
         .map(|index| Ident::new(&format!("T{index}"), Span::call_site()))
         .collect::<Vec<_>>();
+    let values = (0..arity)
+        .map(|index| Ident::new(&format!("value{index}"), Span::call_site()))
+        .collect::<Vec<_>>();
+    let tails = (0..arity)
+        .map(|index| Ident::new(&format!("tail{index}"), Span::call_site()))
+        .collect::<Vec<_>>();
 
-    quote::quote! {
-        impl<#(#types),*> TupleLen<#arity> for (#(#types,)*)
-        {
-        }
+    let hlist_type = types.iter().rev().fold(quote::quote! { HNil }, |tail, ty| {
+        quote::quote! { HCons<#ty, #tail> }
+    });
+
+    let mut destructures = Vec::new();
+    for index in 0..arity {
+        let input = if index == 0 {
+            quote::quote! { self }
+        } else {
+            let previous_tail = &tails[index - 1];
+            quote::quote! { #previous_tail }
+        };
+        let value = &values[index];
+        let tail = &tails[index];
+        destructures.push(quote::quote! {
+            let HCons {
+                head: #value,
+                tail: #tail,
+            } = #input;
+        });
     }
-}
-
-fn tuple_push(arity: usize) -> proc_macro2::TokenStream {
-    let fields = (0..arity)
-        .map(Literal::usize_unsuffixed)
-        .collect::<Vec<_>>();
-    let types = (0..arity)
-        .map(|index| Ident::new(&format!("T{index}"), Span::call_site()))
-        .collect::<Vec<_>>();
 
     quote::quote! {
-        impl<Item, #(#types),*> TuplePush<Item> for (#(#types,)*)
+        impl<#(#types),*> ToTuple for #hlist_type
         {
-            type Output = (#(#types,)* Item,);
+            type Tuple = (#(#types,)*);
 
-            fn push(self, value: Item) -> Self::Output {
-                (
-                    #(self.#fields,)*
-                    value,
-                )
+            fn to_tuple(self) -> Self::Tuple {
+                #(#destructures)*
+                (#(#values,)*)
             }
         }
     }

@@ -8,9 +8,9 @@ use crate::ir::{
     Delete, Filter, Insert, InsertColumn, PredicateNode, Select, Sort, Source, Update, UpdateColumn,
 };
 use crate::{
-    Backend, ColumnRef, Connection, Decode, Expr, ExprKind, InsertableTable, IntoBindValue, IrList,
-    Maybe, Order, Predicate, Projectable, ProjectionShape, QueryBuilder, SchemaTable, SelectColumn,
-    TableProjection, TupleAppend, TupleLen, TuplePush, UpdateableTable,
+    Backend, ColumnRef, Connection, Decode, Expr, ExprKind, HCons, HList, HNil, InsertableTable,
+    IntoBindValue, IrList, Maybe, Order, Predicate, Projectable, ProjectionShape, PushBack,
+    QueryBuilder, SchemaTable, SelectColumn, TableProjection, ToTuple, UpdateableTable,
 };
 
 type ErrorOf<Builder> = <<Builder as QueryBuilder>::Backend as Backend>::Error;
@@ -525,6 +525,30 @@ where
 }
 
 #[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LeftJoinSource<S>
+where
+    S: TableProjection,
+{
+    alias: String,
+    on: PredicateNode,
+    _phantom: PhantomData<S>,
+}
+
+impl<S> LeftJoinSource<S>
+where
+    S: TableProjection,
+{
+    fn new(alias: impl Into<String>, on: PredicateNode) -> Self {
+        Self {
+            alias: alias.into(),
+            on,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+#[doc(hidden)]
 pub trait SourceSpec {
     fn into_source(self) -> Source;
 }
@@ -547,6 +571,15 @@ where
     }
 }
 
+impl<S> SourceSpec for LeftJoinSource<S>
+where
+    S: TableProjection,
+{
+    fn into_source(self) -> Source {
+        Source::left_join(self.alias, S::qualified_name(), self.on)
+    }
+}
+
 #[doc(hidden)]
 pub trait SourceSpecList {
     fn into_sources(self) -> Vec<Source>;
@@ -558,36 +591,78 @@ impl SourceSpecList for () {
     }
 }
 
-squealy_macros::tuple_source_spec_lists!(32);
+impl SourceSpecList for HNil {
+    fn into_sources(self) -> Vec<Source> {
+        Vec::new()
+    }
+}
 
-struct SourceChain<'conn, 'scope, const N: usize, Conn, Exprs, Sources, Filters>
+impl<Head, Tail> SourceSpecList for HCons<Head, Tail>
+where
+    Head: SourceSpec,
+    Tail: SourceSpecList,
+{
+    fn into_sources(self) -> Vec<Source> {
+        let mut sources = vec![self.head.into_source()];
+        sources.extend(self.tail.into_sources());
+        sources
+    }
+}
+
+#[doc(hidden)]
+pub struct SelectParts<'conn, Conn, Exprs, Sources>
 where
     Conn: QueryBuilder,
-    Exprs: TupleLen<N>,
-    Sources: SourceSpecList + TupleLen<N>,
-    Filters: IrList<Filter>,
+    Exprs: HList,
+    Sources: SourceSpecList,
 {
     connection: &'conn Conn,
     depth: usize,
     exprs: Exprs,
     sources: Sources,
-    filters: Filters,
+    filters: Vec<Filter>,
+    orders: Vec<Sort>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+#[doc(hidden)]
+pub trait SelectAst<'conn, 'scope, Conn>
+where
+    Conn: QueryBuilder,
+{
+    type Exprs: HList + Clone + ToTuple;
+    type Sources: SourceSpecList;
+
+    fn depth(&self) -> usize;
+
+    fn exprs(&self) -> Self::Exprs;
+
+    fn into_parts(self) -> SelectParts<'conn, Conn, Self::Exprs, Self::Sources>;
+}
+
+/// A consuming, source-first select builder carrying typed sources.
+pub struct From<'conn, 'scope, Conn, Exprs, Sources>
+where
+    Conn: QueryBuilder,
+    Exprs: HList,
+    Sources: SourceSpecList,
+{
+    connection: &'conn Conn,
+    depth: usize,
+    exprs: Exprs,
+    sources: Sources,
     _scope: PhantomData<&'scope ()>,
 }
 
-/// A consuming, source-first select builder carrying `N` typed sources.
-pub struct From<'conn, 'scope, Conn, const N: usize, Exprs, Sources, Filters = ()>
-where
-    Conn: QueryBuilder,
-    Exprs: TupleLen<N>,
-    Sources: SourceSpecList + TupleLen<N>,
-    Filters: IrList<Filter>,
-{
-    chain: SourceChain<'conn, 'scope, N, Conn, Exprs, Sources, Filters>,
-}
-
 impl<'conn, 'scope, Conn, S>
-    From<'conn, 'scope, Conn, 1, (<S as ProjectionShape>::Exprs<'scope>,), (RootSource<S>,)>
+    From<
+        'conn,
+        'scope,
+        Conn,
+        HCons<<S as ProjectionShape>::Exprs<'scope>, HNil>,
+        HCons<RootSource<S>, HNil>,
+    >
 where
     Conn: QueryBuilder + 'conn,
     S: TableProjection,
@@ -595,234 +670,333 @@ where
     pub(crate) fn new(connection: &'conn Conn, depth: usize) -> Self {
         let alias = format!("q{depth}_0");
         Self {
-            chain: SourceChain {
-                connection,
-                depth,
-                exprs: (S::exprs(&alias),),
-                sources: (RootSource::new(alias),),
-                filters: (),
-                _scope: PhantomData,
+            connection,
+            depth,
+            exprs: HCons {
+                head: S::exprs(&alias),
+                tail: HNil,
             },
+            sources: HCons {
+                head: RootSource::new(alias),
+                tail: HNil,
+            },
+            _scope: PhantomData,
         }
     }
 }
 
-impl<'conn, 'scope, Conn, S, Filters>
-    From<
-        'conn,
-        'scope,
-        Conn,
-        1,
-        (<S as ProjectionShape>::Exprs<'scope>,),
-        (RootSource<S>,),
-        Filters,
-    >
+impl<'conn, 'scope, Conn, Exprs, Sources> SelectAst<'conn, 'scope, Conn>
+    for From<'conn, 'scope, Conn, Exprs, Sources>
 where
     Conn: QueryBuilder + 'conn,
-    S: TableProjection,
-    Filters: IrList<Filter>,
-    <S as ProjectionShape>::Exprs<'scope>: Clone,
+    Exprs: HList + Clone + ToTuple,
+    Sources: SourceSpecList,
 {
-    pub fn where_(
+    type Exprs = Exprs;
+    type Sources = Sources;
+
+    fn depth(&self) -> usize {
+        self.depth
+    }
+
+    fn exprs(&self) -> Self::Exprs {
+        self.exprs.clone()
+    }
+
+    fn into_parts(self) -> SelectParts<'conn, Conn, Self::Exprs, Self::Sources> {
+        SelectParts {
+            connection: self.connection,
+            depth: self.depth,
+            exprs: self.exprs,
+            sources: self.sources,
+            filters: Vec::new(),
+            orders: Vec::new(),
+            limit: None,
+            offset: None,
+        }
+    }
+}
+
+pub struct Where<Base> {
+    base: Base,
+    filter: Filter,
+}
+
+pub struct OrderBy<Base> {
+    base: Base,
+    order: Sort,
+}
+
+pub struct Limited<Base> {
+    base: Base,
+    rows: usize,
+}
+
+pub struct Offset<Base> {
+    base: Base,
+    rows: usize,
+}
+
+pub struct Join<Base, Expr, Source> {
+    base: Base,
+    expr: Expr,
+    source: Source,
+}
+
+pub struct LeftJoin<Base, Expr, Source> {
+    base: Base,
+    expr: Expr,
+    source: Source,
+}
+
+impl<'conn, 'scope, Conn, Base> SelectAst<'conn, 'scope, Conn> for Where<Base>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+{
+    type Exprs = Base::Exprs;
+    type Sources = Base::Sources;
+
+    fn depth(&self) -> usize {
+        self.base.depth()
+    }
+
+    fn exprs(&self) -> Self::Exprs {
+        self.base.exprs()
+    }
+
+    fn into_parts(self) -> SelectParts<'conn, Conn, Self::Exprs, Self::Sources> {
+        let mut parts = self.base.into_parts();
+        parts.filters.push(self.filter);
+        parts
+    }
+}
+
+impl<'conn, 'scope, Conn, Base> SelectAst<'conn, 'scope, Conn> for OrderBy<Base>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+{
+    type Exprs = Base::Exprs;
+    type Sources = Base::Sources;
+
+    fn depth(&self) -> usize {
+        self.base.depth()
+    }
+
+    fn exprs(&self) -> Self::Exprs {
+        self.base.exprs()
+    }
+
+    fn into_parts(self) -> SelectParts<'conn, Conn, Self::Exprs, Self::Sources> {
+        let mut parts = self.base.into_parts();
+        parts.orders.push(self.order);
+        parts
+    }
+}
+
+impl<'conn, 'scope, Conn, Base> SelectAst<'conn, 'scope, Conn> for Limited<Base>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+{
+    type Exprs = Base::Exprs;
+    type Sources = Base::Sources;
+
+    fn depth(&self) -> usize {
+        self.base.depth()
+    }
+
+    fn exprs(&self) -> Self::Exprs {
+        self.base.exprs()
+    }
+
+    fn into_parts(self) -> SelectParts<'conn, Conn, Self::Exprs, Self::Sources> {
+        let mut parts = self.base.into_parts();
+        parts.limit = Some(self.rows);
+        parts
+    }
+}
+
+impl<'conn, 'scope, Conn, Base> SelectAst<'conn, 'scope, Conn> for Offset<Base>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+{
+    type Exprs = Base::Exprs;
+    type Sources = Base::Sources;
+
+    fn depth(&self) -> usize {
+        self.base.depth()
+    }
+
+    fn exprs(&self) -> Self::Exprs {
+        self.base.exprs()
+    }
+
+    fn into_parts(self) -> SelectParts<'conn, Conn, Self::Exprs, Self::Sources> {
+        let mut parts = self.base.into_parts();
+        parts.offset = Some(self.rows);
+        parts
+    }
+}
+
+impl<'conn, 'scope, Conn, Base, Expr, Source> SelectAst<'conn, 'scope, Conn>
+    for Join<Base, Expr, Source>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Base::Exprs: PushBack<Expr>,
+    Base::Sources: PushBack<Source>,
+    <Base::Sources as PushBack<Source>>::Output: SourceSpecList,
+    <Base::Exprs as PushBack<Expr>>::Output: Clone + ToTuple,
+    Expr: Clone,
+    Source: SourceSpec,
+{
+    type Exprs = <Base::Exprs as PushBack<Expr>>::Output;
+    type Sources = <Base::Sources as PushBack<Source>>::Output;
+
+    fn depth(&self) -> usize {
+        self.base.depth()
+    }
+
+    fn exprs(&self) -> Self::Exprs {
+        self.base.exprs().push_back(self.expr.clone())
+    }
+
+    fn into_parts(self) -> SelectParts<'conn, Conn, Self::Exprs, Self::Sources> {
+        let parts = self.base.into_parts();
+        SelectParts {
+            connection: parts.connection,
+            depth: parts.depth,
+            exprs: parts.exprs.push_back(self.expr),
+            sources: parts.sources.push_back(self.source),
+            filters: parts.filters,
+            orders: parts.orders,
+            limit: parts.limit,
+            offset: parts.offset,
+        }
+    }
+}
+
+impl<'conn, 'scope, Conn, Base, Expr, Source> SelectAst<'conn, 'scope, Conn>
+    for LeftJoin<Base, Expr, Source>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Base::Exprs: PushBack<Expr>,
+    Base::Sources: PushBack<Source>,
+    <Base::Sources as PushBack<Source>>::Output: SourceSpecList,
+    <Base::Exprs as PushBack<Expr>>::Output: Clone + ToTuple,
+    Expr: Clone,
+    Source: SourceSpec,
+{
+    type Exprs = <Base::Exprs as PushBack<Expr>>::Output;
+    type Sources = <Base::Sources as PushBack<Source>>::Output;
+
+    fn depth(&self) -> usize {
+        self.base.depth()
+    }
+
+    fn exprs(&self) -> Self::Exprs {
+        self.base.exprs().push_back(self.expr.clone())
+    }
+
+    fn into_parts(self) -> SelectParts<'conn, Conn, Self::Exprs, Self::Sources> {
+        let parts = self.base.into_parts();
+        SelectParts {
+            connection: parts.connection,
+            depth: parts.depth,
+            exprs: parts.exprs.push_back(self.expr),
+            sources: parts.sources.push_back(self.source),
+            filters: parts.filters,
+            orders: parts.orders,
+            limit: parts.limit,
+            offset: parts.offset,
+        }
+    }
+}
+
+pub trait SourceQuery<'conn, 'scope, Conn>: SelectAst<'conn, 'scope, Conn> + Sized
+where
+    Conn: QueryBuilder + 'conn,
+{
+    fn where_(
         self,
-        predicate: impl FnOnce(&<S as ProjectionShape>::Exprs<'scope>) -> Predicate<'scope>,
-    ) -> From<
-        'conn,
-        'scope,
-        Conn,
-        1,
-        (<S as ProjectionShape>::Exprs<'scope>,),
-        (RootSource<S>,),
-        <Filters as TupleAppend<Filter>>::Output,
-    >
-    where
-        Filters: TupleAppend<Filter>,
-    {
-        let predicate = predicate(&self.chain.exprs.0);
-        From {
-            chain: SourceChain {
-                connection: self.chain.connection,
-                depth: self.chain.depth,
-                exprs: self.chain.exprs,
-                sources: self.chain.sources,
-                filters: self
-                    .chain
-                    .filters
-                    .append(Filter::new(predicate.node().clone())),
-                _scope: PhantomData,
-            },
+        predicate: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> Predicate<'scope>,
+    ) -> Where<Self> {
+        let predicate = predicate(self.exprs().to_tuple());
+        Where {
+            base: self,
+            filter: Filter::new(predicate.node().clone()),
         }
     }
 
-    pub fn join<J>(
+    fn order_by(
+        self,
+        order: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> Order<'scope>,
+    ) -> OrderBy<Self> {
+        let order = order(self.exprs().to_tuple());
+        OrderBy {
+            base: self,
+            order: Sort::new(order.node().clone()),
+        }
+    }
+
+    fn limit(self, rows: usize) -> Limited<Self> {
+        Limited { base: self, rows }
+    }
+
+    fn offset(self, rows: usize) -> Offset<Self> {
+        Offset { base: self, rows }
+    }
+
+    fn join<S>(
         self,
         on: impl FnOnce(
-            &<S as ProjectionShape>::Exprs<'scope>,
-            &<J as ProjectionShape>::Exprs<'scope>,
-        ) -> Predicate<'scope>,
-    ) -> From<
-        'conn,
-        'scope,
-        Conn,
-        2,
-        (
+            <Self::Exprs as ToTuple>::Tuple,
             <S as ProjectionShape>::Exprs<'scope>,
-            <J as ProjectionShape>::Exprs<'scope>,
-        ),
-        (RootSource<S>, InnerJoinSource<J>),
-        Filters,
-    >
+        ) -> Predicate<'scope>,
+    ) -> Join<Self, <S as ProjectionShape>::Exprs<'scope>, InnerJoinSource<S>>
     where
-        J: TableProjection,
+        S: TableProjection,
+        <S as ProjectionShape>::Exprs<'scope>: Clone,
     {
-        let alias = format!("q{}_1", self.chain.depth);
-        let right = J::exprs(&alias);
-        let join_on = on(&self.chain.exprs.0, &right);
-        From {
-            chain: SourceChain {
-                connection: self.chain.connection,
-                depth: self.chain.depth,
-                exprs: self.chain.exprs.push(right),
-                sources: self
-                    .chain
-                    .sources
-                    .push(InnerJoinSource::new(alias, join_on.node().clone())),
-                filters: self.chain.filters,
-                _scope: PhantomData,
-            },
+        let alias = format!("q{}_{}", self.depth(), Self::Exprs::LEN);
+        let right = S::exprs(&alias);
+        let join_on = on(self.exprs().to_tuple(), right.clone());
+        Join {
+            base: self,
+            expr: right,
+            source: InnerJoinSource::new(alias, join_on.node().clone()),
         }
     }
 
-    pub fn select<P>(
-        self,
-        projection: impl FnOnce(<S as ProjectionShape>::Exprs<'scope>) -> P,
-    ) -> Conn::Select<'conn, <P as ReturningProjection<'scope>>::Shape>
-    where
-        P: ReturningProjection<'scope> + Projectable,
-        <P as Projectable>::Columns: IrList<SelectColumn>,
-        <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
-        <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
-    {
-        let projection = projection(self.chain.exprs.0.clone());
-        <<Conn as QueryBuilder>::Select<
-            'conn,
-            <P as ReturningProjection<'scope>>::Shape,
-        > as SelectQuery<'conn>>::build(
-            self.chain.connection,
-            Select::new(
-                projection.project().into_vec(),
-                self.chain.sources.into_sources(),
-            )
-            .with_filters(self.chain.filters.into_vec()),
-        )
-    }
-}
-
-impl<'conn, 'scope, Conn, S, J, Filters>
-    From<
-        'conn,
-        'scope,
-        Conn,
-        2,
-        (
-            <S as ProjectionShape>::Exprs<'scope>,
-            <J as ProjectionShape>::Exprs<'scope>,
-        ),
-        (RootSource<S>, InnerJoinSource<J>),
-        Filters,
-    >
-where
-    Conn: QueryBuilder + 'conn,
-    S: TableProjection,
-    J: TableProjection,
-    Filters: IrList<Filter>,
-    <S as ProjectionShape>::Exprs<'scope>: Clone,
-    <J as ProjectionShape>::Exprs<'scope>: Clone,
-{
-    pub fn where_(
-        self,
-        predicate: impl FnOnce(
-            &<S as ProjectionShape>::Exprs<'scope>,
-            &<J as ProjectionShape>::Exprs<'scope>,
-        ) -> Predicate<'scope>,
-    ) -> From<
-        'conn,
-        'scope,
-        Conn,
-        2,
-        (
-            <S as ProjectionShape>::Exprs<'scope>,
-            <J as ProjectionShape>::Exprs<'scope>,
-        ),
-        (RootSource<S>, InnerJoinSource<J>),
-        <Filters as TupleAppend<Filter>>::Output,
-    >
-    where
-        Filters: TupleAppend<Filter>,
-    {
-        let predicate = predicate(&self.chain.exprs.0, &self.chain.exprs.1);
-        From {
-            chain: SourceChain {
-                connection: self.chain.connection,
-                depth: self.chain.depth,
-                exprs: self.chain.exprs,
-                sources: self.chain.sources,
-                filters: self
-                    .chain
-                    .filters
-                    .append(Filter::new(predicate.node().clone())),
-                _scope: PhantomData,
-            },
-        }
-    }
-
-    pub fn join<K>(
+    fn left_join<S>(
         self,
         on: impl FnOnce(
-            &<S as ProjectionShape>::Exprs<'scope>,
-            &<J as ProjectionShape>::Exprs<'scope>,
-            &<K as ProjectionShape>::Exprs<'scope>,
-        ) -> Predicate<'scope>,
-    ) -> From<
-        'conn,
-        'scope,
-        Conn,
-        3,
-        (
+            <Self::Exprs as ToTuple>::Tuple,
             <S as ProjectionShape>::Exprs<'scope>,
-            <J as ProjectionShape>::Exprs<'scope>,
-            <K as ProjectionShape>::Exprs<'scope>,
-        ),
-        (RootSource<S>, InnerJoinSource<J>, InnerJoinSource<K>),
-        Filters,
-    >
+        ) -> Predicate<'scope>,
+    ) -> LeftJoin<Self, <Maybe<S> as ProjectionShape>::Exprs<'scope>, LeftJoinSource<S>>
     where
-        K: TableProjection,
+        S: TableProjection,
+        Maybe<S>: ProjectionShape,
     {
-        let alias = format!("q{}_2", self.chain.depth);
-        let right = K::exprs(&alias);
-        let join_on = on(&self.chain.exprs.0, &self.chain.exprs.1, &right);
-        From {
-            chain: SourceChain {
-                connection: self.chain.connection,
-                depth: self.chain.depth,
-                exprs: self.chain.exprs.push(right),
-                sources: self
-                    .chain
-                    .sources
-                    .push(InnerJoinSource::new(alias, join_on.node().clone())),
-                filters: self.chain.filters,
-                _scope: PhantomData,
-            },
+        let alias = format!("q{}_{}", self.depth(), Self::Exprs::LEN);
+        let joined = S::exprs(&alias);
+        let projection = Maybe::<S>::exprs(&alias);
+        let join_on = on(self.exprs().to_tuple(), joined);
+        LeftJoin {
+            base: self,
+            expr: projection,
+            source: LeftJoinSource::new(alias, join_on.node().clone()),
         }
     }
 
-    pub fn select<P>(
+    fn select<P>(
         self,
-        projection: impl FnOnce(
-            <S as ProjectionShape>::Exprs<'scope>,
-            <J as ProjectionShape>::Exprs<'scope>,
-        ) -> P,
+        projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
     ) -> Conn::Select<'conn, <P as ReturningProjection<'scope>>::Shape>
     where
         P: ReturningProjection<'scope> + Projectable,
@@ -830,119 +1004,27 @@ where
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
         <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
     {
-        let projection = projection(self.chain.exprs.0.clone(), self.chain.exprs.1.clone());
+        let parts = self.into_parts();
+        let projection = projection(parts.exprs.to_tuple());
         <<Conn as QueryBuilder>::Select<
             'conn,
             <P as ReturningProjection<'scope>>::Shape,
         > as SelectQuery<'conn>>::build(
-            self.chain.connection,
-            Select::new(
-                projection.project().into_vec(),
-                self.chain.sources.into_sources(),
-            )
-            .with_filters(self.chain.filters.into_vec()),
+            parts.connection,
+            Select::new(projection.project().into_vec(), parts.sources.into_sources())
+                .with_filters(parts.filters)
+                .with_orders(parts.orders)
+                .with_limit(parts.limit)
+                .with_offset(parts.offset),
         )
     }
 }
 
-impl<'conn, 'scope, Conn, S, J0, J1, Filters>
-    From<
-        'conn,
-        'scope,
-        Conn,
-        3,
-        (
-            <S as ProjectionShape>::Exprs<'scope>,
-            <J0 as ProjectionShape>::Exprs<'scope>,
-            <J1 as ProjectionShape>::Exprs<'scope>,
-        ),
-        (RootSource<S>, InnerJoinSource<J0>, InnerJoinSource<J1>),
-        Filters,
-    >
+impl<'conn, 'scope, Conn, Query> SourceQuery<'conn, 'scope, Conn> for Query
 where
     Conn: QueryBuilder + 'conn,
-    S: TableProjection,
-    J0: TableProjection,
-    J1: TableProjection,
-    Filters: IrList<Filter>,
-    <S as ProjectionShape>::Exprs<'scope>: Clone,
-    <J0 as ProjectionShape>::Exprs<'scope>: Clone,
-    <J1 as ProjectionShape>::Exprs<'scope>: Clone,
+    Query: SelectAst<'conn, 'scope, Conn>,
 {
-    pub fn where_(
-        self,
-        predicate: impl FnOnce(
-            &<S as ProjectionShape>::Exprs<'scope>,
-            &<J0 as ProjectionShape>::Exprs<'scope>,
-            &<J1 as ProjectionShape>::Exprs<'scope>,
-        ) -> Predicate<'scope>,
-    ) -> From<
-        'conn,
-        'scope,
-        Conn,
-        3,
-        (
-            <S as ProjectionShape>::Exprs<'scope>,
-            <J0 as ProjectionShape>::Exprs<'scope>,
-            <J1 as ProjectionShape>::Exprs<'scope>,
-        ),
-        (RootSource<S>, InnerJoinSource<J0>, InnerJoinSource<J1>),
-        <Filters as TupleAppend<Filter>>::Output,
-    >
-    where
-        Filters: TupleAppend<Filter>,
-    {
-        let predicate = predicate(
-            &self.chain.exprs.0,
-            &self.chain.exprs.1,
-            &self.chain.exprs.2,
-        );
-        From {
-            chain: SourceChain {
-                connection: self.chain.connection,
-                depth: self.chain.depth,
-                exprs: self.chain.exprs,
-                sources: self.chain.sources,
-                filters: self
-                    .chain
-                    .filters
-                    .append(Filter::new(predicate.node().clone())),
-                _scope: PhantomData,
-            },
-        }
-    }
-
-    pub fn select<P>(
-        self,
-        projection: impl FnOnce(
-            <S as ProjectionShape>::Exprs<'scope>,
-            <J0 as ProjectionShape>::Exprs<'scope>,
-            <J1 as ProjectionShape>::Exprs<'scope>,
-        ) -> P,
-    ) -> Conn::Select<'conn, <P as ReturningProjection<'scope>>::Shape>
-    where
-        P: ReturningProjection<'scope> + Projectable,
-        <P as Projectable>::Columns: IrList<SelectColumn>,
-        <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
-        <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
-    {
-        let projection = projection(
-            self.chain.exprs.0.clone(),
-            self.chain.exprs.1.clone(),
-            self.chain.exprs.2.clone(),
-        );
-        <<Conn as QueryBuilder>::Select<
-            'conn,
-            <P as ReturningProjection<'scope>>::Shape,
-        > as SelectQuery<'conn>>::build(
-            self.chain.connection,
-            Select::new(
-                projection.project().into_vec(),
-                self.chain.sources.into_sources(),
-            )
-            .with_filters(self.chain.filters.into_vec()),
-        )
-    }
 }
 
 /// Marker for mutation builders that still need a filter or explicit all-rows intent.
@@ -1258,7 +1340,13 @@ where
 /// Construct the initial consuming source-first select builder.
 pub fn build_from_builder<'conn, Conn, S>(
     connection: &'conn Conn,
-) -> From<'conn, 'conn, Conn, 1, (<S as ProjectionShape>::Exprs<'conn>,), (RootSource<S>,), ()>
+) -> From<
+    'conn,
+    'conn,
+    Conn,
+    HCons<<S as ProjectionShape>::Exprs<'conn>, HNil>,
+    HCons<RootSource<S>, HNil>,
+>
 where
     Conn: QueryBuilder + 'conn,
     S: TableProjection,
