@@ -73,6 +73,36 @@ where
     }
 }
 
+impl TestConnection {
+    pub(crate) fn fetch_select<Row>(&self, _select: &Select) -> EmptyRows<Row> {
+        empty_rows()
+    }
+
+    pub(crate) fn execute_insert(&self, _insert: &Insert) -> Ready<Result<u64, TestError>> {
+        ok(0)
+    }
+
+    pub(crate) fn fetch_insert<Row>(&self, _insert: &Insert) -> EmptyRows<Row> {
+        empty_rows()
+    }
+
+    pub(crate) fn execute_delete(&self, _delete: &Delete) -> Ready<Result<u64, TestError>> {
+        ok(0)
+    }
+
+    pub(crate) fn fetch_delete<Row>(&self, _delete: &Delete) -> EmptyRows<Row> {
+        empty_rows()
+    }
+
+    pub(crate) fn execute_update(&self, _update: &Update) -> Ready<Result<u64, TestError>> {
+        ok(0)
+    }
+
+    pub(crate) fn fetch_update<Row>(&self, _update: &Update) -> EmptyRows<Row> {
+        empty_rows()
+    }
+}
+
 fn empty_rows<Row>() -> EmptyRows<Row> {
     EmptyRows::default()
 }
@@ -81,104 +111,104 @@ fn ok<T>(value: T) -> Ready<Result<T, TestError>> {
     ready(Ok(value))
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TestSelect<'conn, Shape>
 where
     Shape: ProjectionShape,
 {
+    connection: &'conn TestConnection,
     select: Select,
-    _connection: PhantomData<&'conn TestConnection>,
     _shape: PhantomData<Shape>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TestInsert<'conn, S, Shape = ()>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
 {
+    connection: &'conn TestConnection,
     insert: Insert,
-    _connection: PhantomData<&'conn TestConnection>,
     _table: PhantomData<S>,
     _shape: PhantomData<Shape>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TestDelete<'conn, S, Shape = ()>
 where
     S: TableProjection,
     Shape: ProjectionShape,
 {
+    connection: &'conn TestConnection,
     delete: Delete,
-    _connection: PhantomData<&'conn TestConnection>,
     _table: PhantomData<S>,
     _shape: PhantomData<Shape>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TestUpdate<'conn, S, Shape = ()>
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
 {
+    connection: &'conn TestConnection,
     update: Update,
-    _connection: PhantomData<&'conn TestConnection>,
     _table: PhantomData<S>,
     _shape: PhantomData<Shape>,
 }
 
-impl<Shape> TestSelect<'_, Shape>
+impl<'conn, Shape> TestSelect<'conn, Shape>
 where
     Shape: ProjectionShape,
 {
-    pub(crate) fn new(select: Select) -> Self {
+    pub(crate) fn new(connection: &'conn TestConnection, select: Select) -> Self {
         Self {
+            connection,
             select,
-            _connection: PhantomData,
             _shape: PhantomData,
         }
     }
 }
 
-impl<S, Shape> TestInsert<'_, S, Shape>
+impl<'conn, S, Shape> TestInsert<'conn, S, Shape>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
 {
-    pub(crate) fn new(insert: Insert) -> Self {
+    pub(crate) fn new(connection: &'conn TestConnection, insert: Insert) -> Self {
         Self {
+            connection,
             insert,
-            _connection: PhantomData,
             _table: PhantomData,
             _shape: PhantomData,
         }
     }
 }
 
-impl<S, Shape> TestDelete<'_, S, Shape>
+impl<'conn, S, Shape> TestDelete<'conn, S, Shape>
 where
     S: TableProjection,
     Shape: ProjectionShape,
 {
-    pub(crate) fn new(delete: Delete) -> Self {
+    pub(crate) fn new(connection: &'conn TestConnection, delete: Delete) -> Self {
         Self {
+            connection,
             delete,
-            _connection: PhantomData,
             _table: PhantomData,
             _shape: PhantomData,
         }
     }
 }
 
-impl<S, Shape> TestUpdate<'_, S, Shape>
+impl<'conn, S, Shape> TestUpdate<'conn, S, Shape>
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
 {
-    pub(crate) fn new(update: Update) -> Self {
+    pub(crate) fn new(connection: &'conn TestConnection, update: Update) -> Self {
         Self {
+            connection,
             update,
-            _connection: PhantomData,
             _table: PhantomData,
             _shape: PhantomData,
         }
@@ -204,7 +234,7 @@ where
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        empty_rows()
+        self.connection.fetch_select(&self.select)
     }
 }
 
@@ -232,11 +262,11 @@ where
         &self,
     ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        ok(0)
+        self.connection.execute_insert(&self.insert)
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        empty_rows()
+        self.connection.fetch_insert(&self.insert)
     }
 }
 
@@ -264,11 +294,11 @@ where
         &self,
     ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        ok(0)
+        self.connection.execute_delete(&self.delete)
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        empty_rows()
+        self.connection.fetch_delete(&self.delete)
     }
 }
 
@@ -296,11 +326,11 @@ where
         &self,
     ) -> impl Future<Output = Result<u64, <Self::Connection as Connection>::Error>> + Send + '_
     {
-        ok(0)
+        self.connection.execute_update(&self.update)
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        empty_rows()
+        self.connection.fetch_update(&self.update)
     }
 }
 

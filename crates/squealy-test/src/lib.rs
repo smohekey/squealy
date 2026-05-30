@@ -78,14 +78,14 @@ impl Connection for TestConnection {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>,
     {
-        TestSelect::new(build_select::<Self, Shape>(f))
+        TestSelect::new(self, build_select::<Self, Shape>(f))
     }
 
     fn insert_query<S>(&self, columns: Vec<squealy::InsertColumn>) -> Self::Insert<'_, S, ()>
     where
         S: InsertableTable,
     {
-        TestInsert::new(build_insert::<S>(columns))
+        TestInsert::new(self, build_insert::<S>(columns))
     }
 
     fn insert_returning_query<S, Shape>(
@@ -98,7 +98,7 @@ impl Connection for TestConnection {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>,
     {
-        TestInsert::new(build_insert_returning::<S>(columns, returning))
+        TestInsert::new(self, build_insert_returning::<S>(columns, returning))
     }
 
     fn update_query<S>(
@@ -110,7 +110,7 @@ impl Connection for TestConnection {
     where
         S: UpdateableTable,
     {
-        TestUpdate::new(build_update::<S>(alias, columns, filters))
+        TestUpdate::new(self, build_update::<S>(alias, columns, filters))
     }
 
     fn update_returning_query<S, Shape>(
@@ -125,9 +125,10 @@ impl Connection for TestConnection {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>,
     {
-        TestUpdate::new(build_update_returning::<S>(
-            alias, columns, filters, returning,
-        ))
+        TestUpdate::new(
+            self,
+            build_update_returning::<S>(alias, columns, filters, returning),
+        )
     }
 
     fn delete_query<S>(
@@ -138,7 +139,7 @@ impl Connection for TestConnection {
     where
         S: TableProjection,
     {
-        TestDelete::new(build_delete::<S>(alias, filters))
+        TestDelete::new(self, build_delete::<S>(alias, filters))
     }
 
     fn delete_returning_query<S, Shape>(
@@ -152,6 +153,6 @@ impl Connection for TestConnection {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>,
     {
-        TestDelete::new(build_delete_returning::<S>(alias, filters, returning))
+        TestDelete::new(self, build_delete_returning::<S>(alias, filters, returning))
     }
 }

@@ -81,14 +81,14 @@ impl Connection for PostgresConnection {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>,
     {
-        PostgresSelect::new(build_select::<Self, Shape>(f))
+        PostgresSelect::new(self, build_select::<Self, Shape>(f))
     }
 
     fn insert_query<S>(&self, columns: Vec<squealy::InsertColumn>) -> Self::Insert<'_, S, ()>
     where
         S: InsertableTable,
     {
-        PostgresInsert::new(build_insert::<S>(columns))
+        PostgresInsert::new(self, build_insert::<S>(columns))
     }
 
     fn insert_returning_query<S, Shape>(
@@ -101,7 +101,7 @@ impl Connection for PostgresConnection {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>,
     {
-        PostgresInsert::new(build_insert_returning::<S>(columns, returning))
+        PostgresInsert::new(self, build_insert_returning::<S>(columns, returning))
     }
 
     fn update_query<S>(
@@ -113,7 +113,7 @@ impl Connection for PostgresConnection {
     where
         S: UpdateableTable,
     {
-        PostgresUpdate::new(build_update::<S>(alias, columns, filters))
+        PostgresUpdate::new(self, build_update::<S>(alias, columns, filters))
     }
 
     fn update_returning_query<S, Shape>(
@@ -128,9 +128,10 @@ impl Connection for PostgresConnection {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>,
     {
-        PostgresUpdate::new(build_update_returning::<S>(
-            alias, columns, filters, returning,
-        ))
+        PostgresUpdate::new(
+            self,
+            build_update_returning::<S>(alias, columns, filters, returning),
+        )
     }
 
     fn delete_query<S>(
@@ -141,7 +142,7 @@ impl Connection for PostgresConnection {
     where
         S: TableProjection,
     {
-        PostgresDelete::new(build_delete::<S>(alias, filters))
+        PostgresDelete::new(self, build_delete::<S>(alias, filters))
     }
 
     fn delete_returning_query<S, Shape>(
@@ -155,6 +156,6 @@ impl Connection for PostgresConnection {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self>,
     {
-        PostgresDelete::new(build_delete_returning::<S>(alias, filters, returning))
+        PostgresDelete::new(self, build_delete_returning::<S>(alias, filters, returning))
     }
 }
