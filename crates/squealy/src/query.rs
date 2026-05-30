@@ -195,33 +195,8 @@ where
         }
     }
 
-    #[doc(hidden)]
-    pub fn into_columns(self) -> Vec<SelectColumn> {
+    fn into_columns(self) -> Vec<SelectColumn> {
         self.columns
-    }
-}
-
-/// Scoped helper for building mutation `RETURNING` projections.
-pub struct MutationReturningBuilder<'scope> {
-    _phantom: PhantomData<&'scope ()>,
-}
-
-impl<'scope> MutationReturningBuilder<'scope> {
-    #[doc(hidden)]
-    pub fn new() -> Self {
-        Self {
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn returning<P>(
-        &mut self,
-        projection: P,
-    ) -> Returning<<P as ReturningProjection<'scope>>::Shape>
-    where
-        P: ReturningProjection<'scope>,
-    {
-        Returning::new(projection.project())
     }
 }
 
@@ -451,24 +426,20 @@ where
         async move { DeleteQuery::execute(&query).await }
     }
 
-    pub fn returning<Shape>(
+    pub fn returning<P>(
         self,
-        projection: impl for<'scope> FnOnce(
-            &mut MutationReturningBuilder<'scope>,
-            <S as ProjectionShape>::Exprs<'scope>,
-        ) -> Returning<Shape>,
-    ) -> Conn::Delete<'conn, S, Shape>
+        projection: impl FnOnce(<S as ProjectionShape>::Exprs<'static>) -> P,
+    ) -> Conn::Delete<'conn, S, <P as ReturningProjection<'static>>::Shape>
     where
-        Shape: ProjectionShape,
+        P: ReturningProjection<'static>,
     {
         let table = S::exprs(&self.alias());
-        let mut q = MutationReturningBuilder::new();
-        let returning = projection(&mut q, table);
-        Connection::delete_returning_query::<S, Shape>(
+        let projection = projection(table);
+        Connection::delete_returning_query::<S, <P as ReturningProjection<'static>>::Shape>(
             self.connection,
             self.alias(),
             self.filters,
-            returning.into_columns(),
+            projection.project(),
         )
     }
 }
