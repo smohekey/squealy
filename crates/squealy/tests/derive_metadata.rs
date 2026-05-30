@@ -41,10 +41,10 @@ fn posts_of_user<'conn, 'scope, K>(
 where
     K: ExprKind<Value = i32>,
 {
-    connection.select::<Post>(|q| {
+    connection.select(|q| {
         let post = q.from::<Post>();
         q.where_(post.user_id.equals(user_id));
-        post
+        q.returning(post)
     })
 }
 
@@ -126,7 +126,10 @@ fn backend_creates_schema_sql() {
 
 #[test]
 fn from_selects_from_derived_table_metadata() {
-    let users = TestConnection.select::<User>(|q| q.from::<User>());
+    let users = TestConnection.select(|q| {
+        let user = q.from::<User>();
+        q.returning(user)
+    });
 
     assert_eq!(
         users.to_sql(),
@@ -153,6 +156,12 @@ where
 {
 }
 
+fn assert_optional_i32_row<'conn, Qry>(_: &'conn Qry)
+where
+    Qry: SelectQuery<'conn, Row = Option<i32>>,
+{
+}
+
 fn assert_user_id_and_post_row<'conn, Qry>(_: &'conn Qry)
 where
     Qry: SelectQuery<'conn, Row = (i32, Post<'static, ColumnValue>)>,
@@ -162,6 +171,18 @@ where
 fn assert_user_id_name_and_post_row<'conn, Qry>(_: &'conn Qry)
 where
     Qry: SelectQuery<'conn, Row = (i32, String, Post<'static, ColumnValue>)>,
+{
+}
+
+fn assert_user_and_maybe_post_row<'conn, Qry>(_: &'conn Qry)
+where
+    Qry: SelectQuery<
+            'conn,
+            Row = (
+                User<'static, ColumnValue>,
+                Post<'static, ColumnNullableValue>,
+            ),
+        >,
 {
 }
 
@@ -222,7 +243,10 @@ fn assert_copy<T: Copy>(_: T) {}
 
 #[test]
 fn from_select_carries_table_projection_shape() {
-    let users = TestConnection.select::<User>(|q| q.from::<User>());
+    let users = TestConnection.select(|q| {
+        let user = q.from::<User>();
+        q.returning(user)
+    });
 
     assert_table_select_shape::<_, User>(&users);
     assert_user_row(&users);
@@ -230,21 +254,21 @@ fn from_select_carries_table_projection_shape() {
 
 #[test]
 fn from_uses_generated_column_expression_kinds() {
-    let _users = TestConnection.select::<User>(|q| {
+    let _users = TestConnection.select(|q| {
         let user = q.from::<User>();
         assert_column_kind::<UserId>(user.id);
         assert_column_kind::<UserName>(user.name);
         assert_copy(user.id);
         assert_copy(user.name);
-        user
+        q.returning(user)
     });
 }
 
 #[test]
 fn select_can_project_a_generated_column_expression_kind() {
-    let user_ids = TestConnection.select::<UserId>(|q| {
+    let user_ids = TestConnection.select(|q| {
         let user = q.from::<User>();
-        user.id
+        q.returning(user.id)
     });
 
     assert_i32_row(&user_ids);
@@ -256,10 +280,10 @@ fn select_can_project_a_generated_column_expression_kind() {
 
 #[test]
 fn select_can_mix_column_and_table_projection_shapes() {
-    let user_ids_and_posts = TestConnection.select::<(UserId, Post)>(|q| {
+    let user_ids_and_posts = TestConnection.select(|q| {
         let user = q.from::<User>();
         let post = q.join::<Post>(|post| post.user_id.equals(user.id));
-        (user.id, post)
+        q.returning((user.id, post))
     });
 
     assert_user_id_and_post_row(&user_ids_and_posts);
@@ -271,10 +295,10 @@ fn select_can_mix_column_and_table_projection_shapes() {
 
 #[test]
 fn select_can_project_three_part_tuple_shapes() {
-    let user_ids_names_and_posts = TestConnection.select::<(UserId, UserName, Post)>(|q| {
+    let user_ids_names_and_posts = TestConnection.select(|q| {
         let user = q.from::<User>();
         let post = q.join::<Post>(|post| post.user_id.equals(user.id));
-        (user.id, user.name, post)
+        q.returning((user.id, user.name, post))
     });
 
     assert_user_id_name_and_post_row(&user_ids_names_and_posts);
@@ -286,16 +310,16 @@ fn select_can_project_three_part_tuple_shapes() {
 
 #[test]
 fn select_rebinds_three_part_tuple_subquery_shape() {
-    let rebound = TestConnection.select::<AddExpr<UserId, i32>>(|q| {
-        let tuple_select = TestConnection.select::<(UserId, UserName, Post)>(|q| {
+    let rebound = TestConnection.select(|q| {
+        let tuple_select = TestConnection.select(|q| {
             let user = q.from::<User>();
             let post = q.join::<Post>(|post| post.user_id.equals(user.id));
-            (user.id, user.name, post)
+            q.returning((user.id, user.name, post))
         });
         let tuple = q.q(&tuple_select);
 
         q.where_(tuple.0.equals(&tuple.2.user_id));
-        &tuple.0 + 0
+        q.returning(&tuple.0 + 0)
     });
 
     assert_i32_row(&rebound);
@@ -308,41 +332,11 @@ fn select_rebinds_three_part_tuple_subquery_shape() {
 
 #[test]
 fn select_can_project_thirty_two_part_tuple_shapes() {
-    let values = TestConnection.select::<ThirtyTwoI32s>(|_q| {
-        (
-            Expr::lit(0),
-            Expr::lit(1),
-            Expr::lit(2),
-            Expr::lit(3),
-            Expr::lit(4),
-            Expr::lit(5),
-            Expr::lit(6),
-            Expr::lit(7),
-            Expr::lit(8),
-            Expr::lit(9),
-            Expr::lit(10),
-            Expr::lit(11),
-            Expr::lit(12),
-            Expr::lit(13),
-            Expr::lit(14),
-            Expr::lit(15),
-            Expr::lit(16),
-            Expr::lit(17),
-            Expr::lit(18),
-            Expr::lit(19),
-            Expr::lit(20),
-            Expr::lit(21),
-            Expr::lit(22),
-            Expr::lit(23),
-            Expr::lit(24),
-            Expr::lit(25),
-            Expr::lit(26),
-            Expr::lit(27),
-            Expr::lit(28),
-            Expr::lit(29),
-            Expr::lit(30),
-            Expr::lit(31),
-        )
+    let values = TestConnection.select(|q| {
+        q.returning((
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31,
+        ))
     });
 
     assert_thirty_two_i32_row(&values);
@@ -358,13 +352,13 @@ fn select_can_project_thirty_two_part_tuple_shapes() {
 
 #[test]
 fn select_can_project_arithmetic_expression_shapes() {
-    let adjusted_ids = TestConnection.select::<AddExpr<UserId, i32>>(|q| {
+    let adjusted_ids = TestConnection.select(|q| {
         let user = q.from::<User>();
-        user.id + 1
+        q.returning(user.id + 1)
     });
-    let scaled_ids = TestConnection.select::<DivideExpr<MultiplyExpr<UserId, i32>, i32>>(|q| {
+    let scaled_ids = TestConnection.select(|q| {
         let user = q.from::<User>();
-        (user.id * 2) / 2
+        q.returning((user.id * 2) / 2)
     });
 
     assert_i32_row(&adjusted_ids);
@@ -386,7 +380,7 @@ fn select_can_project_arithmetic_expression_shapes() {
 
 #[test]
 fn select_can_project_primitive_literal_shapes() {
-    let values = TestConnection.select::<i32>(|_q| Expr::lit(1));
+    let values = TestConnection.select(|q| q.returning(1));
 
     assert_i32_row(&values);
     assert_eq!(values.to_sql(), r#"SELECT ? AS expr"#);
@@ -395,7 +389,10 @@ fn select_can_project_primitive_literal_shapes() {
 
 #[test]
 fn select_exposes_stream_and_convenience_fetch_methods() {
-    let users = TestConnection.select::<User>(|q| q.from::<User>());
+    let users = TestConnection.select(|q| {
+        let user = q.from::<User>();
+        q.returning(user)
+    });
 
     let _stream = users.fetch();
     let _all = users.fetch_all();
@@ -405,7 +402,10 @@ fn select_exposes_stream_and_convenience_fetch_methods() {
 
 #[test]
 fn select_can_use_scoped_table_sources_directly() {
-    let users = TestConnection.select::<User>(|q| q.from::<User>());
+    let users = TestConnection.select(|q| {
+        let user = q.from::<User>();
+        q.returning(user)
+    });
 
     assert_eq!(
         users.to_sql(),
@@ -415,11 +415,11 @@ fn select_can_use_scoped_table_sources_directly() {
 
 #[test]
 fn select_can_order_by_typed_expressions() {
-    let users = TestConnection.select::<User>(|q| {
+    let users = TestConnection.select(|q| {
         let user = q.from::<User>();
         q.order_by(user.name.desc());
         q.order_by(user.id.asc());
-        user
+        q.returning(user)
     });
 
     assert_eq!(
@@ -430,12 +430,12 @@ fn select_can_order_by_typed_expressions() {
 
 #[test]
 fn select_can_limit_and_offset_rows() {
-    let users = TestConnection.select::<User>(|q| {
+    let users = TestConnection.select(|q| {
         let user = q.from::<User>();
         q.order_by(user.id.asc());
         q.limit(10);
         q.offset(20);
-        user
+        q.returning(user)
     });
 
     assert_eq!(
@@ -446,10 +446,10 @@ fn select_can_limit_and_offset_rows() {
 
 #[test]
 fn select_can_inner_join_tables_with_typed_predicates() {
-    let users_and_posts = TestConnection.select::<(User, Post)>(|q| {
+    let users_and_posts = TestConnection.select(|q| {
         let user = q.from::<User>();
         let post = q.join::<Post>(|post| post.user_id.equals(user.id));
-        (user, post)
+        q.returning((user, post))
     });
 
     assert_eq!(
@@ -460,12 +460,15 @@ fn select_can_inner_join_tables_with_typed_predicates() {
 
 #[test]
 fn select_can_left_join_tables_with_typed_predicates() {
-    let users_and_posts = TestConnection.select::<(User, Post)>(|q| {
+    let users_and_posts = TestConnection.select(|q| {
         let user = q.from::<User>();
         let post = q.left_join::<Post>(|post| post.user_id.equals(user.id));
-        (user, post)
+        assert_column_kind::<Nullable<PostId>>(post.id);
+        assert_column_kind::<Nullable<PostUserId>>(post.user_id);
+        q.returning((user, post))
     });
 
+    assert_user_and_maybe_post_row(&users_and_posts);
     assert_eq!(
         users_and_posts.to_sql(),
         r#"SELECT q0_0.id AS t0_id, q0_0.name AS t0_name, q0_1.id AS t1_id, q0_1.user_id AS t1_user_id, q0_1.body AS t1_body FROM public.users AS q0_0 LEFT JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id)"#
@@ -473,8 +476,26 @@ fn select_can_left_join_tables_with_typed_predicates() {
 }
 
 #[test]
+fn left_join_projects_nullable_column_shapes() {
+    let post_ids = TestConnection.select(|q| {
+        let user = q.from::<User>();
+        let post = q.left_join::<Post>(|post| post.user_id.equals(user.id));
+        q.returning(post.id)
+    });
+
+    assert_optional_i32_row(&post_ids);
+    assert_eq!(
+        post_ids.to_sql(),
+        r#"SELECT q0_1.id AS id FROM public.users AS q0_0 LEFT JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id)"#
+    );
+}
+
+#[test]
 fn select_writes_sql_to_writer() {
-    let users = TestConnection.select::<User>(|q| q.from::<User>());
+    let users = TestConnection.select(|q| {
+        let user = q.from::<User>();
+        q.returning(user)
+    });
     let mut sql = Vec::new();
 
     users.write_sql(&mut sql).unwrap();
@@ -487,8 +508,11 @@ fn select_writes_sql_to_writer() {
 
 #[test]
 fn select_composes_subqueries_with_lateral_joins() {
-    let users_and_posts = TestConnection.select::<AddExpr<PostUserId, i32>>(|q| {
-        let users = TestConnection.select::<User>(|q| q.from::<User>());
+    let users_and_posts = TestConnection.select(|q| {
+        let users = TestConnection.select(|q| {
+            let user = q.from::<User>();
+            q.returning(user)
+        });
         let user = q.q(&users);
         let posts = posts_of_user(&TestConnection, &user.id);
         let post = q.q(&posts);
@@ -498,7 +522,7 @@ fn select_composes_subqueries_with_lateral_joins() {
                 .and(user.id.not_equals(42).not_())
                 .or(user.name.equals("Bob")),
         );
-        &post.user_id + 0
+        q.returning(&post.user_id + 0)
     });
 
     assert_eq!(
@@ -520,16 +544,16 @@ fn select_composes_subqueries_with_lateral_joins() {
 
 #[test]
 fn select_rebinds_tuple_subquery_shape_through_output_aliases() {
-    let users_and_posts = TestConnection.select::<AddExpr<UserId, i32>>(|q| {
-        let pair_select = TestConnection.select::<(User, Post)>(|q| {
+    let users_and_posts = TestConnection.select(|q| {
+        let pair_select = TestConnection.select(|q| {
             let user = q.from::<User>();
             let post = q.join::<Post>(|post| post.user_id.equals(user.id));
-            (user, post)
+            q.returning((user, post))
         });
         let pair = q.q(&pair_select);
 
         q.where_(pair.0.id.equals(&pair.1.user_id));
-        &pair.0.id + 0
+        q.returning(&pair.0.id + 0)
     });
 
     assert_eq!(
@@ -541,7 +565,7 @@ fn select_rebinds_tuple_subquery_shape_through_output_aliases() {
 
 #[test]
 fn select_accepts_primitive_literals_and_expression_operators() {
-    let users = TestConnection.select::<User>(|q| {
+    let users = TestConnection.select(|q| {
         let user = q.from::<User>();
         let adjusted_id = user.id + 1;
         let scaled_id = (user.id * 2) / 2;
@@ -553,7 +577,7 @@ fn select_accepts_primitive_literals_and_expression_operators() {
         q.where_((1 + user.id).less_than(100));
         q.where_(scaled_id.equals(user.id));
         q.where_((2 * user.id / 2).equals(user.id));
-        user
+        q.returning(user)
     });
 
     assert_eq!(
@@ -580,16 +604,16 @@ fn select_accepts_primitive_literals_and_expression_operators() {
 
 #[test]
 fn select_collects_source_and_filter_params_in_sql_order() {
-    let users_and_posts = TestConnection.select::<AddExpr<UserId, PostUserId>>(|q| {
-        let user_select = TestConnection.select::<User>(|q| {
+    let users_and_posts = TestConnection.select(|q| {
+        let user_select = TestConnection.select(|q| {
             let user = q.from::<User>();
             q.where_(user.id.greater_than(10));
-            user
+            q.returning(user)
         });
         let user = q.q(&user_select);
         let post = q.join::<Post>(|post| post.user_id.equals(7));
         q.where_(user.name.equals("Ada"));
-        &user.id + post.user_id
+        q.returning(&user.id + post.user_id)
     });
 
     assert_eq!(

@@ -111,6 +111,19 @@ impl_value_expr_kind!(u8, u16, u32, u64, u128, usize);
 impl_value_expr_kind!(f32, f64);
 impl_value_expr_kind!(String, bool);
 
+/// Type-level identity for a nullable SQL expression.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Nullable<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> ExprKind for Nullable<K>
+where
+    K: ExprKind,
+{
+    type Value = Option<K::Value>;
+}
+
 /// Type-level identity for SQL addition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AddExpr<L, R> {
@@ -1174,7 +1187,7 @@ impl<'scope> Clone for Order<'scope> {
 /// #         &self,
 /// #         f: impl for<'scope> FnOnce(
 /// #             &mut ::squealy::SelectBuilder<'_, 'scope, Self>,
-/// #         ) -> <Shape as ProjectionShape>::Exprs<'scope>,
+/// #         ) -> Selection<Shape>,
 /// #     ) -> Self::Select<'_, Shape>
 /// #     where
 /// #         Shape: ProjectionShape,
@@ -1188,10 +1201,10 @@ impl<'scope> Clone for Order<'scope> {
 /// # }
 ///
 /// let conn = DocConnection;
-/// let _ = conn.select::<User>(|q| {
+/// let _ = conn.select(|q| {
 ///     let user = q.from::<User>();
 ///     q.where_(user.id);
-///     user
+///     q.returning(user)
 /// });
 /// ```
 #[derive(Debug, PartialEq)]

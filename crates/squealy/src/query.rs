@@ -5,7 +5,10 @@ use std::marker::PhantomData;
 use futures_core::Stream;
 
 use crate::ir::{Filter, Select, Sort, Source};
-use crate::{Connection, Order, Predicate, Projectable, ProjectionShape, TableProjection};
+use crate::{
+    ColumnRef, Connection, Expr, ExprKind, IntoBindValue, Maybe, Order, Predicate, Projectable,
+    ProjectionShape, SelectColumn, TableProjection,
+};
 
 /// A backend-specific select query object backed by core-owned select IR.
 pub trait SelectQuery<'conn> {
@@ -36,6 +39,57 @@ pub trait SelectQuery<'conn> {
     ) -> impl Future<Output = Result<Option<Self::Row>, <Self::Connection as Connection>::Error>>
     + Send
     + '_;
+}
+
+/// A projection value that can identify the selected query shape it represents.
+pub trait SelectableProjection<'scope>: Projectable {
+    type Shape: ProjectionShape;
+}
+
+impl<'scope, K> SelectableProjection<'scope> for Expr<'scope, K>
+where
+    K: ExprKind + ProjectionShape,
+{
+    type Shape = K;
+}
+
+impl<'scope, K> SelectableProjection<'scope> for ColumnRef<'scope, K>
+where
+    K: ExprKind + ProjectionShape,
+{
+    type Shape = K;
+}
+
+impl<'scope, T> SelectableProjection<'scope> for T
+where
+    T: ExprKind + ProjectionShape + IntoBindValue + Clone,
+{
+    type Shape = T;
+}
+
+/// A selected projection carrying the inferred projection shape.
+pub struct Selection<Shape>
+where
+    Shape: ProjectionShape,
+{
+    columns: Vec<SelectColumn>,
+    _shape: PhantomData<Shape>,
+}
+
+impl<Shape> Selection<Shape>
+where
+    Shape: ProjectionShape,
+{
+    fn new(columns: Vec<SelectColumn>) -> Self {
+        Self {
+            columns,
+            _shape: PhantomData,
+        }
+    }
+
+    fn into_columns(self) -> Vec<SelectColumn> {
+        self.columns
+    }
 }
 
 /// Scoped select builder. Each `q` call adds a lateral-capable subquery.
@@ -99,19 +153,20 @@ where
     pub fn left_join<S>(
         &mut self,
         on: impl FnOnce(&<S as ProjectionShape>::Exprs<'scope>) -> Predicate<'scope>,
-    ) -> <S as ProjectionShape>::Exprs<'scope>
+    ) -> <Maybe<S> as ProjectionShape>::Exprs<'scope>
     where
         S: TableProjection,
+        Maybe<S>: ProjectionShape,
     {
         let alias = self.next_alias();
         let projection = S::exprs(&alias);
         let predicate = on(&projection);
         self.sources.push(Source::left_join(
-            alias,
+            alias.clone(),
             S::qualified_name(),
             predicate.node().clone(),
         ));
-        projection
+        Maybe::<S>::exprs(&alias)
     }
 
     /// Add a subquery as a lateral source and return its projected expression columns in this query scope.
@@ -137,6 +192,17 @@ where
         Qry: SelectQuery<'query, Connection = Conn>,
     {
         self.lateral(query)
+    }
+
+    /// Select the supplied projection value, allowing the query shape to be inferred.
+    pub fn returning<P>(
+        &mut self,
+        projection: P,
+    ) -> Selection<<P as SelectableProjection<'scope>>::Shape>
+    where
+        P: SelectableProjection<'scope>,
+    {
+        Selection::new(projection.project())
     }
 
     fn next_alias(&self) -> String {
@@ -168,7 +234,7 @@ thread_local! {
     static QUERY_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
-/// Build select IR from a scoped query builder closure.
+/// Build select IR from a scoped query builder closure returning a shape-carrying selection.
 ///
 /// Expressions created by the builder are scoped to that builder invocation and cannot be
 /// smuggled out as reusable values:
@@ -214,7 +280,7 @@ thread_local! {
 /// #         &self,
 /// #         f: impl for<'scope> FnOnce(
 /// #             &mut ::squealy::SelectBuilder<'_, 'scope, Self>,
-/// #         ) -> <Shape as ProjectionShape>::Exprs<'scope>,
+/// #         ) -> Selection<Shape>,
 /// #     ) -> Self::Select<'_, Shape>
 /// #     where
 /// #         Shape: ProjectionShape,
@@ -229,17 +295,15 @@ thread_local! {
 ///
 /// let conn = DocConnection;
 /// let mut leaked = None;
-/// let _ = conn.select::<User>(|q| {
+/// let _ = conn.select(|q| {
 ///     let user = q.from::<User>();
 ///     leaked = Some(user.clone());
-///     user
+///     q.returning(user)
 /// });
 /// let _ = leaked.unwrap();
 /// ```
 pub fn build_select<'conn, Conn, Shape>(
-    f: impl for<'scope> FnOnce(
-        &mut SelectBuilder<'conn, 'scope, Conn>,
-    ) -> <Shape as ProjectionShape>::Exprs<'scope>,
+    f: impl for<'scope> FnOnce(&mut SelectBuilder<'conn, 'scope, Conn>) -> Selection<Shape>,
 ) -> Select
 where
     Conn: Connection + 'conn,
@@ -254,12 +318,10 @@ where
 
         depth.set(current_depth);
 
-        let select = Select::new(output.project(), q.sources)
+        Select::new(output.into_columns(), q.sources)
             .with_filters(q.filters)
             .with_orders(q.orders)
             .with_limit(q.limit)
-            .with_offset(q.offset);
-
-        select
+            .with_offset(q.offset)
     })
 }

@@ -29,6 +29,14 @@ impl ColumnMode for ColumnValue {
     type Type<'scope, U> = U;
 }
 
+/// Table fields are nullable Rust values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ColumnNullableValue {}
+
+impl ColumnMode for ColumnNullableValue {
+    type Type<'scope, U> = Option<U>;
+}
+
 /// Database schema metadata for a single column.
 pub trait Column: Sync {
     fn name(&self) -> &'static str;

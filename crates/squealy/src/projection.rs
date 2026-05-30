@@ -1,9 +1,10 @@
 use std::borrow::Cow;
+use std::marker::PhantomData;
 
 use crate::ir::SelectColumn;
 use crate::{
-    AddExpr, ColumnRef, ColumnValue, DivideExpr, Expr, ExprKind, MultiplyExpr, SchemaTable,
-    SubtractExpr,
+    AddExpr, ColumnNullableValue, ColumnRef, ColumnValue, DivideExpr, Expr, ExprKind,
+    IntoBindValue, MultiplyExpr, Nullable, SchemaTable, SelectableProjection, SubtractExpr,
 };
 
 /// A projection shape that can produce scoped expression values for a SQL alias.
@@ -68,6 +69,24 @@ macro_rules! impl_binary_projection_shape {
 
 impl_binary_projection_shape!(AddExpr, SubtractExpr, MultiplyExpr, DivideExpr);
 
+impl<K> ProjectionShape for Nullable<K>
+where
+    K: ExprKind,
+    K::Value: Send,
+{
+    type Exprs<'scope> = ColumnRef<'scope, Nullable<K>>;
+    type ReboundExprs<'scope> = Expr<'scope, Nullable<K>>;
+    type Row = Option<K::Value>;
+
+    fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
+        ColumnRef::column(alias, "expr")
+    }
+
+    fn rebound_exprs<'scope>(alias: &str) -> Self::ReboundExprs<'scope> {
+        Expr::column(alias, "expr")
+    }
+}
+
 impl<S> ProjectionShape for S
 where
     S: SchemaTable,
@@ -85,6 +104,32 @@ where
 
     fn rebound_exprs<'scope>(alias: &str) -> Self::ReboundExprs<'scope> {
         S::column_exprs(alias).re_alias(alias)
+    }
+}
+
+/// A nullable projection shape, typically produced by a SQL `LEFT JOIN`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Maybe<S> {
+    _Marker(PhantomData<S>),
+}
+
+impl<S> ProjectionShape for Maybe<S>
+where
+    S: SchemaTable,
+    <S as SchemaTable>::WithColumn<'static, ColumnNullableValue>: Send,
+    for<'scope> <S as SchemaTable>::NullableExprs<'scope>: Projectable,
+{
+    type Exprs<'scope> = <S as SchemaTable>::NullableExprs<'scope>;
+    type ReboundExprs<'scope> =
+        <<S as SchemaTable>::NullableExprs<'static> as Projectable>::Rebound<'scope>;
+    type Row = <S as SchemaTable>::WithColumn<'static, ColumnNullableValue>;
+
+    fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
+        S::nullable_column_exprs(alias)
+    }
+
+    fn rebound_exprs<'scope>(alias: &str) -> Self::ReboundExprs<'scope> {
+        S::nullable_column_exprs(alias).re_alias(alias)
     }
 }
 
@@ -165,6 +210,21 @@ where
             &prefix_alias(prefix, self.project_alias()),
             self.project_alias().to_owned(),
         )
+    }
+}
+
+impl<T> Projectable for T
+where
+    T: ExprKind + IntoBindValue + Clone,
+{
+    type Rebound<'scope> = Expr<'scope, T>;
+
+    fn project(&self) -> Vec<SelectColumn> {
+        Expr::<T>::lit(self.clone()).project()
+    }
+
+    fn re_alias<'scope>(&self, alias: &str) -> Self::Rebound<'scope> {
+        Expr::column(alias, "expr")
     }
 }
 
