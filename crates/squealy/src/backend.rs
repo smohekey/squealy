@@ -2,9 +2,9 @@ use std::future::Future;
 use std::io::{self, Write};
 
 use crate::{
-    DeleteBuilder, DeleteQuery, Filter, InsertColumn, InsertQuery, InsertableTable,
-    ProjectionShape, Returning, SelectQuery, Table, TableProjection, UpdateColumn, UpdateQuery,
-    UpdateableTable, build_delete_builder,
+    DeleteBuilder, DeleteQuery, InsertQuery, InsertableTable, ProjectionShape, Returning,
+    SelectQuery, Table, TableProjection, UpdateQuery, UpdateableTable, build_delete_builder,
+    build_select,
 };
 
 /// Backend-specific row cursor used while decoding a projected row.
@@ -79,7 +79,10 @@ pub trait Connection: Sized {
     ) -> Self::Select<'_, Shape>
     where
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+    {
+        <Self::Select<'_, Shape> as SelectQuery<'_>>::build(self, build_select::<Self, Shape>(f))
+    }
 
     fn insert<S>(&self) -> S::InsertBuilder<'_, Self>
     where
@@ -88,20 +91,6 @@ pub trait Connection: Sized {
         S::insert_builder(self)
     }
 
-    fn insert_query<S>(&self, columns: Vec<InsertColumn>) -> Self::Insert<'_, S, ()>
-    where
-        S: InsertableTable;
-
-    fn insert_returning_query<S, Shape>(
-        &self,
-        columns: Vec<InsertColumn>,
-        returning: Vec<crate::SelectColumn>,
-    ) -> Self::Insert<'_, S, Shape>
-    where
-        S: InsertableTable,
-        Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
-
     fn update<S>(&self) -> S::UpdateBuilder<'_, Self>
     where
         S: UpdateableTable,
@@ -109,48 +98,12 @@ pub trait Connection: Sized {
         S::update_builder(self)
     }
 
-    fn update_query<S>(
-        &self,
-        alias: String,
-        columns: Vec<UpdateColumn>,
-        filters: Vec<Filter>,
-    ) -> Self::Update<'_, S, ()>
-    where
-        S: UpdateableTable;
-
-    fn update_returning_query<S, Shape>(
-        &self,
-        alias: String,
-        columns: Vec<UpdateColumn>,
-        filters: Vec<Filter>,
-        returning: Vec<crate::SelectColumn>,
-    ) -> Self::Update<'_, S, Shape>
-    where
-        S: UpdateableTable,
-        Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
-
     fn delete<'conn, S>(&'conn self) -> DeleteBuilder<'conn, 'static, Self, S>
     where
         S: TableProjection + 'conn,
     {
         build_delete_builder(self)
     }
-
-    fn delete_query<S>(&self, alias: String, filters: Vec<Filter>) -> Self::Delete<'_, S, ()>
-    where
-        S: TableProjection;
-
-    fn delete_returning_query<S, Shape>(
-        &self,
-        alias: String,
-        filters: Vec<Filter>,
-        returning: Vec<crate::SelectColumn>,
-    ) -> Self::Delete<'_, S, Shape>
-    where
-        S: TableProjection,
-        Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
 }
 
 /// A root backend connection that can run a closure inside a backend-managed transaction.

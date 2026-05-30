@@ -584,6 +584,10 @@ where
         &self.select
     }
 
+    fn build(connection: &'conn Self::Connection, select: Select) -> Self {
+        Self::new(connection, select)
+    }
+
     fn fetch(&self) -> Self::RowStream<'_> {
         PostgresRows::query(
             self.connection,
@@ -612,6 +616,10 @@ where
 
     fn ir(&self) -> &Insert {
         &self.insert
+    }
+
+    fn build(connection: &'conn Self::Connection, insert: Insert) -> Self {
+        Self::new(connection, insert)
     }
 
     fn execute(
@@ -656,6 +664,10 @@ where
         &self.delete
     }
 
+    fn build(connection: &'conn Self::Connection, delete: Delete) -> Self {
+        Self::new(connection, delete)
+    }
+
     fn execute(
         &self,
     ) -> impl Future<
@@ -696,6 +708,10 @@ where
 
     fn ir(&self) -> &Update {
         &self.update
+    }
+
+    fn build(connection: &'conn Self::Connection, update: Update) -> Self {
+        Self::new(connection, update)
     }
 
     fn execute(

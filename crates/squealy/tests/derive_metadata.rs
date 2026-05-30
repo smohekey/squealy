@@ -399,10 +399,13 @@ fn insert_builder_can_use_default_values() {
 
 #[test]
 fn insert_query_builds_column_bindings() {
-    let insert = TestConnection.insert_query::<User>(vec![InsertColumn::new(
-        "name",
-        BindValue::Text("Ada".to_owned()),
-    )]);
+    let insert = <<TestConnection as Connection>::Insert<'_, User, ()> as InsertQuery<'_>>::build(
+        &TestConnection,
+        build_insert::<User>(vec![InsertColumn::new(
+            "name",
+            BindValue::Text("Ada".to_owned()),
+        )]),
+    );
 
     let _execute = insert.execute();
     assert_eq!(
@@ -473,17 +476,20 @@ fn update_builder_skips_non_updateable_columns() {
 
 #[test]
 fn update_query_builds_column_bindings_and_filters() {
-    let update = TestConnection.update_query::<User>(
-        "q0_0".to_owned(),
-        vec![UpdateColumn::new("name", BindValue::Text("Ada".to_owned()))],
-        vec![Filter::new(PredicateNode::Compare {
-            left: ExprNode::Column {
-                alias: "q0_0".to_owned(),
-                column: "id".to_owned(),
-            },
-            op: CompareOp::Equals,
-            right: ExprNode::Literal(BindValue::Int(1)),
-        })],
+    let update = <<TestConnection as Connection>::Update<'_, User, ()> as UpdateQuery<'_>>::build(
+        &TestConnection,
+        build_update::<User>(
+            "q0_0",
+            vec![UpdateColumn::new("name", BindValue::Text("Ada".to_owned()))],
+            vec![Filter::new(PredicateNode::Compare {
+                left: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "id".to_owned(),
+                },
+                op: CompareOp::Equals,
+                right: ExprNode::Literal(BindValue::Int(1)),
+            })],
+        ),
     );
 
     let _execute = update.execute();
@@ -554,26 +560,29 @@ fn delete_builder_can_explicitly_target_all_rows() {
 
 #[test]
 fn delete_query_builds_typed_table_filters() {
-    let delete = TestConnection.delete_query::<User>(
-        "q0_0".to_owned(),
-        vec![
-            Filter::new(PredicateNode::Compare {
-                left: ExprNode::Column {
-                    alias: "q0_0".to_owned(),
-                    column: "id".to_owned(),
-                },
-                op: CompareOp::Equals,
-                right: ExprNode::Literal(BindValue::Int(1)),
-            }),
-            Filter::new(PredicateNode::Compare {
-                left: ExprNode::Column {
-                    alias: "q0_0".to_owned(),
-                    column: "name".to_owned(),
-                },
-                op: CompareOp::Equals,
-                right: ExprNode::Literal(BindValue::Text("Ada".to_owned())),
-            }),
-        ],
+    let delete = <<TestConnection as Connection>::Delete<'_, User, ()> as DeleteQuery<'_>>::build(
+        &TestConnection,
+        build_delete::<User>(
+            "q0_0",
+            vec![
+                Filter::new(PredicateNode::Compare {
+                    left: ExprNode::Column {
+                        alias: "q0_0".to_owned(),
+                        column: "id".to_owned(),
+                    },
+                    op: CompareOp::Equals,
+                    right: ExprNode::Literal(BindValue::Int(1)),
+                }),
+                Filter::new(PredicateNode::Compare {
+                    left: ExprNode::Column {
+                        alias: "q0_0".to_owned(),
+                        column: "name".to_owned(),
+                    },
+                    op: CompareOp::Equals,
+                    right: ExprNode::Literal(BindValue::Text("Ada".to_owned())),
+                }),
+            ],
+        ),
     );
 
     let _execute = delete.execute();

@@ -1,8 +1,6 @@
 use squealy::{
     Backend, Connection, ConnectionWithTransaction, Decode, InsertableTable, ProjectionShape,
-    Returning, SelectBuilder, Table, TableProjection, UpdateableTable, build_delete,
-    build_delete_returning, build_insert, build_insert_returning, build_select, build_update,
-    build_update_returning,
+    Table, TableProjection, UpdateableTable,
 };
 
 mod query;
@@ -72,92 +70,6 @@ impl Connection for TestConnection {
         S: TableProjection,
         Shape: ProjectionShape,
         Shape::Row: Decode<Self::Backend>;
-
-    fn select<Shape>(
-        &self,
-        f: impl for<'scope> FnOnce(&mut SelectBuilder<'_, 'scope, Self>) -> Returning<Shape>,
-    ) -> Self::Select<'_, Shape>
-    where
-        Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>,
-    {
-        TestSelect::new(self, build_select::<Self, Shape>(f))
-    }
-
-    fn insert_query<S>(&self, columns: Vec<squealy::InsertColumn>) -> Self::Insert<'_, S, ()>
-    where
-        S: InsertableTable,
-    {
-        TestInsert::new(self, build_insert::<S>(columns))
-    }
-
-    fn insert_returning_query<S, Shape>(
-        &self,
-        columns: Vec<squealy::InsertColumn>,
-        returning: Vec<squealy::SelectColumn>,
-    ) -> Self::Insert<'_, S, Shape>
-    where
-        S: InsertableTable,
-        Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>,
-    {
-        TestInsert::new(self, build_insert_returning::<S>(columns, returning))
-    }
-
-    fn update_query<S>(
-        &self,
-        alias: String,
-        columns: Vec<squealy::UpdateColumn>,
-        filters: Vec<squealy::Filter>,
-    ) -> Self::Update<'_, S, ()>
-    where
-        S: UpdateableTable,
-    {
-        TestUpdate::new(self, build_update::<S>(alias, columns, filters))
-    }
-
-    fn update_returning_query<S, Shape>(
-        &self,
-        alias: String,
-        columns: Vec<squealy::UpdateColumn>,
-        filters: Vec<squealy::Filter>,
-        returning: Vec<squealy::SelectColumn>,
-    ) -> Self::Update<'_, S, Shape>
-    where
-        S: UpdateableTable,
-        Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>,
-    {
-        TestUpdate::new(
-            self,
-            build_update_returning::<S>(alias, columns, filters, returning),
-        )
-    }
-
-    fn delete_query<S>(
-        &self,
-        alias: String,
-        filters: Vec<squealy::Filter>,
-    ) -> Self::Delete<'_, S, ()>
-    where
-        S: TableProjection,
-    {
-        TestDelete::new(self, build_delete::<S>(alias, filters))
-    }
-
-    fn delete_returning_query<S, Shape>(
-        &self,
-        alias: String,
-        filters: Vec<squealy::Filter>,
-        returning: Vec<squealy::SelectColumn>,
-    ) -> Self::Delete<'_, S, Shape>
-    where
-        S: TableProjection,
-        Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>,
-    {
-        TestDelete::new(self, build_delete_returning::<S>(alias, filters, returning))
-    }
 }
 
 impl ConnectionWithTransaction for TestConnection {
