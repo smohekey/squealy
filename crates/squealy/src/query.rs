@@ -7,11 +7,11 @@ use futures_core::Stream;
 use crate::ir::{Delete, Filter, Insert, InsertColumn, Select, Sort, Source, Update, UpdateColumn};
 use crate::{
     Backend, ColumnRef, Connection, Decode, Expr, ExprKind, InsertableTable, IntoBindValue, Maybe,
-    Order, Predicate, Projectable, ProjectionShape, SchemaTable, SelectColumn, TableProjection,
-    UpdateableTable,
+    Order, Predicate, Projectable, ProjectionShape, QueryBuilder, SchemaTable, SelectColumn,
+    TableProjection, UpdateableTable,
 };
 
-type ErrorOf<Conn> = <<Conn as Connection>::Backend as Backend>::Error;
+type ErrorOf<Builder> = <<Builder as QueryBuilder>::Backend as Backend>::Error;
 
 /// A row stream that can report affected rows after it is exhausted.
 pub trait RowsAffected {
@@ -19,336 +19,355 @@ pub trait RowsAffected {
 }
 
 /// A backend-specific select query object backed by core-owned select IR.
-pub trait SelectQuery<'conn> {
-    type Connection: Connection + 'conn;
+pub trait SelectQuery<'builder> {
+    type Builder: QueryBuilder + 'builder;
     type Shape: ProjectionShape;
-    type Row: Decode<<Self::Connection as Connection>::Backend> + Send;
-
-    type RowStream<'query>: Stream<Item = Result<Self::Row, ErrorOf<Self::Connection>>>
-        + Send
-        + 'query
-    where
-        Self: 'query;
+    type Row: Decode<<Self::Builder as QueryBuilder>::Backend> + Send;
 
     fn ir(&self) -> &Select;
 
-    fn build(connection: &'conn Self::Connection, select: Select) -> Self;
+    fn build(builder: &'builder Self::Builder, select: Select) -> Self;
+}
+
+/// A select query object that can fetch rows through an executable connection.
+pub trait ExecutableSelectQuery<'conn>: SelectQuery<'conn>
+where
+    Self::Builder: Connection,
+{
+    type RowStream<'query>: Stream<Item = Result<Self::Row, ErrorOf<Self::Builder>>> + Send + 'query
+    where
+        Self: 'query;
 
     fn fetch<'query>(&'query self) -> Self::RowStream<'query>;
 
     fn collect<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<Vec<Self::Row>, ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<Vec<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
         let rows = self.fetch();
-        collect_rows::<Self::Connection, Self::Row, _>(rows)
+        collect_rows::<Self::Builder, Self::Row, _>(rows)
     }
 
     fn fetch_one<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<Self::Row, ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<Self::Row, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
-        let row = fetch_optional_row::<Self::Connection, Self::Row, _>(self.fetch());
+        let row = fetch_optional_row::<Self::Builder, Self::Row, _>(self.fetch());
         async move {
             row.await?
-                .ok_or_else(<<Self::Connection as Connection>::Backend as Backend>::no_rows_error)
+                .ok_or_else(<<Self::Builder as QueryBuilder>::Backend as Backend>::no_rows_error)
         }
     }
 
     fn fetch_optional<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<Option<Self::Row>, ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<Option<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
         let rows = self.fetch();
-        fetch_optional_row::<Self::Connection, Self::Row, _>(rows)
+        fetch_optional_row::<Self::Builder, Self::Row, _>(rows)
     }
 }
 
 /// A backend-specific insert query object backed by core-owned insert IR.
-pub trait InsertQuery<'conn> {
-    type Connection: Connection + 'conn;
+pub trait InsertQuery<'builder> {
+    type Builder: QueryBuilder + 'builder;
     type Table: InsertableTable;
     type Shape: ProjectionShape;
-    type Row: Decode<<Self::Connection as Connection>::Backend> + Send;
+    type Row: Decode<<Self::Builder as QueryBuilder>::Backend> + Send;
 
-    type RowStream<'query>: Stream<Item = Result<Self::Row, ErrorOf<Self::Connection>>>
+    fn ir(&self) -> &Insert;
+
+    fn build(builder: &'builder Self::Builder, insert: Insert) -> Self;
+}
+
+/// An insert query object that can execute or fetch rows through a connection.
+pub trait ExecutableInsertQuery<'conn>: InsertQuery<'conn>
+where
+    Self::Builder: Connection,
+{
+    type RowStream<'query>: Stream<Item = Result<Self::Row, ErrorOf<Self::Builder>>>
         + Send
         + RowsAffected
         + 'query
     where
         Self: 'query;
 
-    fn ir(&self) -> &Insert;
-
-    fn build(connection: &'conn Self::Connection, insert: Insert) -> Self;
-
-    fn execute(&self) -> impl Future<Output = Result<u64, ErrorOf<Self::Connection>>> + Send + '_;
+    fn execute(&self) -> impl Future<Output = Result<u64, ErrorOf<Self::Builder>>> + Send + '_;
 
     fn fetch<'query>(&'query self) -> Self::RowStream<'query>;
 
     fn collect<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<Vec<Self::Row>, ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<Vec<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
         let rows = self.fetch();
-        collect_rows::<Self::Connection, Self::Row, _>(rows)
+        collect_rows::<Self::Builder, Self::Row, _>(rows)
     }
 
     fn collect_with_affected<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
         let rows = self.fetch();
-        collect_rows_with_affected::<Self::Connection, Self::Row, _>(rows)
+        collect_rows_with_affected::<Self::Builder, Self::Row, _>(rows)
     }
 
     fn fetch_one_with_affected<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<(Self::Row, u64), ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<(Self::Row, u64), ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
-        let row = fetch_optional_row_with_affected::<Self::Connection, Self::Row, _>(self.fetch());
+        let row = fetch_optional_row_with_affected::<Self::Builder, Self::Row, _>(self.fetch());
         async move {
             let (row, affected) = row.await?;
-            let row = row.ok_or_else(
-                <<Self::Connection as Connection>::Backend as Backend>::no_rows_error,
-            )?;
+            let row = row
+                .ok_or_else(<<Self::Builder as QueryBuilder>::Backend as Backend>::no_rows_error)?;
             Ok((row, affected))
         }
     }
 
     fn fetch_optional_with_affected<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<(Option<Self::Row>, u64), ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<(Option<Self::Row>, u64), ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
         let rows = self.fetch();
-        fetch_optional_row_with_affected::<Self::Connection, Self::Row, _>(rows)
+        fetch_optional_row_with_affected::<Self::Builder, Self::Row, _>(rows)
     }
 
     fn fetch_one<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<Self::Row, ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<Self::Row, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
-        let row = fetch_optional_row::<Self::Connection, Self::Row, _>(self.fetch());
+        let row = fetch_optional_row::<Self::Builder, Self::Row, _>(self.fetch());
         async move {
             row.await?
-                .ok_or_else(<<Self::Connection as Connection>::Backend as Backend>::no_rows_error)
+                .ok_or_else(<<Self::Builder as QueryBuilder>::Backend as Backend>::no_rows_error)
         }
     }
 
     fn fetch_optional<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<Option<Self::Row>, ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<Option<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
         let rows = self.fetch();
-        fetch_optional_row::<Self::Connection, Self::Row, _>(rows)
+        fetch_optional_row::<Self::Builder, Self::Row, _>(rows)
     }
 }
 
 /// A backend-specific update query object backed by core-owned update IR.
-pub trait UpdateQuery<'conn> {
-    type Connection: Connection + 'conn;
+pub trait UpdateQuery<'builder> {
+    type Builder: QueryBuilder + 'builder;
     type Table: UpdateableTable;
     type Shape: ProjectionShape;
-    type Row: Decode<<Self::Connection as Connection>::Backend> + Send;
+    type Row: Decode<<Self::Builder as QueryBuilder>::Backend> + Send;
 
-    type RowStream<'query>: Stream<Item = Result<Self::Row, ErrorOf<Self::Connection>>>
+    fn ir(&self) -> &Update;
+
+    fn build(builder: &'builder Self::Builder, update: Update) -> Self;
+}
+
+/// An update query object that can execute or fetch rows through a connection.
+pub trait ExecutableUpdateQuery<'conn>: UpdateQuery<'conn>
+where
+    Self::Builder: Connection,
+{
+    type RowStream<'query>: Stream<Item = Result<Self::Row, ErrorOf<Self::Builder>>>
         + Send
         + RowsAffected
         + 'query
     where
         Self: 'query;
 
-    fn ir(&self) -> &Update;
-
-    fn build(connection: &'conn Self::Connection, update: Update) -> Self;
-
-    fn execute(&self) -> impl Future<Output = Result<u64, ErrorOf<Self::Connection>>> + Send + '_;
+    fn execute(&self) -> impl Future<Output = Result<u64, ErrorOf<Self::Builder>>> + Send + '_;
 
     fn fetch<'query>(&'query self) -> Self::RowStream<'query>;
 
     fn collect<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<Vec<Self::Row>, ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<Vec<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
         let rows = self.fetch();
-        collect_rows::<Self::Connection, Self::Row, _>(rows)
+        collect_rows::<Self::Builder, Self::Row, _>(rows)
     }
 
     fn collect_with_affected<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
         let rows = self.fetch();
-        collect_rows_with_affected::<Self::Connection, Self::Row, _>(rows)
+        collect_rows_with_affected::<Self::Builder, Self::Row, _>(rows)
     }
 
     fn fetch_one_with_affected<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<(Self::Row, u64), ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<(Self::Row, u64), ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
-        let row = fetch_optional_row_with_affected::<Self::Connection, Self::Row, _>(self.fetch());
+        let row = fetch_optional_row_with_affected::<Self::Builder, Self::Row, _>(self.fetch());
         async move {
             let (row, affected) = row.await?;
-            let row = row.ok_or_else(
-                <<Self::Connection as Connection>::Backend as Backend>::no_rows_error,
-            )?;
+            let row = row
+                .ok_or_else(<<Self::Builder as QueryBuilder>::Backend as Backend>::no_rows_error)?;
             Ok((row, affected))
         }
     }
 
     fn fetch_optional_with_affected<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<(Option<Self::Row>, u64), ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<(Option<Self::Row>, u64), ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
         let rows = self.fetch();
-        fetch_optional_row_with_affected::<Self::Connection, Self::Row, _>(rows)
+        fetch_optional_row_with_affected::<Self::Builder, Self::Row, _>(rows)
     }
 
     fn fetch_one<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<Self::Row, ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<Self::Row, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
-        let row = fetch_optional_row::<Self::Connection, Self::Row, _>(self.fetch());
+        let row = fetch_optional_row::<Self::Builder, Self::Row, _>(self.fetch());
         async move {
             row.await?
-                .ok_or_else(<<Self::Connection as Connection>::Backend as Backend>::no_rows_error)
+                .ok_or_else(<<Self::Builder as QueryBuilder>::Backend as Backend>::no_rows_error)
         }
     }
 
     fn fetch_optional<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<Option<Self::Row>, ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<Option<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
         let rows = self.fetch();
-        fetch_optional_row::<Self::Connection, Self::Row, _>(rows)
+        fetch_optional_row::<Self::Builder, Self::Row, _>(rows)
     }
 }
 
 /// A backend-specific delete query object backed by core-owned delete IR.
-pub trait DeleteQuery<'conn> {
-    type Connection: Connection + 'conn;
+pub trait DeleteQuery<'builder> {
+    type Builder: QueryBuilder + 'builder;
     type Table: TableProjection;
     type Shape: ProjectionShape;
-    type Row: Decode<<Self::Connection as Connection>::Backend> + Send;
+    type Row: Decode<<Self::Builder as QueryBuilder>::Backend> + Send;
 
-    type RowStream<'query>: Stream<Item = Result<Self::Row, ErrorOf<Self::Connection>>>
+    fn ir(&self) -> &Delete;
+
+    fn build(builder: &'builder Self::Builder, delete: Delete) -> Self;
+}
+
+/// A delete query object that can execute or fetch rows through a connection.
+pub trait ExecutableDeleteQuery<'conn>: DeleteQuery<'conn>
+where
+    Self::Builder: Connection,
+{
+    type RowStream<'query>: Stream<Item = Result<Self::Row, ErrorOf<Self::Builder>>>
         + Send
         + RowsAffected
         + 'query
     where
         Self: 'query;
 
-    fn ir(&self) -> &Delete;
-
-    fn build(connection: &'conn Self::Connection, delete: Delete) -> Self;
-
-    fn execute(&self) -> impl Future<Output = Result<u64, ErrorOf<Self::Connection>>> + Send + '_;
+    fn execute(&self) -> impl Future<Output = Result<u64, ErrorOf<Self::Builder>>> + Send + '_;
 
     fn fetch<'query>(&'query self) -> Self::RowStream<'query>;
 
     fn collect<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<Vec<Self::Row>, ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<Vec<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
         let rows = self.fetch();
-        collect_rows::<Self::Connection, Self::Row, _>(rows)
+        collect_rows::<Self::Builder, Self::Row, _>(rows)
     }
 
     fn collect_with_affected<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
         let rows = self.fetch();
-        collect_rows_with_affected::<Self::Connection, Self::Row, _>(rows)
+        collect_rows_with_affected::<Self::Builder, Self::Row, _>(rows)
     }
 
     fn fetch_one_with_affected<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<(Self::Row, u64), ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<(Self::Row, u64), ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
-        let row = fetch_optional_row_with_affected::<Self::Connection, Self::Row, _>(self.fetch());
+        let row = fetch_optional_row_with_affected::<Self::Builder, Self::Row, _>(self.fetch());
         async move {
             let (row, affected) = row.await?;
-            let row = row.ok_or_else(
-                <<Self::Connection as Connection>::Backend as Backend>::no_rows_error,
-            )?;
+            let row = row
+                .ok_or_else(<<Self::Builder as QueryBuilder>::Backend as Backend>::no_rows_error)?;
             Ok((row, affected))
         }
     }
 
     fn fetch_optional_with_affected<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<(Option<Self::Row>, u64), ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<(Option<Self::Row>, u64), ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
         let rows = self.fetch();
-        fetch_optional_row_with_affected::<Self::Connection, Self::Row, _>(rows)
+        fetch_optional_row_with_affected::<Self::Builder, Self::Row, _>(rows)
     }
 
     fn fetch_one<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<Self::Row, ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<Self::Row, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
-        let row = fetch_optional_row::<Self::Connection, Self::Row, _>(self.fetch());
+        let row = fetch_optional_row::<Self::Builder, Self::Row, _>(self.fetch());
         async move {
             row.await?
-                .ok_or_else(<<Self::Connection as Connection>::Backend as Backend>::no_rows_error)
+                .ok_or_else(<<Self::Builder as QueryBuilder>::Backend as Backend>::no_rows_error)
         }
     }
 
     fn fetch_optional<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<Option<Self::Row>, ErrorOf<Self::Connection>>> + Send + 'query
+    ) -> impl Future<Output = Result<Option<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
     {
         let rows = self.fetch();
-        fetch_optional_row::<Self::Connection, Self::Row, _>(rows)
+        fetch_optional_row::<Self::Builder, Self::Row, _>(rows)
     }
 }
 
 async fn collect_rows<Conn, Row, Rows>(rows: Rows) -> Result<Vec<Row>, ErrorOf<Conn>>
 where
-    Conn: Connection,
+    Conn: QueryBuilder,
     Rows: Stream<Item = Result<Row, ErrorOf<Conn>>> + Send,
 {
     let mut rows = Box::pin(rows);
@@ -363,7 +382,7 @@ async fn collect_rows_with_affected<Conn, Row, Rows>(
     rows: Rows,
 ) -> Result<(Vec<Row>, u64), ErrorOf<Conn>>
 where
-    Conn: Connection,
+    Conn: QueryBuilder,
     Rows: Stream<Item = Result<Row, ErrorOf<Conn>>> + RowsAffected + Send,
 {
     let mut rows = Box::pin(rows);
@@ -379,7 +398,7 @@ async fn fetch_optional_row_with_affected<Conn, Row, Rows>(
     rows: Rows,
 ) -> Result<(Option<Row>, u64), ErrorOf<Conn>>
 where
-    Conn: Connection,
+    Conn: QueryBuilder,
     Rows: Stream<Item = Result<Row, ErrorOf<Conn>>> + RowsAffected + Send,
 {
     let mut rows = Box::pin(rows);
@@ -397,7 +416,7 @@ where
 
 async fn fetch_optional_row<Conn, Row, Rows>(rows: Rows) -> Result<Option<Row>, ErrorOf<Conn>>
 where
-    Conn: Connection,
+    Conn: QueryBuilder,
     Rows: Stream<Item = Result<Row, ErrorOf<Conn>>> + Send,
 {
     let mut rows = Box::pin(rows);
@@ -464,7 +483,7 @@ pub enum MutationUnfiltered {}
 pub enum MutationFiltered {}
 
 /// Scoped select builder. Each `q` call adds a lateral-capable subquery.
-pub struct SelectBuilder<'conn, 'scope, Conn: Connection> {
+pub struct SelectBuilder<'conn, 'scope, Conn: QueryBuilder> {
     depth: usize,
     sources: Vec<Source>,
     filters: Vec<Filter>,
@@ -478,7 +497,7 @@ pub struct SelectBuilder<'conn, 'scope, Conn: Connection> {
 pub struct DeleteBuilder<
     'conn,
     'scope,
-    Conn: Connection,
+    Conn: QueryBuilder,
     S: TableProjection,
     FilterState = MutationUnfiltered,
 > {
@@ -490,7 +509,7 @@ pub struct DeleteBuilder<
 
 impl<'conn, 'scope, Conn> SelectBuilder<'conn, 'scope, Conn>
 where
-    Conn: Connection + 'conn,
+    Conn: QueryBuilder + 'conn,
 {
     fn new(depth: usize) -> Self {
         Self {
@@ -560,7 +579,7 @@ where
         query: &Qry,
     ) -> <Qry::Shape as ProjectionShape>::ReboundExprs<'scope>
     where
-        Qry: SelectQuery<'query, Connection = Conn>,
+        Qry: SelectQuery<'query, Builder = Conn>,
     {
         let alias = self.next_alias();
         self.sources
@@ -574,7 +593,7 @@ where
         query: &Qry,
     ) -> <Qry::Shape as ProjectionShape>::ReboundExprs<'scope>
     where
-        Qry: SelectQuery<'query, Connection = Conn>,
+        Qry: SelectQuery<'query, Builder = Conn>,
     {
         self.lateral(query)
     }
@@ -617,7 +636,7 @@ where
 
 impl<'conn, 'scope, Conn, S, FilterState> DeleteBuilder<'conn, 'scope, Conn, S, FilterState>
 where
-    Conn: Connection + 'conn,
+    Conn: QueryBuilder + 'conn,
     S: TableProjection + 'conn,
 {
     pub(crate) fn new(connection: &'conn Conn, depth: usize) -> Self {
@@ -641,7 +660,7 @@ where
 
 impl<'conn, Conn, S, FilterState> DeleteBuilder<'conn, 'static, Conn, S, FilterState>
 where
-    Conn: Connection + 'conn,
+    Conn: QueryBuilder + 'conn,
     S: TableProjection + 'conn,
 {
     /// Add a SQL `WHERE` predicate to the delete currently being built.
@@ -675,15 +694,22 @@ impl<'conn, Conn, S> DeleteBuilder<'conn, 'static, Conn, S, MutationFiltered>
 where
     Conn: Connection + 'conn,
     S: TableProjection + 'conn,
+    <Conn as QueryBuilder>::Delete<'conn, S, ()>: ExecutableDeleteQuery<'conn>,
 {
     pub fn execute(self) -> impl Future<Output = Result<u64, ErrorOf<Conn>>> + 'conn {
-        let query = <<Conn as Connection>::Delete<'conn, S, ()> as DeleteQuery<'conn>>::build(
+        let query = <<Conn as QueryBuilder>::Delete<'conn, S, ()> as DeleteQuery<'conn>>::build(
             self.connection,
             build_delete::<S>(self.alias(), self.filters),
         );
-        async move { DeleteQuery::execute(&query).await }
+        async move { ExecutableDeleteQuery::execute(&query).await }
     }
+}
 
+impl<'conn, Conn, S> DeleteBuilder<'conn, 'static, Conn, S, MutationFiltered>
+where
+    Conn: QueryBuilder + 'conn,
+    S: TableProjection + 'conn,
+{
     pub fn returning<P>(
         self,
         projection: impl FnOnce(<S as ProjectionShape>::Exprs<'static>) -> P,
@@ -694,7 +720,7 @@ where
     {
         let table = S::exprs(&self.alias());
         let projection = projection(table);
-        <<Conn as Connection>::Delete<
+        <<Conn as QueryBuilder>::Delete<
             'conn,
             S,
             <P as ReturningProjection<'static>>::Shape,
@@ -736,7 +762,7 @@ pub fn build_select<'conn, Conn, Shape>(
     f: impl for<'scope> FnOnce(&mut SelectBuilder<'conn, 'scope, Conn>) -> Returning<Shape>,
 ) -> Select
 where
-    Conn: Connection + 'conn,
+    Conn: QueryBuilder + 'conn,
     Shape: ProjectionShape,
 {
     QUERY_DEPTH.with(|depth| {
@@ -828,7 +854,7 @@ pub fn build_delete_builder<'conn, Conn, S>(
     connection: &'conn Conn,
 ) -> DeleteBuilder<'conn, 'static, Conn, S>
 where
-    Conn: Connection + 'conn,
+    Conn: QueryBuilder + 'conn,
     S: TableProjection + 'conn,
 {
     QUERY_DEPTH.with(|depth| {

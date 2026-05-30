@@ -1,6 +1,6 @@
 use squealy::{
     Backend, Connection, ConnectionWithTransaction, Decode, InsertableTable, ProjectionShape,
-    Table, TableProjection, UpdateableTable,
+    QueryBuilder, Table, TableProjection, UpdateableTable,
 };
 
 mod query;
@@ -37,7 +37,7 @@ impl Backend for TestBackend {
     }
 }
 
-impl Connection for TestConnection {
+impl QueryBuilder for TestConnection {
     type Backend = TestBackend;
 
     type Select<'conn, Shape>
@@ -71,6 +71,8 @@ impl Connection for TestConnection {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self::Backend>;
 }
+
+impl Connection for TestConnection {}
 
 impl ConnectionWithTransaction for TestConnection {
     type Transaction<'conn>

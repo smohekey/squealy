@@ -8,9 +8,11 @@ use bytes::BytesMut;
 use futures_core::Stream;
 
 use squealy::{
-    Backend, BindValue, BindValueKind, Connection, Decode, Delete, DeleteQuery, FloatWidth, Insert,
-    InsertQuery, InsertableTable, IntWidth, ProjectionShape, RowsAffected, Select, SelectQuery,
-    TableProjection, UIntWidth, Update, UpdateQuery, UpdateableTable,
+    Backend, BindValue, BindValueKind, Connection, Decode, Delete, DeleteQuery,
+    ExecutableDeleteQuery, ExecutableInsertQuery, ExecutableSelectQuery, ExecutableUpdateQuery,
+    FloatWidth, Insert, InsertQuery, InsertableTable, IntWidth, ProjectionShape, QueryBuilder,
+    RowsAffected, Select, SelectQuery, TableProjection, UIntWidth, Update, UpdateQuery,
+    UpdateableTable,
 };
 use tokio_postgres::types::{FromSqlOwned, IsNull, ToSql, Type, to_sql_checked};
 
@@ -339,34 +341,6 @@ fn render_update(update: &Update) -> String {
     String::from_utf8(sql).unwrap()
 }
 
-impl PostgresExecutor for Postgres {
-    fn decode_row<Row>(row: &tokio_postgres::Row) -> Result<Row, PostgresError>
-    where
-        Row: Decode<Postgres>,
-    {
-        let mut row = PostgresRowReader::new(row);
-        Row::decode(&mut row)
-    }
-
-    fn query_raw<'query>(
-        &'query self,
-        _sql: String,
-        _params: Vec<BindValue>,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<tokio_postgres::RowStream, PostgresError>> + Send + 'query>,
-    > {
-        Box::pin(async { Err(PostgresError::NoDriver) })
-    }
-
-    fn execute_sql<'query>(
-        &'query self,
-        _sql: String,
-        _params: Vec<BindValue>,
-    ) -> Pin<Box<dyn Future<Output = Result<u64, PostgresError>> + Send + 'query>> {
-        Box::pin(async { Err(PostgresError::NoDriver) })
-    }
-}
-
 impl PostgresExecutor for PostgresConnection {
     fn decode_row<Row>(row: &tokio_postgres::Row) -> Result<Row, PostgresError>
     where
@@ -457,7 +431,7 @@ impl PostgresExecutor for PostgresTransaction<'_> {
 pub struct PostgresSelect<'conn, Shape, Conn = PostgresConnection>
 where
     Shape: ProjectionShape,
-    Conn: PostgresExecutor,
+    Conn: QueryBuilder<Backend = Postgres>,
 {
     connection: &'conn Conn,
     select: Select,
@@ -469,7 +443,7 @@ pub struct PostgresInsert<'conn, S, Shape = (), Conn = PostgresConnection>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
-    Conn: PostgresExecutor,
+    Conn: QueryBuilder<Backend = Postgres>,
 {
     connection: &'conn Conn,
     insert: Insert,
@@ -482,7 +456,7 @@ pub struct PostgresDelete<'conn, S, Shape = (), Conn = PostgresConnection>
 where
     S: TableProjection,
     Shape: ProjectionShape,
-    Conn: PostgresExecutor,
+    Conn: QueryBuilder<Backend = Postgres>,
 {
     connection: &'conn Conn,
     delete: Delete,
@@ -495,7 +469,7 @@ pub struct PostgresUpdate<'conn, S, Shape = (), Conn = PostgresConnection>
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
-    Conn: PostgresExecutor,
+    Conn: QueryBuilder<Backend = Postgres>,
 {
     connection: &'conn Conn,
     update: Update,
@@ -506,7 +480,7 @@ where
 impl<'conn, Shape, Conn> PostgresSelect<'conn, Shape, Conn>
 where
     Shape: ProjectionShape,
-    Conn: PostgresExecutor,
+    Conn: QueryBuilder<Backend = Postgres>,
 {
     pub(crate) fn new(connection: &'conn Conn, select: Select) -> Self {
         Self {
@@ -521,7 +495,7 @@ impl<'conn, S, Shape, Conn> PostgresInsert<'conn, S, Shape, Conn>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
-    Conn: PostgresExecutor,
+    Conn: QueryBuilder<Backend = Postgres>,
 {
     pub(crate) fn new(connection: &'conn Conn, insert: Insert) -> Self {
         Self {
@@ -537,7 +511,7 @@ impl<'conn, S, Shape, Conn> PostgresDelete<'conn, S, Shape, Conn>
 where
     S: TableProjection,
     Shape: ProjectionShape,
-    Conn: PostgresExecutor,
+    Conn: QueryBuilder<Backend = Postgres>,
 {
     pub(crate) fn new(connection: &'conn Conn, delete: Delete) -> Self {
         Self {
@@ -553,7 +527,7 @@ impl<'conn, S, Shape, Conn> PostgresUpdate<'conn, S, Shape, Conn>
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
-    Conn: PostgresExecutor,
+    Conn: QueryBuilder<Backend = Postgres>,
 {
     pub(crate) fn new(connection: &'conn Conn, update: Update) -> Self {
         Self {
@@ -568,25 +542,32 @@ where
 impl<'conn, Shape, Conn> SelectQuery<'conn> for PostgresSelect<'conn, Shape, Conn>
 where
     Shape: ProjectionShape,
-    Conn: PostgresExecutor + 'conn,
+    Conn: QueryBuilder<Backend = Postgres> + 'conn,
     Shape::Row: Decode<Postgres>,
 {
-    type Connection = Conn;
+    type Builder = Conn;
     type Shape = Shape;
     type Row = Shape::Row;
-
-    type RowStream<'query>
-        = PostgresRows<'query, Self::Row, Conn>
-    where
-        Self: 'query;
 
     fn ir(&self) -> &Select {
         &self.select
     }
 
-    fn build(connection: &'conn Self::Connection, select: Select) -> Self {
+    fn build(connection: &'conn Self::Builder, select: Select) -> Self {
         Self::new(connection, select)
     }
+}
+
+impl<'conn, Shape, Conn> ExecutableSelectQuery<'conn> for PostgresSelect<'conn, Shape, Conn>
+where
+    Shape: ProjectionShape,
+    Conn: PostgresExecutor + 'conn,
+    Shape::Row: Decode<Postgres>,
+{
+    type RowStream<'query>
+        = PostgresRows<'query, Self::Row, Conn>
+    where
+        Self: 'query;
 
     fn fetch(&self) -> Self::RowStream<'_> {
         PostgresRows::query(
@@ -601,31 +582,39 @@ impl<'conn, S, Shape, Conn> InsertQuery<'conn> for PostgresInsert<'conn, S, Shap
 where
     S: InsertableTable,
     Shape: ProjectionShape,
-    Conn: PostgresExecutor + 'conn,
+    Conn: QueryBuilder<Backend = Postgres> + 'conn,
     Shape::Row: Decode<Postgres>,
 {
-    type Connection = Conn;
+    type Builder = Conn;
     type Table = S;
     type Shape = Shape;
     type Row = Shape::Row;
-
-    type RowStream<'query>
-        = PostgresRows<'query, Self::Row, Conn>
-    where
-        Self: 'query;
 
     fn ir(&self) -> &Insert {
         &self.insert
     }
 
-    fn build(connection: &'conn Self::Connection, insert: Insert) -> Self {
+    fn build(connection: &'conn Self::Builder, insert: Insert) -> Self {
         Self::new(connection, insert)
     }
+}
+
+impl<'conn, S, Shape, Conn> ExecutableInsertQuery<'conn> for PostgresInsert<'conn, S, Shape, Conn>
+where
+    S: InsertableTable,
+    Shape: ProjectionShape,
+    Conn: PostgresExecutor + 'conn,
+    Shape::Row: Decode<Postgres>,
+{
+    type RowStream<'query>
+        = PostgresRows<'query, Self::Row, Conn>
+    where
+        Self: 'query;
 
     fn execute(
         &self,
     ) -> impl Future<
-        Output = Result<u64, <<Self::Connection as Connection>::Backend as Backend>::Error>,
+        Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>,
     > + Send
     + '_ {
         self.connection.execute_sql(
@@ -647,31 +636,39 @@ impl<'conn, S, Shape, Conn> DeleteQuery<'conn> for PostgresDelete<'conn, S, Shap
 where
     S: TableProjection,
     Shape: ProjectionShape,
-    Conn: PostgresExecutor + 'conn,
+    Conn: QueryBuilder<Backend = Postgres> + 'conn,
     Shape::Row: Decode<Postgres>,
 {
-    type Connection = Conn;
+    type Builder = Conn;
     type Table = S;
     type Shape = Shape;
     type Row = Shape::Row;
-
-    type RowStream<'query>
-        = PostgresRows<'query, Self::Row, Conn>
-    where
-        Self: 'query;
 
     fn ir(&self) -> &Delete {
         &self.delete
     }
 
-    fn build(connection: &'conn Self::Connection, delete: Delete) -> Self {
+    fn build(connection: &'conn Self::Builder, delete: Delete) -> Self {
         Self::new(connection, delete)
     }
+}
+
+impl<'conn, S, Shape, Conn> ExecutableDeleteQuery<'conn> for PostgresDelete<'conn, S, Shape, Conn>
+where
+    S: TableProjection,
+    Shape: ProjectionShape,
+    Conn: PostgresExecutor + 'conn,
+    Shape::Row: Decode<Postgres>,
+{
+    type RowStream<'query>
+        = PostgresRows<'query, Self::Row, Conn>
+    where
+        Self: 'query;
 
     fn execute(
         &self,
     ) -> impl Future<
-        Output = Result<u64, <<Self::Connection as Connection>::Backend as Backend>::Error>,
+        Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>,
     > + Send
     + '_ {
         self.connection.execute_sql(
@@ -693,31 +690,39 @@ impl<'conn, S, Shape, Conn> UpdateQuery<'conn> for PostgresUpdate<'conn, S, Shap
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
-    Conn: PostgresExecutor + 'conn,
+    Conn: QueryBuilder<Backend = Postgres> + 'conn,
     Shape::Row: Decode<Postgres>,
 {
-    type Connection = Conn;
+    type Builder = Conn;
     type Table = S;
     type Shape = Shape;
     type Row = Shape::Row;
-
-    type RowStream<'query>
-        = PostgresRows<'query, Self::Row, Conn>
-    where
-        Self: 'query;
 
     fn ir(&self) -> &Update {
         &self.update
     }
 
-    fn build(connection: &'conn Self::Connection, update: Update) -> Self {
+    fn build(connection: &'conn Self::Builder, update: Update) -> Self {
         Self::new(connection, update)
     }
+}
+
+impl<'conn, S, Shape, Conn> ExecutableUpdateQuery<'conn> for PostgresUpdate<'conn, S, Shape, Conn>
+where
+    S: UpdateableTable,
+    Shape: ProjectionShape,
+    Conn: PostgresExecutor + 'conn,
+    Shape::Row: Decode<Postgres>,
+{
+    type RowStream<'query>
+        = PostgresRows<'query, Self::Row, Conn>
+    where
+        Self: 'query;
 
     fn execute(
         &self,
     ) -> impl Future<
-        Output = Result<u64, <<Self::Connection as Connection>::Backend as Backend>::Error>,
+        Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>,
     > + Send
     + '_ {
         self.connection.execute_sql(
@@ -738,7 +743,7 @@ where
 impl<Shape, Conn> PostgresSelect<'_, Shape, Conn>
 where
     Shape: ProjectionShape,
-    Conn: PostgresExecutor,
+    Conn: QueryBuilder<Backend = Postgres>,
 {
     pub fn to_sql(&self) -> String {
         render_select(&self.select)
@@ -757,7 +762,7 @@ impl<S, Shape, Conn> PostgresInsert<'_, S, Shape, Conn>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
-    Conn: PostgresExecutor,
+    Conn: QueryBuilder<Backend = Postgres>,
 {
     pub fn to_sql(&self) -> String {
         render_insert(&self.insert)
@@ -776,7 +781,7 @@ impl<S, Shape, Conn> PostgresDelete<'_, S, Shape, Conn>
 where
     S: TableProjection,
     Shape: ProjectionShape,
-    Conn: PostgresExecutor,
+    Conn: QueryBuilder<Backend = Postgres>,
 {
     pub fn to_sql(&self) -> String {
         render_delete(&self.delete)
@@ -795,7 +800,7 @@ impl<S, Shape, Conn> PostgresUpdate<'_, S, Shape, Conn>
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
-    Conn: PostgresExecutor,
+    Conn: QueryBuilder<Backend = Postgres>,
 {
     pub fn to_sql(&self) -> String {
         render_update(&self.update)
@@ -813,14 +818,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use squealy::{ColumnExpr, ColumnMode, Table};
-
-    #[derive(Clone, Debug, PartialEq, Table)]
-    struct Widget<'scope, C: ColumnMode = ColumnExpr> {
-        #[column(primary_key, auto_increment, db_type = "integer")]
-        id: C::Type<'scope, i32>,
-        name: C::Type<'scope, String>,
-    }
 
     #[test]
     fn signed_widths_map_to_expected_param() {
@@ -938,25 +935,5 @@ mod tests {
         assert!(matches!(&params[0], PostgresParam::Text(value) if value == "Ada"));
         assert!(matches!(params[1], PostgresParam::Bool(true)));
         assert!(matches!(params[2], PostgresParam::Null(_)));
-    }
-
-    #[tokio::test]
-    async fn render_backend_select_fetch_yields_no_driver_error() {
-        let result = Postgres
-            .select(|q| {
-                let widget = q.from::<Widget>();
-                q.returning(widget)
-            })
-            .collect()
-            .await;
-
-        assert!(matches!(result, Err(PostgresError::NoDriver)));
-    }
-
-    #[tokio::test]
-    async fn render_backend_insert_execute_yields_no_driver_error() {
-        let result = Postgres.insert::<Widget>().name("Ada").execute().await;
-
-        assert!(matches!(result, Err(PostgresError::NoDriver)));
     }
 }

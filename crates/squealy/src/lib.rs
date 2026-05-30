@@ -19,7 +19,7 @@ pub use backend::{Backend, Decode, RowReader};
 pub use column::{
     Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullableValue, ColumnValue,
 };
-pub use connection::{Connection, ConnectionWithTransaction};
+pub use connection::{Connection, ConnectionWithTransaction, QueryBuilder};
 pub use database::Database;
 pub use expr::{
     AddExpr, ColumnRef, DivideExpr, Expr, ExprKind, IntoBindValue, IntoExpr, IntoNullableBindValue,
@@ -34,10 +34,11 @@ pub use ir::{
 };
 pub use projection::{Maybe, Projectable, ProjectionShape, TableProjection};
 pub use query::{
-    DeleteBuilder, DeleteQuery, InsertQuery, MutationFiltered, MutationUnfiltered, Returning,
-    ReturningProjection, RowsAffected, SelectBuilder, SelectQuery, UpdateQuery, build_delete,
-    build_delete_builder, build_delete_returning, build_insert, build_insert_returning,
-    build_select, build_update, build_update_returning,
+    DeleteBuilder, DeleteQuery, ExecutableDeleteQuery, ExecutableInsertQuery,
+    ExecutableSelectQuery, ExecutableUpdateQuery, InsertQuery, MutationFiltered,
+    MutationUnfiltered, Returning, ReturningProjection, RowsAffected, SelectBuilder, SelectQuery,
+    UpdateQuery, build_delete, build_delete_builder, build_delete_returning, build_insert,
+    build_insert_returning, build_select, build_update, build_update_returning,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{Database, Schema, Table};

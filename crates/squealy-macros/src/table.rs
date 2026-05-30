@@ -629,7 +629,7 @@ impl TableStruct {
                 quote::quote! {
                     impl<'conn, Conn, #(#impl_state_params),*> #builder_ident <'conn, Conn, #(#self_states),*>
                     where
-                        Conn: ::squealy::Connection + 'conn,
+                        Conn: ::squealy::QueryBuilder + 'conn,
                     {
                         pub fn #field_ident(
                             mut self,
@@ -662,7 +662,7 @@ impl TableStruct {
             )*
 
             #[derive(Clone, Debug, PartialEq)]
-            struct #builder_ident <'conn, Conn: ::squealy::Connection + 'conn, #(#state_defaults),*> {
+            struct #builder_ident <'conn, Conn: ::squealy::QueryBuilder + 'conn, #(#state_defaults),*> {
                 connection: &'conn Conn,
                 columns: ::std::vec::Vec<::squealy::InsertColumn>,
                 _state: ::std::marker::PhantomData<#state_tuple>,
@@ -670,7 +670,7 @@ impl TableStruct {
 
             impl<'conn, Conn> #builder_ident <'conn, Conn, #(#initial_states),*>
             where
-                Conn: ::squealy::Connection + 'conn,
+                Conn: ::squealy::QueryBuilder + 'conn,
             {
                 fn new(connection: &'conn Conn) -> Self {
                     Self {
@@ -685,16 +685,24 @@ impl TableStruct {
 
             impl<'conn, Conn, #(#execute_state_params),*> #builder_ident <'conn, Conn, #(#execute_states),*>
             where
-                Conn: ::squealy::Connection + 'conn,
+                Conn: ::squealy::QueryBuilder + 'conn,
             {
                 const ALIAS: &'static str = "q0_0";
 
                 pub fn execute(
                     self,
                 ) -> impl ::std::future::Future<
-                    Output = ::std::result::Result<u64, <<Conn as ::squealy::Connection>::Backend as ::squealy::Backend>::Error>,
-                > + 'conn {
-                    let query = <<Conn as ::squealy::Connection>::Insert<
+                    Output = ::std::result::Result<u64, <<Conn as ::squealy::QueryBuilder>::Backend as ::squealy::Backend>::Error>,
+                > + 'conn
+                where
+                    Conn: ::squealy::Connection,
+                    <Conn as ::squealy::QueryBuilder>::Insert<
+                        'conn,
+                        #table_ident <'static, ::squealy::ColumnExpr>,
+                        (),
+                    >: ::squealy::ExecutableInsertQuery<'conn>,
+                {
+                    let query = <<Conn as ::squealy::QueryBuilder>::Insert<
                         'conn,
                         #table_ident <'static, ::squealy::ColumnExpr>,
                         (),
@@ -705,7 +713,7 @@ impl TableStruct {
                         ),
                     );
                     async move {
-                        ::squealy::InsertQuery::execute(&query).await
+                        ::squealy::ExecutableInsertQuery::execute(&query).await
                     }
                 }
 
@@ -714,14 +722,14 @@ impl TableStruct {
                     projection: impl ::std::ops::FnOnce(
                         <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
                     ) -> P,
-                ) -> <Conn as ::squealy::Connection>::Insert<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>
+                ) -> <Conn as ::squealy::QueryBuilder>::Insert<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>
                 where
                     P: ::squealy::ReturningProjection<'static>,
-                    <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<<Conn as ::squealy::Connection>::Backend>,
+                    <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<<Conn as ::squealy::QueryBuilder>::Backend>,
                 {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                     let projection = projection(table);
-                    <<Conn as ::squealy::Connection>::Insert<
+                    <<Conn as ::squealy::QueryBuilder>::Insert<
                         'conn,
                         #table_ident <'static, ::squealy::ColumnExpr>,
                         <P as ::squealy::ReturningProjection<'static>>::Shape,
@@ -740,13 +748,13 @@ impl TableStruct {
             impl ::squealy::InsertableTable for #table_ident <'static, ::squealy::ColumnExpr> {
                 type InsertBuilder<'conn, Conn> = #builder_ident <'conn, Conn>
                 where
-                    Conn: ::squealy::Connection + 'conn;
+                    Conn: ::squealy::QueryBuilder + 'conn;
 
                 fn insert_builder<'conn, Conn>(
                     connection: &'conn Conn,
                 ) -> Self::InsertBuilder<'conn, Conn>
                 where
-                    Conn: ::squealy::Connection + 'conn,
+                    Conn: ::squealy::QueryBuilder + 'conn,
                 {
                     #builder_ident::new(connection)
                 }
@@ -826,15 +834,23 @@ impl TableStruct {
             quote::quote! {
                 impl<'conn, Conn, #(#state_idents),*> #builder_ident <'conn, Conn, ::squealy::MutationFiltered, #(#state_idents),*>
                 where
-                    Conn: ::squealy::Connection + 'conn,
+                    Conn: ::squealy::QueryBuilder + 'conn,
                     #state_tuple: #ready_ident,
                 {
                     pub fn execute(
                         self,
                     ) -> impl ::std::future::Future<
-                        Output = ::std::result::Result<u64, <<Conn as ::squealy::Connection>::Backend as ::squealy::Backend>::Error>,
-                    > + 'conn {
-                        let query = <<Conn as ::squealy::Connection>::Update<
+                        Output = ::std::result::Result<u64, <<Conn as ::squealy::QueryBuilder>::Backend as ::squealy::Backend>::Error>,
+                    > + 'conn
+                    where
+                        Conn: ::squealy::Connection,
+                        <Conn as ::squealy::QueryBuilder>::Update<
+                            'conn,
+                            #table_ident <'static, ::squealy::ColumnExpr>,
+                            (),
+                        >: ::squealy::ExecutableUpdateQuery<'conn>,
+                    {
+                        let query = <<Conn as ::squealy::QueryBuilder>::Update<
                             'conn,
                             #table_ident <'static, ::squealy::ColumnExpr>,
                             (),
@@ -847,7 +863,7 @@ impl TableStruct {
                             ),
                         );
                         async move {
-                            ::squealy::UpdateQuery::execute(&query).await
+                            ::squealy::ExecutableUpdateQuery::execute(&query).await
                         }
                     }
 
@@ -856,14 +872,14 @@ impl TableStruct {
                         projection: impl ::std::ops::FnOnce(
                             <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
                         ) -> P,
-                    ) -> <Conn as ::squealy::Connection>::Update<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>
+                    ) -> <Conn as ::squealy::QueryBuilder>::Update<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape>
                     where
                         P: ::squealy::ReturningProjection<'static>,
-                        <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<<Conn as ::squealy::Connection>::Backend>,
+                        <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<<Conn as ::squealy::QueryBuilder>::Backend>,
                     {
                         let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                         let projection = projection(table);
-                        <<Conn as ::squealy::Connection>::Update<
+                        <<Conn as ::squealy::QueryBuilder>::Update<
                             'conn,
                             #table_ident <'static, ::squealy::ColumnExpr>,
                             <P as ::squealy::ReturningProjection<'static>>::Shape,
@@ -931,7 +947,7 @@ impl TableStruct {
                 quote::quote! {
                     impl<'conn, Conn, FilterState, #(#impl_state_params),*> #builder_ident <'conn, Conn, FilterState, #(#self_states),*>
                     where
-                        Conn: ::squealy::Connection + 'conn,
+                        Conn: ::squealy::QueryBuilder + 'conn,
                     {
                         pub fn #field_ident(
                             mut self,
@@ -968,7 +984,7 @@ impl TableStruct {
             #(#ready_impls)*
 
             #[derive(Clone, Debug, PartialEq)]
-            struct #builder_ident <'conn, Conn: ::squealy::Connection + 'conn, FilterState = ::squealy::MutationUnfiltered, #(#state_defaults),*> {
+            struct #builder_ident <'conn, Conn: ::squealy::QueryBuilder + 'conn, FilterState = ::squealy::MutationUnfiltered, #(#state_defaults),*> {
                 connection: &'conn Conn,
                 columns: ::std::vec::Vec<::squealy::UpdateColumn>,
                 filters: ::std::vec::Vec<::squealy::Filter>,
@@ -977,7 +993,7 @@ impl TableStruct {
 
             impl<'conn, Conn> #builder_ident <'conn, Conn, ::squealy::MutationUnfiltered, #(#initial_states),*>
             where
-                Conn: ::squealy::Connection + 'conn,
+                Conn: ::squealy::QueryBuilder + 'conn,
             {
                 fn new(connection: &'conn Conn) -> Self {
                     Self {
@@ -991,7 +1007,7 @@ impl TableStruct {
 
             impl<'conn, Conn, FilterState, #(#state_idents),*> #builder_ident <'conn, Conn, FilterState, #(#state_idents),*>
             where
-                Conn: ::squealy::Connection + 'conn,
+                Conn: ::squealy::QueryBuilder + 'conn,
             {
                 const ALIAS: &'static str = "q0_0";
 
@@ -1031,13 +1047,13 @@ impl TableStruct {
             impl ::squealy::UpdateableTable for #table_ident <'static, ::squealy::ColumnExpr> {
                 type UpdateBuilder<'conn, Conn> = #builder_ident <'conn, Conn>
                 where
-                    Conn: ::squealy::Connection + 'conn;
+                    Conn: ::squealy::QueryBuilder + 'conn;
 
                 fn update_builder<'conn, Conn>(
                     connection: &'conn Conn,
                 ) -> Self::UpdateBuilder<'conn, Conn>
                 where
-                    Conn: ::squealy::Connection + 'conn,
+                    Conn: ::squealy::QueryBuilder + 'conn,
                 {
                     #builder_ident::new(connection)
                 }

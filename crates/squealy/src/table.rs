@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::{Column, ColumnMode, ColumnName, Connection, Index, Projectable, Schema};
+use crate::{Column, ColumnMode, ColumnName, Index, Projectable, QueryBuilder, Schema};
 
 /// Object-safe table metadata exposed through schema membership.
 pub trait Table {
@@ -96,20 +96,20 @@ pub trait SchemaTable: Table {
 pub trait InsertableTable: SchemaTable {
     type InsertBuilder<'conn, Conn>
     where
-        Conn: Connection + 'conn;
+        Conn: QueryBuilder + 'conn;
 
     fn insert_builder<'conn, Conn>(connection: &'conn Conn) -> Self::InsertBuilder<'conn, Conn>
     where
-        Conn: Connection + 'conn;
+        Conn: QueryBuilder + 'conn;
 }
 
 /// A table model that can generate a typed update builder.
 pub trait UpdateableTable: SchemaTable {
     type UpdateBuilder<'conn, Conn>
     where
-        Conn: Connection + 'conn;
+        Conn: QueryBuilder + 'conn;
 
     fn update_builder<'conn, Conn>(connection: &'conn Conn) -> Self::UpdateBuilder<'conn, Conn>
     where
-        Conn: Connection + 'conn;
+        Conn: QueryBuilder + 'conn;
 }

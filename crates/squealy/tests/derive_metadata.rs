@@ -399,7 +399,7 @@ fn insert_builder_can_use_default_values() {
 
 #[test]
 fn insert_query_builds_column_bindings() {
-    let insert = <<TestConnection as Connection>::Insert<'_, User, ()> as InsertQuery<'_>>::build(
+    let insert = <<TestConnection as QueryBuilder>::Insert<'_, User, ()> as InsertQuery<'_>>::build(
         &TestConnection,
         build_insert::<User>(vec![InsertColumn::new(
             "name",
@@ -476,7 +476,7 @@ fn update_builder_skips_non_updateable_columns() {
 
 #[test]
 fn update_query_builds_column_bindings_and_filters() {
-    let update = <<TestConnection as Connection>::Update<'_, User, ()> as UpdateQuery<'_>>::build(
+    let update = <<TestConnection as QueryBuilder>::Update<'_, User, ()> as UpdateQuery<'_>>::build(
         &TestConnection,
         build_update::<User>(
             "q0_0",
@@ -560,7 +560,7 @@ fn delete_builder_can_explicitly_target_all_rows() {
 
 #[test]
 fn delete_query_builds_typed_table_filters() {
-    let delete = <<TestConnection as Connection>::Delete<'_, User, ()> as DeleteQuery<'_>>::build(
+    let delete = <<TestConnection as QueryBuilder>::Delete<'_, User, ()> as DeleteQuery<'_>>::build(
         &TestConnection,
         build_delete::<User>(
             "q0_0",
