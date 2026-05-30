@@ -26,9 +26,9 @@ pub use expr::{
 pub use foreign_key::ForeignKey;
 pub use index::Index;
 pub use ir::{
-    ArithmeticOp, BindValue, CompareOp, Delete, ExprNode, Filter, Insert, InsertColumn,
-    OrderDirection, OrderNode, PredicateNode, Select, SelectColumn, Sort, Source, SourceKind,
-    SourceTarget, Update, UpdateColumn,
+    ArithmeticOp, BindValue, BindValueKind, CompareOp, Delete, ExprNode, Filter, FloatWidth,
+    Insert, InsertColumn, IntWidth, OrderDirection, OrderNode, PredicateNode, Select, SelectColumn,
+    Sort, Source, SourceKind, SourceTarget, UIntWidth, Update, UpdateColumn,
 };
 pub use projection::{Maybe, Projectable, ProjectionShape, TableProjection};
 pub use query::{

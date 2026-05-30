@@ -11,39 +11,32 @@ pub trait IntoBindValue {
     fn into_bind_value(self) -> BindValue;
 }
 
-macro_rules! impl_signed_bind_value {
-    ($($ty:ty),* $(,)?) => {
+macro_rules! impl_bind_value {
+    ($($ty:ty => $constructor:ident),* $(,)?) => {
         $(impl IntoBindValue for $ty {
             fn into_bind_value(self) -> BindValue {
-                BindValue::Int(self as i128)
+                BindValue::$constructor(self)
             }
         })*
     };
 }
 
-macro_rules! impl_unsigned_bind_value {
-    ($($ty:ty),* $(,)?) => {
-        $(impl IntoBindValue for $ty {
-            fn into_bind_value(self) -> BindValue {
-                BindValue::UInt(self as u128)
-            }
-        })*
-    };
+impl_bind_value! {
+    i8 => int8,
+    i16 => int16,
+    i32 => int32,
+    i64 => int64,
+    i128 => int128,
+    isize => isize,
+    u8 => uint8,
+    u16 => uint16,
+    u32 => uint32,
+    u64 => uint64,
+    u128 => uint128,
+    usize => usize,
+    f32 => float32,
+    f64 => float64,
 }
-
-macro_rules! impl_float_bind_value {
-    ($($ty:ty),* $(,)?) => {
-        $(impl IntoBindValue for $ty {
-            fn into_bind_value(self) -> BindValue {
-                BindValue::Float(self as f64)
-            }
-        })*
-    };
-}
-
-impl_signed_bind_value!(i8, i16, i32, i64, i128, isize);
-impl_unsigned_bind_value!(u8, u16, u32, u64, u128, usize);
-impl_float_bind_value!(f32, f64);
 
 impl IntoBindValue for String {
     fn into_bind_value(self) -> BindValue {
