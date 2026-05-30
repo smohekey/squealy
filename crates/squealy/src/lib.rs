@@ -10,6 +10,7 @@ mod expr;
 mod foreign_key;
 mod index;
 pub mod ir;
+mod list;
 mod projection;
 mod query;
 mod schema;
@@ -32,13 +33,15 @@ pub use ir::{
     Insert, InsertColumn, IntWidth, OrderDirection, OrderNode, PredicateNode, Select, SelectColumn,
     Sort, Source, SourceKind, SourceTarget, UIntWidth, Update, UpdateColumn,
 };
+pub use list::{IrList, TupleAppend, TupleConcat, TupleLen, TuplePush};
 pub use projection::{Maybe, Projectable, ProjectionShape, TableProjection};
 pub use query::{
     DeleteBuilder, DeleteQuery, ExecutableDeleteQuery, ExecutableInsertQuery,
-    ExecutableSelectQuery, ExecutableUpdateQuery, InsertQuery, MutationFiltered,
-    MutationUnfiltered, Returning, ReturningProjection, RowsAffected, SelectBuilder, SelectQuery,
-    UpdateQuery, build_delete, build_delete_builder, build_delete_returning, build_insert,
-    build_insert_returning, build_select, build_update, build_update_returning,
+    ExecutableSelectQuery, ExecutableUpdateQuery, From, InnerJoinSource, InsertQuery,
+    MutationFiltered, MutationUnfiltered, Returning, ReturningProjection, RootSource, RowsAffected,
+    SelectBuilder, SelectQuery, UpdateQuery, build_delete, build_delete_builder,
+    build_delete_returning, build_from_builder, build_insert, build_insert_returning, build_select,
+    build_update, build_update_returning,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{Database, Schema, Table};

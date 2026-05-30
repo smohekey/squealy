@@ -1,9 +1,9 @@
 use std::future::Future;
 
 use crate::{
-    Backend, Decode, DeleteBuilder, DeleteQuery, InsertQuery, InsertableTable, ProjectionShape,
-    Returning, SelectQuery, TableProjection, UpdateQuery, UpdateableTable, build_delete_builder,
-    build_select,
+    Backend, Decode, DeleteBuilder, DeleteQuery, From, InsertQuery, InsertableTable, IrList,
+    ProjectionShape, Returning, RootSource, SelectColumn, SelectQuery, TableProjection,
+    UpdateQuery, UpdateableTable, build_delete_builder, build_select,
 };
 
 /// A backend-specific handle that constructs query objects.
@@ -37,15 +37,30 @@ pub trait QueryBuilder: Sized {
         Shape: ProjectionShape,
         Shape::Row: Decode<Self::Backend>;
 
-    fn select<Shape>(
+    fn select<Shape, Columns>(
         &self,
-        f: impl for<'scope> FnOnce(&mut crate::SelectBuilder<'_, 'scope, Self>) -> Returning<Shape>,
+        f: impl for<'scope> FnOnce(
+            &mut crate::SelectBuilder<'_, 'scope, Self>,
+        ) -> Returning<Shape, Columns>,
     ) -> Self::Select<'_, Shape>
     where
         Shape: ProjectionShape,
         Shape::Row: Decode<Self::Backend>,
+        Columns: IrList<SelectColumn>,
     {
-        <Self::Select<'_, Shape> as SelectQuery<'_>>::build(self, build_select::<Self, Shape>(f))
+        <Self::Select<'_, Shape> as SelectQuery<'_>>::build(
+            self,
+            build_select::<Self, Shape, Columns>(f),
+        )
+    }
+
+    fn from<S>(
+        &self,
+    ) -> From<'_, '_, Self, 1, (<S as ProjectionShape>::Exprs<'_>,), (RootSource<S>,), ()>
+    where
+        S: TableProjection,
+    {
+        crate::build_from_builder(self)
     }
 
     fn insert<S>(&self) -> S::InsertBuilder<'_, Self>

@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use crate::ir::SelectColumn;
 use crate::{
     AddExpr, ColumnNullableValue, ColumnRef, ColumnValue, Decode, DivideExpr, Expr, ExprKind,
-    IntoBindValue, MultiplyExpr, Nullable, ReturningProjection, SchemaTable, SubtractExpr,
+    IntoBindValue, IrList, MultiplyExpr, Nullable, ReturningProjection, SchemaTable, SubtractExpr,
 };
 
 /// A projection shape that can produce scoped expression values for a SQL alias.
@@ -17,7 +17,9 @@ pub trait ProjectionShape {
 
     fn rebound_exprs<'scope>(alias: &str) -> Self::ReboundExprs<'scope>;
 
-    fn project_columns(exprs: &Self::Exprs<'_>) -> Vec<SelectColumn> {
+    fn project_columns<'scope>(
+        exprs: &Self::Exprs<'scope>,
+    ) -> <Self::Exprs<'scope> as Projectable>::Columns {
         exprs.project()
     }
 }
@@ -161,9 +163,10 @@ where
 
 /// A table-shaped value whose expression columns can be projected or rebound to a SQL alias.
 pub trait Projectable: Clone {
+    type Columns: IrList<SelectColumn>;
     type Rebound<'scope>: Projectable;
 
-    fn project(&self) -> Vec<SelectColumn>;
+    fn project(&self) -> Self::Columns;
 
     fn re_alias<'scope>(&self, alias: &str) -> Self::Rebound<'scope>;
 
@@ -173,11 +176,10 @@ pub trait Projectable: Clone {
 }
 
 impl Projectable for () {
+    type Columns = ();
     type Rebound<'scope> = ();
 
-    fn project(&self) -> Vec<SelectColumn> {
-        Vec::new()
-    }
+    fn project(&self) -> Self::Columns {}
 
     fn re_alias<'scope>(&self, _alias: &str) -> Self::Rebound<'scope> {}
 }
@@ -188,13 +190,14 @@ impl<'expr, K> Projectable for Expr<'expr, K>
 where
     K: ExprKind,
 {
+    type Columns = (SelectColumn,);
     type Rebound<'scope> = Expr<'scope, K>;
 
-    fn project(&self) -> Vec<SelectColumn> {
-        vec![SelectColumn::new(
+    fn project(&self) -> Self::Columns {
+        (SelectColumn::new(
             self.node().clone(),
             self.project_alias().to_owned(),
-        )]
+        ),)
     }
 
     fn re_alias<'scope>(&self, alias: &str) -> Self::Rebound<'scope> {
@@ -214,10 +217,11 @@ impl<'expr, K> Projectable for ColumnRef<'expr, K>
 where
     K: ExprKind,
 {
+    type Columns = (SelectColumn,);
     type Rebound<'scope> = Expr<'scope, K>;
 
-    fn project(&self) -> Vec<SelectColumn> {
-        vec![SelectColumn::new(self.node(), self.project_alias())]
+    fn project(&self) -> Self::Columns {
+        (SelectColumn::new(self.node(), self.project_alias()),)
     }
 
     fn re_alias<'scope>(&self, alias: &str) -> Self::Rebound<'scope> {
@@ -237,9 +241,10 @@ impl<T> Projectable for T
 where
     T: ExprKind + IntoBindValue + Clone,
 {
+    type Columns = (SelectColumn,);
     type Rebound<'scope> = Expr<'scope, T>;
 
-    fn project(&self) -> Vec<SelectColumn> {
+    fn project(&self) -> Self::Columns {
         Expr::<T>::lit(self.clone()).project()
     }
 

@@ -251,6 +251,12 @@ where
 {
 }
 
+fn assert_user_id_post_id_title_row<'conn, Qry>(_: &'conn Qry)
+where
+    Qry: SelectQuery<'conn, Row = (i32, i32, String)>,
+{
+}
+
 fn assert_user_and_maybe_post_row<'conn, Qry>(_: &'conn Qry)
 where
     Qry: SelectQuery<'conn, Row = (__SquealyUserRowShape, Post<'static, ColumnNullableValue>)>,
@@ -327,6 +333,37 @@ fn from_select_carries_table_projection_shape() {
 
     assert_table_select_shape::<_, __SquealyUserRowShape>(&users);
     assert_user_row(&users);
+}
+
+#[test]
+fn source_chain_selects_from_typed_root_and_join() {
+    let posts = TestConnection
+        .from::<User>()
+        .where_(|user| user.name.equals("John"))
+        .join::<Post>(|user, post| post.user_id.equals(user.id))
+        .select(|user, post| (user.id, post.id, post.body));
+
+    assert_user_id_post_id_title_row(&posts);
+    assert_eq!(
+        posts.to_sql(),
+        r#"SELECT q0_0.id AS t0_id, q0_1.id AS t1_id, q0_1.body AS t2_body FROM public.users AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id) WHERE (q0_0.name = ?)"#
+    );
+    assert_eq!(posts.params(), vec![BindValue::Text("John".to_owned())]);
+}
+
+#[test]
+fn source_chain_can_append_multiple_typed_joins() {
+    let rows = TestConnection
+        .from::<User>()
+        .join::<Post>(|user, post| post.user_id.equals(user.id))
+        .join::<ComputedRecord>(|_user, post, record| record.id.equals(post.id))
+        .select(|user, post, record| (user.id, post.id, record.title));
+
+    assert_user_id_post_id_title_row(&rows);
+    assert_eq!(
+        rows.to_sql(),
+        r#"SELECT q0_0.id AS t0_id, q0_1.id AS t1_id, q0_2.title AS t2_title FROM public.users AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id) INNER JOIN computed_records AS q0_2 ON (q0_2.id = q0_1.id)"#
+    );
 }
 
 #[test]
