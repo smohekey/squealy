@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 env:
@@ -38,6 +40,12 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all --check
+
+      - name: Install cargo-rdme
+        run: cargo install cargo-rdme --version 1.5.0 --locked
+
+      - name: Check README
+        run: cargo rdme --workspace-project squealy --readme-path README.md --check
 
       - name: Build
         run: cargo build --workspace --all-targets
