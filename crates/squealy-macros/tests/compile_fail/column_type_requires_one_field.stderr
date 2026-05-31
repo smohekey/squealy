@@ -1,0 +1,7 @@
+error: ColumnType requires exactly one field
+ --> tests/compile_fail/column_type_requires_one_field.rs:3:10
+  |
+3 | #[derive(ColumnType)]
+  |          ^^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `ColumnType` (in Nightly builds, run with -Z macro-backtrace for more info)

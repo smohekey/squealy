@@ -895,3 +895,35 @@ where
         .unwrap();
     writer.finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_column_types_map_to_test_backend_ddl_types() {
+        let cases = [
+            (ColumnType::Bool, "boolean"),
+            (ColumnType::I8, "smallint"),
+            (ColumnType::I16, "smallint"),
+            (ColumnType::I32, "integer"),
+            (ColumnType::I64, "bigint"),
+            (ColumnType::I128, "numeric"),
+            (ColumnType::Isize, "bigint"),
+            (ColumnType::U8, "smallint"),
+            (ColumnType::U16, "integer"),
+            (ColumnType::U32, "bigint"),
+            (ColumnType::U64, "numeric"),
+            (ColumnType::U128, "numeric"),
+            (ColumnType::Usize, "bigint"),
+            (ColumnType::F32, "real"),
+            (ColumnType::F64, "double precision"),
+            (ColumnType::String, "text"),
+            (ColumnType::Raw("jsonb"), "jsonb"),
+        ];
+
+        for (column_type, db_type) in cases {
+            assert_eq!(test_column_type(column_type), db_type);
+        }
+    }
+}
