@@ -1,0 +1,10 @@
+[package]
+name = "squealy-test"
+version = "0.1.0"
+edition = "2024"
+description = "Test backend for squealy"
+license = "MIT"
+
+[dependencies]
+futures-core = "0.3"
+squealy = { path = "../squealy" }

@@ -1,0 +1,14 @@
+[package]
+name = "squealy"
+version = "0.1.0"
+edition = "2024"
+description = "SQL ORM for Rust"
+license = "MIT"
+
+[dependencies]
+futures-core = "0.3"
+squealy-macros = { path = "../squealy-macros" }
+
+[dev-dependencies]
+squealy-test = { path = "../squealy-test" }
+trybuild = "1.0"
