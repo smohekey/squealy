@@ -2,7 +2,7 @@ use std::fmt;
 
 use squealy::{
     Backend, BindValue, Connection, ConnectionWithTransaction, Decode, InsertableTable,
-    ProjectionShape, QueryBuilder, Table, TableProjection, UpdateableTable,
+    Projectable, ProjectionShape, QueryBuilder, SelectAst, Table, TableProjection, UpdateableTable,
 };
 use tokio_postgres::Client;
 
@@ -10,7 +10,8 @@ mod query;
 mod sql;
 
 pub use query::{
-    EmptyRows, PostgresDelete, PostgresInsert, PostgresRowReader, PostgresSelect, PostgresUpdate,
+    EmptyRows, PostgresDelete, PostgresInsert, PostgresPreparedMutation, PostgresPreparedSelect,
+    PostgresRowReader, PostgresSelect, PostgresUpdate,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -86,106 +87,133 @@ impl Backend for Postgres {
 impl QueryBuilder for Postgres {
     type Backend = Postgres;
 
-    type Select<'conn, Shape>
-        = PostgresSelect<'conn, Shape, Self>
+    type Select<'conn, 'scope, Base, Shape, Projection>
+        = PostgresSelect<'conn, 'scope, Shape, Base, Projection, Self>
     where
         Self: 'conn,
+        Base: SelectAst<'conn, 'scope, Self> + 'conn,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Projection: Projectable;
 
-    type Insert<'conn, S, Shape>
-        = PostgresInsert<'conn, S, Shape, Self>
+    type Insert<'conn, S, Shape, Columns, Returning>
+        = PostgresInsert<'conn, S, Shape, Columns, Returning, Self>
     where
         Self: 'conn,
         S: InsertableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Columns: squealy::InsertAssignments,
+        Returning: Projectable;
 
-    type Update<'conn, S, Shape>
-        = PostgresUpdate<'conn, S, Shape, Self>
+    type Update<'conn, S, Shape, Columns, Filters, Returning>
+        = PostgresUpdate<'conn, S, Shape, Columns, Filters, Returning, Self>
     where
         Self: 'conn,
         S: UpdateableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Columns: squealy::UpdateAssignments,
+        Filters: squealy::PredicateNodes,
+        Returning: Projectable;
 
-    type Delete<'conn, S, Shape>
-        = PostgresDelete<'conn, S, Shape, Self>
+    type Delete<'conn, S, Shape, Filters, Returning>
+        = PostgresDelete<'conn, S, Shape, Filters, Returning, Self>
     where
         Self: 'conn,
         S: TableProjection,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Filters: squealy::PredicateNodes,
+        Returning: Projectable;
 }
 
 impl QueryBuilder for PostgresConnection {
     type Backend = Postgres;
 
-    type Select<'conn, Shape>
-        = PostgresSelect<'conn, Shape, Self>
+    type Select<'conn, 'scope, Base, Shape, Projection>
+        = PostgresSelect<'conn, 'scope, Shape, Base, Projection, Self>
     where
         Self: 'conn,
+        Base: SelectAst<'conn, 'scope, Self> + 'conn,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Projection: Projectable;
 
-    type Insert<'conn, S, Shape>
-        = PostgresInsert<'conn, S, Shape, Self>
+    type Insert<'conn, S, Shape, Columns, Returning>
+        = PostgresInsert<'conn, S, Shape, Columns, Returning, Self>
     where
         Self: 'conn,
         S: InsertableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Columns: squealy::InsertAssignments,
+        Returning: Projectable;
 
-    type Update<'conn, S, Shape>
-        = PostgresUpdate<'conn, S, Shape, Self>
+    type Update<'conn, S, Shape, Columns, Filters, Returning>
+        = PostgresUpdate<'conn, S, Shape, Columns, Filters, Returning, Self>
     where
         Self: 'conn,
         S: UpdateableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Columns: squealy::UpdateAssignments,
+        Filters: squealy::PredicateNodes,
+        Returning: Projectable;
 
-    type Delete<'conn, S, Shape>
-        = PostgresDelete<'conn, S, Shape, Self>
+    type Delete<'conn, S, Shape, Filters, Returning>
+        = PostgresDelete<'conn, S, Shape, Filters, Returning, Self>
     where
         Self: 'conn,
         S: TableProjection,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Filters: squealy::PredicateNodes,
+        Returning: Projectable;
 }
 
 impl QueryBuilder for PostgresTransaction<'_> {
     type Backend = Postgres;
 
-    type Select<'conn, Shape>
-        = PostgresSelect<'conn, Shape, Self>
+    type Select<'conn, 'scope, Base, Shape, Projection>
+        = PostgresSelect<'conn, 'scope, Shape, Base, Projection, Self>
     where
         Self: 'conn,
+        Base: SelectAst<'conn, 'scope, Self> + 'conn,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Projection: Projectable;
 
-    type Insert<'conn, S, Shape>
-        = PostgresInsert<'conn, S, Shape, Self>
+    type Insert<'conn, S, Shape, Columns, Returning>
+        = PostgresInsert<'conn, S, Shape, Columns, Returning, Self>
     where
         Self: 'conn,
         S: InsertableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Columns: squealy::InsertAssignments,
+        Returning: Projectable;
 
-    type Update<'conn, S, Shape>
-        = PostgresUpdate<'conn, S, Shape, Self>
+    type Update<'conn, S, Shape, Columns, Filters, Returning>
+        = PostgresUpdate<'conn, S, Shape, Columns, Filters, Returning, Self>
     where
         Self: 'conn,
         S: UpdateableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Columns: squealy::UpdateAssignments,
+        Filters: squealy::PredicateNodes,
+        Returning: Projectable;
 
-    type Delete<'conn, S, Shape>
-        = PostgresDelete<'conn, S, Shape, Self>
+    type Delete<'conn, S, Shape, Filters, Returning>
+        = PostgresDelete<'conn, S, Shape, Filters, Returning, Self>
     where
         Self: 'conn,
         S: TableProjection,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Filters: squealy::PredicateNodes,
+        Returning: Projectable;
 }
 
 impl Connection for PostgresConnection {}

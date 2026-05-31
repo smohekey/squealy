@@ -1,12 +1,15 @@
 use squealy::{
-    Backend, Connection, ConnectionWithTransaction, Decode, InsertableTable, ProjectionShape,
-    QueryBuilder, Table, TableProjection, UpdateableTable,
+    Backend, Connection, ConnectionWithTransaction, Decode, InsertableTable, Projectable,
+    ProjectionShape, QueryBuilder, SelectAst, Table, TableProjection, UpdateableTable,
 };
 
 mod query;
 mod sql;
 
-pub use query::{EmptyRows, TestDelete, TestInsert, TestRowReader, TestSelect, TestUpdate};
+pub use query::{
+    EmptyRows, TestDelete, TestInsert, TestPreparedMutation, TestPreparedSelect, TestRowReader,
+    TestSelect, TestUpdate,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TestConnection;
@@ -40,36 +43,45 @@ impl Backend for TestBackend {
 impl QueryBuilder for TestConnection {
     type Backend = TestBackend;
 
-    type Select<'conn, Shape>
-        = TestSelect<'conn, Shape>
+    type Select<'conn, 'scope, Base, Shape, Projection>
+        = TestSelect<'conn, 'scope, Shape, Base, Projection>
     where
         Self: 'conn,
+        Base: SelectAst<'conn, 'scope, Self> + 'conn,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Projection: Projectable;
 
-    type Insert<'conn, S, Shape>
-        = TestInsert<'conn, S, Shape>
+    type Insert<'conn, S, Shape, Columns, Returning>
+        = TestInsert<'conn, S, Shape, Columns, Returning>
     where
         Self: 'conn,
         S: InsertableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Columns: squealy::InsertAssignments,
+        Returning: Projectable;
 
-    type Update<'conn, S, Shape>
-        = TestUpdate<'conn, S, Shape>
+    type Update<'conn, S, Shape, Columns, Filters, Returning>
+        = TestUpdate<'conn, S, Shape, Columns, Filters, Returning>
     where
         Self: 'conn,
         S: UpdateableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Columns: squealy::UpdateAssignments,
+        Filters: squealy::PredicateNodes,
+        Returning: Projectable;
 
-    type Delete<'conn, S, Shape>
-        = TestDelete<'conn, S, Shape>
+    type Delete<'conn, S, Shape, Filters, Returning>
+        = TestDelete<'conn, S, Shape, Filters, Returning>
     where
         Self: 'conn,
         S: TableProjection,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Filters: squealy::PredicateNodes,
+        Returning: Projectable;
 }
 
 impl Connection for TestConnection {}

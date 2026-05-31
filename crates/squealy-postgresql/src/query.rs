@@ -8,13 +8,18 @@ use bytes::BytesMut;
 use futures_core::Stream;
 
 use squealy::{
-    Backend, BindValue, BindValueKind, Connection, Decode, Delete, DeleteQuery,
+    Backend, BindSink, BindValue, BindValueKind, Connection, Decode, DeleteQuery,
     ExecutableDeleteQuery, ExecutableInsertQuery, ExecutableSelectQuery, ExecutableUpdateQuery,
-    FloatWidth, Insert, InsertQuery, InsertableTable, IntWidth, ProjectionShape, QueryBuilder,
-    RowsAffected, Select, SelectQuery, TableProjection, UIntWidth, Update, UpdateQuery,
-    UpdateableTable,
+    FloatWidth, HAppend, HList, HNil, InsertQuery, InsertableTable, IntWidth, NoRuntimeParams,
+    PredicateNodes, PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery,
+    PreparableUpdateQuery, PreparedMutationQuery, PreparedParamValues, PreparedSelectQuery,
+    Projectable, ProjectionShape, QueryBuilder, RowsAffected, SelectAst, SelectQuery, Selected,
+    SourceAlias, TableProjection, UIntWidth, UpdateQuery, UpdateableTable,
 };
-use tokio_postgres::types::{FromSqlOwned, IsNull, ToSql, Type, to_sql_checked};
+use tokio_postgres::{
+    GenericClient,
+    types::{FromSqlOwned, IsNull, ToSql, Type, to_sql_checked},
+};
 
 use crate::{Postgres, PostgresConnection, PostgresError, PostgresTransaction, sql};
 
@@ -121,10 +126,17 @@ pub trait PostgresExecutor: Connection<Backend = Postgres> {
     where
         Row: Decode<Postgres>;
 
+    fn prepare_sql<'query>(
+        &'query self,
+        sql: String,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<tokio_postgres::Statement, PostgresError>> + Send + 'query>,
+    >;
+
     fn query_raw<'query>(
         &'query self,
         sql: String,
-        params: Vec<BindValue>,
+        params: Vec<PostgresParam>,
     ) -> Pin<
         Box<dyn Future<Output = Result<tokio_postgres::RowStream, PostgresError>> + Send + 'query>,
     >;
@@ -132,7 +144,21 @@ pub trait PostgresExecutor: Connection<Backend = Postgres> {
     fn execute_sql<'query>(
         &'query self,
         sql: String,
-        params: Vec<BindValue>,
+        params: Vec<PostgresParam>,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, PostgresError>> + Send + 'query>>;
+
+    fn query_statement<'query>(
+        &'query self,
+        statement: &'query tokio_postgres::Statement,
+        params: Vec<PostgresParam>,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<tokio_postgres::RowStream, PostgresError>> + Send + 'query>,
+    >;
+
+    fn execute_statement<'query>(
+        &'query self,
+        statement: &'query tokio_postgres::Statement,
+        params: Vec<PostgresParam>,
     ) -> Pin<Box<dyn Future<Output = Result<u64, PostgresError>> + Send + 'query>>;
 }
 
@@ -161,9 +187,35 @@ impl<'query, Row, Conn> PostgresRows<'query, Row, Conn>
 where
     Conn: PostgresExecutor,
 {
-    fn query(connection: &'query Conn, sql: String, params: Vec<BindValue>) -> Self {
+    fn query_with_params(
+        connection: &'query Conn,
+        sql: String,
+        params: Vec<PostgresParam>,
+    ) -> Self {
         Self {
             state: PostgresRowsState::Pending(connection.query_raw(sql, params)),
+            affected_rows: None,
+            _row: PhantomData,
+            _connection: PhantomData,
+        }
+    }
+
+    fn prepared(
+        connection: &'query Conn,
+        statement: &'query tokio_postgres::Statement,
+        params: Vec<PostgresParam>,
+    ) -> Self {
+        Self {
+            state: PostgresRowsState::Pending(connection.query_statement(statement, params)),
+            affected_rows: None,
+            _row: PhantomData,
+            _connection: PhantomData,
+        }
+    }
+
+    fn error(error: PostgresError) -> Self {
+        Self {
+            state: PostgresRowsState::Pending(Box::pin(std::future::ready(Err(error)))),
             affected_rows: None,
             _row: PhantomData,
             _connection: PhantomData,
@@ -224,7 +276,8 @@ impl<Row, Conn> RowsAffected for PostgresRows<'_, Row, Conn> {
     }
 }
 
-enum PostgresParam {
+#[doc(hidden)]
+pub enum PostgresParam {
     Int16(i16),
     Int32(i32),
     Int64(i64),
@@ -250,8 +303,38 @@ impl PostgresParam {
     }
 }
 
+struct PostgresBindSink {
+    params: Vec<PostgresParam>,
+}
+
+impl PostgresBindSink {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            params: Vec::with_capacity(capacity),
+        }
+    }
+
+    fn into_params(self) -> Vec<PostgresParam> {
+        self.params
+    }
+}
+
+impl BindSink for PostgresBindSink {
+    type Error = PostgresError;
+
+    fn reserve_bind_values(&mut self, additional: usize) {
+        self.params.reserve(additional);
+    }
+
+    fn push_bind_value(&mut self, value: BindValue) -> Result<(), Self::Error> {
+        self.params.push(postgres_param(value)?);
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
-struct PostgresNull;
+#[doc(hidden)]
+pub struct PostgresNull;
 
 impl ToSql for PostgresNull {
     fn to_sql(
@@ -269,18 +352,98 @@ impl ToSql for PostgresNull {
     to_sql_checked!();
 }
 
+#[cfg(test)]
 fn postgres_params(params: Vec<BindValue>) -> Result<Vec<PostgresParam>, PostgresError> {
-    params
-        .into_iter()
-        .map(|param| match param.into_kind() {
-            BindValueKind::Int { value, width } => postgres_signed_int(value, width),
-            BindValueKind::UInt { value, width } => postgres_unsigned_int(value, width),
-            BindValueKind::Float { value, width } => postgres_float(value, width),
-            BindValueKind::Text(value) => Ok(PostgresParam::Text(value)),
-            BindValueKind::Bool(value) => Ok(PostgresParam::Bool(value)),
-            BindValueKind::Null => Ok(PostgresParam::Null(PostgresNull)),
-        })
-        .collect()
+    let mut sink = PostgresBindSink::with_capacity(params.len());
+    for param in params {
+        sink.push_bind_value(param)?;
+    }
+    Ok(sink.into_params())
+}
+
+struct StringSql {
+    sql: String,
+}
+
+impl StringSql {
+    fn new() -> Self {
+        Self { sql: String::new() }
+    }
+
+    fn into_string(self) -> String {
+        self.sql
+    }
+}
+
+impl std::io::Write for StringSql {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let text = std::str::from_utf8(buf).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("SQL renderer wrote non-UTF-8 bytes: {error}"),
+            )
+        })?;
+        self.sql.push_str(text);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn rendered_sql(write: impl FnOnce(&mut StringSql) -> std::io::Result<()>) -> String {
+    let mut sql = StringSql::new();
+    write(&mut sql).expect("render SQL");
+    sql.into_string()
+}
+
+fn collect_postgres_params(
+    capacity: usize,
+    write: impl FnOnce(&mut PostgresBindSink) -> Result<(), PostgresError>,
+) -> Result<Vec<PostgresParam>, PostgresError> {
+    let mut sink = PostgresBindSink::with_capacity(capacity);
+    write(&mut sink)?;
+    Ok(sink.into_params())
+}
+
+fn execute_error<'query>(
+    error: PostgresError,
+) -> Pin<Box<dyn Future<Output = Result<u64, PostgresError>> + Send + 'query>> {
+    Box::pin(std::future::ready(Err(error)))
+}
+
+fn postgres_param(param: BindValue) -> Result<PostgresParam, PostgresError> {
+    match param.into_kind() {
+        BindValueKind::Int { value, width } => postgres_signed_int(value, width),
+        BindValueKind::UInt { value, width } => postgres_unsigned_int(value, width),
+        BindValueKind::Float { value, width } => postgres_float(value, width),
+        BindValueKind::Text(value) => Ok(PostgresParam::Text(value)),
+        BindValueKind::Bool(value) => Ok(PostgresParam::Bool(value)),
+        BindValueKind::Null => Ok(PostgresParam::Null(PostgresNull)),
+    }
+}
+
+fn resolve_prepared_params<Shape, Params>(
+    bindings: &[sql::SqlParam],
+    params: &Params,
+) -> Result<Vec<PostgresParam>, PostgresError>
+where
+    Shape: HList,
+    Params: PreparedParamValues<Shape>,
+{
+    let mut sink = PostgresBindSink::with_capacity(bindings.len());
+    for param in bindings {
+        match param {
+            sql::SqlParam::Static(value) => sink.push_bind_value(value.clone())?,
+            sql::SqlParam::Runtime(index) => {
+                if !params.write_bind_value_at(*index, &mut sink)? {
+                    return Err(PostgresError::Conversion("prepared parameter"));
+                }
+            }
+        }
+    }
+    Ok(sink.into_params())
 }
 
 fn postgres_signed_int(value: i128, width: IntWidth) -> Result<PostgresParam, PostgresError> {
@@ -317,28 +480,70 @@ fn postgres_float(value: f64, width: FloatWidth) -> Result<PostgresParam, Postgr
     }
 }
 
-fn render_select(select: &Select) -> String {
-    let mut sql = Vec::new();
-    sql::write_select(select, &mut sql).unwrap();
-    String::from_utf8(sql).unwrap()
+async fn query_with_params<Client>(
+    client: &Client,
+    sql: String,
+    params: Vec<PostgresParam>,
+) -> Result<tokio_postgres::RowStream, PostgresError>
+where
+    Client: GenericClient + Sync,
+{
+    client
+        .query_raw(&sql, params.iter().map(PostgresParam::as_sql))
+        .await
+        .map_err(PostgresError::Database)
 }
 
-fn render_insert(insert: &Insert) -> String {
-    let mut sql = Vec::new();
-    sql::write_insert(insert, &mut sql).unwrap();
-    String::from_utf8(sql).unwrap()
+async fn execute_with_params<Client>(
+    client: &Client,
+    sql: String,
+    params: Vec<PostgresParam>,
+) -> Result<u64, PostgresError>
+where
+    Client: GenericClient + Sync,
+{
+    client
+        .execute_raw(&sql, params.iter().map(PostgresParam::as_sql))
+        .await
+        .map_err(PostgresError::Database)
 }
 
-fn render_delete(delete: &Delete) -> String {
-    let mut sql = Vec::new();
-    sql::write_delete(delete, &mut sql).unwrap();
-    String::from_utf8(sql).unwrap()
+async fn prepare_statement<Client>(
+    client: &Client,
+    sql: String,
+) -> Result<tokio_postgres::Statement, PostgresError>
+where
+    Client: GenericClient + Sync,
+{
+    client.prepare(&sql).await.map_err(PostgresError::Database)
 }
 
-fn render_update(update: &Update) -> String {
-    let mut sql = Vec::new();
-    sql::write_update(update, &mut sql).unwrap();
-    String::from_utf8(sql).unwrap()
+async fn query_prepared_with_bind_values<Client>(
+    client: &Client,
+    statement: &tokio_postgres::Statement,
+    params: Vec<PostgresParam>,
+) -> Result<tokio_postgres::RowStream, PostgresError>
+where
+    Client: GenericClient + Sync,
+{
+    client
+        .query_raw(statement, params.iter().map(PostgresParam::as_sql))
+        .await
+        .map_err(PostgresError::Database)
+}
+
+async fn execute_prepared_with_bind_values<Client>(
+    client: &Client,
+    statement: &tokio_postgres::Statement,
+    params: Vec<PostgresParam>,
+) -> Result<u64, PostgresError>
+where
+    Client: GenericClient + Sync,
+{
+    client
+        .execute_raw(statement, params.iter().map(PostgresParam::as_sql))
+        .await
+        .map_err(PostgresError::Database)
 }
 
 impl PostgresExecutor for PostgresConnection {
@@ -350,38 +555,54 @@ impl PostgresExecutor for PostgresConnection {
         Row::decode(&mut row)
     }
 
+    fn prepare_sql<'query>(
+        &'query self,
+        sql: String,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<tokio_postgres::Statement, PostgresError>> + Send + 'query>,
+    > {
+        let client = self.client();
+        Box::pin(prepare_statement(client, sql))
+    }
+
     fn query_raw<'query>(
         &'query self,
         sql: String,
-        params: Vec<BindValue>,
+        params: Vec<PostgresParam>,
     ) -> Pin<
         Box<dyn Future<Output = Result<tokio_postgres::RowStream, PostgresError>> + Send + 'query>,
     > {
         let client = self.client();
-        Box::pin(async move {
-            let params = postgres_params(params)?;
-            let params = params.iter().map(PostgresParam::as_sql).collect::<Vec<_>>();
-            client
-                .query_raw(&sql, params)
-                .await
-                .map_err(PostgresError::Database)
-        })
+        Box::pin(query_with_params(client, sql, params))
     }
 
     fn execute_sql<'query>(
         &'query self,
         sql: String,
-        params: Vec<BindValue>,
+        params: Vec<PostgresParam>,
     ) -> Pin<Box<dyn Future<Output = Result<u64, PostgresError>> + Send + 'query>> {
         let client = self.client();
-        Box::pin(async move {
-            let params = postgres_params(params)?;
-            let params = params.iter().map(PostgresParam::as_sql).collect::<Vec<_>>();
-            client
-                .execute(&sql, &params)
-                .await
-                .map_err(PostgresError::Database)
-        })
+        Box::pin(execute_with_params(client, sql, params))
+    }
+
+    fn query_statement<'query>(
+        &'query self,
+        statement: &'query tokio_postgres::Statement,
+        params: Vec<PostgresParam>,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<tokio_postgres::RowStream, PostgresError>> + Send + 'query>,
+    > {
+        let client = self.client();
+        Box::pin(query_prepared_with_bind_values(client, statement, params))
+    }
+
+    fn execute_statement<'query>(
+        &'query self,
+        statement: &'query tokio_postgres::Statement,
+        params: Vec<PostgresParam>,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, PostgresError>> + Send + 'query>> {
+        let client = self.client();
+        Box::pin(execute_prepared_with_bind_values(client, statement, params))
     }
 }
 
@@ -394,175 +615,417 @@ impl PostgresExecutor for PostgresTransaction<'_> {
         Row::decode(&mut row)
     }
 
+    fn prepare_sql<'query>(
+        &'query self,
+        sql: String,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<tokio_postgres::Statement, PostgresError>> + Send + 'query>,
+    > {
+        Box::pin(prepare_statement(&self.transaction, sql))
+    }
+
     fn query_raw<'query>(
         &'query self,
         sql: String,
-        params: Vec<BindValue>,
+        params: Vec<PostgresParam>,
     ) -> Pin<
         Box<dyn Future<Output = Result<tokio_postgres::RowStream, PostgresError>> + Send + 'query>,
     > {
-        Box::pin(async move {
-            let params = postgres_params(params)?;
-            let params = params.iter().map(PostgresParam::as_sql).collect::<Vec<_>>();
-            self.transaction
-                .query_raw(&sql, params)
-                .await
-                .map_err(PostgresError::Database)
-        })
+        Box::pin(query_with_params(&self.transaction, sql, params))
     }
 
     fn execute_sql<'query>(
         &'query self,
         sql: String,
-        params: Vec<BindValue>,
+        params: Vec<PostgresParam>,
     ) -> Pin<Box<dyn Future<Output = Result<u64, PostgresError>> + Send + 'query>> {
-        Box::pin(async move {
-            let params = postgres_params(params)?;
-            let params = params.iter().map(PostgresParam::as_sql).collect::<Vec<_>>();
-            self.transaction
-                .execute(&sql, &params)
-                .await
-                .map_err(PostgresError::Database)
-        })
+        Box::pin(execute_with_params(&self.transaction, sql, params))
+    }
+
+    fn query_statement<'query>(
+        &'query self,
+        statement: &'query tokio_postgres::Statement,
+        params: Vec<PostgresParam>,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<tokio_postgres::RowStream, PostgresError>> + Send + 'query>,
+    > {
+        Box::pin(query_prepared_with_bind_values(
+            &self.transaction,
+            statement,
+            params,
+        ))
+    }
+
+    fn execute_statement<'query>(
+        &'query self,
+        statement: &'query tokio_postgres::Statement,
+        params: Vec<PostgresParam>,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, PostgresError>> + Send + 'query>> {
+        Box::pin(execute_prepared_with_bind_values(
+            &self.transaction,
+            statement,
+            params,
+        ))
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct PostgresSelect<'conn, Shape, Conn = PostgresConnection>
+pub struct PostgresSelect<'conn, 'scope, Shape, Base, Projection, Conn = PostgresConnection>
 where
     Shape: ProjectionShape,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Projection: Projectable,
     Conn: QueryBuilder<Backend = Postgres>,
 {
     connection: &'conn Conn,
-    select: Select,
+    selected: Selected<'scope, Base, Shape, Projection>,
     _shape: PhantomData<Shape>,
 }
 
-#[derive(Clone, Debug)]
-pub struct PostgresInsert<'conn, S, Shape = (), Conn = PostgresConnection>
+pub struct PostgresInsert<
+    'conn,
+    S,
+    Shape = (),
+    Columns = HNil,
+    Returning = (),
+    Conn = PostgresConnection,
+> where
+    S: InsertableTable,
+    Shape: ProjectionShape,
+    Columns: squealy::InsertAssignments,
+    Returning: Projectable,
+    Conn: QueryBuilder<Backend = Postgres>,
+{
+    connection: &'conn Conn,
+    columns: Columns,
+    returning: Returning,
+    _table: PhantomData<S>,
+    _shape: PhantomData<Shape>,
+}
+
+pub struct PostgresDelete<
+    'conn,
+    S,
+    Shape = (),
+    Filters = HNil,
+    Returning = (),
+    Conn = PostgresConnection,
+> where
+    S: TableProjection,
+    Shape: ProjectionShape,
+    Filters: PredicateNodes,
+    Returning: Projectable,
+    Conn: QueryBuilder<Backend = Postgres>,
+{
+    connection: &'conn Conn,
+    alias: SourceAlias,
+    filters: Filters,
+    returning: Returning,
+    _table: PhantomData<S>,
+    _shape: PhantomData<Shape>,
+}
+
+pub struct PostgresUpdate<
+    'conn,
+    S,
+    Shape = (),
+    Columns = HNil,
+    Filters = HNil,
+    Returning = (),
+    Conn = PostgresConnection,
+> where
+    S: UpdateableTable,
+    Shape: ProjectionShape,
+    Columns: squealy::UpdateAssignments,
+    Filters: PredicateNodes,
+    Returning: Projectable,
+    Conn: QueryBuilder<Backend = Postgres>,
+{
+    connection: &'conn Conn,
+    alias: SourceAlias,
+    columns: Columns,
+    filters: Filters,
+    returning: Returning,
+    _table: PhantomData<S>,
+    _shape: PhantomData<Shape>,
+}
+
+pub struct PostgresPreparedSelect<'conn, Row, Conn = PostgresConnection, ParamShape = HNil>
+where
+    Conn: PostgresExecutor,
+    ParamShape: HList,
+{
+    connection: &'conn Conn,
+    statement: tokio_postgres::Statement,
+    params: Vec<sql::SqlParam>,
+    _row: PhantomData<Row>,
+    _params: PhantomData<ParamShape>,
+}
+
+pub struct PostgresPreparedMutation<'conn, Row, Conn = PostgresConnection, ParamShape = HNil>
+where
+    Conn: PostgresExecutor,
+    ParamShape: HList,
+{
+    connection: &'conn Conn,
+    statement: tokio_postgres::Statement,
+    params: Vec<sql::SqlParam>,
+    _row: PhantomData<Row>,
+    _params: PhantomData<ParamShape>,
+}
+
+impl<'conn, Row, Conn, ParamShape> PostgresPreparedSelect<'conn, Row, Conn, ParamShape>
+where
+    Conn: PostgresExecutor,
+    ParamShape: HList,
+{
+    fn new(
+        connection: &'conn Conn,
+        statement: tokio_postgres::Statement,
+        params: Vec<sql::SqlParam>,
+    ) -> Self {
+        Self {
+            connection,
+            statement,
+            params,
+            _row: PhantomData,
+            _params: PhantomData,
+        }
+    }
+}
+
+impl<'conn, Row, Conn, ParamShape> PostgresPreparedMutation<'conn, Row, Conn, ParamShape>
+where
+    Conn: PostgresExecutor,
+    ParamShape: HList,
+{
+    fn new(
+        connection: &'conn Conn,
+        statement: tokio_postgres::Statement,
+        params: Vec<sql::SqlParam>,
+    ) -> Self {
+        Self {
+            connection,
+            statement,
+            params,
+            _row: PhantomData,
+            _params: PhantomData,
+        }
+    }
+}
+
+impl<'conn, 'scope, Shape, Base, Projection, Conn>
+    PostgresSelect<'conn, 'scope, Shape, Base, Projection, Conn>
+where
+    Shape: ProjectionShape,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Projection: Projectable,
+    Conn: QueryBuilder<Backend = Postgres>,
+{
+    fn new_selected(
+        connection: &'conn Conn,
+        selected: Selected<'scope, Base, Shape, Projection>,
+    ) -> Self {
+        Self {
+            connection,
+            selected,
+            _shape: PhantomData,
+        }
+    }
+
+    fn prepared_sql(&self) -> sql::PreparedSql {
+        let mut buffer = sql::PreparedSql::default();
+        sql::render_selected_prepared::<Conn, Base, Shape, Projection>(&self.selected, &mut buffer);
+        buffer
+    }
+
+    fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
+        let sql = rendered_sql(|writer| {
+            sql::write_selected_into::<Conn, Base, Shape, Projection, _>(&self.selected, writer)
+        });
+        let params = collect_postgres_params(0, |sink| {
+            sql::write_selected_params::<Conn, Base, Shape, Projection, _>(&self.selected, sink)
+        })?;
+        Ok((sql, params))
+    }
+}
+
+impl<'conn, S, Shape, Columns, Returning, Conn>
+    PostgresInsert<'conn, S, Shape, Columns, Returning, Conn>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
+    Columns: squealy::InsertAssignments,
+    Returning: Projectable,
     Conn: QueryBuilder<Backend = Postgres>,
 {
-    connection: &'conn Conn,
-    insert: Insert,
-    _table: PhantomData<S>,
-    _shape: PhantomData<Shape>,
+    pub(crate) fn new(connection: &'conn Conn, columns: Columns, returning: Returning) -> Self {
+        Self {
+            connection,
+            columns,
+            returning,
+            _table: PhantomData,
+            _shape: PhantomData,
+        }
+    }
+
+    fn prepared_sql(&self) -> sql::PreparedSql {
+        let mut buffer = sql::PreparedSql::default();
+        sql::render_insert_prepared::<S, _, _>(&self.columns, &self.returning, &mut buffer);
+        buffer
+    }
+
+    fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
+        let sql = rendered_sql(|writer| {
+            sql::write_insert::<S, _, _>(&self.columns, &self.returning, writer)
+        });
+        let params = collect_postgres_params(self.columns.len(), |sink| {
+            sql::write_insert_params::<S, _, _, _>(&self.columns, &self.returning, sink)
+        })?;
+        Ok((sql, params))
+    }
 }
 
-#[derive(Clone, Debug)]
-pub struct PostgresDelete<'conn, S, Shape = (), Conn = PostgresConnection>
+impl<'conn, S, Shape, Filters, Returning, Conn>
+    PostgresDelete<'conn, S, Shape, Filters, Returning, Conn>
 where
     S: TableProjection,
     Shape: ProjectionShape,
+    Filters: PredicateNodes,
+    Returning: Projectable,
     Conn: QueryBuilder<Backend = Postgres>,
 {
-    connection: &'conn Conn,
-    delete: Delete,
-    _table: PhantomData<S>,
-    _shape: PhantomData<Shape>,
+    pub(crate) fn new(
+        connection: &'conn Conn,
+        alias: SourceAlias,
+        filters: Filters,
+        returning: Returning,
+    ) -> Self {
+        Self {
+            connection,
+            alias,
+            filters,
+            returning,
+            _table: PhantomData,
+            _shape: PhantomData,
+        }
+    }
+
+    fn prepared_sql(&self) -> sql::PreparedSql {
+        let mut buffer = sql::PreparedSql::default();
+        sql::render_delete_prepared::<S, _, _>(
+            self.alias,
+            &self.filters,
+            &self.returning,
+            &mut buffer,
+        );
+        buffer
+    }
+
+    fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
+        let sql = rendered_sql(|writer| {
+            sql::write_delete::<S, _, _>(self.alias, &self.filters, &self.returning, writer)
+        });
+        let params = collect_postgres_params(self.filters.len(), |sink| {
+            sql::write_delete_params::<S, _, _, _>(self.alias, &self.filters, &self.returning, sink)
+        })?;
+        Ok((sql, params))
+    }
 }
 
-#[derive(Clone, Debug)]
-pub struct PostgresUpdate<'conn, S, Shape = (), Conn = PostgresConnection>
+impl<'conn, S, Shape, Columns, Filters, Returning, Conn>
+    PostgresUpdate<'conn, S, Shape, Columns, Filters, Returning, Conn>
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
+    Columns: squealy::UpdateAssignments,
+    Filters: PredicateNodes,
+    Returning: Projectable,
     Conn: QueryBuilder<Backend = Postgres>,
 {
-    connection: &'conn Conn,
-    update: Update,
-    _table: PhantomData<S>,
-    _shape: PhantomData<Shape>,
-}
-
-impl<'conn, Shape, Conn> PostgresSelect<'conn, Shape, Conn>
-where
-    Shape: ProjectionShape,
-    Conn: QueryBuilder<Backend = Postgres>,
-{
-    pub(crate) fn new(connection: &'conn Conn, select: Select) -> Self {
+    pub(crate) fn new(
+        connection: &'conn Conn,
+        alias: SourceAlias,
+        columns: Columns,
+        filters: Filters,
+        returning: Returning,
+    ) -> Self {
         Self {
             connection,
-            select,
-            _shape: PhantomData,
-        }
-    }
-}
-
-impl<'conn, S, Shape, Conn> PostgresInsert<'conn, S, Shape, Conn>
-where
-    S: InsertableTable,
-    Shape: ProjectionShape,
-    Conn: QueryBuilder<Backend = Postgres>,
-{
-    pub(crate) fn new(connection: &'conn Conn, insert: Insert) -> Self {
-        Self {
-            connection,
-            insert,
+            alias,
+            columns,
+            filters,
+            returning,
             _table: PhantomData,
             _shape: PhantomData,
         }
     }
-}
 
-impl<'conn, S, Shape, Conn> PostgresDelete<'conn, S, Shape, Conn>
-where
-    S: TableProjection,
-    Shape: ProjectionShape,
-    Conn: QueryBuilder<Backend = Postgres>,
-{
-    pub(crate) fn new(connection: &'conn Conn, delete: Delete) -> Self {
-        Self {
-            connection,
-            delete,
-            _table: PhantomData,
-            _shape: PhantomData,
-        }
+    fn prepared_sql(&self) -> sql::PreparedSql {
+        let mut buffer = sql::PreparedSql::default();
+        sql::render_update_prepared::<S, _, _, _>(
+            self.alias,
+            &self.columns,
+            &self.filters,
+            &self.returning,
+            &mut buffer,
+        );
+        buffer
+    }
+
+    fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
+        let sql = rendered_sql(|writer| {
+            sql::write_update::<S, _, _, _>(
+                self.alias,
+                &self.columns,
+                &self.filters,
+                &self.returning,
+                writer,
+            )
+        });
+        let params = collect_postgres_params(self.columns.len() + self.filters.len(), |sink| {
+            sql::write_update_params::<S, _, _, _, _>(
+                self.alias,
+                &self.columns,
+                &self.filters,
+                &self.returning,
+                sink,
+            )
+        })?;
+        Ok((sql, params))
     }
 }
 
-impl<'conn, S, Shape, Conn> PostgresUpdate<'conn, S, Shape, Conn>
-where
-    S: UpdateableTable,
-    Shape: ProjectionShape,
-    Conn: QueryBuilder<Backend = Postgres>,
-{
-    pub(crate) fn new(connection: &'conn Conn, update: Update) -> Self {
-        Self {
-            connection,
-            update,
-            _table: PhantomData,
-            _shape: PhantomData,
-        }
-    }
-}
-
-impl<'conn, Shape, Conn> SelectQuery<'conn> for PostgresSelect<'conn, Shape, Conn>
+impl<'conn, 'scope, Shape, Base, Projection, Conn> SelectQuery<'conn, 'scope, Base, Projection>
+    for PostgresSelect<'conn, 'scope, Shape, Base, Projection, Conn>
 where
     Shape: ProjectionShape,
     Conn: QueryBuilder<Backend = Postgres> + 'conn,
     Shape::Row: Decode<Postgres>,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Projection: Projectable,
 {
     type Builder = Conn;
     type Shape = Shape;
     type Row = Shape::Row;
 
-    fn ir(&self) -> &Select {
-        &self.select
-    }
-
-    fn build(connection: &'conn Self::Builder, select: Select) -> Self {
-        Self::new(connection, select)
+    fn build_selected(
+        connection: &'conn Self::Builder,
+        selected: Selected<'scope, Base, Self::Shape, Projection>,
+    ) -> Self {
+        Self::new_selected(connection, selected)
     }
 }
 
-impl<'conn, Shape, Conn> ExecutableSelectQuery<'conn> for PostgresSelect<'conn, Shape, Conn>
+impl<'conn, 'scope, Shape, Base, Projection, Conn>
+    ExecutableSelectQuery<'conn, 'scope, Base, Projection>
+    for PostgresSelect<'conn, 'scope, Shape, Base, Projection, Conn>
 where
     Shape: ProjectionShape,
     Conn: PostgresExecutor + 'conn,
     Shape::Row: Decode<Postgres>,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Base::Params: NoRuntimeParams,
+    Projection: Projectable,
 {
     type RowStream<'query>
         = PostgresRows<'query, Self::Row, Conn>
@@ -570,41 +1033,162 @@ where
         Self: 'query;
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        PostgresRows::query(
-            self.connection,
-            render_select(&self.select),
-            sql::select_params(&self.select),
-        )
+        match self.execution_parts() {
+            Ok((sql, params)) => PostgresRows::query_with_params(self.connection, sql, params),
+            Err(error) => PostgresRows::error(error),
+        }
     }
 }
 
-impl<'conn, S, Shape, Conn> InsertQuery<'conn> for PostgresInsert<'conn, S, Shape, Conn>
+impl<'conn, Row, Conn, ParamShape> PreparedSelectQuery<'conn>
+    for PostgresPreparedSelect<'conn, Row, Conn, ParamShape>
+where
+    Row: Decode<Postgres> + Send,
+    Conn: PostgresExecutor + 'conn,
+    ParamShape: HList,
+{
+    type Builder = Conn;
+    type Params = ParamShape;
+    type Row = Row;
+
+    type RowStream<'query>
+        = PostgresRows<'query, Self::Row, Conn>
+    where
+        Self: 'query;
+
+    fn fetch<'query, ParamValues>(&'query self, params: ParamValues) -> Self::RowStream<'query>
+    where
+        ParamValues: PreparedParamValues<Self::Params>,
+    {
+        match resolve_prepared_params::<ParamShape, _>(&self.params, &params) {
+            Ok(params) => PostgresRows::prepared(self.connection, &self.statement, params),
+            Err(error) => PostgresRows::error(error),
+        }
+    }
+}
+
+impl<'conn, Row, Conn, ParamShape> PreparedMutationQuery<'conn>
+    for PostgresPreparedMutation<'conn, Row, Conn, ParamShape>
+where
+    Row: Decode<Postgres> + Send,
+    Conn: PostgresExecutor + 'conn,
+    ParamShape: HList,
+{
+    type Builder = Conn;
+    type Params = ParamShape;
+    type Row = Row;
+
+    type RowStream<'query>
+        = PostgresRows<'query, Self::Row, Conn>
+    where
+        Self: 'query;
+
+    fn execute<'query, ParamValues>(
+        &'query self,
+        params: ParamValues,
+    ) -> impl Future<
+        Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>,
+    > + Send
+    + 'query
+    where
+        'conn: 'query,
+        ParamValues: PreparedParamValues<Self::Params> + 'query,
+    {
+        match resolve_prepared_params::<ParamShape, _>(&self.params, &params) {
+            Ok(params) => self.connection.execute_statement(&self.statement, params),
+            Err(error) => Box::pin(std::future::ready(Err(error))),
+        }
+    }
+
+    fn fetch<'query, ParamValues>(&'query self, params: ParamValues) -> Self::RowStream<'query>
+    where
+        ParamValues: PreparedParamValues<Self::Params>,
+    {
+        match resolve_prepared_params::<ParamShape, _>(&self.params, &params) {
+            Ok(params) => PostgresRows::prepared(self.connection, &self.statement, params),
+            Err(error) => PostgresRows::error(error),
+        }
+    }
+}
+
+impl<'conn, 'scope, Shape, Base, Projection, Conn>
+    PreparableSelectQuery<'conn, 'scope, Base, Projection>
+    for PostgresSelect<'conn, 'scope, Shape, Base, Projection, Conn>
+where
+    Shape: ProjectionShape,
+    Conn: PostgresExecutor + 'conn,
+    Shape::Row: Decode<Postgres> + Send,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Base::Params: HList,
+    Projection: Projectable,
+{
+    type Params = Base::Params;
+
+    type Prepared<'prepared>
+        = PostgresPreparedSelect<'prepared, Shape::Row, Conn, Base::Params>
+    where
+        Self: 'prepared,
+        'conn: 'prepared,
+        'scope: 'prepared,
+        Base: 'prepared,
+        Projection: 'prepared;
+
+    fn prepare<'prepared>(
+        &'prepared self,
+    ) -> impl Future<
+        Output = Result<
+            Self::Prepared<'prepared>,
+            <<Self::Builder as QueryBuilder>::Backend as Backend>::Error,
+        >,
+    > + 'prepared
+    where
+        'conn: 'prepared,
+        'scope: 'prepared,
+        Base: 'prepared,
+        Projection: 'prepared,
+    {
+        let (sql, params) = self.prepared_sql().into_parts();
+        async move {
+            let statement = self.connection.prepare_sql(sql).await?;
+            Ok(PostgresPreparedSelect::new(
+                self.connection,
+                statement,
+                params,
+            ))
+        }
+    }
+}
+
+impl<'conn, S, Shape, Columns, Returning, Conn> InsertQuery<'conn, Columns, Returning>
+    for PostgresInsert<'conn, S, Shape, Columns, Returning, Conn>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
     Conn: QueryBuilder<Backend = Postgres> + 'conn,
     Shape::Row: Decode<Postgres>,
+    Columns: squealy::InsertAssignments,
+    Returning: Projectable,
 {
     type Builder = Conn;
     type Table = S;
     type Shape = Shape;
     type Row = Shape::Row;
 
-    fn ir(&self) -> &Insert {
-        &self.insert
-    }
-
-    fn build(connection: &'conn Self::Builder, insert: Insert) -> Self {
-        Self::new(connection, insert)
+    fn build(connection: &'conn Self::Builder, columns: Columns, returning: Returning) -> Self {
+        Self::new(connection, columns, returning)
     }
 }
 
-impl<'conn, S, Shape, Conn> ExecutableInsertQuery<'conn> for PostgresInsert<'conn, S, Shape, Conn>
+impl<'conn, S, Shape, Columns, Returning, Conn> ExecutableInsertQuery<'conn, Columns, Returning>
+    for PostgresInsert<'conn, S, Shape, Columns, Returning, Conn>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
     Conn: PostgresExecutor + 'conn,
     Shape::Row: Decode<Postgres>,
+    Columns: squealy::InsertAssignments,
+    Columns::Params: NoRuntimeParams,
+    Returning: Projectable,
 {
     type RowStream<'query>
         = PostgresRows<'query, Self::Row, Conn>
@@ -617,201 +1201,463 @@ where
         Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>,
     > + Send
     + '_ {
-        self.connection.execute_sql(
-            render_insert(&self.insert),
-            sql::insert_params(&self.insert),
-        )
+        match self.execution_parts() {
+            Ok((sql, params)) => self.connection.execute_sql(sql, params),
+            Err(error) => execute_error(error),
+        }
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        PostgresRows::query(
-            self.connection,
-            render_insert(&self.insert),
-            sql::insert_params(&self.insert),
-        )
+        match self.execution_parts() {
+            Ok((sql, params)) => PostgresRows::query_with_params(self.connection, sql, params),
+            Err(error) => PostgresRows::error(error),
+        }
     }
 }
 
-impl<'conn, S, Shape, Conn> DeleteQuery<'conn> for PostgresDelete<'conn, S, Shape, Conn>
-where
-    S: TableProjection,
-    Shape: ProjectionShape,
-    Conn: QueryBuilder<Backend = Postgres> + 'conn,
-    Shape::Row: Decode<Postgres>,
-{
-    type Builder = Conn;
-    type Table = S;
-    type Shape = Shape;
-    type Row = Shape::Row;
-
-    fn ir(&self) -> &Delete {
-        &self.delete
-    }
-
-    fn build(connection: &'conn Self::Builder, delete: Delete) -> Self {
-        Self::new(connection, delete)
-    }
-}
-
-impl<'conn, S, Shape, Conn> ExecutableDeleteQuery<'conn> for PostgresDelete<'conn, S, Shape, Conn>
-where
-    S: TableProjection,
-    Shape: ProjectionShape,
-    Conn: PostgresExecutor + 'conn,
-    Shape::Row: Decode<Postgres>,
-{
-    type RowStream<'query>
-        = PostgresRows<'query, Self::Row, Conn>
-    where
-        Self: 'query;
-
-    fn execute(
-        &self,
-    ) -> impl Future<
-        Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>,
-    > + Send
-    + '_ {
-        self.connection.execute_sql(
-            render_delete(&self.delete),
-            sql::delete_params(&self.delete),
-        )
-    }
-
-    fn fetch(&self) -> Self::RowStream<'_> {
-        PostgresRows::query(
-            self.connection,
-            render_delete(&self.delete),
-            sql::delete_params(&self.delete),
-        )
-    }
-}
-
-impl<'conn, S, Shape, Conn> UpdateQuery<'conn> for PostgresUpdate<'conn, S, Shape, Conn>
-where
-    S: UpdateableTable,
-    Shape: ProjectionShape,
-    Conn: QueryBuilder<Backend = Postgres> + 'conn,
-    Shape::Row: Decode<Postgres>,
-{
-    type Builder = Conn;
-    type Table = S;
-    type Shape = Shape;
-    type Row = Shape::Row;
-
-    fn ir(&self) -> &Update {
-        &self.update
-    }
-
-    fn build(connection: &'conn Self::Builder, update: Update) -> Self {
-        Self::new(connection, update)
-    }
-}
-
-impl<'conn, S, Shape, Conn> ExecutableUpdateQuery<'conn> for PostgresUpdate<'conn, S, Shape, Conn>
-where
-    S: UpdateableTable,
-    Shape: ProjectionShape,
-    Conn: PostgresExecutor + 'conn,
-    Shape::Row: Decode<Postgres>,
-{
-    type RowStream<'query>
-        = PostgresRows<'query, Self::Row, Conn>
-    where
-        Self: 'query;
-
-    fn execute(
-        &self,
-    ) -> impl Future<
-        Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>,
-    > + Send
-    + '_ {
-        self.connection.execute_sql(
-            render_update(&self.update),
-            sql::update_params(&self.update),
-        )
-    }
-
-    fn fetch(&self) -> Self::RowStream<'_> {
-        PostgresRows::query(
-            self.connection,
-            render_update(&self.update),
-            sql::update_params(&self.update),
-        )
-    }
-}
-
-impl<Shape, Conn> PostgresSelect<'_, Shape, Conn>
-where
-    Shape: ProjectionShape,
-    Conn: QueryBuilder<Backend = Postgres>,
-{
-    pub fn to_sql(&self) -> String {
-        render_select(&self.select)
-    }
-
-    pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-        sql::write_select(&self.select, writer)
-    }
-
-    pub fn params(&self) -> Vec<BindValue> {
-        sql::select_params(&self.select)
-    }
-}
-
-impl<S, Shape, Conn> PostgresInsert<'_, S, Shape, Conn>
+impl<'conn, S, Shape, Columns, Returning, Conn> PreparableInsertQuery<'conn, Columns, Returning>
+    for PostgresInsert<'conn, S, Shape, Columns, Returning, Conn>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
-    Conn: QueryBuilder<Backend = Postgres>,
+    Conn: PostgresExecutor + 'conn,
+    Shape::Row: Decode<Postgres> + Send,
+    Columns: squealy::InsertAssignments,
+    Columns::Params: HList,
+    Returning: Projectable,
 {
-    pub fn to_sql(&self) -> String {
-        render_insert(&self.insert)
-    }
+    type Params = Columns::Params;
 
-    pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-        sql::write_insert(&self.insert, writer)
-    }
+    type Prepared<'prepared>
+        = PostgresPreparedMutation<'prepared, Shape::Row, Conn, Columns::Params>
+    where
+        Self: 'prepared,
+        'conn: 'prepared,
+        Columns: 'prepared,
+        Returning: 'prepared;
 
-    pub fn params(&self) -> Vec<BindValue> {
-        sql::insert_params(&self.insert)
+    fn prepare<'prepared>(
+        &'prepared self,
+    ) -> impl Future<
+        Output = Result<
+            Self::Prepared<'prepared>,
+            <<Self::Builder as QueryBuilder>::Backend as Backend>::Error,
+        >,
+    > + 'prepared
+    where
+        'conn: 'prepared,
+        Columns: 'prepared,
+        Returning: 'prepared,
+    {
+        let (sql, params) = self.prepared_sql().into_parts();
+        async move {
+            let statement = self.connection.prepare_sql(sql).await?;
+            Ok(PostgresPreparedMutation::new(
+                self.connection,
+                statement,
+                params,
+            ))
+        }
     }
 }
 
-impl<S, Shape, Conn> PostgresDelete<'_, S, Shape, Conn>
+impl<'conn, S, Shape, Filters, Returning, Conn> DeleteQuery<'conn, Filters, Returning>
+    for PostgresDelete<'conn, S, Shape, Filters, Returning, Conn>
 where
     S: TableProjection,
     Shape: ProjectionShape,
-    Conn: QueryBuilder<Backend = Postgres>,
+    Conn: QueryBuilder<Backend = Postgres> + 'conn,
+    Shape::Row: Decode<Postgres>,
+    Filters: PredicateNodes,
+    Returning: Projectable,
 {
-    pub fn to_sql(&self) -> String {
-        render_delete(&self.delete)
-    }
+    type Builder = Conn;
+    type Table = S;
+    type Shape = Shape;
+    type Row = Shape::Row;
 
-    pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-        sql::write_delete(&self.delete, writer)
-    }
-
-    pub fn params(&self) -> Vec<BindValue> {
-        sql::delete_params(&self.delete)
+    fn build(
+        connection: &'conn Self::Builder,
+        alias: SourceAlias,
+        filters: Filters,
+        returning: Returning,
+    ) -> Self {
+        Self::new(connection, alias, filters, returning)
     }
 }
 
-impl<S, Shape, Conn> PostgresUpdate<'_, S, Shape, Conn>
+impl<'conn, S, Shape, Filters, Returning, Conn> ExecutableDeleteQuery<'conn, Filters, Returning>
+    for PostgresDelete<'conn, S, Shape, Filters, Returning, Conn>
+where
+    S: TableProjection,
+    Shape: ProjectionShape,
+    Conn: PostgresExecutor + 'conn,
+    Shape::Row: Decode<Postgres>,
+    Filters: PredicateNodes,
+    Filters::Params: NoRuntimeParams,
+    Returning: Projectable,
+{
+    type RowStream<'query>
+        = PostgresRows<'query, Self::Row, Conn>
+    where
+        Self: 'query;
+
+    fn execute(
+        &self,
+    ) -> impl Future<
+        Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>,
+    > + Send
+    + '_ {
+        match self.execution_parts() {
+            Ok((sql, params)) => self.connection.execute_sql(sql, params),
+            Err(error) => execute_error(error),
+        }
+    }
+
+    fn fetch(&self) -> Self::RowStream<'_> {
+        match self.execution_parts() {
+            Ok((sql, params)) => PostgresRows::query_with_params(self.connection, sql, params),
+            Err(error) => PostgresRows::error(error),
+        }
+    }
+}
+
+impl<'conn, S, Shape, Filters, Returning, Conn> PreparableDeleteQuery<'conn, Filters, Returning>
+    for PostgresDelete<'conn, S, Shape, Filters, Returning, Conn>
+where
+    S: TableProjection,
+    Shape: ProjectionShape,
+    Conn: PostgresExecutor + 'conn,
+    Shape::Row: Decode<Postgres> + Send,
+    Filters: PredicateNodes,
+    Filters::Params: HList,
+    Returning: Projectable,
+{
+    type Params = Filters::Params;
+
+    type Prepared<'prepared>
+        = PostgresPreparedMutation<'prepared, Shape::Row, Conn, Filters::Params>
+    where
+        Self: 'prepared,
+        'conn: 'prepared,
+        Filters: 'prepared,
+        Returning: 'prepared;
+
+    fn prepare<'prepared>(
+        &'prepared self,
+    ) -> impl Future<
+        Output = Result<
+            Self::Prepared<'prepared>,
+            <<Self::Builder as QueryBuilder>::Backend as Backend>::Error,
+        >,
+    > + 'prepared
+    where
+        'conn: 'prepared,
+        Filters: 'prepared,
+        Returning: 'prepared,
+    {
+        let (sql, params) = self.prepared_sql().into_parts();
+        async move {
+            let statement = self.connection.prepare_sql(sql).await?;
+            Ok(PostgresPreparedMutation::new(
+                self.connection,
+                statement,
+                params,
+            ))
+        }
+    }
+}
+
+impl<'conn, S, Shape, Columns, Filters, Returning, Conn>
+    UpdateQuery<'conn, Columns, Filters, Returning>
+    for PostgresUpdate<'conn, S, Shape, Columns, Filters, Returning, Conn>
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
+    Conn: QueryBuilder<Backend = Postgres> + 'conn,
+    Shape::Row: Decode<Postgres>,
+    Columns: squealy::UpdateAssignments,
+    Filters: PredicateNodes,
+    Returning: Projectable,
+{
+    type Builder = Conn;
+    type Table = S;
+    type Shape = Shape;
+    type Row = Shape::Row;
+
+    fn build(
+        connection: &'conn Self::Builder,
+        alias: SourceAlias,
+        columns: Columns,
+        filters: Filters,
+        returning: Returning,
+    ) -> Self {
+        Self::new(connection, alias, columns, filters, returning)
+    }
+}
+
+impl<'conn, S, Shape, Columns, Filters, Returning, Conn>
+    ExecutableUpdateQuery<'conn, Columns, Filters, Returning>
+    for PostgresUpdate<'conn, S, Shape, Columns, Filters, Returning, Conn>
+where
+    S: UpdateableTable,
+    Shape: ProjectionShape,
+    Conn: PostgresExecutor + 'conn,
+    Shape::Row: Decode<Postgres>,
+    Columns: squealy::UpdateAssignments,
+    Columns::Params: NoRuntimeParams,
+    Filters: PredicateNodes,
+    Filters::Params: NoRuntimeParams,
+    Returning: Projectable,
+{
+    type RowStream<'query>
+        = PostgresRows<'query, Self::Row, Conn>
+    where
+        Self: 'query;
+
+    fn execute(
+        &self,
+    ) -> impl Future<
+        Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>,
+    > + Send
+    + '_ {
+        match self.execution_parts() {
+            Ok((sql, params)) => self.connection.execute_sql(sql, params),
+            Err(error) => execute_error(error),
+        }
+    }
+
+    fn fetch(&self) -> Self::RowStream<'_> {
+        match self.execution_parts() {
+            Ok((sql, params)) => PostgresRows::query_with_params(self.connection, sql, params),
+            Err(error) => PostgresRows::error(error),
+        }
+    }
+}
+
+impl<'conn, S, Shape, Columns, Filters, Returning, Conn>
+    PreparableUpdateQuery<'conn, Columns, Filters, Returning>
+    for PostgresUpdate<'conn, S, Shape, Columns, Filters, Returning, Conn>
+where
+    S: UpdateableTable,
+    Shape: ProjectionShape,
+    Conn: PostgresExecutor + 'conn,
+    Shape::Row: Decode<Postgres> + Send,
+    Columns: squealy::UpdateAssignments,
+    Filters: PredicateNodes,
+    Columns::Params: HAppend<Filters::Params>,
+    <Columns::Params as HAppend<Filters::Params>>::Output: HList,
+    Returning: Projectable,
+{
+    type Params = <Columns::Params as HAppend<Filters::Params>>::Output;
+
+    type Prepared<'prepared>
+        = PostgresPreparedMutation<
+        'prepared,
+        Shape::Row,
+        Conn,
+        <Columns::Params as HAppend<Filters::Params>>::Output,
+    >
+    where
+        Self: 'prepared,
+        'conn: 'prepared,
+        Columns: 'prepared,
+        Filters: 'prepared,
+        Returning: 'prepared;
+
+    fn prepare<'prepared>(
+        &'prepared self,
+    ) -> impl Future<
+        Output = Result<
+            Self::Prepared<'prepared>,
+            <<Self::Builder as QueryBuilder>::Backend as Backend>::Error,
+        >,
+    > + 'prepared
+    where
+        'conn: 'prepared,
+        Columns: 'prepared,
+        Filters: 'prepared,
+        Returning: 'prepared,
+    {
+        let (sql, params) = self.prepared_sql().into_parts();
+        async move {
+            let statement = self.connection.prepare_sql(sql).await?;
+            Ok(PostgresPreparedMutation::new(
+                self.connection,
+                statement,
+                params,
+            ))
+        }
+    }
+}
+
+impl<'conn, 'scope, Shape, Base, Projection, Conn>
+    PostgresSelect<'conn, 'scope, Shape, Base, Projection, Conn>
+where
+    Shape: ProjectionShape,
+    Conn: QueryBuilder<Backend = Postgres>,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Projection: Projectable,
+{
+    /// Render this query into a newly allocated SQL string.
+    ///
+    /// Use [`Self::write_sql`] to stream SQL into caller-provided storage instead.
+    pub fn to_sql(&self) -> String {
+        rendered_sql(|writer| self.write_sql(writer))
+    }
+
+    /// Stream SQL into caller-provided storage without allocating a SQL string.
+    pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+        sql::write_selected_into::<Conn, Base, Shape, Projection, _>(&self.selected, writer)
+    }
+
+    /// Write bind parameters into a caller-provided sink.
+    pub fn write_params<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: BindSink,
+    {
+        sql::write_selected_params::<Conn, Base, Shape, Projection, _>(&self.selected, sink)
+    }
+
+    /// Collect bind parameters into a newly allocated vector.
+    ///
+    /// Use [`Self::write_params`] to inspect parameters without allocating a vector.
+    pub fn collect_params(&self) -> Vec<BindValue> {
+        let mut params = Vec::new();
+        self.write_params(&mut params)
+            .unwrap_or_else(|error| match error {});
+        params
+    }
+}
+
+impl<S, Shape, Columns, Returning, Conn> PostgresInsert<'_, S, Shape, Columns, Returning, Conn>
+where
+    S: InsertableTable,
+    Shape: ProjectionShape,
+    Columns: squealy::InsertAssignments,
+    Returning: Projectable,
     Conn: QueryBuilder<Backend = Postgres>,
 {
+    /// Render this query into a newly allocated SQL string.
+    ///
+    /// Use [`Self::write_sql`] to stream SQL into caller-provided storage instead.
     pub fn to_sql(&self) -> String {
-        render_update(&self.update)
+        rendered_sql(|writer| self.write_sql(writer))
     }
 
+    /// Stream SQL into caller-provided storage without allocating a SQL string.
     pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-        sql::write_update(&self.update, writer)
+        sql::write_insert::<S, _, _>(&self.columns, &self.returning, writer)
     }
 
-    pub fn params(&self) -> Vec<BindValue> {
-        sql::update_params(&self.update)
+    /// Write bind parameters into a caller-provided sink.
+    pub fn write_params<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: BindSink,
+    {
+        sql::write_insert_params::<S, _, _, _>(&self.columns, &self.returning, sink)
+    }
+
+    /// Collect bind parameters into a newly allocated vector.
+    ///
+    /// Use [`Self::write_params`] to inspect parameters without allocating a vector.
+    pub fn collect_params(&self) -> Vec<BindValue> {
+        let mut params = Vec::new();
+        self.write_params(&mut params)
+            .unwrap_or_else(|error| match error {});
+        params
+    }
+}
+
+impl<S, Shape, Filters, Returning, Conn> PostgresDelete<'_, S, Shape, Filters, Returning, Conn>
+where
+    S: TableProjection,
+    Shape: ProjectionShape,
+    Filters: PredicateNodes,
+    Returning: Projectable,
+    Conn: QueryBuilder<Backend = Postgres>,
+{
+    /// Render this query into a newly allocated SQL string.
+    ///
+    /// Use [`Self::write_sql`] to stream SQL into caller-provided storage instead.
+    pub fn to_sql(&self) -> String {
+        rendered_sql(|writer| self.write_sql(writer))
+    }
+
+    /// Stream SQL into caller-provided storage without allocating a SQL string.
+    pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+        sql::write_delete::<S, _, _>(self.alias, &self.filters, &self.returning, writer)
+    }
+
+    /// Write bind parameters into a caller-provided sink.
+    pub fn write_params<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: BindSink,
+    {
+        sql::write_delete_params::<S, _, _, _>(self.alias, &self.filters, &self.returning, sink)
+    }
+
+    /// Collect bind parameters into a newly allocated vector.
+    ///
+    /// Use [`Self::write_params`] to inspect parameters without allocating a vector.
+    pub fn collect_params(&self) -> Vec<BindValue> {
+        let mut params = Vec::new();
+        self.write_params(&mut params)
+            .unwrap_or_else(|error| match error {});
+        params
+    }
+}
+
+impl<S, Shape, Columns, Filters, Returning, Conn>
+    PostgresUpdate<'_, S, Shape, Columns, Filters, Returning, Conn>
+where
+    S: UpdateableTable,
+    Shape: ProjectionShape,
+    Columns: squealy::UpdateAssignments,
+    Filters: PredicateNodes,
+    Returning: Projectable,
+    Conn: QueryBuilder<Backend = Postgres>,
+{
+    /// Render this query into a newly allocated SQL string.
+    ///
+    /// Use [`Self::write_sql`] to stream SQL into caller-provided storage instead.
+    pub fn to_sql(&self) -> String {
+        rendered_sql(|writer| self.write_sql(writer))
+    }
+
+    /// Stream SQL into caller-provided storage without allocating a SQL string.
+    pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+        sql::write_update::<S, _, _, _>(
+            self.alias,
+            &self.columns,
+            &self.filters,
+            &self.returning,
+            writer,
+        )
+    }
+
+    /// Write bind parameters into a caller-provided sink.
+    pub fn write_params<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: BindSink,
+    {
+        sql::write_update_params::<S, _, _, _, _>(
+            self.alias,
+            &self.columns,
+            &self.filters,
+            &self.returning,
+            sink,
+        )
+    }
+
+    /// Collect bind parameters into a newly allocated vector.
+    ///
+    /// Use [`Self::write_params`] to inspect parameters without allocating a vector.
+    pub fn collect_params(&self) -> Vec<BindValue> {
+        let mut params = Vec::new();
+        self.write_params(&mut params)
+            .unwrap_or_else(|error| match error {});
+        params
     }
 }
 

@@ -11,3 +11,4 @@ squealy-macros = { path = "../squealy-macros" }
 
 [dev-dependencies]
 squealy-test = { path = "../squealy-test" }
+trybuild = "1.0"

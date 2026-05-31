@@ -50,14 +50,20 @@ pub fn tuple_projection_shapes(input: TokenStream) -> TokenStream {
     tuple::projection_shapes(input)
 }
 
-/// Generates fixed homogeneous IR list support for tuple arities from 1 through the supplied maximum.
+/// Generates fixed homogeneous list support for tuple arities from 1 through the supplied maximum.
 #[proc_macro]
-pub fn tuple_ir_lists(input: TokenStream) -> TokenStream {
-    tuple::ir_lists(input)
+pub fn tuple_fixed_lists(input: TokenStream) -> TokenStream {
+    tuple::fixed_lists(input)
 }
 
 /// Generates conversions from HLists to tuples from arity 1 through the supplied maximum.
 #[proc_macro]
 pub fn hlist_tuples(input: TokenStream) -> TokenStream {
     tuple::hlist_tuples(input)
+}
+
+/// Generates prepared parameter tuple support for arities from 1 through the supplied maximum.
+#[proc_macro]
+pub fn prepared_param_values(input: TokenStream) -> TokenStream {
+    tuple::prepared_param_values(input)
 }

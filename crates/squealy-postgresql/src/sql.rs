@@ -1,21 +1,415 @@
+use std::borrow::Cow;
 use std::io::{self, Write};
 
 use squealy::{
-    ArithmeticOp, BindValue, ColumnDefault, CompareOp, Delete, ExprNode, Insert, OrderDirection,
-    OrderNode, PredicateNode, Select, SelectColumn, Sort, Source, SourceKind, SourceTarget, Table,
-    Update,
+    ArithmeticOp, AssignmentValueRef, BindSink, BindValue, ColumnDefault, ColumnRef, CompareOp,
+    Expr, ExprAst, ExprKind, ExprVisitor, InsertAssignments, InsertableTable, Order,
+    OrderDirection, Predicate, PredicateAst, PredicateAstVisitor, PredicateKind, PredicateNodes,
+    PredicateVisitor, Projectable, ProjectionShape, ProjectionVisitor, QueryBuilder, SchemaTable,
+    SelectAst, SelectSink, Selected, SourceAlias, Table, TableProjection, UpdateAssignments,
+    UpdateableTable,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Renderer {
     next_param: usize,
+    next_runtime_param: usize,
 }
 
 impl Renderer {
-    fn placeholder(&mut self) -> String {
+    fn write_placeholder(&mut self, writer: &mut impl Write) -> io::Result<()> {
         self.next_param += 1;
-        format!("${}", self.next_param)
+        write!(writer, "${}", self.next_param)
     }
+
+    fn next_runtime_param(&mut self) -> usize {
+        let index = self.next_runtime_param;
+        self.next_runtime_param += 1;
+        index
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PreparedSql {
+    sql: String,
+    params: Vec<SqlParam>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SqlParam {
+    Static(BindValue),
+    Runtime(usize),
+}
+
+impl PreparedSql {
+    pub(crate) fn into_parts(self) -> (String, Vec<SqlParam>) {
+        (self.sql, self.params)
+    }
+
+    fn clear(&mut self) {
+        self.sql.clear();
+        self.params.clear();
+    }
+
+    fn push_param(&mut self, param: BindValue) {
+        self.params.push(SqlParam::Static(param));
+    }
+
+    fn push_runtime_param(&mut self, index: usize) {
+        self.params.push(SqlParam::Runtime(index));
+    }
+}
+
+impl Write for PreparedSql {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let text = std::str::from_utf8(buf).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("SQL renderer wrote non-UTF-8 bytes: {error}"),
+            )
+        })?;
+        self.sql.push_str(text);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+trait SqlWriter: Write {
+    fn push_bind(&mut self, value: &BindValue);
+
+    fn push_runtime_bind(&mut self, index: usize);
+}
+
+impl SqlWriter for PreparedSql {
+    fn push_bind(&mut self, value: &BindValue) {
+        self.push_param(value.clone());
+    }
+
+    fn push_runtime_bind(&mut self, index: usize) {
+        self.push_runtime_param(index);
+    }
+}
+
+struct SqlOnly<'writer, Writer>(&'writer mut Writer);
+
+impl<Writer> Write for SqlOnly<'_, Writer>
+where
+    Writer: Write,
+{
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl<Writer> SqlWriter for SqlOnly<'_, Writer>
+where
+    Writer: Write,
+{
+    fn push_bind(&mut self, _value: &BindValue) {}
+
+    fn push_runtime_bind(&mut self, _index: usize) {}
+}
+
+struct ParamSinkWriter<'sink, Sink>
+where
+    Sink: BindSink,
+{
+    sink: &'sink mut Sink,
+    error: Option<Sink::Error>,
+}
+
+impl<Sink> ParamSinkWriter<'_, Sink>
+where
+    Sink: BindSink,
+{
+    fn finish(self) -> Result<(), Sink::Error> {
+        match self.error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+impl<Sink> Write for ParamSinkWriter<'_, Sink>
+where
+    Sink: BindSink,
+{
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<Sink> SqlWriter for ParamSinkWriter<'_, Sink>
+where
+    Sink: BindSink,
+{
+    fn push_bind(&mut self, value: &BindValue) {
+        if self.error.is_none() {
+            self.error = self.sink.push_bind_value(value.clone()).err();
+        }
+    }
+
+    fn push_runtime_bind(&mut self, _index: usize) {}
+}
+
+struct PostgresSelectSink<'writer, Writer> {
+    writer: &'writer mut Writer,
+    renderer: Renderer,
+    columns: usize,
+    sources: usize,
+    filters: usize,
+    orders: usize,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+impl<'writer, Writer> PostgresSelectSink<'writer, Writer>
+where
+    Writer: SqlWriter,
+{
+    fn new(writer: &'writer mut Writer) -> io::Result<Self> {
+        writer.write_all(b"SELECT ")?;
+        Ok(Self {
+            writer,
+            renderer: Renderer::default(),
+            columns: 0,
+            sources: 0,
+            filters: 0,
+            orders: 0,
+            limit: None,
+            offset: None,
+        })
+    }
+
+    fn finish(self) -> io::Result<()> {
+        if let Some(limit) = self.limit {
+            write!(self.writer, " LIMIT {limit}")?;
+        }
+        if let Some(offset) = self.offset {
+            write!(self.writer, " OFFSET {offset}")?;
+        }
+        Ok(())
+    }
+
+    fn push_source_separator(&mut self) -> io::Result<()> {
+        self.writer.write_all(b" ")?;
+        self.sources += 1;
+        Ok(())
+    }
+
+    fn push_join<S, P, Ast>(
+        &mut self,
+        alias: SourceAlias,
+        on: Predicate<'_, P, Ast>,
+        join: &str,
+    ) -> io::Result<()>
+    where
+        S: TableProjection,
+        P: PredicateKind,
+        Ast: PredicateAst,
+    {
+        let first_source = self.sources == 0;
+        self.push_source_separator()?;
+        if first_source {
+            write!(self.writer, "FROM {} AS {alias}", S::qualified_name())?;
+        } else {
+            write!(self.writer, "{join} {} AS {alias} ON ", S::qualified_name())?;
+            write_predicate_value(&on, self.writer, &mut self.renderer)?;
+        }
+        Ok(())
+    }
+
+    fn push_projection_separator(&mut self) -> io::Result<()> {
+        if self.columns > 0 {
+            self.writer.write_all(b", ")?;
+        }
+        self.columns += 1;
+        Ok(())
+    }
+}
+
+impl<Writer> SelectSink for PostgresSelectSink<'_, Writer>
+where
+    Writer: SqlWriter,
+{
+    type Error = io::Error;
+
+    fn push_projection<Shape, P>(&mut self, projection: P) -> io::Result<()>
+    where
+        Shape: ProjectionShape,
+        P: Projectable,
+    {
+        _ = std::marker::PhantomData::<Shape>;
+        projection.visit_projection(self)
+    }
+
+    fn push_table_source<S>(&mut self, alias: SourceAlias) -> io::Result<()>
+    where
+        S: TableProjection,
+    {
+        self.push_source_separator()?;
+        write!(self.writer, "FROM {} AS {alias}", S::qualified_name())
+    }
+
+    fn push_inner_join<S, P, Ast>(
+        &mut self,
+        alias: SourceAlias,
+        on: Predicate<'_, P, Ast>,
+    ) -> io::Result<()>
+    where
+        S: TableProjection,
+        P: PredicateKind,
+        Ast: PredicateAst,
+    {
+        self.push_join::<S, P, Ast>(alias, on, "INNER JOIN")
+    }
+
+    fn push_left_join<S, P, Ast>(
+        &mut self,
+        alias: SourceAlias,
+        on: Predicate<'_, P, Ast>,
+    ) -> io::Result<()>
+    where
+        S: TableProjection,
+        P: PredicateKind,
+        Ast: PredicateAst,
+    {
+        self.push_join::<S, P, Ast>(alias, on, "LEFT JOIN")
+    }
+
+    fn push_filter<P, Ast>(&mut self, predicate: Predicate<'_, P, Ast>) -> io::Result<()>
+    where
+        P: PredicateKind,
+        Ast: PredicateAst,
+    {
+        if self.filters == 0 {
+            self.writer.write_all(b" WHERE ")?;
+        } else {
+            self.writer.write_all(b" AND ")?;
+        }
+        self.filters += 1;
+        write_predicate_value(&predicate, self.writer, &mut self.renderer)
+    }
+
+    fn push_order<K, Ast>(&mut self, order: Order<'_, K, Ast>) -> io::Result<()>
+    where
+        K: ExprKind,
+        Ast: ExprAst,
+    {
+        if self.orders == 0 {
+            self.writer.write_all(b" ORDER BY ")?;
+        } else {
+            self.writer.write_all(b", ")?;
+        }
+        self.orders += 1;
+        write_order_value(&order, self.writer, &mut self.renderer)
+    }
+
+    fn set_limit(&mut self, rows: usize) -> io::Result<()> {
+        self.limit = Some(rows);
+        Ok(())
+    }
+
+    fn set_offset(&mut self, rows: usize) -> io::Result<()> {
+        self.offset = Some(rows);
+        Ok(())
+    }
+}
+
+impl<Writer> ProjectionVisitor for PostgresSelectSink<'_, Writer>
+where
+    Writer: SqlWriter,
+{
+    type Error = io::Error;
+
+    fn visit_expr<K, Ast>(
+        &mut self,
+        expr: &Expr<'_, K, Ast>,
+        alias: Cow<'static, str>,
+    ) -> io::Result<()>
+    where
+        K: ExprKind,
+        Ast: ExprAst,
+    {
+        self.push_projection_separator()?;
+        write_expr_value(expr, self.writer, &mut self.renderer)?;
+        write!(self.writer, " AS {alias}")?;
+        Ok(())
+    }
+
+    fn visit_column<K>(
+        &mut self,
+        column: ColumnRef<'_, K>,
+        alias: Cow<'static, str>,
+    ) -> io::Result<()>
+    where
+        K: ExprKind,
+    {
+        self.push_projection_separator()?;
+        write_column_value(column, self.writer, &mut self.renderer)?;
+        write!(self.writer, " AS {alias}")
+    }
+}
+
+pub(crate) fn render_selected_prepared<'conn, 'scope, Conn, Base, Shape, Projection>(
+    selected: &Selected<'scope, Base, Shape, Projection>,
+    buffer: &mut PreparedSql,
+) where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Shape: ProjectionShape,
+    Projection: Projectable,
+{
+    buffer.clear();
+    let mut sink = PostgresSelectSink::new(buffer).unwrap();
+    selected.lower_into::<Conn, _>(&mut sink).unwrap();
+    sink.finish().unwrap();
+}
+
+pub(crate) fn write_selected_into<'conn, 'scope, Conn, Base, Shape, Projection, Writer>(
+    selected: &Selected<'scope, Base, Shape, Projection>,
+    writer: &mut Writer,
+) -> io::Result<()>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Shape: ProjectionShape,
+    Projection: Projectable,
+    Writer: Write,
+{
+    let mut writer = SqlOnly(writer);
+    let mut sink = PostgresSelectSink::new(&mut writer)?;
+    selected.lower_into::<Conn, _>(&mut sink)?;
+    sink.finish()
+}
+
+pub(crate) fn write_selected_params<'conn, 'scope, Conn, Base, Shape, Projection, Sink>(
+    selected: &Selected<'scope, Base, Shape, Projection>,
+    sink: &mut Sink,
+) -> Result<(), Sink::Error>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Shape: ProjectionShape,
+    Projection: Projectable,
+    Sink: BindSink,
+{
+    let mut writer = ParamSinkWriter { sink, error: None };
+    let mut select_sink = PostgresSelectSink::new(&mut writer).unwrap();
+    selected.lower_into::<Conn, _>(&mut select_sink).unwrap();
+    select_sink.finish().unwrap();
+    writer.finish()
 }
 
 pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -> io::Result<()> {
@@ -44,16 +438,11 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
             write_default(default, writer)?;
         }
         if let Some(reference) = column.references() {
-            write!(
-                writer,
-                " REFERENCES {}{}({})",
-                reference
-                    .schema_name()
-                    .map(|schema| format!("{schema}."))
-                    .unwrap_or_default(),
-                reference.table(),
-                reference.column()
-            )?;
+            writer.write_all(b" REFERENCES ")?;
+            if let Some(schema) = reference.schema_name() {
+                write!(writer, "{schema}.")?;
+            }
+            write!(writer, "{}({})", reference.table(), reference.column())?;
             if let Some(on_delete) = reference.on_delete() {
                 write!(writer, " ON DELETE {on_delete}")?;
             }
@@ -67,14 +456,25 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
     for index in table.indexes() {
         let unique = if index.unique() { "UNIQUE " } else { "" };
         let name = index.name().unwrap_or("unnamed_idx");
-        let columns = index.columns().join(", ");
         write!(
             writer,
-            "\nCREATE {unique}INDEX {name} ON {} ({columns})",
+            "\nCREATE {unique}INDEX {name} ON {} (",
             table.qualified_name()
         )?;
+        write_comma_separated(index.columns(), writer)?;
+        writer.write_all(b")")?;
     }
 
+    Ok(())
+}
+
+fn write_comma_separated(values: &[&'static str], writer: &mut impl Write) -> io::Result<()> {
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        writer.write_all(value.as_bytes())?;
+    }
     Ok(())
 }
 
@@ -84,7 +484,7 @@ fn write_default(default: ColumnDefault, writer: &mut impl Write) -> io::Result<
         ColumnDefault::Int(value) => write!(writer, "{value}"),
         ColumnDefault::UInt(value) => write!(writer, "{value}"),
         ColumnDefault::Float(value) => write!(writer, "{value}"),
-        ColumnDefault::Text(value) => write!(writer, "'{}'", value.replace('\'', "''")),
+        ColumnDefault::Text(value) => write_quoted_text(value, writer),
         ColumnDefault::Bool(true) => writer.write_all(b"TRUE"),
         ColumnDefault::Bool(false) => writer.write_all(b"FALSE"),
         ColumnDefault::CurrentTimestamp => writer.write_all(b"CURRENT_TIMESTAMP"),
@@ -94,260 +494,254 @@ fn write_default(default: ColumnDefault, writer: &mut impl Write) -> io::Result<
     }
 }
 
-pub(crate) fn write_select(select: &Select, writer: &mut impl Write) -> io::Result<()> {
-    let mut renderer = Renderer::default();
-    write_select_with_renderer(select, writer, &mut renderer)
+fn write_quoted_text(value: &str, writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(b"'")?;
+    for byte in value.as_bytes() {
+        if *byte == b'\'' {
+            writer.write_all(b"''")?;
+        } else {
+            writer.write_all(std::slice::from_ref(byte))?;
+        }
+    }
+    writer.write_all(b"'")
 }
 
-pub(crate) fn write_insert(insert: &Insert, writer: &mut impl Write) -> io::Result<()> {
+pub(crate) fn write_insert<S, Columns, Returning>(
+    columns: &Columns,
+    returning: &Returning,
+    writer: &mut impl Write,
+) -> io::Result<()>
+where
+    S: InsertableTable,
+    Columns: InsertAssignments,
+    Returning: Projectable,
+{
+    let mut writer = SqlOnly(writer);
+    write_insert_with_params::<S, _, _, _>(columns, returning, &mut writer)
+}
+
+fn write_insert_with_params<S, Columns, Returning, Writer>(
+    columns: &Columns,
+    returning: &Returning,
+    writer: &mut Writer,
+) -> io::Result<()>
+where
+    S: InsertableTable,
+    Columns: InsertAssignments,
+    Returning: Projectable,
+    Writer: SqlWriter,
+{
     let mut renderer = Renderer::default();
-    write!(writer, "INSERT INTO {}", insert.table())?;
-    if insert.columns().is_empty() {
+    write!(
+        writer,
+        "INSERT INTO {}",
+        <S as SchemaTable>::qualified_name()
+    )?;
+    if columns.is_empty() {
         writer.write_all(b" DEFAULT VALUES")?;
     } else {
         writer.write_all(b" (")?;
-        for (index, column) in insert.columns().iter().enumerate() {
+        let mut index = 0;
+        columns.try_for_each(|column, _value| {
             if index > 0 {
                 writer.write_all(b", ")?;
             }
-            writer.write_all(column.column().as_bytes())?;
-        }
+            index += 1;
+            writer.write_all(column.as_bytes())?;
+            Ok::<(), io::Error>(())
+        })?;
         writer.write_all(b") VALUES (")?;
-        for index in 0..insert.columns().len() {
+        let mut index = 0;
+        columns.try_for_each(|_column, value| {
             if index > 0 {
                 writer.write_all(b", ")?;
             }
-            writer.write_all(renderer.placeholder().as_bytes())?;
-        }
+            index += 1;
+            write_assignment_value(value, writer, &mut renderer)?;
+            Ok::<(), io::Error>(())
+        })?;
         writer.write_all(b")")?;
     }
-    write_insert_returning(insert.returning(), writer, &mut renderer)?;
+    write_insert_returning(returning, writer, &mut renderer)?;
     Ok(())
 }
 
-pub(crate) fn write_update(update: &Update, writer: &mut impl Write) -> io::Result<()> {
+pub(crate) fn write_update<S, Columns, Filters, Returning>(
+    alias: SourceAlias,
+    columns: &Columns,
+    filters: &Filters,
+    returning: &Returning,
+    writer: &mut impl Write,
+) -> io::Result<()>
+where
+    S: UpdateableTable,
+    Columns: UpdateAssignments,
+    Filters: PredicateNodes,
+    Returning: Projectable,
+{
+    let mut writer = SqlOnly(writer);
+    write_update_with_params::<S, _, _, _, _>(alias, columns, filters, returning, &mut writer)
+}
+
+fn write_update_with_params<S, Columns, Filters, Returning, Writer>(
+    alias: SourceAlias,
+    columns: &Columns,
+    filters: &Filters,
+    returning: &Returning,
+    writer: &mut Writer,
+) -> io::Result<()>
+where
+    S: UpdateableTable,
+    Columns: UpdateAssignments,
+    Filters: PredicateNodes,
+    Returning: Projectable,
+    Writer: SqlWriter,
+{
     let mut renderer = Renderer::default();
     write!(
         writer,
         "UPDATE {} AS {} SET ",
-        update.table(),
-        update.alias()
+        <S as SchemaTable>::qualified_name(),
+        alias
     )?;
-    for (index, column) in update.columns().iter().enumerate() {
+    let mut index = 0;
+    columns.try_for_each(|column, value| {
         if index > 0 {
             writer.write_all(b", ")?;
         }
-        write!(writer, "{} = {}", column.column(), renderer.placeholder())?;
-    }
-    write_filters(update.filters(), writer, &mut renderer)?;
-    write_returning(update.returning(), writer, &mut renderer)?;
+        index += 1;
+        write!(writer, "{column} = ")?;
+        write_assignment_value(value, writer, &mut renderer)?;
+        Ok::<(), io::Error>(())
+    })?;
+    write_filters(filters, writer, &mut renderer)?;
+    write_returning(returning, writer, &mut renderer)?;
     Ok(())
 }
 
-pub(crate) fn write_delete(delete: &Delete, writer: &mut impl Write) -> io::Result<()> {
-    let mut renderer = Renderer::default();
-    write!(
-        writer,
-        "DELETE FROM {} AS {}",
-        delete.table(),
-        delete.alias()
-    )?;
-    write_filters(delete.filters(), writer, &mut renderer)?;
-    write_returning(delete.returning(), writer, &mut renderer)?;
-    Ok(())
-}
-
-fn write_select_with_renderer(
-    select: &Select,
+pub(crate) fn write_delete<S, Filters, Returning>(
+    alias: SourceAlias,
+    filters: &Filters,
+    returning: &Returning,
     writer: &mut impl Write,
-    renderer: &mut Renderer,
-) -> io::Result<()> {
-    writer.write_all(b"SELECT ")?;
-    write_select_columns(select.columns(), writer, renderer)?;
-    if !select.sources().is_empty() {
-        writer.write_all(b" ")?;
-        write_sources(select.sources(), writer, renderer)?;
-    }
-    write_filters(select.filters(), writer, renderer)?;
-    write_orders(select.orders(), writer, renderer)?;
-    if let Some(limit) = select.limit() {
-        write!(writer, " LIMIT {limit}")?;
-    }
-    if let Some(offset) = select.offset() {
-        write!(writer, " OFFSET {offset}")?;
-    }
+) -> io::Result<()>
+where
+    S: TableProjection,
+    Filters: PredicateNodes,
+    Returning: Projectable,
+{
+    let mut writer = SqlOnly(writer);
+    write_delete_with_params::<S, _, _, _>(alias, filters, returning, &mut writer)
+}
+
+fn write_delete_with_params<S, Filters, Returning, Writer>(
+    alias: SourceAlias,
+    filters: &Filters,
+    returning: &Returning,
+    writer: &mut Writer,
+) -> io::Result<()>
+where
+    S: TableProjection,
+    Filters: PredicateNodes,
+    Returning: Projectable,
+    Writer: SqlWriter,
+{
+    let mut renderer = Renderer::default();
+    write!(writer, "DELETE FROM {} AS {}", S::qualified_name(), alias)?;
+    write_filters(filters, writer, &mut renderer)?;
+    write_returning(returning, writer, &mut renderer)?;
     Ok(())
 }
 
 fn write_returning(
-    columns: &[SelectColumn],
-    writer: &mut impl Write,
+    returning: &impl Projectable,
+    writer: &mut impl SqlWriter,
     renderer: &mut Renderer,
 ) -> io::Result<()> {
-    if !columns.is_empty() {
-        writer.write_all(b" RETURNING ")?;
-        write_select_columns(columns, writer, renderer)?;
-    }
-    Ok(())
+    write_projection(returning, writer, renderer, false)
 }
 
 fn write_insert_returning(
-    columns: &[SelectColumn],
-    writer: &mut impl Write,
+    returning: &impl Projectable,
+    writer: &mut impl SqlWriter,
     renderer: &mut Renderer,
 ) -> io::Result<()> {
-    if !columns.is_empty() {
-        writer.write_all(b" RETURNING ")?;
-        write_insert_returning_columns(columns, writer, renderer)?;
-    }
-    Ok(())
+    write_projection(returning, writer, renderer, true)
 }
 
-fn write_select_columns(
-    columns: &[SelectColumn],
-    writer: &mut impl Write,
+fn write_projection(
+    projection: &impl Projectable,
+    writer: &mut impl SqlWriter,
     renderer: &mut Renderer,
+    insert_returning: bool,
 ) -> io::Result<()> {
-    for (index, column) in columns.iter().enumerate() {
-        if index > 0 {
-            writer.write_all(b", ")?;
-        }
-        write!(
-            writer,
-            "{} AS {}",
-            render_expr(&column.expr, renderer),
-            column.alias
-        )?;
-    }
-    Ok(())
+    projection.visit_projection(&mut WriteProjection {
+        writer,
+        renderer,
+        index: 0,
+        insert_returning,
+    })
 }
 
-fn write_insert_returning_columns(
-    columns: &[SelectColumn],
-    writer: &mut impl Write,
-    renderer: &mut Renderer,
-) -> io::Result<()> {
-    for (index, column) in columns.iter().enumerate() {
-        if index > 0 {
-            writer.write_all(b", ")?;
-        }
-        write!(
-            writer,
-            "{} AS {}",
-            render_insert_returning_expr(&column.expr, renderer),
-            column.alias
-        )?;
-    }
-    Ok(())
+struct WriteProjection<'writer, 'renderer, Writer> {
+    writer: &'writer mut Writer,
+    renderer: &'renderer mut Renderer,
+    index: usize,
+    insert_returning: bool,
 }
 
-fn write_sources(
-    sources: &[Source],
-    writer: &mut impl Write,
-    renderer: &mut Renderer,
-) -> io::Result<()> {
-    for (index, source) in sources.iter().enumerate() {
-        if index > 0 {
-            writer.write_all(b" ")?;
+impl<Writer> WriteProjection<'_, '_, Writer>
+where
+    Writer: SqlWriter,
+{
+    fn write_prefix(&mut self) -> io::Result<()> {
+        if self.index == 0 {
+            self.writer.write_all(b" RETURNING ")?;
+        } else {
+            self.writer.write_all(b", ")?;
         }
-        write_source(source, index, writer, renderer)?;
+        self.index += 1;
+        Ok(())
     }
-    Ok(())
 }
 
-fn write_source(
-    source: &Source,
-    position: usize,
-    writer: &mut impl Write,
-    renderer: &mut Renderer,
-) -> io::Result<()> {
-    match (source.kind(), source.target(), position) {
-        (SourceKind::From, SourceTarget::Table(table), _) => {
-            write!(writer, "FROM {table} AS {}", source.alias())
-        }
-        (SourceKind::From, SourceTarget::Query(query), _) => {
-            writer.write_all(b"FROM (")?;
-            write_select_with_renderer(query, writer, renderer)?;
-            write!(writer, ") AS {}", source.alias())
-        }
-        (SourceKind::InnerLateral, SourceTarget::Query(query), 0) => {
-            writer.write_all(b"FROM (")?;
-            write_select_with_renderer(query, writer, renderer)?;
-            write!(writer, ") AS {}", source.alias())
-        }
-        (SourceKind::InnerLateral, SourceTarget::Query(query), _) => {
-            writer.write_all(b"INNER JOIN LATERAL (")?;
-            write_select_with_renderer(query, writer, renderer)?;
-            write!(writer, ") AS {} ON TRUE", source.alias())
-        }
-        (SourceKind::InnerLateral, SourceTarget::Table(table), 0) => {
-            write!(writer, "FROM {table} AS {}", source.alias())
-        }
-        (SourceKind::InnerLateral, SourceTarget::Table(table), _) => {
-            write!(
-                writer,
-                "INNER JOIN LATERAL {table} AS {} ON TRUE",
-                source.alias()
-            )
-        }
-        (SourceKind::InnerJoin { on: _ }, SourceTarget::Table(table), 0) => {
-            write!(writer, "FROM {table} AS {}", source.alias())
-        }
-        (SourceKind::InnerJoin { on }, SourceTarget::Table(table), _) => {
-            write!(
-                writer,
-                "INNER JOIN {table} AS {} ON {}",
-                source.alias(),
-                render_predicate(on, renderer)
-            )
-        }
-        (SourceKind::InnerJoin { on: _ }, SourceTarget::Query(query), 0) => {
-            writer.write_all(b"FROM (")?;
-            write_select_with_renderer(query, writer, renderer)?;
-            write!(writer, ") AS {}", source.alias())
-        }
-        (SourceKind::InnerJoin { on }, SourceTarget::Query(query), _) => {
-            writer.write_all(b"INNER JOIN (")?;
-            write_select_with_renderer(query, writer, renderer)?;
-            write!(
-                writer,
-                ") AS {} ON {}",
-                source.alias(),
-                render_predicate(on, renderer)
-            )
-        }
-        (SourceKind::LeftJoin { on: _ }, SourceTarget::Table(table), 0) => {
-            write!(writer, "FROM {table} AS {}", source.alias())
-        }
-        (SourceKind::LeftJoin { on }, SourceTarget::Table(table), _) => {
-            write!(
-                writer,
-                "LEFT JOIN {table} AS {} ON {}",
-                source.alias(),
-                render_predicate(on, renderer)
-            )
-        }
-        (SourceKind::LeftJoin { on: _ }, SourceTarget::Query(query), 0) => {
-            writer.write_all(b"FROM (")?;
-            write_select_with_renderer(query, writer, renderer)?;
-            write!(writer, ") AS {}", source.alias())
-        }
-        (SourceKind::LeftJoin { on }, SourceTarget::Query(query), _) => {
-            writer.write_all(b"LEFT JOIN (")?;
-            write_select_with_renderer(query, writer, renderer)?;
-            write!(
-                writer,
-                ") AS {} ON {}",
-                source.alias(),
-                render_predicate(on, renderer)
-            )
-        }
+impl<Writer> ProjectionVisitor for WriteProjection<'_, '_, Writer>
+where
+    Writer: SqlWriter,
+{
+    type Error = io::Error;
+
+    fn visit_expr<K, Ast>(
+        &mut self,
+        expr: &Expr<'_, K, Ast>,
+        alias: Cow<'static, str>,
+    ) -> io::Result<()>
+    where
+        K: ExprKind,
+        Ast: ExprAst,
+    {
+        self.write_prefix()?;
+        write_expr_value_node(expr, self.writer, self.renderer, self.insert_returning)?;
+        write!(self.writer, " AS {alias}")
+    }
+
+    fn visit_column<K>(
+        &mut self,
+        column: ColumnRef<'_, K>,
+        alias: Cow<'static, str>,
+    ) -> io::Result<()>
+    where
+        K: ExprKind,
+    {
+        self.write_prefix()?;
+        write_column_value_node(column, self.writer, self.renderer, self.insert_returning)?;
+        write!(self.writer, " AS {alias}")
     }
 }
 
 fn write_filters(
-    filters: &[squealy::Filter],
-    writer: &mut impl Write,
+    filters: &impl PredicateNodes,
+    writer: &mut impl SqlWriter,
     renderer: &mut Renderer,
 ) -> io::Result<()> {
     if filters.is_empty() {
@@ -355,98 +749,240 @@ fn write_filters(
     }
 
     writer.write_all(b" WHERE ")?;
-    for (index, filter) in filters.iter().enumerate() {
-        if index > 0 {
-            writer.write_all(b" AND ")?;
-        }
-        writer.write_all(render_predicate(filter.predicate(), renderer).as_bytes())?;
-    }
+    filters.try_visit(&mut WritePredicateFilters {
+        writer,
+        renderer,
+        index: 0,
+    })?;
     Ok(())
 }
 
-fn write_orders(
-    orders: &[Sort],
-    writer: &mut impl Write,
+struct WritePredicateFilters<'writer, 'renderer, Writer> {
+    writer: &'writer mut Writer,
+    renderer: &'renderer mut Renderer,
+    index: usize,
+}
+
+impl<Writer> PredicateVisitor for WritePredicateFilters<'_, '_, Writer>
+where
+    Writer: SqlWriter,
+{
+    type Error = io::Error;
+
+    fn visit_predicate<Kind, Ast>(&mut self, predicate: &Predicate<'_, Kind, Ast>) -> io::Result<()>
+    where
+        Kind: PredicateKind,
+        Ast: PredicateAst,
+    {
+        if self.index > 0 {
+            self.writer.write_all(b" AND ")?;
+        }
+        self.index += 1;
+        write_predicate_value(predicate, self.writer, self.renderer)
+    }
+}
+
+fn write_expr_value<K, Ast>(
+    expr: &Expr<'_, K, Ast>,
+    writer: &mut impl SqlWriter,
+    renderer: &mut Renderer,
+) -> io::Result<()>
+where
+    K: ExprKind,
+    Ast: ExprAst,
+{
+    write_expr_value_node(expr, writer, renderer, false)
+}
+
+fn write_column_value<K>(
+    column: ColumnRef<'_, K>,
+    writer: &mut impl SqlWriter,
+    renderer: &mut Renderer,
+) -> io::Result<()>
+where
+    K: ExprKind,
+{
+    write_column_value_node(column, writer, renderer, false)
+}
+
+fn write_expr_value_node<K, Ast>(
+    expr: &Expr<'_, K, Ast>,
+    writer: &mut impl SqlWriter,
+    renderer: &mut Renderer,
+    insert_returning: bool,
+) -> io::Result<()>
+where
+    K: ExprKind,
+    Ast: ExprAst,
+{
+    write_ast(writer, renderer, insert_returning, |visitor| {
+        expr.visit(visitor)
+    })
+}
+
+fn write_column_value_node<K>(
+    column: ColumnRef<'_, K>,
+    writer: &mut impl SqlWriter,
+    renderer: &mut Renderer,
+    insert_returning: bool,
+) -> io::Result<()>
+where
+    K: ExprKind,
+{
+    write_ast(writer, renderer, insert_returning, |visitor| {
+        column.visit(visitor)
+    })
+}
+
+fn write_predicate_value<K, Ast>(
+    predicate: &Predicate<'_, K, Ast>,
+    writer: &mut impl SqlWriter,
+    renderer: &mut Renderer,
+) -> io::Result<()>
+where
+    K: PredicateKind,
+    Ast: PredicateAst,
+{
+    write_ast(writer, renderer, false, |visitor| predicate.visit(visitor))
+}
+
+fn write_order_value<K, Ast>(
+    order: &Order<'_, K, Ast>,
+    writer: &mut impl SqlWriter,
+    renderer: &mut Renderer,
+) -> io::Result<()>
+where
+    K: ExprKind,
+    Ast: ExprAst,
+{
+    write_ast(writer, renderer, false, |visitor| order.visit_expr(visitor))?;
+    write!(writer, " {}", render_order_direction(order.direction()))
+}
+
+fn write_assignment_value(
+    value: AssignmentValueRef<'_>,
+    writer: &mut impl SqlWriter,
     renderer: &mut Renderer,
 ) -> io::Result<()> {
-    if orders.is_empty() {
-        return Ok(());
-    }
-
-    writer.write_all(b" ORDER BY ")?;
-    for (index, order) in orders.iter().enumerate() {
-        if index > 0 {
-            writer.write_all(b", ")?;
+    match value {
+        AssignmentValueRef::Static(value) => writer.push_bind(value),
+        AssignmentValueRef::Runtime => {
+            let index = renderer.next_runtime_param();
+            writer.push_runtime_bind(index);
         }
-        writer.write_all(render_order(order.order(), renderer).as_bytes())?;
     }
-    Ok(())
+    renderer.write_placeholder(writer)
 }
 
-fn render_expr(expr: &ExprNode, renderer: &mut Renderer) -> String {
-    match expr {
-        ExprNode::Column { alias, column } => format!("{alias}.{column}"),
-        ExprNode::Literal(_) => renderer.placeholder(),
-        ExprNode::Binary { left, op, right } => {
-            format!(
-                "({} {} {})",
-                render_expr(left, renderer),
-                render_arithmetic_op(*op),
-                render_expr(right, renderer)
-            )
+fn write_ast<Writer>(
+    writer: &mut Writer,
+    renderer: &mut Renderer,
+    insert_returning: bool,
+    render: impl FnOnce(&mut RenderAst<'_, '_, Writer>) -> io::Result<()>,
+) -> io::Result<()>
+where
+    Writer: SqlWriter,
+{
+    let mut visitor = RenderAst {
+        writer,
+        renderer,
+        insert_returning,
+    };
+    render(&mut visitor)
+}
+
+struct RenderAst<'writer, 'renderer, Writer> {
+    writer: &'writer mut Writer,
+    renderer: &'renderer mut Renderer,
+    insert_returning: bool,
+}
+
+impl<Writer> ExprVisitor for RenderAst<'_, '_, Writer>
+where
+    Writer: SqlWriter,
+{
+    type Error = io::Error;
+
+    fn visit_column(&mut self, alias: SourceAlias, column: &str) -> Result<(), Self::Error> {
+        if self.insert_returning {
+            self.writer.write_all(column.as_bytes())
+        } else {
+            write!(self.writer, "{alias}.{column}")
         }
+    }
+
+    fn visit_literal(&mut self, value: &BindValue) -> Result<(), Self::Error> {
+        self.writer.push_bind(value);
+        self.renderer.write_placeholder(self.writer)
+    }
+
+    fn visit_param(&mut self) -> Result<(), Self::Error> {
+        let index = self.renderer.next_runtime_param();
+        self.writer.push_runtime_bind(index);
+        self.renderer.write_placeholder(self.writer)
+    }
+
+    fn visit_binary<L, R>(&mut self, op: ArithmeticOp, left: L, right: R) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        self.writer.write_all(b"(")?;
+        left(self)?;
+        write!(self.writer, " {} ", render_arithmetic_op(op))?;
+        right(self)?;
+        self.writer.write_all(b")")
     }
 }
 
-fn render_insert_returning_expr(expr: &ExprNode, renderer: &mut Renderer) -> String {
-    match expr {
-        ExprNode::Column { column, .. } => column.clone(),
-        ExprNode::Literal(_) => renderer.placeholder(),
-        ExprNode::Binary { left, op, right } => {
-            format!(
-                "({} {} {})",
-                render_insert_returning_expr(left, renderer),
-                render_arithmetic_op(*op),
-                render_insert_returning_expr(right, renderer)
-            )
-        }
+impl<Writer> PredicateAstVisitor for RenderAst<'_, '_, Writer>
+where
+    Writer: SqlWriter,
+{
+    fn visit_compare<L, R>(&mut self, op: CompareOp, left: L, right: R) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        self.writer.write_all(b"(")?;
+        left(self)?;
+        write!(self.writer, " {} ", render_compare_op(op))?;
+        right(self)?;
+        self.writer.write_all(b")")
     }
-}
 
-fn render_predicate(predicate: &PredicateNode, renderer: &mut Renderer) -> String {
-    match predicate {
-        PredicateNode::Compare { left, op, right } => {
-            format!(
-                "({} {} {})",
-                render_expr(left, renderer),
-                render_compare_op(*op),
-                render_expr(right, renderer)
-            )
-        }
-        PredicateNode::And { left, right } => {
-            format!(
-                "({} AND {})",
-                render_predicate(left, renderer),
-                render_predicate(right, renderer)
-            )
-        }
-        PredicateNode::Or { left, right } => {
-            format!(
-                "({} OR {})",
-                render_predicate(left, renderer),
-                render_predicate(right, renderer)
-            )
-        }
-        PredicateNode::Not(predicate) => format!("(NOT {})", render_predicate(predicate, renderer)),
+    fn visit_and<L, R>(&mut self, left: L, right: R) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        self.writer.write_all(b"(")?;
+        left(self)?;
+        self.writer.write_all(b" AND ")?;
+        right(self)?;
+        self.writer.write_all(b")")
     }
-}
 
-fn render_order(order: &OrderNode, renderer: &mut Renderer) -> String {
-    format!(
-        "{} {}",
-        render_expr(&order.expr, renderer),
-        render_order_direction(order.direction)
-    )
+    fn visit_or<L, R>(&mut self, left: L, right: R) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        self.writer.write_all(b"(")?;
+        left(self)?;
+        self.writer.write_all(b" OR ")?;
+        right(self)?;
+        self.writer.write_all(b")")
+    }
+
+    fn visit_not<P>(&mut self, predicate: P) -> Result<(), Self::Error>
+    where
+        P: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        self.writer.write_all(b"(NOT ")?;
+        predicate(self)?;
+        self.writer.write_all(b")")
+    }
 }
 
 fn render_arithmetic_op(op: ArithmeticOp) -> &'static str {
@@ -476,101 +1012,101 @@ fn render_order_direction(direction: OrderDirection) -> &'static str {
     }
 }
 
-pub(crate) fn select_params(select: &Select) -> Vec<BindValue> {
-    let mut params = Vec::new();
-    for column in select.columns() {
-        collect_expr_params(&column.expr, &mut params);
-    }
-    for (position, source) in select.sources().iter().enumerate() {
-        collect_source_params(source, position, &mut params);
-    }
-    for filter in select.filters() {
-        collect_predicate_params(filter.predicate(), &mut params);
-    }
-    for order in select.orders() {
-        collect_order_params(order.order(), &mut params);
-    }
-    params
+pub(crate) fn render_insert_prepared<S, Columns, Returning>(
+    columns: &Columns,
+    returning: &Returning,
+    buffer: &mut PreparedSql,
+) where
+    S: InsertableTable,
+    Columns: InsertAssignments,
+    Returning: Projectable,
+{
+    buffer.clear();
+    write_insert_with_params::<S, _, _, _>(columns, returning, buffer).unwrap();
 }
 
-pub(crate) fn insert_params(insert: &Insert) -> Vec<BindValue> {
-    let mut params = insert
-        .columns()
-        .iter()
-        .map(|column| column.value().clone())
-        .collect::<Vec<_>>();
-    for column in insert.returning() {
-        collect_expr_params(&column.expr, &mut params);
-    }
-    params
+pub(crate) fn write_insert_params<S, Columns, Returning, Sink>(
+    columns: &Columns,
+    returning: &Returning,
+    sink: &mut Sink,
+) -> Result<(), Sink::Error>
+where
+    S: InsertableTable,
+    Columns: InsertAssignments,
+    Returning: Projectable,
+    Sink: BindSink,
+{
+    sink.reserve_bind_values(columns.len());
+    let mut writer = ParamSinkWriter { sink, error: None };
+    write_insert_with_params::<S, _, _, _>(columns, returning, &mut writer).unwrap();
+    writer.finish()
 }
 
-pub(crate) fn delete_params(delete: &Delete) -> Vec<BindValue> {
-    let mut params = Vec::new();
-    for filter in delete.filters() {
-        collect_predicate_params(filter.predicate(), &mut params);
-    }
-    for column in delete.returning() {
-        collect_expr_params(&column.expr, &mut params);
-    }
-    params
+pub(crate) fn render_delete_prepared<S, Filters, Returning>(
+    alias: SourceAlias,
+    filters: &Filters,
+    returning: &Returning,
+    buffer: &mut PreparedSql,
+) where
+    S: TableProjection,
+    Filters: PredicateNodes,
+    Returning: Projectable,
+{
+    buffer.clear();
+    write_delete_with_params::<S, _, _, _>(alias, filters, returning, buffer).unwrap();
 }
 
-pub(crate) fn update_params(update: &Update) -> Vec<BindValue> {
-    let mut params = update
-        .columns()
-        .iter()
-        .map(|column| column.value().clone())
-        .collect::<Vec<_>>();
-    for filter in update.filters() {
-        collect_predicate_params(filter.predicate(), &mut params);
-    }
-    for column in update.returning() {
-        collect_expr_params(&column.expr, &mut params);
-    }
-    params
+pub(crate) fn write_delete_params<S, Filters, Returning, Sink>(
+    alias: SourceAlias,
+    filters: &Filters,
+    returning: &Returning,
+    sink: &mut Sink,
+) -> Result<(), Sink::Error>
+where
+    S: TableProjection,
+    Filters: PredicateNodes,
+    Returning: Projectable,
+    Sink: BindSink,
+{
+    sink.reserve_bind_values(filters.len());
+    let mut writer = ParamSinkWriter { sink, error: None };
+    write_delete_with_params::<S, _, _, _>(alias, filters, returning, &mut writer).unwrap();
+    writer.finish()
 }
 
-fn collect_source_params(source: &Source, position: usize, params: &mut Vec<BindValue>) {
-    if let SourceTarget::Query(query) = source.target() {
-        params.extend(select_params(query));
-    }
-
-    if position > 0 {
-        match source.kind() {
-            SourceKind::InnerJoin { on } | SourceKind::LeftJoin { on } => {
-                collect_predicate_params(on, params)
-            }
-            SourceKind::From | SourceKind::InnerLateral => {}
-        }
-    }
+pub(crate) fn render_update_prepared<S, Columns, Filters, Returning>(
+    alias: SourceAlias,
+    columns: &Columns,
+    filters: &Filters,
+    returning: &Returning,
+    buffer: &mut PreparedSql,
+) where
+    S: UpdateableTable,
+    Columns: UpdateAssignments,
+    Filters: PredicateNodes,
+    Returning: Projectable,
+{
+    buffer.clear();
+    write_update_with_params::<S, _, _, _, _>(alias, columns, filters, returning, buffer).unwrap();
 }
 
-fn collect_expr_params(expr: &ExprNode, params: &mut Vec<BindValue>) {
-    match expr {
-        ExprNode::Column { .. } => {}
-        ExprNode::Literal(value) => params.push(value.clone()),
-        ExprNode::Binary { left, right, .. } => {
-            collect_expr_params(left, params);
-            collect_expr_params(right, params);
-        }
-    }
-}
-
-fn collect_predicate_params(predicate: &PredicateNode, params: &mut Vec<BindValue>) {
-    match predicate {
-        PredicateNode::Compare { left, right, .. } => {
-            collect_expr_params(left, params);
-            collect_expr_params(right, params);
-        }
-        PredicateNode::And { left, right } | PredicateNode::Or { left, right } => {
-            collect_predicate_params(left, params);
-            collect_predicate_params(right, params);
-        }
-        PredicateNode::Not(predicate) => collect_predicate_params(predicate, params),
-    }
-}
-
-fn collect_order_params(order: &OrderNode, params: &mut Vec<BindValue>) {
-    collect_expr_params(&order.expr, params);
+pub(crate) fn write_update_params<S, Columns, Filters, Returning, Sink>(
+    alias: SourceAlias,
+    columns: &Columns,
+    filters: &Filters,
+    returning: &Returning,
+    sink: &mut Sink,
+) -> Result<(), Sink::Error>
+where
+    S: UpdateableTable,
+    Columns: UpdateAssignments,
+    Filters: PredicateNodes,
+    Returning: Projectable,
+    Sink: BindSink,
+{
+    sink.reserve_bind_values(columns.len() + filters.len());
+    let mut writer = ParamSinkWriter { sink, error: None };
+    write_update_with_params::<S, _, _, _, _>(alias, columns, filters, returning, &mut writer)
+        .unwrap();
+    writer.finish()
 }
