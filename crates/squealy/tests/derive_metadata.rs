@@ -133,7 +133,7 @@ impl SelectSink for RecordingSelectSink {
 struct User<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key, auto_increment, index)]
     id: C::Type<'scope, i32>,
-    #[column(index, nullable, default = value("anonymous"), db_type = "text")]
+    #[column(index, nullable, default = value("anonymous"))]
     name: C::Type<'scope, String>,
 }
 
@@ -174,6 +174,15 @@ struct DefaultVariant<'scope, C: ColumnMode = ColumnExpr> {
     created_at: C::Type<'scope, String>,
     #[column(default_raw = "lower('ADA')")]
     code: C::Type<'scope, String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct JsonPayload;
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct RawTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(db_type = "jsonb")]
+    payload: C::Type<'scope, JsonPayload>,
 }
 
 #[allow(dead_code)]
@@ -222,7 +231,8 @@ fn derive_table_populates_table_metadata() {
         column_metadata[1].default(),
         Some(ColumnDefault::Text("anonymous"))
     );
-    assert_eq!(column_metadata[1].db_type(), Some("text"));
+    assert_eq!(column_metadata[0].column_type(), ColumnType::I32);
+    assert_eq!(column_metadata[1].column_type(), ColumnType::String);
     assert_eq!(indexes.len(), 3);
     assert_eq!(indexes[2].name(), Some("users_name_id_idx"));
     assert_eq!(indexes[2].columns(), &["name", "id"]);
@@ -277,6 +287,13 @@ fn derive_table_populates_typed_default_metadata() {
 }
 
 #[test]
+fn derive_table_treats_db_type_as_raw_backend_type_override() {
+    let columns = <RawTypeRecord as SchemaTable>::columns();
+
+    assert_eq!(columns[0].column_type(), ColumnType::Raw("jsonb"));
+}
+
+#[test]
 fn backend_creates_schema_sql() {
     let mut sql = Vec::new();
     let schema_tables = <Public as Schema>::tables().collect::<Vec<_>>();
@@ -284,8 +301,8 @@ fn backend_creates_schema_sql() {
     let sql = String::from_utf8(sql).unwrap();
 
     assert!(sql.contains(
-            "CREATE TABLE public.users (id text PRIMARY KEY AUTOINCREMENT NOT NULL, name text DEFAULT 'anonymous')"
-        ));
+        "CREATE TABLE public.users (id integer PRIMARY KEY AUTOINCREMENT NOT NULL, name text DEFAULT 'anonymous')"
+    ));
     assert!(sql.contains("CREATE UNIQUE INDEX users_name_id_idx ON public.users (name, id)"));
 
     let mut sql = Vec::new();
