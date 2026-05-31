@@ -179,10 +179,23 @@ struct DefaultVariant<'scope, C: ColumnMode = ColumnExpr> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct JsonPayload;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ColumnType)]
+pub struct RecordId(i32);
+
+#[derive(Clone, Debug, PartialEq, ColumnType)]
+#[column_type(raw = "jsonb")]
+pub struct JsonColumn(String);
+
 #[derive(Clone, Debug, PartialEq, Table)]
 struct RawTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
     #[column(db_type = "jsonb")]
     payload: C::Type<'scope, JsonPayload>,
+}
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct DerivedColumnTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
+    id: C::Type<'scope, RecordId>,
+    payload: C::Type<'scope, JsonColumn>,
 }
 
 #[allow(dead_code)]
@@ -291,6 +304,14 @@ fn derive_table_treats_db_type_as_raw_backend_type_override() {
     let columns = <RawTypeRecord as SchemaTable>::columns();
 
     assert_eq!(columns[0].column_type(), ColumnType::Raw("jsonb"));
+}
+
+#[test]
+fn derive_column_type_maps_newtype_columns() {
+    let columns = <DerivedColumnTypeRecord as SchemaTable>::columns();
+
+    assert_eq!(columns[0].column_type(), ColumnType::I32);
+    assert_eq!(columns[1].column_type(), ColumnType::Raw("jsonb"));
 }
 
 #[test]
