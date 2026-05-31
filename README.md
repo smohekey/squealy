@@ -1,2 +1,166 @@
 # squealy
-SQL ORM for Rust
+
+<!-- cargo-rdme start -->
+
+SQL ORM for Rust.
+
+Squealy is a typed query builder and schema metadata layer for Rust applications that want SQL
+without treating SQL as unstructured strings. Table derives turn your Rust row types into typed
+column expressions, row decoding shapes, DDL metadata, and mutation builders. Query methods then
+compose those generated types into a type-level query AST: sources, joins, filters, projections,
+ordering, mutation assignments, and runtime parameter shapes are all carried by Rust types.
+
+The core crate deliberately stops at describing queries and schema. Backend crates, such as a
+PostgreSQL backend, own SQL rendering, bind handling, preparation, execution, streaming rows,
+and transaction behavior. That split lets each backend decide how to turn the typed AST into the
+best SQL for that database, while the shared builder API keeps user code backend-shaped rather
+than string-shaped.
+
+Runtime values are explicit. Literal values can be captured directly in a concrete query, while
+[`param`] creates typed runtime parameters that must be prepared before execution. Streaming is
+the default result model through `fetch`; allocating helpers such as `collect`, `to_sql`, and
+`collect_params` are convenience APIs for callers that choose them.
+
+### Prepare Rust types for queries
+
+Start by deriving [`Table`] for each row type. Table structs currently use this shape:
+
+- a lifetime named `'scope`
+- a column mode parameter `C: ColumnMode = ColumnExpr`
+- fields typed as `C::Type<'scope, Value>`
+
+```rust
+use squealy::*;
+
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Public)]
+struct User<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment, db_type = "integer")]
+    id: C::Type<'scope, i32>,
+
+    #[column(index, default = value("anonymous"), db_type = "text")]
+    name: C::Type<'scope, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Public)]
+struct Post<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment, db_type = "integer")]
+    id: C::Type<'scope, i32>,
+
+    #[column(index, references(User::id, on_delete = "cascade"), db_type = "integer")]
+    user_id: C::Type<'scope, i32>,
+
+    #[column(db_type = "text")]
+    title: C::Type<'scope, String>,
+}
+
+#[derive(Schema)]
+struct Public {
+    users: User<'static, ColumnName>,
+    posts: Post<'static, ColumnName>,
+}
+
+#[derive(Database)]
+struct AppDatabase {
+    public: Public,
+}
+```
+
+The derive generates table metadata, typed expression projections, row decoding shapes, and a
+write builder for `conn.to::<Table>()`. It also generates a marker type for each column by
+combining the table and field names: `User::id` becomes `UserId`, `Post::title` becomes
+`PostTitle`, and so on. Those marker types are useful when declaring runtime parameters with
+[`param`].
+
+Common column attributes include:
+
+- `primary_key`, `auto_increment`, `index`, and `unique`
+- `nullable`
+- `generated`, `insert = false`, and `update = false`
+- `default = value(...)`, `default = current_timestamp`, `default = current_date`,
+  `default = current_time`, and `default_raw = "..."`
+- `db_type = "..."` and `check = "..."`
+- `references(OtherTable::column, on_delete = "...", on_update = "...")`
+
+`#[schema(Type)]` attaches a table to a schema namespace. `#[derive(Schema)]` lists the tables
+in that namespace, and `#[derive(Database)]` lists schemas for DDL/backends that want database
+metadata.
+
+### Select rows
+
+Select queries start from a source table and finish with `select`:
+
+```rust
+let query = conn
+    .from::<User>()
+    .where_(|user| user.name.equals("Ada"))
+    .join::<Post>()
+    .on(|(user,), post| post.user_id.equals(user.id))
+    .order_by(|(_user, post)| post.id.desc())
+    .select(|(user, post)| (user.id, post.title));
+
+let mut rows = pin!(query.fetch());
+while let Some(row) = poll_fn(|cx| rows.as_mut().poll_next(cx)).await {
+    let (user_id, title) = row?;
+    // Process each row as it arrives instead of collecting every row first.
+}
+```
+
+For smaller result sets where allocation is acceptable, use `collect()`:
+
+```rust
+let rows = conn
+    .from::<User>()
+    .where_(|user| user.name.equals("Ada"))
+    .select(|(user,)| (user.id, user.name))
+    .collect()
+    .await?;
+```
+
+### Insert, update, and delete
+
+Mutations use the same source/destination vocabulary: `to` for insert and update, `from` for
+delete. Returning mutations use explicit verb names so the final action stays clear.
+
+```rust
+conn.to::<User>().name("Ada").insert().await?;
+
+let created = conn
+    .to::<User>()
+    .name("Ada")
+    .insert_returning(|user| user.id)
+    .fetch_one()
+    .await?;
+
+conn.to::<User>()
+    .name("Grace")
+    .where_(|user| user.name.equals("Ada"))
+    .update()
+    .await?;
+
+conn.from::<User>()
+    .where_(|user| user.id.equals(1))
+    .delete()
+    .await?;
+```
+
+### Prepare queries with runtime parameters
+
+Runtime parameters make a query preparable instead of directly executable. Prepared statements
+keep SQL generation inside the backend and accept typed values at execution time.
+
+```rust
+let query = conn
+    .from::<User>()
+    .where_(|user| user.name.equals(squealy::param::<UserName>()))
+    .select(|(user,)| user.id);
+let by_name = query.prepare().await?;
+
+let ids = by_name.collect(("Ada",)).await?;
+```
+
+Streaming methods such as `fetch` avoid collecting rows up front. Convenience methods like
+`collect`, `to_sql`, and `collect_params` allocate by design.
+
+<!-- cargo-rdme end -->
