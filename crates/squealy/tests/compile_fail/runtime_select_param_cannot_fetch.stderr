@@ -1,0 +1,19 @@
+error[E0599]: the method `fetch` exists for struct `TestSelect<'_, '_, UserId, squealy::Where<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, EqualsPredicate<UserName, RuntimeParam<UserName>>, squealy::ComparePredicateAst<squealy::ColumnExprAst<UserName>, squealy::ParamExprAst<UserName>>>, ColumnRef<'_, UserId>>`, but its trait bounds were not satisfied
+  --> tests/compile_fail/runtime_select_param_cannot_fetch.rs:16:23
+   |
+16 |     let _rows = query.fetch();
+   |                       ^^^^^ method cannot be called due to unsatisfied trait bounds
+   |
+  ::: src/list.rs
+   |
+   | pub struct HCons<Head, Tail> {
+   | ---------------------------- doesn't satisfy `HCons<String, HNil>: NoRuntimeParams`
+   |
+  ::: $WORKSPACE/crates/squealy-test/src/query.rs
+   |
+   | pub struct TestSelect<'conn, 'scope, Shape, Base, Projection>
+   | ------------------------------------------------------------- doesn't satisfy `_: ExecutableSelectQuery<'_, '_, Where<'_, From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, RootSource<User<'_>>>, EqualsPredicate<UserName, RuntimeParam<UserName>>, ComparePredicateAst<ColumnExprAst<UserName>, ParamExprAst<UserName>>>, ColumnRef<'_, UserId>>`
+   |
+   = note: the following trait bounds were not satisfied:
+           `HCons<String, HNil>: NoRuntimeParams`
+           which is required by `TestSelect<'_, '_, UserId, squealy::Where<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, EqualsPredicate<UserName, RuntimeParam<UserName>>, squealy::ComparePredicateAst<squealy::ColumnExprAst<UserName>, squealy::ParamExprAst<UserName>>>, ColumnRef<'_, UserId>>: squealy::ExecutableSelectQuery<'_, '_, squealy::Where<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, EqualsPredicate<UserName, RuntimeParam<UserName>>, squealy::ComparePredicateAst<squealy::ColumnExprAst<UserName>, squealy::ParamExprAst<UserName>>>, ColumnRef<'_, UserId>>`

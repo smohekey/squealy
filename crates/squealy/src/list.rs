@@ -1,0 +1,320 @@
+/// A fixed homogeneous list used by core builders.
+pub trait FixedList<T> {
+    fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn try_for_each<E>(&self, f: impl FnMut(&T) -> Result<(), E>) -> Result<(), E>;
+}
+
+/// Append an item to a typed list, producing the widened list type.
+pub trait TupleAppend<T>: FixedList<T> + Sized {
+    type Output: FixedList<T>;
+
+    fn append(self, value: T) -> Self::Output;
+}
+
+/// Concatenate two typed lists.
+pub trait TupleConcat<T, Rhs>: FixedList<T> + Sized
+where
+    Rhs: FixedList<T>,
+{
+    type Output: FixedList<T>;
+
+    fn concat(self, rhs: Rhs) -> Self::Output;
+}
+
+/// Map a typed homogeneous list to another typed homogeneous list of the same width.
+pub trait MapFixedList<T, U>: FixedList<T> + Sized {
+    type Output: FixedList<U>;
+
+    fn map_list(self, f: impl FnMut(T) -> U) -> Self::Output;
+}
+
+/// Empty heterogeneous list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HNil;
+
+/// Non-empty heterogeneous list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HCons<Head, Tail> {
+    pub head: Head,
+    pub tail: Tail,
+}
+
+/// A heterogeneous list whose width is known in the type system.
+pub trait HList {
+    const LEN: usize;
+}
+
+/// Marker for query ASTs that contain no runtime parameters.
+///
+/// Execution APIs require this marker, so queries containing `param::<T>()`
+/// must be prepared before values are supplied.
+pub trait NoRuntimeParams: HList {}
+
+/// Append a value to the end of a heterogeneous list.
+pub trait PushBack<T>: HList + Sized {
+    type Output: HList;
+
+    fn push_back(self, value: T) -> Self::Output;
+}
+
+/// Concatenate two heterogeneous lists.
+pub trait HAppend<Rhs>: HList + Sized
+where
+    Rhs: HList,
+{
+    type Output: HList;
+}
+
+/// Convert a heterogeneous list to a same-order tuple.
+pub trait ToTuple {
+    type Tuple;
+
+    fn to_tuple(self) -> Self::Tuple;
+}
+
+/// Receives bind values while a query or prepared parameter list is traversed.
+pub trait BindSink {
+    type Error;
+
+    fn reserve_bind_values(&mut self, additional: usize) {
+        _ = additional;
+    }
+
+    fn push_bind_value(&mut self, value: crate::BindValue) -> Result<(), Self::Error>;
+}
+
+/// Runtime values supplied when executing a prepared statement.
+pub trait PreparedParamValues<Shape>
+where
+    Shape: HList,
+{
+    fn write_bind_values<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: BindSink;
+
+    fn write_bind_value_at<Sink>(&self, index: usize, sink: &mut Sink) -> Result<bool, Sink::Error>
+    where
+        Sink: BindSink;
+
+    /// Collect prepared bind values into a newly allocated vector.
+    ///
+    /// Use [`Self::write_bind_values`] when the caller can consume values without
+    /// allocation.
+    fn collect_bind_values(&self) -> Vec<crate::BindValue> {
+        let mut values = Vec::with_capacity(Shape::LEN);
+        self.write_bind_values(&mut values)
+            .unwrap_or_else(|error| match error {});
+        values
+    }
+}
+
+/// Converts a value supplied to a prepared statement into a bind value for a
+/// specific runtime-parameter shape entry.
+pub trait IntoPreparedParam<T> {
+    fn into_prepared_param(self) -> crate::BindValue;
+}
+
+macro_rules! impl_prepared_param {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl IntoPreparedParam<$ty> for $ty {
+                fn into_prepared_param(self) -> crate::BindValue {
+                    crate::IntoBindValue::into_bind_value(self)
+                }
+            }
+        )*
+    };
+}
+
+impl_prepared_param! {
+    i8, i16, i32, i64, i128, isize,
+    u8, u16, u32, u64, u128, usize,
+    f32, f64,
+    bool,
+}
+
+impl IntoPreparedParam<String> for String {
+    fn into_prepared_param(self) -> crate::BindValue {
+        crate::IntoBindValue::into_bind_value(self)
+    }
+}
+
+impl IntoPreparedParam<String> for &str {
+    fn into_prepared_param(self) -> crate::BindValue {
+        crate::IntoBindValue::into_bind_value(self)
+    }
+}
+
+impl IntoPreparedParam<String> for &String {
+    fn into_prepared_param(self) -> crate::BindValue {
+        crate::IntoBindValue::into_bind_value(self)
+    }
+}
+
+macro_rules! impl_nullable_prepared_param {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl IntoPreparedParam<Option<$ty>> for Option<$ty> {
+                fn into_prepared_param(self) -> crate::BindValue {
+                    crate::IntoNullableBindValue::<$ty>::into_nullable_bind_value(self)
+                }
+            }
+        )*
+    };
+}
+
+impl_nullable_prepared_param! {
+    i8, i16, i32, i64, i128, isize,
+    u8, u16, u32, u64, u128, usize,
+    f32, f64,
+    bool,
+    String,
+}
+
+impl IntoPreparedParam<Option<String>> for Option<&str> {
+    fn into_prepared_param(self) -> crate::BindValue {
+        crate::IntoNullableBindValue::<String>::into_nullable_bind_value(self)
+    }
+}
+
+impl IntoPreparedParam<Option<String>> for Option<&String> {
+    fn into_prepared_param(self) -> crate::BindValue {
+        crate::IntoNullableBindValue::<String>::into_nullable_bind_value(self)
+    }
+}
+
+impl BindSink for Vec<crate::BindValue> {
+    type Error = std::convert::Infallible;
+
+    fn reserve_bind_values(&mut self, additional: usize) {
+        self.reserve(additional);
+    }
+
+    fn push_bind_value(&mut self, value: crate::BindValue) -> Result<(), Self::Error> {
+        self.push(value);
+        Ok(())
+    }
+}
+
+impl<T> FixedList<T> for () {
+    fn len(&self) -> usize {
+        0
+    }
+
+    fn try_for_each<E>(&self, _f: impl FnMut(&T) -> Result<(), E>) -> Result<(), E> {
+        Ok(())
+    }
+}
+
+impl<T> TupleAppend<T> for () {
+    type Output = (T,);
+
+    fn append(self, value: T) -> Self::Output {
+        (value,)
+    }
+}
+
+impl<T, Rhs> TupleConcat<T, Rhs> for ()
+where
+    Rhs: FixedList<T>,
+{
+    type Output = Rhs;
+
+    fn concat(self, rhs: Rhs) -> Self::Output {
+        rhs
+    }
+}
+
+impl<T, U> MapFixedList<T, U> for () {
+    type Output = ();
+
+    fn map_list(self, _f: impl FnMut(T) -> U) -> Self::Output {}
+}
+
+impl HList for HNil {
+    const LEN: usize = 0;
+}
+
+impl NoRuntimeParams for HNil {}
+
+impl<Head, Tail> HList for HCons<Head, Tail>
+where
+    Tail: HList,
+{
+    const LEN: usize = Tail::LEN + 1;
+}
+
+impl<T> PushBack<T> for HNil {
+    type Output = HCons<T, HNil>;
+
+    fn push_back(self, value: T) -> Self::Output {
+        HCons {
+            head: value,
+            tail: HNil,
+        }
+    }
+}
+
+impl<Rhs> HAppend<Rhs> for HNil
+where
+    Rhs: HList,
+{
+    type Output = Rhs;
+}
+
+impl<Head, Tail, Rhs> HAppend<Rhs> for HCons<Head, Tail>
+where
+    Tail: HAppend<Rhs>,
+    Rhs: HList,
+{
+    type Output = HCons<Head, <Tail as HAppend<Rhs>>::Output>;
+}
+
+impl<Head, Tail, T> PushBack<T> for HCons<Head, Tail>
+where
+    Tail: PushBack<T>,
+{
+    type Output = HCons<Head, <Tail as PushBack<T>>::Output>;
+
+    fn push_back(self, value: T) -> Self::Output {
+        HCons {
+            head: self.head,
+            tail: self.tail.push_back(value),
+        }
+    }
+}
+
+impl ToTuple for HNil {
+    type Tuple = ();
+
+    fn to_tuple(self) -> Self::Tuple {}
+}
+
+impl PreparedParamValues<HNil> for () {
+    fn write_bind_values<Sink>(&self, _sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: BindSink,
+    {
+        Ok(())
+    }
+
+    fn write_bind_value_at<Sink>(
+        &self,
+        _index: usize,
+        _sink: &mut Sink,
+    ) -> Result<bool, Sink::Error>
+    where
+        Sink: BindSink,
+    {
+        Ok(false)
+    }
+}
+
+squealy_macros::tuple_fixed_lists!(32);
+squealy_macros::hlist_tuples!(32);
+squealy_macros::prepared_param_values!(32);

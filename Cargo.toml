@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "crates/squealy",
+    "crates/squealy-macros",
+    "crates/squealy-postgresql",
+    "crates/squealy-test",
+]
+resolver = "3"

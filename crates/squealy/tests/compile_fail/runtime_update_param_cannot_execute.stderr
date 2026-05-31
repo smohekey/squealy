@@ -1,0 +1,17 @@
+error[E0277]: the trait bound `HCons<String, HNil>: NoRuntimeParams` is not satisfied
+  --> tests/compile_fail/runtime_update_param_cannot_execute.rs:15:10
+   |
+15 |         .update();
+   |          ^^^^^^ the trait `NoRuntimeParams` is not implemented for `HCons<String, HNil>`
+   |
+help: the trait `NoRuntimeParams` is implemented for `HNil`
+  --> src/list.rs
+   |
+   | impl NoRuntimeParams for HNil {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `__SquealyUserWriteBuilder::<'conn, Conn, InsertColumns, UpdateColumns, Filters, squealy::MutationFiltered, __SquealyUserIdWriteInsertState, __SquealyUserNameWriteInsertState, __SquealyUserIdWriteUpdateState, __SquealyUserNameWriteUpdateState>::update`
+  --> tests/compile_fail/runtime_update_param_cannot_execute.rs:4:35
+   |
+ 4 | #[derive(Clone, Debug, PartialEq, Table)]
+   |                                   ^^^^^ required by this bound in `__SquealyUserWriteBuilder::<'conn, Conn, InsertColumns, UpdateColumns, Filters, MutationFiltered, __SquealyUserIdWriteInsertState, __SquealyUserNameWriteInsertState, __SquealyUserIdWriteUpdateState, __SquealyUserNameWriteUpdateState>::update`
+   = note: this error originates in the derive macro `Table` (in Nightly builds, run with -Z macro-backtrace for more info)
