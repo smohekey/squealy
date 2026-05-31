@@ -4,6 +4,8 @@
 
 SQL ORM for Rust.
 
+### Why Squealy?
+
 Squealy is a typed query builder and schema metadata layer for Rust applications that want SQL
 without treating SQL as unstructured strings. Table derives turn your Rust row types into typed
 column expressions, row decoding shapes, DDL metadata, and mutation builders. Query methods then
@@ -21,7 +23,7 @@ Runtime values are explicit. Literal values can be captured directly in a concre
 the default result model through `fetch`; allocating helpers such as `collect`, `to_sql`, and
 `collect_params` are convenience APIs for callers that choose them.
 
-### Prepare Rust types for queries
+### Model your database with derives
 
 Start by deriving [`Table`] for each row type. Table structs currently use this shape:
 
@@ -35,23 +37,22 @@ use squealy::*;
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(Public)]
 struct User<'scope, C: ColumnMode = ColumnExpr> {
-    #[column(primary_key, auto_increment, db_type = "integer")]
+    #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
 
-    #[column(index, default = value("anonymous"), db_type = "text")]
+    #[column(index, default = value("anonymous"))]
     name: C::Type<'scope, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(Public)]
 struct Post<'scope, C: ColumnMode = ColumnExpr> {
-    #[column(primary_key, auto_increment, db_type = "integer")]
+    #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
 
-    #[column(index, references(User::id, on_delete = "cascade"), db_type = "integer")]
+    #[column(index, references(User::id, on_delete = "cascade"))]
     user_id: C::Type<'scope, i32>,
 
-    #[column(db_type = "text")]
     title: C::Type<'scope, String>,
 }
 
@@ -80,14 +81,19 @@ Common column attributes include:
 - `generated`, `insert = false`, and `update = false`
 - `default = value(...)`, `default = current_timestamp`, `default = current_date`,
   `default = current_time`, and `default_raw = "..."`
-- `db_type = "..."` and `check = "..."`
+- `check = "..."`, plus `db_type = "..."` as a raw backend-specific DDL type override
 - `references(OtherTable::column, on_delete = "...", on_update = "...")`
+
+If `db_type` is omitted, backend crates map the Rust field type to an appropriate database
+column type. For example, the PostgreSQL backend renders `i32` as `integer` and `String` as
+`text`. Use `db_type` only when you need an explicit backend-specific escape hatch such as
+`varchar(64)`, `jsonb`, or a domain type.
 
 `#[schema(Type)]` attaches a table to a schema namespace. `#[derive(Schema)]` lists the tables
 in that namespace, and `#[derive(Database)]` lists schemas for DDL/backends that want database
 metadata.
 
-### Select rows
+### Stream rows from select queries
 
 Select queries start from a source table and finish with `select`:
 
@@ -118,7 +124,7 @@ let rows = conn
     .await?;
 ```
 
-### Insert, update, and delete
+### Write data with type-checked mutations
 
 Mutations use the same source/destination vocabulary: `to` for insert and update, `from` for
 delete. Returning mutations use explicit verb names so the final action stays clear.
@@ -145,7 +151,7 @@ conn.from::<User>()
     .await?;
 ```
 
-### Prepare queries with runtime parameters
+### Prepare runtime-parameterized queries
 
 Runtime parameters make a query preparable instead of directly executable. Prepared statements
 keep SQL generation inside the backend and accept typed values at execution time.

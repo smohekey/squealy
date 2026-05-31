@@ -1269,7 +1269,12 @@ impl Field {
         let insertable = bool_tokens(self.insertable());
         let updateable = bool_tokens(self.updateable());
         let default = self.default_tokens();
-        let db_type = option_literal(self.attrs.db_type.as_deref());
+        let value_ty = &self.value_ty;
+        let column_type = if let Some(db_type) = self.attrs.db_type.as_deref() {
+            quote::quote! { ::squealy::ColumnType::Raw(#db_type) }
+        } else {
+            quote::quote! { <#value_ty as ::squealy::HasColumnType>::COLUMN_TYPE }
+        };
         let check = option_literal(self.attrs.check.as_deref());
         let references = self.references_tokens(column_ident);
 
@@ -1287,7 +1292,7 @@ impl Field {
                 fn insertable(&self) -> bool { #insertable }
                 fn updateable(&self) -> bool { #updateable }
                 fn default(&self) -> Option<::squealy::ColumnDefault> { #default }
-                fn db_type(&self) -> Option<&'static str> { #db_type }
+                fn column_type(&self) -> ::squealy::ColumnType { #column_type }
                 fn check(&self) -> Option<&'static str> { #check }
                 fn references(&self) -> Option<&'static dyn ::squealy::ForeignKey> { #references }
             }
@@ -1638,7 +1643,7 @@ fn named_fields(group: &Group) -> Result<Vec<Field>, String> {
 
         fields.push(Field {
             ident,
-            value_ty: column_value_type(&type_tokens)?,
+            value_ty: column_type_value(&type_tokens)?,
             attrs: std::mem::take(&mut pending_attrs),
         });
         index += 1;
@@ -1651,7 +1656,7 @@ fn named_fields(group: &Group) -> Result<Vec<Field>, String> {
     }
 }
 
-fn column_value_type(type_tokens: &[TokenTree]) -> Result<proc_macro2::TokenStream, String> {
+fn column_type_value(type_tokens: &[TokenTree]) -> Result<proc_macro2::TokenStream, String> {
     let mut angle_depth = 0usize;
     let mut seen_first_argument = false;
     let mut value_tokens = Vec::new();

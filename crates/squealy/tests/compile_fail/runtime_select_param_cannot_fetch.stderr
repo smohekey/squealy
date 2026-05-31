@@ -7,7 +7,7 @@ error[E0599]: the method `fetch` exists for struct `TestSelect<'_, '_, UserId, s
   ::: src/list.rs
    |
    | pub struct HCons<Head, Tail> {
-   | ---------------------------- doesn't satisfy `HCons<String, HNil>: NoRuntimeParams`
+   | ---------------------------- doesn't satisfy `HCons<std::string::String, HNil>: NoRuntimeParams`
    |
   ::: $WORKSPACE/crates/squealy-test/src/query.rs
    |
@@ -15,5 +15,5 @@ error[E0599]: the method `fetch` exists for struct `TestSelect<'_, '_, UserId, s
    | ------------------------------------------------------------- doesn't satisfy `_: ExecutableSelectQuery<'_, '_, Where<'_, From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, RootSource<User<'_>>>, EqualsPredicate<UserName, RuntimeParam<UserName>>, ComparePredicateAst<ColumnExprAst<UserName>, ParamExprAst<UserName>>>, ColumnRef<'_, UserId>>`
    |
    = note: the following trait bounds were not satisfied:
-           `HCons<String, HNil>: NoRuntimeParams`
+           `HCons<std::string::String, HNil>: NoRuntimeParams`
            which is required by `TestSelect<'_, '_, UserId, squealy::Where<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, EqualsPredicate<UserName, RuntimeParam<UserName>>, squealy::ComparePredicateAst<squealy::ColumnExprAst<UserName>, squealy::ParamExprAst<UserName>>>, ColumnRef<'_, UserId>>: squealy::ExecutableSelectQuery<'_, '_, squealy::Where<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, EqualsPredicate<UserName, RuntimeParam<UserName>>, squealy::ComparePredicateAst<squealy::ColumnExprAst<UserName>, squealy::ParamExprAst<UserName>>>, ColumnRef<'_, UserId>>`

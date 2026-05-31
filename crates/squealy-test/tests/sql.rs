@@ -12,14 +12,14 @@ use squealy_test::{TestBackend, TestConnection};
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(Public)]
 struct User<'scope, C: ColumnMode = ColumnExpr> {
-    #[column(primary_key, auto_increment, db_type = "integer")]
+    #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
     name: C::Type<'scope, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
 struct DefaultedRecord<'scope, C: ColumnMode = ColumnExpr> {
-    #[column(primary_key, auto_increment, db_type = "integer")]
+    #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
 }
 

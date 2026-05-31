@@ -7,79 +7,71 @@ use tokio_postgres::NoTls;
 
 #[derive(Clone, Debug, PartialEq, Table)]
 struct IntegrationUser<'scope, C: ColumnMode = ColumnExpr> {
-    #[column(primary_key, auto_increment, db_type = "integer")]
+    #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
     name: C::Type<'scope, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
 struct TransactionUser<'scope, C: ColumnMode = ColumnExpr> {
-    #[column(primary_key, auto_increment, db_type = "integer")]
+    #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
     name: C::Type<'scope, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
 struct IntegrationDefaulted<'scope, C: ColumnMode = ColumnExpr> {
-    #[column(primary_key, auto_increment, db_type = "integer")]
+    #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
-    #[column(default = value("anonymous"), db_type = "text")]
+    #[column(default = value("anonymous"))]
     name: C::Type<'scope, String>,
-    #[column(default = value(42), db_type = "integer")]
+    #[column(default = value(42))]
     score: C::Type<'scope, i32>,
-    #[column(default = value(true), db_type = "boolean")]
+    #[column(default = value(true))]
     active: C::Type<'scope, bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
 struct IntegrationNullable<'scope, C: ColumnMode = ColumnExpr> {
-    #[column(primary_key, auto_increment, db_type = "integer")]
+    #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
-    #[column(nullable, db_type = "text")]
+    #[column(nullable)]
     note: C::Type<'scope, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
 struct JoinUser<'scope, C: ColumnMode = ColumnExpr> {
-    #[column(primary_key, auto_increment, db_type = "integer")]
+    #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
-    #[column(db_type = "text")]
     name: C::Type<'scope, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
 struct JoinPost<'scope, C: ColumnMode = ColumnExpr> {
-    #[column(primary_key, auto_increment, db_type = "integer")]
+    #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
-    #[column(references(JoinUser::id), db_type = "integer")]
+    #[column(references(JoinUser::id))]
     user_id: C::Type<'scope, i32>,
-    #[column(db_type = "text")]
     title: C::Type<'scope, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
 struct IntegrationTypes<'scope, C: ColumnMode = ColumnExpr> {
-    #[column(primary_key, auto_increment, db_type = "integer")]
+    #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
-    #[column(db_type = "smallint")]
     small: C::Type<'scope, i16>,
-    #[column(db_type = "integer")]
     medium: C::Type<'scope, i32>,
-    #[column(db_type = "bigint")]
     large: C::Type<'scope, i64>,
-    #[column(db_type = "real")]
     single: C::Type<'scope, f32>,
-    #[column(db_type = "double precision")]
     double: C::Type<'scope, f64>,
-    #[column(db_type = "boolean")]
     flag: C::Type<'scope, bool>,
-    #[column(db_type = "text")]
+    #[column(db_type = "varchar(64)")]
     label: C::Type<'scope, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
 struct MissingTable<'scope, C: ColumnMode = ColumnExpr> {
-    #[column(primary_key, auto_increment, db_type = "integer")]
+    #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
 }
 

@@ -1,0 +1,21 @@
+error[E0277]: the trait bound `JsonPayload: HasColumnType` is not satisfied
+ --> tests/compile_fail/unmapped_column_type_requires_db_type.rs:9:30
+  |
+9 |     payload: C::Type<'scope, JsonPayload>,
+  |                              ^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `HasColumnType` is not implemented for `JsonPayload`
+ --> tests/compile_fail/unmapped_column_type_requires_db_type.rs:4:1
+  |
+4 | struct JsonPayload;
+  | ^^^^^^^^^^^^^^^^^^
+  = help: the following other types implement trait `HasColumnType`:
+            bool
+            f32
+            f64
+            i128
+            i16
+            i32
+            i64
+            i8
+          and $N others

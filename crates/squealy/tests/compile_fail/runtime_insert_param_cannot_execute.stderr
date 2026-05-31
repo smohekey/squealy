@@ -1,8 +1,8 @@
-error[E0277]: the trait bound `HCons<String, HNil>: NoRuntimeParams` is not satisfied
+error[E0277]: the trait bound `HCons<std::string::String, HNil>: NoRuntimeParams` is not satisfied
   --> tests/compile_fail/runtime_insert_param_cannot_execute.rs:15:10
    |
 15 |         .insert();
-   |          ^^^^^^ the trait `NoRuntimeParams` is not implemented for `HCons<String, HNil>`
+   |          ^^^^^^ the trait `NoRuntimeParams` is not implemented for `HCons<std::string::String, HNil>`
    |
 help: the trait `NoRuntimeParams` is implemented for `HNil`
   --> src/list.rs
