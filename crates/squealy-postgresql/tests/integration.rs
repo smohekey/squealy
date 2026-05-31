@@ -76,6 +76,8 @@ pub struct IntegrationRecordId(i32);
 struct IntegrationNewtype<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key)]
     id: C::Type<'scope, IntegrationRecordId>,
+    #[column(nullable)]
+    parent_id: C::Type<'scope, IntegrationRecordId>,
     name: C::Type<'scope, String>,
 }
 
@@ -514,6 +516,7 @@ async fn postgres_round_trips_transparent_newtypes() {
     let inserted = connection
         .to::<IntegrationNewtype>()
         .id(IntegrationRecordId(7))
+        .parent_id(Some(IntegrationRecordId(3)))
         .name("wrapped")
         .insert_returning(|record| record)
         .fetch_one()
@@ -521,6 +524,7 @@ async fn postgres_round_trips_transparent_newtypes() {
         .expect("insert newtype record");
 
     assert_eq!(inserted.id, IntegrationRecordId(7));
+    assert_eq!(inserted.parent_id, Some(IntegrationRecordId(3)));
     assert_eq!(inserted.name, "wrapped");
 
     let ids = connection

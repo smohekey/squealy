@@ -271,7 +271,7 @@ mod query;
 mod schema;
 mod table;
 
-pub use backend::{Backend, Decode, RowReader};
+pub use backend::{Backend, Decode, DecodeNullable, RowReader};
 pub use column::{
     Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullableValue, ColumnType,
     ColumnValue, HasColumnType,

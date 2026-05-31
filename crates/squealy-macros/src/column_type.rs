@@ -65,6 +65,19 @@ impl ColumnTypeStruct {
                     ::std::result::Result::Ok(#construct)
                 }
             }
+
+            impl<Backend> ::squealy::DecodeNullable<Backend> for #ident
+            where
+                Backend: ::squealy::Backend,
+                #field_ty: ::squealy::DecodeNullable<Backend>,
+            {
+                fn decode_nullable(
+                    row: &mut <Backend as ::squealy::Backend>::RowReader<'_>,
+                ) -> ::std::result::Result<::std::option::Option<Self>, <Backend as ::squealy::Backend>::Error> {
+                    let value = <#field_ty as ::squealy::DecodeNullable<Backend>>::decode_nullable(row)?;
+                    ::std::result::Result::Ok(value.map(|value| #construct))
+                }
+            }
         }
         .into()
     }

@@ -700,6 +700,7 @@ fn table_rows_implement_backend_decode() {
     assert_decode::<JsonColumn>();
     assert_decode::<User<'static, ColumnValue>>();
     assert_decode::<DerivedColumnTypeRecord<'static, ColumnValue>>();
+    assert_decode::<DerivedColumnTypeRecord<'static, ColumnNullableValue>>();
     assert_decode::<User<'static, ColumnNullableValue>>();
     assert_decode::<__SquealyUserRowShape>();
     assert_decode::<(i32, User<'static, ColumnValue>)>();
