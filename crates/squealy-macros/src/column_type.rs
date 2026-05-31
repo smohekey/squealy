@@ -12,33 +12,95 @@ pub(crate) fn derive(input: TokenStream) -> TokenStream {
 
 struct ColumnTypeStruct {
     ident: Ident,
-    field_ty: proc_macro2::TokenStream,
-    raw: Option<String>,
+    field: ColumnTypeField,
+    db_type: Option<String>,
+}
+
+enum ColumnTypeField {
+    Tuple(proc_macro2::TokenStream),
+    Named {
+        ident: Ident,
+        ty: proc_macro2::TokenStream,
+    },
 }
 
 impl ColumnTypeStruct {
     fn expand(&self) -> TokenStream {
         let ident = proc_macro2::Ident::new(&self.ident.to_string(), Span::call_site());
-        let column_type = if let Some(raw) = &self.raw {
-            let raw = Literal::string(raw);
-            quote::quote! { ::squealy::ColumnType::Raw(#raw) }
+        let field_ty = self.field.ty();
+        let column_type = if let Some(db_type) = &self.db_type {
+            let db_type = Literal::string(db_type);
+            quote::quote! { ::squealy::ColumnType::Raw(#db_type) }
         } else {
-            let field_ty = &self.field_ty;
             quote::quote! { <#field_ty as ::squealy::HasColumnType>::COLUMN_TYPE }
         };
+        let deconstruct = self.field.deconstruct();
+        let construct = self.field.construct();
 
         quote::quote! {
             impl ::squealy::HasColumnType for #ident {
                 const COLUMN_TYPE: ::squealy::ColumnType = #column_type;
+            }
+
+            impl ::squealy::ExprKind for #ident {
+                type Value = Self;
+            }
+
+            impl ::squealy::IntoBindValue for #ident {
+                fn into_bind_value(self) -> ::squealy::BindValue {
+                    let #deconstruct = self;
+                    ::squealy::IntoBindValue::into_bind_value(value)
+                }
+            }
+
+            impl<Backend> ::squealy::Decode<Backend> for #ident
+            where
+                Backend: ::squealy::Backend,
+                #field_ty: ::squealy::Decode<Backend>,
+            {
+                fn decode(
+                    row: &mut <Backend as ::squealy::Backend>::RowReader<'_>,
+                ) -> ::std::result::Result<Self, <Backend as ::squealy::Backend>::Error> {
+                    let value = ::squealy::RowReader::read::<#field_ty>(row)?;
+                    ::std::result::Result::Ok(#construct)
+                }
             }
         }
         .into()
     }
 }
 
+impl ColumnTypeField {
+    fn ty(&self) -> &proc_macro2::TokenStream {
+        match self {
+            Self::Tuple(ty) | Self::Named { ty, .. } => ty,
+        }
+    }
+
+    fn deconstruct(&self) -> proc_macro2::TokenStream {
+        match self {
+            Self::Tuple(_) => quote::quote! { Self(value) },
+            Self::Named { ident, .. } => {
+                let ident = proc_macro2::Ident::new(&ident.to_string(), Span::call_site());
+                quote::quote! { Self { #ident: value } }
+            }
+        }
+    }
+
+    fn construct(&self) -> proc_macro2::TokenStream {
+        match self {
+            Self::Tuple(_) => quote::quote! { Self(value) },
+            Self::Named { ident, .. } => {
+                let ident = proc_macro2::Ident::new(&ident.to_string(), Span::call_site());
+                quote::quote! { Self { #ident: value } }
+            }
+        }
+    }
+}
+
 fn column_type_struct(input: TokenStream) -> Result<ColumnTypeStruct, String> {
     let tokens = input.into_iter().collect::<Vec<_>>();
-    let raw = column_type_attrs(&tokens)?;
+    let db_type = column_type_attrs(&tokens)?;
     let struct_index = tokens
         .iter()
         .position(|token| matches_ident(token, "struct"))
@@ -65,21 +127,21 @@ fn column_type_struct(input: TokenStream) -> Result<ColumnTypeStruct, String> {
         })
         .ok_or_else(|| "ColumnType requires a single-field struct".to_owned())?;
 
-    let field_ty = match body.delimiter() {
-        Delimiter::Parenthesis => tuple_field_type(&body)?,
-        Delimiter::Brace => named_field_type(&body)?,
+    let field = match body.delimiter() {
+        Delimiter::Parenthesis => ColumnTypeField::Tuple(tuple_field_type(&body)?),
+        Delimiter::Brace => named_field(&body)?,
         _ => unreachable!(),
     };
 
     Ok(ColumnTypeStruct {
         ident,
-        field_ty,
-        raw,
+        field,
+        db_type,
     })
 }
 
 fn column_type_attrs(tokens: &[TokenTree]) -> Result<Option<String>, String> {
-    let mut raw = None;
+    let mut db_type = None;
     let mut index = 0;
 
     while index < tokens.len() {
@@ -112,38 +174,42 @@ fn column_type_attrs(tokens: &[TokenTree]) -> Result<Option<String>, String> {
             return Err("#[column_type(...)] requires metadata inside parentheses".to_owned());
         }
 
-        raw = Some(column_type_attr_raw(&meta)?);
+        db_type = Some(column_type_attr_db_type(&meta)?);
         index += 2;
     }
 
-    Ok(raw)
+    Ok(db_type)
 }
 
-fn column_type_attr_raw(group: &Group) -> Result<String, String> {
+fn column_type_attr_db_type(group: &Group) -> Result<String, String> {
     let tokens = group.stream().into_iter().collect::<Vec<_>>();
     let Some(TokenTree::Ident(name)) = tokens.first() else {
         return Err("unsupported ColumnType attribute".to_owned());
     };
 
-    if name.to_string() != "raw" {
+    if name.to_string() != "db_type" {
         return Err(format!("unsupported ColumnType attribute `{name}`"));
     }
 
     if !matches!(tokens.get(1), Some(TokenTree::Punct(punct)) if punct.as_char() == '=') {
-        return Err("attribute `raw` requires a string value".to_owned());
+        return Err("attribute `db_type` requires a string value".to_owned());
     }
 
-    required_literal("raw", &tokens[2..])
+    required_literal("db_type", &tokens[2..])
 }
 
-fn named_field_type(group: &Group) -> Result<proc_macro2::TokenStream, String> {
+fn named_field(group: &Group) -> Result<ColumnTypeField, String> {
     let fields = struct_fields(group, "ColumnType field")?;
 
     if fields.len() != 1 {
         return Err("ColumnType requires exactly one field".to_owned());
     }
 
-    Ok(fields.into_iter().next().unwrap().ty)
+    let field = fields.into_iter().next().unwrap();
+    Ok(ColumnTypeField::Named {
+        ident: field.ident,
+        ty: field.ty,
+    })
 }
 
 fn tuple_field_type(group: &Group) -> Result<proc_macro2::TokenStream, String> {

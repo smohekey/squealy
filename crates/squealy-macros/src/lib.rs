@@ -33,7 +33,12 @@ pub fn derive_table(input: TokenStream) -> TokenStream {
     table::derive(input)
 }
 
-/// Derives column type metadata for newtype wrappers.
+/// Derives transparent column metadata for single-field newtype wrappers.
+///
+/// The wrapper uses its inner field's column type, bind conversion, row decoding,
+/// and literal expression behavior. Add `#[column_type(db_type = "...")]` when the
+/// wrapper should keep the transparent Rust conversions but render a raw
+/// backend-specific DDL type.
 #[proc_macro_derive(ColumnType, attributes(column_type))]
 pub fn derive_column_type(input: TokenStream) -> TokenStream {
     column_type::derive(input)

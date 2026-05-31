@@ -183,7 +183,7 @@ pub struct JsonPayload;
 pub struct RecordId(i32);
 
 #[derive(Clone, Debug, PartialEq, ColumnType)]
-#[column_type(raw = "jsonb")]
+#[column_type(db_type = "jsonb")]
 pub struct JsonColumn(String);
 
 #[derive(Clone, Debug, PartialEq, Table)]
@@ -312,6 +312,23 @@ fn derive_column_type_maps_newtype_columns() {
 
     assert_eq!(columns[0].column_type(), ColumnType::I32);
     assert_eq!(columns[1].column_type(), ColumnType::Raw("jsonb"));
+}
+
+#[test]
+fn derive_column_type_maps_newtype_bind_values() {
+    let insert = TestConnection
+        .to::<DerivedColumnTypeRecord>()
+        .id(RecordId(7))
+        .payload(JsonColumn("{\"ok\":true}".to_owned()))
+        .insert_returning(|record| record.id);
+
+    assert_eq!(
+        insert.collect_params(),
+        vec![
+            BindValue::Int(7),
+            BindValue::Text("{\"ok\":true}".to_owned())
+        ]
+    );
 }
 
 #[test]
@@ -679,7 +696,10 @@ fn table_rows_implement_backend_decode() {
     assert_decode::<()>();
     assert_decode::<i32>();
     assert_decode::<Option<String>>();
+    assert_decode::<RecordId>();
+    assert_decode::<JsonColumn>();
     assert_decode::<User<'static, ColumnValue>>();
+    assert_decode::<DerivedColumnTypeRecord<'static, ColumnValue>>();
     assert_decode::<User<'static, ColumnNullableValue>>();
     assert_decode::<__SquealyUserRowShape>();
     assert_decode::<(i32, User<'static, ColumnValue>)>();

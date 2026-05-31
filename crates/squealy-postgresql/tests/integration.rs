@@ -69,6 +69,16 @@ struct IntegrationTypes<'scope, C: ColumnMode = ColumnExpr> {
     label: C::Type<'scope, String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ColumnType)]
+pub struct IntegrationRecordId(i32);
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct IntegrationNewtype<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, IntegrationRecordId>,
+    name: C::Type<'scope, String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Table)]
 struct MissingTable<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key, auto_increment)]
@@ -485,6 +495,43 @@ async fn postgres_round_trips_primitive_types() {
     assert_eq!(stored.double, 2.5);
     assert!(stored.flag);
     assert_eq!(stored.label, "mixed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_round_trips_transparent_newtypes() {
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS integration_newtypes")
+        .await
+        .expect("drop old newtype table");
+
+    let ddl_backend = Postgres;
+    create_table::<IntegrationNewtype>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+
+    let inserted = connection
+        .to::<IntegrationNewtype>()
+        .id(IntegrationRecordId(7))
+        .name("wrapped")
+        .insert_returning(|record| record)
+        .fetch_one()
+        .await
+        .expect("insert newtype record");
+
+    assert_eq!(inserted.id, IntegrationRecordId(7));
+    assert_eq!(inserted.name, "wrapped");
+
+    let ids = connection
+        .from::<IntegrationNewtype>()
+        .where_(|record| record.id.equals(IntegrationRecordId(7)))
+        .select(|(record,)| record.id)
+        .collect()
+        .await
+        .expect("select newtype ids");
+
+    assert_eq!(ids, vec![IntegrationRecordId(7)]);
 }
 
 #[tokio::test]
