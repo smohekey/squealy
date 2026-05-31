@@ -2,6 +2,7 @@
 
 use proc_macro::TokenStream;
 
+mod column_type;
 mod common;
 mod database;
 mod schema;
@@ -30,6 +31,12 @@ mod tuple;
 )]
 pub fn derive_table(input: TokenStream) -> TokenStream {
     table::derive(input)
+}
+
+/// Derives column type metadata for newtype wrappers.
+#[proc_macro_derive(ColumnType, attributes(column_type))]
+pub fn derive_column_type(input: TokenStream) -> TokenStream {
+    column_type::derive(input)
 }
 
 /// Derives squealy schema metadata from fields containing table types.

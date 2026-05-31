@@ -89,6 +89,27 @@ column type. For example, the PostgreSQL backend renders `i32` as `integer` and 
 `text`. Use `db_type` only when you need an explicit backend-specific escape hatch such as
 `varchar(64)`, `jsonb`, or a domain type.
 
+For newtype wrappers, derive `ColumnType` on the wrapper. Single-field structs are
+transparent by default, so the wrapper uses the same database type as its inner value. Use
+`#[column_type(raw = "...")]` when the wrapper should use a backend-specific database type:
+
+```rust
+use squealy::*;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ColumnType)]
+pub struct UserId(i32);
+
+#[derive(Clone, Debug, PartialEq, ColumnType)]
+#[column_type(raw = "jsonb")]
+pub struct JsonPayload(String);
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct Event<'scope, C: ColumnMode = ColumnExpr> {
+    id: C::Type<'scope, UserId>,
+    payload: C::Type<'scope, JsonPayload>,
+}
+```
+
 `#[schema(Type)]` attaches a table to a schema namespace. `#[derive(Schema)]` lists the tables
 in that namespace, and `#[derive(Database)]` lists schemas for DDL/backends that want database
 metadata.
