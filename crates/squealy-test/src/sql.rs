@@ -2,12 +2,12 @@ use std::borrow::Cow;
 use std::io::{self, Write};
 
 use squealy::{
-    ArithmeticOp, AssignmentValueRef, BindSink, BindValue, ColumnDefault, ColumnRef, CompareOp,
-    Expr, ExprAst, ExprKind, ExprVisitor, InsertAssignments, InsertableTable, Order,
-    OrderDirection, Predicate, PredicateAst, PredicateAstVisitor, PredicateKind, PredicateNodes,
-    PredicateVisitor, Projectable, ProjectionShape, ProjectionVisitor, QueryBuilder, SchemaTable,
-    SelectAst, SelectSink, Selected, SourceAlias, Table, TableProjection, UpdateAssignments,
-    UpdateableTable,
+    ArithmeticOp, AssignmentValueRef, BindSink, BindValue, Column, ColumnDefault, ColumnRef,
+    ColumnType, CompareOp, Expr, ExprAst, ExprKind, ExprVisitor, InsertAssignments,
+    InsertableTable, Order, OrderDirection, Predicate, PredicateAst, PredicateAstVisitor,
+    PredicateKind, PredicateNodes, PredicateVisitor, Projectable, ProjectionShape,
+    ProjectionVisitor, QueryBuilder, SchemaTable, SelectAst, SelectSink, Selected, SourceAlias,
+    Table, TableProjection, UpdateAssignments, UpdateableTable,
 };
 
 trait SqlWriter: Write {
@@ -330,12 +330,8 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
         if index > 0 {
             writer.write_all(b", ")?;
         }
-        write!(
-            writer,
-            "{} {}",
-            column.name(),
-            column.db_type().unwrap_or("text")
-        )?;
+        write!(writer, "{} ", column.name())?;
+        write_column_type(*column, writer)?;
         if column.primary_key() {
             writer.write_all(b" PRIMARY KEY")?;
         }
@@ -378,6 +374,28 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
     }
 
     Ok(())
+}
+
+fn write_column_type(column: &dyn Column, writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(test_column_type(column.column_type()).as_bytes())
+}
+
+fn test_column_type(column_type: ColumnType) -> &'static str {
+    match column_type {
+        ColumnType::Raw(db_type) => db_type,
+        ColumnType::Bool => "boolean",
+        ColumnType::I8 | ColumnType::I16 => "smallint",
+        ColumnType::I32 => "integer",
+        ColumnType::I64 | ColumnType::Isize => "bigint",
+        ColumnType::I128 => "numeric",
+        ColumnType::U8 => "smallint",
+        ColumnType::U16 => "integer",
+        ColumnType::U32 | ColumnType::Usize => "bigint",
+        ColumnType::U64 | ColumnType::U128 => "numeric",
+        ColumnType::F32 => "real",
+        ColumnType::F64 => "double precision",
+        ColumnType::String => "text",
+    }
 }
 
 fn write_comma_separated(values: &[&'static str], writer: &mut impl Write) -> io::Result<()> {

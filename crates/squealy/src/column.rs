@@ -52,6 +52,62 @@ pub enum ColumnDefault {
     Raw(&'static str),
 }
 
+/// Backend-agnostic column type metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColumnType {
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    Isize,
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    Usize,
+    F32,
+    F64,
+    String,
+    Bool,
+    Raw(&'static str),
+}
+
+/// Maps a Rust value type to backend-specific column DDL.
+pub trait HasColumnType {
+    const COLUMN_TYPE: ColumnType;
+}
+
+macro_rules! impl_column_type {
+    ($($ty:ty => $kind:ident),* $(,)?) => {
+        $(
+            impl HasColumnType for $ty {
+                const COLUMN_TYPE: ColumnType = ColumnType::$kind;
+            }
+        )*
+    };
+}
+
+impl_column_type! {
+    i8 => I8,
+    i16 => I16,
+    i32 => I32,
+    i64 => I64,
+    i128 => I128,
+    isize => Isize,
+    u8 => U8,
+    u16 => U16,
+    u32 => U32,
+    u64 => U64,
+    u128 => U128,
+    usize => Usize,
+    f32 => F32,
+    f64 => F64,
+    String => String,
+    bool => Bool,
+}
+
 /// Database schema metadata for a single column.
 pub trait Column: Sync {
     fn name(&self) -> &'static str;
@@ -92,9 +148,7 @@ pub trait Column: Sync {
         None
     }
 
-    fn db_type(&self) -> Option<&'static str> {
-        None
-    }
+    fn column_type(&self) -> ColumnType;
 
     fn check(&self) -> Option<&'static str> {
         None
