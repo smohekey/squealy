@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 
-use crate::{Column, ColumnMode, ColumnName, Index, Projectable, QueryBuilder, Schema};
+use crate::{
+    Column, ColumnMode, ColumnName, Index, Projectable, QueryBuilder, Schema, SourceAlias,
+};
 
 /// Object-safe table metadata exposed through schema membership.
 pub trait Table {
@@ -70,46 +72,41 @@ pub trait SchemaTable: Table {
     fn column_names() -> Self::WithColumn<'static, ColumnName>;
 
     /// Build expression-mode fields that refer to the supplied SQL alias.
-    fn column_exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
+    fn column_exprs<'scope>(alias: SourceAlias) -> Self::Exprs<'scope> {
         Self::column_exprs_from(alias, &Self::column_names())
     }
 
     /// Build expression-mode fields from explicit database column names.
     fn column_exprs_from<'scope>(
-        alias: &str,
+        alias: SourceAlias,
         columns: &Self::WithColumn<'static, ColumnName>,
     ) -> Self::Exprs<'scope>;
 
     /// Build nullable expression-mode fields that refer to the supplied SQL alias.
-    fn nullable_column_exprs<'scope>(alias: &str) -> Self::NullableExprs<'scope> {
+    fn nullable_column_exprs<'scope>(alias: SourceAlias) -> Self::NullableExprs<'scope> {
         Self::nullable_column_exprs_from(alias, &Self::column_names())
     }
 
     /// Build nullable expression-mode fields from explicit database column names.
     fn nullable_column_exprs_from<'scope>(
-        alias: &str,
+        alias: SourceAlias,
         columns: &Self::WithColumn<'static, ColumnName>,
     ) -> Self::NullableExprs<'scope>;
 }
 
 /// A table model whose value-mode fields can be inserted as bind parameters.
-pub trait InsertableTable: SchemaTable {
-    type InsertBuilder<'conn, Conn>
-    where
-        Conn: QueryBuilder + 'conn;
-
-    fn insert_builder<'conn, Conn>(connection: &'conn Conn) -> Self::InsertBuilder<'conn, Conn>
-    where
-        Conn: QueryBuilder + 'conn;
-}
+pub trait InsertableTable: SchemaTable {}
 
 /// A table model that can generate a typed update builder.
-pub trait UpdateableTable: SchemaTable {
-    type UpdateBuilder<'conn, Conn>
+pub trait UpdateableTable: SchemaTable {}
+
+/// A table model that can generate a typed write builder for insert and update.
+pub trait WriteableTable: SchemaTable {
+    type WriteBuilder<'conn, Conn>
     where
         Conn: QueryBuilder + 'conn;
 
-    fn update_builder<'conn, Conn>(connection: &'conn Conn) -> Self::UpdateBuilder<'conn, Conn>
+    fn write_builder<'conn, Conn>(connection: &'conn Conn) -> Self::WriteBuilder<'conn, Conn>
     where
         Conn: QueryBuilder + 'conn;
 }

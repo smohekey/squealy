@@ -31,62 +31,77 @@ struct Public {
 
 #[test]
 fn test_select_uses_question_mark_placeholders() {
-    let users = TestConnection.select(|q| {
-        let user = q.from::<User>();
-        q.where_(user.id.equals(1));
-        q.returning(&user.id + 2)
-    });
+    let users = TestConnection
+        .from::<User>()
+        .where_(|user| user.id.equals(1))
+        .select(|(user,)| user.id + 2);
 
     assert_eq!(
         users.to_sql(),
         "SELECT (q0_0.id + ?) AS expr FROM public.users AS q0_0 WHERE (q0_0.id = ?)"
     );
-    assert_eq!(users.params(), vec![BindValue::Int(2), BindValue::Int(1)]);
+    let mut written = Vec::new();
+    users.write_params(&mut written).unwrap();
+    assert_eq!(written, vec![BindValue::Int(2), BindValue::Int(1)]);
+    assert_eq!(
+        users.collect_params(),
+        vec![BindValue::Int(2), BindValue::Int(1)]
+    );
 }
 
 #[test]
-fn test_select_numbers_nothing_across_subqueries() {
-    let inner = TestConnection.select(|q| {
-        let user = q.from::<User>();
-        q.where_(user.name.equals("Ada"));
-        q.returning(user.id + 1)
-    });
-    let outer = TestConnection.select(|q| {
-        let user_id = q.q(&inner);
-        q.where_(user_id.equals(3));
-        q.returning(&user_id + 4)
-    });
+fn test_runtime_prepared_params_render_without_captured_values() {
+    let users = TestConnection
+        .from::<User>()
+        .where_(|user| user.name.equals(param::<UserName>()))
+        .select(|(user,)| user.name);
 
     assert_eq!(
-        outer.to_sql(),
-        "SELECT (q0_0.expr + ?) AS expr FROM (SELECT (q0_0.id + ?) AS expr FROM public.users AS q0_0 WHERE (q0_0.name = ?)) AS q0_0 WHERE (q0_0.expr = ?)"
+        users.to_sql(),
+        "SELECT q0_0.name AS name FROM public.users AS q0_0 WHERE (q0_0.name = ?)"
+    );
+    assert_eq!(users.collect_params(), Vec::<BindValue>::new());
+}
+
+#[test]
+fn test_runtime_prepared_assignment_params_render_without_captured_values() {
+    let insert = TestConnection
+        .to::<User>()
+        .name(param::<UserName>())
+        .insert_returning(|user| user.id);
+    let update = TestConnection
+        .to::<User>()
+        .name(param::<UserName>())
+        .where_(|user| user.id.equals(param::<UserId>()))
+        .update_returning(|user| user.name);
+
+    assert_eq!(
+        insert.to_sql(),
+        "INSERT INTO public.users (name) VALUES (?) RETURNING q0_0.id AS id"
     );
     assert_eq!(
-        outer.params(),
-        vec![
-            BindValue::Int(4),
-            BindValue::Int(1),
-            BindValue::Text("Ada".to_owned()),
-            BindValue::Int(3),
-        ]
+        update.to_sql(),
+        "UPDATE public.users AS q0_0 SET name = ? WHERE (q0_0.id = ?) RETURNING q0_0.name AS name"
     );
+    assert_eq!(insert.collect_params(), Vec::<BindValue>::new());
+    assert_eq!(update.collect_params(), Vec::<BindValue>::new());
 }
 
 #[test]
 fn test_insert_update_and_delete_render_returning() {
     let insert = TestConnection
-        .insert::<User>()
+        .to::<User>()
         .name("Ada")
-        .returning(|user| user.id);
+        .insert_returning(|user| user.id);
     let update = TestConnection
-        .update::<User>()
+        .to::<User>()
         .name("Ada")
         .where_(|user| user.id.equals(1))
-        .returning(|user| (user.id, user.name));
+        .update_returning(|user| (user.id, user.name));
     let delete = TestConnection
-        .delete::<User>()
+        .from::<User>()
         .where_(|user| user.id.equals(1))
-        .returning(|user| user);
+        .delete_returning(|user| user);
 
     assert_eq!(
         insert.to_sql(),
@@ -100,25 +115,100 @@ fn test_insert_update_and_delete_render_returning() {
         delete.to_sql(),
         "DELETE FROM public.users AS q0_0 WHERE (q0_0.id = ?) RETURNING q0_0.id AS id, q0_0.name AS name"
     );
-    assert_eq!(insert.params(), vec![BindValue::Text("Ada".to_owned())]);
     assert_eq!(
-        update.params(),
+        insert.collect_params(),
+        vec![BindValue::Text("Ada".to_owned())]
+    );
+    assert_eq!(
+        update.collect_params(),
         vec![BindValue::Text("Ada".to_owned()), BindValue::Int(1)]
     );
-    assert_eq!(delete.params(), vec![BindValue::Int(1)]);
+    assert_eq!(delete.collect_params(), vec![BindValue::Int(1)]);
 }
 
 #[test]
 fn test_insert_can_use_default_values() {
     let insert = TestConnection
-        .insert::<DefaultedRecord>()
-        .returning(|record| record.id);
+        .to::<DefaultedRecord>()
+        .insert_returning(|record| record.id);
 
     assert_eq!(
         insert.to_sql(),
         "INSERT INTO defaulted_records DEFAULT VALUES RETURNING q0_0.id AS id"
     );
-    assert_eq!(insert.params(), Vec::<BindValue>::new());
+    assert_eq!(insert.collect_params(), Vec::<BindValue>::new());
+}
+
+#[test]
+fn test_queries_can_be_prepared() {
+    {
+        let select = TestConnection
+            .from::<User>()
+            .where_(|user| user.id.equals(1))
+            .select(|(user,)| user.name);
+        let _prepare = select.prepare();
+    }
+
+    {
+        let insert = TestConnection
+            .to::<User>()
+            .name("Ada")
+            .insert_returning(|user| user.id);
+        let _prepare = insert.prepare();
+    }
+
+    {
+        let update = TestConnection
+            .to::<User>()
+            .name("Ada")
+            .where_(|user| user.id.equals(1))
+            .update_returning(|user| user.id);
+        let _prepare = update.prepare();
+    }
+
+    {
+        let delete = TestConnection
+            .from::<User>()
+            .where_(|user| user.id.equals(1))
+            .delete_returning(|user| user.id);
+        let _prepare = delete.prepare();
+    }
+}
+
+#[test]
+fn test_runtime_param_queries_can_be_prepared() {
+    {
+        let select = TestConnection
+            .from::<User>()
+            .where_(|user| user.name.equals(param::<UserName>()))
+            .select(|(user,)| user.id);
+        let _prepare = select.prepare();
+    }
+
+    {
+        let insert = TestConnection
+            .to::<User>()
+            .name(param::<UserName>())
+            .insert_returning(|user| user.id);
+        let _prepare = insert.prepare();
+    }
+
+    {
+        let update = TestConnection
+            .to::<User>()
+            .name(param::<UserName>())
+            .where_(|user| user.id.equals(param::<UserId>()))
+            .update_returning(|user| user.id);
+        let _prepare = update.prepare();
+    }
+
+    {
+        let delete = TestConnection
+            .from::<User>()
+            .where_(|user| user.id.equals(param::<UserId>()))
+            .delete_returning(|user| user.id);
+        let _prepare = delete.prepare();
+    }
 }
 
 #[test]

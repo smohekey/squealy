@@ -23,62 +23,97 @@ struct Public {
 
 #[test]
 fn postgres_select_uses_numbered_placeholders() {
-    let users = Postgres.select(|q| {
-        let user = q.from::<User>();
-        q.where_(user.id.equals(1));
-        q.returning(&user.id + 2)
-    });
+    let users = Postgres
+        .from::<User>()
+        .where_(|user| user.id.equals(1))
+        .select(|(user,)| user.id + 2);
 
     assert_eq!(
         users.to_sql(),
         "SELECT (q0_0.id + $1) AS expr FROM public.users AS q0_0 WHERE (q0_0.id = $2)"
     );
-    assert_eq!(users.params(), vec![BindValue::Int(2), BindValue::Int(1)]);
+    let mut written = Vec::new();
+    users.write_params(&mut written).unwrap();
+    assert_eq!(written, vec![BindValue::Int(2), BindValue::Int(1)]);
+    assert_eq!(
+        users.collect_params(),
+        vec![BindValue::Int(2), BindValue::Int(1)]
+    );
 }
 
 #[test]
-fn postgres_select_numbers_placeholders_across_subqueries() {
-    let inner = Postgres.select(|q| {
-        let user = q.from::<User>();
-        q.where_(user.name.equals("Ada"));
-        q.returning(user.id + 1)
-    });
-    let outer = Postgres.select(|q| {
-        let user_id = q.q(&inner);
-        q.where_(user_id.equals(3));
-        q.returning(&user_id + 4)
-    });
+fn postgres_runtime_prepared_params_render_without_captured_values() {
+    let users = Postgres
+        .from::<User>()
+        .where_(|user| user.name.equals(param::<UserName>()))
+        .select(|(user,)| user.name);
 
     assert_eq!(
-        outer.to_sql(),
-        "SELECT (q0_0.expr + $1) AS expr FROM (SELECT (q0_0.id + $2) AS expr FROM public.users AS q0_0 WHERE (q0_0.name = $3)) AS q0_0 WHERE (q0_0.expr = $4)"
+        users.to_sql(),
+        "SELECT q0_0.name AS name FROM public.users AS q0_0 WHERE (q0_0.name = $1)"
+    );
+    assert_eq!(users.collect_params(), Vec::<BindValue>::new());
+}
+
+#[test]
+fn postgres_runtime_prepared_assignment_params_render_without_captured_values() {
+    let insert = Postgres
+        .to::<User>()
+        .name(param::<UserName>())
+        .insert_returning(|user| user.id);
+    let update = Postgres
+        .to::<User>()
+        .name(param::<UserName>())
+        .where_(|user| user.id.equals(param::<UserId>()))
+        .update_returning(|user| user.name);
+
+    assert_eq!(
+        insert.to_sql(),
+        "INSERT INTO public.users (name) VALUES ($1) RETURNING id AS id"
     );
     assert_eq!(
-        outer.params(),
-        vec![
-            BindValue::Int(4),
-            BindValue::Int(1),
-            BindValue::Text("Ada".to_owned()),
-            BindValue::Int(3),
-        ]
+        update.to_sql(),
+        "UPDATE public.users AS q0_0 SET name = $1 WHERE (q0_0.id = $2) RETURNING q0_0.name AS name"
+    );
+    assert_eq!(insert.collect_params(), Vec::<BindValue>::new());
+    assert_eq!(update.collect_params(), Vec::<BindValue>::new());
+}
+
+#[test]
+fn postgres_source_first_select_renders_from_backend_selected_ast() {
+    let users = Postgres
+        .from::<User>()
+        .order_by(|(user,)| (user.id + 2).desc())
+        .where_(|(user,)| user.id.equals(1))
+        .limit(10)
+        .offset(5)
+        .select(|(user,)| user.name);
+
+    assert_eq!(
+        users.to_sql(),
+        "SELECT q0_0.name AS name FROM public.users AS q0_0 WHERE (q0_0.id = $1) ORDER BY (q0_0.id + $2) DESC LIMIT 10 OFFSET 5"
+    );
+    assert_eq!(
+        users.collect_params(),
+        vec![BindValue::Int(1), BindValue::Int(2)]
     );
 }
 
 #[test]
 fn postgres_insert_update_and_delete_render_returning() {
     let insert = Postgres
-        .insert::<User>()
+        .to::<User>()
         .name("Ada")
-        .returning(|user| user.id);
+        .insert_returning(|user| user.id);
     let update = Postgres
-        .update::<User>()
+        .to::<User>()
         .name("Ada")
         .where_(|user| user.id.equals(1))
-        .returning(|user| (user.id, user.name));
+        .update_returning(|user| (user.id, user.name));
     let delete = Postgres
-        .delete::<User>()
+        .from::<User>()
         .where_(|user| user.id.equals(1))
-        .returning(|user| user);
+        .delete_returning(|user| user);
 
     assert_eq!(
         insert.to_sql(),
@@ -92,38 +127,41 @@ fn postgres_insert_update_and_delete_render_returning() {
         delete.to_sql(),
         "DELETE FROM public.users AS q0_0 WHERE (q0_0.id = $1) RETURNING q0_0.id AS id, q0_0.name AS name"
     );
-    assert_eq!(insert.params(), vec![BindValue::Text("Ada".to_owned())]);
     assert_eq!(
-        update.params(),
+        insert.collect_params(),
+        vec![BindValue::Text("Ada".to_owned())]
+    );
+    assert_eq!(
+        update.collect_params(),
         vec![BindValue::Text("Ada".to_owned()), BindValue::Int(1)]
     );
-    assert_eq!(delete.params(), vec![BindValue::Int(1)]);
+    assert_eq!(delete.collect_params(), vec![BindValue::Int(1)]);
 }
 
 #[test]
 fn postgres_insert_can_use_default_values() {
     let insert = Postgres
-        .insert::<DefaultedRecord>()
-        .returning(|record| record.id);
+        .to::<DefaultedRecord>()
+        .insert_returning(|record| record.id);
 
     assert_eq!(
         insert.to_sql(),
         "INSERT INTO defaulted_records DEFAULT VALUES RETURNING id AS id"
     );
-    assert_eq!(insert.params(), Vec::<BindValue>::new());
+    assert_eq!(insert.collect_params(), Vec::<BindValue>::new());
 }
 
 #[test]
 fn postgres_mutation_returning_expressions_continue_placeholder_numbering() {
     let insert = Postgres
-        .insert::<User>()
+        .to::<User>()
         .name("Ada")
-        .returning(|user| user.id + 1);
+        .insert_returning(|user| user.id + 1);
     let update = Postgres
-        .update::<User>()
+        .to::<User>()
         .name("Ada")
         .where_(|user| user.id.equals(1))
-        .returning(|user| user.id + 2);
+        .update_returning(|user| user.id + 2);
 
     assert_eq!(
         insert.to_sql(),
@@ -134,11 +172,11 @@ fn postgres_mutation_returning_expressions_continue_placeholder_numbering() {
         "UPDATE public.users AS q0_0 SET name = $1 WHERE (q0_0.id = $2) RETURNING (q0_0.id + $3) AS expr"
     );
     assert_eq!(
-        insert.params(),
+        insert.collect_params(),
         vec![BindValue::Text("Ada".to_owned()), BindValue::Int(1)]
     );
     assert_eq!(
-        update.params(),
+        update.collect_params(),
         vec![
             BindValue::Text("Ada".to_owned()),
             BindValue::Int(1),

@@ -121,9 +121,9 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
     let connection = PostgresConnection::new(client);
 
     let (ada, ada_count) = connection
-        .insert::<IntegrationUser>()
+        .to::<IntegrationUser>()
         .name("Ada")
-        .returning(|user| user)
+        .insert_returning(|user| user)
         .fetch_one_with_affected()
         .await
         .expect("insert Ada");
@@ -131,19 +131,143 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
     assert_eq!(ada.name, "Ada");
 
     let affected = connection
-        .insert::<IntegrationUser>()
+        .to::<IntegrationUser>()
         .name("Grace")
-        .execute()
+        .insert()
         .await
         .expect("insert Grace");
     assert_eq!(affected, 1);
 
+    let insert_preparable = connection
+        .to::<IntegrationUser>()
+        .name("Prepared")
+        .insert_returning(|user| user.name);
+    let prepared_insert = insert_preparable.prepare().await.expect("prepare insert");
+    assert_eq!(
+        prepared_insert
+            .fetch_one(())
+            .await
+            .expect("execute prepared insert"),
+        "Prepared"
+    );
+    assert_eq!(
+        prepared_insert
+            .fetch_one(())
+            .await
+            .expect("execute prepared insert again"),
+        "Prepared"
+    );
+
+    let dynamic_insert_preparable = connection
+        .to::<IntegrationUser>()
+        .name(param::<IntegrationUserName>())
+        .insert_returning(|user| user.name);
+    let prepared_dynamic_insert = dynamic_insert_preparable
+        .prepare()
+        .await
+        .expect("prepare dynamic insert");
+    assert_eq!(
+        prepared_dynamic_insert
+            .fetch_one(("Runtime Inserted".to_owned(),))
+            .await
+            .expect("execute dynamic prepared insert"),
+        "Runtime Inserted"
+    );
+
+    let update_preparable = connection
+        .to::<IntegrationUser>()
+        .name("Prepared Updated")
+        .where_(|user| user.name.equals("Prepared"))
+        .update_returning(|user| user.name);
+    let prepared_update = update_preparable.prepare().await.expect("prepare update");
+    let (updated_names, updated_count) = prepared_update
+        .collect_with_affected(())
+        .await
+        .expect("execute prepared update");
+    assert_eq!(updated_count, 2);
+    assert_eq!(
+        updated_names,
+        vec!["Prepared Updated".to_owned(), "Prepared Updated".to_owned()]
+    );
+
+    let select_preparable = connection
+        .from::<IntegrationUser>()
+        .where_(|user| user.name.equals("Prepared Updated"))
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| user.name);
+    let prepared_select = select_preparable.prepare().await.expect("prepare select");
+    assert_eq!(
+        prepared_select
+            .collect(())
+            .await
+            .expect("execute prepared select"),
+        vec!["Prepared Updated".to_owned(), "Prepared Updated".to_owned()]
+    );
+
+    let dynamic_select_preparable = connection
+        .from::<IntegrationUser>()
+        .where_(|user| user.name.equals(param::<IntegrationUserName>()))
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| user.name);
+    let prepared_dynamic_select = dynamic_select_preparable
+        .prepare()
+        .await
+        .expect("prepare dynamic select");
+    assert_eq!(
+        prepared_dynamic_select
+            .collect(("Prepared Updated",))
+            .await
+            .expect("execute dynamic prepared select"),
+        vec!["Prepared Updated".to_owned(), "Prepared Updated".to_owned()]
+    );
+
+    let dynamic_update_preparable = connection
+        .to::<IntegrationUser>()
+        .name(param::<IntegrationUserName>())
+        .where_(|user| user.name.equals(param::<IntegrationUserName>()))
+        .update_returning(|user| user.name);
+    let prepared_dynamic_update = dynamic_update_preparable
+        .prepare()
+        .await
+        .expect("prepare dynamic update");
+    let (runtime_updated_names, runtime_updated_count) = prepared_dynamic_update
+        .collect_with_affected(("Runtime Prepared Updated".to_owned(), "Prepared Updated"))
+        .await
+        .expect("execute dynamic prepared update");
+    assert_eq!(runtime_updated_count, 2);
+    assert_eq!(
+        runtime_updated_names,
+        vec![
+            "Runtime Prepared Updated".to_owned(),
+            "Runtime Prepared Updated".to_owned()
+        ]
+    );
+
+    let dynamic_delete_preparable = connection
+        .from::<IntegrationUser>()
+        .where_(|user| user.name.equals(param::<IntegrationUserName>()))
+        .delete_returning(|user| user.id);
+    let prepared_dynamic_delete = dynamic_delete_preparable
+        .prepare()
+        .await
+        .expect("prepare dynamic delete");
+    let (deleted_ids, deleted_count) = prepared_dynamic_delete
+        .collect_with_affected(("Runtime Prepared Updated",))
+        .await
+        .expect("execute dynamic prepared delete");
+    assert_eq!(deleted_count, 2);
+    assert_eq!(deleted_ids.len(), 2);
+    let (deleted_runtime_ids, deleted_runtime_count) = prepared_dynamic_delete
+        .collect_with_affected(("Runtime Inserted",))
+        .await
+        .expect("execute dynamic prepared delete again");
+    assert_eq!(deleted_runtime_count, 1);
+    assert_eq!(deleted_runtime_ids.len(), 1);
+
     let users = connection
-        .select(|q| {
-            let user = q.from::<IntegrationUser>();
-            q.order_by(user.id.asc());
-            q.returning(user)
-        })
+        .from::<IntegrationUser>()
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| user)
         .collect()
         .await
         .expect("fetch inserted users");
@@ -153,10 +277,10 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
     assert_eq!(users[1].name, "Grace");
 
     let (updated_rows, updated_count) = connection
-        .update::<IntegrationUser>()
+        .to::<IntegrationUser>()
         .name("Ada Lovelace")
         .where_(|user| user.id.equals(ada.id))
-        .returning(|user| user)
+        .update_returning(|user| user)
         .collect_with_affected()
         .await
         .expect("update Ada");
@@ -167,9 +291,9 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
     assert_eq!(updated_ada.name, "Ada Lovelace");
 
     let (deleted_rows, deleted_count) = connection
-        .delete::<IntegrationUser>()
+        .from::<IntegrationUser>()
         .where_(|user| user.name.equals("Grace"))
-        .returning(|user| user)
+        .delete_returning(|user| user)
         .collect_with_affected()
         .await
         .expect("delete Grace");
@@ -179,20 +303,17 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
     assert_eq!(deleted_grace.name, "Grace");
 
     let remaining = connection
-        .select(|q| {
-            let user = q.from::<IntegrationUser>();
-            q.returning(user)
-        })
+        .from::<IntegrationUser>()
+        .select(|(user,)| user)
         .collect()
         .await
         .expect("fetch remaining users");
 
     assert_eq!(remaining, vec![updated_ada]);
 
-    let stream_query = connection.select(|q| {
-        let user = q.from::<IntegrationUser>();
-        q.returning(user.name)
-    });
+    let stream_query = connection
+        .from::<IntegrationUser>()
+        .select(|(user,)| user.name);
     let mut rows = Box::pin(stream_query.fetch());
     let first = poll_fn(|cx| rows.as_mut().poll_next(cx))
         .await
@@ -204,8 +325,8 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
     assert!(second.is_none());
 
     let defaulted = connection
-        .insert::<IntegrationDefaulted>()
-        .returning(|record| record)
+        .to::<IntegrationDefaulted>()
+        .insert_returning(|record| record)
         .fetch_one()
         .await
         .expect("insert defaulted record");
@@ -215,29 +336,27 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
     assert!(defaulted.active);
 
     let nullable_id = connection
-        .insert::<IntegrationNullable>()
+        .to::<IntegrationNullable>()
         .note(None::<String>)
-        .returning(|record| record.id)
+        .insert_returning(|record| record.id)
         .fetch_one()
         .await
         .expect("insert nullable record");
 
     let affected = connection
-        .update::<IntegrationNullable>()
+        .to::<IntegrationNullable>()
         .note(None::<String>)
         .where_(|record| record.id.equals(nullable_id))
-        .execute()
+        .update()
         .await
         .expect("update nullable record");
 
     assert_eq!(affected, 1);
 
     let nullable_row = connection
-        .select(|q| {
-            let record = q.from::<IntegrationNullable>();
-            q.where_(record.id.equals(nullable_id));
-            q.returning(record)
-        })
+        .from::<IntegrationNullable>()
+        .where_(|record| record.id.equals(nullable_id))
+        .select(|(record,)| record)
         .fetch_one()
         .await
         .expect("fetch nullable record");
@@ -262,28 +381,34 @@ async fn postgres_inner_joins_across_tables() {
     let connection = PostgresConnection::new(client);
 
     let ada = connection
-        .insert::<JoinUser>()
+        .to::<JoinUser>()
         .name("Ada")
-        .returning(|user| user)
+        .insert_returning(|user| user)
         .fetch_one()
         .await
         .expect("insert Ada");
 
     connection
-        .insert::<JoinPost>()
+        .to::<JoinUser>()
+        .name("Grace")
+        .insert()
+        .await
+        .expect("insert Grace");
+
+    connection
+        .to::<JoinPost>()
         .user_id(ada.id)
         .title("Notes on the Analytical Engine")
-        .execute()
+        .insert()
         .await
         .expect("insert post");
 
     let rows = connection
-        .select(|q| {
-            let user = q.from::<JoinUser>();
-            let post = q.join::<JoinPost>(|post| post.user_id.equals(user.id));
-            q.order_by(post.id.asc());
-            q.returning((user, post))
-        })
+        .from::<JoinUser>()
+        .join::<JoinPost>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .order_by(|(_user, post)| post.id.asc())
+        .select(|(user, post)| (user, post))
         .collect()
         .await
         .expect("fetch joined rows");
@@ -292,6 +417,45 @@ async fn postgres_inner_joins_across_tables() {
     assert_eq!(rows[0].0.name, "Ada");
     assert_eq!(rows[0].1.user_id, ada.id);
     assert_eq!(rows[0].1.title, "Notes on the Analytical Engine");
+
+    let source_first_rows = connection
+        .from::<JoinUser>()
+        .join::<JoinPost>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .order_by(|(_user, post)| post.id.asc())
+        .select(|(user, post)| (user.name, post.title))
+        .collect()
+        .await
+        .expect("fetch joined rows through source-first query");
+
+    assert_eq!(
+        source_first_rows,
+        vec![(
+            "Ada".to_owned(),
+            "Notes on the Analytical Engine".to_owned()
+        )]
+    );
+
+    let source_first_left_join_rows = connection
+        .from::<JoinUser>()
+        .left_join::<JoinPost>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .order_by(|(user, _post)| user.id.asc())
+        .select(|(user, post)| (user.name, post.title))
+        .collect()
+        .await
+        .expect("fetch left joined rows through source-first query");
+
+    assert_eq!(
+        source_first_left_join_rows,
+        vec![
+            (
+                "Ada".to_owned(),
+                Some("Notes on the Analytical Engine".to_owned())
+            ),
+            ("Grace".to_owned(), None),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -309,7 +473,7 @@ async fn postgres_round_trips_primitive_types() {
     let connection = PostgresConnection::new(client);
 
     let stored = connection
-        .insert::<IntegrationTypes>()
+        .to::<IntegrationTypes>()
         .small(7i16)
         .medium(1_000i32)
         .large(9_000_000_000i64)
@@ -317,7 +481,7 @@ async fn postgres_round_trips_primitive_types() {
         .double(2.5f64)
         .flag(true)
         .label("mixed")
-        .returning(|record| record)
+        .insert_returning(|record| record)
         .fetch_one()
         .await
         .expect("insert typed record");
@@ -343,10 +507,8 @@ async fn postgres_surfaces_database_errors() {
     let connection = PostgresConnection::new(client);
 
     let result = connection
-        .select(|q| {
-            let row = q.from::<MissingTable>();
-            q.returning(row)
-        })
+        .from::<MissingTable>()
+        .select(|(row,)| row)
         .collect()
         .await;
 
@@ -373,9 +535,9 @@ async fn postgres_runs_transaction_closures() {
     let committed_name = connection
         .transaction(async |transaction| {
             let user = transaction
-                .insert::<TransactionUser>()
+                .to::<TransactionUser>()
                 .name("Committed")
-                .returning(|user| user)
+                .insert_returning(|user| user)
                 .fetch_one()
                 .await?;
             Ok(user.name)
@@ -388,9 +550,9 @@ async fn postgres_runs_transaction_closures() {
     let rolled_back: Result<(), PostgresError> = connection
         .transaction(async |transaction| {
             transaction
-                .insert::<TransactionUser>()
+                .to::<TransactionUser>()
                 .name("Rolled back")
-                .execute()
+                .insert()
                 .await?;
             Err(PostgresError::NoRows)
         })
@@ -399,11 +561,9 @@ async fn postgres_runs_transaction_closures() {
     assert!(matches!(rolled_back, Err(PostgresError::NoRows)));
 
     let users = connection
-        .select(|q| {
-            let user = q.from::<TransactionUser>();
-            q.order_by(user.id.asc());
-            q.returning(user.name)
-        })
+        .from::<TransactionUser>()
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| user.name)
         .collect()
         .await
         .expect("fetch committed users");

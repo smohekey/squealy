@@ -1,27 +1,21 @@
 use std::borrow::Cow;
 use std::marker::PhantomData;
 
-use crate::ir::SelectColumn;
 use crate::{
-    AddExpr, ColumnNullableValue, ColumnRef, ColumnValue, Decode, DivideExpr, Expr, ExprKind,
-    IntoBindValue, IrList, MultiplyExpr, Nullable, ReturningProjection, SchemaTable, SubtractExpr,
+    AddExpr, ColumnNullableValue, ColumnRef, ColumnValue, Decode, DivideExpr, Expr, ExprAst,
+    ExprKind, IntoBindValue, MultiplyExpr, Nullable, ReturningProjection, SchemaTable, SourceAlias,
+    SubtractExpr,
 };
 
 /// A projection shape that can produce scoped expression values for a SQL alias.
 pub trait ProjectionShape {
     type Exprs<'scope>: Projectable;
-    type ReboundExprs<'scope>: Projectable;
+    type ReboundExprs<'scope>;
     type Row: Send;
 
-    fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope>;
+    fn exprs<'scope>(alias: SourceAlias) -> Self::Exprs<'scope>;
 
-    fn rebound_exprs<'scope>(alias: &str) -> Self::ReboundExprs<'scope>;
-
-    fn project_columns<'scope>(
-        exprs: &Self::Exprs<'scope>,
-    ) -> <Self::Exprs<'scope> as Projectable>::Columns {
-        exprs.project()
-    }
+    fn rebound_exprs<'scope>(alias: SourceAlias) -> Self::ReboundExprs<'scope>;
 }
 
 impl ProjectionShape for () {
@@ -29,9 +23,9 @@ impl ProjectionShape for () {
     type ReboundExprs<'scope> = ();
     type Row = ();
 
-    fn exprs<'scope>(_alias: &str) -> Self::Exprs<'scope> {}
+    fn exprs<'scope>(_alias: SourceAlias) -> Self::Exprs<'scope> {}
 
-    fn rebound_exprs<'scope>(_alias: &str) -> Self::ReboundExprs<'scope> {}
+    fn rebound_exprs<'scope>(_alias: SourceAlias) -> Self::ReboundExprs<'scope> {}
 }
 
 macro_rules! impl_value_projection_shape {
@@ -41,11 +35,11 @@ macro_rules! impl_value_projection_shape {
             type ReboundExprs<'scope> = Expr<'scope, $ty>;
             type Row = $ty;
 
-            fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
+            fn exprs<'scope>(alias: SourceAlias) -> Self::Exprs<'scope> {
                 Expr::column(alias, "expr")
             }
 
-            fn rebound_exprs<'scope>(alias: &str) -> Self::ReboundExprs<'scope> {
+            fn rebound_exprs<'scope>(alias: SourceAlias) -> Self::ReboundExprs<'scope> {
                 Expr::column(alias, "expr")
             }
         })*
@@ -68,11 +62,11 @@ macro_rules! impl_binary_projection_shape {
             type ReboundExprs<'scope> = Expr<'scope, $ty<L, R>>;
             type Row = <$ty<L, R> as ExprKind>::Value;
 
-            fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
+            fn exprs<'scope>(alias: SourceAlias) -> Self::Exprs<'scope> {
                 Expr::column(alias, "expr")
             }
 
-            fn rebound_exprs<'scope>(alias: &str) -> Self::ReboundExprs<'scope> {
+            fn rebound_exprs<'scope>(alias: SourceAlias) -> Self::ReboundExprs<'scope> {
                 Expr::column(alias, "expr")
             }
         })*
@@ -90,11 +84,11 @@ where
     type ReboundExprs<'scope> = Expr<'scope, Nullable<K>>;
     type Row = Option<K::Value>;
 
-    fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
+    fn exprs<'scope>(alias: SourceAlias) -> Self::Exprs<'scope> {
         ColumnRef::column(alias, "expr")
     }
 
-    fn rebound_exprs<'scope>(alias: &str) -> Self::ReboundExprs<'scope> {
+    fn rebound_exprs<'scope>(alias: SourceAlias) -> Self::ReboundExprs<'scope> {
         Expr::column(alias, "expr")
     }
 }
@@ -110,11 +104,11 @@ where
         <<S as SchemaTable>::Exprs<'static> as Projectable>::Rebound<'scope>;
     type Row = <S as SchemaTable>::WithColumn<'static, ColumnValue>;
 
-    fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
+    fn exprs<'scope>(alias: SourceAlias) -> Self::Exprs<'scope> {
         S::column_exprs(alias)
     }
 
-    fn rebound_exprs<'scope>(alias: &str) -> Self::ReboundExprs<'scope> {
+    fn rebound_exprs<'scope>(alias: SourceAlias) -> Self::ReboundExprs<'scope> {
         S::column_exprs(alias).re_alias(alias)
     }
 }
@@ -136,11 +130,11 @@ where
         <<S as SchemaTable>::NullableExprs<'static> as Projectable>::Rebound<'scope>;
     type Row = <S as SchemaTable>::WithColumn<'static, ColumnNullableValue>;
 
-    fn exprs<'scope>(alias: &str) -> Self::Exprs<'scope> {
+    fn exprs<'scope>(alias: SourceAlias) -> Self::Exprs<'scope> {
         S::nullable_column_exprs(alias)
     }
 
-    fn rebound_exprs<'scope>(alias: &str) -> Self::ReboundExprs<'scope> {
+    fn rebound_exprs<'scope>(alias: SourceAlias) -> Self::ReboundExprs<'scope> {
         S::nullable_column_exprs(alias).re_alias(alias)
     }
 }
@@ -163,51 +157,101 @@ where
 
 /// A table-shaped value whose expression columns can be projected or rebound to a SQL alias.
 pub trait Projectable: Clone {
-    type Columns: IrList<SelectColumn>;
-    type Rebound<'scope>: Projectable;
+    type Rebound<'scope>;
 
-    fn project(&self) -> Self::Columns;
+    fn visit_projection<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ProjectionVisitor;
 
-    fn re_alias<'scope>(&self, alias: &str) -> Self::Rebound<'scope>;
+    fn visit_projection_with_prefix<V>(&self, prefix: &str, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ProjectionVisitor,
+    {
+        _ = prefix;
+        self.visit_projection(visitor)
+    }
 
-    fn re_alias_with_prefix<'scope>(&self, alias: &str, _prefix: &str) -> Self::Rebound<'scope> {
+    fn re_alias<'scope>(&self, alias: SourceAlias) -> Self::Rebound<'scope>;
+
+    fn re_alias_with_prefix<'scope>(
+        &self,
+        alias: SourceAlias,
+        _prefix: &str,
+    ) -> Self::Rebound<'scope> {
         self.re_alias(alias)
     }
 }
 
+#[doc(hidden)]
+pub trait ProjectionVisitor {
+    type Error;
+
+    fn visit_expr<K, Ast>(
+        &mut self,
+        expr: &Expr<'_, K, Ast>,
+        alias: Cow<'static, str>,
+    ) -> Result<(), Self::Error>
+    where
+        K: ExprKind,
+        Ast: ExprAst;
+
+    fn visit_column<K>(
+        &mut self,
+        column: ColumnRef<'_, K>,
+        alias: Cow<'static, str>,
+    ) -> Result<(), Self::Error>
+    where
+        K: ExprKind;
+}
+
 impl Projectable for () {
-    type Columns = ();
     type Rebound<'scope> = ();
 
-    fn project(&self) -> Self::Columns {}
+    fn visit_projection<V>(&self, _visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ProjectionVisitor,
+    {
+        Ok(())
+    }
 
-    fn re_alias<'scope>(&self, _alias: &str) -> Self::Rebound<'scope> {}
+    fn re_alias<'scope>(&self, _alias: SourceAlias) -> Self::Rebound<'scope> {}
 }
 
 squealy_macros::tuple_projection_shapes!(32);
 
-impl<'expr, K> Projectable for Expr<'expr, K>
+impl<'expr, K, Ast> Projectable for Expr<'expr, K, Ast>
 where
     K: ExprKind,
+    Ast: ExprAst,
 {
-    type Columns = (SelectColumn,);
     type Rebound<'scope> = Expr<'scope, K>;
 
-    fn project(&self) -> Self::Columns {
-        (SelectColumn::new(
-            self.node().clone(),
-            self.project_alias().to_owned(),
-        ),)
+    fn visit_projection<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ProjectionVisitor,
+    {
+        visitor.visit_expr(self, Cow::Owned(self.project_alias().to_owned()))
     }
 
-    fn re_alias<'scope>(&self, alias: &str) -> Self::Rebound<'scope> {
-        Expr::column(alias, self.project_alias())
+    fn visit_projection_with_prefix<V>(&self, prefix: &str, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ProjectionVisitor,
+    {
+        visitor.visit_expr(self, Cow::Owned(prefix_alias(prefix, self.project_alias())))
     }
 
-    fn re_alias_with_prefix<'scope>(&self, alias: &str, prefix: &str) -> Self::Rebound<'scope> {
+    fn re_alias<'scope>(&self, alias: SourceAlias) -> Self::Rebound<'scope> {
+        Expr::column(alias, self.project_alias().to_owned())
+    }
+
+    fn re_alias_with_prefix<'scope>(
+        &self,
+        alias: SourceAlias,
+        prefix: &str,
+    ) -> Self::Rebound<'scope> {
         Expr::column_with_project_alias(
             alias,
-            &prefix_alias(prefix, self.project_alias()),
+            prefix_alias(prefix, self.project_alias()),
             self.project_alias().to_owned(),
         )
     }
@@ -217,21 +261,37 @@ impl<'expr, K> Projectable for ColumnRef<'expr, K>
 where
     K: ExprKind,
 {
-    type Columns = (SelectColumn,);
     type Rebound<'scope> = Expr<'scope, K>;
 
-    fn project(&self) -> Self::Columns {
-        (SelectColumn::new(self.node(), self.project_alias()),)
+    fn visit_projection<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ProjectionVisitor,
+    {
+        visitor.visit_column(*self, Cow::Borrowed(self.project_alias()))
     }
 
-    fn re_alias<'scope>(&self, alias: &str) -> Self::Rebound<'scope> {
+    fn visit_projection_with_prefix<V>(&self, prefix: &str, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ProjectionVisitor,
+    {
+        visitor.visit_column(
+            *self,
+            Cow::Owned(prefix_alias(prefix, self.project_alias())),
+        )
+    }
+
+    fn re_alias<'scope>(&self, alias: SourceAlias) -> Self::Rebound<'scope> {
         Expr::column(alias, self.project_alias())
     }
 
-    fn re_alias_with_prefix<'scope>(&self, alias: &str, prefix: &str) -> Self::Rebound<'scope> {
+    fn re_alias_with_prefix<'scope>(
+        &self,
+        alias: SourceAlias,
+        prefix: &str,
+    ) -> Self::Rebound<'scope> {
         Expr::column_with_project_alias(
             alias,
-            &prefix_alias(prefix, self.project_alias()),
+            prefix_alias(prefix, self.project_alias()),
             self.project_alias().to_owned(),
         )
     }
@@ -241,14 +301,24 @@ impl<T> Projectable for T
 where
     T: ExprKind + IntoBindValue + Clone,
 {
-    type Columns = (SelectColumn,);
     type Rebound<'scope> = Expr<'scope, T>;
 
-    fn project(&self) -> Self::Columns {
-        Expr::<T>::lit(self.clone()).project()
+    fn visit_projection<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ProjectionVisitor,
+    {
+        Expr::<T, crate::LiteralExprAst<T>>::lit(self.clone()).visit_projection(visitor)
     }
 
-    fn re_alias<'scope>(&self, alias: &str) -> Self::Rebound<'scope> {
+    fn visit_projection_with_prefix<V>(&self, prefix: &str, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ProjectionVisitor,
+    {
+        Expr::<T, crate::LiteralExprAst<T>>::lit(self.clone())
+            .visit_projection_with_prefix(prefix, visitor)
+    }
+
+    fn re_alias<'scope>(&self, alias: SourceAlias) -> Self::Rebound<'scope> {
         Expr::column(alias, "expr")
     }
 }

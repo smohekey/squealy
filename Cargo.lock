@@ -625,6 +625,7 @@ dependencies = [
  "futures-core",
  "squealy-macros",
  "squealy-test",
+ "trybuild",
 ]
 
 [[package]]

@@ -1,93 +1,84 @@
 use std::future::Future;
 
 use crate::{
-    Backend, Decode, DeleteBuilder, DeleteQuery, From, HCons, HNil, InsertQuery, InsertableTable,
-    IrList, ProjectionShape, Returning, RootSource, SelectColumn, SelectQuery, TableProjection,
-    UpdateQuery, UpdateableTable, build_delete_builder, build_select,
+    Backend, Decode, DeleteQuery, From, HCons, HNil, InsertQuery, InsertableTable, Projectable,
+    ProjectionShape, ReturningProjection, RootSource, SelectAst, SelectQuery, TableProjection,
+    UpdateQuery, UpdateableTable, WriteableTable,
 };
 
 /// A backend-specific handle that constructs query objects.
 pub trait QueryBuilder: Sized {
     type Backend: Backend;
 
-    type Select<'builder, Shape>: SelectQuery<'builder, Builder = Self, Shape = Shape>
+    type Select<'builder, 'scope, Base, Shape, Projection>: SelectQuery<'builder, 'scope, Base, Projection, Builder = Self, Shape = Shape>
     where
         Self: 'builder,
+        Base: 'builder,
+        Base: SelectAst<'builder, 'scope, Self>,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Projection: Projectable;
 
-    type Insert<'builder, S, Shape>: InsertQuery<'builder, Builder = Self, Table = S, Shape = Shape>
+    type Insert<'builder, S, Shape, Columns, Returning>: InsertQuery<'builder, Columns, Returning, Builder = Self, Table = S, Shape = Shape>
     where
         Self: 'builder,
         S: InsertableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Columns: crate::InsertAssignments,
+        Returning: Projectable;
 
-    type Update<'builder, S, Shape>: UpdateQuery<'builder, Builder = Self, Table = S, Shape = Shape>
+    type Update<'builder, S, Shape, Columns, Filters, Returning>: UpdateQuery<'builder, Columns, Filters, Returning, Builder = Self, Table = S, Shape = Shape>
     where
         Self: 'builder,
         S: UpdateableTable,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
+        Shape::Row: Decode<Self::Backend>,
+        Columns: crate::UpdateAssignments,
+        Filters: crate::PredicateNodes,
+        Returning: Projectable;
 
-    type Delete<'builder, S, Shape>: DeleteQuery<'builder, Builder = Self, Table = S, Shape = Shape>
+    type Delete<'builder, S, Shape, Filters, Returning>: DeleteQuery<'builder, Filters, Returning, Builder = Self, Table = S, Shape = Shape>
     where
         Self: 'builder,
         S: TableProjection,
         Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>;
-
-    fn select<Shape, Columns>(
-        &self,
-        f: impl for<'scope> FnOnce(
-            &mut crate::SelectBuilder<'_, 'scope, Self>,
-        ) -> Returning<Shape, Columns>,
-    ) -> Self::Select<'_, Shape>
-    where
-        Shape: ProjectionShape,
         Shape::Row: Decode<Self::Backend>,
-        Columns: IrList<SelectColumn>,
+        Filters: crate::PredicateNodes,
+        Returning: Projectable;
+
+    fn select<P>(
+        &self,
+        projection: P,
+    ) -> Self::Select<
+        '_,
+        'static,
+        crate::NoSources<'_, Self>,
+        <P as ReturningProjection<'static>>::Shape,
+        P,
+    >
+    where
+        P: ReturningProjection<'static> + Projectable,
+        <P as ReturningProjection<'static>>::Shape: ProjectionShape,
+        <<P as ReturningProjection<'static>>::Shape as ProjectionShape>::Row: Decode<Self::Backend>,
     {
-        <Self::Select<'_, Shape> as SelectQuery<'_>>::build(
-            self,
-            build_select::<Self, Shape, Columns>(f),
-        )
+        crate::query::build_sourceless_select(self, projection)
     }
 
     fn from<S>(
         &self,
-    ) -> From<
-        '_,
-        '_,
-        Self,
-        HCons<<S as ProjectionShape>::Exprs<'_>, HNil>,
-        HCons<RootSource<S>, HNil>,
-    >
+    ) -> From<'_, '_, Self, HCons<<S as ProjectionShape>::Exprs<'_>, HNil>, RootSource<S>>
     where
         S: TableProjection,
     {
-        crate::build_from_builder(self)
+        crate::query::build_from_builder(self)
     }
 
-    fn insert<S>(&self) -> S::InsertBuilder<'_, Self>
+    fn to<S>(&self) -> S::WriteBuilder<'_, Self>
     where
-        S: InsertableTable,
+        S: WriteableTable,
     {
-        S::insert_builder(self)
-    }
-
-    fn update<S>(&self) -> S::UpdateBuilder<'_, Self>
-    where
-        S: UpdateableTable,
-    {
-        S::update_builder(self)
-    }
-
-    fn delete<'conn, S>(&'conn self) -> DeleteBuilder<'conn, 'static, Self, S>
-    where
-        S: TableProjection + 'conn,
-    {
-        build_delete_builder(self)
+        S::write_builder(self)
     }
 }
 
