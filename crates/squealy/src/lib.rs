@@ -80,14 +80,18 @@
 //! - `check = "..."`, plus `db_type = "..."` as a raw backend-specific DDL type override
 //! - `references(OtherTable::column, on_delete = "...", on_update = "...")`
 //!
-//! If `db_type` is omitted, backend crates map the Rust field type to an appropriate database
-//! column type. For example, the PostgreSQL backend renders `i32` as `integer` and `String` as
+//! If `db_type` is omitted, the field's Rust value type must implement [`HasColumnType`].
+//! Primitive Rust types already do, and backend crates map those logical types to appropriate
+//! database DDL. For example, the PostgreSQL backend renders `i32` as `integer` and `String` as
 //! `text`. Use `db_type` only when you need an explicit backend-specific escape hatch such as
-//! `varchar(64)`, `jsonb`, or a domain type.
+//! `varchar(64)`, `jsonb`, or a domain type. If a custom field type does not implement
+//! [`HasColumnType`] and does not provide `db_type`, the table derive fails to compile.
 //!
-//! For newtype wrappers, derive `ColumnType` on the wrapper. Single-field structs are
-//! transparent by default, so the wrapper uses the same database type as its inner value. Use
-//! `#[column_type(raw = "...")]` when the wrapper should use a backend-specific database type:
+//! For newtype wrappers, derive `ColumnType` on the wrapper. Single-field tuple structs and
+//! single-field named structs are transparent by default, so the wrapper uses the same database
+//! type, bind conversion, row decoding, and literal expression support as its inner value. Use
+//! `#[column_type(db_type = "...")]` when the wrapper should still bind/decode transparently but use
+//! a backend-specific database type:
 //!
 //! ```rust
 //! use squealy::*;
@@ -96,7 +100,7 @@
 //! pub struct UserId(i32);
 //!
 //! #[derive(Clone, Debug, PartialEq, ColumnType)]
-//! #[column_type(raw = "jsonb")]
+//! #[column_type(db_type = "jsonb")]
 //! pub struct JsonPayload(String);
 //!
 //! #[derive(Clone, Debug, PartialEq, Table)]
@@ -267,7 +271,7 @@ mod query;
 mod schema;
 mod table;
 
-pub use backend::{Backend, Decode, RowReader};
+pub use backend::{Backend, Decode, DecodeNullable, RowReader};
 pub use column::{
     Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullableValue, ColumnType,
     ColumnValue, HasColumnType,

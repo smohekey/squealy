@@ -53,6 +53,15 @@ pub enum ColumnDefault {
 }
 
 /// Backend-agnostic column type metadata.
+///
+/// Variants describe the Rust-side value shape. Backend crates decide how those
+/// shapes become concrete DDL types for their database. For example, PostgreSQL
+/// can render [`ColumnType::I32`] as `integer`, while another backend may choose
+/// a different native spelling.
+///
+/// [`ColumnType::Raw`] is the escape hatch for callers that need to name a
+/// backend-specific type directly, such as `jsonb`, `varchar(64)`, or a database
+/// domain. Raw type names are intentionally not interpreted by the core crate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColumnType {
     I8,
@@ -75,6 +84,15 @@ pub enum ColumnType {
 }
 
 /// Maps a Rust value type to backend-specific column DDL.
+///
+/// The [`Table`](crate::Table) derive uses this trait for each field unless the
+/// field has an explicit `#[column(db_type = "...")]` override. Primitive Rust
+/// types have built-in implementations. Domain newtypes can derive `ColumnType`
+/// to use their single field's mapping while also gaining transparent bind
+/// conversion, row decoding, and literal expression support.
+///
+/// If a table field's value type does not implement this trait, the table derive
+/// fails to compile unless the field supplies a raw `db_type` override.
 pub trait HasColumnType {
     const COLUMN_TYPE: ColumnType;
 }
@@ -148,6 +166,10 @@ pub trait Column: Sync {
         None
     }
 
+    /// Returns the logical column type used by backend DDL renderers.
+    ///
+    /// This is never optional: a column either gets its type from
+    /// [`HasColumnType`] or from a raw `#[column(db_type = "...")]` override.
     fn column_type(&self) -> ColumnType;
 
     fn check(&self) -> Option<&'static str> {

@@ -140,6 +140,30 @@ impl TableStruct {
                 }
             })
             .collect::<Vec<_>>();
+        let row_field_decode_bounds = self
+            .fields
+            .iter()
+            .map(|field| {
+                let field_ty = field.value_ty.clone();
+                if field.nullable() {
+                    quote::quote! { #field_ty: ::squealy::DecodeNullable<Backend> }
+                } else {
+                    quote::quote! { #field_ty: ::squealy::Decode<Backend> }
+                }
+            })
+            .collect::<Vec<_>>();
+        let row_field_decode_values = self
+            .fields
+            .iter()
+            .map(|field| {
+                let field_ty = field.value_ty.clone();
+                if field.nullable() {
+                    quote::quote! { <#field_ty as ::squealy::DecodeNullable<Backend>>::decode_nullable(row)? }
+                } else {
+                    quote::quote! { ::squealy::RowReader::read::<#field_ty>(row)? }
+                }
+            })
+            .collect::<Vec<_>>();
         let field_indexes = self
             .fields
             .iter()
@@ -357,14 +381,14 @@ impl TableStruct {
             impl<Backend> ::squealy::Decode<Backend> for #row_shape_ident
             where
                 Backend: ::squealy::Backend,
-                #(#row_field_value_tys: ::squealy::Decode<Backend>,)*
+                #(#row_field_decode_bounds,)*
             {
                 fn decode(
                     row: &mut <Backend as ::squealy::Backend>::RowReader<'_>,
                 ) -> ::std::result::Result<Self, <Backend as ::squealy::Backend>::Error> {
                     Ok(#row_shape_ident {
                         #(
-                            #fields: ::squealy::RowReader::read::<#row_field_value_tys>(row)?,
+                            #fields: #row_field_decode_values,
                         )*
                     })
                 }
@@ -373,14 +397,14 @@ impl TableStruct {
             impl<Backend> ::squealy::Decode<Backend> for #ident <'static, ::squealy::ColumnNullableValue>
             where
                 Backend: ::squealy::Backend,
-                #(::std::option::Option<#field_value_tys>: ::squealy::Decode<Backend>,)*
+                #(#field_value_tys: ::squealy::DecodeNullable<Backend>,)*
             {
                 fn decode(
                     row: &mut <Backend as ::squealy::Backend>::RowReader<'_>,
                 ) -> ::std::result::Result<Self, <Backend as ::squealy::Backend>::Error> {
                     Ok(#ident {
                         #(
-                            #fields: ::squealy::RowReader::read::<::std::option::Option<#field_value_tys>>(row)?,
+                            #fields: <#field_value_tys as ::squealy::DecodeNullable<Backend>>::decode_nullable(row)?,
                         )*
                     })
                 }
