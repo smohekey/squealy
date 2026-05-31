@@ -25,6 +25,47 @@ where
     }
 }
 
+/// Decode a nullable Rust value from a backend row reader.
+///
+/// Implementations return `None` when the next backend column is SQL `NULL`;
+/// otherwise they decode and wrap the concrete value.
+pub trait DecodeNullable<B: Backend>: Sized {
+    fn decode_nullable(row: &mut B::RowReader<'_>) -> Result<Option<Self>, B::Error>;
+}
+
+macro_rules! impl_decode_nullable_via_option {
+    ($($ty:ty),* $(,)?) => {
+        $(impl<B> DecodeNullable<B> for $ty
+        where
+            B: Backend,
+            Option<$ty>: Decode<B>,
+        {
+            fn decode_nullable(row: &mut B::RowReader<'_>) -> Result<Option<Self>, B::Error> {
+                row.read::<Option<$ty>>()
+            }
+        })*
+    };
+}
+
+impl_decode_nullable_via_option! {
+    i8,
+    i16,
+    i32,
+    i64,
+    i128,
+    isize,
+    u8,
+    u16,
+    u32,
+    u64,
+    u128,
+    usize,
+    f32,
+    f64,
+    String,
+    bool,
+}
+
 /// Backend-specific DDL generation.
 pub trait Backend: Sized {
     type Error;
