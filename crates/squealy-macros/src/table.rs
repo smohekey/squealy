@@ -2,14 +2,14 @@ use proc_macro::{Delimiter, Group, Ident, TokenStream, TokenTree};
 use proc_macro2::{Literal, Span, TokenStream as TokenStream2};
 
 use crate::common::{
-    bool_tokens, compile_error, foreign_key_ident, generated_ident, is_attribute_start,
+    MacroError, bool_tokens, foreign_key_ident, generated_ident, is_attribute_start,
     literal_string, matches_ident, option_literal, required_literal, to_pascal, to_snake_plural,
 };
 
 pub(crate) fn derive(input: TokenStream) -> TokenStream {
     match table_struct(input) {
         Ok(table) => table.expand(),
-        Err(message) => compile_error(&message),
+        Err(error) => error.into_compile_error(),
     }
 }
 
@@ -19,7 +19,6 @@ struct TableStruct {
     fields: Vec<Field>,
     indexes: Vec<IndexAttrs>,
     schema: Option<proc_macro2::TokenStream>,
-    has_scope_and_mode: bool,
 }
 
 struct Field {
@@ -84,12 +83,6 @@ struct ForeignKeyAttrs {
 
 impl TableStruct {
     fn expand(&self) -> TokenStream {
-        if !self.has_scope_and_mode {
-            return compile_error(
-                "Table currently requires structs shaped like `Type<'scope, C: ColumnMode = ColumnExpr>`",
-            );
-        }
-
         let ident = proc_macro2::Ident::new(&self.ident.to_string(), Span::call_site());
         let name = Literal::string(&to_snake_plural(&ident.to_string()));
         let fields = self
@@ -1406,7 +1399,7 @@ impl Field {
     }
 }
 
-fn table_struct(input: TokenStream) -> Result<TableStruct, String> {
+fn table_struct(input: TokenStream) -> Result<TableStruct, MacroError> {
     let tokens = input.into_iter().collect::<Vec<_>>();
     let struct_index = tokens
         .iter()
@@ -1426,11 +1419,12 @@ fn table_struct(input: TokenStream) -> Result<TableStruct, String> {
         .position(|token| matches!(token, TokenTree::Group(group) if group.delimiter() == Delimiter::Brace))
         .ok_or_else(|| "Table requires a named-field struct".to_owned())?;
 
-    let has_scope_and_mode = tokens[struct_index + 2..body_index]
-        .iter()
-        .map(ToString::to_string)
-        .collect::<String>()
-        .contains("'scope,C:");
+    if !has_scope_and_mode(&tokens[struct_index + 2..body_index]) {
+        return Err(MacroError::spanned(
+            "Table currently requires structs shaped like `Type<'scope, C: ColumnMode = ColumnExpr>`",
+            ident.span().into(),
+        ));
+    }
 
     let fields = match &tokens[body_index] {
         TokenTree::Group(group) => named_fields(group)?,
@@ -1446,8 +1440,47 @@ fn table_struct(input: TokenStream) -> Result<TableStruct, String> {
         fields,
         indexes: table_attrs.indexes,
         schema: table_attrs.schema,
-        has_scope_and_mode,
     })
+}
+
+/// Structurally verifies the generic parameter list contains a `'scope` lifetime
+/// and a `C` column-mode type parameter, the shape every table field relies on
+/// (`C::Type<'scope, Value>`). This replaces a brittle stringified-token match.
+fn has_scope_and_mode(generic_tokens: &[TokenTree]) -> bool {
+    let Some(start) = generic_tokens
+        .iter()
+        .position(|token| matches!(token, TokenTree::Punct(punct) if punct.as_char() == '<'))
+    else {
+        return false;
+    };
+
+    let mut depth = 0usize;
+    let mut has_scope = false;
+    let mut has_mode = false;
+
+    for (offset, token) in generic_tokens[start..].iter().enumerate() {
+        match token {
+            TokenTree::Punct(punct) if punct.as_char() == '<' => depth += 1,
+            TokenTree::Punct(punct) if punct.as_char() == '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            // A lifetime is a `'` punct joined to the following identifier.
+            TokenTree::Punct(punct) if punct.as_char() == '\'' && depth == 1 => {
+                if let Some(TokenTree::Ident(name)) = generic_tokens.get(start + offset + 1) {
+                    if name.to_string() == "scope" {
+                        has_scope = true;
+                    }
+                }
+            }
+            TokenTree::Ident(ident) if depth == 1 && ident.to_string() == "C" => has_mode = true,
+            _ => {}
+        }
+    }
+
+    has_scope && has_mode
 }
 
 fn struct_visibility(tokens: &[TokenTree], struct_index: usize) -> TokenStream2 {
@@ -1604,36 +1637,37 @@ fn parse_index_columns(group: &Group) -> Result<Vec<Ident>, String> {
 
 /// Rejects column attribute combinations that are mutually contradictory and would
 /// otherwise only surface as a database error at DDL time.
-fn validate_field_attrs(fields: &[Field]) -> Result<(), String> {
+fn validate_field_attrs(fields: &[Field]) -> Result<(), MacroError> {
     for field in fields {
         let attrs = &field.attrs;
         let name = field.ident.to_string();
         let nullable = attrs.nullable == Some(true);
+        let at_field = |message: String| MacroError::spanned(message, field.ident.span().into());
 
         if attrs.primary_key && nullable {
-            return Err(format!(
+            return Err(at_field(format!(
                 "column `{name}` cannot be both `primary_key` and `nullable`"
-            ));
+            )));
         }
         if attrs.auto_increment && nullable {
-            return Err(format!(
+            return Err(at_field(format!(
                 "column `{name}` cannot be both `auto_increment` and `nullable`"
-            ));
+            )));
         }
         if attrs.auto_increment && attrs.default.is_some() {
-            return Err(format!(
+            return Err(at_field(format!(
                 "column `{name}` cannot combine `auto_increment` with a default"
-            ));
+            )));
         }
         if attrs.generated && attrs.default.is_some() {
-            return Err(format!(
+            return Err(at_field(format!(
                 "column `{name}` cannot combine `generated` with a default"
-            ));
+            )));
         }
         if attrs.generated && attrs.auto_increment {
-            return Err(format!(
+            return Err(at_field(format!(
                 "column `{name}` cannot be both `generated` and `auto_increment`"
-            ));
+            )));
         }
     }
 

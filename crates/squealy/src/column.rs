@@ -38,6 +38,13 @@ impl ColumnMode for ColumnNullableValue {
 }
 
 /// A backend-agnostic column default.
+///
+/// Most variants describe a structured value that backends render safely (for
+/// example, [`ColumnDefault::Text`] is quoted and escaped). [`ColumnDefault::Raw`]
+/// is the exception: its string is emitted verbatim into the generated `DEFAULT`
+/// clause without escaping or validation. It comes from a compile-time
+/// `default_raw = "..."` attribute, so it is the caller's responsibility to supply
+/// a valid backend default expression.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ColumnDefault {
     Null,
@@ -49,6 +56,7 @@ pub enum ColumnDefault {
     CurrentTimestamp,
     CurrentDate,
     CurrentTime,
+    /// A backend-specific default expression emitted verbatim, without escaping.
     Raw(&'static str),
 }
 
@@ -172,6 +180,12 @@ pub trait Column: Sync {
     /// [`HasColumnType`] or from a raw `#[column(db_type = "...")]` override.
     fn column_type(&self) -> ColumnType;
 
+    /// An optional `CHECK` constraint expression, emitted verbatim into DDL.
+    ///
+    /// The string is rendered into the generated `CHECK (...)` clause without
+    /// escaping or validation, so it must be a valid backend boolean expression.
+    /// It originates from a compile-time `check = "..."` attribute, not runtime
+    /// input.
     fn check(&self) -> Option<&'static str> {
         None
     }

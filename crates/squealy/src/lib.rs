@@ -256,6 +256,8 @@
 //! Streaming methods such as `fetch` avoid collecting rows up front. Convenience methods like
 //! `collect`, `to_sql`, and `collect_params` allocate by design.
 
+#![forbid(unsafe_code)]
+
 extern crate self as squealy;
 
 mod backend;

@@ -1,5 +1,7 @@
 //! Procedural macros for squealy.
 
+#![forbid(unsafe_code)]
+
 use proc_macro::TokenStream;
 
 mod column_type;
