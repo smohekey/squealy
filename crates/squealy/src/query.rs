@@ -8,8 +8,8 @@ use futures_core::Stream;
 use crate::{
     Backend, BindValue, ColumnExprAst, ColumnRef, Connection, Decode, Expr, ExprAst, ExprKind,
     ExprVisitor, HCons, HList, HNil, InsertableTable, IntoBindValue, IntoNullableBindValue, Maybe,
-    NoRuntimeParams, Order, Predicate, PredicateKind, Projectable, ProjectionShape, PushBack,
-    QueryBuilder, SourceAlias, TableProjection, ToTuple, UpdateableTable,
+    NoRuntimeParams, Order, ParamExprAst, Predicate, PredicateKind, Projectable, ProjectionShape,
+    PushBack, QueryBuilder, RuntimeParam, SourceAlias, TableProjection, ToTuple, UpdateableTable,
 };
 
 type ErrorOf<Builder> = <<Builder as QueryBuilder>::Backend as Backend>::Error;
@@ -59,12 +59,12 @@ where
 impl<K, Value> IntoInsertColumnValue<K, Value> for NonNullableColumn
 where
     K: ColumnKey,
-    Value: IntoAssignmentValue<K>,
+    Value: IntoInsertAssignmentValue<K>,
 {
-    type AssignmentValue = <Value as IntoAssignmentValue<K>>::Value;
+    type AssignmentValue = <Value as IntoInsertAssignmentValue<K>>::Value;
 
     fn into_insert_column_value(value: Value) -> Self::AssignmentValue {
-        value.into_assignment_value()
+        value.into_insert_assignment_value()
     }
 }
 
@@ -105,12 +105,12 @@ where
 impl<K, Value> IntoInsertColumnValue<K, Value> for NullableColumn
 where
     K: ColumnKey,
-    Value: IntoNullableAssignmentValue<K>,
+    Value: IntoNullableInsertAssignmentValue<K>,
 {
-    type AssignmentValue = <Value as IntoNullableAssignmentValue<K>>::Value;
+    type AssignmentValue = <Value as IntoNullableInsertAssignmentValue<K>>::Value;
 
     fn into_insert_column_value(value: Value) -> Self::AssignmentValue {
-        value.into_nullable_assignment_value()
+        value.into_nullable_insert_assignment_value()
     }
 }
 
@@ -416,6 +416,26 @@ where
     fn into_nullable_assignment_value(self) -> Self::Value;
 }
 
+#[doc(hidden)]
+pub trait IntoInsertAssignmentValue<K>
+where
+    K: ColumnKey,
+{
+    type Value: AssignmentValueNode;
+
+    fn into_insert_assignment_value(self) -> Self::Value;
+}
+
+#[doc(hidden)]
+pub trait IntoNullableInsertAssignmentValue<K>
+where
+    K: ColumnKey,
+{
+    type Value: AssignmentValueNode;
+
+    fn into_nullable_insert_assignment_value(self) -> Self::Value;
+}
+
 impl<K, Value> IntoAssignmentValue<K> for Value
 where
     K: ColumnKey,
@@ -439,6 +459,29 @@ where
     }
 }
 
+impl<K, Value> IntoInsertAssignmentValue<K> for Value
+where
+    K: ColumnKey,
+    Value: IntoBindValue,
+{
+    type Value = StaticAssignmentValue;
+
+    fn into_insert_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(self.into_bind_value())
+    }
+}
+
+impl<K> IntoInsertAssignmentValue<K> for DefaultValue
+where
+    K: ColumnKey,
+{
+    type Value = DefaultAssignmentValue;
+
+    fn into_insert_assignment_value(self) -> Self::Value {
+        DefaultAssignmentValue
+    }
+}
+
 macro_rules! impl_nullable_assignment_value {
     ($($ty:ty),* $(,)?) => {
         $(
@@ -449,6 +492,17 @@ macro_rules! impl_nullable_assignment_value {
                 type Value = StaticAssignmentValue;
 
                 fn into_nullable_assignment_value(self) -> Self::Value {
+                    StaticAssignmentValue::new(self.into_nullable_bind_value())
+                }
+            }
+
+            impl<K> IntoNullableInsertAssignmentValue<K> for $ty
+            where
+                K: ColumnKey<Value = $ty>,
+            {
+                type Value = StaticAssignmentValue;
+
+                fn into_nullable_insert_assignment_value(self) -> Self::Value {
                     StaticAssignmentValue::new(self.into_nullable_bind_value())
                 }
             }
@@ -477,6 +531,19 @@ where
     }
 }
 
+impl<K> IntoNullableInsertAssignmentValue<K> for &str
+where
+    K: ColumnKey<Value = String>,
+{
+    type Value = StaticAssignmentValue;
+
+    fn into_nullable_insert_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(
+            <&str as IntoNullableBindValue<String>>::into_nullable_bind_value(self),
+        )
+    }
+}
+
 impl<K> IntoNullableAssignmentValue<K> for &String
 where
     K: ColumnKey<Value = String>,
@@ -484,6 +551,19 @@ where
     type Value = StaticAssignmentValue;
 
     fn into_nullable_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(
+            <&String as IntoNullableBindValue<String>>::into_nullable_bind_value(self),
+        )
+    }
+}
+
+impl<K> IntoNullableInsertAssignmentValue<K> for &String
+where
+    K: ColumnKey<Value = String>,
+{
+    type Value = StaticAssignmentValue;
+
+    fn into_nullable_insert_assignment_value(self) -> Self::Value {
         StaticAssignmentValue::new(
             <&String as IntoNullableBindValue<String>>::into_nullable_bind_value(self),
         )
@@ -504,6 +584,20 @@ where
     }
 }
 
+impl<K, T> IntoNullableInsertAssignmentValue<K> for Option<T>
+where
+    K: ColumnKey<Value = T>,
+    T: IntoBindValue,
+{
+    type Value = StaticAssignmentValue;
+
+    fn into_nullable_insert_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(
+            <Option<T> as IntoNullableBindValue<T>>::into_nullable_bind_value(self),
+        )
+    }
+}
+
 impl<K> IntoNullableAssignmentValue<K> for DefaultValue
 where
     K: ColumnKey,
@@ -512,6 +606,40 @@ where
 
     fn into_nullable_assignment_value(self) -> Self::Value {
         DefaultAssignmentValue
+    }
+}
+
+impl<K> IntoNullableInsertAssignmentValue<K> for DefaultValue
+where
+    K: ColumnKey,
+{
+    type Value = DefaultAssignmentValue;
+
+    fn into_nullable_insert_assignment_value(self) -> Self::Value {
+        DefaultAssignmentValue
+    }
+}
+
+impl<'scope, K> IntoInsertAssignmentValue<K> for Expr<'scope, RuntimeParam<K>, ParamExprAst<K>>
+where
+    K: ColumnKey,
+{
+    type Value = RuntimeAssignmentValue<K>;
+
+    fn into_insert_assignment_value(self) -> Self::Value {
+        RuntimeAssignmentValue::new()
+    }
+}
+
+impl<'scope, K> IntoNullableInsertAssignmentValue<K>
+    for Expr<'scope, RuntimeParam<K>, ParamExprAst<K>>
+where
+    K: ColumnKey,
+{
+    type Value = RuntimeAssignmentValue<K>;
+
+    fn into_nullable_insert_assignment_value(self) -> Self::Value {
+        RuntimeAssignmentValue::new()
     }
 }
 

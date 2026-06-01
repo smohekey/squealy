@@ -1,4 +1,4 @@
-error[E0277]: the trait bound `Option<std::string::String>: squealy::IntoAssignmentValue<RequiredRecordTitle>` is not satisfied
+error[E0277]: the trait bound `Option<std::string::String>: squealy::query::IntoInsertAssignmentValue<RequiredRecordTitle>` is not satisfied
   --> tests/compile_fail/explicit_insert_columns_reject_null_for_non_nullable.rs:14:10
    |
 14 |         .row((None::<String>,))
@@ -14,6 +14,6 @@ error[E0277]: the trait bound `Option<std::string::String>: squealy::IntoAssignm
              i16
              i32
            and $N others
-   = note: required for `Option<std::string::String>` to implement `squealy::IntoAssignmentValue<RequiredRecordTitle>`
+   = note: required for `Option<std::string::String>` to implement `squealy::query::IntoInsertAssignmentValue<RequiredRecordTitle>`
    = note: required for `squealy::NonNullableColumn` to implement `squealy::IntoInsertColumnValue<RequiredRecordTitle, Option<std::string::String>>`
    = note: required for `(RequiredRecordTitle,)` to implement `squealy::InsertColumnValues<RequiredRecord<'_>, (Option<std::string::String>,)>`
