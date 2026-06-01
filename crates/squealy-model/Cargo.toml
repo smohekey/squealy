@@ -13,3 +13,6 @@ categories.workspace = true
 kdl.workspace = true
 squealy.workspace = true
 zip.workspace = true
+
+[dev-dependencies]
+squealy-postgresql.workspace = true

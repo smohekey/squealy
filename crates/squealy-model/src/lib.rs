@@ -19,3 +19,24 @@ pub use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyModel, IndexModel,
     SchemaBackend, SchemaModel, SqlType, TableModel,
 };
+
+use squealy::Database;
+
+/// Renders create-from-scratch DDL for an owned model using the given backend (the "script" /
+/// dry-run operation: it produces SQL without touching a database).
+pub fn render_create_sql<B: SchemaBackend>(
+    model: &DatabaseModel,
+    backend: &B,
+) -> std::io::Result<String> {
+    let mut buffer = Vec::new();
+    backend.render_create(model, &mut buffer)?;
+    // SchemaBackend renderers emit UTF-8; treat anything else as a renderer bug.
+    Ok(String::from_utf8(buffer).expect("render_create emits valid UTF-8"))
+}
+
+/// Renders create-from-scratch DDL straight from a compile-time [`Database`].
+///
+/// Equivalent to `render_create_sql(&DatabaseModel::from_database::<D>(), backend)`.
+pub fn script<D: Database, B: SchemaBackend>(backend: &B) -> std::io::Result<String> {
+    render_create_sql(&DatabaseModel::from_database::<D>(), backend)
+}

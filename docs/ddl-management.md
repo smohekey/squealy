@@ -57,10 +57,22 @@ The spine is a neutral, owned, serializable model that decouples *where the sche
   └──────────────────────┘                                   * = future sprint
 ```
 
-### The owned model (`squealy-model`)
+### The owned model (in core `squealy`)
 
 Runtime/serializable mirror of the compile-time trait model. "Schema" here means **namespace**,
 consistent with `#[derive(Schema)]`.
+
+> **Placement (revised during implementation):** the model types *and* the `SchemaBackend` trait live
+> in **core `squealy`**, not `squealy-model`. `SchemaBackend::render_create` must reference
+> `DatabaseModel`, and backends must implement it without depending on the management engine —
+> otherwise `squealy-postgresql → squealy-model → squealy` plus `squealy → squealy-model` would cycle.
+> Putting both in core (next to `Backend`/`write_table`) keeps backends depending only on core. The
+> `squealy-model` *engine* crate owns the operations (package, script/publish, CLI) and the heavier
+> deps (KDL, zip).
+>
+> Column type and default are owned mirrors **`SqlType`** / **`DefaultValue`** (not the compile-time
+> `ColumnType`/`ColumnDefault`, which borrow `'static` strings and so can't be rebuilt from a package
+> or introspection). `SqlType` is where the neutral type vocabulary grows structurally later.
 
 Constraints are **hoisted to the table level as named lists** (not hung off columns as in the query
 traits). Columns keep only per-column facts; PK/unique/FK/check/index are table-level and named. This
@@ -134,10 +146,13 @@ Decisions:
 ```
 crates/
   squealy              (exists)  metadata traits + query AST
-  squealy-postgresql   (exists)  backend: DDL rendering + (future) introspection
-  squealy-model        (NEW lib) DatabaseModel + From<&dyn Database> + KDL/zip package
-                                  + FK topo-ordering + create-from-scratch emit
-                                  + script/publish/export. Backend-agnostic.
+                                  + owned model (DatabaseModel, SqlType, DefaultValue, …)
+                                  + DatabaseModel::from_database::<D>() walker
+                                  + SchemaBackend trait
+  squealy-postgresql   (exists)  backend: query + SchemaBackend (create render; introspect later)
+  squealy-model        (NEW lib) engine over the core model: KDL/zip .sqz package,
+                                  render_create_sql/script/publish, ddl_main!/cli.
+                                  Heavier deps (kdl, zip) isolated here.
   squealy-cli          (later)   stub-compiling global CLI (sqlpackage-like UX)
 ```
 
@@ -291,22 +306,45 @@ pub async fn publish<B, C>(model: &DatabaseModel, backend: &B, conn: &C, opts: &
   or model↔live), bridging declarative authoring with checked-in, auditable artifacts.
 - **Stub-compiling global CLI** (`squealy-cli`) for a single-binary, sqlpackage-like UX.
 
+## Implementation status (sprint 1)
+
+Done and tested:
+- **Owned model + walker** in core `squealy` (`DatabaseModel`/`SchemaModel`/`TableModel`/`ColumnModel`
+  + named `Constraint`/`ForeignKeyModel`/`CheckModel`/`IndexModel`, owned `SqlType`/`DefaultValue`,
+  deterministic constraint names, `DatabaseModel::from_database::<D>()`).
+- **`SchemaBackend` trait** in core; **Postgres `render_create`** (phased create-from-scratch).
+- **`.sqz` package** in `squealy-model`: deterministic KDL `model.kdl` + `manifest.kdl` in a zip,
+  with full KDL and zip round-trip tests.
+- **`render_create_sql` / `script`** engine entry points.
+
+Remaining for sprint 1:
+- **`publish`** — execute the rendered DDL against a live connection. Needs a new raw-DDL-execution
+  capability (e.g. a `DdlExecutor` trait in core implemented by `PostgresConnection` via
+  `batch_execute`), since the existing `Connection` API is typed-query-only.
+- **`ddl_main!` macro + `cli`** — dispatch `script` / `export` / `import` / `publish`. `ddl_main!` can
+  be a `macro_rules!` (no proc-macro): it expands to a `main` calling `cli::<D, B>(...)`.
+
 ## Settled decisions
 
 - Source of truth = the Rust database crate; git over the Rust source is the schema history.
-- Engine in `squealy-model`; owned neutral `DatabaseModel` with **table-level named constraints**.
+- Owned neutral `DatabaseModel` (+ `SqlType`/`DefaultValue`) and the `SchemaBackend` trait live in
+  **core `squealy`** (see the placement note in Architecture); the `squealy-model` engine owns the
+  operations and heavier deps.
+- `DatabaseModel` uses **table-level named constraints**.
 - Constraint names are deterministic (`pk_`/`fk_`/`uq_`/`ck_`/`idx_`) with optional override; they are
   the diff identity (name-based; rename hints later).
-- `ColumnType` stays minimal in sprint 1; grows structurally with introspection; package type encoding
+- `SqlType` stays minimal in sprint 1; grows structurally with introspection; package type encoding
   is structured from day one.
 - Package = KDL in a zip, extension **`.sqz`** (`manifest.kdl` + `model.kdl`), backend-neutral,
-  deterministic.
+  deterministic (store-only zip, fixed timestamp).
 - Front-end = `squealy_model::cli::<D, B>()` + `ddl_main!(Db, Backend)` macro.
 - **`SchemaBackend` trait in core `squealy`**; `squealy-postgresql` implements it; `write_table` is
-  superseded and retired.
+  superseded (retirement deferred until nothing depends on it).
 
 ## Open questions
 
+- `publish` execution seam: confirm `DdlExecutor` (raw `batch_execute`) as the capability, and whether
+  publish wraps the script in a transaction (Postgres supports transactional DDL).
 - Exact `PublishOptions` surface (deferred until the diff sprint gives it teeth).
 - Whether `manifest.kdl` should also pin a minimum `squealy-version` for forward-compat.
 - Hash algorithm for `model-hash` (blake3 vs sha256).
