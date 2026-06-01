@@ -98,14 +98,14 @@ impl QueryBuilder for Postgres {
         Shape::Row: Decode<Self::Backend>,
         Projection: Projectable;
 
-    type Insert<'conn, S, Shape, Columns, Returning>
-        = PostgresInsert<'conn, S, Shape, Columns, Returning, Self>
+    type Insert<'conn, S, Shape, Rows, Returning>
+        = PostgresInsert<'conn, S, Shape, Rows, Returning, Self>
     where
         Self: 'conn,
         S: InsertableTable,
         Shape: ProjectionShape,
         Shape::Row: Decode<Self::Backend>,
-        Columns: squealy::InsertAssignments,
+        Rows: squealy::InsertRows,
         Returning: Projectable;
 
     type Update<'conn, S, Shape, Columns, Filters, Returning>
@@ -142,14 +142,14 @@ impl QueryBuilder for PostgresConnection {
         Shape::Row: Decode<Self::Backend>,
         Projection: Projectable;
 
-    type Insert<'conn, S, Shape, Columns, Returning>
-        = PostgresInsert<'conn, S, Shape, Columns, Returning, Self>
+    type Insert<'conn, S, Shape, Rows, Returning>
+        = PostgresInsert<'conn, S, Shape, Rows, Returning, Self>
     where
         Self: 'conn,
         S: InsertableTable,
         Shape: ProjectionShape,
         Shape::Row: Decode<Self::Backend>,
-        Columns: squealy::InsertAssignments,
+        Rows: squealy::InsertRows,
         Returning: Projectable;
 
     type Update<'conn, S, Shape, Columns, Filters, Returning>
@@ -186,14 +186,14 @@ impl QueryBuilder for PostgresTransaction<'_> {
         Shape::Row: Decode<Self::Backend>,
         Projection: Projectable;
 
-    type Insert<'conn, S, Shape, Columns, Returning>
-        = PostgresInsert<'conn, S, Shape, Columns, Returning, Self>
+    type Insert<'conn, S, Shape, Rows, Returning>
+        = PostgresInsert<'conn, S, Shape, Rows, Returning, Self>
     where
         Self: 'conn,
         S: InsertableTable,
         Shape: ProjectionShape,
         Shape::Row: Decode<Self::Backend>,
-        Columns: squealy::InsertAssignments,
+        Rows: squealy::InsertRows,
         Returning: Projectable;
 
     type Update<'conn, S, Shape, Columns, Filters, Returning>

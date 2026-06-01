@@ -210,6 +210,37 @@ impl TableStruct {
         let visibility = &self.visibility;
         let write_builder_defs = write_builder.definitions;
         let write_table_impl = write_builder.table_impl;
+        let field_nullability = self
+            .fields
+            .iter()
+            .map(|field| {
+                if field.nullable() {
+                    quote::quote! { ::squealy::NullableColumn }
+                } else {
+                    quote::quote! { ::squealy::NonNullableColumn }
+                }
+            })
+            .collect::<Vec<_>>();
+        let insert_column_key_impls = self
+            .fields
+            .iter()
+            .zip(expr_kind_idents.iter())
+            .filter(|(field, _)| field.insertable())
+            .map(|(_, expr_kind_ident)| {
+                quote::quote! {
+                    impl ::squealy::InsertColumnKey for #expr_kind_ident {}
+                }
+            });
+        let update_column_key_impls = self
+            .fields
+            .iter()
+            .zip(expr_kind_idents.iter())
+            .filter(|(field, _)| field.updateable())
+            .map(|(_, expr_kind_ident)| {
+                quote::quote! {
+                    impl ::squealy::UpdateColumnKey for #expr_kind_ident {}
+                }
+            });
 
         quote::quote! {
             #(#foreign_key_defs)*
@@ -218,13 +249,16 @@ impl TableStruct {
 
             #(
                 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-                pub enum #expr_kind_idents {}
+                #visibility enum #expr_kind_idents {}
 
                 impl ::squealy::ExprKind for #expr_kind_idents {
                     type Value = #field_value_tys;
                 }
 
                 impl ::squealy::ColumnKey for #expr_kind_idents {
+                    type Table = #ident <'static, ::squealy::ColumnExpr>;
+                    type Nullability = #field_nullability;
+
                     const NAME: &'static str = #field_literals;
                 }
 
@@ -242,6 +276,9 @@ impl TableStruct {
                     }
                 }
             )*
+
+            #(#insert_column_key_impls)*
+            #(#update_column_key_impls)*
 
             #[doc(hidden)]
             #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1072,6 +1109,7 @@ impl TableStruct {
             where
                 Conn: ::squealy::QueryBuilder + 'conn,
                 InsertColumns: ::squealy::InsertAssignments + 'conn,
+                <InsertColumns as ::squealy::InsertAssignments>::Params: ::squealy::HAppend<::squealy::HNil>,
             {
                 pub fn insert(
                     self,
@@ -1080,25 +1118,29 @@ impl TableStruct {
                 > + 'conn
                 where
                     Conn: ::squealy::Connection,
-                    InsertColumns: ::squealy::InsertAssignments,
-                    <InsertColumns as ::squealy::InsertAssignments>::Params: ::squealy::NoRuntimeParams,
+                    ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>: ::squealy::InsertRows,
+                    <::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil> as ::squealy::InsertRows>::Params: ::squealy::NoRuntimeParams,
                     <Conn as ::squealy::QueryBuilder>::Insert<
                         'conn,
                         #table_ident <'static, ::squealy::ColumnExpr>,
                         (),
-                        InsertColumns,
+                        ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>,
                         (),
-                    >: ::squealy::ExecutableInsertQuery<'conn, InsertColumns, ()>,
+                    >: ::squealy::ExecutableInsertQuery<'conn, ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>, ()>,
                 {
+                    let insert_rows = ::squealy::HCons {
+                        head: ::squealy::InsertRow::new(self.insert_columns),
+                        tail: ::squealy::HNil,
+                    };
                     let query = <<Conn as ::squealy::QueryBuilder>::Insert<
                         'conn,
                         #table_ident <'static, ::squealy::ColumnExpr>,
                         (),
-                        InsertColumns,
+                        ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>,
                         (),
-                    > as ::squealy::InsertQuery<'conn, InsertColumns, ()>>::build(
+                    > as ::squealy::InsertQuery<'conn, ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>, ()>>::build(
                         self.connection,
-                        self.insert_columns,
+                        insert_rows,
                         (),
                     );
                     async move {
@@ -1111,22 +1153,26 @@ impl TableStruct {
                     projection: impl ::std::ops::FnOnce(
                         <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
                     ) -> P,
-                ) -> <Conn as ::squealy::QueryBuilder>::Insert<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape, InsertColumns, P>
+                ) -> <Conn as ::squealy::QueryBuilder>::Insert<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape, ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>, P>
                 where
                     P: ::squealy::ReturningProjection<'static> + ::squealy::Projectable,
                     <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<<Conn as ::squealy::QueryBuilder>::Backend>,
                 {
+                    let insert_rows = ::squealy::HCons {
+                        head: ::squealy::InsertRow::new(self.insert_columns),
+                        tail: ::squealy::HNil,
+                    };
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                     let projection = projection(table);
                     <<Conn as ::squealy::QueryBuilder>::Insert<
                         'conn,
                         #table_ident <'static, ::squealy::ColumnExpr>,
                         <P as ::squealy::ReturningProjection<'static>>::Shape,
-                        InsertColumns,
+                        ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>,
                         P,
-                        > as ::squealy::InsertQuery<'conn, InsertColumns, P>>::build(
+                    > as ::squealy::InsertQuery<'conn, ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>, P>>::build(
                         self.connection,
-                        self.insert_columns,
+                        insert_rows,
                         projection,
                     )
                 }

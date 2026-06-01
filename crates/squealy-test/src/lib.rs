@@ -54,14 +54,14 @@ impl QueryBuilder for TestConnection {
         Shape::Row: Decode<Self::Backend>,
         Projection: Projectable;
 
-    type Insert<'conn, S, Shape, Columns, Returning>
-        = TestInsert<'conn, S, Shape, Columns, Returning>
+    type Insert<'conn, S, Shape, Rows, Returning>
+        = TestInsert<'conn, S, Shape, Rows, Returning>
     where
         Self: 'conn,
         S: InsertableTable,
         Shape: ProjectionShape,
         Shape::Row: Decode<Self::Backend>,
-        Columns: squealy::InsertAssignments,
+        Rows: squealy::InsertRows,
         Returning: Projectable;
 
     type Update<'conn, S, Shape, Columns, Filters, Returning>

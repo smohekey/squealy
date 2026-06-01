@@ -8,11 +8,11 @@ use futures_core::Stream;
 use squealy::{
     Backend, BindSink, BindValue, Decode, DeleteQuery, ExecutableDeleteQuery,
     ExecutableInsertQuery, ExecutableSelectQuery, ExecutableUpdateQuery, HAppend, HList, HNil,
-    InsertQuery, InsertableTable, NoRuntimeParams, PredicateNodes, PreparableDeleteQuery,
-    PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery, PreparedMutationQuery,
-    PreparedParamValues, PreparedSelectQuery, Projectable, ProjectionShape, QueryBuilder,
-    RowsAffected, SelectAst, SelectQuery, Selected, SourceAlias, TableProjection, UpdateQuery,
-    UpdateableTable,
+    InsertQuery, InsertRows, InsertableTable, NoRuntimeParams, PredicateNodes,
+    PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery,
+    PreparedMutationQuery, PreparedParamValues, PreparedSelectQuery, Projectable, ProjectionShape,
+    QueryBuilder, RowsAffected, SelectAst, SelectQuery, Selected, SourceAlias, TableProjection,
+    UpdateQuery, UpdateableTable,
 };
 
 use crate::{TestBackend, TestConnection, TestError, sql};
@@ -134,15 +134,15 @@ where
     _shape: PhantomData<Shape>,
 }
 
-pub struct TestInsert<'conn, S, Shape = (), Columns = HNil, Returning = ()>
+pub struct TestInsert<'conn, S, Shape = (), Rows = HNil, Returning = ()>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
-    Columns: squealy::InsertAssignments,
+    Rows: InsertRows,
     Returning: Projectable,
 {
     connection: &'conn TestConnection,
-    columns: Columns,
+    columns: Rows,
     returning: Returning,
     _table: PhantomData<S>,
     _shape: PhantomData<Shape>,
@@ -247,16 +247,16 @@ where
     }
 }
 
-impl<'conn, S, Shape, Columns, Returning> TestInsert<'conn, S, Shape, Columns, Returning>
+impl<'conn, S, Shape, Rows, Returning> TestInsert<'conn, S, Shape, Rows, Returning>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
-    Columns: squealy::InsertAssignments,
+    Rows: InsertRows,
     Returning: Projectable,
 {
     pub(crate) fn new(
         connection: &'conn TestConnection,
-        columns: Columns,
+        columns: Rows,
         returning: Returning,
     ) -> Self {
         Self {
@@ -464,13 +464,13 @@ where
     }
 }
 
-impl<'conn, S, Shape, Columns, Returning> InsertQuery<'conn, Columns, Returning>
-    for TestInsert<'conn, S, Shape, Columns, Returning>
+impl<'conn, S, Shape, Rows, Returning> InsertQuery<'conn, Rows, Returning>
+    for TestInsert<'conn, S, Shape, Rows, Returning>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
     Shape::Row: Decode<TestBackend>,
-    Columns: squealy::InsertAssignments,
+    Rows: InsertRows,
     Returning: Projectable,
 {
     type Builder = TestConnection;
@@ -478,19 +478,19 @@ where
     type Shape = Shape;
     type Row = Shape::Row;
 
-    fn build(connection: &'conn Self::Builder, columns: Columns, returning: Returning) -> Self {
+    fn build(connection: &'conn Self::Builder, columns: Rows, returning: Returning) -> Self {
         Self::new(connection, columns, returning)
     }
 }
 
-impl<'conn, S, Shape, Columns, Returning> ExecutableInsertQuery<'conn, Columns, Returning>
-    for TestInsert<'conn, S, Shape, Columns, Returning>
+impl<'conn, S, Shape, Rows, Returning> ExecutableInsertQuery<'conn, Rows, Returning>
+    for TestInsert<'conn, S, Shape, Rows, Returning>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
     Shape::Row: Decode<TestBackend>,
-    Columns: squealy::InsertAssignments,
-    Columns::Params: NoRuntimeParams,
+    Rows: InsertRows,
+    Rows::Params: NoRuntimeParams,
     Returning: Projectable,
 {
     type RowStream<'query>
@@ -512,24 +512,24 @@ where
     }
 }
 
-impl<'conn, S, Shape, Columns, Returning> PreparableInsertQuery<'conn, Columns, Returning>
-    for TestInsert<'conn, S, Shape, Columns, Returning>
+impl<'conn, S, Shape, Rows, Returning> PreparableInsertQuery<'conn, Rows, Returning>
+    for TestInsert<'conn, S, Shape, Rows, Returning>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
     Shape::Row: Decode<TestBackend> + Send,
-    Columns: squealy::InsertAssignments,
-    Columns::Params: HList,
+    Rows: InsertRows,
+    Rows::Params: HList,
     Returning: Projectable,
 {
-    type Params = Columns::Params;
+    type Params = Rows::Params;
 
     type Prepared<'prepared>
-        = TestPreparedMutation<'prepared, Shape::Row, Columns::Params>
+        = TestPreparedMutation<'prepared, Shape::Row, Rows::Params>
     where
         Self: 'prepared,
         'conn: 'prepared,
-        Columns: 'prepared,
+        Rows: 'prepared,
         Returning: 'prepared;
 
     fn prepare<'prepared>(
@@ -542,7 +542,7 @@ where
     > + 'prepared
     where
         'conn: 'prepared,
-        Columns: 'prepared,
+        Rows: 'prepared,
         Returning: 'prepared,
     {
         ready(Ok(TestPreparedMutation::new(self.connection)))
@@ -786,11 +786,11 @@ where
     }
 }
 
-impl<S, Shape, Columns, Returning> TestInsert<'_, S, Shape, Columns, Returning>
+impl<S, Shape, Rows, Returning> TestInsert<'_, S, Shape, Rows, Returning>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
-    Columns: squealy::InsertAssignments,
+    Rows: InsertRows,
     Returning: Projectable,
 {
     /// Render this query into a newly allocated SQL string.

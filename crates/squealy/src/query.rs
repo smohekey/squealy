@@ -6,10 +6,10 @@ use std::pin::pin;
 use futures_core::Stream;
 
 use crate::{
-    Backend, BindValue, ColumnRef, Connection, Decode, Expr, ExprAst, ExprKind, HCons, HList, HNil,
-    InsertableTable, IntoBindValue, IntoNullableBindValue, Maybe, NoRuntimeParams, Order,
-    ParamExprAst, Predicate, PredicateKind, Projectable, ProjectionShape, PushBack, QueryBuilder,
-    RuntimeParam, SourceAlias, TableProjection, ToTuple, UpdateableTable,
+    Backend, BindValue, ColumnExprAst, ColumnRef, Connection, Decode, Expr, ExprAst, ExprKind,
+    ExprVisitor, HCons, HList, HNil, InsertableTable, IntoBindValue, IntoNullableBindValue, Maybe,
+    NoRuntimeParams, Order, Predicate, PredicateKind, Projectable, ProjectionShape, PushBack,
+    QueryBuilder, SourceAlias, TableProjection, ToTuple, UpdateableTable,
 };
 
 type ErrorOf<Builder> = <<Builder as QueryBuilder>::Backend as Backend>::Error;
@@ -17,7 +17,110 @@ type ErrorOf<Builder> = <<Builder as QueryBuilder>::Backend as Backend>::Error;
 /// Type-level identity for a table column that can be assigned in mutations.
 #[doc(hidden)]
 pub trait ColumnKey: ExprKind {
+    type Table: TableProjection;
+    type Nullability: InsertColumnNullability;
+
     const NAME: &'static str;
+}
+
+/// Type-level identity for a table column that may appear in explicit insert rows.
+#[doc(hidden)]
+pub trait InsertColumnKey: ColumnKey {}
+
+/// Type-level identity for a table column that may appear in explicit update assignments.
+#[doc(hidden)]
+pub trait UpdateColumnKey: ColumnKey {}
+
+#[doc(hidden)]
+pub trait InsertColumnNullability {}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NonNullableColumn {}
+
+impl InsertColumnNullability for NonNullableColumn {}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NullableColumn {}
+
+impl InsertColumnNullability for NullableColumn {}
+
+#[doc(hidden)]
+pub trait IntoInsertColumnValue<K, Value>
+where
+    K: ColumnKey,
+{
+    type AssignmentValue: AssignmentValueNode;
+
+    fn into_insert_column_value(value: Value) -> Self::AssignmentValue;
+}
+
+impl<K, Value> IntoInsertColumnValue<K, Value> for NonNullableColumn
+where
+    K: ColumnKey,
+    Value: IntoAssignmentValue<K>,
+{
+    type AssignmentValue = <Value as IntoAssignmentValue<K>>::Value;
+
+    fn into_insert_column_value(value: Value) -> Self::AssignmentValue {
+        value.into_assignment_value()
+    }
+}
+
+#[doc(hidden)]
+pub trait IntoUpdateColumnValue<K, Value>
+where
+    K: ColumnKey,
+{
+    type AssignmentValue: AssignmentValueNode;
+
+    fn into_update_column_value(value: Value) -> Self::AssignmentValue;
+}
+
+impl<K, Value> IntoUpdateColumnValue<K, Value> for NonNullableColumn
+where
+    K: ColumnKey,
+    Value: IntoAssignmentValue<K>,
+{
+    type AssignmentValue = <Value as IntoAssignmentValue<K>>::Value;
+
+    fn into_update_column_value(value: Value) -> Self::AssignmentValue {
+        value.into_assignment_value()
+    }
+}
+
+impl<K, Value> IntoUpdateColumnValue<K, Value> for NullableColumn
+where
+    K: ColumnKey,
+    Value: IntoNullableAssignmentValue<K>,
+{
+    type AssignmentValue = <Value as IntoNullableAssignmentValue<K>>::Value;
+
+    fn into_update_column_value(value: Value) -> Self::AssignmentValue {
+        value.into_nullable_assignment_value()
+    }
+}
+
+impl<K, Value> IntoInsertColumnValue<K, Value> for NullableColumn
+where
+    K: ColumnKey,
+    Value: IntoNullableAssignmentValue<K>,
+{
+    type AssignmentValue = <Value as IntoNullableAssignmentValue<K>>::Value;
+
+    fn into_insert_column_value(value: Value) -> Self::AssignmentValue {
+        value.into_nullable_assignment_value()
+    }
+}
+
+/// Marker value for an explicit assignment that should use the database default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DefaultValue;
+
+/// Use a column's database default in an explicit insert row or update assignment.
+pub fn default() -> DefaultValue {
+    DefaultValue
 }
 
 /// A typed insert assignment for a single generated table column.
@@ -77,6 +180,32 @@ pub struct StaticAssignmentValue {
 }
 
 #[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DefaultAssignmentValue;
+
+#[doc(hidden)]
+#[derive(Debug, PartialEq)]
+pub struct ExprAssignmentValue<'scope, K, Ast>
+where
+    K: ExprKind,
+    Ast: ExprAst,
+{
+    expr: Expr<'scope, K, Ast>,
+}
+
+impl<'scope, K, Ast> Clone for ExprAssignmentValue<'scope, K, Ast>
+where
+    K: ExprKind,
+    Ast: ExprAst,
+{
+    fn clone(&self) -> Self {
+        Self {
+            expr: self.expr.clone(),
+        }
+    }
+}
+
+#[doc(hidden)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct RuntimeAssignmentValue<K>
 where
@@ -86,17 +215,30 @@ where
 }
 
 #[doc(hidden)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum AssignmentValueRef<'value> {
-    Static(&'value BindValue),
-    Runtime,
-}
-
-#[doc(hidden)]
 pub trait AssignmentValueNode: Clone {
     type Params: HList;
 
-    fn as_ref(&self) -> AssignmentValueRef<'_>;
+    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentValueVisitor;
+
+    fn param_count(&self) -> usize;
+}
+
+#[doc(hidden)]
+pub trait AssignmentValueVisitor {
+    type Error;
+
+    fn visit_static(&mut self, value: &BindValue) -> Result<(), Self::Error>;
+
+    fn visit_default(&mut self) -> Result<(), Self::Error>;
+
+    fn visit_runtime(&mut self) -> Result<(), Self::Error>;
+
+    fn visit_expr<K, Ast>(&mut self, expr: &Expr<'_, K, Ast>) -> Result<(), Self::Error>
+    where
+        K: ExprKind,
+        Ast: ExprAst;
 }
 
 impl StaticAssignmentValue {
@@ -120,6 +262,16 @@ where
     }
 }
 
+impl<'scope, K, Ast> ExprAssignmentValue<'scope, K, Ast>
+where
+    K: ExprKind,
+    Ast: ExprAst,
+{
+    pub fn new(expr: Expr<'scope, K, Ast>) -> Self {
+        Self { expr }
+    }
+}
+
 impl<K> Clone for RuntimeAssignmentValue<K>
 where
     K: ExprKind,
@@ -134,8 +286,30 @@ impl<K> Copy for RuntimeAssignmentValue<K> where K: ExprKind {}
 impl AssignmentValueNode for StaticAssignmentValue {
     type Params = HNil;
 
-    fn as_ref(&self) -> AssignmentValueRef<'_> {
-        AssignmentValueRef::Static(&self.value)
+    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentValueVisitor,
+    {
+        visitor.visit_static(&self.value)
+    }
+
+    fn param_count(&self) -> usize {
+        1
+    }
+}
+
+impl AssignmentValueNode for DefaultAssignmentValue {
+    type Params = HNil;
+
+    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentValueVisitor,
+    {
+        visitor.visit_default()
+    }
+
+    fn param_count(&self) -> usize {
+        0
     }
 }
 
@@ -145,9 +319,81 @@ where
 {
     type Params = HCons<K::Value, HNil>;
 
-    fn as_ref(&self) -> AssignmentValueRef<'_> {
-        AssignmentValueRef::Runtime
+    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentValueVisitor,
+    {
+        visitor.visit_runtime()
     }
+
+    fn param_count(&self) -> usize {
+        1
+    }
+}
+
+impl<'scope, K, Ast> AssignmentValueNode for ExprAssignmentValue<'scope, K, Ast>
+where
+    K: ExprKind,
+    Ast: ExprAst,
+{
+    type Params = Ast::Params;
+
+    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentValueVisitor,
+    {
+        visitor.visit_expr(&self.expr)
+    }
+
+    fn param_count(&self) -> usize {
+        count_expr_params(&self.expr)
+    }
+}
+
+struct ParamCountVisitor {
+    count: usize,
+}
+
+impl ExprVisitor for ParamCountVisitor {
+    type Error = std::convert::Infallible;
+
+    fn visit_column(&mut self, _alias: SourceAlias, _column: &str) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn visit_literal(&mut self, _value: &BindValue) -> Result<(), Self::Error> {
+        self.count += 1;
+        Ok(())
+    }
+
+    fn visit_param(&mut self) -> Result<(), Self::Error> {
+        self.count += 1;
+        Ok(())
+    }
+
+    fn visit_binary<L, R>(
+        &mut self,
+        _op: crate::ArithmeticOp,
+        left: L,
+        right: R,
+    ) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        left(self)?;
+        right(self)
+    }
+}
+
+fn count_expr_params<K, Ast>(expr: &Expr<'_, K, Ast>) -> usize
+where
+    K: ExprKind,
+    Ast: ExprAst,
+{
+    let mut visitor = ParamCountVisitor { count: 0 };
+    expr.visit(&mut visitor).unwrap();
+    visitor.count
 }
 
 #[doc(hidden)]
@@ -179,6 +425,17 @@ where
 
     fn into_assignment_value(self) -> Self::Value {
         StaticAssignmentValue::new(self.into_bind_value())
+    }
+}
+
+impl<K> IntoAssignmentValue<K> for DefaultValue
+where
+    K: ColumnKey,
+{
+    type Value = DefaultAssignmentValue;
+
+    fn into_assignment_value(self) -> Self::Value {
+        DefaultAssignmentValue
     }
 }
 
@@ -247,35 +504,104 @@ where
     }
 }
 
-impl<'scope, K> IntoAssignmentValue<K> for Expr<'scope, RuntimeParam<K>, ParamExprAst<K>>
+impl<K> IntoNullableAssignmentValue<K> for DefaultValue
 where
     K: ColumnKey,
 {
-    type Value = RuntimeAssignmentValue<K>;
+    type Value = DefaultAssignmentValue;
 
-    fn into_assignment_value(self) -> Self::Value {
-        RuntimeAssignmentValue::new()
+    fn into_nullable_assignment_value(self) -> Self::Value {
+        DefaultAssignmentValue
     }
 }
 
-impl<'scope, K> IntoNullableAssignmentValue<K> for Expr<'scope, RuntimeParam<K>, ParamExprAst<K>>
+impl<'scope, K, ExprK, Ast> IntoAssignmentValue<K> for Expr<'scope, ExprK, Ast>
 where
     K: ColumnKey,
+    ExprK: ExprKind<Value = K::Value>,
+    Ast: ExprAst,
 {
-    type Value = RuntimeAssignmentValue<K>;
+    type Value = ExprAssignmentValue<'scope, ExprK, Ast>;
+
+    fn into_assignment_value(self) -> Self::Value {
+        ExprAssignmentValue::new(self)
+    }
+}
+
+impl<'scope, K, ExprK> IntoAssignmentValue<K> for ColumnRef<'scope, ExprK>
+where
+    K: ColumnKey,
+    ExprK: ExprKind<Value = K::Value>,
+{
+    type Value = ExprAssignmentValue<'scope, ExprK, ColumnExprAst<ExprK>>;
+
+    fn into_assignment_value(self) -> Self::Value {
+        ExprAssignmentValue::new(self.into_expr())
+    }
+}
+
+impl<'scope, K, ExprK, Ast> IntoNullableAssignmentValue<K> for Expr<'scope, ExprK, Ast>
+where
+    K: ColumnKey,
+    ExprK: ExprKind<Value = K::Value>,
+    Ast: ExprAst,
+{
+    type Value = ExprAssignmentValue<'scope, ExprK, Ast>;
 
     fn into_nullable_assignment_value(self) -> Self::Value {
-        RuntimeAssignmentValue::new()
+        ExprAssignmentValue::new(self)
+    }
+}
+
+impl<'scope, K, ExprK> IntoNullableAssignmentValue<K> for ColumnRef<'scope, ExprK>
+where
+    K: ColumnKey,
+    ExprK: ExprKind<Value = K::Value>,
+{
+    type Value = ExprAssignmentValue<'scope, ExprK, ColumnExprAst<ExprK>>;
+
+    fn into_nullable_assignment_value(self) -> Self::Value {
+        ExprAssignmentValue::new(self.into_expr())
     }
 }
 
 #[doc(hidden)]
-pub trait InsertAssignmentNode {
+pub trait AssignmentNode {
     type Params: HList;
 
     fn column(&self) -> &'static str;
 
-    fn value(&self) -> AssignmentValueRef<'_>;
+    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentValueVisitor;
+
+    fn param_count(&self) -> usize;
+}
+
+#[doc(hidden)]
+pub trait InsertAssignmentNode: AssignmentNode {}
+
+impl<K, Value> AssignmentNode for InsertAssignment<K, Value>
+where
+    K: ColumnKey,
+    Value: AssignmentValueNode,
+{
+    type Params = Value::Params;
+
+    fn column(&self) -> &'static str {
+        K::NAME
+    }
+
+    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentValueVisitor,
+    {
+        self.value.visit_value(visitor)
+    }
+
+    fn param_count(&self) -> usize {
+        self.value.param_count()
+    }
 }
 
 impl<K, Value> InsertAssignmentNode for InsertAssignment<K, Value>
@@ -283,27 +609,12 @@ where
     K: ColumnKey,
     Value: AssignmentValueNode,
 {
-    type Params = Value::Params;
-
-    fn column(&self) -> &'static str {
-        K::NAME
-    }
-
-    fn value(&self) -> AssignmentValueRef<'_> {
-        self.value.as_ref()
-    }
 }
 
 #[doc(hidden)]
-pub trait UpdateAssignmentNode {
-    type Params: HList;
+pub trait UpdateAssignmentNode: AssignmentNode {}
 
-    fn column(&self) -> &'static str;
-
-    fn value(&self) -> AssignmentValueRef<'_>;
-}
-
-impl<K, Value> UpdateAssignmentNode for UpdateAssignment<K, Value>
+impl<K, Value> AssignmentNode for UpdateAssignment<K, Value>
 where
     K: ColumnKey,
     Value: AssignmentValueNode,
@@ -314,10 +625,216 @@ where
         K::NAME
     }
 
-    fn value(&self) -> AssignmentValueRef<'_> {
-        self.value.as_ref()
+    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentValueVisitor,
+    {
+        self.value.visit_value(visitor)
+    }
+
+    fn param_count(&self) -> usize {
+        self.value.param_count()
     }
 }
+
+impl<K, Value> UpdateAssignmentNode for UpdateAssignment<K, Value>
+where
+    K: ColumnKey,
+    Value: AssignmentValueNode,
+{
+}
+
+#[doc(hidden)]
+pub trait AssignmentVisitor {
+    type Error;
+
+    fn visit_assignment<Value>(
+        &mut self,
+        column: &'static str,
+        value: &Value,
+    ) -> Result<(), Self::Error>
+    where
+        Value: AssignmentNode;
+}
+
+/// A typed insert row containing the assignments for one SQL `VALUES` group.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InsertRow<Columns>
+where
+    Columns: InsertAssignments,
+{
+    columns: Columns,
+}
+
+impl<Columns> InsertRow<Columns>
+where
+    Columns: InsertAssignments,
+{
+    pub fn new(columns: Columns) -> Self {
+        Self { columns }
+    }
+
+    pub fn columns(&self) -> &Columns {
+        &self.columns
+    }
+}
+
+/// Visitor used to traverse heterogeneously typed insert rows without allocation.
+#[doc(hidden)]
+pub trait InsertRowVisitor<E> {
+    fn visit_row<Columns>(&mut self, row: &InsertRow<Columns>) -> Result<(), E>
+    where
+        Columns: InsertAssignments;
+}
+
+/// Heterogeneous list of typed insert rows.
+#[doc(hidden)]
+pub trait InsertRows {
+    type Params: HList;
+
+    fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn first_row_len(&self) -> usize;
+
+    fn try_for_each_column<E>(&self, f: impl FnMut(&'static str) -> Result<(), E>)
+    -> Result<(), E>;
+
+    fn try_for_each_row<E, Visitor>(&self, visitor: &mut Visitor) -> Result<(), E>
+    where
+        Visitor: InsertRowVisitor<E>;
+
+    fn param_count(&self) -> usize;
+}
+
+#[doc(hidden)]
+pub trait NonEmptyInsertRows: InsertRows {}
+
+impl InsertRows for HNil {
+    type Params = HNil;
+
+    fn len(&self) -> usize {
+        0
+    }
+
+    fn first_row_len(&self) -> usize {
+        0
+    }
+
+    fn try_for_each_column<E>(
+        &self,
+        _f: impl FnMut(&'static str) -> Result<(), E>,
+    ) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn try_for_each_row<E, Visitor>(&self, _visitor: &mut Visitor) -> Result<(), E>
+    where
+        Visitor: InsertRowVisitor<E>,
+    {
+        Ok(())
+    }
+
+    fn param_count(&self) -> usize {
+        0
+    }
+}
+
+impl<Columns, Tail> InsertRows for HCons<InsertRow<Columns>, Tail>
+where
+    Columns: InsertAssignments,
+    Tail: InsertRows,
+    Columns::Params: crate::HAppend<Tail::Params>,
+{
+    type Params = <Columns::Params as crate::HAppend<Tail::Params>>::Output;
+
+    fn len(&self) -> usize {
+        1 + self.tail.len()
+    }
+
+    fn first_row_len(&self) -> usize {
+        self.head.columns().len()
+    }
+
+    fn try_for_each_column<E>(
+        &self,
+        f: impl FnMut(&'static str) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.head.columns().try_for_each_column(f)
+    }
+
+    fn try_for_each_row<E, Visitor>(&self, visitor: &mut Visitor) -> Result<(), E>
+    where
+        Visitor: InsertRowVisitor<E>,
+    {
+        visitor.visit_row(&self.head)?;
+        self.tail.try_for_each_row(visitor)
+    }
+
+    fn param_count(&self) -> usize {
+        self.head.columns().param_count() + self.tail.param_count()
+    }
+}
+
+impl<Columns, Tail> NonEmptyInsertRows for HCons<InsertRow<Columns>, Tail>
+where
+    Columns: InsertAssignments,
+    Tail: InsertRows,
+    Columns::Params: crate::HAppend<Tail::Params>,
+{
+}
+
+/// Converts a tuple of row values into a typed insert assignment list for a fixed column tuple.
+#[doc(hidden)]
+pub trait InsertColumnValues<S, Values>
+where
+    S: InsertableTable,
+{
+    type Assignments: InsertAssignments;
+
+    fn into_insert_assignments(values: Values) -> Self::Assignments;
+}
+
+impl<S> InsertColumnValues<S, ()> for ()
+where
+    S: InsertableTable,
+{
+    type Assignments = HNil;
+
+    fn into_insert_assignments(_values: ()) -> Self::Assignments {
+        HNil
+    }
+}
+
+squealy_macros::insert_column_values!(32);
+
+/// Converts a tuple of update values into a typed update assignment list for a fixed column tuple.
+#[doc(hidden)]
+pub trait UpdateColumnValues<S, Values>
+where
+    S: UpdateableTable,
+{
+    type Assignments: UpdateAssignments;
+
+    fn into_update_assignments(values: Values) -> Self::Assignments;
+}
+
+impl<S> UpdateColumnValues<S, ()> for ()
+where
+    S: UpdateableTable,
+{
+    type Assignments = HNil;
+
+    fn into_update_assignments(_values: ()) -> Self::Assignments {
+        HNil
+    }
+}
+
+squealy_macros::update_column_values!(32);
 
 /// Heterogeneous list of typed insert assignments.
 #[doc(hidden)]
@@ -330,10 +847,14 @@ pub trait InsertAssignments {
         self.len() == 0
     }
 
-    fn try_for_each<E>(
-        &self,
-        f: impl FnMut(&'static str, AssignmentValueRef<'_>) -> Result<(), E>,
-    ) -> Result<(), E>;
+    fn try_for_each_column<E>(&self, f: impl FnMut(&'static str) -> Result<(), E>)
+    -> Result<(), E>;
+
+    fn try_visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentVisitor;
+
+    fn param_count(&self) -> usize;
 }
 
 impl InsertAssignments for HNil {
@@ -343,11 +864,22 @@ impl InsertAssignments for HNil {
         0
     }
 
-    fn try_for_each<E>(
+    fn try_for_each_column<E>(
         &self,
-        _f: impl FnMut(&'static str, AssignmentValueRef<'_>) -> Result<(), E>,
+        _f: impl FnMut(&'static str) -> Result<(), E>,
     ) -> Result<(), E> {
         Ok(())
+    }
+
+    fn try_visit<V>(&self, _visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentVisitor,
+    {
+        Ok(())
+    }
+
+    fn param_count(&self) -> usize {
+        0
     }
 }
 
@@ -363,12 +895,24 @@ where
         1 + self.tail.len()
     }
 
-    fn try_for_each<E>(
+    fn try_for_each_column<E>(
         &self,
-        mut f: impl FnMut(&'static str, AssignmentValueRef<'_>) -> Result<(), E>,
+        mut f: impl FnMut(&'static str) -> Result<(), E>,
     ) -> Result<(), E> {
-        f(self.head.column(), self.head.value())?;
-        self.tail.try_for_each(f)
+        f(self.head.column())?;
+        self.tail.try_for_each_column(f)
+    }
+
+    fn try_visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentVisitor,
+    {
+        visitor.visit_assignment(self.head.column(), &self.head)?;
+        self.tail.try_visit(visitor)
+    }
+
+    fn param_count(&self) -> usize {
+        self.head.param_count() + self.tail.param_count()
     }
 }
 
@@ -383,10 +927,11 @@ pub trait UpdateAssignments {
         self.len() == 0
     }
 
-    fn try_for_each<E>(
-        &self,
-        f: impl FnMut(&'static str, AssignmentValueRef<'_>) -> Result<(), E>,
-    ) -> Result<(), E>;
+    fn try_visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentVisitor;
+
+    fn param_count(&self) -> usize;
 }
 
 impl UpdateAssignments for HNil {
@@ -396,11 +941,15 @@ impl UpdateAssignments for HNil {
         0
     }
 
-    fn try_for_each<E>(
-        &self,
-        _f: impl FnMut(&'static str, AssignmentValueRef<'_>) -> Result<(), E>,
-    ) -> Result<(), E> {
+    fn try_visit<V>(&self, _visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentVisitor,
+    {
         Ok(())
+    }
+
+    fn param_count(&self) -> usize {
+        0
     }
 }
 
@@ -416,12 +965,16 @@ where
         1 + self.tail.len()
     }
 
-    fn try_for_each<E>(
-        &self,
-        mut f: impl FnMut(&'static str, AssignmentValueRef<'_>) -> Result<(), E>,
-    ) -> Result<(), E> {
-        f(self.head.column(), self.head.value())?;
-        self.tail.try_for_each(f)
+    fn try_visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentVisitor,
+    {
+        visitor.visit_assignment(self.head.column(), &self.head)?;
+        self.tail.try_visit(visitor)
+    }
+
+    fn param_count(&self) -> usize {
+        self.head.param_count() + self.tail.param_count()
     }
 }
 
@@ -774,9 +1327,9 @@ where
 }
 
 /// A backend-specific insert query object built from typed insert state.
-pub trait InsertQuery<'builder, Columns, Returning>
+pub trait InsertQuery<'builder, Rows, Returning>
 where
-    Columns: InsertAssignments,
+    Rows: InsertRows,
     Returning: Projectable,
 {
     type Builder: QueryBuilder + 'builder;
@@ -784,18 +1337,18 @@ where
     type Shape: ProjectionShape;
     type Row: Decode<<Self::Builder as QueryBuilder>::Backend> + Send;
 
-    fn build(builder: &'builder Self::Builder, columns: Columns, returning: Returning) -> Self
+    fn build(builder: &'builder Self::Builder, rows: Rows, returning: Returning) -> Self
     where
         Self: Sized;
 }
 
 /// An insert query object that can execute or fetch rows through a connection.
-pub trait ExecutableInsertQuery<'conn, Columns, Returning>:
-    InsertQuery<'conn, Columns, Returning>
+pub trait ExecutableInsertQuery<'conn, Rows, Returning>:
+    InsertQuery<'conn, Rows, Returning>
 where
     Self::Builder: Connection,
-    Columns: InsertAssignments,
-    Columns::Params: NoRuntimeParams,
+    Rows: InsertRows,
+    Rows::Params: NoRuntimeParams,
     Returning: Projectable,
 {
     type RowStream<'query>: Stream<Item = Result<Self::Row, ErrorOf<Self::Builder>>>
@@ -814,7 +1367,7 @@ where
     ) -> impl Future<Output = Result<Vec<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        Columns: 'query,
+        Rows: 'query,
         Returning: 'query,
     {
         let rows = self.fetch();
@@ -826,7 +1379,7 @@ where
     ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        Columns: 'query,
+        Rows: 'query,
         Returning: 'query,
     {
         let rows = self.fetch();
@@ -838,7 +1391,7 @@ where
     ) -> impl Future<Output = Result<(Self::Row, u64), ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        Columns: 'query,
+        Rows: 'query,
         Returning: 'query,
     {
         let row = fetch_optional_row_with_affected::<Self::Builder, Self::Row, _>(self.fetch());
@@ -855,7 +1408,7 @@ where
     ) -> impl Future<Output = Result<(Option<Self::Row>, u64), ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        Columns: 'query,
+        Rows: 'query,
         Returning: 'query,
     {
         let rows = self.fetch();
@@ -867,7 +1420,7 @@ where
     ) -> impl Future<Output = Result<Self::Row, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        Columns: 'query,
+        Rows: 'query,
         Returning: 'query,
     {
         let row = fetch_optional_row::<Self::Builder, Self::Row, _>(self.fetch());
@@ -882,7 +1435,7 @@ where
     ) -> impl Future<Output = Result<Option<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        Columns: 'query,
+        Rows: 'query,
         Returning: 'query,
     {
         let rows = self.fetch();
@@ -891,11 +1444,11 @@ where
 }
 
 /// An insert query object that can be compiled into a backend-owned prepared statement.
-pub trait PreparableInsertQuery<'conn, Columns, Returning>:
-    InsertQuery<'conn, Columns, Returning>
+pub trait PreparableInsertQuery<'conn, Rows, Returning>:
+    InsertQuery<'conn, Rows, Returning>
 where
     Self::Builder: Connection,
-    Columns: InsertAssignments,
+    Rows: InsertRows,
     Returning: Projectable,
 {
     type Params: HList;
@@ -909,7 +1462,7 @@ where
     where
         Self: 'prepared,
         'conn: 'prepared,
-        Columns: 'prepared,
+        Rows: 'prepared,
         Returning: 'prepared;
 
     fn prepare<'prepared>(
@@ -917,8 +1470,264 @@ where
     ) -> impl Future<Output = Result<Self::Prepared<'prepared>, ErrorOf<Self::Builder>>> + 'prepared
     where
         'conn: 'prepared,
-        Columns: 'prepared,
+        Rows: 'prepared,
         Returning: 'prepared;
+}
+
+/// Mutation builder for an explicit table column tuple.
+pub struct ToColumns<'conn, Conn, S, Columns, Rows = HNil>
+where
+    Conn: QueryBuilder + 'conn,
+    Rows: InsertRows,
+{
+    connection: &'conn Conn,
+    rows: Rows,
+    _table: PhantomData<S>,
+    _columns: PhantomData<Columns>,
+}
+
+/// Backwards-compatible name for the explicit insert rows builder.
+#[doc(hidden)]
+pub type InsertRowsBuilder<'conn, Conn, S, Columns, Rows = HNil> =
+    ToColumns<'conn, Conn, S, Columns, Rows>;
+
+impl<'conn, Conn, S, Columns> ToColumns<'conn, Conn, S, Columns, HNil>
+where
+    Conn: QueryBuilder + 'conn,
+{
+    pub(crate) fn new(connection: &'conn Conn) -> Self {
+        Self {
+            connection,
+            rows: HNil,
+            _table: PhantomData,
+            _columns: PhantomData,
+        }
+    }
+}
+
+impl<'conn, Conn, S, Columns, Rows> ToColumns<'conn, Conn, S, Columns, Rows>
+where
+    Conn: QueryBuilder + 'conn,
+    S: InsertableTable,
+    Rows: InsertRows,
+{
+    pub fn row<Values>(
+        self,
+        values: Values,
+    ) -> ToColumns<
+        'conn,
+        Conn,
+        S,
+        Columns,
+        <Rows as PushBack<InsertRow<<Columns as InsertColumnValues<S, Values>>::Assignments>>>::Output,
+    >
+    where
+        Columns: InsertColumnValues<S, Values>,
+        Rows: PushBack<InsertRow<<Columns as InsertColumnValues<S, Values>>::Assignments>>,
+        <Rows as PushBack<InsertRow<<Columns as InsertColumnValues<S, Values>>::Assignments>>>::Output:
+            InsertRows,
+    {
+        let row = InsertRow::new(Columns::into_insert_assignments(values));
+        ToColumns {
+            connection: self.connection,
+            rows: self.rows.push_back(row),
+            _table: PhantomData,
+            _columns: PhantomData,
+        }
+    }
+
+    pub fn insert(self) -> impl Future<Output = Result<u64, ErrorOf<Conn>>> + 'conn
+    where
+        Conn: Connection + 'conn,
+        S: 'conn,
+        Rows: NonEmptyInsertRows + 'conn,
+        Rows::Params: NoRuntimeParams,
+        <Conn as QueryBuilder>::Insert<'conn, S, (), Rows, ()>:
+            ExecutableInsertQuery<'conn, Rows, ()>,
+    {
+        let query = <<Conn as QueryBuilder>::Insert<'conn, S, (), Rows, ()> as InsertQuery<
+            'conn,
+            Rows,
+            (),
+        >>::build(self.connection, self.rows, ());
+        async move { ExecutableInsertQuery::execute(&query).await }
+    }
+
+    pub fn insert_returning<P>(
+        self,
+        projection: impl FnOnce(<S as ProjectionShape>::Exprs<'static>) -> P,
+    ) -> Conn::Insert<'conn, S, <P as ReturningProjection<'static>>::Shape, Rows, P>
+    where
+        S: ProjectionShape + 'conn,
+        Rows: NonEmptyInsertRows + 'conn,
+        P: ReturningProjection<'static> + Projectable,
+        <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
+    {
+        let table = <S as ProjectionShape>::exprs(SourceAlias::new(0, 0));
+        let projection = projection(table);
+        <<Conn as QueryBuilder>::Insert<
+            'conn,
+            S,
+            <P as ReturningProjection<'static>>::Shape,
+            Rows,
+            P,
+        > as InsertQuery<'conn, Rows, P>>::build(self.connection, self.rows, projection)
+    }
+}
+
+impl<'conn, Conn, S, Columns, Rows> ToColumns<'conn, Conn, S, Columns, Rows>
+where
+    Conn: QueryBuilder + 'conn,
+    S: UpdateableTable + ProjectionShape,
+    Rows: InsertRows,
+{
+    pub fn set<Values>(
+        self,
+        values: impl FnOnce(<S as ProjectionShape>::Exprs<'static>) -> Values,
+    ) -> ExplicitUpdateBuilder<
+        'conn,
+        Conn,
+        S,
+        <Columns as UpdateColumnValues<S, Values>>::Assignments,
+    >
+    where
+        Columns: UpdateColumnValues<S, Values>,
+    {
+        let alias = SourceAlias::new(0, 0);
+        let table = <S as ProjectionShape>::exprs(alias);
+        ExplicitUpdateBuilder {
+            connection: self.connection,
+            alias,
+            columns: Columns::into_update_assignments(values(table)),
+            filters: HNil,
+            _table: PhantomData,
+            _state: PhantomData,
+        }
+    }
+}
+
+pub struct ExplicitUpdateBuilder<
+    'conn,
+    Conn,
+    S,
+    Columns,
+    Filters = HNil,
+    FilterState = MutationUnfiltered,
+> where
+    Conn: QueryBuilder + 'conn,
+    S: UpdateableTable,
+    Columns: UpdateAssignments,
+    Filters: PredicateNodes,
+{
+    connection: &'conn Conn,
+    alias: SourceAlias,
+    columns: Columns,
+    filters: Filters,
+    _table: PhantomData<S>,
+    _state: PhantomData<FilterState>,
+}
+
+impl<'conn, Conn, S, Columns, Filters, FilterState>
+    ExplicitUpdateBuilder<'conn, Conn, S, Columns, Filters, FilterState>
+where
+    Conn: QueryBuilder + 'conn,
+    S: UpdateableTable + ProjectionShape,
+    Columns: UpdateAssignments,
+    Filters: PredicateNodes,
+{
+    pub fn where_<P, PredicateAst>(
+        self,
+        predicate: impl FnOnce(
+            <S as ProjectionShape>::Exprs<'static>,
+        ) -> Predicate<'static, P, PredicateAst>,
+    ) -> ExplicitUpdateBuilder<
+        'conn,
+        Conn,
+        S,
+        Columns,
+        <Filters as PushBack<Predicate<'static, P, PredicateAst>>>::Output,
+        MutationFiltered,
+    >
+    where
+        P: PredicateKind,
+        PredicateAst: crate::PredicateAst,
+        Filters: PushBack<Predicate<'static, P, PredicateAst>>,
+        <Filters as PushBack<Predicate<'static, P, PredicateAst>>>::Output: PredicateNodes,
+    {
+        let table = <S as ProjectionShape>::exprs(self.alias);
+        ExplicitUpdateBuilder {
+            connection: self.connection,
+            alias: self.alias,
+            columns: self.columns,
+            filters: self.filters.push_back(predicate(table)),
+            _table: PhantomData,
+            _state: PhantomData,
+        }
+    }
+
+    pub fn all(self) -> ExplicitUpdateBuilder<'conn, Conn, S, Columns, Filters, MutationFiltered> {
+        ExplicitUpdateBuilder {
+            connection: self.connection,
+            alias: self.alias,
+            columns: self.columns,
+            filters: self.filters,
+            _table: PhantomData,
+            _state: PhantomData,
+        }
+    }
+}
+
+impl<'conn, Conn, S, Columns, Filters>
+    ExplicitUpdateBuilder<'conn, Conn, S, Columns, Filters, MutationFiltered>
+where
+    Conn: QueryBuilder + 'conn,
+    S: UpdateableTable + ProjectionShape + 'conn,
+    Columns: UpdateAssignments + 'conn,
+    Filters: PredicateNodes + 'conn,
+{
+    pub fn update(self) -> impl Future<Output = Result<u64, ErrorOf<Conn>>> + 'conn
+    where
+        Conn: Connection + 'conn,
+        Columns::Params: NoRuntimeParams,
+        Filters::Params: NoRuntimeParams,
+        <Conn as QueryBuilder>::Update<'conn, S, (), Columns, Filters, ()>:
+            ExecutableUpdateQuery<'conn, Columns, Filters, ()>,
+    {
+        let query =
+            <<Conn as QueryBuilder>::Update<'conn, S, (), Columns, Filters, ()> as UpdateQuery<
+                'conn,
+                Columns,
+                Filters,
+                (),
+            >>::build(self.connection, self.alias, self.columns, self.filters, ());
+        async move { ExecutableUpdateQuery::execute(&query).await }
+    }
+
+    pub fn update_returning<P>(
+        self,
+        projection: impl FnOnce(<S as ProjectionShape>::Exprs<'static>) -> P,
+    ) -> Conn::Update<'conn, S, <P as ReturningProjection<'static>>::Shape, Columns, Filters, P>
+    where
+        P: ReturningProjection<'static> + Projectable,
+        <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
+    {
+        let table = <S as ProjectionShape>::exprs(self.alias);
+        let projection = projection(table);
+        <<Conn as QueryBuilder>::Update<
+            'conn,
+            S,
+            <P as ReturningProjection<'static>>::Shape,
+            Columns,
+            Filters,
+            P,
+        > as UpdateQuery<'conn, Columns, Filters, P>>::build(
+            self.connection,
+            self.alias,
+            self.columns,
+            self.filters,
+            projection,
+        )
+    }
 }
 
 /// A backend-specific update query object built from typed update state.
