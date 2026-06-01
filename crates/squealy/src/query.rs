@@ -116,11 +116,11 @@ where
 
 /// Marker value for an explicit assignment that should use the database default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct DefaultValue;
+pub struct DefaultValueNode;
 
 /// Use a column's database default in an explicit insert row or update assignment.
-pub fn default() -> DefaultValue {
-    DefaultValue
+pub fn default() -> DefaultValueNode {
+    DefaultValueNode
 }
 
 /// A typed insert assignment for a single generated table column.
@@ -448,7 +448,7 @@ where
     }
 }
 
-impl<K> IntoAssignmentValue<K> for DefaultValue
+impl<K> IntoAssignmentValue<K> for DefaultValueNode
 where
     K: ColumnKey,
 {
@@ -471,7 +471,7 @@ where
     }
 }
 
-impl<K> IntoInsertAssignmentValue<K> for DefaultValue
+impl<K> IntoInsertAssignmentValue<K> for DefaultValueNode
 where
     K: ColumnKey,
 {
@@ -598,7 +598,7 @@ where
     }
 }
 
-impl<K> IntoNullableAssignmentValue<K> for DefaultValue
+impl<K> IntoNullableAssignmentValue<K> for DefaultValueNode
 where
     K: ColumnKey,
 {
@@ -609,7 +609,7 @@ where
     }
 }
 
-impl<K> IntoNullableInsertAssignmentValue<K> for DefaultValue
+impl<K> IntoNullableInsertAssignmentValue<K> for DefaultValueNode
 where
     K: ColumnKey,
 {
