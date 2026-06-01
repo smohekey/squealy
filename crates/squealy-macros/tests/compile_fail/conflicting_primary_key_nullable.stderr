@@ -1,0 +1,5 @@
+error: column `id` cannot be both `primary_key` and `nullable`
+ --> tests/compile_fail/conflicting_primary_key_nullable.rs:6:5
+  |
+6 |     id: C::Type<'scope, i32>,
+  |     ^^

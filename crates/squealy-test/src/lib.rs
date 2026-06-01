@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use squealy::{
     Backend, Connection, ConnectionWithTransaction, Decode, InsertableTable, Projectable,
     ProjectionShape, QueryBuilder, SelectAst, Table, TableProjection, UpdateableTable,
