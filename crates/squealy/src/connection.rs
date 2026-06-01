@@ -3,7 +3,7 @@ use std::future::Future;
 use crate::{
     Backend, Decode, DeleteQuery, From, HCons, HNil, InsertQuery, InsertableTable, Projectable,
     ProjectionShape, ReturningProjection, RootSource, SelectAst, SelectQuery, TableProjection,
-    UpdateQuery, UpdateableTable, WriteableTable,
+    ToColumns, UpdateQuery, UpdateableTable, WriteableTable,
 };
 
 /// A backend-specific handle that constructs query objects.
@@ -19,13 +19,13 @@ pub trait QueryBuilder: Sized {
         Shape::Row: Decode<Self::Backend>,
         Projection: Projectable;
 
-    type Insert<'builder, S, Shape, Columns, Returning>: InsertQuery<'builder, Columns, Returning, Builder = Self, Table = S, Shape = Shape>
+    type Insert<'builder, S, Shape, Rows, Returning>: InsertQuery<'builder, Rows, Returning, Builder = Self, Table = S, Shape = Shape>
     where
         Self: 'builder,
         S: InsertableTable,
         Shape: ProjectionShape,
         Shape::Row: Decode<Self::Backend>,
-        Columns: crate::InsertAssignments,
+        Rows: crate::InsertRows,
         Returning: Projectable;
 
     type Update<'builder, S, Shape, Columns, Filters, Returning>: UpdateQuery<'builder, Columns, Filters, Returning, Builder = Self, Table = S, Shape = Shape>
@@ -79,6 +79,13 @@ pub trait QueryBuilder: Sized {
         S: WriteableTable,
     {
         S::write_builder(self)
+    }
+
+    fn to_columns<S, Columns>(&self) -> ToColumns<'_, Self, S, Columns>
+    where
+        S: TableProjection,
+    {
+        ToColumns::new(self)
     }
 }
 

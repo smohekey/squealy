@@ -10,11 +10,11 @@ use futures_core::Stream;
 use squealy::{
     Backend, BindSink, BindValue, BindValueKind, Connection, Decode, DeleteQuery,
     ExecutableDeleteQuery, ExecutableInsertQuery, ExecutableSelectQuery, ExecutableUpdateQuery,
-    FloatWidth, HAppend, HList, HNil, InsertQuery, InsertableTable, IntWidth, NoRuntimeParams,
-    PredicateNodes, PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery,
-    PreparableUpdateQuery, PreparedMutationQuery, PreparedParamValues, PreparedSelectQuery,
-    Projectable, ProjectionShape, QueryBuilder, RowsAffected, SelectAst, SelectQuery, Selected,
-    SourceAlias, TableProjection, UIntWidth, UpdateQuery, UpdateableTable,
+    FloatWidth, HAppend, HList, HNil, InsertQuery, InsertRows, InsertableTable, IntWidth,
+    NoRuntimeParams, PredicateNodes, PreparableDeleteQuery, PreparableInsertQuery,
+    PreparableSelectQuery, PreparableUpdateQuery, PreparedMutationQuery, PreparedParamValues,
+    PreparedSelectQuery, Projectable, ProjectionShape, QueryBuilder, RowsAffected, SelectAst,
+    SelectQuery, Selected, SourceAlias, TableProjection, UIntWidth, UpdateQuery, UpdateableTable,
 };
 use tokio_postgres::{
     GenericClient,
@@ -932,18 +932,18 @@ pub struct PostgresInsert<
     'conn,
     S,
     Shape = (),
-    Columns = HNil,
+    Rows = HNil,
     Returning = (),
     Conn = PostgresConnection,
 > where
     S: InsertableTable,
     Shape: ProjectionShape,
-    Columns: squealy::InsertAssignments,
+    Rows: InsertRows,
     Returning: Projectable,
     Conn: QueryBuilder<Backend = Postgres>,
 {
     connection: &'conn Conn,
-    columns: Columns,
+    columns: Rows,
     returning: Returning,
     _table: PhantomData<S>,
     _shape: PhantomData<Shape>,
@@ -1096,16 +1096,15 @@ where
     }
 }
 
-impl<'conn, S, Shape, Columns, Returning, Conn>
-    PostgresInsert<'conn, S, Shape, Columns, Returning, Conn>
+impl<'conn, S, Shape, Rows, Returning, Conn> PostgresInsert<'conn, S, Shape, Rows, Returning, Conn>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
-    Columns: squealy::InsertAssignments,
+    Rows: InsertRows,
     Returning: Projectable,
     Conn: QueryBuilder<Backend = Postgres>,
 {
-    pub(crate) fn new(connection: &'conn Conn, columns: Columns, returning: Returning) -> Self {
+    pub(crate) fn new(connection: &'conn Conn, columns: Rows, returning: Returning) -> Self {
         Self {
             connection,
             columns,
@@ -1125,9 +1124,10 @@ where
         let sql = rendered_sql(|writer| {
             sql::write_insert::<S, _, _>(&self.columns, &self.returning, writer)
         });
-        let params = collect_postgres_params(self.columns.len(), |sink| {
-            sql::write_insert_params::<S, _, _, _>(&self.columns, &self.returning, sink)
-        })?;
+        let params =
+            collect_postgres_params(self.columns.first_row_len() * self.columns.len(), |sink| {
+                sql::write_insert_params::<S, _, _, _>(&self.columns, &self.returning, sink)
+            })?;
         Ok((sql, params))
     }
 }
@@ -1406,14 +1406,14 @@ where
     }
 }
 
-impl<'conn, S, Shape, Columns, Returning, Conn> InsertQuery<'conn, Columns, Returning>
-    for PostgresInsert<'conn, S, Shape, Columns, Returning, Conn>
+impl<'conn, S, Shape, Rows, Returning, Conn> InsertQuery<'conn, Rows, Returning>
+    for PostgresInsert<'conn, S, Shape, Rows, Returning, Conn>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
     Conn: QueryBuilder<Backend = Postgres> + 'conn,
     Shape::Row: Decode<Postgres>,
-    Columns: squealy::InsertAssignments,
+    Rows: InsertRows,
     Returning: Projectable,
 {
     type Builder = Conn;
@@ -1421,20 +1421,20 @@ where
     type Shape = Shape;
     type Row = Shape::Row;
 
-    fn build(connection: &'conn Self::Builder, columns: Columns, returning: Returning) -> Self {
+    fn build(connection: &'conn Self::Builder, columns: Rows, returning: Returning) -> Self {
         Self::new(connection, columns, returning)
     }
 }
 
-impl<'conn, S, Shape, Columns, Returning, Conn> ExecutableInsertQuery<'conn, Columns, Returning>
-    for PostgresInsert<'conn, S, Shape, Columns, Returning, Conn>
+impl<'conn, S, Shape, Rows, Returning, Conn> ExecutableInsertQuery<'conn, Rows, Returning>
+    for PostgresInsert<'conn, S, Shape, Rows, Returning, Conn>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
     Conn: PostgresExecutor + 'conn,
     Shape::Row: Decode<Postgres>,
-    Columns: squealy::InsertAssignments,
-    Columns::Params: NoRuntimeParams,
+    Rows: InsertRows,
+    Rows::Params: NoRuntimeParams,
     Returning: Projectable,
 {
     type RowStream<'query>
@@ -1462,25 +1462,25 @@ where
     }
 }
 
-impl<'conn, S, Shape, Columns, Returning, Conn> PreparableInsertQuery<'conn, Columns, Returning>
-    for PostgresInsert<'conn, S, Shape, Columns, Returning, Conn>
+impl<'conn, S, Shape, Rows, Returning, Conn> PreparableInsertQuery<'conn, Rows, Returning>
+    for PostgresInsert<'conn, S, Shape, Rows, Returning, Conn>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
     Conn: PostgresExecutor + 'conn,
     Shape::Row: Decode<Postgres> + Send,
-    Columns: squealy::InsertAssignments,
-    Columns::Params: HList,
+    Rows: InsertRows,
+    Rows::Params: HList,
     Returning: Projectable,
 {
-    type Params = Columns::Params;
+    type Params = Rows::Params;
 
     type Prepared<'prepared>
-        = PostgresPreparedMutation<'prepared, Shape::Row, Conn, Columns::Params>
+        = PostgresPreparedMutation<'prepared, Shape::Row, Conn, Rows::Params>
     where
         Self: 'prepared,
         'conn: 'prepared,
-        Columns: 'prepared,
+        Rows: 'prepared,
         Returning: 'prepared;
 
     fn prepare<'prepared>(
@@ -1493,7 +1493,7 @@ where
     > + 'prepared
     where
         'conn: 'prepared,
-        Columns: 'prepared,
+        Rows: 'prepared,
         Returning: 'prepared,
     {
         let (sql, params) = self.prepared_sql().into_parts();
@@ -1777,11 +1777,11 @@ where
     }
 }
 
-impl<S, Shape, Columns, Returning, Conn> PostgresInsert<'_, S, Shape, Columns, Returning, Conn>
+impl<S, Shape, Rows, Returning, Conn> PostgresInsert<'_, S, Shape, Rows, Returning, Conn>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
-    Columns: squealy::InsertAssignments,
+    Rows: InsertRows,
     Returning: Projectable,
     Conn: QueryBuilder<Backend = Postgres>,
 {

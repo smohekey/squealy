@@ -413,12 +413,12 @@ fn assert_thirty_two_i32_row(_: &impl HasSelectRow<ThirtyTwoI32s>) {}
 
 trait HasInsertRow<Row> {}
 
-impl<'conn, S, Shape, Columns, Returning, Row> HasInsertRow<Row>
-    for TestInsert<'conn, S, Shape, Columns, Returning>
+impl<'conn, S, Shape, Rows, Returning, Row> HasInsertRow<Row>
+    for TestInsert<'conn, S, Shape, Rows, Returning>
 where
     S: InsertableTable,
     Shape: ProjectionShape<Row = Row>,
-    Columns: InsertAssignments,
+    Rows: InsertRows,
     Returning: Projectable,
 {
 }
@@ -755,11 +755,12 @@ fn insert_query_builds_column_bindings() {
     let columns = HNil.push_back(InsertAssignment::<UserName>::new(BindValue::Text(
         "Ada".to_owned(),
     )));
+    let rows = HNil.push_back(InsertRow::new(columns));
     let insert = <<TestConnection as QueryBuilder>::Insert<'_, User, (), _, ()> as InsertQuery<
         '_,
         _,
         (),
-    >>::build(&TestConnection, columns, ());
+    >>::build(&TestConnection, rows, ());
 
     let _execute = insert.execute();
     assert_eq!(
@@ -804,6 +805,35 @@ fn insert_builder_can_return_projected_rows() {
 }
 
 #[test]
+fn insert_builder_can_insert_multiple_rows() {
+    let insert = TestConnection
+        .to_columns::<User, (UserName,)>()
+        .row(("Ada",))
+        .row(("Grace",))
+        .insert_returning(|user| user.id);
+
+    assert_insert_i32_row(&insert);
+    assert_eq!(
+        insert.to_sql(),
+        r#"INSERT INTO public.users (name) VALUES (?), (?) RETURNING q0_0.id AS id"#
+    );
+    assert_eq!(
+        insert.collect_params(),
+        vec![
+            BindValue::Text("Ada".to_owned()),
+            BindValue::Text("Grace".to_owned())
+        ]
+    );
+
+    let mut sink = RecordingBindSink {
+        values: Vec::new(),
+        reserved: 0,
+    };
+    insert.write_params(&mut sink).unwrap();
+    assert_eq!(sink.reserved, 2);
+}
+
+#[test]
 fn insert_builder_accepts_null_for_nullable_columns() {
     let insert = TestConnection
         .to::<User>()
@@ -815,6 +845,49 @@ fn insert_builder_accepts_null_for_nullable_columns() {
         r#"INSERT INTO public.users (name) VALUES (?) RETURNING q0_0.id AS id"#
     );
     assert_eq!(insert.collect_params(), vec![BindValue::Null]);
+}
+
+#[test]
+fn explicit_insert_rows_accept_null_for_nullable_columns() {
+    let insert = TestConnection
+        .to_columns::<User, (UserName,)>()
+        .row((None::<String>,))
+        .row((Some("Ada".to_owned()),))
+        .insert_returning(|user| user.id);
+
+    assert_eq!(
+        insert.to_sql(),
+        r#"INSERT INTO public.users (name) VALUES (?), (?) RETURNING q0_0.id AS id"#
+    );
+    assert_eq!(
+        insert.collect_params(),
+        vec![BindValue::Null, BindValue::Text("Ada".to_owned())]
+    );
+}
+
+#[test]
+fn explicit_insert_rows_can_use_column_defaults() {
+    let insert = TestConnection
+        .to_columns::<User, (UserName,)>()
+        .row((default(),))
+        .row(("Ada",))
+        .insert_returning(|user| user.id);
+
+    assert_eq!(
+        insert.to_sql(),
+        r#"INSERT INTO public.users (name) VALUES (DEFAULT), (?) RETURNING q0_0.id AS id"#
+    );
+    assert_eq!(
+        insert.collect_params(),
+        vec![BindValue::Text("Ada".to_owned())]
+    );
+
+    let mut sink = RecordingBindSink {
+        values: Vec::new(),
+        reserved: 0,
+    };
+    insert.write_params(&mut sink).unwrap();
+    assert_eq!(sink.reserved, 1);
 }
 
 #[test]
@@ -920,6 +993,53 @@ fn update_builder_accepts_null_for_nullable_columns() {
         update.collect_params(),
         vec![BindValue::Null, BindValue::Int(1)]
     );
+}
+
+#[test]
+fn update_builder_can_use_column_defaults() {
+    let update = TestConnection
+        .to::<User>()
+        .name(default())
+        .where_(|user| user.id.equals(1))
+        .update_returning(|user| user.id);
+
+    assert_eq!(
+        update.to_sql(),
+        r#"UPDATE public.users AS q0_0 SET name = DEFAULT WHERE (q0_0.id = ?) RETURNING q0_0.id AS id"#
+    );
+    assert_eq!(update.collect_params(), vec![BindValue::Int(1)]);
+
+    let mut sink = RecordingBindSink {
+        values: Vec::new(),
+        reserved: 0,
+    };
+    update.write_params(&mut sink).unwrap();
+    assert_eq!(sink.reserved, 1);
+}
+
+#[test]
+fn explicit_update_columns_can_reference_existing_values() {
+    let update = TestConnection
+        .to_columns::<DefaultVariant, (DefaultVariantCount,)>()
+        .set(|record| (record.count + 1,))
+        .where_(|record| record.count.equals(41))
+        .update_returning(|record| record.count);
+
+    assert_eq!(
+        update.to_sql(),
+        r#"UPDATE default_variants AS q0_0 SET count = (q0_0.count + ?) WHERE (q0_0.count = ?) RETURNING q0_0.count AS count"#
+    );
+    assert_eq!(
+        update.collect_params(),
+        vec![BindValue::Int(1), BindValue::Int(41)]
+    );
+
+    let mut sink = RecordingBindSink {
+        values: Vec::new(),
+        reserved: 0,
+    };
+    update.write_params(&mut sink).unwrap();
+    assert_eq!(sink.reserved, 2);
 }
 
 #[test]

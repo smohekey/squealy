@@ -83,6 +83,44 @@ pub(crate) fn prepared_param_values(input: TokenStream) -> TokenStream {
     .into()
 }
 
+pub(crate) fn insert_column_values(input: TokenStream) -> TokenStream {
+    let max_arity = match input.to_string().trim().parse::<usize>() {
+        Ok(max_arity) if max_arity >= 1 => max_arity,
+        _ => {
+            return quote::quote! {
+                compile_error!("insert_column_values! expects a maximum arity of at least 1");
+            }
+            .into();
+        }
+    };
+
+    let impls = (1..=max_arity).map(insert_column_value);
+
+    quote::quote! {
+        #(#impls)*
+    }
+    .into()
+}
+
+pub(crate) fn update_column_values(input: TokenStream) -> TokenStream {
+    let max_arity = match input.to_string().trim().parse::<usize>() {
+        Ok(max_arity) if max_arity >= 1 => max_arity,
+        _ => {
+            return quote::quote! {
+                compile_error!("update_column_values! expects a maximum arity of at least 1");
+            }
+            .into();
+        }
+    };
+
+    let impls = (1..=max_arity).map(update_column_value);
+
+    quote::quote! {
+        #(#impls)*
+    }
+    .into()
+}
+
 fn tuple_fixed_list(arity: usize) -> proc_macro2::TokenStream {
     let fields = (0..arity)
         .map(Literal::usize_unsuffixed)
@@ -216,6 +254,200 @@ fn hlist_tuple(arity: usize) -> proc_macro2::TokenStream {
             fn to_tuple(self) -> Self::Tuple {
                 #(#destructures)*
                 (#(#values,)*)
+            }
+        }
+    }
+}
+
+fn insert_column_value(arity: usize) -> proc_macro2::TokenStream {
+    let columns = (0..arity)
+        .map(|index| Ident::new(&format!("K{index}"), Span::call_site()))
+        .collect::<Vec<_>>();
+    let values = (0..arity)
+        .map(|index| Ident::new(&format!("V{index}"), Span::call_site()))
+        .collect::<Vec<_>>();
+    let fields = (0..arity)
+        .map(Literal::usize_unsuffixed)
+        .collect::<Vec<_>>();
+
+    let assignment_types = columns
+        .iter()
+        .zip(values.iter())
+        .map(|(column, value)| {
+            quote::quote! {
+                crate::InsertAssignment<
+                    #column,
+                    <<#column as crate::ColumnKey>::Nullability as crate::IntoInsertColumnValue<
+                        #column,
+                        #value
+                    >>::AssignmentValue
+                >
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let assignments =
+        assignment_types
+            .iter()
+            .rev()
+            .fold(quote::quote! { crate::HNil }, |tail, assignment| {
+                quote::quote! {
+                    crate::HCons<#assignment, #tail>
+                }
+            });
+
+    let assignment_tails = (0..arity)
+        .map(|index| {
+            assignment_types[(index + 1)..].iter().rev().fold(
+                quote::quote! { crate::HNil },
+                |tail, assignment| quote::quote! { crate::HCons<#assignment, #tail> },
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let assignment_tail_bounds = assignment_tails
+        .iter()
+        .map(|tail| quote::quote! { #tail: crate::InsertAssignments, })
+        .collect::<Vec<_>>();
+
+    let append_bounds = columns
+        .iter()
+        .zip(values.iter())
+        .zip(assignment_tails.iter())
+        .map(|((column, value), tail)| {
+            quote::quote! {
+                <<<#column as crate::ColumnKey>::Nullability as crate::IntoInsertColumnValue<
+                    #column,
+                    #value
+                >>::AssignmentValue as crate::AssignmentValueNode>::Params:
+                    crate::HAppend<<#tail as crate::InsertAssignments>::Params>,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    quote::quote! {
+        impl<S, #(#columns,)* #(#values,)*> crate::InsertColumnValues<S, (#(#values,)*)>
+            for (#(#columns,)*)
+        where
+            S: crate::InsertableTable,
+            #(
+                #columns: crate::InsertColumnKey<Table = S>,
+                <#columns as crate::ColumnKey>::Nullability:
+                    crate::IntoInsertColumnValue<#columns, #values>,
+            )*
+            #assignments: crate::InsertAssignments,
+            #(#assignment_tail_bounds)*
+            #(#append_bounds)*
+        {
+            type Assignments = #assignments;
+
+            fn into_insert_assignments(values: (#(#values,)*)) -> Self::Assignments {
+                crate::HNil
+                    #(
+                        .push_back(crate::InsertAssignment::<#columns, _>::new(
+                            <<#columns as crate::ColumnKey>::Nullability as crate::IntoInsertColumnValue<
+                                #columns,
+                                #values
+                            >>::into_insert_column_value(values.#fields)
+                        ))
+                    )*
+            }
+        }
+    }
+}
+
+fn update_column_value(arity: usize) -> proc_macro2::TokenStream {
+    let columns = (0..arity)
+        .map(|index| Ident::new(&format!("K{index}"), Span::call_site()))
+        .collect::<Vec<_>>();
+    let values = (0..arity)
+        .map(|index| Ident::new(&format!("V{index}"), Span::call_site()))
+        .collect::<Vec<_>>();
+    let fields = (0..arity)
+        .map(Literal::usize_unsuffixed)
+        .collect::<Vec<_>>();
+
+    let assignment_types = columns
+        .iter()
+        .zip(values.iter())
+        .map(|(column, value)| {
+            quote::quote! {
+                crate::UpdateAssignment<
+                    #column,
+                    <<#column as crate::ColumnKey>::Nullability as crate::IntoUpdateColumnValue<
+                        #column,
+                        #value
+                    >>::AssignmentValue
+                >
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let assignments =
+        assignment_types
+            .iter()
+            .rev()
+            .fold(quote::quote! { crate::HNil }, |tail, assignment| {
+                quote::quote! {
+                    crate::HCons<#assignment, #tail>
+                }
+            });
+
+    let assignment_tails = (0..arity)
+        .map(|index| {
+            assignment_types[(index + 1)..].iter().rev().fold(
+                quote::quote! { crate::HNil },
+                |tail, assignment| quote::quote! { crate::HCons<#assignment, #tail> },
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let assignment_tail_bounds = assignment_tails
+        .iter()
+        .map(|tail| quote::quote! { #tail: crate::UpdateAssignments, })
+        .collect::<Vec<_>>();
+
+    let append_bounds = columns
+        .iter()
+        .zip(values.iter())
+        .zip(assignment_tails.iter())
+        .map(|((column, value), tail)| {
+            quote::quote! {
+                <<<#column as crate::ColumnKey>::Nullability as crate::IntoUpdateColumnValue<
+                    #column,
+                    #value
+                >>::AssignmentValue as crate::AssignmentValueNode>::Params:
+                    crate::HAppend<<#tail as crate::UpdateAssignments>::Params>,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    quote::quote! {
+        impl<S, #(#columns,)* #(#values,)*> crate::UpdateColumnValues<S, (#(#values,)*)>
+            for (#(#columns,)*)
+        where
+            S: crate::UpdateableTable,
+            #(
+                #columns: crate::UpdateColumnKey<Table = S>,
+                <#columns as crate::ColumnKey>::Nullability:
+                    crate::IntoUpdateColumnValue<#columns, #values>,
+            )*
+            #assignments: crate::UpdateAssignments,
+            #(#assignment_tail_bounds)*
+            #(#append_bounds)*
+        {
+            type Assignments = #assignments;
+
+            fn into_update_assignments(values: (#(#values,)*)) -> Self::Assignments {
+                crate::HNil
+                    #(
+                        .push_back(crate::UpdateAssignment::<#columns, _>::new(
+                            <<#columns as crate::ColumnKey>::Nullability as crate::IntoUpdateColumnValue<
+                                #columns,
+                                #values
+                            >>::into_update_column_value(values.#fields)
+                        ))
+                    )*
             }
         }
     }
