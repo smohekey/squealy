@@ -8,6 +8,8 @@ use squealy::{
 };
 use tokio_postgres::Client;
 
+#[cfg(feature = "schema")]
+mod introspect;
 mod query;
 mod sql;
 
@@ -148,6 +150,15 @@ impl squealy::SchemaConnect for Postgres {
             let _ = connection.await;
         });
         Ok(PostgresConnection::new(client))
+    }
+}
+
+#[cfg(feature = "schema")]
+impl squealy::SchemaIntrospect for PostgresConnection {
+    type Error = PostgresError;
+
+    async fn introspect_database(&mut self) -> Result<squealy::DatabaseModel, PostgresError> {
+        introspect::database(self.client()).await
     }
 }
 

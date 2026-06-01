@@ -78,3 +78,30 @@ async fn publish_creates_schema_then_round_trips_rows() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].1, "gadget");
 }
+
+#[tokio::test]
+#[ignore]
+async fn publish_then_introspect_round_trips_schema_model() {
+    let mut connection = connect().await;
+    let expected = DatabaseModel::from_database::<PublishDemoDb>();
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS \"publish_demo\" CASCADE")
+        .await
+        .expect("drop schema");
+
+    squealy_model::publish(&expected, &Postgres, &mut connection)
+        .await
+        .expect("publish create-from-scratch");
+
+    let actual = squealy_model::introspect(&mut connection)
+        .await
+        .expect("introspect published schema");
+    let actual_schema = actual
+        .schemas
+        .into_iter()
+        .find(|schema| schema.name.as_deref() == Some("publish_demo"))
+        .expect("published schema should be introspected");
+
+    assert_eq!(actual_schema, expected.schemas[0]);
+}

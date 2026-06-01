@@ -17,7 +17,7 @@ pub use package::{
 };
 pub use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DdlExecutor, DefaultValue, ForeignKeyModel,
-    IndexModel, SchemaBackend, SchemaConnect, SchemaModel, SqlType, TableModel,
+    IndexModel, SchemaBackend, SchemaConnect, SchemaIntrospect, SchemaModel, SqlType, TableModel,
 };
 
 use std::fmt;
@@ -99,4 +99,15 @@ where
     C: DdlExecutor,
 {
     publish(&DatabaseModel::from_database::<D>(), backend, connection).await
+}
+
+/// Reads the live database schema visible to `connection` into the neutral model.
+///
+/// Backend crates own the catalog queries and type normalization; the management engine only depends
+/// on the shared [`SchemaIntrospect`] contract.
+pub async fn introspect<C>(connection: &mut C) -> Result<DatabaseModel, C::Error>
+where
+    C: SchemaIntrospect,
+{
+    connection.introspect_database().await
 }

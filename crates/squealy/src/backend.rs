@@ -108,6 +108,18 @@ pub trait DdlExecutor {
     fn execute_ddl(&mut self, sql: &str) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
+/// Reads a live database schema into the neutral [`DatabaseModel`].
+///
+/// This is the introspection half of schema management. Backends implement it on their live
+/// schema-management connection type, alongside [`DdlExecutor`], so the model engine can compare a
+/// declared/package model with the database state without knowing backend catalog details.
+pub trait SchemaIntrospect {
+    type Error;
+
+    /// Introspects the current database visible to this connection.
+    fn introspect_database(&mut self) -> impl Future<Output = Result<DatabaseModel, Self::Error>>;
+}
+
 /// Opens a schema-management connection from a connection string.
 ///
 /// Backends implement this so the management engine and CLI can `publish` from a URL without knowing

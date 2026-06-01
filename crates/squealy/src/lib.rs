@@ -389,6 +389,7 @@ mod table;
 
 pub use backend::{
     Backend, DdlExecutor, Decode, DecodeNullable, RowReader, SchemaBackend, SchemaConnect,
+    SchemaIntrospect,
 };
 pub use column::{
     Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullableValue, ColumnType,
