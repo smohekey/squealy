@@ -1,5 +1,5 @@
 use proc_macro::{Delimiter, Group, Ident, TokenStream, TokenTree};
-use proc_macro2::{Literal, Span};
+use proc_macro2::Span;
 
 use crate::common::{compile_error, matches_ident, required_literal, struct_fields};
 
@@ -29,8 +29,7 @@ impl ColumnTypeStruct {
         let ident = proc_macro2::Ident::new(&self.ident.to_string(), Span::call_site());
         let field_ty = self.field.ty();
         let column_type = if let Some(db_type) = &self.db_type {
-            let db_type = Literal::string(db_type);
-            quote::quote! { ::squealy::ColumnType::Raw(#db_type) }
+            crate::common::parse_db_type(db_type)
         } else {
             quote::quote! { <#field_ty as ::squealy::HasColumnType>::COLUMN_TYPE }
         };

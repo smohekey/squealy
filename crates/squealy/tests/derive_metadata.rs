@@ -190,6 +190,13 @@ pub struct JsonColumn(String);
 struct RawTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
     #[column(db_type = "jsonb")]
     payload: C::Type<'scope, JsonPayload>,
+    #[column(db_type = "varchar(64)")]
+    label: C::Type<'scope, String>,
+    #[column(db_type = "decimal(10,2)")]
+    amount: C::Type<'scope, String>,
+    // Unrecognized db_type falls back to verbatim Raw.
+    #[column(db_type = "citext")]
+    custom: C::Type<'scope, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
@@ -300,10 +307,20 @@ fn derive_table_populates_typed_default_metadata() {
 }
 
 #[test]
-fn derive_table_treats_db_type_as_raw_backend_type_override() {
+fn derive_table_parses_db_type_into_structured_column_type() {
     let columns = <RawTypeRecord as SchemaTable>::columns();
 
-    assert_eq!(columns[0].column_type(), ColumnType::Raw("jsonb"));
+    assert_eq!(columns[0].column_type(), ColumnType::Jsonb);
+    assert_eq!(columns[1].column_type(), ColumnType::Varchar(64));
+    assert_eq!(
+        columns[2].column_type(),
+        ColumnType::Decimal {
+            precision: 10,
+            scale: 2
+        }
+    );
+    // Unrecognized db_type stays verbatim.
+    assert_eq!(columns[3].column_type(), ColumnType::Raw("citext"));
 }
 
 #[test]
@@ -311,7 +328,7 @@ fn derive_column_type_maps_newtype_columns() {
     let columns = <DerivedColumnTypeRecord as SchemaTable>::columns();
 
     assert_eq!(columns[0].column_type(), ColumnType::I32);
-    assert_eq!(columns[1].column_type(), ColumnType::Raw("jsonb"));
+    assert_eq!(columns[1].column_type(), ColumnType::Jsonb);
 }
 
 #[test]
