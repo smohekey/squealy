@@ -10,4 +10,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls"] }
 squealy.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
