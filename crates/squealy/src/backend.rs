@@ -107,3 +107,14 @@ pub trait DdlExecutor {
     /// Executes one or more `;`-separated DDL statements as a single batch.
     fn execute_ddl(&mut self, sql: &str) -> impl Future<Output = Result<(), Self::Error>>;
 }
+
+/// Opens a schema-management connection from a connection string.
+///
+/// Backends implement this so the management engine and CLI can `publish` from a URL without knowing
+/// backend-specific connection details. The returned connection executes DDL via [`DdlExecutor`].
+pub trait SchemaConnect {
+    type Connection: DdlExecutor;
+    type Error;
+
+    fn connect(&self, url: &str) -> impl Future<Output = Result<Self::Connection, Self::Error>>;
+}

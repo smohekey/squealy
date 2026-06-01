@@ -11,14 +11,16 @@ categories.workspace = true
 
 [features]
 default = []
-# Schema/DDL management: SchemaBackend rendering and DdlExecutor (publish). Off by default so
-# query-only users carry none of it; the management engine and CLI enable it.
-schema = []
+# Schema/DDL management: SchemaBackend rendering, DdlExecutor (publish), and SchemaConnect. Off by
+# default so query-only users carry none of it; the management engine and CLI enable it. Pulls tokio
+# for spawning the connection task in SchemaConnect.
+schema = ["dep:tokio"]
 
 [dependencies]
 bytes = "1"
 futures-core.workspace = true
 squealy.workspace = true
+tokio = { version = "1", features = ["rt"], optional = true }
 tokio-postgres = "0.7"
 
 [dev-dependencies]

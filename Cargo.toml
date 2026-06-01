@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/squealy",
+    "crates/squealy-cli",
     "crates/squealy-macros",
     "crates/squealy-model",
     "crates/squealy-postgresql",

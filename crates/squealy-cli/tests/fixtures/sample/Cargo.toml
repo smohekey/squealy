@@ -1,0 +1,11 @@
+[package]
+name = "sample-db"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone workspace so this fixture is not pulled into the squealy workspace.
+[workspace]
+
+[dependencies]
+squealy = { path = "../../../../squealy" }

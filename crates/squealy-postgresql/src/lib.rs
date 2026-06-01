@@ -68,6 +68,31 @@ impl From<tokio_postgres::Error> for PostgresError {
     }
 }
 
+impl fmt::Display for PostgresError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PostgresError::NoRows => formatter.write_str("query returned no rows"),
+            PostgresError::UnsupportedBind(value) => {
+                write!(formatter, "unsupported bind value: {value:?}")
+            }
+            PostgresError::Database(error) => write!(formatter, "database error: {error}"),
+            PostgresError::Decode(error) => write!(formatter, "decode error: {error}"),
+            PostgresError::Conversion(target) => {
+                write!(formatter, "could not convert value to {target}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PostgresError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PostgresError::Database(error) | PostgresError::Decode(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 impl Backend for Postgres {
     type Error = PostgresError;
 
@@ -108,6 +133,21 @@ impl squealy::DdlExecutor for PostgresConnection {
         transaction.batch_execute(sql).await?;
         transaction.commit().await?;
         Ok(())
+    }
+}
+
+#[cfg(feature = "schema")]
+impl squealy::SchemaConnect for Postgres {
+    type Connection = PostgresConnection;
+    type Error = PostgresError;
+
+    async fn connect(&self, url: &str) -> Result<PostgresConnection, PostgresError> {
+        let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls).await?;
+        // Drive the connection's IO task in the background for the life of the client.
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        Ok(PostgresConnection::new(client))
     }
 }
 

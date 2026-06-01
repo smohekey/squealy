@@ -17,7 +17,7 @@ pub use package::{
 };
 pub use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DdlExecutor, DefaultValue, ForeignKeyModel,
-    IndexModel, SchemaBackend, SchemaModel, SqlType, TableModel,
+    IndexModel, SchemaBackend, SchemaConnect, SchemaModel, SqlType, TableModel,
 };
 
 use std::fmt;

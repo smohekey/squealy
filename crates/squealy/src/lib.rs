@@ -274,7 +274,9 @@ mod query;
 mod schema;
 mod table;
 
-pub use backend::{Backend, DdlExecutor, Decode, DecodeNullable, RowReader, SchemaBackend};
+pub use backend::{
+    Backend, DdlExecutor, Decode, DecodeNullable, RowReader, SchemaBackend, SchemaConnect,
+};
 pub use column::{
     Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullableValue, ColumnType,
     ColumnValue, HasColumnType,
