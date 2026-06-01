@@ -1438,6 +1438,7 @@ fn table_struct(input: TokenStream) -> Result<TableStruct, String> {
     };
     let table_attrs = table_attributes(&tokens[..struct_index])?;
     validate_index_columns(&table_attrs.indexes, &fields)?;
+    validate_field_attrs(&fields)?;
 
     Ok(TableStruct {
         ident,
@@ -1599,6 +1600,44 @@ fn parse_index_columns(group: &Group) -> Result<Vec<Ident>, String> {
         }
     }
     Ok(columns)
+}
+
+/// Rejects column attribute combinations that are mutually contradictory and would
+/// otherwise only surface as a database error at DDL time.
+fn validate_field_attrs(fields: &[Field]) -> Result<(), String> {
+    for field in fields {
+        let attrs = &field.attrs;
+        let name = field.ident.to_string();
+        let nullable = attrs.nullable == Some(true);
+
+        if attrs.primary_key && nullable {
+            return Err(format!(
+                "column `{name}` cannot be both `primary_key` and `nullable`"
+            ));
+        }
+        if attrs.auto_increment && nullable {
+            return Err(format!(
+                "column `{name}` cannot be both `auto_increment` and `nullable`"
+            ));
+        }
+        if attrs.auto_increment && attrs.default.is_some() {
+            return Err(format!(
+                "column `{name}` cannot combine `auto_increment` with a default"
+            ));
+        }
+        if attrs.generated && attrs.default.is_some() {
+            return Err(format!(
+                "column `{name}` cannot combine `generated` with a default"
+            ));
+        }
+        if attrs.generated && attrs.auto_increment {
+            return Err(format!(
+                "column `{name}` cannot be both `generated` and `auto_increment`"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_index_columns(indexes: &[IndexAttrs], fields: &[Field]) -> Result<(), String> {

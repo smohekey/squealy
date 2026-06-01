@@ -3,7 +3,7 @@ use std::io::{self, Write};
 
 use squealy::{
     ArithmeticOp, AssignmentValueRef, BindSink, BindValue, Column, ColumnDefault, ColumnRef,
-    ColumnType, CompareOp, Expr, ExprAst, ExprKind, ExprVisitor, InsertAssignments,
+    ColumnType, CompareOp, Expr, ExprAst, ExprKind, ExprVisitor, Index, InsertAssignments,
     InsertableTable, Order, OrderDirection, Predicate, PredicateAst, PredicateAstVisitor,
     PredicateKind, PredicateNodes, PredicateVisitor, Projectable, ProjectionShape,
     ProjectionVisitor, QueryBuilder, SchemaTable, SelectAst, SelectSink, Selected, SourceAlias,
@@ -222,9 +222,13 @@ where
         let first_source = self.sources == 0;
         self.push_source_separator()?;
         if first_source {
-            write!(self.writer, "FROM {} AS {alias}", S::qualified_name())?;
+            self.writer.write_all(b"FROM ")?;
+            write_table_ref::<S>(self.writer)?;
+            write!(self.writer, " AS {alias}")?;
         } else {
-            write!(self.writer, "{join} {} AS {alias} ON ", S::qualified_name())?;
+            write!(self.writer, "{join} ")?;
+            write_table_ref::<S>(self.writer)?;
+            write!(self.writer, " AS {alias} ON ")?;
             write_predicate_value(&on, self.writer, &mut self.renderer)?;
         }
         Ok(())
@@ -259,7 +263,9 @@ where
         S: TableProjection,
     {
         self.push_source_separator()?;
-        write!(self.writer, "FROM {} AS {alias}", S::qualified_name())
+        self.writer.write_all(b"FROM ")?;
+        write_table_ref::<S>(self.writer)?;
+        write!(self.writer, " AS {alias}")
     }
 
     fn push_inner_join<S, P, Ast>(
@@ -344,7 +350,8 @@ where
     {
         self.push_projection_separator()?;
         write_expr_value(expr, self.writer, &mut self.renderer)?;
-        write!(self.writer, " AS {alias}")?;
+        self.writer.write_all(b" AS ")?;
+        write_quoted_ident(&alias, self.writer)?;
         Ok(())
     }
 
@@ -358,7 +365,8 @@ where
     {
         self.push_projection_separator()?;
         write_column_value(column, self.writer, &mut self.renderer)?;
-        write!(self.writer, " AS {alias}")
+        self.writer.write_all(b" AS ")?;
+        write_quoted_ident(&alias, self.writer)
     }
 }
 
@@ -413,12 +421,15 @@ where
 }
 
 pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -> io::Result<()> {
-    write!(writer, "CREATE TABLE {} (", table.qualified_name())?;
+    writer.write_all(b"CREATE TABLE ")?;
+    write_qualified_name(table.schema_name(), table.name(), writer)?;
+    writer.write_all(b" (")?;
     for (index, column) in table.columns().iter().enumerate() {
         if index > 0 {
             writer.write_all(b", ")?;
         }
-        write!(writer, "{} ", column.name())?;
+        write_quoted_ident(column.name(), writer)?;
+        writer.write_all(b" ")?;
         write_column_type(*column, writer)?;
         if column.primary_key() {
             writer.write_all(b" PRIMARY KEY")?;
@@ -435,10 +446,10 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
         }
         if let Some(reference) = column.references() {
             writer.write_all(b" REFERENCES ")?;
-            if let Some(schema) = reference.schema_name() {
-                write!(writer, "{schema}.")?;
-            }
-            write!(writer, "{}({})", reference.table(), reference.column())?;
+            write_qualified_name(reference.schema_name(), reference.table(), writer)?;
+            writer.write_all(b"(")?;
+            write_quoted_ident(reference.column(), writer)?;
+            writer.write_all(b")")?;
             if let Some(on_delete) = reference.on_delete() {
                 write!(writer, " ON DELETE {on_delete}")?;
             }
@@ -449,19 +460,35 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
     }
     writer.write_all(b")")?;
 
-    for index in table.indexes() {
+    for (position, index) in table.indexes().iter().enumerate() {
         let unique = if index.unique() { "UNIQUE " } else { "" };
-        let name = index.name().unwrap_or("unnamed_idx");
-        write!(
-            writer,
-            "\nCREATE {unique}INDEX {name} ON {} (",
-            table.qualified_name()
-        )?;
-        write_comma_separated(index.columns(), writer)?;
+        write!(writer, "\nCREATE {unique}INDEX ")?;
+        match index.name() {
+            Some(name) => write_quoted_ident(name, writer)?,
+            None => write_quoted_ident(&derived_index_name(table, *index, position), writer)?,
+        }
+        writer.write_all(b" ON ")?;
+        write_qualified_name(table.schema_name(), table.name(), writer)?;
+        writer.write_all(b" (")?;
+        write_quoted_idents(index.columns(), writer)?;
         writer.write_all(b")")?;
     }
 
     Ok(())
+}
+
+/// Builds a deterministic, unique index name for an index that did not supply one.
+/// Without this, every unnamed index would render as the same name and collide.
+fn derived_index_name(table: &(dyn Table + Sync), index: &dyn Index, position: usize) -> String {
+    let mut name = format!("idx_{}", table.name());
+    for column in index.columns() {
+        name.push('_');
+        name.push_str(column);
+    }
+    if index.columns().is_empty() {
+        name.push_str(&format!("_{position}"));
+    }
+    name
 }
 
 fn write_column_type(column: &dyn Column, writer: &mut impl Write) -> io::Result<()> {
@@ -484,12 +511,12 @@ fn postgres_column_type(column_type: ColumnType) -> &'static str {
     }
 }
 
-fn write_comma_separated(values: &[&'static str], writer: &mut impl Write) -> io::Result<()> {
+fn write_quoted_idents(values: &[&'static str], writer: &mut impl Write) -> io::Result<()> {
     for (index, value) in values.iter().enumerate() {
         if index > 0 {
             writer.write_all(b", ")?;
         }
-        writer.write_all(value.as_bytes())?;
+        write_quoted_ident(value, writer)?;
     }
     Ok(())
 }
@@ -522,6 +549,60 @@ fn write_quoted_text(value: &str, writer: &mut impl Write) -> io::Result<()> {
     writer.write_all(b"'")
 }
 
+/// Writes a single SQL identifier wrapped in double quotes, doubling any embedded
+/// quotes. This keeps reserved words (`user`, `order`, ...) and identifiers with
+/// special characters valid. Identifiers come from compile-time table metadata, so
+/// this is robustness, not injection defense.
+fn write_quoted_ident(value: &str, writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(b"\"")?;
+    for byte in value.as_bytes() {
+        if *byte == b'"' {
+            writer.write_all(b"\"\"")?;
+        } else {
+            writer.write_all(std::slice::from_ref(byte))?;
+        }
+    }
+    writer.write_all(b"\"")
+}
+
+/// Writes a schema-qualified table reference with each part quoted separately,
+/// e.g. `"public"."users"`.
+fn write_qualified_name(
+    schema: Option<&str>,
+    name: &str,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    if let Some(schema) = schema {
+        write_quoted_ident(schema, writer)?;
+        writer.write_all(b".")?;
+    }
+    write_quoted_ident(name, writer)
+}
+
+/// Writes a quoted, schema-qualified reference to a `TableProjection` source.
+fn write_table_ref<S>(writer: &mut impl Write) -> io::Result<()>
+where
+    S: TableProjection,
+{
+    write_qualified_name(
+        <S as TableProjection>::schema_name(),
+        <S as TableProjection>::name(),
+        writer,
+    )
+}
+
+/// Writes a quoted, schema-qualified reference to a `SchemaTable` model.
+fn write_schema_table_ref<S>(writer: &mut impl Write) -> io::Result<()>
+where
+    S: SchemaTable,
+{
+    write_qualified_name(
+        <S as SchemaTable>::schema_name(),
+        <S as SchemaTable>::name(),
+        writer,
+    )
+}
+
 pub(crate) fn write_insert<S, Columns, Returning>(
     columns: &Columns,
     returning: &Returning,
@@ -548,11 +629,8 @@ where
     Writer: SqlWriter,
 {
     let mut renderer = Renderer::default();
-    write!(
-        writer,
-        "INSERT INTO {}",
-        <S as SchemaTable>::qualified_name()
-    )?;
+    writer.write_all(b"INSERT INTO ")?;
+    write_schema_table_ref::<S>(writer)?;
     if columns.is_empty() {
         writer.write_all(b" DEFAULT VALUES")?;
     } else {
@@ -563,7 +641,7 @@ where
                 writer.write_all(b", ")?;
             }
             index += 1;
-            writer.write_all(column.as_bytes())?;
+            write_quoted_ident(column, writer)?;
             Ok::<(), io::Error>(())
         })?;
         writer.write_all(b") VALUES (")?;
@@ -614,19 +692,17 @@ where
     Writer: SqlWriter,
 {
     let mut renderer = Renderer::default();
-    write!(
-        writer,
-        "UPDATE {} AS {} SET ",
-        <S as SchemaTable>::qualified_name(),
-        alias
-    )?;
+    writer.write_all(b"UPDATE ")?;
+    write_schema_table_ref::<S>(writer)?;
+    write!(writer, " AS {alias} SET ")?;
     let mut index = 0;
     columns.try_for_each(|column, value| {
         if index > 0 {
             writer.write_all(b", ")?;
         }
         index += 1;
-        write!(writer, "{column} = ")?;
+        write_quoted_ident(column, writer)?;
+        writer.write_all(b" = ")?;
         write_assignment_value(value, writer, &mut renderer)?;
         Ok::<(), io::Error>(())
     })?;
@@ -663,7 +739,9 @@ where
     Writer: SqlWriter,
 {
     let mut renderer = Renderer::default();
-    write!(writer, "DELETE FROM {} AS {}", S::qualified_name(), alias)?;
+    writer.write_all(b"DELETE FROM ")?;
+    write_table_ref::<S>(writer)?;
+    write!(writer, " AS {alias}")?;
     write_filters(filters, writer, &mut renderer)?;
     write_returning(returning, writer, &mut renderer)?;
     Ok(())
@@ -738,7 +816,8 @@ where
     {
         self.write_prefix()?;
         write_expr_value_node(expr, self.writer, self.renderer, self.insert_returning)?;
-        write!(self.writer, " AS {alias}")
+        self.writer.write_all(b" AS ")?;
+        write_quoted_ident(&alias, self.writer)
     }
 
     fn visit_column<K>(
@@ -751,7 +830,8 @@ where
     {
         self.write_prefix()?;
         write_column_value_node(column, self.writer, self.renderer, self.insert_returning)?;
-        write!(self.writer, " AS {alias}")
+        self.writer.write_all(b" AS ")?;
+        write_quoted_ident(&alias, self.writer)
     }
 }
 
@@ -921,9 +1001,10 @@ where
 
     fn visit_column(&mut self, alias: SourceAlias, column: &str) -> Result<(), Self::Error> {
         if self.insert_returning {
-            self.writer.write_all(column.as_bytes())
+            write_quoted_ident(column, self.writer)
         } else {
-            write!(self.writer, "{alias}.{column}")
+            write!(self.writer, "{alias}.")?;
+            write_quoted_ident(column, self.writer)
         }
     }
 
