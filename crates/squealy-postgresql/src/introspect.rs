@@ -344,3 +344,70 @@ fn check_expression(definition: &str) -> String {
         .unwrap_or(definition)
         .to_owned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_postgres_scalar_types_to_neutral_types() {
+        assert_eq!(sql_type("boolean"), SqlType::Bool);
+        assert_eq!(sql_type("smallint"), SqlType::I16);
+        assert_eq!(sql_type("integer"), SqlType::I32);
+        assert_eq!(sql_type("bigint"), SqlType::I64);
+        assert_eq!(sql_type("real"), SqlType::F32);
+        assert_eq!(sql_type("double precision"), SqlType::F64);
+        assert_eq!(sql_type("text"), SqlType::String);
+        assert_eq!(sql_type("date"), SqlType::Date);
+        assert_eq!(
+            sql_type("time without time zone"),
+            SqlType::Time { tz: false }
+        );
+        assert_eq!(sql_type("time with time zone"), SqlType::Time { tz: true });
+        assert_eq!(
+            sql_type("timestamp without time zone"),
+            SqlType::Timestamp { tz: false }
+        );
+        assert_eq!(
+            sql_type("timestamp with time zone"),
+            SqlType::Timestamp { tz: true }
+        );
+        assert_eq!(sql_type("uuid"), SqlType::Uuid);
+        assert_eq!(sql_type("json"), SqlType::Json);
+        assert_eq!(sql_type("jsonb"), SqlType::Jsonb);
+        assert_eq!(sql_type("bytea"), SqlType::Bytes);
+        assert_eq!(sql_type("citext"), SqlType::Raw("citext".to_owned()));
+    }
+
+    #[test]
+    fn maps_postgres_parametric_types_to_neutral_types() {
+        assert_eq!(sql_type("character varying(64)"), SqlType::Varchar(64));
+        assert_eq!(sql_type("character(2)"), SqlType::Char(2));
+        assert_eq!(
+            sql_type("numeric(10,2)"),
+            SqlType::Decimal {
+                precision: 10,
+                scale: 2
+            }
+        );
+        assert_eq!(
+            sql_type("numeric(10,2)[]"),
+            SqlType::Raw("numeric(10,2)[]".to_owned())
+        );
+    }
+
+    #[test]
+    fn maps_foreign_key_actions() {
+        assert_eq!(action("a"), None);
+        assert_eq!(action("c"), Some("cascade".to_owned()));
+        assert_eq!(action("r"), Some("restrict".to_owned()));
+        assert_eq!(action("n"), Some("set null".to_owned()));
+        assert_eq!(action("d"), Some("set default".to_owned()));
+    }
+
+    #[test]
+    fn strips_check_wrapper() {
+        assert_eq!(check_expression("CHECK ((score > 0))"), "(score > 0)");
+        assert_eq!(check_expression("score > 0"), "score > 0");
+    }
+}
