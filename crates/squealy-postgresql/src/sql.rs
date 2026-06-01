@@ -537,16 +537,29 @@ fn write_default(default: ColumnDefault, writer: &mut impl Write) -> io::Result<
     }
 }
 
-fn write_quoted_text(value: &str, writer: &mut impl Write) -> io::Result<()> {
-    writer.write_all(b"'")?;
-    for byte in value.as_bytes() {
-        if *byte == b'\'' {
-            writer.write_all(b"''")?;
-        } else {
-            writer.write_all(std::slice::from_ref(byte))?;
-        }
+/// Writes `value` wrapped in `delimiter` quotes, doubling any embedded delimiter.
+///
+/// Whole UTF-8 slices are written between delimiters rather than individual bytes,
+/// so writers that validate each `write` chunk as UTF-8 (such as the string-backed
+/// SQL writer) accept multibyte identifiers and literals like `café`.
+fn write_quoted(value: &str, delimiter: char, writer: &mut impl Write) -> io::Result<()> {
+    let mut encoded = [0u8; 4];
+    let delim = delimiter.encode_utf8(&mut encoded).as_bytes();
+
+    writer.write_all(delim)?;
+    let mut start = 0;
+    for (index, _) in value.match_indices(delimiter) {
+        writer.write_all(value[start..index].as_bytes())?;
+        writer.write_all(delim)?;
+        writer.write_all(delim)?;
+        start = index + delimiter.len_utf8();
     }
-    writer.write_all(b"'")
+    writer.write_all(value[start..].as_bytes())?;
+    writer.write_all(delim)
+}
+
+fn write_quoted_text(value: &str, writer: &mut impl Write) -> io::Result<()> {
+    write_quoted(value, '\'', writer)
 }
 
 /// Writes a single SQL identifier wrapped in double quotes, doubling any embedded
@@ -554,15 +567,7 @@ fn write_quoted_text(value: &str, writer: &mut impl Write) -> io::Result<()> {
 /// special characters valid. Identifiers come from compile-time table metadata, so
 /// this is robustness, not injection defense.
 fn write_quoted_ident(value: &str, writer: &mut impl Write) -> io::Result<()> {
-    writer.write_all(b"\"")?;
-    for byte in value.as_bytes() {
-        if *byte == b'"' {
-            writer.write_all(b"\"\"")?;
-        } else {
-            writer.write_all(std::slice::from_ref(byte))?;
-        }
-    }
-    writer.write_all(b"\"")
+    write_quoted(value, '"', writer)
 }
 
 /// Writes a schema-qualified table reference with each part quoted separately,

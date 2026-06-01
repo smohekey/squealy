@@ -291,3 +291,26 @@ fn postgres_ddl_gives_unnamed_indexes_distinct_names() {
         "second unnamed index missing or wrong: {sql}"
     );
 }
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct Accented<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    #[column(name = "café")]
+    cafe: C::Type<'scope, String>,
+}
+
+#[test]
+fn postgres_renders_non_ascii_identifiers() {
+    // The string-backed SQL writer validates each write chunk as UTF-8, so quoting
+    // must emit whole characters rather than individual bytes. Rendering a multibyte
+    // identifier through to_sql() would otherwise panic mid-character.
+    let query = Postgres
+        .from::<Accented>()
+        .select(|(row,)| (row.id, row.cafe));
+
+    assert_eq!(
+        query.to_sql(),
+        "SELECT q0_0.\"id\" AS \"t0_id\", q0_0.\"café\" AS \"t1_café\" FROM \"accenteds\" AS q0_0"
+    );
+}
