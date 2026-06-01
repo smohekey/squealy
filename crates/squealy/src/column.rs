@@ -88,6 +88,18 @@ pub enum ColumnType {
     F64,
     String,
     Bool,
+    // Structured types produced by parsing `#[column(db_type = "...")]` and (later) by introspection.
+    Varchar(u32),
+    Char(u32),
+    Text,
+    Decimal { precision: u32, scale: u32 },
+    Date,
+    Time { tz: bool },
+    Timestamp { tz: bool },
+    Uuid,
+    Json,
+    Jsonb,
+    Bytes,
     Raw(&'static str),
 }
 

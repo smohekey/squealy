@@ -112,7 +112,8 @@ fn entry(writer: &mut impl Write, first: &mut bool) -> io::Result<()> {
 
 fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()> {
     write_quoted_ident(&column.name, writer)?;
-    write!(writer, " {}", mysql_sql_type(&column.ty))?;
+    writer.write_all(b" ")?;
+    write_mysql_sql_type(&column.ty, writer)?;
     if !column.nullable {
         writer.write_all(b" NOT NULL")?;
     }
@@ -126,14 +127,13 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
     Ok(())
 }
 
-/// Maps the neutral [`SqlType`] to a MySQL DDL type.
+/// Renders the neutral [`SqlType`] as a MySQL DDL type.
 ///
-/// Unlike PostgreSQL, MySQL has native unsigned integers, no first-class unbounded `text` usable in
-/// keys, and a `TINYINT(1)` boolean — so `String` becomes `VARCHAR(255)` (index-safe) here. That
-/// `SqlType::String` is "unbounded text" with no length is a neutral-model nuance each backend renders
-/// its own way; introspection/diff will want a length-carrying string type eventually.
-fn mysql_sql_type(ty: &SqlType) -> &str {
-    match ty {
+/// MySQL differs from PostgreSQL in several ways the neutral model surfaces: native unsigned integers,
+/// a `TINYINT(1)` boolean, no unbounded `text` usable in keys (so bare `String` becomes `VARCHAR(255)`),
+/// no native `uuid` (rendered `CHAR(36)`) and only `JSON` (so `Jsonb` also renders `JSON`).
+fn write_mysql_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()> {
+    let name = match ty {
         SqlType::Bool => "TINYINT(1)",
         SqlType::I8 => "TINYINT",
         SqlType::I16 => "SMALLINT",
@@ -146,8 +146,22 @@ fn mysql_sql_type(ty: &SqlType) -> &str {
         SqlType::F32 => "FLOAT",
         SqlType::F64 => "DOUBLE",
         SqlType::String => "VARCHAR(255)",
+        SqlType::Varchar(length) => return write!(writer, "VARCHAR({length})"),
+        SqlType::Char(length) => return write!(writer, "CHAR({length})"),
+        SqlType::Text => "TEXT",
+        SqlType::Decimal { precision, scale } => {
+            return write!(writer, "DECIMAL({precision},{scale})");
+        }
+        SqlType::Date => "DATE",
+        SqlType::Time { .. } => "TIME",
+        SqlType::Timestamp { tz: true } => "TIMESTAMP",
+        SqlType::Timestamp { tz: false } => "DATETIME",
+        SqlType::Uuid => "CHAR(36)",
+        SqlType::Json | SqlType::Jsonb => "JSON",
+        SqlType::Bytes => "BLOB",
         SqlType::Raw(raw) => raw.as_str(),
-    }
+    };
+    writer.write_all(name.as_bytes())
 }
 
 fn write_default_value(default: &DefaultValue, writer: &mut impl Write) -> io::Result<()> {
@@ -281,4 +295,59 @@ fn write_quoted_ident_list(columns: &[String], writer: &mut impl Write) -> io::R
         write_quoted_ident(column, writer)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render_type(ty: SqlType) -> String {
+        let mut out = Vec::new();
+        write_mysql_sql_type(&ty, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn mysql_types_map_to_mysql_ddl_types() {
+        let cases = [
+            (SqlType::Bool, "TINYINT(1)"),
+            (SqlType::I8, "TINYINT"),
+            (SqlType::I16, "SMALLINT"),
+            (SqlType::I32, "INT"),
+            (SqlType::I64, "BIGINT"),
+            (SqlType::U8, "TINYINT UNSIGNED"),
+            (SqlType::U32, "INT UNSIGNED"),
+            (SqlType::U64, "BIGINT UNSIGNED"),
+            (SqlType::F32, "FLOAT"),
+            (SqlType::F64, "DOUBLE"),
+            (SqlType::String, "VARCHAR(255)"),
+            (SqlType::Raw("GEOMETRY".to_owned()), "GEOMETRY"),
+        ];
+
+        for (ty, expected) in cases {
+            assert_eq!(render_type(ty), expected);
+        }
+    }
+
+    #[test]
+    fn mysql_renders_structured_types() {
+        assert_eq!(render_type(SqlType::Varchar(64)), "VARCHAR(64)");
+        assert_eq!(render_type(SqlType::Char(2)), "CHAR(2)");
+        assert_eq!(render_type(SqlType::Text), "TEXT");
+        assert_eq!(
+            render_type(SqlType::Decimal {
+                precision: 10,
+                scale: 2
+            }),
+            "DECIMAL(10,2)"
+        );
+        assert_eq!(render_type(SqlType::Date), "DATE");
+        assert_eq!(render_type(SqlType::Time { tz: false }), "TIME");
+        assert_eq!(render_type(SqlType::Timestamp { tz: false }), "DATETIME");
+        assert_eq!(render_type(SqlType::Timestamp { tz: true }), "TIMESTAMP");
+        assert_eq!(render_type(SqlType::Uuid), "CHAR(36)");
+        assert_eq!(render_type(SqlType::Json), "JSON");
+        assert_eq!(render_type(SqlType::Jsonb), "JSON");
+        assert_eq!(render_type(SqlType::Bytes), "BLOB");
+    }
 }
