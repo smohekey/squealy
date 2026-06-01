@@ -56,4 +56,10 @@ jobs:
       - name: Integration tests (PostgreSQL)
         env:
           SQUEALY_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/squealy_test
-        run: cargo test -p squealy-postgresql --test integration -- --ignored --test-threads=1
+        run: |
+          cargo test -p squealy-postgresql --test integration -- --ignored --test-threads=1
+          cargo test -p squealy-model --test publish -- --ignored --test-threads=1
+
+      # Compiles + runs an extraction stub against a fixture crate (no database needed).
+      - name: CLI extraction test
+        run: cargo test -p squealy-cli --test cli -- --ignored

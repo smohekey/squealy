@@ -268,12 +268,15 @@ mod expr;
 mod foreign_key;
 mod index;
 mod list;
+mod model;
 mod projection;
 mod query;
 mod schema;
 mod table;
 
-pub use backend::{Backend, Decode, DecodeNullable, RowReader};
+pub use backend::{
+    Backend, DdlExecutor, Decode, DecodeNullable, RowReader, SchemaBackend, SchemaConnect,
+};
 pub use column::{
     Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullableValue, ColumnType,
     ColumnValue, HasColumnType,
@@ -294,6 +297,10 @@ pub use index::Index;
 pub use list::{
     BindSink, FixedList, HAppend, HCons, HList, HNil, IntoPreparedParam, MapFixedList,
     NoRuntimeParams, PreparedParamValues, PushBack, ToTuple, TupleAppend, TupleConcat,
+};
+pub use model::{
+    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyModel, IndexModel,
+    SchemaModel, SqlType, TableModel,
 };
 pub use projection::{Maybe, Projectable, ProjectionShape, ProjectionVisitor, TableProjection};
 pub use query::{
