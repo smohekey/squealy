@@ -210,11 +210,7 @@ fn column_to_node(column: &ColumnModel) -> KdlNode {
     let mut node = KdlNode::new("column");
     node.push(KdlEntry::new(column.name.clone()));
 
-    let (type_name, raw) = sql_type_parts(&column.ty);
-    node.push(KdlEntry::new_prop("type", type_name));
-    if let Some(raw) = raw {
-        node.push(KdlEntry::new_prop("raw", raw));
-    }
+    write_sql_type(&mut node, &column.ty);
     if column.nullable {
         node.push(KdlEntry::new_prop("nullable", KdlValue::Bool(true)));
     }
@@ -295,25 +291,64 @@ fn check_to_node(check: &CheckModel) -> KdlNode {
     node
 }
 
-fn sql_type_parts(ty: &SqlType) -> (&'static str, Option<String>) {
+fn write_sql_type(node: &mut KdlNode, ty: &SqlType) {
+    let name = match ty {
+        SqlType::I8 => "i8",
+        SqlType::I16 => "i16",
+        SqlType::I32 => "i32",
+        SqlType::I64 => "i64",
+        SqlType::I128 => "i128",
+        SqlType::Isize => "isize",
+        SqlType::U8 => "u8",
+        SqlType::U16 => "u16",
+        SqlType::U32 => "u32",
+        SqlType::U64 => "u64",
+        SqlType::U128 => "u128",
+        SqlType::Usize => "usize",
+        SqlType::F32 => "f32",
+        SqlType::F64 => "f64",
+        SqlType::String => "string",
+        SqlType::Bool => "bool",
+        SqlType::Varchar(_) => "varchar",
+        SqlType::Char(_) => "char",
+        SqlType::Text => "text",
+        SqlType::Decimal { .. } => "decimal",
+        SqlType::Date => "date",
+        SqlType::Time { .. } => "time",
+        SqlType::Timestamp { .. } => "timestamp",
+        SqlType::Uuid => "uuid",
+        SqlType::Json => "json",
+        SqlType::Jsonb => "jsonb",
+        SqlType::Bytes => "bytes",
+        SqlType::Raw(_) => "raw",
+    };
+    node.push(KdlEntry::new_prop("type", name));
+
+    // Structured extras (purely-default `tz=#false` is omitted).
     match ty {
-        SqlType::I8 => ("i8", None),
-        SqlType::I16 => ("i16", None),
-        SqlType::I32 => ("i32", None),
-        SqlType::I64 => ("i64", None),
-        SqlType::I128 => ("i128", None),
-        SqlType::Isize => ("isize", None),
-        SqlType::U8 => ("u8", None),
-        SqlType::U16 => ("u16", None),
-        SqlType::U32 => ("u32", None),
-        SqlType::U64 => ("u64", None),
-        SqlType::U128 => ("u128", None),
-        SqlType::Usize => ("usize", None),
-        SqlType::F32 => ("f32", None),
-        SqlType::F64 => ("f64", None),
-        SqlType::String => ("string", None),
-        SqlType::Bool => ("bool", None),
-        SqlType::Raw(raw) => ("raw", Some(raw.clone())),
+        SqlType::Varchar(length) | SqlType::Char(length) => {
+            node.push(KdlEntry::new_prop(
+                "length",
+                KdlValue::Integer(*length as i128),
+            ));
+        }
+        SqlType::Decimal { precision, scale } => {
+            node.push(KdlEntry::new_prop(
+                "precision",
+                KdlValue::Integer(*precision as i128),
+            ));
+            node.push(KdlEntry::new_prop(
+                "scale",
+                KdlValue::Integer(*scale as i128),
+            ));
+        }
+        SqlType::Time { tz: true } | SqlType::Timestamp { tz: true } => {
+            node.push(KdlEntry::new_prop("tz", KdlValue::Bool(true)));
+        }
+        SqlType::Raw(raw) => {
+            node.push(KdlEntry::new_prop("raw", raw.clone()));
+        }
+        _ => {}
     }
 }
 
@@ -465,9 +500,43 @@ fn sql_type_from_node(node: &KdlNode) -> Result<SqlType, PackageError> {
         "f64" => SqlType::F64,
         "string" => SqlType::String,
         "bool" => SqlType::Bool,
+        "varchar" => SqlType::Varchar(required_u32(node, "length")?),
+        "char" => SqlType::Char(required_u32(node, "length")?),
+        "text" => SqlType::Text,
+        "decimal" => SqlType::Decimal {
+            precision: required_u32(node, "precision")?,
+            scale: required_u32(node, "scale")?,
+        },
+        "date" => SqlType::Date,
+        "time" => SqlType::Time {
+            tz: prop_bool(node, "tz"),
+        },
+        "timestamp" => SqlType::Timestamp {
+            tz: prop_bool(node, "tz"),
+        },
+        "uuid" => SqlType::Uuid,
+        "json" => SqlType::Json,
+        "jsonb" => SqlType::Jsonb,
+        "bytes" => SqlType::Bytes,
         "raw" => SqlType::Raw(required_prop(node, "raw")?),
         other => return Err(malformed(format!("unknown column type `{other}`"))),
     })
+}
+
+/// Reads a required `u32` integer property (length/precision/scale).
+fn required_u32(node: &KdlNode, key: &str) -> Result<u32, PackageError> {
+    let value = node
+        .entries()
+        .iter()
+        .find(|entry| entry.name().map(|name| name.value()) == Some(key))
+        .and_then(|entry| entry.value().as_integer())
+        .ok_or_else(|| {
+            malformed(format!(
+                "`{}` is missing integer `{key}`",
+                node.name().value()
+            ))
+        })?;
+    u32::try_from(value).map_err(|_| malformed(format!("`{key}` is out of range for u32")))
 }
 
 fn default_from_node(node: &KdlNode) -> Result<Option<DefaultValue>, PackageError> {
@@ -699,5 +768,62 @@ mod tests {
 
         let parsed = from_kdl(&to_kdl(&model)).expect("parse");
         assert_eq!(parsed, model);
+    }
+
+    #[test]
+    fn kdl_round_trips_structured_types() {
+        // Every structured SqlType variant must survive the KDL encode/decode, including the
+        // parametric ones (length/precision/scale) and the tz flag on time/timestamp.
+        let types = [
+            SqlType::Varchar(64),
+            SqlType::Char(2),
+            SqlType::Text,
+            SqlType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+            SqlType::Date,
+            SqlType::Time { tz: false },
+            SqlType::Time { tz: true },
+            SqlType::Timestamp { tz: false },
+            SqlType::Timestamp { tz: true },
+            SqlType::Uuid,
+            SqlType::Json,
+            SqlType::Jsonb,
+            SqlType::Bytes,
+            SqlType::Raw("citext".to_owned()),
+        ];
+
+        let columns = types
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| ColumnModel {
+                name: format!("c{index}"),
+                ty: ty.clone(),
+                nullable: false,
+                default: None,
+                auto_increment: false,
+                generated: false,
+            })
+            .collect();
+
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "structured".to_owned(),
+                    columns,
+                    primary_key: None,
+                    foreign_keys: vec![],
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(parsed, model, "structured-type round-trip diverged:\n{kdl}");
     }
 }

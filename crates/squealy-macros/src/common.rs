@@ -258,6 +258,80 @@ pub(crate) fn compile_error(message: &str) -> TokenStream {
     .into()
 }
 
+/// Parses a `db_type = "..."` string into a structured [`ColumnType`](::squealy::ColumnType) where
+/// recognized, falling back to `ColumnType::Raw` (verbatim) for anything else. Matching is
+/// case-insensitive; the `Raw` fallback preserves the original spelling. Shared by the `Table` and
+/// `ColumnType` derives.
+pub(crate) fn parse_db_type(db_type: &str) -> proc_macro2::TokenStream {
+    let original = db_type.trim();
+    let lower = original.to_ascii_lowercase();
+
+    let simple = match lower.as_str() {
+        "text" => Some(quote::quote! { ::squealy::ColumnType::Text }),
+        "date" => Some(quote::quote! { ::squealy::ColumnType::Date }),
+        "time" => Some(quote::quote! { ::squealy::ColumnType::Time { tz: false } }),
+        "time with time zone" | "timetz" => {
+            Some(quote::quote! { ::squealy::ColumnType::Time { tz: true } })
+        }
+        "timestamp" | "datetime" => {
+            Some(quote::quote! { ::squealy::ColumnType::Timestamp { tz: false } })
+        }
+        "timestamp with time zone" | "timestamptz" => {
+            Some(quote::quote! { ::squealy::ColumnType::Timestamp { tz: true } })
+        }
+        "uuid" => Some(quote::quote! { ::squealy::ColumnType::Uuid }),
+        "json" => Some(quote::quote! { ::squealy::ColumnType::Json }),
+        "jsonb" => Some(quote::quote! { ::squealy::ColumnType::Jsonb }),
+        "bytea" | "blob" | "bytes" => Some(quote::quote! { ::squealy::ColumnType::Bytes }),
+        _ => None,
+    };
+    if let Some(tokens) = simple {
+        return tokens;
+    }
+
+    // Parametric: `varchar(n)`, `char(n)`, `decimal(p,s)` / `numeric(p,s)`.
+    if let Some((kind, args)) = split_type_args(&lower) {
+        match kind {
+            "varchar" | "character varying" => {
+                if let Ok(length) = args.trim().parse::<u32>() {
+                    return quote::quote! { ::squealy::ColumnType::Varchar(#length) };
+                }
+            }
+            "char" | "character" => {
+                if let Ok(length) = args.trim().parse::<u32>() {
+                    return quote::quote! { ::squealy::ColumnType::Char(#length) };
+                }
+            }
+            "decimal" | "numeric" => {
+                let parts = args.split(',').map(str::trim).collect::<Vec<_>>();
+                if let [precision, scale] = parts[..] {
+                    if let (Ok(precision), Ok(scale)) =
+                        (precision.parse::<u32>(), scale.parse::<u32>())
+                    {
+                        return quote::quote! {
+                            ::squealy::ColumnType::Decimal { precision: #precision, scale: #scale }
+                        };
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    quote::quote! { ::squealy::ColumnType::Raw(#original) }
+}
+
+/// Splits `"name(args)"` into `(name, args)`, trimming the name. Returns `None` if there is no
+/// parenthesized argument list.
+fn split_type_args(input: &str) -> Option<(&str, &str)> {
+    let open = input.find('(')?;
+    let close = input.rfind(')')?;
+    if close < open || close + 1 != input.len() {
+        return None;
+    }
+    Some((input[..open].trim(), &input[open + 1..close]))
+}
+
 /// A macro error carrying a diagnostic message and the source span it refers to.
 ///
 /// Leaf parsing helpers can return a plain `String` (or `&str`); the `From`

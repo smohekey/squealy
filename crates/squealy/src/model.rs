@@ -79,6 +79,24 @@ pub enum SqlType {
     F64,
     String,
     Bool,
+    Varchar(u32),
+    Char(u32),
+    Text,
+    Decimal {
+        precision: u32,
+        scale: u32,
+    },
+    Date,
+    Time {
+        tz: bool,
+    },
+    Timestamp {
+        tz: bool,
+    },
+    Uuid,
+    Json,
+    Jsonb,
+    Bytes,
     /// A backend-specific type name, emitted verbatim into DDL.
     Raw(String),
 }
@@ -102,6 +120,17 @@ impl From<ColumnType> for SqlType {
             ColumnType::F64 => SqlType::F64,
             ColumnType::String => SqlType::String,
             ColumnType::Bool => SqlType::Bool,
+            ColumnType::Varchar(length) => SqlType::Varchar(length),
+            ColumnType::Char(length) => SqlType::Char(length),
+            ColumnType::Text => SqlType::Text,
+            ColumnType::Decimal { precision, scale } => SqlType::Decimal { precision, scale },
+            ColumnType::Date => SqlType::Date,
+            ColumnType::Time { tz } => SqlType::Time { tz },
+            ColumnType::Timestamp { tz } => SqlType::Timestamp { tz },
+            ColumnType::Uuid => SqlType::Uuid,
+            ColumnType::Json => SqlType::Json,
+            ColumnType::Jsonb => SqlType::Jsonb,
+            ColumnType::Bytes => SqlType::Bytes,
             ColumnType::Raw(raw) => SqlType::Raw(raw.to_owned()),
         }
     }
@@ -328,6 +357,10 @@ mod tests {
         email: C::Type<'scope, String>,
         #[column(index)]
         name: C::Type<'scope, String>,
+        #[column(db_type = "varchar(16)")]
+        code: C::Type<'scope, String>,
+        #[column(db_type = "jsonb")]
+        payload: C::Type<'scope, String>,
     }
 
     #[derive(Clone, Debug, PartialEq, Table)]
@@ -404,6 +437,25 @@ mod tests {
         assert_eq!(id.ty, SqlType::I32);
         assert!(id.auto_increment);
         assert!(!id.nullable);
+    }
+
+    #[test]
+    fn maps_db_type_columns_into_structured_sql_types() {
+        // `#[column(db_type = "...")]` parses to a structured `ColumnType` in the derive, which the
+        // walker carries through `From<ColumnType> for SqlType` into the owned model.
+        let model = DatabaseModel::from_database::<App>();
+        let users = table(&model, "users");
+
+        let column = |name: &str| {
+            users
+                .columns
+                .iter()
+                .find(|column| column.name == name)
+                .unwrap_or_else(|| panic!("column `{name}` not found"))
+        };
+
+        assert_eq!(column("code").ty, SqlType::Varchar(16));
+        assert_eq!(column("payload").ty, SqlType::Jsonb);
     }
 
     #[test]

@@ -3,7 +3,8 @@ use proc_macro2::{Literal, Span, TokenStream as TokenStream2};
 
 use crate::common::{
     MacroError, bool_tokens, foreign_key_ident, generated_ident, is_attribute_start,
-    literal_string, matches_ident, option_literal, required_literal, to_pascal, to_snake_plural,
+    literal_string, matches_ident, option_literal, parse_db_type, required_literal, to_pascal,
+    to_snake_plural,
 };
 
 pub(crate) fn derive(input: TokenStream) -> TokenStream {
@@ -1365,7 +1366,7 @@ impl Field {
         let default = self.default_tokens();
         let value_ty = &self.value_ty;
         let column_type = if let Some(db_type) = self.attrs.db_type.as_deref() {
-            quote::quote! { ::squealy::ColumnType::Raw(#db_type) }
+            parse_db_type(db_type)
         } else {
             quote::quote! { <#value_ty as ::squealy::HasColumnType>::COLUMN_TYPE }
         };

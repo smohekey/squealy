@@ -378,11 +378,11 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
 }
 
 fn write_column_type(column: &dyn Column, writer: &mut impl Write) -> io::Result<()> {
-    writer.write_all(test_column_type(column.column_type()).as_bytes())
+    write_test_column_type(column.column_type(), writer)
 }
 
-fn test_column_type(column_type: ColumnType) -> &'static str {
-    match column_type {
+fn write_test_column_type(column_type: ColumnType, writer: &mut impl Write) -> io::Result<()> {
+    let name = match column_type {
         ColumnType::Raw(db_type) => db_type,
         ColumnType::Bool => "boolean",
         ColumnType::I8 | ColumnType::I16 => "smallint",
@@ -395,8 +395,33 @@ fn test_column_type(column_type: ColumnType) -> &'static str {
         ColumnType::U64 | ColumnType::U128 => "numeric",
         ColumnType::F32 => "real",
         ColumnType::F64 => "double precision",
-        ColumnType::String => "text",
-    }
+        ColumnType::String | ColumnType::Text => "text",
+        ColumnType::Varchar(length) => return write!(writer, "varchar({length})"),
+        ColumnType::Char(length) => return write!(writer, "char({length})"),
+        ColumnType::Decimal { precision, scale } => {
+            return write!(writer, "numeric({precision},{scale})");
+        }
+        ColumnType::Date => "date",
+        ColumnType::Time { tz } => {
+            if tz {
+                "time with time zone"
+            } else {
+                "time"
+            }
+        }
+        ColumnType::Timestamp { tz } => {
+            if tz {
+                "timestamp with time zone"
+            } else {
+                "timestamp"
+            }
+        }
+        ColumnType::Uuid => "uuid",
+        ColumnType::Json => "json",
+        ColumnType::Jsonb => "jsonb",
+        ColumnType::Bytes => "bytea",
+    };
+    writer.write_all(name.as_bytes())
 }
 
 fn write_comma_separated(values: &[&'static str], writer: &mut impl Write) -> io::Result<()> {
@@ -1040,7 +1065,9 @@ mod tests {
         ];
 
         for (column_type, db_type) in cases {
-            assert_eq!(test_column_type(column_type), db_type);
+            let mut out = Vec::new();
+            write_test_column_type(column_type, &mut out).unwrap();
+            assert_eq!(String::from_utf8(out).unwrap(), db_type);
         }
     }
 }
