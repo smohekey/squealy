@@ -42,6 +42,17 @@ fn postgres_select_uses_numbered_placeholders() {
 }
 
 #[test]
+fn postgres_division_renders_fractional_result() {
+    let users = Postgres.from::<User>().select(|(user,)| user.id / 2);
+
+    assert_eq!(
+        users.to_sql(),
+        "SELECT (CAST(q0_0.\"id\" AS double precision) / CAST($1 AS double precision)) AS \"expr\" FROM \"public\".\"users\" AS q0_0"
+    );
+    assert_eq!(users.collect_params(), vec![BindValue::Int(2)]);
+}
+
+#[test]
 fn postgres_runtime_prepared_params_render_without_captured_values() {
     let users = Postgres
         .from::<User>()
