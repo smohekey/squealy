@@ -256,17 +256,23 @@ fn foreign_key_to_node(foreign_key: &ForeignKeyModel) -> KdlNode {
         "references-table",
         foreign_key.references_table.clone(),
     ));
-    // Local args and these remote columns pair by position.
-    node.push(KdlEntry::new_prop(
-        "references-columns",
-        foreign_key.references_columns.join(" "),
-    ));
     if let Some(on_delete) = &foreign_key.on_delete {
         node.push(KdlEntry::new_prop("on-delete", on_delete.clone()));
     }
     if let Some(on_update) = &foreign_key.on_update {
         node.push(KdlEntry::new_prop("on-update", on_update.clone()));
     }
+
+    // Referenced columns go in a child node as separate KDL values (paired by position with the
+    // local columns above), so names containing whitespace survive the round-trip.
+    let mut references = KdlNode::new("references");
+    for column in &foreign_key.references_columns {
+        references.push(KdlEntry::new(column.clone()));
+    }
+    let mut children = KdlDocument::new();
+    children.nodes_mut().push(references);
+    node.set_children(children);
+
     node
 }
 
@@ -416,11 +422,10 @@ fn foreign_key_from_node(node: &KdlNode) -> Result<ForeignKeyModel, PackageError
         columns: args(node),
         references_schema: prop(node, "references-schema").map(str::to_owned),
         references_table: required_prop(node, "references-table")?,
-        references_columns: prop(node, "references-columns")
-            .unwrap_or_default()
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect(),
+        references_columns: child_nodes(node, "references")
+            .next()
+            .map(args)
+            .unwrap_or_default(),
         on_delete: prop(node, "on-delete").map(str::to_owned),
         on_update: prop(node, "on-update").map(str::to_owned),
     })
@@ -655,6 +660,44 @@ mod tests {
         let mut buffer = Vec::new();
         write_package_to(&model, Cursor::new(&mut buffer)).expect("write package");
         let parsed = read_package_from(Cursor::new(buffer)).expect("read package");
+        assert_eq!(parsed, model);
+    }
+
+    #[test]
+    fn kdl_round_trips_names_with_whitespace() {
+        // Column names can contain whitespace (e.g. `#[column(name = "user id")]`); local and
+        // referenced foreign-key columns must survive the round-trip as distinct values.
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "events".to_owned(),
+                    columns: vec![ColumnModel {
+                        name: "user id".to_owned(),
+                        ty: SqlType::I32,
+                        nullable: false,
+                        default: None,
+                        auto_increment: false,
+                        generated: false,
+                    }],
+                    primary_key: None,
+                    foreign_keys: vec![ForeignKeyModel {
+                        name: "fk_events_user_id".to_owned(),
+                        columns: vec!["user id".to_owned()],
+                        references_schema: None,
+                        references_table: "users".to_owned(),
+                        references_columns: vec!["account id".to_owned()],
+                        on_delete: None,
+                        on_update: None,
+                    }],
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let parsed = from_kdl(&to_kdl(&model)).expect("parse");
         assert_eq!(parsed, model);
     }
 }
