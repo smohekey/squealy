@@ -1,14 +1,18 @@
 [package]
 name = "squealy-postgresql"
-version = "0.1.0"
-edition = "2024"
 description = "PostgreSQL backend for squealy"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 bytes = "1"
-futures-core = "0.3"
-squealy = { path = "../squealy" }
+futures-core.workspace = true
+squealy.workspace = true
 tokio-postgres = "0.7"
 
 [dev-dependencies]

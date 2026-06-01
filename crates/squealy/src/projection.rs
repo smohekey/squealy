@@ -142,6 +142,12 @@ where
 /// A table-backed projection shape that can also provide its SQL source name.
 pub trait TableProjection: ProjectionShape {
     fn qualified_name() -> Cow<'static, str>;
+
+    /// Returns the containing schema namespace for this table, if one is configured.
+    fn schema_name() -> Option<&'static str>;
+
+    /// Returns the unqualified table name for this table.
+    fn name() -> &'static str;
 }
 
 impl<S> TableProjection for S
@@ -152,6 +158,14 @@ where
 {
     fn qualified_name() -> Cow<'static, str> {
         <S as SchemaTable>::qualified_name()
+    }
+
+    fn schema_name() -> Option<&'static str> {
+        <S as SchemaTable>::schema_name()
+    }
+
+    fn name() -> &'static str {
+        <S as SchemaTable>::name()
     }
 }
 
