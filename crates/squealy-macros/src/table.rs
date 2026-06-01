@@ -121,6 +121,36 @@ impl TableStruct {
             .iter()
             .map(|field| field.value_ty.clone())
             .collect::<Vec<_>>();
+        // For each `references(Table::column)` foreign key, assert at compile time that the local
+        // column's value type matches the referenced column's — so a mismatched FK fails to compile
+        // rather than producing DDL the database rejects.
+        let fk_type_assertions = self
+            .fields
+            .iter()
+            .filter_map(|field| {
+                let references = field.attrs.references.as_ref()?;
+                let table = references.table.as_ref()?;
+                let column = references.column.as_ref()?;
+                let referenced_marker = proc_macro2::Ident::new(
+                    &format!("{}{}", table, to_pascal(&column.to_string())),
+                    Span::call_site(),
+                );
+                let local_value_ty = field.value_ty.clone();
+                Some(quote::quote! {
+                    const _: fn() = || {
+                        fn assert_foreign_key_column_type<A, B>()
+                        where
+                            A: ::squealy::SameValue<B>,
+                        {
+                        }
+                        assert_foreign_key_column_type::<
+                            #local_value_ty,
+                            <#referenced_marker as ::squealy::ExprKind>::Value,
+                        >();
+                    };
+                })
+            })
+            .collect::<Vec<_>>();
         let row_field_value_tys = self
             .fields
             .iter()
@@ -243,6 +273,7 @@ impl TableStruct {
             });
 
         quote::quote! {
+            #(#fk_type_assertions)*
             #(#foreign_key_defs)*
             #(#column_defs)*
             #(#index_defs)*

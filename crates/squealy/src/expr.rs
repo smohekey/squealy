@@ -410,6 +410,18 @@ pub trait ExprKind {
     type Value;
 }
 
+/// Compile-time witness that two column value types are identical.
+///
+/// The `Table` derive emits a `LocalType: SameValue<<ReferencedColumn as ExprKind>::Value>` bound for
+/// each `references(...)` foreign key, so a foreign key whose column type does not match the
+/// referenced column's type fails to compile. The only implementor is the reflexive blanket impl, so
+/// `A: SameValue<B>` holds exactly when `A` and `B` are the same type.
+#[doc(hidden)]
+pub trait SameValue<T> {}
+
+#[doc(hidden)]
+impl<T> SameValue<T> for T {}
+
 #[doc(hidden)]
 pub trait ExprAst: Clone {
     type Params: crate::HList;

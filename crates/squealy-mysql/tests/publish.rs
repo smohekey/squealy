@@ -16,10 +16,22 @@ struct Widget<'scope, C: ColumnMode = ColumnExpr> {
     seats: C::Type<'scope, u32>,
 }
 
+// A referencing table so the live test exercises FK creation (the `ALTER … ADD CONSTRAINT` MySQL is
+// strict about). `widget_id` matches `Widget::id` in size and sign.
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Catalog)]
+struct Part<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    #[column(index, references(Widget::id, on_delete = "cascade"))]
+    widget_id: C::Type<'scope, i32>,
+}
+
 #[allow(dead_code)]
 #[derive(Schema)]
 struct Catalog {
     widgets: Widget<'static, ColumnName>,
+    parts: Part<'static, ColumnName>,
 }
 
 #[allow(dead_code)]
