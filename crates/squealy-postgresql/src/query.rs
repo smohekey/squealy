@@ -439,6 +439,11 @@ impl ToSql for PostgresNumericInteger {
         ty: &Type,
         out: &mut BytesMut,
     ) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
+        if *ty == Type::FLOAT8 {
+            out.put_f64(self.as_f64());
+            return Ok(IsNull::No);
+        }
+
         if *ty != Type::NUMERIC {
             return Err(format!("PostgresNumericInteger does not support SQL type {ty:?}").into());
         }
@@ -448,10 +453,17 @@ impl ToSql for PostgresNumericInteger {
     }
 
     fn accepts(ty: &Type) -> bool {
-        *ty == Type::NUMERIC
+        matches!(*ty, Type::NUMERIC | Type::FLOAT8)
     }
 
     to_sql_checked!();
+}
+
+impl PostgresNumericInteger {
+    fn as_f64(self) -> f64 {
+        let value = self.magnitude as f64;
+        if self.negative { -value } else { value }
+    }
 }
 
 impl<'sql> FromSql<'sql> for PostgresNumericInteger {

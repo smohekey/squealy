@@ -384,6 +384,27 @@ impl_sql_number!(i8, i16, i32, i64, i128, isize);
 impl_sql_number!(u8, u16, u32, u64, u128, usize);
 impl_sql_number!(f32, f64);
 
+/// Computes the Rust value type produced by SQL division.
+///
+/// Division may produce fractional values even when both operands are integers,
+/// so Squealy models division as producing `f64` rather than preserving the
+/// operand type.
+pub trait SqlDivide: SqlNumber {
+    type Output: SqlNumber;
+}
+
+macro_rules! impl_sql_divide {
+    ($($ty:ty),* $(,)?) => {
+        $(impl SqlDivide for $ty {
+            type Output = f64;
+        })*
+    };
+}
+
+impl_sql_divide!(i8, i16, i32, i64, i128, isize);
+impl_sql_divide!(u8, u16, u32, u64, u128, usize);
+impl_sql_divide!(f32, f64);
+
 /// Type-level identity for a SQL expression.
 pub trait ExprKind {
     type Value;
@@ -645,9 +666,9 @@ impl<L, R> ExprKind for DivideExpr<L, R>
 where
     L: ExprKind,
     R: ExprKind<Value = L::Value>,
-    L::Value: SqlNumber,
+    L::Value: SqlDivide,
 {
-    type Value = L::Value;
+    type Value = <L::Value as SqlDivide>::Output;
 }
 
 /// Type-level identity for a SQL predicate.
@@ -1030,6 +1051,7 @@ where
     where
         R: IntoExpr<'scope>,
         R::Kind: ExprKind<Value = K::Value>,
+        K::Value: SqlDivide,
         <ColumnExprAst<K> as ExprAst>::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
     {
         self.into_expr() / other
@@ -1297,6 +1319,7 @@ where
     where
         R: IntoExpr<'scope>,
         R::Kind: ExprKind<Value = K::Value>,
+        K::Value: SqlDivide,
         Ast::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
     {
         Self::binary::<DivideExpr<K, R::Kind>, _>(self.ast.clone(), ArithmeticOp::Divide, other)
@@ -1544,7 +1567,7 @@ impl<'scope, K, Ast, R> Div<R> for Expr<'scope, K, Ast>
 where
     K: ExprKind,
     Ast: ExprAst,
-    K::Value: SqlNumber,
+    K::Value: SqlDivide,
     R: IntoExpr<'scope>,
     R::Kind: ExprKind<Value = K::Value>,
     Ast::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
@@ -1560,7 +1583,7 @@ impl<'scope, K, Ast, R> Div<R> for &Expr<'scope, K, Ast>
 where
     K: ExprKind,
     Ast: ExprAst,
-    K::Value: SqlNumber,
+    K::Value: SqlDivide,
     R: IntoExpr<'scope>,
     R::Kind: ExprKind<Value = K::Value>,
     Ast::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
@@ -1579,7 +1602,7 @@ where
 impl<'scope, K, R> Div<R> for ColumnRef<'scope, K>
 where
     K: ExprKind,
-    K::Value: SqlNumber,
+    K::Value: SqlDivide,
     R: IntoExpr<'scope>,
     R::Kind: ExprKind<Value = K::Value>,
     <ColumnExprAst<K> as ExprAst>::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
@@ -1594,7 +1617,7 @@ where
 impl<'scope, K, R> Div<R> for &ColumnRef<'scope, K>
 where
     K: ExprKind,
-    K::Value: SqlNumber,
+    K::Value: SqlDivide,
     R: IntoExpr<'scope>,
     R::Kind: ExprKind<Value = K::Value>,
     <ColumnExprAst<K> as ExprAst>::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,

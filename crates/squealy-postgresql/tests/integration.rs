@@ -506,6 +506,23 @@ async fn postgres_round_trips_primitive_types() {
     assert_eq!(stored.double, 2.5);
     assert!(stored.flag);
     assert_eq!(stored.label, "mixed");
+
+    let quotients = connection
+        .from::<IntegrationTypes>()
+        .select(|(record,)| {
+            (
+                record.signed_wide / 2i128,
+                record.unsigned_large / 2u64,
+                record.unsigned_wide / 2u128,
+            )
+        })
+        .fetch_one()
+        .await
+        .expect("select numeric quotients");
+
+    assert_eq!(quotients.0, (i128::MIN as f64) / 2.0);
+    assert_eq!(quotients.1, (u64::MAX as f64) / 2.0);
+    assert_eq!(quotients.2, (u128::MAX as f64) / 2.0);
 }
 
 #[tokio::test]

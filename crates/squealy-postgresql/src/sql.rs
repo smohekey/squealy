@@ -1031,6 +1031,14 @@ where
         L: FnOnce(&mut Self) -> Result<(), Self::Error>,
         R: FnOnce(&mut Self) -> Result<(), Self::Error>,
     {
+        if op == ArithmeticOp::Divide {
+            self.writer.write_all(b"(CAST(")?;
+            left(self)?;
+            self.writer.write_all(b" AS double precision) / CAST(")?;
+            right(self)?;
+            return self.writer.write_all(b" AS double precision))");
+        }
+
         self.writer.write_all(b"(")?;
         left(self)?;
         write!(self.writer, " {} ", render_arithmetic_op(op))?;

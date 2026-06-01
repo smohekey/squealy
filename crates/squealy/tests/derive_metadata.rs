@@ -392,6 +392,8 @@ fn assert_user_row(_: &impl HasSelectRow<__SquealyUserRowShape>) {}
 
 fn assert_i32_row(_: &impl HasSelectRow<i32>) {}
 
+fn assert_f64_row(_: &impl HasSelectRow<f64>) {}
+
 fn assert_optional_i32_row(_: &impl HasSelectRow<Option<i32>>) {}
 
 fn assert_user_id_and_post_row(_: &impl HasSelectRow<(i32, __SquealyPostRowShape)>) {}
@@ -1057,7 +1059,7 @@ fn select_can_project_arithmetic_expression_shapes() {
         r#"SELECT (q0_0.id + ?) AS expr FROM public.users AS q0_0"#
     );
     assert_eq!(adjusted_ids.collect_params(), vec![BindValue::Int(1)]);
-    assert_i32_row(&scaled_ids);
+    assert_f64_row(&scaled_ids);
     assert_eq!(
         scaled_ids.to_sql(),
         r#"SELECT ((q0_0.id * ?) / ?) AS expr FROM public.users AS q0_0"#
@@ -1195,11 +1197,8 @@ fn select_accepts_primitive_literals_and_expression_operators() {
             ((user.id + 1 - 1).greater_than(0) & !user.id.not_equals(42)) | user.name.equals("Bob")
         })
         .where_(|(user,)| (1 + user.id).less_than(100))
-        .where_(|(user,)| {
-            let scaled_id = (user.id * 2) / 2;
-            scaled_id.equals(user.id)
-        })
-        .where_(|(user,)| (2 * user.id / 2).equals(user.id))
+        .where_(|(user,)| ((user.id * 2) / 2).greater_than(0.0))
+        .where_(|(user,)| (2 * user.id / 2).less_than(100.0))
         .select(|(user,)| {
             let adjusted_id = user.id + 1;
             let scaled_id = (user.id * 2) / 2;
@@ -1210,7 +1209,7 @@ fn select_accepts_primitive_literals_and_expression_operators() {
 
     assert_eq!(
         users.to_sql(),
-        r#"SELECT q0_0.id AS id, q0_0.name AS name FROM public.users AS q0_0 WHERE (((((q0_0.id + ?) - ?) > ?) AND (NOT (q0_0.id <> ?))) OR (q0_0.name = ?)) AND ((? + q0_0.id) < ?) AND (((q0_0.id * ?) / ?) = q0_0.id) AND (((? * q0_0.id) / ?) = q0_0.id)"#
+        r#"SELECT q0_0.id AS id, q0_0.name AS name FROM public.users AS q0_0 WHERE (((((q0_0.id + ?) - ?) > ?) AND (NOT (q0_0.id <> ?))) OR (q0_0.name = ?)) AND ((? + q0_0.id) < ?) AND (((q0_0.id * ?) / ?) > ?) AND (((? * q0_0.id) / ?) < ?)"#
     );
     assert_eq!(
         users.collect_params(),
@@ -1224,8 +1223,10 @@ fn select_accepts_primitive_literals_and_expression_operators() {
             BindValue::Int(100),
             BindValue::Int(2),
             BindValue::Int(2),
+            BindValue::Float(0.0),
             BindValue::Int(2),
             BindValue::Int(2),
+            BindValue::Float(100.0),
         ]
     );
 }
