@@ -1,0 +1,660 @@
+//! The `.sqz` schema package: a KDL model inside a zip container.
+//!
+//! The package is a *derived* deploy artifact (the Rust crate remains the source of truth), so it can
+//! be handed to an environment without a Rust toolchain. It is backend-neutral and serialized
+//! deterministically so a given model always produces the same bytes.
+//!
+//! Layout:
+//! ```text
+//! package.sqz (zip)
+//! ├── manifest.kdl   metadata
+//! └── model.kdl      the DatabaseModel
+//! ```
+
+use std::fmt;
+use std::io::{self, Read, Write};
+use std::path::Path;
+
+use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
+use squealy::{
+    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyModel, IndexModel,
+    SchemaModel, SqlType, TableModel,
+};
+
+/// Current package format version, recorded in `manifest.kdl`.
+pub const FORMAT_VERSION: i128 = 1;
+
+const MODEL_ENTRY: &str = "model.kdl";
+const MANIFEST_ENTRY: &str = "manifest.kdl";
+
+/// An error produced while reading or writing a `.sqz` package.
+#[derive(Debug)]
+pub enum PackageError {
+    Io(io::Error),
+    Zip(String),
+    /// The KDL failed to parse, or did not match the expected schema-model shape.
+    Malformed(String),
+}
+
+impl fmt::Display for PackageError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PackageError::Io(error) => write!(formatter, "package io error: {error}"),
+            PackageError::Zip(error) => write!(formatter, "package archive error: {error}"),
+            PackageError::Malformed(error) => write!(formatter, "malformed package: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for PackageError {}
+
+impl From<io::Error> for PackageError {
+    fn from(error: io::Error) -> Self {
+        PackageError::Io(error)
+    }
+}
+
+impl From<zip::result::ZipError> for PackageError {
+    fn from(error: zip::result::ZipError) -> Self {
+        PackageError::Zip(error.to_string())
+    }
+}
+
+fn malformed(message: impl Into<String>) -> PackageError {
+    PackageError::Malformed(message.into())
+}
+
+// --- Public API ---------------------------------------------------------------------------------
+
+/// Serializes a model to its canonical `model.kdl` text.
+pub fn to_kdl(model: &DatabaseModel) -> String {
+    let mut document = model_to_document(model);
+    document.autoformat();
+    document.to_string()
+}
+
+/// Parses a model from `model.kdl` text.
+pub fn from_kdl(text: &str) -> Result<DatabaseModel, PackageError> {
+    let document =
+        KdlDocument::parse_v2(text).map_err(|error| malformed(format!("invalid KDL: {error}")))?;
+    model_from_document(&document)
+}
+
+/// Writes a `.sqz` package (zip of `manifest.kdl` + `model.kdl`) to `path`.
+pub fn write_package(model: &DatabaseModel, path: &Path) -> Result<(), PackageError> {
+    let file = std::fs::File::create(path)?;
+    write_package_to(model, file)
+}
+
+/// Reads a model back from a `.sqz` package at `path`.
+pub fn read_package(path: &Path) -> Result<DatabaseModel, PackageError> {
+    let file = std::fs::File::open(path)?;
+    read_package_from(file)
+}
+
+/// Writes a package to any writer (used by [`write_package`]; handy for tests with a `Cursor`).
+pub fn write_package_to<W: Write + io::Seek>(
+    model: &DatabaseModel,
+    writer: W,
+) -> Result<(), PackageError> {
+    let mut zip = zip::ZipWriter::new(writer);
+    // Stored (no compression) keeps the dependency surface minimal; a fixed timestamp keeps the
+    // archive byte-reproducible.
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default());
+
+    zip.start_file(MANIFEST_ENTRY, options)?;
+    zip.write_all(manifest_kdl(model).as_bytes())?;
+
+    zip.start_file(MODEL_ENTRY, options)?;
+    zip.write_all(to_kdl(model).as_bytes())?;
+
+    zip.finish()?;
+    Ok(())
+}
+
+/// Reads a model from any package reader (used by [`read_package`]).
+pub fn read_package_from<R: Read + io::Seek>(reader: R) -> Result<DatabaseModel, PackageError> {
+    let mut archive = zip::ZipArchive::new(reader)?;
+    let mut model_kdl = String::new();
+    archive
+        .by_name(MODEL_ENTRY)?
+        .read_to_string(&mut model_kdl)?;
+    from_kdl(&model_kdl)
+}
+
+fn manifest_kdl(model: &DatabaseModel) -> String {
+    let mut document = KdlDocument::new();
+    let mut manifest = KdlNode::new("manifest");
+    let mut body = KdlDocument::new();
+
+    let mut format_version = KdlNode::new("format-version");
+    format_version.push(KdlEntry::new(KdlValue::Integer(FORMAT_VERSION)));
+    body.nodes_mut().push(format_version);
+
+    let mut squealy_version = KdlNode::new("squealy-version");
+    squealy_version.push(KdlEntry::new(env!("CARGO_PKG_VERSION")));
+    body.nodes_mut().push(squealy_version);
+
+    let mut neutral = KdlNode::new("neutral");
+    neutral.push(KdlEntry::new(KdlValue::Bool(true)));
+    body.nodes_mut().push(neutral);
+
+    // `model` is referenced so the manifest stays in step with the model it describes; richer
+    // metadata (content hash, target backend) lands with later sprints.
+    let _ = model;
+
+    manifest.set_children(body);
+    document.nodes_mut().push(manifest);
+    document.autoformat();
+    document.to_string()
+}
+
+// --- Model -> KDL -------------------------------------------------------------------------------
+
+fn model_to_document(model: &DatabaseModel) -> KdlDocument {
+    let mut document = KdlDocument::new();
+    let mut database = KdlNode::new("database");
+    let mut schemas = KdlDocument::new();
+    for schema in &model.schemas {
+        schemas.nodes_mut().push(schema_to_node(schema));
+    }
+    database.set_children(schemas);
+    document.nodes_mut().push(database);
+    document
+}
+
+fn schema_to_node(schema: &SchemaModel) -> KdlNode {
+    let mut node = KdlNode::new("schema");
+    if let Some(name) = &schema.name {
+        node.push(KdlEntry::new(name.clone()));
+    }
+    let mut tables = KdlDocument::new();
+    for table in &schema.tables {
+        tables.nodes_mut().push(table_to_node(table));
+    }
+    node.set_children(tables);
+    node
+}
+
+fn table_to_node(table: &TableModel) -> KdlNode {
+    let mut node = KdlNode::new("table");
+    node.push(KdlEntry::new(table.name.clone()));
+
+    let mut body = KdlDocument::new();
+    for column in &table.columns {
+        body.nodes_mut().push(column_to_node(column));
+    }
+    if let Some(primary_key) = &table.primary_key {
+        body.nodes_mut()
+            .push(constraint_to_node("primary-key", primary_key));
+    }
+    for unique in &table.uniques {
+        body.nodes_mut().push(constraint_to_node("unique", unique));
+    }
+    for foreign_key in &table.foreign_keys {
+        body.nodes_mut().push(foreign_key_to_node(foreign_key));
+    }
+    for index in &table.indexes {
+        body.nodes_mut().push(index_to_node(index));
+    }
+    for check in &table.checks {
+        body.nodes_mut().push(check_to_node(check));
+    }
+    node.set_children(body);
+    node
+}
+
+fn column_to_node(column: &ColumnModel) -> KdlNode {
+    let mut node = KdlNode::new("column");
+    node.push(KdlEntry::new(column.name.clone()));
+
+    let (type_name, raw) = sql_type_parts(&column.ty);
+    node.push(KdlEntry::new_prop("type", type_name));
+    if let Some(raw) = raw {
+        node.push(KdlEntry::new_prop("raw", raw));
+    }
+    if column.nullable {
+        node.push(KdlEntry::new_prop("nullable", KdlValue::Bool(true)));
+    }
+    if column.auto_increment {
+        node.push(KdlEntry::new_prop("auto-increment", KdlValue::Bool(true)));
+    }
+    if column.generated {
+        node.push(KdlEntry::new_prop("generated", KdlValue::Bool(true)));
+    }
+    if let Some(default) = &column.default {
+        let (kind, value) = default_parts(default);
+        node.push(KdlEntry::new_prop("default", kind));
+        if let Some(value) = value {
+            node.push(KdlEntry::new_prop("default-value", value));
+        }
+    }
+    node
+}
+
+fn constraint_to_node(kind: &str, constraint: &Constraint) -> KdlNode {
+    let mut node = KdlNode::new(kind);
+    for column in &constraint.columns {
+        node.push(KdlEntry::new(column.clone()));
+    }
+    node.push(KdlEntry::new_prop("name", constraint.name.clone()));
+    node
+}
+
+fn foreign_key_to_node(foreign_key: &ForeignKeyModel) -> KdlNode {
+    let mut node = KdlNode::new("foreign-key");
+    for column in &foreign_key.columns {
+        node.push(KdlEntry::new(column.clone()));
+    }
+    node.push(KdlEntry::new_prop("name", foreign_key.name.clone()));
+    if let Some(schema) = &foreign_key.references_schema {
+        node.push(KdlEntry::new_prop("references-schema", schema.clone()));
+    }
+    node.push(KdlEntry::new_prop(
+        "references-table",
+        foreign_key.references_table.clone(),
+    ));
+    // Local args and these remote columns pair by position.
+    node.push(KdlEntry::new_prop(
+        "references-columns",
+        foreign_key.references_columns.join(" "),
+    ));
+    if let Some(on_delete) = &foreign_key.on_delete {
+        node.push(KdlEntry::new_prop("on-delete", on_delete.clone()));
+    }
+    if let Some(on_update) = &foreign_key.on_update {
+        node.push(KdlEntry::new_prop("on-update", on_update.clone()));
+    }
+    node
+}
+
+fn index_to_node(index: &IndexModel) -> KdlNode {
+    let mut node = KdlNode::new("index");
+    for column in &index.columns {
+        node.push(KdlEntry::new(column.clone()));
+    }
+    node.push(KdlEntry::new_prop("name", index.name.clone()));
+    if index.unique {
+        node.push(KdlEntry::new_prop("unique", KdlValue::Bool(true)));
+    }
+    node
+}
+
+fn check_to_node(check: &CheckModel) -> KdlNode {
+    let mut node = KdlNode::new("check");
+    node.push(KdlEntry::new_prop("name", check.name.clone()));
+    node.push(KdlEntry::new_prop("expr", check.expression.clone()));
+    node
+}
+
+fn sql_type_parts(ty: &SqlType) -> (&'static str, Option<String>) {
+    match ty {
+        SqlType::I8 => ("i8", None),
+        SqlType::I16 => ("i16", None),
+        SqlType::I32 => ("i32", None),
+        SqlType::I64 => ("i64", None),
+        SqlType::I128 => ("i128", None),
+        SqlType::Isize => ("isize", None),
+        SqlType::U8 => ("u8", None),
+        SqlType::U16 => ("u16", None),
+        SqlType::U32 => ("u32", None),
+        SqlType::U64 => ("u64", None),
+        SqlType::U128 => ("u128", None),
+        SqlType::Usize => ("usize", None),
+        SqlType::F32 => ("f32", None),
+        SqlType::F64 => ("f64", None),
+        SqlType::String => ("string", None),
+        SqlType::Bool => ("bool", None),
+        SqlType::Raw(raw) => ("raw", Some(raw.clone())),
+    }
+}
+
+fn default_parts(default: &DefaultValue) -> (&'static str, Option<String>) {
+    match default {
+        DefaultValue::Null => ("null", None),
+        DefaultValue::Int(value) => ("int", Some(value.to_string())),
+        DefaultValue::UInt(value) => ("uint", Some(value.to_string())),
+        DefaultValue::Float(value) => ("float", Some(value.to_string())),
+        DefaultValue::Text(value) => ("text", Some(value.clone())),
+        DefaultValue::Bool(value) => ("bool", Some(value.to_string())),
+        DefaultValue::CurrentTimestamp => ("current_timestamp", None),
+        DefaultValue::CurrentDate => ("current_date", None),
+        DefaultValue::CurrentTime => ("current_time", None),
+        DefaultValue::Raw(value) => ("raw", Some(value.clone())),
+    }
+}
+
+// --- KDL -> Model -------------------------------------------------------------------------------
+
+fn model_from_document(document: &KdlDocument) -> Result<DatabaseModel, PackageError> {
+    let database = document
+        .nodes()
+        .iter()
+        .find(|node| node.name().value() == "database")
+        .ok_or_else(|| malformed("missing `database` node"))?;
+
+    let schemas = child_nodes(database, "schema")
+        .map(schema_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DatabaseModel { schemas })
+}
+
+fn schema_from_node(node: &KdlNode) -> Result<SchemaModel, PackageError> {
+    let tables = child_nodes(node, "table")
+        .map(table_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SchemaModel {
+        name: first_arg(node).map(str::to_owned),
+        tables,
+    })
+}
+
+fn table_from_node(node: &KdlNode) -> Result<TableModel, PackageError> {
+    let name = first_arg(node)
+        .ok_or_else(|| malformed("`table` is missing its name"))?
+        .to_owned();
+
+    let columns = child_nodes(node, "column")
+        .map(column_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
+    let primary_key = child_nodes(node, "primary-key")
+        .next()
+        .map(constraint_from_node)
+        .transpose()?;
+    let uniques = child_nodes(node, "unique")
+        .map(constraint_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
+    let foreign_keys = child_nodes(node, "foreign-key")
+        .map(foreign_key_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
+    let indexes = child_nodes(node, "index")
+        .map(index_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
+    let checks = child_nodes(node, "check")
+        .map(check_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(TableModel {
+        name,
+        columns,
+        primary_key,
+        foreign_keys,
+        uniques,
+        checks,
+        indexes,
+    })
+}
+
+fn column_from_node(node: &KdlNode) -> Result<ColumnModel, PackageError> {
+    let name = first_arg(node)
+        .ok_or_else(|| malformed("`column` is missing its name"))?
+        .to_owned();
+    let ty = sql_type_from_node(node)?;
+    let default = default_from_node(node)?;
+    Ok(ColumnModel {
+        name,
+        ty,
+        nullable: prop_bool(node, "nullable"),
+        default,
+        auto_increment: prop_bool(node, "auto-increment"),
+        generated: prop_bool(node, "generated"),
+    })
+}
+
+fn constraint_from_node(node: &KdlNode) -> Result<Constraint, PackageError> {
+    Ok(Constraint {
+        name: required_prop(node, "name")?,
+        columns: args(node),
+    })
+}
+
+fn foreign_key_from_node(node: &KdlNode) -> Result<ForeignKeyModel, PackageError> {
+    Ok(ForeignKeyModel {
+        name: required_prop(node, "name")?,
+        columns: args(node),
+        references_schema: prop(node, "references-schema").map(str::to_owned),
+        references_table: required_prop(node, "references-table")?,
+        references_columns: prop(node, "references-columns")
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect(),
+        on_delete: prop(node, "on-delete").map(str::to_owned),
+        on_update: prop(node, "on-update").map(str::to_owned),
+    })
+}
+
+fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
+    Ok(IndexModel {
+        name: required_prop(node, "name")?,
+        columns: args(node),
+        unique: prop_bool(node, "unique"),
+    })
+}
+
+fn check_from_node(node: &KdlNode) -> Result<CheckModel, PackageError> {
+    Ok(CheckModel {
+        name: required_prop(node, "name")?,
+        expression: required_prop(node, "expr")?,
+    })
+}
+
+fn sql_type_from_node(node: &KdlNode) -> Result<SqlType, PackageError> {
+    let name = prop(node, "type").ok_or_else(|| malformed("`column` is missing `type`"))?;
+    Ok(match name {
+        "i8" => SqlType::I8,
+        "i16" => SqlType::I16,
+        "i32" => SqlType::I32,
+        "i64" => SqlType::I64,
+        "i128" => SqlType::I128,
+        "isize" => SqlType::Isize,
+        "u8" => SqlType::U8,
+        "u16" => SqlType::U16,
+        "u32" => SqlType::U32,
+        "u64" => SqlType::U64,
+        "u128" => SqlType::U128,
+        "usize" => SqlType::Usize,
+        "f32" => SqlType::F32,
+        "f64" => SqlType::F64,
+        "string" => SqlType::String,
+        "bool" => SqlType::Bool,
+        "raw" => SqlType::Raw(required_prop(node, "raw")?),
+        other => return Err(malformed(format!("unknown column type `{other}`"))),
+    })
+}
+
+fn default_from_node(node: &KdlNode) -> Result<Option<DefaultValue>, PackageError> {
+    let Some(kind) = prop(node, "default") else {
+        return Ok(None);
+    };
+    let value = || required_prop(node, "default-value");
+    let parsed = |label: &str| -> Result<String, PackageError> {
+        value().map_err(|_| malformed(format!("`default` {label} is missing `default-value`")))
+    };
+    Ok(Some(match kind {
+        "null" => DefaultValue::Null,
+        "current_timestamp" => DefaultValue::CurrentTimestamp,
+        "current_date" => DefaultValue::CurrentDate,
+        "current_time" => DefaultValue::CurrentTime,
+        "int" => DefaultValue::Int(
+            parsed("int")?
+                .parse()
+                .map_err(|_| malformed("invalid integer default"))?,
+        ),
+        "uint" => DefaultValue::UInt(
+            parsed("uint")?
+                .parse()
+                .map_err(|_| malformed("invalid unsigned default"))?,
+        ),
+        "float" => DefaultValue::Float(
+            parsed("float")?
+                .parse()
+                .map_err(|_| malformed("invalid float default"))?,
+        ),
+        "bool" => DefaultValue::Bool(
+            parsed("bool")?
+                .parse()
+                .map_err(|_| malformed("invalid bool default"))?,
+        ),
+        "text" => DefaultValue::Text(parsed("text")?),
+        "raw" => DefaultValue::Raw(parsed("raw")?),
+        other => return Err(malformed(format!("unknown default kind `{other}`"))),
+    }))
+}
+
+// --- KDL node accessors -------------------------------------------------------------------------
+
+fn child_nodes<'a>(node: &'a KdlNode, name: &'a str) -> impl Iterator<Item = &'a KdlNode> {
+    node.children()
+        .into_iter()
+        .flat_map(KdlDocument::nodes)
+        .filter(move |child| child.name().value() == name)
+}
+
+fn first_arg(node: &KdlNode) -> Option<&str> {
+    node.entries()
+        .iter()
+        .find(|entry| entry.name().is_none())
+        .and_then(|entry| entry.value().as_string())
+}
+
+fn args(node: &KdlNode) -> Vec<String> {
+    node.entries()
+        .iter()
+        .filter(|entry| entry.name().is_none())
+        .filter_map(|entry| entry.value().as_string().map(str::to_owned))
+        .collect()
+}
+
+fn prop<'a>(node: &'a KdlNode, key: &str) -> Option<&'a str> {
+    node.entries()
+        .iter()
+        .find(|entry| entry.name().map(|name| name.value()) == Some(key))
+        .and_then(|entry| entry.value().as_string())
+}
+
+fn prop_bool(node: &KdlNode, key: &str) -> bool {
+    node.entries()
+        .iter()
+        .find(|entry| entry.name().map(|name| name.value()) == Some(key))
+        .and_then(|entry| entry.value().as_bool())
+        .unwrap_or(false)
+}
+
+fn required_prop(node: &KdlNode, key: &str) -> Result<String, PackageError> {
+    prop(node, key)
+        .map(str::to_owned)
+        .ok_or_else(|| malformed(format!("`{}` is missing `{key}`", node.name().value())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn sample_model() -> DatabaseModel {
+        DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: Some("public".to_owned()),
+                tables: vec![
+                    TableModel {
+                        name: "orgs".to_owned(),
+                        columns: vec![
+                            ColumnModel {
+                                name: "id".to_owned(),
+                                ty: SqlType::I32,
+                                nullable: false,
+                                default: None,
+                                auto_increment: true,
+                                generated: false,
+                            },
+                            ColumnModel {
+                                name: "slug".to_owned(),
+                                ty: SqlType::String,
+                                nullable: false,
+                                default: Some(DefaultValue::Text("acme".to_owned())),
+                                auto_increment: false,
+                                generated: false,
+                            },
+                            ColumnModel {
+                                name: "metadata".to_owned(),
+                                ty: SqlType::Raw("jsonb".to_owned()),
+                                nullable: true,
+                                default: Some(DefaultValue::Raw("'{}'::jsonb".to_owned())),
+                                auto_increment: false,
+                                generated: false,
+                            },
+                        ],
+                        primary_key: Some(Constraint {
+                            name: "pk_orgs".to_owned(),
+                            columns: vec!["id".to_owned()],
+                        }),
+                        foreign_keys: vec![],
+                        uniques: vec![Constraint {
+                            name: "uq_orgs_slug".to_owned(),
+                            columns: vec!["slug".to_owned()],
+                        }],
+                        checks: vec![CheckModel {
+                            name: "ck_orgs_slug".to_owned(),
+                            expression: "length(slug) > 0".to_owned(),
+                        }],
+                        indexes: vec![IndexModel {
+                            name: "uq_orgs_slug_idx".to_owned(),
+                            columns: vec!["slug".to_owned()],
+                            unique: true,
+                        }],
+                    },
+                    TableModel {
+                        name: "members".to_owned(),
+                        columns: vec![ColumnModel {
+                            name: "org_id".to_owned(),
+                            ty: SqlType::I32,
+                            nullable: false,
+                            default: None,
+                            auto_increment: false,
+                            generated: false,
+                        }],
+                        primary_key: None,
+                        foreign_keys: vec![ForeignKeyModel {
+                            name: "fk_members_org_id".to_owned(),
+                            columns: vec!["org_id".to_owned()],
+                            references_schema: Some("public".to_owned()),
+                            references_table: "orgs".to_owned(),
+                            references_columns: vec!["id".to_owned()],
+                            on_delete: Some("cascade".to_owned()),
+                            on_update: None,
+                        }],
+                        uniques: vec![],
+                        checks: vec![],
+                        indexes: vec![],
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn kdl_round_trips() {
+        let model = sample_model();
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("model.kdl should parse");
+        assert_eq!(parsed, model, "KDL round-trip diverged:\n{kdl}");
+    }
+
+    #[test]
+    fn kdl_is_deterministic() {
+        let model = sample_model();
+        assert_eq!(to_kdl(&model), to_kdl(&model));
+    }
+
+    #[test]
+    fn package_zip_round_trips() {
+        let model = sample_model();
+        let mut buffer = Vec::new();
+        write_package_to(&model, Cursor::new(&mut buffer)).expect("write package");
+        let parsed = read_package_from(Cursor::new(buffer)).expect("read package");
+        assert_eq!(parsed, model);
+    }
+}

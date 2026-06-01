@@ -9,7 +9,13 @@
 
 #![forbid(unsafe_code)]
 
+mod package;
+
+pub use package::{
+    FORMAT_VERSION, PackageError, from_kdl, read_package, read_package_from, to_kdl, write_package,
+    write_package_to,
+};
 pub use squealy::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, ForeignKeyModel, IndexModel, SchemaBackend,
-    SchemaModel, TableModel,
+    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyModel, IndexModel,
+    SchemaBackend, SchemaModel, SqlType, TableModel,
 };

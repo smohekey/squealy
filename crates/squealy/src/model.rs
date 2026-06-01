@@ -48,11 +48,96 @@ pub struct TableModel {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ColumnModel {
     pub name: String,
-    pub ty: ColumnType,
+    pub ty: SqlType,
     pub nullable: bool,
-    pub default: Option<ColumnDefault>,
+    pub default: Option<DefaultValue>,
     pub auto_increment: bool,
     pub generated: bool,
+}
+
+/// The owned, backend-neutral logical column type.
+///
+/// This mirrors the compile-time [`ColumnType`] but owns its strings, so a model can be rebuilt from
+/// a package or live-database introspection (the `const`-friendly [`ColumnType`] borrows `'static`
+/// strings and cannot represent runtime-sourced values). It is the place the neutral type vocabulary
+/// grows structurally (e.g. `Varchar { len }`) as introspection lands.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SqlType {
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    Isize,
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    Usize,
+    F32,
+    F64,
+    String,
+    Bool,
+    /// A backend-specific type name, emitted verbatim into DDL.
+    Raw(String),
+}
+
+impl From<ColumnType> for SqlType {
+    fn from(column_type: ColumnType) -> Self {
+        match column_type {
+            ColumnType::I8 => SqlType::I8,
+            ColumnType::I16 => SqlType::I16,
+            ColumnType::I32 => SqlType::I32,
+            ColumnType::I64 => SqlType::I64,
+            ColumnType::I128 => SqlType::I128,
+            ColumnType::Isize => SqlType::Isize,
+            ColumnType::U8 => SqlType::U8,
+            ColumnType::U16 => SqlType::U16,
+            ColumnType::U32 => SqlType::U32,
+            ColumnType::U64 => SqlType::U64,
+            ColumnType::U128 => SqlType::U128,
+            ColumnType::Usize => SqlType::Usize,
+            ColumnType::F32 => SqlType::F32,
+            ColumnType::F64 => SqlType::F64,
+            ColumnType::String => SqlType::String,
+            ColumnType::Bool => SqlType::Bool,
+            ColumnType::Raw(raw) => SqlType::Raw(raw.to_owned()),
+        }
+    }
+}
+
+/// The owned, backend-neutral mirror of [`ColumnDefault`] (owns its strings; see [`SqlType`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum DefaultValue {
+    Null,
+    Int(i128),
+    UInt(u128),
+    Float(f64),
+    Text(String),
+    Bool(bool),
+    CurrentTimestamp,
+    CurrentDate,
+    CurrentTime,
+    /// A backend-specific default expression, emitted verbatim into DDL.
+    Raw(String),
+}
+
+impl From<ColumnDefault> for DefaultValue {
+    fn from(default: ColumnDefault) -> Self {
+        match default {
+            ColumnDefault::Null => DefaultValue::Null,
+            ColumnDefault::Int(value) => DefaultValue::Int(value),
+            ColumnDefault::UInt(value) => DefaultValue::UInt(value),
+            ColumnDefault::Float(value) => DefaultValue::Float(value),
+            ColumnDefault::Text(value) => DefaultValue::Text(value.to_owned()),
+            ColumnDefault::Bool(value) => DefaultValue::Bool(value),
+            ColumnDefault::CurrentTimestamp => DefaultValue::CurrentTimestamp,
+            ColumnDefault::CurrentDate => DefaultValue::CurrentDate,
+            ColumnDefault::CurrentTime => DefaultValue::CurrentTime,
+            ColumnDefault::Raw(value) => DefaultValue::Raw(value.to_owned()),
+        }
+    }
 }
 
 /// A named constraint over one or more columns (primary key, unique).
@@ -170,9 +255,9 @@ fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
 fn column_from_dyn(column: &dyn Column) -> ColumnModel {
     ColumnModel {
         name: column.name().to_owned(),
-        ty: column.column_type(),
+        ty: column.column_type().into(),
         nullable: column.nullable(),
-        default: column.default(),
+        default: column.default().map(DefaultValue::from),
         auto_increment: column.auto_increment(),
         generated: column.generated(),
     }
@@ -316,7 +401,7 @@ mod tests {
 
         let id = &users.columns[0];
         assert_eq!(id.name, "id");
-        assert_eq!(id.ty, ColumnType::I32);
+        assert_eq!(id.ty, SqlType::I32);
         assert!(id.auto_increment);
         assert!(!id.nullable);
     }

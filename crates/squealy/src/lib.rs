@@ -297,8 +297,8 @@ pub use list::{
     NoRuntimeParams, PreparedParamValues, PushBack, ToTuple, TupleAppend, TupleConcat,
 };
 pub use model::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, ForeignKeyModel, IndexModel, SchemaModel,
-    TableModel,
+    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyModel, IndexModel,
+    SchemaModel, SqlType, TableModel,
 };
 pub use projection::{Maybe, Projectable, ProjectionShape, ProjectionVisitor, TableProjection};
 pub use query::{

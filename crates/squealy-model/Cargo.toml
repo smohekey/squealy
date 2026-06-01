@@ -10,4 +10,6 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+kdl.workspace = true
 squealy.workspace = true
+zip.workspace = true
