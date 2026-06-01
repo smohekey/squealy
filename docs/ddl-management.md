@@ -163,26 +163,44 @@ and no backend crate has to depend on the management engine. The new whole-DB, o
 ALTER-aware renderer **supersedes `Backend::write_table`**, which is migrated under `SchemaBackend`
 and retired.
 
-### Front-end
+### Front-end — a stub-compiling global CLI
 
-The engine is a set of generic functions over `D: Database` + a backend. Two ways to get a binary
-that calls them:
+**Decision: the front-end is a standalone `squealy` CLI that drives the user's crate; the user's crate
+stays pristine.** No `main`, no attribute, no derive change, and the user can keep
+`#![forbid(unsafe_code)]`.
 
-1. **Per-project bin / macro (sprint 1).** Ship a library entry
-   `squealy_model::cli::<D, B: SchemaBackend>(args)` *and* a `ddl_main!` macro that expands to a
-   `main` calling it — so a hand-written bin and the macro are the same one-liner ("both" for free):
+Rejected alternatives and why:
+- *In-crate `run_cli`/`ddl_main!`*: still requires the user to write a `main`/macro call — boilerplate.
+- *Reflection registry (`linkme`/`inventory`)*: would auto-register each `#[derive(Database)]`, but the
+  registration emits `#[link_section]` — an **unsafe attribute** — *into the user's crate*, breaking
+  any user with `#![forbid(unsafe_code)]`. That's exactly the "magic in the crate" we're avoiding.
 
-   ```rust
-   squealy::ddl_main!(AppDatabase, squealy_postgresql::Postgres);
-   // ⇒ fn main() { squealy_model::cli::<AppDatabase, Postgres>(std::env::args()) }
-   ```
+How the CLI works (the model only materializes by *running* code — trait-resolved column types + owned
+strings — so the crate must be compiled and run):
 
-   Then `cargo run --bin squealy-ddl -- publish …`. Zero orchestration; the in-memory model is right
-   there.
-2. **Stub-compiling global CLI (later).** A `squealy` binary reads config
-   (`[package.metadata.squealy]`: which crate, which `Database` type, which backend — Rust has no
-   runtime reflection, so the type must be *named*), generates a temp stub crate that `use`s it,
-   `cargo build`s and runs it. Same engine underneath. UX nicety; deferred.
+1. The operator names the database type: `squealy <cmd> --database my_crate::AppDatabase` (optionally
+   defaulted via `[package.metadata.squealy] database = "…"`). Rust has no reflection, so *something*
+   must name the type; the operator already knows it. Multiple databases → name which one. (Auto-`list`
+   would need nightly rustdoc JSON — deferred.)
+2. The CLI generates a tiny **stub crate** depending on the user crate + `squealy-model`, whose `main`
+   is `from_database::<my_crate::AppDatabase>()` → serialize → write to a CLI-controlled file.
+3. `cargo build` + run the stub in a **subprocess**; harvest the model from the file.
+
+**Security** (the stub runs the user's own code — same trust as `cargo run` — but with sharp edges):
+- **Validate `--database` as a strict Rust path** (`ident(::ident)*`, no generics/whitespace/punct).
+  It's interpolated into generated source, so an untrusted value (CI/multi-tenant) would be code
+  injection. Mandatory.
+- Use a **private, unpredictable temp dir** for the stub (avoid TOCTOU).
+- Harvest via a **CLI-controlled file**, not stdout (avoid `println!`/panic spoofing).
+- A **subprocess** isolates user code from the CLI process (a point in the stub's favor over the
+  rejected `dlopen` path, which would have run user code *in* the CLI).
+
+**Export-then-publish split (privilege separation):**
+- `squealy export --database … model.sqz` — compile + run stub → package. **No DB, no secrets.**
+- `squealy publish --package model.sqz --url …` — operates on the static artifact; **executes no
+  project code**, just renders DDL and runs it. Right shape for CI/CD with credentials.
+- `squealy publish --database … --url …` (compile+run then deploy in one step) stays available for dev
+  convenience, using `SchemaConnect` to open the connection from the URL.
 
 ## Package format — KDL in a zip (`.sqz`)
 
@@ -324,10 +342,11 @@ Done and tested:
   whole-DB renderer sit behind a default-off `schema` feature, so query-only users carry none of it.
 
 Remaining for sprint 1:
-- **`ddl_main!` macro + `cli`** — dispatch `script` / `export` / `import` / `publish`. `ddl_main!` can
-  be a `macro_rules!` (no proc-macro): it expands to a `main` calling `cli::<D, B>(...)`. `publish`
-  from the CLI additionally needs a connect step (URL → connection); the programmatic `publish` API
-  is already done and decoupled from that.
+- **`SchemaConnect`** (core trait) + Postgres impl (under `schema`) — open a connection from a URL for
+  `publish --database … --url …`.
+- **Stub-compiling `squealy` CLI** (see Front-end): `--database <path>` discovery + strict validation,
+  stub generation in a private temp dir, file harvest, and the `export` / `publish` / `script`
+  commands (incl. `publish --package`). New `squealy-cli` bin crate.
 
 ## Settled decisions
 
@@ -342,7 +361,11 @@ Remaining for sprint 1:
   is structured from day one.
 - Package = KDL in a zip, extension **`.sqz`** (`manifest.kdl` + `model.kdl`), backend-neutral,
   deterministic (store-only zip, fixed timestamp).
-- Front-end = `squealy_model::cli::<D, B>()` + `ddl_main!(Db, Backend)` macro.
+- Front-end = a **standalone stub-compiling `squealy` CLI**; the user's crate stays pristine (no
+  boilerplate, keeps `forbid(unsafe_code)`). Database type named via `--database <path>`. Reflection
+  registry (`linkme`) rejected — it injects unsafe `#[link_section]` into the user crate.
+- **Privilege split**: `export` (compile+run → `.sqz`, no secrets) then `publish --package` (no code
+  execution); `publish --database` stays for dev convenience.
 - **`SchemaBackend` trait in core `squealy`**; `squealy-postgresql` implements it; `write_table` is
   superseded (retirement deferred until nothing depends on it).
 
