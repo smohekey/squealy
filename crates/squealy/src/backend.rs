@@ -1,6 +1,7 @@
+use std::future::Future;
 use std::io::{self, Write};
 
-use crate::Table;
+use crate::{DatabaseModel, Table};
 
 /// Backend-specific row cursor used while decoding a projected row.
 pub trait RowReader: Sized {
@@ -76,4 +77,44 @@ pub trait Backend: Sized {
 
     /// Generate backend-specific SQL for a table.
     fn write_table(&self, table: &(dyn Table + Sync), writer: &mut impl Write) -> io::Result<()>;
+}
+
+/// Backend-specific DDL rendering driven by an owned [`DatabaseModel`].
+///
+/// This is the schema-management counterpart to [`Backend`]: it renders ordered, whole-database
+/// create-from-scratch DDL from the neutral model (and, in future, incremental `ALTER` plans and
+/// introspection). Backends implement it against the core model so the `squealy-model` engine can
+/// drive deployment without depending on any backend. It supersedes [`Backend::write_table`], which
+/// renders only a single table.
+pub trait SchemaBackend {
+    /// Renders ordered create-from-scratch DDL for the whole model into `writer`.
+    ///
+    /// Implementations emit namespaces, then tables in foreign-key dependency order, then indexes,
+    /// then foreign keys as separate `ALTER TABLE … ADD CONSTRAINT` statements (so dependency cycles
+    /// and ordering do not block creation).
+    fn render_create(&self, model: &DatabaseModel, writer: &mut impl Write) -> io::Result<()>;
+}
+
+/// Executes already-rendered DDL against a live connection.
+///
+/// This is the execution half of schema management ([`SchemaBackend`] is the rendering half). It is
+/// deliberately minimal — one batch of statements — and lives on the connection because executing DDL
+/// needs the live connection a backend owns. Implementations should run the batch atomically where
+/// the backend supports transactional DDL.
+pub trait DdlExecutor {
+    type Error;
+
+    /// Executes one or more `;`-separated DDL statements as a single batch.
+    fn execute_ddl(&mut self, sql: &str) -> impl Future<Output = Result<(), Self::Error>>;
+}
+
+/// Opens a schema-management connection from a connection string.
+///
+/// Backends implement this so the management engine and CLI can `publish` from a URL without knowing
+/// backend-specific connection details. The returned connection executes DDL via [`DdlExecutor`].
+pub trait SchemaConnect {
+    type Connection: DdlExecutor;
+    type Error;
+
+    fn connect(&self, url: &str) -> impl Future<Output = Result<Self::Connection, Self::Error>>;
 }

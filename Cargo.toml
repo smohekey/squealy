@@ -1,7 +1,9 @@
 [workspace]
 members = [
     "crates/squealy",
+    "crates/squealy-cli",
     "crates/squealy-macros",
+    "crates/squealy-model",
     "crates/squealy-postgresql",
     "crates/squealy-test",
 ]
@@ -19,6 +21,10 @@ categories = ["database"]
 [workspace.dependencies]
 squealy = { version = "0.1.0", path = "crates/squealy" }
 squealy-macros = { version = "0.1.0", path = "crates/squealy-macros" }
+squealy-model = { version = "0.1.0", path = "crates/squealy-model" }
+squealy-postgresql = { version = "0.1.0", path = "crates/squealy-postgresql" }
 squealy-test = { version = "0.1.0", path = "crates/squealy-test" }
 futures-core = "0.3"
+kdl = "6.5"
 trybuild = "1.0"
+zip = { version = "7.2", default-features = false }

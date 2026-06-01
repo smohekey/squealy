@@ -1,0 +1,20 @@
+[package]
+name = "squealy-model"
+description = "Schema model and DDL management engine for squealy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+kdl.workspace = true
+squealy.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+squealy-postgresql = { workspace = true, features = ["schema"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio-postgres = "0.7"

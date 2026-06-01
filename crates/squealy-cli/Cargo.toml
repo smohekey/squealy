@@ -1,0 +1,22 @@
+[package]
+name = "squealy-cli"
+description = "Command-line schema management for squealy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "squealy"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+squealy-model.workspace = true
+squealy-postgresql = { workspace = true, features = ["schema"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

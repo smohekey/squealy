@@ -68,6 +68,31 @@ impl From<tokio_postgres::Error> for PostgresError {
     }
 }
 
+impl fmt::Display for PostgresError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PostgresError::NoRows => formatter.write_str("query returned no rows"),
+            PostgresError::UnsupportedBind(value) => {
+                write!(formatter, "unsupported bind value: {value:?}")
+            }
+            PostgresError::Database(error) => write!(formatter, "database error: {error}"),
+            PostgresError::Decode(error) => write!(formatter, "decode error: {error}"),
+            PostgresError::Conversion(target) => {
+                write!(formatter, "could not convert value to {target}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PostgresError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PostgresError::Database(error) | PostgresError::Decode(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 impl Backend for Postgres {
     type Error = PostgresError;
 
@@ -83,6 +108,46 @@ impl Backend for Postgres {
         writer: &mut impl std::io::Write,
     ) -> std::io::Result<()> {
         sql::write_table(table, writer)
+    }
+}
+
+#[cfg(feature = "schema")]
+impl squealy::SchemaBackend for Postgres {
+    fn render_create(
+        &self,
+        model: &squealy::DatabaseModel,
+        writer: &mut impl std::io::Write,
+    ) -> std::io::Result<()> {
+        sql::ddl::write_database(model, writer)
+    }
+}
+
+#[cfg(feature = "schema")]
+impl squealy::DdlExecutor for PostgresConnection {
+    type Error = PostgresError;
+
+    /// Runs the DDL batch inside a transaction so create-from-scratch is all-or-nothing
+    /// (PostgreSQL supports transactional DDL).
+    async fn execute_ddl(&mut self, sql: &str) -> Result<(), PostgresError> {
+        let transaction = self.client_mut().transaction().await?;
+        transaction.batch_execute(sql).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "schema")]
+impl squealy::SchemaConnect for Postgres {
+    type Connection = PostgresConnection;
+    type Error = PostgresError;
+
+    async fn connect(&self, url: &str) -> Result<PostgresConnection, PostgresError> {
+        let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls).await?;
+        // Drive the connection's IO task in the background for the life of the client.
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        Ok(PostgresConnection::new(client))
     }
 }
 
