@@ -639,6 +639,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "squealy-model"
+version = "0.1.0"
+dependencies = [
+ "squealy",
+]
+
+[[package]]
 name = "squealy-postgresql"
 version = "0.1.0"
 dependencies = [

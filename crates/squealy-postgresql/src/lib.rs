@@ -3,8 +3,9 @@
 use std::fmt;
 
 use squealy::{
-    Backend, BindValue, Connection, ConnectionWithTransaction, Decode, InsertableTable,
-    Projectable, ProjectionShape, QueryBuilder, SelectAst, Table, TableProjection, UpdateableTable,
+    Backend, BindValue, Connection, ConnectionWithTransaction, DatabaseModel, Decode,
+    InsertableTable, Projectable, ProjectionShape, QueryBuilder, SchemaBackend, SelectAst, Table,
+    TableProjection, UpdateableTable,
 };
 use tokio_postgres::Client;
 
@@ -83,6 +84,16 @@ impl Backend for Postgres {
         writer: &mut impl std::io::Write,
     ) -> std::io::Result<()> {
         sql::write_table(table, writer)
+    }
+}
+
+impl SchemaBackend for Postgres {
+    fn render_create(
+        &self,
+        model: &DatabaseModel,
+        writer: &mut impl std::io::Write,
+    ) -> std::io::Result<()> {
+        sql::write_database(model, writer)
     }
 }
 
