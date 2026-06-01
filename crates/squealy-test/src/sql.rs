@@ -2,12 +2,13 @@ use std::borrow::Cow;
 use std::io::{self, Write};
 
 use squealy::{
-    ArithmeticOp, AssignmentValueRef, BindSink, BindValue, Column, ColumnDefault, ColumnRef,
-    ColumnType, CompareOp, Expr, ExprAst, ExprKind, ExprVisitor, InsertAssignments,
-    InsertableTable, Order, OrderDirection, Predicate, PredicateAst, PredicateAstVisitor,
-    PredicateKind, PredicateNodes, PredicateVisitor, Projectable, ProjectionShape,
-    ProjectionVisitor, QueryBuilder, SchemaTable, SelectAst, SelectSink, Selected, SourceAlias,
-    Table, TableProjection, UpdateAssignments, UpdateableTable,
+    ArithmeticOp, AssignmentNode, AssignmentValueVisitor, AssignmentVisitor, BindSink, BindValue,
+    Column, ColumnDefault, ColumnRef, ColumnType, CompareOp, Expr, ExprAst, ExprKind, ExprVisitor,
+    InsertAssignments, InsertRow, InsertRowVisitor, InsertRows, InsertableTable, Order,
+    OrderDirection, Predicate, PredicateAst, PredicateAstVisitor, PredicateKind, PredicateNodes,
+    PredicateVisitor, Projectable, ProjectionShape, ProjectionVisitor, QueryBuilder, SchemaTable,
+    SelectAst, SelectSink, Selected, SourceAlias, Table, TableProjection, UpdateAssignments,
+    UpdateableTable,
 };
 
 trait SqlWriter: Write {
@@ -436,28 +437,28 @@ fn write_quoted_text(value: &str, writer: &mut impl Write) -> io::Result<()> {
     writer.write_all(b"'")
 }
 
-pub(crate) fn write_insert<S, Columns, Returning>(
-    columns: &Columns,
+pub(crate) fn write_insert<S, Rows, Returning>(
+    rows: &Rows,
     returning: &Returning,
     writer: &mut impl Write,
 ) -> io::Result<()>
 where
     S: InsertableTable,
-    Columns: InsertAssignments,
+    Rows: InsertRows,
     Returning: Projectable,
 {
     let mut writer = SqlOnly(writer);
-    write_insert_with_params::<S, _, _, _>(columns, returning, &mut writer)
+    write_insert_with_params::<S, _, _, _>(rows, returning, &mut writer)
 }
 
-fn write_insert_with_params<S, Columns, Returning, Writer>(
-    columns: &Columns,
+fn write_insert_with_params<S, Rows, Returning, Writer>(
+    rows: &Rows,
     returning: &Returning,
     writer: &mut Writer,
 ) -> io::Result<()>
 where
     S: InsertableTable,
-    Columns: InsertAssignments,
+    Rows: InsertRows,
     Returning: Projectable,
     Writer: SqlWriter,
 {
@@ -466,12 +467,12 @@ where
         "INSERT INTO {}",
         <S as SchemaTable>::qualified_name()
     )?;
-    if columns.is_empty() {
+    if rows.len() == 1 && rows.first_row_len() == 0 {
         writer.write_all(b" DEFAULT VALUES")?;
     } else {
         writer.write_all(b" (")?;
         let mut index = 0;
-        columns.try_for_each(|column, _value| {
+        rows.try_for_each_column(|column| {
             if index > 0 {
                 writer.write_all(b", ")?;
             }
@@ -479,20 +480,87 @@ where
             writer.write_all(column.as_bytes())?;
             Ok::<(), io::Error>(())
         })?;
-        writer.write_all(b") VALUES (")?;
-        let mut index = 0;
-        columns.try_for_each(|_column, value| {
-            if index > 0 {
-                writer.write_all(b", ")?;
-            }
-            index += 1;
-            write_assignment_value(value, writer)?;
-            Ok::<(), io::Error>(())
-        })?;
-        writer.write_all(b")")?;
+        writer.write_all(b") VALUES ")?;
+        write_insert_rows(rows, writer)?;
     }
     write_returning(returning, writer)?;
     Ok(())
+}
+
+struct WriteInsertRows<'writer, Writer> {
+    writer: &'writer mut Writer,
+    expected_columns: usize,
+    row_index: usize,
+}
+
+impl<Writer> InsertRowVisitor<io::Error> for WriteInsertRows<'_, Writer>
+where
+    Writer: SqlWriter,
+{
+    fn visit_row<Columns>(&mut self, row: &InsertRow<Columns>) -> io::Result<()>
+    where
+        Columns: InsertAssignments,
+    {
+        if row.columns().len() != self.expected_columns {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "all inserted rows must assign the same columns",
+            ));
+        }
+
+        if self.row_index > 0 {
+            self.writer.write_all(b", ")?;
+        }
+        self.row_index += 1;
+
+        self.writer.write_all(b"(")?;
+        let mut assignments = WriteAssignmentValues {
+            writer: self.writer,
+            index: 0,
+        };
+        row.columns().try_visit(&mut assignments)?;
+        self.writer.write_all(b")")
+    }
+}
+
+struct WriteAssignmentValues<'writer, Writer> {
+    writer: &'writer mut Writer,
+    index: usize,
+}
+
+impl<Writer> AssignmentVisitor for WriteAssignmentValues<'_, Writer>
+where
+    Writer: SqlWriter,
+{
+    type Error = io::Error;
+
+    fn visit_assignment<Value>(
+        &mut self,
+        _column: &'static str,
+        value: &Value,
+    ) -> Result<(), Self::Error>
+    where
+        Value: AssignmentNode,
+    {
+        if self.index > 0 {
+            self.writer.write_all(b", ")?;
+        }
+        self.index += 1;
+        write_assignment_value(value, self.writer)
+    }
+}
+
+fn write_insert_rows<Rows, Writer>(rows: &Rows, writer: &mut Writer) -> io::Result<()>
+where
+    Rows: InsertRows,
+    Writer: SqlWriter,
+{
+    let mut visitor = WriteInsertRows {
+        writer,
+        expected_columns: rows.first_row_len(),
+        row_index: 0,
+    };
+    rows.try_for_each_row(&mut visitor)
 }
 
 pub(crate) fn write_update<S, Columns, Filters, Returning>(
@@ -532,19 +600,39 @@ where
         <S as SchemaTable>::qualified_name(),
         alias
     )?;
-    let mut index = 0;
-    columns.try_for_each(|column, value| {
-        if index > 0 {
-            writer.write_all(b", ")?;
-        }
-        index += 1;
-        write!(writer, "{column} = ")?;
-        write_assignment_value(value, writer)?;
-        Ok::<(), io::Error>(())
-    })?;
+    let mut assignments = WriteUpdateAssignments { writer, index: 0 };
+    columns.try_visit(&mut assignments)?;
     write_filters(filters, writer)?;
     write_returning(returning, writer)?;
     Ok(())
+}
+
+struct WriteUpdateAssignments<'writer, Writer> {
+    writer: &'writer mut Writer,
+    index: usize,
+}
+
+impl<Writer> AssignmentVisitor for WriteUpdateAssignments<'_, Writer>
+where
+    Writer: SqlWriter,
+{
+    type Error = io::Error;
+
+    fn visit_assignment<Value>(
+        &mut self,
+        column: &'static str,
+        value: &Value,
+    ) -> Result<(), Self::Error>
+    where
+        Value: AssignmentNode,
+    {
+        if self.index > 0 {
+            self.writer.write_all(b", ")?;
+        }
+        self.index += 1;
+        write!(self.writer, "{column} = ")?;
+        write_assignment_value(value, self.writer)
+    }
 }
 
 pub(crate) fn write_delete<S, Filters, Returning>(
@@ -715,15 +803,44 @@ where
     write!(writer, " {}", render_order_direction(order.direction()))
 }
 
-fn write_assignment_value(
-    value: AssignmentValueRef<'_>,
-    writer: &mut impl SqlWriter,
-) -> io::Result<()> {
-    match value {
-        AssignmentValueRef::Static(value) => writer.push_bind(value),
-        AssignmentValueRef::Runtime => writer.push_runtime_bind(),
+fn write_assignment_value<Value>(value: &Value, writer: &mut impl SqlWriter) -> io::Result<()>
+where
+    Value: AssignmentNode,
+{
+    value.visit_value(&mut RenderAssignmentValue { writer })
+}
+
+struct RenderAssignmentValue<'writer, Writer> {
+    writer: &'writer mut Writer,
+}
+
+impl<Writer> AssignmentValueVisitor for RenderAssignmentValue<'_, Writer>
+where
+    Writer: SqlWriter,
+{
+    type Error = io::Error;
+
+    fn visit_static(&mut self, value: &BindValue) -> Result<(), Self::Error> {
+        self.writer.push_bind(value);
+        self.writer.write_all(b"?")
     }
-    writer.write_all(b"?")
+
+    fn visit_default(&mut self) -> Result<(), Self::Error> {
+        self.writer.write_all(b"DEFAULT")
+    }
+
+    fn visit_runtime(&mut self) -> Result<(), Self::Error> {
+        self.writer.push_runtime_bind();
+        self.writer.write_all(b"?")
+    }
+
+    fn visit_expr<K, Ast>(&mut self, expr: &Expr<'_, K, Ast>) -> Result<(), Self::Error>
+    where
+        K: ExprKind,
+        Ast: ExprAst,
+    {
+        write_expr_value(expr, self.writer)
+    }
 }
 
 struct RenderAst<'writer, Writer> {
@@ -840,20 +957,20 @@ fn render_order_direction(direction: OrderDirection) -> &'static str {
     }
 }
 
-pub(crate) fn write_insert_params<S, Columns, Returning, Sink>(
-    columns: &Columns,
+pub(crate) fn write_insert_params<S, Rows, Returning, Sink>(
+    rows: &Rows,
     returning: &Returning,
     sink: &mut Sink,
 ) -> Result<(), Sink::Error>
 where
     S: InsertableTable,
-    Columns: InsertAssignments,
+    Rows: InsertRows,
     Returning: Projectable,
     Sink: BindSink,
 {
-    sink.reserve_bind_values(columns.len());
+    sink.reserve_bind_values(rows.param_count());
     let mut writer = ParamSinkWriter { sink, error: None };
-    write_insert_with_params::<S, _, _, _>(columns, returning, &mut writer).unwrap();
+    write_insert_with_params::<S, _, _, _>(rows, returning, &mut writer).unwrap();
     writer.finish()
 }
 
@@ -889,7 +1006,7 @@ where
     Returning: Projectable,
     Sink: BindSink,
 {
-    sink.reserve_bind_values(columns.len() + filters.len());
+    sink.reserve_bind_values(columns.param_count() + filters.len());
     let mut writer = ParamSinkWriter { sink, error: None };
     write_update_with_params::<S, _, _, _, _>(alias, columns, filters, returning, &mut writer)
         .unwrap();

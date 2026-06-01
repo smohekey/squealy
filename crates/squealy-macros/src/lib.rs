@@ -81,3 +81,15 @@ pub fn hlist_tuples(input: TokenStream) -> TokenStream {
 pub fn prepared_param_values(input: TokenStream) -> TokenStream {
     tuple::prepared_param_values(input)
 }
+
+/// Generates explicit insert column/value tuple support from arity 1 through the supplied maximum.
+#[proc_macro]
+pub fn insert_column_values(input: TokenStream) -> TokenStream {
+    tuple::insert_column_values(input)
+}
+
+/// Generates explicit update column/value tuple support from arity 1 through the supplied maximum.
+#[proc_macro]
+pub fn update_column_values(input: TokenStream) -> TokenStream {
+    tuple::update_column_values(input)
+}

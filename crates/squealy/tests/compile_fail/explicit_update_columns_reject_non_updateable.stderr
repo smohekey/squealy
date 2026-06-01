@@ -1,0 +1,19 @@
+error[E0599]: the method `set` exists for struct `ToColumns<'_, TestConnection, GeneratedRecord<'_>, (GeneratedRecordSlug,)>`, but its trait bounds were not satisfied
+  --> tests/compile_fail/explicit_update_columns_reject_non_updateable.rs:16:10
+   |
+ 4 |   #[derive(Clone, Debug, PartialEq, Table)]
+   |                                     ----- doesn't satisfy `GeneratedRecordSlug: squealy::UpdateColumnKey`
+...
+14 |       let _update = TestConnection
+   |  ___________________-
+15 | |         .to_columns::<GeneratedRecord, (GeneratedRecordSlug,)>()
+16 | |         .set(|_| ("not-updateable",))
+   | |_________-^^^
+   |
+   = note: the following trait bounds were not satisfied:
+           `GeneratedRecordSlug: squealy::UpdateColumnKey`
+note: the trait `squealy::UpdateColumnKey` must be implemented
+  --> src/query.rs
+   |
+   | pub trait UpdateColumnKey: ColumnKey {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

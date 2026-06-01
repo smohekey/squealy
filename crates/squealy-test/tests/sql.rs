@@ -23,6 +23,13 @@ struct DefaultedRecord<'scope, C: ColumnMode = ColumnExpr> {
     id: C::Type<'scope, i32>,
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+struct Counter<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    count: C::Type<'scope, i32>,
+}
+
 #[allow(dead_code)]
 #[derive(Schema)]
 struct Public {
@@ -88,6 +95,39 @@ fn test_runtime_prepared_assignment_params_render_without_captured_values() {
 }
 
 #[test]
+fn test_update_renders_explicit_defaults() {
+    let update = TestConnection
+        .to::<User>()
+        .name(default())
+        .where_(|user| user.id.equals(1))
+        .update_returning(|user| user.name);
+
+    assert_eq!(
+        update.to_sql(),
+        "UPDATE public.users AS q0_0 SET name = DEFAULT WHERE (q0_0.id = ?) RETURNING q0_0.name AS name"
+    );
+    assert_eq!(update.collect_params(), vec![BindValue::Int(1)]);
+}
+
+#[test]
+fn test_explicit_update_columns_render_expression_assignments() {
+    let update = TestConnection
+        .to_columns::<Counter, (CounterCount,)>()
+        .set(|counter| (counter.count + 1,))
+        .where_(|counter| counter.id.equals(7))
+        .update_returning(|counter| counter.count);
+
+    assert_eq!(
+        update.to_sql(),
+        "UPDATE counters AS q0_0 SET count = (q0_0.count + ?) WHERE (q0_0.id = ?) RETURNING q0_0.count AS count"
+    );
+    assert_eq!(
+        update.collect_params(),
+        vec![BindValue::Int(1), BindValue::Int(7)]
+    );
+}
+
+#[test]
 fn test_insert_update_and_delete_render_returning() {
     let insert = TestConnection
         .to::<User>()
@@ -124,6 +164,45 @@ fn test_insert_update_and_delete_render_returning() {
         vec![BindValue::Text("Ada".to_owned()), BindValue::Int(1)]
     );
     assert_eq!(delete.collect_params(), vec![BindValue::Int(1)]);
+}
+
+#[test]
+fn test_insert_renders_multiple_rows() {
+    let insert = TestConnection
+        .to_columns::<User, (UserName,)>()
+        .row(("Ada",))
+        .row(("Grace",))
+        .insert_returning(|user| user.id);
+
+    assert_eq!(
+        insert.to_sql(),
+        "INSERT INTO public.users (name) VALUES (?), (?) RETURNING q0_0.id AS id"
+    );
+    assert_eq!(
+        insert.collect_params(),
+        vec![
+            BindValue::Text("Ada".to_owned()),
+            BindValue::Text("Grace".to_owned())
+        ]
+    );
+}
+
+#[test]
+fn test_insert_renders_explicit_defaults() {
+    let insert = TestConnection
+        .to_columns::<User, (UserName,)>()
+        .row((default(),))
+        .row(("Grace",))
+        .insert_returning(|user| user.id);
+
+    assert_eq!(
+        insert.to_sql(),
+        "INSERT INTO public.users (name) VALUES (DEFAULT), (?) RETURNING q0_0.id AS id"
+    );
+    assert_eq!(
+        insert.collect_params(),
+        vec![BindValue::Text("Grace".to_owned())]
+    );
 }
 
 #[test]
@@ -189,6 +268,15 @@ fn test_runtime_param_queries_can_be_prepared() {
         let insert = TestConnection
             .to::<User>()
             .name(param::<UserName>())
+            .insert_returning(|user| user.id);
+        let _prepare = insert.prepare();
+    }
+
+    {
+        let insert = TestConnection
+            .to_columns::<User, (UserName,)>()
+            .row((param::<UserName>(),))
+            .row((param::<UserName>(),))
             .insert_returning(|user| user.id);
         let _prepare = insert.prepare();
     }

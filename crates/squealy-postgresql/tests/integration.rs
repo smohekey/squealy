@@ -342,6 +342,29 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
     assert_eq!(defaulted.score, 42);
     assert!(defaulted.active);
 
+    let explicitly_defaulted = connection
+        .to_columns::<IntegrationDefaulted, (IntegrationDefaultedName, IntegrationDefaultedScore)>()
+        .row((default(), default()))
+        .insert_returning(|record| record)
+        .fetch_one()
+        .await
+        .expect("insert explicitly defaulted record");
+
+    assert_eq!(explicitly_defaulted.name, "anonymous");
+    assert_eq!(explicitly_defaulted.score, 42);
+    assert!(explicitly_defaulted.active);
+
+    let incremented = connection
+        .to_columns::<IntegrationDefaulted, (IntegrationDefaultedScore,)>()
+        .set(|record| (record.score + 1,))
+        .where_(|record| record.id.equals(explicitly_defaulted.id))
+        .update_returning(|record| record.score)
+        .fetch_one()
+        .await
+        .expect("increment defaulted record score");
+
+    assert_eq!(incremented, 43);
+
     let nullable_id = connection
         .to::<IntegrationNullable>()
         .note(None::<String>)
@@ -462,6 +485,51 @@ async fn postgres_inner_joins_across_tables() {
             ),
             ("Grace".to_owned(), None),
         ]
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_inserts_multiple_rows() {
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS integration_users")
+        .await
+        .expect("drop old integration_users table");
+
+    let ddl_backend = Postgres;
+    create_table::<IntegrationUser>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+    let (names, affected) = connection
+        .to_columns::<IntegrationUser, (IntegrationUserName,)>()
+        .row(("Ada",))
+        .row(("Grace",))
+        .insert_returning(|user| user.name)
+        .collect_with_affected()
+        .await
+        .expect("insert multiple users");
+
+    assert_eq!(affected, 2);
+    assert_eq!(names, vec!["Ada".to_owned(), "Grace".to_owned()]);
+
+    let dynamic_multi_insert_preparable = connection
+        .to_columns::<IntegrationUser, (IntegrationUserName,)>()
+        .row((param::<IntegrationUserName>(),))
+        .row((param::<IntegrationUserName>(),))
+        .insert_returning(|user| user.name);
+    let prepared_dynamic_multi_insert = dynamic_multi_insert_preparable
+        .prepare()
+        .await
+        .expect("prepare dynamic multi insert");
+    let (runtime_names, runtime_count) = prepared_dynamic_multi_insert
+        .collect_with_affected(("Runtime One".to_owned(), "Runtime Two".to_owned()))
+        .await
+        .expect("execute dynamic multi insert");
+    assert_eq!(runtime_count, 2);
+    assert_eq!(
+        runtime_names,
+        vec!["Runtime One".to_owned(), "Runtime Two".to_owned()]
     );
 }
 
