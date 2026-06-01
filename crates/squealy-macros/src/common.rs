@@ -326,7 +326,7 @@ pub(crate) fn parse_db_type(db_type: &str) -> proc_macro2::TokenStream {
 fn split_type_args(input: &str) -> Option<(&str, &str)> {
     let open = input.find('(')?;
     let close = input.rfind(')')?;
-    if close < open {
+    if close < open || close + 1 != input.len() {
         return None;
     }
     Some((input[..open].trim(), &input[open + 1..close]))

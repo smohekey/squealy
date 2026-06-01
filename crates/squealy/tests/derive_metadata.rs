@@ -186,6 +186,10 @@ pub struct RecordId(i32);
 #[column_type(db_type = "jsonb")]
 pub struct JsonColumn(String);
 
+#[derive(Clone, Debug, PartialEq, ColumnType)]
+#[column_type(db_type = "varchar(64)[]")]
+pub struct VarcharArrayColumn(String);
+
 #[derive(Clone, Debug, PartialEq, Table)]
 struct RawTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
     #[column(db_type = "jsonb")]
@@ -194,6 +198,10 @@ struct RawTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
     label: C::Type<'scope, String>,
     #[column(db_type = "decimal(10,2)")]
     amount: C::Type<'scope, String>,
+    #[column(db_type = "varchar(64)[]")]
+    labels: C::Type<'scope, String>,
+    #[column(db_type = "decimal(10,2) unsigned")]
+    unsigned_amount: C::Type<'scope, String>,
     // Unrecognized db_type falls back to verbatim Raw.
     #[column(db_type = "citext")]
     custom: C::Type<'scope, String>,
@@ -203,6 +211,7 @@ struct RawTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
 struct DerivedColumnTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
     id: C::Type<'scope, RecordId>,
     payload: C::Type<'scope, JsonColumn>,
+    labels: C::Type<'scope, VarcharArrayColumn>,
 }
 
 #[allow(dead_code)]
@@ -319,8 +328,13 @@ fn derive_table_parses_db_type_into_structured_column_type() {
             scale: 2
         }
     );
+    assert_eq!(columns[3].column_type(), ColumnType::Raw("varchar(64)[]"));
+    assert_eq!(
+        columns[4].column_type(),
+        ColumnType::Raw("decimal(10,2) unsigned")
+    );
     // Unrecognized db_type stays verbatim.
-    assert_eq!(columns[3].column_type(), ColumnType::Raw("citext"));
+    assert_eq!(columns[5].column_type(), ColumnType::Raw("citext"));
 }
 
 #[test]
@@ -329,6 +343,7 @@ fn derive_column_type_maps_newtype_columns() {
 
     assert_eq!(columns[0].column_type(), ColumnType::I32);
     assert_eq!(columns[1].column_type(), ColumnType::Jsonb);
+    assert_eq!(columns[2].column_type(), ColumnType::Raw("varchar(64)[]"));
 }
 
 #[test]
@@ -337,13 +352,15 @@ fn derive_column_type_maps_newtype_bind_values() {
         .to::<DerivedColumnTypeRecord>()
         .id(RecordId(7))
         .payload(JsonColumn("{\"ok\":true}".to_owned()))
+        .labels(VarcharArrayColumn("{a,b}".to_owned()))
         .insert_returning(|record| record.id);
 
     assert_eq!(
         insert.collect_params(),
         vec![
             BindValue::Int(7),
-            BindValue::Text("{\"ok\":true}".to_owned())
+            BindValue::Text("{\"ok\":true}".to_owned()),
+            BindValue::Text("{a,b}".to_owned())
         ]
     );
 }
@@ -717,6 +734,7 @@ fn table_rows_implement_backend_decode() {
     assert_decode::<Option<String>>();
     assert_decode::<RecordId>();
     assert_decode::<JsonColumn>();
+    assert_decode::<VarcharArrayColumn>();
     assert_decode::<User<'static, ColumnValue>>();
     assert_decode::<DerivedColumnTypeRecord<'static, ColumnValue>>();
     assert_decode::<DerivedColumnTypeRecord<'static, ColumnNullableValue>>();
