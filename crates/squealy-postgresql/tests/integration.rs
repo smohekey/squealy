@@ -484,9 +484,9 @@ async fn postgres_round_trips_primitive_types() {
         .small(7i16)
         .medium(1_000i32)
         .large(9_000_000_000i64)
-        .signed_wide(123_456_789_012i128)
-        .unsigned_large(987_654_321u64)
-        .unsigned_wide(123_456_789_012u128)
+        .signed_wide(i128::MIN)
+        .unsigned_large(u64::MAX)
+        .unsigned_wide(u128::MAX)
         .single(1.5f32)
         .double(2.5f64)
         .flag(true)
@@ -499,13 +499,30 @@ async fn postgres_round_trips_primitive_types() {
     assert_eq!(stored.small, 7);
     assert_eq!(stored.medium, 1_000);
     assert_eq!(stored.large, 9_000_000_000);
-    assert_eq!(stored.signed_wide, 123_456_789_012);
-    assert_eq!(stored.unsigned_large, 987_654_321);
-    assert_eq!(stored.unsigned_wide, 123_456_789_012);
+    assert_eq!(stored.signed_wide, i128::MIN);
+    assert_eq!(stored.unsigned_large, u64::MAX);
+    assert_eq!(stored.unsigned_wide, u128::MAX);
     assert_eq!(stored.single, 1.5);
     assert_eq!(stored.double, 2.5);
     assert!(stored.flag);
     assert_eq!(stored.label, "mixed");
+
+    let quotients = connection
+        .from::<IntegrationTypes>()
+        .select(|(record,)| {
+            (
+                record.signed_wide / 2i128,
+                record.unsigned_large / 2u64,
+                record.unsigned_wide / 2u128,
+            )
+        })
+        .fetch_one()
+        .await
+        .expect("select numeric quotients");
+
+    assert_eq!(quotients.0, (i128::MIN as f64) / 2.0);
+    assert_eq!(quotients.1, (u64::MAX as f64) / 2.0);
+    assert_eq!(quotients.2, (u128::MAX as f64) / 2.0);
 }
 
 #[tokio::test]

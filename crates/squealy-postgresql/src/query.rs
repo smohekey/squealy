@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use bytes::BytesMut;
+use bytes::{Buf, BufMut, BytesMut};
 use futures_core::Stream;
 
 use squealy::{
@@ -18,7 +18,7 @@ use squealy::{
 };
 use tokio_postgres::{
     GenericClient,
-    types::{FromSqlOwned, IsNull, ToSql, Type, to_sql_checked},
+    types::{FromSql, FromSqlOwned, IsNull, ToSql, Type, to_sql_checked},
 };
 
 use crate::{Postgres, PostgresConnection, PostgresError, PostgresTransaction, sql};
@@ -108,8 +108,22 @@ macro_rules! impl_postgres_decode_from_i64 {
     };
 }
 
+macro_rules! impl_postgres_decode_from_numeric {
+    ($($ty:ty),* $(,)?) => {
+        $(impl Decode<Postgres> for $ty {
+            fn decode(
+                row: &mut <Postgres as Backend>::RowReader<'_>,
+            ) -> Result<Self, PostgresError> {
+                let value = row.take_sql::<PostgresNumericInteger>()?;
+                <$ty>::try_from(value).map_err(|_| PostgresError::Conversion(stringify!($ty)))
+            }
+        })*
+    };
+}
+
 impl_postgres_decode_direct!(i16, i32, i64, f32, f64, String, bool);
-impl_postgres_decode_from_i64!(i8, i128, isize, u8, u16, u32, u64, u128, usize);
+impl_postgres_decode_from_i64!(i8, isize, u8, u16, u32, usize);
+impl_postgres_decode_from_numeric!(i128, u64, u128);
 
 impl<T> Decode<Postgres> for Option<T>
 where
@@ -281,6 +295,7 @@ pub enum PostgresParam {
     Int16(i16),
     Int32(i32),
     Int64(i64),
+    Numeric(PostgresNumericInteger),
     Float32(f32),
     Float64(f64),
     Text(String),
@@ -294,6 +309,7 @@ impl PostgresParam {
             Self::Int16(value) => value,
             Self::Int32(value) => value,
             Self::Int64(value) => value,
+            Self::Numeric(value) => value,
             Self::Float32(value) => value,
             Self::Float64(value) => value,
             Self::Text(value) => value,
@@ -301,6 +317,233 @@ impl PostgresParam {
             Self::Null(value) => value,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct PostgresNumericInteger {
+    negative: bool,
+    magnitude: u128,
+}
+
+impl PostgresNumericInteger {
+    const SIGN_POSITIVE: u16 = 0x0000;
+    const SIGN_NEGATIVE: u16 = 0x4000;
+    const SIGN_NAN: u16 = 0xC000;
+    const SIGN_POSITIVE_INFINITY: u16 = 0xD000;
+    const SIGN_NEGATIVE_INFINITY: u16 = 0xF000;
+    const BASE: u128 = 10_000;
+    const MAX_DIGITS: usize = 10;
+
+    const fn unsigned(magnitude: u128) -> Self {
+        Self {
+            negative: false,
+            magnitude,
+        }
+    }
+
+    const fn signed(value: i128) -> Self {
+        Self {
+            negative: value.is_negative(),
+            magnitude: value.unsigned_abs(),
+        }
+    }
+
+    fn write_numeric(&self, out: &mut BytesMut) {
+        if self.magnitude == 0 {
+            out.put_i16(0);
+            out.put_i16(0);
+            out.put_u16(Self::SIGN_POSITIVE);
+            out.put_i16(0);
+            return;
+        }
+
+        let mut digits = [0u16; Self::MAX_DIGITS];
+        let digits = self.write_digits(&mut digits);
+
+        out.put_i16(digits.len() as i16);
+        out.put_i16(digits.len() as i16 - 1);
+        out.put_u16(if self.negative {
+            Self::SIGN_NEGATIVE
+        } else {
+            Self::SIGN_POSITIVE
+        });
+        out.put_i16(0);
+
+        for &digit in digits {
+            out.put_u16(digit);
+        }
+    }
+
+    fn write_digits<'digits>(
+        &self,
+        digits: &'digits mut [u16; Self::MAX_DIGITS],
+    ) -> &'digits [u16] {
+        let mut value = self.magnitude;
+        let mut index = Self::MAX_DIGITS;
+
+        while value > 0 {
+            index -= 1;
+            digits[index] = (value % Self::BASE) as u16;
+            value /= Self::BASE;
+        }
+
+        &digits[index..]
+    }
+}
+
+impl TryFrom<PostgresNumericInteger> for i128 {
+    type Error = ();
+
+    fn try_from(value: PostgresNumericInteger) -> Result<Self, Self::Error> {
+        if value.negative {
+            if value.magnitude == (i128::MAX as u128) + 1 {
+                Ok(i128::MIN)
+            } else {
+                let magnitude = i128::try_from(value.magnitude).map_err(|_| ())?;
+                Ok(-magnitude)
+            }
+        } else {
+            i128::try_from(value.magnitude).map_err(|_| ())
+        }
+    }
+}
+
+impl TryFrom<PostgresNumericInteger> for u64 {
+    type Error = ();
+
+    fn try_from(value: PostgresNumericInteger) -> Result<Self, Self::Error> {
+        if value.negative {
+            Err(())
+        } else {
+            u64::try_from(value.magnitude).map_err(|_| ())
+        }
+    }
+}
+
+impl TryFrom<PostgresNumericInteger> for u128 {
+    type Error = ();
+
+    fn try_from(value: PostgresNumericInteger) -> Result<Self, Self::Error> {
+        if value.negative {
+            Err(())
+        } else {
+            Ok(value.magnitude)
+        }
+    }
+}
+
+impl ToSql for PostgresNumericInteger {
+    fn to_sql(
+        &self,
+        ty: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
+        if *ty == Type::FLOAT8 {
+            out.put_f64(self.as_f64());
+            return Ok(IsNull::No);
+        }
+
+        if *ty != Type::NUMERIC {
+            return Err(format!("PostgresNumericInteger does not support SQL type {ty:?}").into());
+        }
+
+        self.write_numeric(out);
+        Ok(IsNull::No)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        matches!(*ty, Type::NUMERIC | Type::FLOAT8)
+    }
+
+    to_sql_checked!();
+}
+
+impl PostgresNumericInteger {
+    fn as_f64(self) -> f64 {
+        let value = self.magnitude as f64;
+        if self.negative { -value } else { value }
+    }
+}
+
+impl<'sql> FromSql<'sql> for PostgresNumericInteger {
+    fn from_sql(ty: &Type, raw: &'sql [u8]) -> Result<Self, Box<dyn Error + Sync + Send>> {
+        if *ty != Type::NUMERIC {
+            return Err(format!("PostgresNumericInteger does not support SQL type {ty:?}").into());
+        }
+
+        let mut raw = raw;
+        if raw.remaining() < 8 {
+            return Err("invalid numeric value".into());
+        }
+
+        let digits_len = raw.get_i16();
+        let weight = raw.get_i16();
+        let sign = raw.get_u16();
+        let dscale = raw.get_i16();
+
+        if digits_len < 0 || weight < -1 || dscale < 0 {
+            return Err("invalid numeric metadata".into());
+        }
+
+        let digits_len = digits_len as usize;
+        if raw.remaining() != digits_len * 2 {
+            return Err("invalid numeric digit length".into());
+        }
+
+        if matches!(
+            sign,
+            Self::SIGN_NAN | Self::SIGN_POSITIVE_INFINITY | Self::SIGN_NEGATIVE_INFINITY
+        ) {
+            return Err("non-finite numeric value cannot decode as integer".into());
+        }
+        if !matches!(sign, Self::SIGN_POSITIVE | Self::SIGN_NEGATIVE) {
+            return Err("invalid numeric sign".into());
+        }
+
+        let mut magnitude = 0u128;
+        for index in 0..digits_len {
+            let digit = raw.get_u16();
+            if digit >= Self::BASE as u16 {
+                return Err("invalid numeric digit".into());
+            }
+
+            let exponent = i32::from(weight) - index as i32;
+            if exponent < 0 {
+                if digit != 0 {
+                    return Err("fractional numeric value cannot decode as integer".into());
+                }
+                continue;
+            }
+
+            let place = numeric_place(exponent as u32)?;
+            let digit_value = u128::from(digit)
+                .checked_mul(place)
+                .ok_or("numeric value exceeds u128")?;
+            magnitude = magnitude
+                .checked_add(digit_value)
+                .ok_or("numeric value exceeds u128")?;
+        }
+
+        Ok(Self {
+            negative: sign == Self::SIGN_NEGATIVE && magnitude != 0,
+            magnitude,
+        })
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::NUMERIC
+    }
+}
+
+fn numeric_place(exponent: u32) -> Result<u128, Box<dyn Error + Sync + Send>> {
+    let mut place = 1u128;
+    for _ in 0..exponent {
+        place = place
+            .checked_mul(PostgresNumericInteger::BASE)
+            .ok_or("numeric value exceeds u128")?;
+    }
+    Ok(place)
 }
 
 struct PostgresBindSink {
@@ -454,9 +697,12 @@ fn postgres_signed_int(value: i128, width: IntWidth) -> Result<PostgresParam, Po
         IntWidth::I32 => i32::try_from(value)
             .map(PostgresParam::Int32)
             .map_err(|_| PostgresError::UnsupportedBind(BindValue::Int(value))),
-        IntWidth::I64 | IntWidth::I128 | IntWidth::Isize => i64::try_from(value)
+        IntWidth::I64 | IntWidth::Isize => i64::try_from(value)
             .map(PostgresParam::Int64)
             .map_err(|_| PostgresError::UnsupportedBind(BindValue::Int(value))),
+        IntWidth::I128 => Ok(PostgresParam::Numeric(PostgresNumericInteger::signed(
+            value,
+        ))),
     }
 }
 
@@ -465,11 +711,12 @@ fn postgres_unsigned_int(value: u128, width: UIntWidth) -> Result<PostgresParam,
         UIntWidth::U8 | UIntWidth::U16 => i32::try_from(value)
             .map(PostgresParam::Int32)
             .map_err(|_| PostgresError::UnsupportedBind(BindValue::UInt(value))),
-        UIntWidth::U32 | UIntWidth::U64 | UIntWidth::U128 | UIntWidth::Usize => {
-            i64::try_from(value)
-                .map(PostgresParam::Int64)
-                .map_err(|_| PostgresError::UnsupportedBind(BindValue::UInt(value)))
-        }
+        UIntWidth::U32 | UIntWidth::Usize => i64::try_from(value)
+            .map(PostgresParam::Int64)
+            .map_err(|_| PostgresError::UnsupportedBind(BindValue::UInt(value))),
+        UIntWidth::U64 | UIntWidth::U128 => Ok(PostgresParam::Numeric(
+            PostgresNumericInteger::unsigned(value),
+        )),
     }
 }
 
@@ -1685,7 +1932,10 @@ mod tests {
         ));
         assert!(matches!(
             postgres_signed_int(7, IntWidth::I128),
-            Ok(PostgresParam::Int64(7))
+            Ok(PostgresParam::Numeric(PostgresNumericInteger {
+                negative: false,
+                magnitude: 7
+            }))
         ));
         assert!(matches!(
             postgres_signed_int(7, IntWidth::Isize),
@@ -1730,11 +1980,17 @@ mod tests {
         ));
         assert!(matches!(
             postgres_unsigned_int(7, UIntWidth::U64),
-            Ok(PostgresParam::Int64(7))
+            Ok(PostgresParam::Numeric(PostgresNumericInteger {
+                negative: false,
+                magnitude: 7
+            }))
         ));
         assert!(matches!(
             postgres_unsigned_int(7, UIntWidth::U128),
-            Ok(PostgresParam::Int64(7))
+            Ok(PostgresParam::Numeric(PostgresNumericInteger {
+                negative: false,
+                magnitude: 7
+            }))
         ));
         assert!(matches!(
             postgres_unsigned_int(7, UIntWidth::Usize),
@@ -1750,11 +2006,46 @@ mod tests {
             Err(PostgresError::UnsupportedBind(_))
         ));
 
-        let too_big_for_i64 = u128::from(u64::MAX);
         assert!(matches!(
-            postgres_unsigned_int(too_big_for_i64, UIntWidth::U64),
-            Err(PostgresError::UnsupportedBind(_))
+            postgres_unsigned_int(u128::from(u64::MAX), UIntWidth::U64),
+            Ok(PostgresParam::Numeric(PostgresNumericInteger {
+                negative: false,
+                magnitude
+            })) if magnitude == u128::from(u64::MAX)
         ));
+    }
+
+    #[test]
+    fn numeric_integer_round_trips_wide_values() {
+        let values = [
+            PostgresNumericInteger::signed(i128::MIN),
+            PostgresNumericInteger::signed(i128::MAX),
+            PostgresNumericInteger::unsigned(u128::MAX),
+            PostgresNumericInteger::signed(-123_456_789_012_345_678_901_234_567_890i128),
+            PostgresNumericInteger::unsigned(123_456_789_012_345_678_901_234_567_890u128),
+        ];
+
+        for value in values {
+            let mut bytes = BytesMut::new();
+            value.write_numeric(&mut bytes);
+            let decoded =
+                PostgresNumericInteger::from_sql(&Type::NUMERIC, &bytes).expect("decode numeric");
+
+            assert_eq!(decoded, value);
+        }
+    }
+
+    #[test]
+    fn numeric_integer_rejects_fractional_values() {
+        let mut bytes = BytesMut::new();
+        bytes.put_i16(2);
+        bytes.put_i16(0);
+        bytes.put_u16(PostgresNumericInteger::SIGN_POSITIVE);
+        bytes.put_i16(4);
+        bytes.put_u16(1);
+        bytes.put_u16(5_000);
+
+        assert!(PostgresNumericInteger::from_sql(&Type::NUMERIC, &bytes).is_err());
     }
 
     #[test]
