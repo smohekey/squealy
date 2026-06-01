@@ -418,7 +418,7 @@ pub use model::{
 pub use projection::{Maybe, Projectable, ProjectionShape, ProjectionVisitor, TableProjection};
 pub use query::{
     AllRows, AssignmentNode, AssignmentValueNode, AssignmentValueVisitor, AssignmentVisitor,
-    ColumnKey, DefaultAssignmentValue, DefaultValue, DeleteQuery, DeleteSourceAst,
+    ColumnKey, DefaultAssignmentValue, DefaultValueNode, DeleteQuery, DeleteSourceAst,
     DeleteSourceQuery, ExecutableDeleteQuery, ExecutableInsertQuery, ExecutableSelectQuery,
     ExecutableUpdateQuery, ExplicitUpdateBuilder, ExprAssignmentValue, From, InnerJoinSource,
     InsertAssignment, InsertAssignmentNode, InsertAssignments, InsertColumnKey,
