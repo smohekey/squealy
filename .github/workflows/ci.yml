@@ -13,8 +13,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
-    # PostgreSQL service container mirroring compose.yaml, used by the
-    # `#[ignore]`d integration tests below.
+    # Service containers mirroring compose.yaml, used by the `#[ignore]`d integration tests below.
     services:
       postgres:
         image: postgres:17
@@ -27,6 +26,18 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U postgres -d squealy_test"
           --health-interval 1s
+          --health-timeout 5s
+          --health-retries 30
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: squealy_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval 2s
           --health-timeout 5s
           --health-retries 30
 
@@ -59,6 +70,11 @@ jobs:
         run: |
           cargo test -p squealy-postgresql --test integration -- --ignored --test-threads=1
           cargo test -p squealy-model --test publish -- --ignored --test-threads=1
+
+      - name: Integration tests (MySQL)
+        env:
+          SQUEALY_MYSQL_URL: mysql://root:root@127.0.0.1:3306/squealy_test
+        run: cargo test -p squealy-mysql --test publish -- --ignored --test-threads=1
 
       # Compiles + runs an extraction stub against a fixture crate (no database needed).
       - name: CLI extraction test
