@@ -403,7 +403,8 @@ pub use expr::{
     IntWidth, IntoBindValue, IntoExpr, IntoNullableBindValue, LessThanOrEqualsPredicate,
     LessThanPredicate, LiteralExprAst, MultiplyExpr, NotEqualsPredicate, NotPredicate, Nullable,
     OrPredicate, Order, OrderDirection, ParamExprAst, Predicate, PredicateAst, PredicateAstVisitor,
-    PredicateKind, RuntimeParam, SourceAlias, SqlDivide, SqlNumber, SubtractExpr, UIntWidth, param,
+    PredicateKind, RuntimeParam, SameValue, SourceAlias, SqlDivide, SqlNumber, SubtractExpr,
+    UIntWidth, param,
 };
 pub use foreign_key::ForeignKey;
 pub use index::Index;
