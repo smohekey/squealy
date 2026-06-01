@@ -341,12 +341,16 @@ Done and tested:
 - **DDL is feature-gated**: `squealy-postgresql`'s `SchemaBackend`/`DdlExecutor` impls and the
   whole-DB renderer sit behind a default-off `schema` feature, so query-only users carry none of it.
 
-Remaining for sprint 1:
-- **`SchemaConnect`** (core trait) + Postgres impl (under `schema`) — open a connection from a URL for
-  `publish --database … --url …`.
-- **Stub-compiling `squealy` CLI** (see Front-end): `--database <path>` discovery + strict validation,
-  stub generation in a private temp dir, file harvest, and the `export` / `publish` / `script`
-  commands (incl. `publish --package`). New `squealy-cli` bin crate.
+- **`SchemaConnect`** (core trait) + Postgres impl (under `schema`) — opens a connection from a URL,
+  spawning its IO task; used by `publish --database … --url …`.
+- **Stub-compiling `squealy` CLI** (`squealy-cli`, bin `squealy`): resolves the package via
+  `cargo metadata`, validates `--database` as a strict Rust path, generates a stub in a private temp
+  dir, compiles + runs it as a subprocess, and harvests the `.sqz`. Commands `script` / `export` /
+  `publish`, each sourced from `--database <path>` (compile + run) or `--package <file.sqz>` (no
+  project code runs). Verified end-to-end against a fixture crate and a live Postgres.
+
+**Sprint 1 is functionally complete.** Next: introspection → diff → incremental ALTER plans (the
+declarative migration core), then `PublishOptions` teeth and the hybrid flow.
 
 ## Settled decisions
 
