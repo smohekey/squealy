@@ -1,0 +1,13 @@
+[package]
+name = "squealy-mysql"
+description = "MySQL schema-management backend for squealy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+squealy.workspace = true

@@ -4,6 +4,7 @@ members = [
     "crates/squealy-cli",
     "crates/squealy-macros",
     "crates/squealy-model",
+    "crates/squealy-mysql",
     "crates/squealy-postgresql",
     "crates/squealy-test",
 ]
