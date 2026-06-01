@@ -3,9 +3,8 @@
 use std::fmt;
 
 use squealy::{
-    Backend, BindValue, Connection, ConnectionWithTransaction, DatabaseModel, Decode,
-    InsertableTable, Projectable, ProjectionShape, QueryBuilder, SchemaBackend, SelectAst, Table,
-    TableProjection, UpdateableTable,
+    Backend, BindValue, Connection, ConnectionWithTransaction, Decode, InsertableTable,
+    Projectable, ProjectionShape, QueryBuilder, SelectAst, Table, TableProjection, UpdateableTable,
 };
 use tokio_postgres::Client;
 
@@ -87,13 +86,28 @@ impl Backend for Postgres {
     }
 }
 
-impl SchemaBackend for Postgres {
+#[cfg(feature = "schema")]
+impl squealy::SchemaBackend for Postgres {
     fn render_create(
         &self,
-        model: &DatabaseModel,
+        model: &squealy::DatabaseModel,
         writer: &mut impl std::io::Write,
     ) -> std::io::Result<()> {
-        sql::write_database(model, writer)
+        sql::ddl::write_database(model, writer)
+    }
+}
+
+#[cfg(feature = "schema")]
+impl squealy::DdlExecutor for PostgresConnection {
+    type Error = PostgresError;
+
+    /// Runs the DDL batch inside a transaction so create-from-scratch is all-or-nothing
+    /// (PostgreSQL supports transactional DDL).
+    async fn execute_ddl(&mut self, sql: &str) -> Result<(), PostgresError> {
+        let transaction = self.client_mut().transaction().await?;
+        transaction.batch_execute(sql).await?;
+        transaction.commit().await?;
+        Ok(())
     }
 }
 

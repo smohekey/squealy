@@ -316,13 +316,18 @@ Done and tested:
 - **`.sqz` package** in `squealy-model`: deterministic KDL `model.kdl` + `manifest.kdl` in a zip,
   with full KDL and zip round-trip tests.
 - **`render_create_sql` / `script`** engine entry points.
+- **`publish`** — `DdlExecutor` trait in core; `PostgresConnection` implements it transactionally via
+  `batch_execute` (behind the `schema` feature); `squealy-model::publish`/`publish_database` render
+  then execute. Verified by a live `#[ignore]`d integration test (create-from-scratch → insert →
+  select round-trip).
+- **DDL is feature-gated**: `squealy-postgresql`'s `SchemaBackend`/`DdlExecutor` impls and the
+  whole-DB renderer sit behind a default-off `schema` feature, so query-only users carry none of it.
 
 Remaining for sprint 1:
-- **`publish`** — execute the rendered DDL against a live connection. Needs a new raw-DDL-execution
-  capability (e.g. a `DdlExecutor` trait in core implemented by `PostgresConnection` via
-  `batch_execute`), since the existing `Connection` API is typed-query-only.
 - **`ddl_main!` macro + `cli`** — dispatch `script` / `export` / `import` / `publish`. `ddl_main!` can
-  be a `macro_rules!` (no proc-macro): it expands to a `main` calling `cli::<D, B>(...)`.
+  be a `macro_rules!` (no proc-macro): it expands to a `main` calling `cli::<D, B>(...)`. `publish`
+  from the CLI additionally needs a connect step (URL → connection); the programmatic `publish` API
+  is already done and decoupled from that.
 
 ## Settled decisions
 

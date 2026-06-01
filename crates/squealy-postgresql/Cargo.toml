@@ -9,6 +9,12 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+# Schema/DDL management: SchemaBackend rendering and DdlExecutor (publish). Off by default so
+# query-only users carry none of it; the management engine and CLI enable it.
+schema = []
+
 [dependencies]
 bytes = "1"
 futures-core.workspace = true

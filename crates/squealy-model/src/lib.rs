@@ -16,9 +16,11 @@ pub use package::{
     write_package_to,
 };
 pub use squealy::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyModel, IndexModel,
-    SchemaBackend, SchemaModel, SqlType, TableModel,
+    CheckModel, ColumnModel, Constraint, DatabaseModel, DdlExecutor, DefaultValue, ForeignKeyModel,
+    IndexModel, SchemaBackend, SchemaModel, SqlType, TableModel,
 };
+
+use std::fmt;
 
 use squealy::Database;
 
@@ -39,4 +41,62 @@ pub fn render_create_sql<B: SchemaBackend>(
 /// Equivalent to `render_create_sql(&DatabaseModel::from_database::<D>(), backend)`.
 pub fn script<D: Database, B: SchemaBackend>(backend: &B) -> std::io::Result<String> {
     render_create_sql(&DatabaseModel::from_database::<D>(), backend)
+}
+
+/// An error from [`publish`]: either rendering the DDL or executing it failed.
+#[derive(Debug)]
+pub enum PublishError<E> {
+    Render(std::io::Error),
+    Execute(E),
+}
+
+impl<E: fmt::Display> fmt::Display for PublishError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PublishError::Render(error) => write!(formatter, "failed to render DDL: {error}"),
+            PublishError::Execute(error) => write!(formatter, "failed to execute DDL: {error}"),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for PublishError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PublishError::Render(error) => Some(error),
+            PublishError::Execute(error) => Some(error),
+        }
+    }
+}
+
+/// Renders create-from-scratch DDL for `model` and executes it against `connection`.
+///
+/// The backend executes the batch atomically where it supports transactional DDL, so a failed
+/// create-from-scratch leaves no partial schema behind.
+pub async fn publish<B, C>(
+    model: &DatabaseModel,
+    backend: &B,
+    connection: &mut C,
+) -> Result<(), PublishError<C::Error>>
+where
+    B: SchemaBackend,
+    C: DdlExecutor,
+{
+    let sql = render_create_sql(model, backend).map_err(PublishError::Render)?;
+    connection
+        .execute_ddl(&sql)
+        .await
+        .map_err(PublishError::Execute)
+}
+
+/// Publishes create-from-scratch DDL straight from a compile-time [`Database`].
+pub async fn publish_database<D, B, C>(
+    backend: &B,
+    connection: &mut C,
+) -> Result<(), PublishError<C::Error>>
+where
+    D: Database,
+    B: SchemaBackend,
+    C: DdlExecutor,
+{
+    publish(&DatabaseModel::from_database::<D>(), backend, connection).await
 }

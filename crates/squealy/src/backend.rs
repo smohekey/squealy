@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::io::{self, Write};
 
 use crate::{DatabaseModel, Table};
@@ -92,4 +93,17 @@ pub trait SchemaBackend {
     /// then foreign keys as separate `ALTER TABLE … ADD CONSTRAINT` statements (so dependency cycles
     /// and ordering do not block creation).
     fn render_create(&self, model: &DatabaseModel, writer: &mut impl Write) -> io::Result<()>;
+}
+
+/// Executes already-rendered DDL against a live connection.
+///
+/// This is the execution half of schema management ([`SchemaBackend`] is the rendering half). It is
+/// deliberately minimal — one batch of statements — and lives on the connection because executing DDL
+/// needs the live connection a backend owns. Implementations should run the batch atomically where
+/// the backend supports transactional DDL.
+pub trait DdlExecutor {
+    type Error;
+
+    /// Executes one or more `;`-separated DDL statements as a single batch.
+    fn execute_ddl(&mut self, sql: &str) -> impl Future<Output = Result<(), Self::Error>>;
 }

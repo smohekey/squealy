@@ -754,6 +754,8 @@ dependencies = [
  "kdl",
  "squealy",
  "squealy-postgresql",
+ "tokio",
+ "tokio-postgres",
  "zip",
 ]
 

@@ -15,4 +15,6 @@ squealy.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
-squealy-postgresql.workspace = true
+squealy-postgresql = { workspace = true, features = ["schema"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio-postgres = "0.7"
