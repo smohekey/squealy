@@ -6,11 +6,12 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use squealy_cli::extract::extract_model;
 use squealy_model::{
     DatabaseModel, SchemaConnect, check_create, publish, read_package, render_create_sql,
 };
+use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
 
 #[derive(Parser)]
@@ -26,11 +27,15 @@ enum Command {
     Check {
         #[command(flatten)]
         source: ModelSource,
+        #[command(flatten)]
+        backend: BackendOption,
     },
     /// Print create-from-scratch DDL to stdout.
     Script {
         #[command(flatten)]
         source: ModelSource,
+        #[command(flatten)]
+        backend: BackendOption,
     },
     /// Build a `.sqz` schema package from the crate.
     Export {
@@ -44,10 +49,26 @@ enum Command {
     Publish {
         #[command(flatten)]
         source: ModelSource,
+        #[command(flatten)]
+        backend: BackendOption,
         /// Connection URL.
         #[arg(long)]
         url: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum BackendKind {
+    Postgres,
+    Mysql,
+}
+
+/// Target SQL backend.
+#[derive(clap::Args)]
+struct BackendOption {
+    /// Target backend.
+    #[arg(long, value_enum, default_value_t = BackendKind::Postgres)]
+    backend: BackendKind,
 }
 
 /// Where a command's model comes from: the crate (compile + run a stub) or a prebuilt package.
@@ -88,14 +109,24 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
-        Command::Check { source } => {
+        Command::Check { source, backend } => {
             let model = source.load()?;
-            check_create(&model, &Postgres).map_err(|error| format!("check model: {error}"))
+            match backend.backend {
+                BackendKind::Postgres => {
+                    check_create(&model, &Postgres).map_err(|error| format!("check model: {error}"))
+                }
+                BackendKind::Mysql => {
+                    check_create(&model, &Mysql).map_err(|error| format!("check model: {error}"))
+                }
+            }
         }
-        Command::Script { source } => {
+        Command::Script { source, backend } => {
             let model = source.load()?;
-            let sql = render_create_sql(&model, &Postgres)
-                .map_err(|error| format!("render DDL: {error}"))?;
+            let sql = match backend.backend {
+                BackendKind::Postgres => render_create_sql(&model, &Postgres),
+                BackendKind::Mysql => render_create_sql(&model, &Mysql),
+            }
+            .map_err(|error| format!("render DDL: {error}"))?;
             print!("{sql}");
             Ok(())
         }
@@ -104,15 +135,32 @@ async fn run(cli: Cli) -> Result<(), String> {
             squealy_model::write_package(&model, &output)
                 .map_err(|error| format!("write package: {error}"))
         }
-        Command::Publish { source, url } => {
+        Command::Publish {
+            source,
+            backend,
+            url,
+        } => {
             let model = source.load()?;
-            let mut connection = Postgres
-                .connect(&url)
-                .await
-                .map_err(|error| format!("connect: {error}"))?;
-            publish(&model, &Postgres, &mut connection)
-                .await
-                .map_err(|error| format!("publish: {error}"))
+            match backend.backend {
+                BackendKind::Postgres => {
+                    let mut connection = Postgres
+                        .connect(&url)
+                        .await
+                        .map_err(|error| format!("connect: {error}"))?;
+                    publish(&model, &Postgres, &mut connection)
+                        .await
+                        .map_err(|error| format!("publish: {error}"))
+                }
+                BackendKind::Mysql => {
+                    let mut connection = Mysql
+                        .connect(&url)
+                        .await
+                        .map_err(|error| format!("connect: {error}"))?;
+                    publish(&model, &Mysql, &mut connection)
+                        .await
+                        .map_err(|error| format!("publish: {error}"))
+                }
+            }
         }
     }
 }

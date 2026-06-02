@@ -1550,6 +1550,7 @@ dependencies = [
  "clap",
  "serde_json",
  "squealy-model",
+ "squealy-mysql",
  "squealy-postgresql",
  "tempfile",
  "tokio",

@@ -72,6 +72,61 @@ fn check_rejects_unsupported_package_metadata() {
 }
 
 #[test]
+fn mysql_backend_rejects_postgres_only_metadata() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = dir.path().join("schema.sqz");
+    let mut model = empty_model();
+    model.schemas[0].tables[0].checks.push(CheckModel {
+        name: "ck_events_id".to_owned(),
+        expression: "id > 0".to_owned(),
+        validation: Some(squealy_model::ConstraintValidation::NotValidated),
+        enforcement: None,
+    });
+    write_package(&model, &package).expect("write package");
+
+    let output = Command::new(SQUEALY)
+        .args(["check", "--backend", "mysql", "--package"])
+        .arg(&package)
+        .output()
+        .expect("run squealy");
+
+    assert!(!output.status.success(), "unsupported package should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("check validation metadata"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn mysql_backend_renders_mysql_sql() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = dir.path().join("schema.sqz");
+    write_package(&empty_model(), &package).expect("write package");
+
+    let output = Command::new(SQUEALY)
+        .args(["script", "--backend", "mysql", "--package"])
+        .arg(&package)
+        .output()
+        .expect("run squealy");
+
+    assert!(
+        output.status.success(),
+        "script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("CREATE SCHEMA IF NOT EXISTS `public`;"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("CREATE TABLE `public`.`events`"),
+        "{stdout}"
+    );
+}
+
+#[test]
 #[ignore]
 fn extracts_and_scripts_from_a_crate() {
     let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample");
