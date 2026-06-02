@@ -7,9 +7,12 @@
 use std::process::Command;
 
 use squealy_model::{
-    CheckModel, ConstraintDeferrability, DatabaseModel, ForeignKeyMatch, ForeignKeyModel,
-    IndexModel, SchemaModel, TableModel, write_package,
+    CheckModel, ColumnModel, ConstraintDeferrability, DatabaseModel, DdlExecutor, ForeignKeyMatch,
+    ForeignKeyModel, IndexModel, SchemaConnect, SchemaModel, SqlType, TableModel, read_package,
+    write_package,
 };
+use squealy_mysql::Mysql;
+use squealy_postgresql::Postgres;
 
 const SQUEALY: &str = env!("CARGO_BIN_EXE_squealy");
 
@@ -368,6 +371,110 @@ fn extracts_and_scripts_from_a_crate() {
     );
 }
 
+#[tokio::test]
+#[ignore]
+async fn postgres_introspects_live_database_to_package() {
+    let url = postgres_url();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source_package = dir.path().join("source.sqz");
+    let introspected_package = dir.path().join("introspected.sqz");
+    let model = live_introspection_model();
+    write_package(&model, &source_package).expect("write package");
+
+    let mut connection = Postgres.connect(&url).await.expect("connect to Postgres");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS \"cli_live_introspect\" CASCADE")
+        .await
+        .expect("drop schema");
+
+    let publish = Command::new(SQUEALY)
+        .args(["publish", "--backend", "postgres", "--package"])
+        .arg(&source_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy publish");
+    assert!(
+        publish.status.success(),
+        "publish failed: {}",
+        String::from_utf8_lossy(&publish.stderr)
+    );
+
+    let introspect = Command::new(SQUEALY)
+        .args(["introspect", "--backend", "postgres", "--url", &url])
+        .arg(&introspected_package)
+        .output()
+        .expect("run squealy introspect");
+    assert!(
+        introspect.status.success(),
+        "introspect failed: {}",
+        String::from_utf8_lossy(&introspect.stderr)
+    );
+
+    let actual = read_package(&introspected_package).expect("read introspected package");
+    assert_eq!(
+        actual_schema(actual, "cli_live_introspect"),
+        model.schemas[0],
+        "introspected package should include the published schema"
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS \"cli_live_introspect\" CASCADE")
+        .await
+        .expect("cleanup schema");
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_introspects_live_database_to_package() {
+    let url = mysql_url();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source_package = dir.path().join("source.sqz");
+    let introspected_package = dir.path().join("introspected.sqz");
+    let model = live_introspection_model();
+    write_package(&model, &source_package).expect("write package");
+
+    let mut connection = Mysql.connect(&url).await.expect("connect to MySQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `cli_live_introspect`")
+        .await
+        .expect("drop schema");
+
+    let publish = Command::new(SQUEALY)
+        .args(["publish", "--backend", "mysql", "--package"])
+        .arg(&source_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy publish");
+    assert!(
+        publish.status.success(),
+        "publish failed: {}",
+        String::from_utf8_lossy(&publish.stderr)
+    );
+
+    let introspect = Command::new(SQUEALY)
+        .args(["introspect", "--backend", "mysql", "--url", &url])
+        .arg(&introspected_package)
+        .output()
+        .expect("run squealy introspect");
+    assert!(
+        introspect.status.success(),
+        "introspect failed: {}",
+        String::from_utf8_lossy(&introspect.stderr)
+    );
+
+    let actual = read_package(&introspected_package).expect("read introspected package");
+    assert_eq!(
+        actual_schema(actual, "cli_live_introspect"),
+        model.schemas[0],
+        "introspected package should include the published schema"
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `cli_live_introspect`")
+        .await
+        .expect("cleanup schema");
+}
+
 fn empty_model() -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
@@ -384,6 +491,51 @@ fn empty_model() -> DatabaseModel {
             }],
         }],
     }
+}
+
+fn live_introspection_model() -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("cli_live_introspect".to_owned()),
+            tables: vec![TableModel {
+                name: "events".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "id".to_owned(),
+                    comment: None,
+                    ty: SqlType::I32,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: vec![],
+                uniques: vec![],
+                checks: vec![],
+                indexes: vec![],
+            }],
+        }],
+    }
+}
+
+fn actual_schema(model: DatabaseModel, name: &str) -> SchemaModel {
+    model
+        .schemas
+        .into_iter()
+        .find(|schema| schema.name.as_deref() == Some(name))
+        .expect("schema should be present")
+}
+
+fn postgres_url() -> String {
+    std::env::var("SQUEALY_POSTGRES_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:55432/squealy_test".to_owned())
+}
+
+fn mysql_url() -> String {
+    std::env::var("SQUEALY_MYSQL_URL")
+        .unwrap_or_else(|_| "mysql://root:root@127.0.0.1:33306/squealy_test".to_owned())
 }
 
 fn assert_capability(stdout: &str, expected: &str) {

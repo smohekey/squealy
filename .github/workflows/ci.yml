@@ -78,4 +78,12 @@ jobs:
 
       # Compiles + runs an extraction stub against a fixture crate (no database needed).
       - name: CLI extraction test
-        run: cargo test -p squealy-cli --test cli -- --ignored
+        run: cargo test -p squealy-cli --test cli extracts_and_scripts_from_a_crate -- --ignored
+
+      - name: CLI live introspection tests
+        env:
+          SQUEALY_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/squealy_test
+          SQUEALY_MYSQL_URL: mysql://root:root@127.0.0.1:3306/squealy_test
+        run: |
+          cargo test -p squealy-cli --test cli postgres_introspects_live_database_to_package -- --ignored --test-threads=1
+          cargo test -p squealy-cli --test cli mysql_introspects_live_database_to_package -- --ignored --test-threads=1
