@@ -9,8 +9,9 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use squealy_cli::extract::extract_model;
 use squealy_model::{
-    DatabaseModel, SchemaBackend, SchemaCapabilities, SchemaConnect, check_create, introspect,
-    publish, read_package, render_create_sql, write_package,
+    DatabaseDiffChange, DatabaseModel, SchemaBackend, SchemaCapabilities, SchemaConnect,
+    TableDiffChange, check_create, diff_models, introspect, publish, read_package,
+    render_create_sql, write_package,
 };
 use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
@@ -50,6 +51,15 @@ enum Command {
         database: String,
         /// Output package path.
         output: PathBuf,
+    },
+    /// Compare two `.sqz` schema packages.
+    Diff {
+        /// Desired target package.
+        #[arg(long)]
+        desired: PathBuf,
+        /// Actual/current package.
+        #[arg(long)]
+        actual: PathBuf,
     },
     /// Introspect a live database and write a `.sqz` schema package.
     Introspect {
@@ -154,6 +164,13 @@ async fn run(cli: Cli) -> Result<(), String> {
             let model = extract_model(&database)?;
             write_package(&model, &output).map_err(|error| format!("write package: {error}"))
         }
+        Command::Diff { desired, actual } => {
+            let desired =
+                read_package(&desired).map_err(|error| format!("read desired: {error}"))?;
+            let actual = read_package(&actual).map_err(|error| format!("read actual: {error}"))?;
+            print_diff(&diff_models(&desired, &actual));
+            Ok(())
+        }
         Command::Introspect {
             backend,
             url,
@@ -208,6 +225,89 @@ async fn run(cli: Cli) -> Result<(), String> {
             }
         }
     }
+}
+
+fn print_diff(diff: &squealy_model::DatabaseDiff) {
+    if diff.is_empty() {
+        println!("no changes");
+        return;
+    }
+
+    for change in &diff.changes {
+        match change {
+            DatabaseDiffChange::CreateSchema { schema } => {
+                println!("schema + {}", schema_name(schema));
+            }
+            DatabaseDiffChange::DropSchema { schema } => {
+                println!("schema - {}", schema_name(schema));
+            }
+            DatabaseDiffChange::CreateTable { schema, table } => {
+                println!("table + {}", qualified(schema, &table.name));
+            }
+            DatabaseDiffChange::DropTable { schema, table } => {
+                println!("table - {}", qualified(schema, &table.name));
+            }
+            DatabaseDiffChange::AlterTable {
+                schema,
+                table,
+                changes,
+            } => {
+                println!("table ~ {}", qualified(schema, table));
+                for table_change in changes {
+                    print_table_change(schema, table, table_change);
+                }
+            }
+        }
+    }
+}
+
+fn print_table_change(schema: &Option<String>, table: &str, change: &TableDiffChange) {
+    let table = qualified(schema, table);
+    match change {
+        TableDiffChange::SetTableComment { .. } => println!("comment ~ {table}"),
+        TableDiffChange::AddColumn { column } => println!("column + {table}.{}", column.name),
+        TableDiffChange::DropColumn { column } => println!("column - {table}.{}", column.name),
+        TableDiffChange::AlterColumn { after, .. } => println!("column ~ {table}.{}", after.name),
+        TableDiffChange::AddPrimaryKey { constraint } => {
+            println!("primary-key + {table}.{}", constraint.name);
+        }
+        TableDiffChange::DropPrimaryKey { constraint } => {
+            println!("primary-key - {table}.{}", constraint.name);
+        }
+        TableDiffChange::AlterPrimaryKey { after, .. } => {
+            println!("primary-key ~ {table}.{}", after.name);
+        }
+        TableDiffChange::AddUnique { constraint } => {
+            println!("unique + {table}.{}", constraint.name)
+        }
+        TableDiffChange::DropUnique { constraint } => {
+            println!("unique - {table}.{}", constraint.name);
+        }
+        TableDiffChange::AlterUnique { after, .. } => println!("unique ~ {table}.{}", after.name),
+        TableDiffChange::AddForeignKey { foreign_key } => {
+            println!("foreign-key + {table}.{}", foreign_key.name);
+        }
+        TableDiffChange::DropForeignKey { foreign_key } => {
+            println!("foreign-key - {table}.{}", foreign_key.name);
+        }
+        TableDiffChange::AlterForeignKey { after, .. } => {
+            println!("foreign-key ~ {table}.{}", after.name);
+        }
+        TableDiffChange::AddCheck { check } => println!("check + {table}.{}", check.name),
+        TableDiffChange::DropCheck { check } => println!("check - {table}.{}", check.name),
+        TableDiffChange::AlterCheck { after, .. } => println!("check ~ {table}.{}", after.name),
+        TableDiffChange::AddIndex { index } => println!("index + {table}.{}", index.name),
+        TableDiffChange::DropIndex { index } => println!("index - {table}.{}", index.name),
+        TableDiffChange::AlterIndex { after, .. } => println!("index ~ {table}.{}", after.name),
+    }
+}
+
+fn qualified(schema: &Option<String>, name: &str) -> String {
+    format!("{}.{}", schema_name(schema), name)
+}
+
+fn schema_name(schema: &Option<String>) -> &str {
+    schema.as_deref().unwrap_or("<default>")
 }
 
 fn print_capabilities(backend: BackendKind) {

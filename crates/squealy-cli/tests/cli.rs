@@ -184,6 +184,87 @@ fn checks_supported_package() {
 }
 
 #[test]
+fn diff_reports_no_changes_for_identical_packages() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = dir.path().join("schema.sqz");
+    write_package(&empty_model(), &package).expect("write package");
+
+    let output = Command::new(SQUEALY)
+        .args(["diff", "--desired"])
+        .arg(&package)
+        .args(["--actual"])
+        .arg(&package)
+        .output()
+        .expect("run squealy");
+
+    assert!(
+        output.status.success(),
+        "diff failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "no changes\n");
+}
+
+#[test]
+fn diff_reports_package_model_changes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let desired = dir.path().join("desired.sqz");
+    let actual = dir.path().join("actual.sqz");
+    let mut desired_model = empty_model();
+    desired_model.schemas[0].tables[0]
+        .columns
+        .push(ColumnModel {
+            name: "name".to_owned(),
+            comment: None,
+            ty: SqlType::Text,
+            collation: None,
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+        });
+    desired_model.schemas[0].tables.push(TableModel {
+        name: "created".to_owned(),
+        comment: None,
+        columns: vec![],
+        primary_key: None,
+        foreign_keys: vec![],
+        uniques: vec![],
+        checks: vec![],
+        indexes: vec![],
+    });
+    write_package(&desired_model, &desired).expect("write desired package");
+    write_package(&empty_model(), &actual).expect("write actual package");
+
+    let output = Command::new(SQUEALY)
+        .args(["diff", "--desired"])
+        .arg(&desired)
+        .args(["--actual"])
+        .arg(&actual)
+        .output()
+        .expect("run squealy");
+
+    assert!(
+        output.status.success(),
+        "diff failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("table + public.created"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("table ~ public.events"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("column + public.events.name"),
+        "unexpected stdout: {stdout}"
+    );
+}
+
+#[test]
 fn check_rejects_unsupported_package_metadata() {
     let dir = tempfile::tempdir().expect("tempdir");
     let package = dir.path().join("schema.sqz");
