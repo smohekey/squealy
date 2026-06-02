@@ -88,16 +88,30 @@ pub trait Backend: Sized {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SchemaCapabilities {
     pub constraints: ConstraintCapabilities,
+    pub indexes: IndexCapabilities,
 }
 
 /// Constraint metadata capabilities, split by constraint kind because SQL backends often expose
 /// validation/enforcement differently for foreign keys and checks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ConstraintCapabilities {
+    pub foreign_key_match_type: bool,
+    pub foreign_key_deferrability: bool,
     pub foreign_key_validation: bool,
     pub foreign_key_enforcement: bool,
     pub check_validation: bool,
     pub check_enforcement: bool,
+}
+
+/// Index metadata capabilities for features that are not uniformly available across SQL backends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IndexCapabilities {
+    pub predicates: bool,
+    pub expressions: bool,
+    pub include_columns: bool,
+    pub null_ordering: bool,
+    pub collations: bool,
+    pub operator_classes: bool,
 }
 
 /// Backend-specific DDL rendering driven by an owned [`DatabaseModel`].

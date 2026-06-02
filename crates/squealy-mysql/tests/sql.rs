@@ -39,10 +39,18 @@ struct ShopDb {
 fn mysql_reports_schema_capabilities() {
     let capabilities = Mysql.capabilities();
 
+    assert!(!capabilities.constraints.foreign_key_match_type);
+    assert!(!capabilities.constraints.foreign_key_deferrability);
     assert!(!capabilities.constraints.foreign_key_validation);
     assert!(!capabilities.constraints.foreign_key_enforcement);
     assert!(!capabilities.constraints.check_validation);
     assert!(!capabilities.constraints.check_enforcement);
+    assert!(!capabilities.indexes.predicates);
+    assert!(!capabilities.indexes.expressions);
+    assert!(!capabilities.indexes.include_columns);
+    assert!(!capabilities.indexes.null_ordering);
+    assert!(!capabilities.indexes.collations);
+    assert!(!capabilities.indexes.operator_classes);
 }
 
 #[test]

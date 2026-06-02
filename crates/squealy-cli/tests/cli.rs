@@ -62,10 +62,18 @@ fn postgres_capabilities_are_printed() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_capability(&stdout, "backend=postgres");
+    assert_capability(&stdout, "constraints.foreign_key_match_type=true");
+    assert_capability(&stdout, "constraints.foreign_key_deferrability=true");
     assert_capability(&stdout, "constraints.foreign_key_validation=true");
     assert_capability(&stdout, "constraints.foreign_key_enforcement=false");
     assert_capability(&stdout, "constraints.check_validation=true");
     assert_capability(&stdout, "constraints.check_enforcement=false");
+    assert_capability(&stdout, "indexes.predicates=true");
+    assert_capability(&stdout, "indexes.expressions=true");
+    assert_capability(&stdout, "indexes.include_columns=true");
+    assert_capability(&stdout, "indexes.null_ordering=true");
+    assert_capability(&stdout, "indexes.collations=true");
+    assert_capability(&stdout, "indexes.operator_classes=true");
 }
 
 #[test]
@@ -82,10 +90,18 @@ fn mysql_capabilities_are_printed() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_capability(&stdout, "backend=mysql");
+    assert_capability(&stdout, "constraints.foreign_key_match_type=false");
+    assert_capability(&stdout, "constraints.foreign_key_deferrability=false");
     assert_capability(&stdout, "constraints.foreign_key_validation=false");
     assert_capability(&stdout, "constraints.foreign_key_enforcement=false");
     assert_capability(&stdout, "constraints.check_validation=false");
     assert_capability(&stdout, "constraints.check_enforcement=false");
+    assert_capability(&stdout, "indexes.predicates=false");
+    assert_capability(&stdout, "indexes.expressions=false");
+    assert_capability(&stdout, "indexes.include_columns=false");
+    assert_capability(&stdout, "indexes.null_ordering=false");
+    assert_capability(&stdout, "indexes.collations=false");
+    assert_capability(&stdout, "indexes.operator_classes=false");
 }
 
 #[test]

@@ -118,10 +118,20 @@ impl squealy::SchemaBackend for Postgres {
     fn capabilities(&self) -> squealy::SchemaCapabilities {
         squealy::SchemaCapabilities {
             constraints: squealy::ConstraintCapabilities {
+                foreign_key_match_type: true,
+                foreign_key_deferrability: true,
                 foreign_key_validation: true,
                 foreign_key_enforcement: false,
                 check_validation: true,
                 check_enforcement: false,
+            },
+            indexes: squealy::IndexCapabilities {
+                predicates: true,
+                expressions: true,
+                include_columns: true,
+                null_ordering: true,
+                collations: true,
+                operator_classes: true,
             },
         }
     }

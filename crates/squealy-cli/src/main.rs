@@ -187,6 +187,14 @@ fn print_capabilities(backend: BackendKind) {
 
 fn print_schema_capabilities(capabilities: SchemaCapabilities) {
     println!(
+        "constraints.foreign_key_match_type={}",
+        capabilities.constraints.foreign_key_match_type
+    );
+    println!(
+        "constraints.foreign_key_deferrability={}",
+        capabilities.constraints.foreign_key_deferrability
+    );
+    println!(
         "constraints.foreign_key_validation={}",
         capabilities.constraints.foreign_key_validation
     );
@@ -201,6 +209,21 @@ fn print_schema_capabilities(capabilities: SchemaCapabilities) {
     println!(
         "constraints.check_enforcement={}",
         capabilities.constraints.check_enforcement
+    );
+    println!("indexes.predicates={}", capabilities.indexes.predicates);
+    println!("indexes.expressions={}", capabilities.indexes.expressions);
+    println!(
+        "indexes.include_columns={}",
+        capabilities.indexes.include_columns
+    );
+    println!(
+        "indexes.null_ordering={}",
+        capabilities.indexes.null_ordering
+    );
+    println!("indexes.collations={}", capabilities.indexes.collations);
+    println!(
+        "indexes.operator_classes={}",
+        capabilities.indexes.operator_classes
     );
 }
 

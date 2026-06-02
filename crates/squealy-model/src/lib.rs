@@ -16,10 +16,11 @@ pub use package::{
     write_package_to,
 };
 pub use squealy::{
-    CheckModel, ColumnModel, Constraint, ConstraintCapabilities, ConstraintEnforcement,
-    ConstraintValidation, DatabaseModel, DdlExecutor, DefaultValue, ForeignKeyAction,
-    ForeignKeyModel, IndexDirection, IndexMethod, IndexModel, SchemaBackend, SchemaCapabilities,
-    SchemaConnect, SchemaIntrospect, SchemaModel, SqlType, TableModel,
+    CheckModel, ColumnModel, Constraint, ConstraintCapabilities, ConstraintDeferrability,
+    ConstraintEnforcement, ConstraintValidation, DatabaseModel, DdlExecutor, DefaultValue,
+    ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, IndexCapabilities, IndexCollation,
+    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, SchemaBackend,
+    SchemaCapabilities, SchemaConnect, SchemaIntrospect, SchemaModel, SqlType, TableModel,
 };
 
 use std::fmt;
@@ -130,10 +131,28 @@ fn validate_capabilities(
     for schema in &model.schemas {
         for table in &schema.tables {
             for foreign_key in &table.foreign_keys {
+                if foreign_key.match_type.is_some()
+                    && !capabilities.constraints.foreign_key_match_type
+                {
+                    return unsupported_constraint(
+                        &table.name,
+                        &foreign_key.name,
+                        "foreign key match metadata",
+                    );
+                }
+                if foreign_key.deferrability.is_some()
+                    && !capabilities.constraints.foreign_key_deferrability
+                {
+                    return unsupported_constraint(
+                        &table.name,
+                        &foreign_key.name,
+                        "foreign key deferrability metadata",
+                    );
+                }
                 if foreign_key.validation.is_some()
                     && !capabilities.constraints.foreign_key_validation
                 {
-                    return unsupported(
+                    return unsupported_constraint(
                         &table.name,
                         &foreign_key.name,
                         "foreign key validation metadata",
@@ -142,7 +161,7 @@ fn validate_capabilities(
                 if foreign_key.enforcement.is_some()
                     && !capabilities.constraints.foreign_key_enforcement
                 {
-                    return unsupported(
+                    return unsupported_constraint(
                         &table.name,
                         &foreign_key.name,
                         "foreign key enforcement metadata",
@@ -151,10 +170,42 @@ fn validate_capabilities(
             }
             for check in &table.checks {
                 if check.validation.is_some() && !capabilities.constraints.check_validation {
-                    return unsupported(&table.name, &check.name, "check validation metadata");
+                    return unsupported_constraint(
+                        &table.name,
+                        &check.name,
+                        "check validation metadata",
+                    );
                 }
                 if check.enforcement.is_some() && !capabilities.constraints.check_enforcement {
-                    return unsupported(&table.name, &check.name, "check enforcement metadata");
+                    return unsupported_constraint(
+                        &table.name,
+                        &check.name,
+                        "check enforcement metadata",
+                    );
+                }
+            }
+            for index in &table.indexes {
+                if index.predicate.is_some() && !capabilities.indexes.predicates {
+                    return unsupported_index(&table.name, &index.name, "partial index predicates");
+                }
+                if !index.expressions.is_empty() && !capabilities.indexes.expressions {
+                    return unsupported_index(&table.name, &index.name, "index expressions");
+                }
+                if !index.include_columns.is_empty() && !capabilities.indexes.include_columns {
+                    return unsupported_index(&table.name, &index.name, "index include columns");
+                }
+                if !index.nulls.is_empty() && !capabilities.indexes.null_ordering {
+                    return unsupported_index(&table.name, &index.name, "index null ordering");
+                }
+                if !index.collations.is_empty() && !capabilities.indexes.collations {
+                    return unsupported_index(
+                        &table.name,
+                        &index.name,
+                        "index collation overrides",
+                    );
+                }
+                if !index.operator_classes.is_empty() && !capabilities.indexes.operator_classes {
+                    return unsupported_index(&table.name, &index.name, "index operator classes");
                 }
             }
         }
@@ -162,12 +213,19 @@ fn validate_capabilities(
     Ok(())
 }
 
-fn unsupported(table: &str, constraint: &str, feature: &str) -> std::io::Result<()> {
+fn unsupported_constraint(table: &str, constraint: &str, feature: &str) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::InvalidInput,
         format!(
             "backend cannot render and introspect {feature} for constraint `{constraint}` on `{table}`"
         ),
+    ))
+}
+
+fn unsupported_index(table: &str, index: &str, feature: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("backend cannot render and introspect {feature} for index `{index}` on `{table}`"),
     ))
 }
 
@@ -236,6 +294,40 @@ mod tests {
         }
     }
 
+    fn table_with_index(index: IndexModel) -> DatabaseModel {
+        DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "memberships".to_owned(),
+                    comment: None,
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys: vec![],
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![index],
+                }],
+            }],
+        }
+    }
+
+    fn index() -> IndexModel {
+        IndexModel {
+            name: "idx_memberships_tenant_id".to_owned(),
+            columns: vec!["tenant_id".to_owned()],
+            expressions: vec![],
+            include_columns: vec![],
+            unique: false,
+            method: None,
+            directions: vec![],
+            nulls: vec![],
+            collations: vec![],
+            operator_classes: vec![],
+            predicate: None,
+        }
+    }
+
     #[test]
     fn render_create_rejects_unsupported_constraint_capabilities() {
         let mut foreign_key = foreign_key();
@@ -262,6 +354,60 @@ mod tests {
     }
 
     #[test]
+    fn render_create_rejects_unsupported_foreign_key_shape_capabilities() {
+        let mut foreign_key = foreign_key();
+        foreign_key.match_type = Some(ForeignKeyMatch::Full);
+        foreign_key.deferrability = Some(ConstraintDeferrability::InitiallyDeferred);
+        let model = table_with_constraints(foreign_key, check());
+
+        let error = render_create_sql(
+            &model,
+            &TestBackend {
+                capabilities: SchemaCapabilities::default(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("foreign key match metadata"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn render_create_rejects_unsupported_index_capabilities() {
+        let mut index = index();
+        index.predicate = Some("tenant_id IS NOT NULL".to_owned());
+        index.expressions = vec!["lower(name)".to_owned()];
+        index.include_columns = vec!["created_at".to_owned()];
+        index.nulls = vec![IndexNullsOrder::Last];
+        index.collations = vec![IndexCollation {
+            position: 0,
+            name: "C".to_owned(),
+        }];
+        index.operator_classes = vec![IndexOperatorClass {
+            position: 0,
+            name: "text_pattern_ops".to_owned(),
+        }];
+        let model = table_with_index(index);
+
+        let error = render_create_sql(
+            &model,
+            &TestBackend {
+                capabilities: SchemaCapabilities::default(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("partial index predicates"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn render_create_allows_reported_constraint_capabilities() {
         let mut foreign_key = foreign_key();
         foreign_key.validation = Some(ConstraintValidation::NotValidated);
@@ -274,10 +420,51 @@ mod tests {
             &TestBackend {
                 capabilities: SchemaCapabilities {
                     constraints: ConstraintCapabilities {
+                        foreign_key_match_type: false,
+                        foreign_key_deferrability: false,
                         foreign_key_validation: true,
                         foreign_key_enforcement: false,
                         check_validation: false,
                         check_enforcement: true,
+                    },
+                    indexes: IndexCapabilities::default(),
+                },
+            },
+        )
+        .expect("reported capabilities should allow rendering");
+
+        assert_eq!(sql, "-- rendered");
+    }
+
+    #[test]
+    fn render_create_allows_reported_index_capabilities() {
+        let mut index = index();
+        index.predicate = Some("tenant_id IS NOT NULL".to_owned());
+        index.expressions = vec!["lower(name)".to_owned()];
+        index.include_columns = vec!["created_at".to_owned()];
+        index.nulls = vec![IndexNullsOrder::Last];
+        index.collations = vec![IndexCollation {
+            position: 0,
+            name: "C".to_owned(),
+        }];
+        index.operator_classes = vec![IndexOperatorClass {
+            position: 0,
+            name: "text_pattern_ops".to_owned(),
+        }];
+        let model = table_with_index(index);
+
+        let sql = render_create_sql(
+            &model,
+            &TestBackend {
+                capabilities: SchemaCapabilities {
+                    constraints: ConstraintCapabilities::default(),
+                    indexes: IndexCapabilities {
+                        predicates: true,
+                        expressions: true,
+                        include_columns: true,
+                        null_ordering: true,
+                        collations: true,
+                        operator_classes: true,
                     },
                 },
             },

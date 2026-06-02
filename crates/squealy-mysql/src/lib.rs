@@ -24,6 +24,7 @@ impl SchemaBackend for Mysql {
     fn capabilities(&self) -> squealy::SchemaCapabilities {
         squealy::SchemaCapabilities {
             constraints: squealy::ConstraintCapabilities::default(),
+            indexes: squealy::IndexCapabilities::default(),
         }
     }
 
