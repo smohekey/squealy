@@ -23,7 +23,7 @@ change of polarity — see below.
 | `.sqlproj` (source of truth) | the Rust **database crate** (`#[derive]` types) |
 | **dacpac** (zip + `model.xml`) | **db model package** (zip + KDL) — an *optional, derived* deploy artifact |
 | Build (sqlproj → dacpac) | walk the in-memory `Database` model (no build artifact required) |
-| Extract (DB → dacpac) | introspect live DB → model *(future sprint)* |
+| Extract (DB → dacpac) | introspect live DB → model/package |
 | Script / DeployReport | dry-run: render plan without applying |
 | Publish (dacpac → DB) | apply plan to a connection, with configurable policy |
 | Schema Compare | diff two models (crate, package, or live DB) *(future sprint)* |
@@ -53,7 +53,7 @@ The spine is a neutral, owned, serializable model that decouples *where the sche
   ├──────────────────────┤          ├─→ DatabaseModel ┼──→│ export → package (KDL/zip)│
   │ package file (.szp)   │── load ──┤   (owned,neutral)│   ├──────────────────────────┤
   ├──────────────────────┤          │                 └──→│ diff(desired, actual)*    │
-  │ live DB (introspect)* │── read ──┘                      └──────────────────────────┘
+  │ live DB               │── read ──┘                      └──────────────────────────┘
   └──────────────────────┘                                   * = future sprint
 ```
 
@@ -105,7 +105,7 @@ pub struct ColumnModel {
 ```
 
 Built three ways: `From<&dyn Database>` (walk the derives, flattening per-column constraint data into
-the table-level lists), deserialize from a package, or introspect a live DB (future). Every operation
+the table-level lists), deserialize from a package, or introspect a live DB. Every operation
 takes `DatabaseModel`(s), so "operate on the crate" vs "on a package" vs "against live DB" is just
 *which source you plugged in*.
 
