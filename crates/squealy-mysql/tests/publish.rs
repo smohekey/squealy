@@ -208,6 +208,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                     name: "idx_parts_widget_id".to_owned(),
                     columns: vec!["widget_id".to_owned()],
                     unique: false,
+                    method: Some(IndexMethod::BTree),
                 }],
             },
             TableModel {
@@ -332,6 +333,7 @@ fn rich_mysql_model() -> DatabaseModel {
                         name: "idx_memberships_tenant_id".to_owned(),
                         columns: vec!["tenant_id".to_owned()],
                         unique: false,
+                        method: Some(IndexMethod::BTree),
                     }],
                 },
                 TableModel {
@@ -467,6 +469,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                     name: "idx_memberships_tenant_id".to_owned(),
                     columns: vec!["tenant_id".to_owned()],
                     unique: false,
+                    method: Some(IndexMethod::BTree),
                 }],
             },
             TableModel {

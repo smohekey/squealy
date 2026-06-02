@@ -226,7 +226,12 @@ fn write_create_index(
     write_qualified_name(schema, table, writer)?;
     writer.write_all(b" (")?;
     write_quoted_ident_list(&index.columns, writer)?;
-    writer.write_all(b")")
+    writer.write_all(b")")?;
+    if let Some(method) = &index.method {
+        writer.write_all(b" USING ")?;
+        writer.write_all(method.mysql_sql().as_bytes())?;
+    }
+    Ok(())
 }
 
 fn write_add_foreign_key(

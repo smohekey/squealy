@@ -19,7 +19,7 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
     ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexModel, SchemaModel, SqlType, TableModel,
+    IndexMethod, IndexModel, SchemaModel, SqlType, TableModel,
 };
 
 /// Current package format version, recorded in `manifest.kdl`.
@@ -300,6 +300,9 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
     if index.unique {
         node.push(KdlEntry::new_prop("unique", KdlValue::Bool(true)));
     }
+    if let Some(method) = &index.method {
+        node.push(KdlEntry::new_prop("method", index_method(method)));
+    }
     node
 }
 
@@ -490,6 +493,7 @@ fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
         name: required_prop(node, "name")?,
         columns: args(node),
         unique: prop_bool(node, "unique"),
+        method: prop(node, "method").map(IndexMethod::from_sql),
     })
 }
 
@@ -716,6 +720,18 @@ fn foreign_key_action(action: &ForeignKeyAction) -> &str {
     }
 }
 
+fn index_method(method: &IndexMethod) -> &str {
+    match method {
+        IndexMethod::BTree => "btree",
+        IndexMethod::Hash => "hash",
+        IndexMethod::Gin => "gin",
+        IndexMethod::Gist => "gist",
+        IndexMethod::SpGist => "spgist",
+        IndexMethod::Brin => "brin",
+        IndexMethod::Raw(method) => method,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -773,6 +789,7 @@ mod tests {
                             name: "uq_orgs_slug_idx".to_owned(),
                             columns: vec!["slug".to_owned()],
                             unique: true,
+                            method: None,
                         }],
                     },
                     TableModel {
@@ -1056,6 +1073,47 @@ mod tests {
             parsed, model,
             "foreign-key action round-trip diverged:\n{kdl}"
         );
+    }
+
+    #[test]
+    fn kdl_round_trips_index_methods() {
+        let methods = [
+            IndexMethod::BTree,
+            IndexMethod::Hash,
+            IndexMethod::Gin,
+            IndexMethod::Gist,
+            IndexMethod::SpGist,
+            IndexMethod::Brin,
+            IndexMethod::Raw("custom_method".to_owned()),
+        ];
+        let indexes = methods
+            .iter()
+            .enumerate()
+            .map(|(index, method)| IndexModel {
+                name: format!("idx_events_{index}"),
+                columns: vec!["event_id".to_owned()],
+                unique: false,
+                method: Some(method.clone()),
+            })
+            .collect();
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "events".to_owned(),
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys: vec![],
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes,
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(parsed, model, "index method round-trip diverged:\n{kdl}");
     }
 
     #[test]

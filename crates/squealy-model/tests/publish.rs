@@ -201,6 +201,7 @@ fn rich_model() -> DatabaseModel {
                         name: "idx_memberships_tenant_id".to_owned(),
                         columns: vec!["tenant_id".to_owned()],
                         unique: false,
+                        method: Some(IndexMethod::BTree),
                     }],
                 },
                 TableModel {

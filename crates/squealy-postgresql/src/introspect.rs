@@ -1,7 +1,7 @@
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
     ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexModel, SchemaModel, SqlType, TableModel,
+    IndexMethod, IndexModel, SchemaModel, SqlType, TableModel,
 };
 use tokio_postgres::Client;
 
@@ -256,6 +256,7 @@ async fn indexes(client: &Client, table_ref: &TableRef) -> Result<Vec<IndexModel
 SELECT
     idx.relname,
     i.indisunique,
+    am.amname,
     ARRAY(
         SELECT a.attname::text
         FROM unnest(i.indkey) WITH ORDINALITY AS key(attnum, position)
@@ -266,6 +267,7 @@ FROM pg_index i
 JOIN pg_class c ON c.oid = i.indrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_class idx ON idx.oid = i.indexrelid
+JOIN pg_am am ON am.oid = idx.relam
 LEFT JOIN pg_constraint con ON con.conindid = i.indexrelid
 WHERE n.nspname = $1
   AND c.relname = $2
@@ -280,7 +282,8 @@ ORDER BY idx.relname",
         .map(|row| IndexModel {
             name: row.get(0),
             unique: row.get(1),
-            columns: row.get(2),
+            method: Some(IndexMethod::from_sql(&row.get::<_, String>(2))),
+            columns: row.get(3),
         })
         .collect())
 }

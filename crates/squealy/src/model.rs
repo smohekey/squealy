@@ -270,6 +270,58 @@ pub struct IndexModel {
     pub name: String,
     pub columns: Vec<String>,
     pub unique: bool,
+    pub method: Option<IndexMethod>,
+}
+
+/// Backend-neutral index access method.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IndexMethod {
+    BTree,
+    Hash,
+    Gin,
+    Gist,
+    SpGist,
+    Brin,
+    /// A backend-specific index method, emitted verbatim into DDL.
+    Raw(String),
+}
+
+impl IndexMethod {
+    pub fn from_sql(method: &str) -> Self {
+        match method.trim().to_ascii_lowercase().as_str() {
+            "btree" => IndexMethod::BTree,
+            "hash" => IndexMethod::Hash,
+            "gin" => IndexMethod::Gin,
+            "gist" => IndexMethod::Gist,
+            "spgist" => IndexMethod::SpGist,
+            "brin" => IndexMethod::Brin,
+            _ => IndexMethod::Raw(method.to_owned()),
+        }
+    }
+
+    pub fn postgres_sql(&self) -> &str {
+        match self {
+            IndexMethod::BTree => "btree",
+            IndexMethod::Hash => "hash",
+            IndexMethod::Gin => "gin",
+            IndexMethod::Gist => "gist",
+            IndexMethod::SpGist => "spgist",
+            IndexMethod::Brin => "brin",
+            IndexMethod::Raw(method) => method,
+        }
+    }
+
+    pub fn mysql_sql(&self) -> &str {
+        match self {
+            IndexMethod::BTree => "BTREE",
+            IndexMethod::Hash => "HASH",
+            IndexMethod::Gin => "GIN",
+            IndexMethod::Gist => "GIST",
+            IndexMethod::SpGist => "SPGIST",
+            IndexMethod::Brin => "BRIN",
+            IndexMethod::Raw(method) => method,
+        }
+    }
 }
 
 impl DatabaseModel {
@@ -387,6 +439,7 @@ fn index_from_dyn(table: &str, index: &dyn Index) -> IndexModel {
             .unwrap_or_else(|| idx_name(table, columns)),
         columns: columns.iter().map(|column| (*column).to_owned()).collect(),
         unique: index.unique(),
+        method: None,
     }
 }
 

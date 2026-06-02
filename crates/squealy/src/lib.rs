@@ -416,7 +416,7 @@ pub use list::{
 pub use model::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
     ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexModel, SchemaModel, SqlType, TableModel,
+    IndexMethod, IndexModel, SchemaModel, SqlType, TableModel,
 };
 pub use projection::{Maybe, Projectable, ProjectionShape, ProjectionVisitor, TableProjection};
 pub use query::{

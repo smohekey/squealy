@@ -4,7 +4,7 @@ use mysql_async::{params, prelude::Queryable};
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
     ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexModel, SchemaModel, SqlType, TableModel,
+    IndexMethod, IndexModel, SchemaModel, SqlType, TableModel,
 };
 
 use crate::MysqlError;
@@ -287,7 +287,7 @@ async fn indexes(
     let rows = conn
         .exec_map(
             "\
-SELECT INDEX_NAME, NON_UNIQUE, COLUMN_NAME
+SELECT INDEX_NAME, NON_UNIQUE, INDEX_TYPE, COLUMN_NAME
 FROM information_schema.STATISTICS s
 LEFT JOIN information_schema.TABLE_CONSTRAINTS tc
   ON tc.TABLE_SCHEMA = s.TABLE_SCHEMA
@@ -303,17 +303,20 @@ ORDER BY INDEX_NAME, SEQ_IN_INDEX",
                 "schema" => &table_ref.schema,
                 "table" => &table_ref.name,
             },
-            |(name, non_unique, column): (String, u8, String)| (name, non_unique, column),
+            |(name, non_unique, index_type, column): (String, u8, String, String)| {
+                (name, non_unique, index_type, column)
+            },
         )
         .await
         .map_err(MysqlError::Introspect)?;
 
     let mut grouped = BTreeMap::<String, IndexModel>::new();
-    for (name, non_unique, column) in rows {
+    for (name, non_unique, index_type, column) in rows {
         let index = grouped.entry(name.clone()).or_insert_with(|| IndexModel {
             name,
             columns: Vec::new(),
             unique: non_unique == 0,
+            method: Some(IndexMethod::from_sql(&index_type)),
         });
         index.columns.push(column);
     }

@@ -698,6 +698,10 @@ pub(crate) mod ddl {
         write_quoted_ident(&index.name, writer)?;
         writer.write_all(b" ON ")?;
         write_qualified_name(schema, table, writer)?;
+        if let Some(method) = &index.method {
+            writer.write_all(b" USING ")?;
+            writer.write_all(method.postgres_sql().as_bytes())?;
+        }
         writer.write_all(b" (")?;
         write_quoted_ident_list(&index.columns, writer)?;
         writer.write_all(b")")
