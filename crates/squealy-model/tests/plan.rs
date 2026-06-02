@@ -1,6 +1,6 @@
 use squealy_model::{
     ChangeRisk, ColumnModel, DatabaseModel, DatabasePlanStep, DiffPolicy, SchemaModel, SqlType,
-    TableDiffChange, TableModel, plan_models,
+    TableModel, TablePlanStep, classified_plan_steps, plan_models,
 };
 
 #[test]
@@ -27,7 +27,7 @@ fn plan_models_flattens_diff_changes_in_order() {
             DatabasePlanStep::AlterTable {
                 schema: Some("public".to_owned()),
                 table: "events".to_owned(),
-                change: TableDiffChange::SetTableComment {
+                change: TablePlanStep::SetTableComment {
                     before: None,
                     after: Some("new comment".to_owned()),
                 },
@@ -35,7 +35,7 @@ fn plan_models_flattens_diff_changes_in_order() {
             DatabasePlanStep::AlterTable {
                 schema: Some("public".to_owned()),
                 table: "events".to_owned(),
-                change: TableDiffChange::AddColumn {
+                change: TablePlanStep::AddColumn {
                     column: column("name", SqlType::Text),
                 },
             },
@@ -68,7 +68,7 @@ fn plan_steps_are_classified_individually() {
     let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan diff");
 
     assert_eq!(
-        plan.classified_steps()
+        classified_plan_steps(&plan)
             .into_iter()
             .map(|step| step.risk)
             .collect::<Vec<_>>(),

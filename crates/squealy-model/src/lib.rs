@@ -23,14 +23,16 @@ pub use package::{
     write_package_to,
 };
 pub use plan::{
-    ClassifiedDatabasePlanStep, DatabasePlan, DatabasePlanStep, plan_diff, plan_models,
+    ClassifiedDatabasePlanStep, classified_plan_steps, plan_diff, plan_models, plan_step_risk,
+    table_plan_step_risk,
 };
 pub use squealy::{
     CheckModel, ColumnModel, Constraint, ConstraintCapabilities, ConstraintDeferrability,
-    ConstraintEnforcement, ConstraintValidation, DatabaseModel, DdlExecutor, DefaultValue,
-    ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, IndexCapabilities, IndexCollation,
-    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, SchemaBackend,
-    SchemaCapabilities, SchemaConnect, SchemaIntrospect, SchemaModel, SqlType, TableModel,
+    ConstraintEnforcement, ConstraintValidation, DatabaseModel, DatabasePlan, DatabasePlanStep,
+    DdlExecutor, DefaultValue, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
+    IndexCapabilities, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
+    IndexOperatorClass, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect,
+    SchemaModel, SqlType, TableModel, TablePlanStep,
 };
 
 use std::fmt;

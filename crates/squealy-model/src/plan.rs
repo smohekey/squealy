@@ -7,29 +7,7 @@ use crate::{
     ChangeRisk, DatabaseDiff, DatabaseDiffChange, DatabaseModel, DiffPolicy, DiffPolicyError,
     TableDiffChange, check_diff_policy, diff_models,
 };
-use squealy::TableModel;
-
-/// An ordered deployment plan from an actual model to a desired model.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct DatabasePlan {
-    pub steps: Vec<DatabasePlanStep>,
-}
-
-impl DatabasePlan {
-    pub fn is_empty(&self) -> bool {
-        self.steps.is_empty()
-    }
-
-    pub fn classified_steps(&self) -> Vec<ClassifiedDatabasePlanStep> {
-        self.steps
-            .iter()
-            .map(|step| ClassifiedDatabasePlanStep {
-                risk: step.risk(),
-                step: step.clone(),
-            })
-            .collect()
-    }
-}
+use squealy::{DatabasePlan, DatabasePlanStep, TablePlanStep};
 
 /// A plan step with conservative deployment-risk classification.
 #[derive(Clone, Debug, PartialEq)]
@@ -38,41 +16,58 @@ pub struct ClassifiedDatabasePlanStep {
     pub step: DatabasePlanStep,
 }
 
-/// One ordered backend-neutral deployment step.
-#[derive(Clone, Debug, PartialEq)]
-pub enum DatabasePlanStep {
-    CreateSchema {
-        schema: Option<String>,
-    },
-    DropSchema {
-        schema: Option<String>,
-    },
-    CreateTable {
-        schema: Option<String>,
-        table: TableModel,
-    },
-    DropTable {
-        schema: Option<String>,
-        table: TableModel,
-    },
-    AlterTable {
-        schema: Option<String>,
-        table: String,
-        change: TableDiffChange,
-    },
+/// Classifies every step in `plan`.
+pub fn classified_plan_steps(plan: &DatabasePlan) -> Vec<ClassifiedDatabasePlanStep> {
+    plan.steps
+        .iter()
+        .map(|step| ClassifiedDatabasePlanStep {
+            risk: plan_step_risk(step),
+            step: step.clone(),
+        })
+        .collect()
 }
 
-impl DatabasePlanStep {
-    pub fn risk(&self) -> ChangeRisk {
-        match self {
-            DatabasePlanStep::CreateSchema { .. } | DatabasePlanStep::CreateTable { .. } => {
-                ChangeRisk::Safe
-            }
-            DatabasePlanStep::DropSchema { .. } | DatabasePlanStep::DropTable { .. } => {
-                ChangeRisk::Destructive
-            }
-            DatabasePlanStep::AlterTable { change, .. } => change.risk(),
+/// Returns the conservative deployment-risk classification for `step`.
+pub fn plan_step_risk(step: &DatabasePlanStep) -> ChangeRisk {
+    match step {
+        DatabasePlanStep::CreateSchema { .. } | DatabasePlanStep::CreateTable { .. } => {
+            ChangeRisk::Safe
         }
+        DatabasePlanStep::DropSchema { .. } | DatabasePlanStep::DropTable { .. } => {
+            ChangeRisk::Destructive
+        }
+        DatabasePlanStep::AlterTable { change, .. } => table_plan_step_risk(change),
+    }
+}
+
+/// Returns the conservative deployment-risk classification for `step`.
+pub fn table_plan_step_risk(step: &TablePlanStep) -> ChangeRisk {
+    match step {
+        TablePlanStep::SetTableComment { .. }
+        | TablePlanStep::AddPrimaryKey { .. }
+        | TablePlanStep::AddUnique { .. }
+        | TablePlanStep::AddForeignKey { .. }
+        | TablePlanStep::AddCheck { .. }
+        | TablePlanStep::AddIndex { .. } => ChangeRisk::Safe,
+        TablePlanStep::DropColumn { .. }
+        | TablePlanStep::DropPrimaryKey { .. }
+        | TablePlanStep::DropUnique { .. }
+        | TablePlanStep::DropForeignKey { .. }
+        | TablePlanStep::DropCheck { .. }
+        | TablePlanStep::DropIndex { .. } => ChangeRisk::Destructive,
+        TablePlanStep::AddColumn { column } => {
+            if column.nullable || column.default.is_some() || column.identity.is_some() {
+                ChangeRisk::Safe
+            } else {
+                ChangeRisk::Ambiguous
+            }
+        }
+        TablePlanStep::AlterColumn { .. }
+        | TablePlanStep::AlterPrimaryKey { .. }
+        | TablePlanStep::AlterUnique { .. }
+        | TablePlanStep::AlterForeignKey { .. }
+        | TablePlanStep::AlterCheck { .. }
+        | TablePlanStep::AlterIndex { .. } => ChangeRisk::Ambiguous,
     }
 }
 
@@ -128,11 +123,80 @@ fn flatten_diff(diff: &DatabaseDiff) -> Vec<DatabasePlanStep> {
                     steps.push(DatabasePlanStep::AlterTable {
                         schema: schema.clone(),
                         table: table.clone(),
-                        change: table_change.clone(),
+                        change: table_plan_step(table_change),
                     });
                 }
             }
         }
     }
     steps
+}
+
+fn table_plan_step(change: &TableDiffChange) -> TablePlanStep {
+    match change {
+        TableDiffChange::SetTableComment { before, after } => TablePlanStep::SetTableComment {
+            before: before.clone(),
+            after: after.clone(),
+        },
+        TableDiffChange::AddColumn { column } => TablePlanStep::AddColumn {
+            column: column.clone(),
+        },
+        TableDiffChange::DropColumn { column } => TablePlanStep::DropColumn {
+            column: column.clone(),
+        },
+        TableDiffChange::AlterColumn { before, after } => TablePlanStep::AlterColumn {
+            before: before.clone(),
+            after: after.clone(),
+        },
+        TableDiffChange::AddPrimaryKey { constraint } => TablePlanStep::AddPrimaryKey {
+            constraint: constraint.clone(),
+        },
+        TableDiffChange::DropPrimaryKey { constraint } => TablePlanStep::DropPrimaryKey {
+            constraint: constraint.clone(),
+        },
+        TableDiffChange::AlterPrimaryKey { before, after } => TablePlanStep::AlterPrimaryKey {
+            before: before.clone(),
+            after: after.clone(),
+        },
+        TableDiffChange::AddUnique { constraint } => TablePlanStep::AddUnique {
+            constraint: constraint.clone(),
+        },
+        TableDiffChange::DropUnique { constraint } => TablePlanStep::DropUnique {
+            constraint: constraint.clone(),
+        },
+        TableDiffChange::AlterUnique { before, after } => TablePlanStep::AlterUnique {
+            before: before.clone(),
+            after: after.clone(),
+        },
+        TableDiffChange::AddForeignKey { foreign_key } => TablePlanStep::AddForeignKey {
+            foreign_key: foreign_key.clone(),
+        },
+        TableDiffChange::DropForeignKey { foreign_key } => TablePlanStep::DropForeignKey {
+            foreign_key: foreign_key.clone(),
+        },
+        TableDiffChange::AlterForeignKey { before, after } => TablePlanStep::AlterForeignKey {
+            before: before.clone(),
+            after: after.clone(),
+        },
+        TableDiffChange::AddCheck { check } => TablePlanStep::AddCheck {
+            check: check.clone(),
+        },
+        TableDiffChange::DropCheck { check } => TablePlanStep::DropCheck {
+            check: check.clone(),
+        },
+        TableDiffChange::AlterCheck { before, after } => TablePlanStep::AlterCheck {
+            before: before.clone(),
+            after: after.clone(),
+        },
+        TableDiffChange::AddIndex { index } => TablePlanStep::AddIndex {
+            index: index.clone(),
+        },
+        TableDiffChange::DropIndex { index } => TablePlanStep::DropIndex {
+            index: index.clone(),
+        },
+        TableDiffChange::AlterIndex { before, after } => TablePlanStep::AlterIndex {
+            before: before.clone(),
+            after: after.clone(),
+        },
+    }
 }

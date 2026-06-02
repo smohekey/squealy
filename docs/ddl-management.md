@@ -64,7 +64,8 @@ consistent with `#[derive(Schema)]`.
 
 > **Placement (revised during implementation):** the model types *and* the `SchemaBackend` trait live
 > in **core `squealy`**, not `squealy-model`. `SchemaBackend::render_create` must reference
-> `DatabaseModel`, and backends must implement it without depending on the management engine —
+> `DatabaseModel`, future plan rendering must reference `DatabasePlan`, and backends must implement
+> both without depending on the management engine —
 > otherwise `squealy-postgresql → squealy-model → squealy` plus `squealy → squealy-model` would cycle.
 > Putting both in core (next to `Backend`/`write_table`) keeps backends depending only on core. The
 > `squealy-model` *engine* crate owns the operations (package, script/publish, CLI) and the heavier
@@ -147,6 +148,7 @@ Decisions:
 crates/
   squealy              (exists)  metadata traits + query AST
                                   + owned model (DatabaseModel, SqlType, DefaultValue, …)
+                                  + neutral plan data (DatabasePlan, DatabasePlanStep, …)
                                   + DatabaseModel::from_database::<D>() walker
                                   + SchemaBackend trait
   squealy-postgresql   (exists)  backend: query + SchemaBackend (create render; introspect later)
@@ -336,6 +338,8 @@ Done and tested:
 - **Owned model + walker** in core `squealy` (`DatabaseModel`/`SchemaModel`/`TableModel`/`ColumnModel`
   + named `Constraint`/`ForeignKeyModel`/`CheckModel`/`IndexModel`, owned `SqlType`/`DefaultValue`,
   deterministic constraint names, `DatabaseModel::from_database::<D>()`).
+- **Neutral plan data** in core `squealy` (`DatabasePlan`/`DatabasePlanStep`/`TablePlanStep`) so
+  backend crates can render incremental plans without depending on `squealy-model`.
 - **`SchemaBackend` trait** in core; **Postgres and MySQL `render_create`** (phased
   create-from-scratch).
 - **Schema capabilities** in core: backends report the metadata they can render and introspect as a
@@ -368,8 +372,9 @@ Done and tested:
   classifies changes as safe/destructive/ambiguous, and `DiffPolicy` can block risky changes.
   `squealy diff` prints risk-prefixed changes and can enforce policy with `--check-policy`,
   `--allow-ambiguous`, and `--allow-destructive`.
-- **Planning**: `plan_models(desired, actual, policy)` turns a diff into ordered, policy-checked,
-  backend-neutral deployment steps. Backend-specific ALTER rendering/execution is the next layer.
+- **Planning**: `squealy-model::plan_models(desired, actual, policy)` turns a diff into ordered,
+  policy-checked, backend-neutral `DatabasePlan` steps. Backend-specific ALTER rendering/execution is
+  the next layer.
 
 **Sprint 1 is functionally complete, and the diff/policy/neutral-plan layer is underway.** Next:
 backend-specific incremental ALTER rendering, then apply/publish paths that consume plans and the

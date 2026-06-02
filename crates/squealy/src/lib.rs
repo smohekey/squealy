@@ -382,6 +382,7 @@ mod foreign_key;
 mod index;
 mod list;
 mod model;
+mod plan;
 mod projection;
 mod query;
 mod schema;
@@ -420,6 +421,7 @@ pub use model::{
     IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
     SchemaModel, SqlType, TableModel,
 };
+pub use plan::{DatabasePlan, DatabasePlanStep, TablePlanStep};
 pub use projection::{Maybe, Projectable, ProjectionShape, ProjectionVisitor, TableProjection};
 pub use query::{
     AllRows, AssignmentNode, AssignmentValueNode, AssignmentValueVisitor, AssignmentVisitor,
