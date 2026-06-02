@@ -19,7 +19,8 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
     ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, SchemaModel, SqlType, TableModel,
+    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, SchemaModel,
+    SqlType, TableModel,
 };
 
 /// Current package format version, recorded in `manifest.kdl`.
@@ -310,6 +311,7 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
         || !index.include_columns.is_empty()
         || !index.directions.is_empty()
         || !index.nulls.is_empty()
+        || !index.operator_classes.is_empty()
     {
         let mut children = KdlDocument::new();
         if !index.expressions.is_empty() {
@@ -340,8 +342,22 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
             }
             children.nodes_mut().push(nulls);
         }
+        for operator_class in &index.operator_classes {
+            children
+                .nodes_mut()
+                .push(index_operator_class_to_node(operator_class));
+        }
         node.set_children(children);
     }
+    node
+}
+
+fn index_operator_class_to_node(operator_class: &IndexOperatorClass) -> KdlNode {
+    let mut node = KdlNode::new("operator-class");
+    node.push(KdlEntry::new(KdlValue::Integer(
+        operator_class.position as i128,
+    )));
+    node.push(KdlEntry::new(operator_class.name.clone()));
     node
 }
 
@@ -551,6 +567,9 @@ fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
             .map(index_nulls_from_node)
             .transpose()?
             .unwrap_or_default(),
+        operator_classes: child_nodes(node, "operator-class")
+            .map(index_operator_class_from_node)
+            .collect::<Result<Vec<_>, _>>()?,
         predicate: prop(node, "predicate").map(str::to_owned),
     })
 }
@@ -830,6 +849,26 @@ fn index_nulls_from_node(node: &KdlNode) -> Result<Vec<IndexNullsOrder>, Package
         .collect()
 }
 
+fn index_operator_class_from_node(node: &KdlNode) -> Result<IndexOperatorClass, PackageError> {
+    let mut args = node
+        .entries()
+        .iter()
+        .filter(|entry| entry.name().is_none())
+        .map(KdlEntry::value);
+    let position = args
+        .next()
+        .and_then(KdlValue::as_integer)
+        .ok_or_else(|| malformed("`operator-class` is missing integer position"))?;
+    let position = usize::try_from(position)
+        .map_err(|_| malformed("`operator-class` position is out of range for usize"))?;
+    let name = args
+        .next()
+        .and_then(KdlValue::as_string)
+        .ok_or_else(|| malformed("`operator-class` is missing class name"))?
+        .to_owned();
+    Ok(IndexOperatorClass { position, name })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -892,6 +931,7 @@ mod tests {
                             method: None,
                             directions: Vec::new(),
                             nulls: Vec::new(),
+                            operator_classes: Vec::new(),
                             predicate: None,
                         }],
                     },
@@ -1201,6 +1241,7 @@ mod tests {
                 method: Some(method.clone()),
                 directions: vec![IndexDirection::Desc],
                 nulls: Vec::new(),
+                operator_classes: Vec::new(),
                 predicate: Some("event_id IS NOT NULL".to_owned()),
             })
             .collect();
@@ -1245,6 +1286,10 @@ mod tests {
                         method: Some(IndexMethod::BTree),
                         directions: vec![IndexDirection::Asc],
                         nulls: Vec::new(),
+                        operator_classes: vec![IndexOperatorClass {
+                            position: 0,
+                            name: "text_pattern_ops".to_owned(),
+                        }],
                         predicate: None,
                     }],
                 }],
@@ -1280,6 +1325,7 @@ mod tests {
                         method: Some(IndexMethod::BTree),
                         directions: vec![IndexDirection::Asc],
                         nulls: vec![IndexNullsOrder::Last],
+                        operator_classes: Vec::new(),
                         predicate: None,
                     }],
                 }],

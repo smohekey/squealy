@@ -325,6 +325,7 @@ ORDER BY INDEX_NAME, SEQ_IN_INDEX",
             method: Some(IndexMethod::from_sql(&index_type)),
             directions: Vec::new(),
             nulls: Vec::new(),
+            operator_classes: Vec::new(),
             predicate: None,
         });
         index.columns.push(column);

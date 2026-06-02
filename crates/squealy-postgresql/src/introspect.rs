@@ -1,7 +1,8 @@
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
     ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, SchemaModel, SqlType, TableModel,
+    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, SchemaModel,
+    SqlType, TableModel,
 };
 use tokio_postgres::Client;
 
@@ -281,6 +282,22 @@ SELECT
         FROM unnest(i.indoption) WITH ORDINALITY AS opt(option, position)
         ORDER BY position
     ) AS nulls,
+    ARRAY(
+        SELECT (cls.position - 1)::int
+        FROM unnest(i.indclass) WITH ORDINALITY AS cls(opcoid, position)
+        JOIN pg_opclass opc ON opc.oid = cls.opcoid
+        WHERE cls.position <= i.indnkeyatts
+          AND NOT opc.opcdefault
+        ORDER BY cls.position
+    ) AS operator_class_positions,
+    ARRAY(
+        SELECT opc.opcname::text
+        FROM unnest(i.indclass) WITH ORDINALITY AS cls(opcoid, position)
+        JOIN pg_opclass opc ON opc.oid = cls.opcoid
+        WHERE cls.position <= i.indnkeyatts
+          AND NOT opc.opcdefault
+        ORDER BY cls.position
+    ) AS operator_classes,
 	    pg_get_expr(i.indpred, i.indrelid) AS predicate,
 	    pg_get_expr(i.indexprs, i.indrelid) AS expressions
 FROM pg_index i
@@ -306,16 +323,18 @@ ORDER BY idx.relname",
                 .map(|direction| index_direction(&direction))
                 .collect::<Vec<_>>();
             let nulls = index_nulls(&directions, row.get(6));
+            let operator_classes = index_operator_classes(row.get(7), row.get(8));
             IndexModel {
                 name: row.get(0),
                 unique: row.get(1),
                 method: Some(IndexMethod::from_sql(&row.get::<_, String>(2))),
                 columns: row.get(3),
-                expressions: row.get::<_, Option<String>>(8).into_iter().collect(),
+                expressions: row.get::<_, Option<String>>(10).into_iter().collect(),
                 include_columns: row.get(4),
                 directions,
                 nulls,
-                predicate: row.get(7),
+                operator_classes,
+                predicate: row.get(9),
             }
         })
         .collect())
@@ -493,6 +512,18 @@ fn index_nulls(directions: &[IndexDirection], nulls: Vec<String>) -> Vec<IndexNu
         )
     });
     if all_default { Vec::new() } else { nulls }
+}
+
+fn index_operator_classes(positions: Vec<i32>, names: Vec<String>) -> Vec<IndexOperatorClass> {
+    positions
+        .into_iter()
+        .zip(names)
+        .filter_map(|(position, name)| {
+            usize::try_from(position)
+                .ok()
+                .map(|position| IndexOperatorClass { position, name })
+        })
+        .collect()
 }
 
 fn check_expression(definition: &str) -> String {

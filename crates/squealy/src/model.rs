@@ -278,6 +278,8 @@ pub struct IndexModel {
     pub method: Option<IndexMethod>,
     pub directions: Vec<IndexDirection>,
     pub nulls: Vec<IndexNullsOrder>,
+    /// Backend-specific operator classes by zero-based key-term position.
+    pub operator_classes: Vec<IndexOperatorClass>,
     /// Backend-specific predicate for a partial index.
     pub predicate: Option<String>,
 }
@@ -294,6 +296,13 @@ pub enum IndexDirection {
 pub enum IndexNullsOrder {
     First,
     Last,
+}
+
+/// Operator class override for an indexed key term.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexOperatorClass {
+    pub position: usize,
+    pub name: String,
 }
 
 /// Backend-neutral index access method.
@@ -467,6 +476,7 @@ fn index_from_dyn(table: &str, index: &dyn Index) -> IndexModel {
         method: None,
         directions: Vec::new(),
         nulls: Vec::new(),
+        operator_classes: Vec::new(),
         predicate: None,
     }
 }

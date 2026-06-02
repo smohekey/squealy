@@ -240,6 +240,12 @@ fn write_create_index(
             "MySQL does not support index null ordering",
         ));
     }
+    if !index.operator_classes.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support index operator classes",
+        ));
+    }
 
     writer.write_all(b"CREATE ")?;
     if index.unique {

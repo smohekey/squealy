@@ -764,6 +764,7 @@ pub(crate) mod ddl {
                 writer.write_all(b", ")?;
             }
             write_quoted_ident(column, writer)?;
+            write_index_operator_class(index, position, writer)?;
             write_index_direction(index, position, writer)?;
             write_index_nulls(index, position, writer)?;
         }
@@ -773,6 +774,7 @@ pub(crate) mod ddl {
                 writer.write_all(b", ")?;
             }
             writer.write_all(expression.as_bytes())?;
+            write_index_operator_class(index, position, writer)?;
             write_index_direction(index, position, writer)?;
             write_index_nulls(index, position, writer)?;
         }
@@ -788,6 +790,22 @@ pub(crate) mod ddl {
             Some(squealy::IndexDirection::Asc) => writer.write_all(b" ASC")?,
             Some(squealy::IndexDirection::Desc) => writer.write_all(b" DESC")?,
             None => {}
+        }
+        Ok(())
+    }
+
+    fn write_index_operator_class(
+        index: &IndexModel,
+        position: usize,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        if let Some(operator_class) = index
+            .operator_classes
+            .iter()
+            .find(|operator_class| operator_class.position == position)
+        {
+            writer.write_all(b" ")?;
+            writer.write_all(operator_class.name.as_bytes())?;
         }
         Ok(())
     }
