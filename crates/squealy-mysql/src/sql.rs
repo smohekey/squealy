@@ -205,15 +205,58 @@ fn write_table_plan_step(
             writer.write_all(b" ON ")?;
             write_qualified_name(schema, table, writer)?;
         }
-        TablePlanStep::AlterColumn { .. }
-        | TablePlanStep::AlterPrimaryKey { .. }
-        | TablePlanStep::AlterUnique { .. }
-        | TablePlanStep::AlterForeignKey { .. }
-        | TablePlanStep::AlterCheck { .. }
-        | TablePlanStep::AlterIndex { .. } => {
+        TablePlanStep::AlterPrimaryKey { after, .. } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP PRIMARY KEY")?;
+            statement(writer, first)?;
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ADD ")?;
+            write_named_constraint("PRIMARY KEY", &after.name, &after.columns, writer)?;
+        }
+        TablePlanStep::AlterUnique { before, after } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP INDEX ")?;
+            write_quoted_ident(&before.name, writer)?;
+            statement(writer, first)?;
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ADD ")?;
+            write_named_constraint("UNIQUE", &after.name, &after.columns, writer)?;
+        }
+        TablePlanStep::AlterForeignKey { before, after } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP FOREIGN KEY ")?;
+            write_quoted_ident(&before.name, writer)?;
+            statement(writer, first)?;
+            write_add_foreign_key(schema, table, after, writer)?;
+        }
+        TablePlanStep::AlterCheck { before, after } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP CHECK ")?;
+            write_quoted_ident(&before.name, writer)?;
+            statement(writer, first)?;
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ADD ")?;
+            write_check(after, writer)?;
+        }
+        TablePlanStep::AlterIndex { before, after } => {
+            writer.write_all(b"DROP INDEX ")?;
+            write_quoted_ident(&before.name, writer)?;
+            writer.write_all(b" ON ")?;
+            write_qualified_name(schema, table, writer)?;
+            statement(writer, first)?;
+            write_create_index(schema, table, after, writer)?;
+        }
+        TablePlanStep::AlterColumn { .. } => {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "MySQL incremental ALTER rendering for changed definitions is not supported yet",
+                "MySQL incremental ALTER rendering for changed columns is not supported yet",
             ));
         }
     }

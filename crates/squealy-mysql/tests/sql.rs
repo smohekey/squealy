@@ -165,6 +165,142 @@ DROP SCHEMA `old`;"
 }
 
 #[test]
+fn mysql_renders_changed_constraints_and_indexes_in_schema_plan() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: TablePlanStep::AlterPrimaryKey {
+                    before: Constraint {
+                        name: "pk_events".to_owned(),
+                        columns: vec!["id".to_owned()],
+                    },
+                    after: Constraint {
+                        name: "pk_events".to_owned(),
+                        columns: vec!["event_id".to_owned()],
+                    },
+                },
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: TablePlanStep::AlterUnique {
+                    before: Constraint {
+                        name: "uq_events_name".to_owned(),
+                        columns: vec!["name".to_owned()],
+                    },
+                    after: Constraint {
+                        name: "uq_events_name".to_owned(),
+                        columns: vec!["slug".to_owned()],
+                    },
+                },
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: TablePlanStep::AlterForeignKey {
+                    before: ForeignKeyModel {
+                        name: "fk_events_user_id".to_owned(),
+                        columns: vec!["user_id".to_owned()],
+                        references_schema: Some("shop".to_owned()),
+                        references_table: "users".to_owned(),
+                        references_columns: vec!["id".to_owned()],
+                        match_type: None,
+                        deferrability: None,
+                        validation: None,
+                        enforcement: None,
+                        on_delete: None,
+                        on_update: None,
+                    },
+                    after: ForeignKeyModel {
+                        name: "fk_events_user_id".to_owned(),
+                        columns: vec!["owner_id".to_owned()],
+                        references_schema: Some("shop".to_owned()),
+                        references_table: "users".to_owned(),
+                        references_columns: vec!["id".to_owned()],
+                        match_type: None,
+                        deferrability: None,
+                        validation: None,
+                        enforcement: None,
+                        on_delete: Some(ForeignKeyAction::Cascade),
+                        on_update: None,
+                    },
+                },
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: TablePlanStep::AlterCheck {
+                    before: CheckModel {
+                        name: "ck_events_id".to_owned(),
+                        expression: "id > 0".to_owned(),
+                        validation: None,
+                        enforcement: None,
+                    },
+                    after: CheckModel {
+                        name: "ck_events_id".to_owned(),
+                        expression: "event_id > 0".to_owned(),
+                        validation: None,
+                        enforcement: None,
+                    },
+                },
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: TablePlanStep::AlterIndex {
+                    before: IndexModel {
+                        name: "idx_events_name".to_owned(),
+                        columns: vec!["name".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: Vec::new(),
+                        unique: false,
+                        method: None,
+                        directions: Vec::new(),
+                        nulls: Vec::new(),
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    },
+                    after: IndexModel {
+                        name: "idx_events_name".to_owned(),
+                        columns: vec!["slug".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: Vec::new(),
+                        unique: true,
+                        method: None,
+                        directions: Vec::new(),
+                        nulls: Vec::new(),
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    },
+                },
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "ALTER TABLE `shop`.`events` DROP PRIMARY KEY;\n\
+ALTER TABLE `shop`.`events` ADD CONSTRAINT `pk_events` PRIMARY KEY (`event_id`);\n\
+ALTER TABLE `shop`.`events` DROP INDEX `uq_events_name`;\n\
+ALTER TABLE `shop`.`events` ADD CONSTRAINT `uq_events_name` UNIQUE (`slug`);\n\
+ALTER TABLE `shop`.`events` DROP FOREIGN KEY `fk_events_user_id`;\n\
+ALTER TABLE `shop`.`events` ADD CONSTRAINT `fk_events_user_id` FOREIGN KEY (`owner_id`) REFERENCES `shop`.`users` (`id`) ON DELETE CASCADE;\n\
+ALTER TABLE `shop`.`events` DROP CHECK `ck_events_id`;\n\
+ALTER TABLE `shop`.`events` ADD CONSTRAINT `ck_events_id` CHECK (event_id > 0);\n\
+DROP INDEX `idx_events_name` ON `shop`.`events`;\n\
+CREATE UNIQUE INDEX `idx_events_name` ON `shop`.`events` (`slug`);"
+    );
+}
+
+#[test]
 fn mysql_renders_create_from_scratch() {
     let model = DatabaseModel::from_database::<ShopDb>();
     let mut sql = Vec::new();
