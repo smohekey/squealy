@@ -296,6 +296,7 @@ ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
                 references_table,
                 references_columns: Vec::new(),
                 match_type: match_type(&match_option),
+                deferrability: None,
                 on_delete: action(&delete_rule),
                 on_update: action(&update_rule),
             });

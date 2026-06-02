@@ -17,10 +17,10 @@ use std::path::Path;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
-    ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
-    IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
-    IndexOperatorClass, SchemaModel, SqlType, TableModel,
+    CheckModel, ColumnModel, Constraint, ConstraintDeferrability, DatabaseModel, DefaultValue,
+    ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage,
+    IdentityMode, IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel,
+    IndexNullsOrder, IndexOperatorClass, SchemaModel, SqlType, TableModel,
 };
 
 /// Current package format version, recorded in `manifest.kdl`.
@@ -274,6 +274,12 @@ fn foreign_key_to_node(foreign_key: &ForeignKeyModel) -> KdlNode {
     ));
     if let Some(match_type) = &foreign_key.match_type {
         node.push(KdlEntry::new_prop("match", foreign_key_match(match_type)));
+    }
+    if let Some(deferrability) = &foreign_key.deferrability {
+        node.push(KdlEntry::new_prop(
+            "deferrable",
+            constraint_deferrability(deferrability),
+        ));
     }
     if let Some(on_delete) = &foreign_key.on_delete {
         node.push(KdlEntry::new_prop(
@@ -563,6 +569,7 @@ fn foreign_key_from_node(node: &KdlNode) -> Result<ForeignKeyModel, PackageError
             .map(args)
             .unwrap_or_default(),
         match_type: prop(node, "match").map(ForeignKeyMatch::from_sql),
+        deferrability: prop(node, "deferrable").map(ConstraintDeferrability::from_sql),
         on_delete: prop(node, "on-delete").map(ForeignKeyAction::from_sql),
         on_update: prop(node, "on-update").map(ForeignKeyAction::from_sql),
     })
@@ -834,6 +841,14 @@ fn foreign_key_match(match_type: &ForeignKeyMatch) -> &str {
     }
 }
 
+fn constraint_deferrability(deferrability: &ConstraintDeferrability) -> &str {
+    match deferrability {
+        ConstraintDeferrability::InitiallyImmediate => "initially-immediate",
+        ConstraintDeferrability::InitiallyDeferred => "initially-deferred",
+        ConstraintDeferrability::Raw(deferrability) => deferrability,
+    }
+}
+
 fn index_method(method: &IndexMethod) -> &str {
     match method {
         IndexMethod::BTree => "btree",
@@ -1010,6 +1025,7 @@ mod tests {
                             references_table: "orgs".to_owned(),
                             references_columns: vec!["id".to_owned()],
                             match_type: None,
+                            deferrability: None,
                             on_delete: Some(ForeignKeyAction::Cascade),
                             on_update: None,
                         }],
@@ -1074,6 +1090,7 @@ mod tests {
                         references_table: "users".to_owned(),
                         references_columns: vec!["account id".to_owned()],
                         match_type: None,
+                        deferrability: None,
                         on_delete: None,
                         on_update: None,
                     }],
@@ -1264,6 +1281,7 @@ mod tests {
                 references_table: "parents".to_owned(),
                 references_columns: vec!["id".to_owned()],
                 match_type: None,
+                deferrability: None,
                 on_delete: Some(action.clone()),
                 on_update: Some(action.clone()),
             })
@@ -1310,6 +1328,7 @@ mod tests {
                 references_table: "parents".to_owned(),
                 references_columns: vec!["id".to_owned()],
                 match_type: Some(match_type.clone()),
+                deferrability: None,
                 on_delete: None,
                 on_update: None,
             })
@@ -1336,6 +1355,53 @@ mod tests {
         assert_eq!(
             parsed, model,
             "foreign-key match round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn kdl_round_trips_foreign_key_deferrability() {
+        let values = [
+            ConstraintDeferrability::InitiallyImmediate,
+            ConstraintDeferrability::InitiallyDeferred,
+            ConstraintDeferrability::Raw("backend-specific".to_owned()),
+        ];
+        let foreign_keys = values
+            .iter()
+            .enumerate()
+            .map(|(index, deferrability)| ForeignKeyModel {
+                name: format!("fk_child_parent_deferrable_{index}"),
+                columns: vec![format!("parent_id_{index}")],
+                references_schema: Some("public".to_owned()),
+                references_table: "parents".to_owned(),
+                references_columns: vec!["id".to_owned()],
+                match_type: None,
+                deferrability: Some(deferrability.clone()),
+                on_delete: None,
+                on_update: None,
+            })
+            .collect();
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "children".to_owned(),
+                    comment: None,
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys,
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        assert!(kdl.contains("deferrable=initially-deferred"));
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(
+            parsed, model,
+            "foreign-key deferrability round-trip diverged:\n{kdl}"
         );
     }
 

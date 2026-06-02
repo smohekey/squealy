@@ -195,6 +195,7 @@ fn rich_model() -> DatabaseModel {
                         references_table: "tenants".to_owned(),
                         references_columns: vec!["id".to_owned()],
                         match_type: Some(ForeignKeyMatch::Full),
+                        deferrability: Some(ConstraintDeferrability::InitiallyDeferred),
                         on_delete: Some(ForeignKeyAction::Cascade),
                         on_update: None,
                     }],

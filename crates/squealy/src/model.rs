@@ -219,8 +219,44 @@ pub struct ForeignKeyModel {
     pub references_table: String,
     pub references_columns: Vec<String>,
     pub match_type: Option<ForeignKeyMatch>,
+    pub deferrability: Option<ConstraintDeferrability>,
     pub on_delete: Option<ForeignKeyAction>,
     pub on_update: Option<ForeignKeyAction>,
+}
+
+/// Backend-neutral constraint deferrability.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConstraintDeferrability {
+    InitiallyImmediate,
+    InitiallyDeferred,
+    /// A backend-specific deferrability clause, emitted verbatim into DDL.
+    Raw(String),
+}
+
+impl ConstraintDeferrability {
+    pub fn from_sql(deferrability: &str) -> Self {
+        let normalized = deferrability
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['-', '_'], " ");
+        match normalized.as_str() {
+            "initially immediate" | "deferrable initially immediate" => {
+                ConstraintDeferrability::InitiallyImmediate
+            }
+            "initially deferred" | "deferrable initially deferred" => {
+                ConstraintDeferrability::InitiallyDeferred
+            }
+            _ => ConstraintDeferrability::Raw(deferrability.to_owned()),
+        }
+    }
+
+    pub fn as_sql(&self) -> &str {
+        match self {
+            ConstraintDeferrability::InitiallyImmediate => "DEFERRABLE INITIALLY IMMEDIATE",
+            ConstraintDeferrability::InitiallyDeferred => "DEFERRABLE INITIALLY DEFERRED",
+            ConstraintDeferrability::Raw(deferrability) => deferrability,
+        }
+    }
 }
 
 /// Backend-neutral foreign-key match type.
@@ -502,6 +538,7 @@ fn foreign_key_from_dyn(table: &str, column: &str, reference: &dyn ForeignKey) -
         references_table: reference.table().to_owned(),
         references_columns: vec![reference.column().to_owned()],
         match_type: None,
+        deferrability: None,
         on_delete: reference.on_delete().map(ForeignKeyAction::from_sql),
         on_update: reference.on_update().map(ForeignKeyAction::from_sql),
     }
@@ -688,6 +725,7 @@ mod tests {
                 references_table: "users".to_owned(),
                 references_columns: vec!["id".to_owned()],
                 match_type: None,
+                deferrability: None,
                 on_delete: Some(ForeignKeyAction::Cascade),
                 on_update: None,
             }]

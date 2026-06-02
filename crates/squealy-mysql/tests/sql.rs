@@ -115,6 +115,48 @@ fn mysql_rejects_foreign_key_match_types() {
                     references_table: "tenants".to_owned(),
                     references_columns: vec!["id".to_owned()],
                     match_type: Some(ForeignKeyMatch::Full),
+                    deferrability: None,
+                    on_delete: None,
+                    on_update: None,
+                }],
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mysql_rejects_deferrable_foreign_keys() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: vec![TableModel {
+                name: "memberships".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "tenant_id".to_owned(),
+                    comment: None,
+                    ty: SqlType::I32,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: vec![ForeignKeyModel {
+                    name: "fk_memberships_tenant_id".to_owned(),
+                    columns: vec!["tenant_id".to_owned()],
+                    references_schema: Some("shop".to_owned()),
+                    references_table: "tenants".to_owned(),
+                    references_columns: vec!["id".to_owned()],
+                    match_type: None,
+                    deferrability: Some(ConstraintDeferrability::InitiallyDeferred),
                     on_delete: None,
                     on_update: None,
                 }],

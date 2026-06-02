@@ -1,8 +1,8 @@
 use squealy::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
-    ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
-    IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
-    IndexOperatorClass, SchemaModel, SqlType, TableModel,
+    CheckModel, ColumnModel, Constraint, ConstraintDeferrability, DatabaseModel, DefaultValue,
+    ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage,
+    IdentityMode, IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel,
+    IndexNullsOrder, IndexOperatorClass, SchemaModel, SqlType, TableModel,
 };
 use tokio_postgres::Client;
 
@@ -217,6 +217,8 @@ SELECT
         ORDER BY key.position
     ) AS references_columns,
     con.confmatchtype::text,
+    con.condeferrable,
+    con.condeferred,
     con.confdeltype::text,
     con.confupdtype::text
 FROM pg_constraint con
@@ -243,8 +245,9 @@ ORDER BY con.conname",
                 references_table: row.get(3),
                 references_columns: row.get(4),
                 match_type: match_type(row.get::<_, String>(5).as_str()),
-                on_delete: action(row.get::<_, String>(6).as_str()),
-                on_update: action(row.get::<_, String>(7).as_str()),
+                deferrability: deferrability(row.get(6), row.get(7)),
+                on_delete: action(row.get::<_, String>(8).as_str()),
+                on_update: action(row.get::<_, String>(9).as_str()),
             }
         })
         .collect())
@@ -256,6 +259,16 @@ fn match_type(value: &str) -> Option<ForeignKeyMatch> {
         "f" => Some(ForeignKeyMatch::Full),
         "p" => Some(ForeignKeyMatch::Partial),
         other => Some(ForeignKeyMatch::Raw(other.to_owned())),
+    }
+}
+
+fn deferrability(deferrable: bool, deferred: bool) -> Option<ConstraintDeferrability> {
+    if !deferrable {
+        None
+    } else if deferred {
+        Some(ConstraintDeferrability::InitiallyDeferred)
+    } else {
+        Some(ConstraintDeferrability::InitiallyImmediate)
     }
 }
 

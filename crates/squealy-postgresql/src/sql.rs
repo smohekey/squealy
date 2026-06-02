@@ -795,6 +795,9 @@ pub(crate) mod ddl {
         if let Some(on_update) = &foreign_key.on_update {
             write!(writer, " ON UPDATE {}", on_update.as_sql())?;
         }
+        if let Some(deferrability) = &foreign_key.deferrability {
+            write!(writer, " {}", deferrability.as_sql())?;
+        }
         Ok(())
     }
 

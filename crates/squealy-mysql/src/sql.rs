@@ -307,6 +307,12 @@ fn write_add_foreign_key(
             "MySQL does not support foreign key MATCH clauses",
         ));
     }
+    if foreign_key.deferrability.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support deferrable foreign keys",
+        ));
+    }
 
     writer.write_all(b"ALTER TABLE ")?;
     write_qualified_name(schema, table, writer)?;
