@@ -219,6 +219,9 @@ fn column_to_node(column: &ColumnModel) -> KdlNode {
     }
 
     write_sql_type(&mut node, &column.ty);
+    if let Some(collation) = &column.collation {
+        node.push(KdlEntry::new_prop("collation", collation.clone()));
+    }
     if column.nullable {
         node.push(KdlEntry::new_prop("nullable", KdlValue::Bool(true)));
     }
@@ -544,6 +547,7 @@ fn column_from_node(node: &KdlNode) -> Result<ColumnModel, PackageError> {
         name,
         comment: prop(node, "comment").map(str::to_owned),
         ty,
+        collation: prop(node, "collation").map(str::to_owned),
         nullable: prop_bool(node, "nullable"),
         default,
         identity: identity_from_node(node)?,
@@ -952,6 +956,7 @@ mod tests {
                                 name: "id".to_owned(),
                                 comment: Some("Synthetic organization id".to_owned()),
                                 ty: SqlType::I32,
+                                collation: None,
                                 nullable: false,
                                 default: None,
                                 identity: Some(IdentityModel {
@@ -963,6 +968,7 @@ mod tests {
                                 name: "slug".to_owned(),
                                 comment: Some("Stable organization slug".to_owned()),
                                 ty: SqlType::String,
+                                collation: Some("C".to_owned()),
                                 nullable: false,
                                 default: Some(DefaultValue::Text("acme".to_owned())),
                                 identity: None,
@@ -972,6 +978,7 @@ mod tests {
                                 name: "metadata".to_owned(),
                                 comment: None,
                                 ty: SqlType::Raw("jsonb".to_owned()),
+                                collation: None,
                                 nullable: true,
                                 default: Some(DefaultValue::Raw("'{}'::jsonb".to_owned())),
                                 identity: None,
@@ -1012,6 +1019,7 @@ mod tests {
                             name: "org_id".to_owned(),
                             comment: None,
                             ty: SqlType::I32,
+                            collation: None,
                             nullable: false,
                             default: None,
                             identity: None,
@@ -1044,6 +1052,7 @@ mod tests {
         let kdl = to_kdl(&model);
         assert!(kdl.contains("comment=\"Organizations in the catalog\""));
         assert!(kdl.contains("comment=\"Synthetic organization id\""));
+        assert!(kdl.contains("collation=C"));
         let parsed = from_kdl(&kdl).expect("model.kdl should parse");
         assert_eq!(parsed, model, "KDL round-trip diverged:\n{kdl}");
     }
@@ -1077,6 +1086,7 @@ mod tests {
                         name: "user id".to_owned(),
                         comment: None,
                         ty: SqlType::I32,
+                        collation: None,
                         nullable: false,
                         default: None,
                         identity: None,
@@ -1136,6 +1146,7 @@ mod tests {
                 name: format!("c{index}"),
                 comment: None,
                 ty: ty.clone(),
+                collation: None,
                 nullable: false,
                 default: None,
                 identity: None,
@@ -1171,6 +1182,7 @@ mod tests {
                 name: "id_always".to_owned(),
                 comment: None,
                 ty: SqlType::I32,
+                collation: None,
                 nullable: false,
                 default: None,
                 identity: Some(IdentityModel {
@@ -1182,6 +1194,7 @@ mod tests {
                 name: "id_by_default".to_owned(),
                 comment: None,
                 ty: SqlType::I32,
+                collation: None,
                 nullable: false,
                 default: None,
                 identity: Some(IdentityModel {
@@ -1193,6 +1206,7 @@ mod tests {
                 name: "id_auto_increment".to_owned(),
                 comment: None,
                 ty: SqlType::I32,
+                collation: None,
                 nullable: false,
                 default: None,
                 identity: Some(IdentityModel {
@@ -1204,6 +1218,7 @@ mod tests {
                 name: "virtual_generated".to_owned(),
                 comment: None,
                 ty: SqlType::I32,
+                collation: None,
                 nullable: true,
                 default: None,
                 identity: None,
@@ -1216,6 +1231,7 @@ mod tests {
                 name: "stored_generated".to_owned(),
                 comment: None,
                 ty: SqlType::I32,
+                collation: None,
                 nullable: true,
                 default: None,
                 identity: None,
@@ -1228,6 +1244,7 @@ mod tests {
                 name: "unknown_generated".to_owned(),
                 comment: None,
                 ty: SqlType::I32,
+                collation: None,
                 nullable: true,
                 default: None,
                 identity: None,

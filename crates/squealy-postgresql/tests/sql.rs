@@ -477,6 +477,7 @@ fn postgres_renders_table_and_column_comments() {
                     name: "slug".to_owned(),
                     comment: Some("Tenant's stable slug".to_owned()),
                     ty: SqlType::String,
+                    collation: Some("C".to_owned()),
                     nullable: false,
                     default: None,
                     identity: None,
@@ -498,7 +499,7 @@ fn postgres_renders_table_and_column_comments() {
     assert_eq!(
         sql,
         "CREATE SCHEMA IF NOT EXISTS \"catalog\";\n\
-CREATE TABLE \"catalog\".\"tenants\" (\n  \"slug\" text NOT NULL\n);\n\
+CREATE TABLE \"catalog\".\"tenants\" (\n  \"slug\" text COLLATE \"C\" NOT NULL\n);\n\
 COMMENT ON TABLE \"catalog\".\"tenants\" IS 'Tenant records';\n\
 COMMENT ON COLUMN \"catalog\".\"tenants\".\"slug\" IS 'Tenant''s stable slug';"
     );
@@ -517,6 +518,7 @@ fn postgres_renders_foreign_key_match_type() {
                         name: "tenant_id".to_owned(),
                         comment: None,
                         ty: SqlType::I32,
+                        collation: None,
                         nullable: false,
                         default: None,
                         identity: None,
@@ -545,6 +547,7 @@ fn postgres_renders_foreign_key_match_type() {
                         name: "id".to_owned(),
                         comment: None,
                         ty: SqlType::I32,
+                        collation: None,
                         nullable: false,
                         default: None,
                         identity: None,
@@ -584,6 +587,7 @@ fn postgres_renders_partial_indexes() {
                     name: "tenant_id".to_owned(),
                     comment: None,
                     ty: SqlType::I32,
+                    collation: None,
                     nullable: false,
                     default: None,
                     identity: None,
@@ -634,6 +638,7 @@ fn postgres_renders_expression_indexes() {
                     name: "slug".to_owned(),
                     comment: None,
                     ty: SqlType::String,
+                    collation: None,
                     nullable: false,
                     default: None,
                     identity: None,
@@ -685,6 +690,7 @@ fn postgres_renders_covering_indexes() {
                         name: "tenant_id".to_owned(),
                         comment: None,
                         ty: SqlType::I32,
+                        collation: None,
                         nullable: false,
                         default: None,
                         identity: None,
@@ -694,6 +700,7 @@ fn postgres_renders_covering_indexes() {
                         name: "role_code".to_owned(),
                         comment: None,
                         ty: SqlType::String,
+                        collation: None,
                         nullable: false,
                         default: None,
                         identity: None,
@@ -745,6 +752,7 @@ fn postgres_renders_index_null_ordering() {
                     name: "tenant_id".to_owned(),
                     comment: None,
                     ty: SqlType::I32,
+                    collation: None,
                     nullable: true,
                     default: None,
                     identity: None,
@@ -795,6 +803,7 @@ fn postgres_renders_index_operator_classes() {
                     name: "slug".to_owned(),
                     comment: None,
                     ty: SqlType::String,
+                    collation: None,
                     nullable: false,
                     default: None,
                     identity: None,
@@ -848,6 +857,7 @@ fn postgres_renders_index_collations() {
                     name: "slug".to_owned(),
                     comment: None,
                     ty: SqlType::String,
+                    collation: None,
                     nullable: false,
                     default: None,
                     identity: None,

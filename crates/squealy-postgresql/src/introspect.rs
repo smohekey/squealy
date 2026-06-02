@@ -86,6 +86,10 @@ async fn columns(client: &Client, table_ref: &TableRef) -> Result<Vec<ColumnMode
 SELECT
     a.attname,
     format_type(a.atttypid, a.atttypmod),
+    CASE
+        WHEN a.attcollation <> typ.typcollation THEN coll.collname
+        ELSE NULL
+    END,
     a.attnotnull,
     a.attidentity::text,
     a.attgenerated::text,
@@ -94,6 +98,8 @@ SELECT
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_attribute a ON a.attrelid = c.oid
+JOIN pg_type typ ON typ.oid = a.atttypid
+LEFT JOIN pg_collation coll ON coll.oid = a.attcollation
 LEFT JOIN pg_attrdef ad ON ad.adrelid = c.oid AND ad.adnum = a.attnum
 WHERE n.nspname = $1
   AND c.relname = $2
@@ -110,14 +116,15 @@ ORDER BY a.attnum",
         .map(|row| {
             let db_type: String = row.get(1);
             let ty = sql_type(&db_type);
-            let identity: String = row.get(3);
-            let generated: String = row.get(4);
-            let default: Option<String> = row.get(5);
+            let identity: String = row.get(4);
+            let generated: String = row.get(5);
+            let default: Option<String> = row.get(6);
             ColumnModel {
                 name: row.get(0),
-                comment: row.get(6),
+                comment: row.get(7),
                 ty: ty.clone(),
-                nullable: !row.get::<_, bool>(2),
+                collation: row.get(2),
+                nullable: !row.get::<_, bool>(3),
                 default: (generated != "s")
                     .then(|| default.clone())
                     .flatten()

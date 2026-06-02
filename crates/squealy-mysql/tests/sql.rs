@@ -65,6 +65,7 @@ fn mysql_renders_table_and_column_comments() {
                     name: "slug".to_owned(),
                     comment: Some("Tenant's stable slug".to_owned()),
                     ty: SqlType::String,
+                    collation: Some("utf8mb4_bin".to_owned()),
                     nullable: false,
                     default: None,
                     identity: None,
@@ -86,7 +87,7 @@ fn mysql_renders_table_and_column_comments() {
     assert_eq!(
         sql,
         "CREATE SCHEMA IF NOT EXISTS `shop`;\n\
-CREATE TABLE `shop`.`tenants` (\n  `slug` VARCHAR(255) NOT NULL COMMENT 'Tenant''s stable slug'\n) COMMENT='Tenant records';"
+CREATE TABLE `shop`.`tenants` (\n  `slug` VARCHAR(255) COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant''s stable slug'\n) COMMENT='Tenant records';"
     );
 }
 
@@ -102,6 +103,7 @@ fn mysql_rejects_foreign_key_match_types() {
                     name: "tenant_id".to_owned(),
                     comment: None,
                     ty: SqlType::I32,
+                    collation: None,
                     nullable: false,
                     default: None,
                     identity: None,
@@ -143,6 +145,7 @@ fn mysql_rejects_deferrable_foreign_keys() {
                     name: "tenant_id".to_owned(),
                     comment: None,
                     ty: SqlType::I32,
+                    collation: None,
                     nullable: false,
                     default: None,
                     identity: None,
@@ -184,6 +187,7 @@ fn mysql_rejects_partial_index_predicates() {
                     name: "tenant_id".to_owned(),
                     comment: None,
                     ty: SqlType::I32,
+                    collation: None,
                     nullable: false,
                     default: None,
                     identity: None,
@@ -227,6 +231,7 @@ fn mysql_rejects_expression_indexes() {
                     name: "slug".to_owned(),
                     comment: None,
                     ty: SqlType::String,
+                    collation: None,
                     nullable: false,
                     default: None,
                     identity: None,
@@ -271,6 +276,7 @@ fn mysql_rejects_covering_index_include_columns() {
                         name: "tenant_id".to_owned(),
                         comment: None,
                         ty: SqlType::I32,
+                        collation: None,
                         nullable: false,
                         default: None,
                         identity: None,
@@ -280,6 +286,7 @@ fn mysql_rejects_covering_index_include_columns() {
                         name: "role_code".to_owned(),
                         comment: None,
                         ty: SqlType::String,
+                        collation: None,
                         nullable: false,
                         default: None,
                         identity: None,
@@ -324,6 +331,7 @@ fn mysql_rejects_index_null_ordering() {
                     name: "tenant_id".to_owned(),
                     comment: None,
                     ty: SqlType::I32,
+                    collation: None,
                     nullable: true,
                     default: None,
                     identity: None,
@@ -367,6 +375,7 @@ fn mysql_rejects_index_operator_classes() {
                     name: "slug".to_owned(),
                     comment: None,
                     ty: SqlType::String,
+                    collation: None,
                     nullable: false,
                     default: None,
                     identity: None,
@@ -413,6 +422,7 @@ fn mysql_rejects_index_collations() {
                     name: "slug".to_owned(),
                     comment: None,
                     ty: SqlType::String,
+                    collation: None,
                     nullable: false,
                     default: None,
                     identity: None,

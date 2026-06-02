@@ -51,6 +51,7 @@ pub struct ColumnModel {
     pub name: String,
     pub comment: Option<String>,
     pub ty: SqlType,
+    pub collation: Option<String>,
     pub nullable: bool,
     pub default: Option<DefaultValue>,
     pub identity: Option<IdentityModel>,
@@ -518,6 +519,7 @@ fn column_from_dyn(column: &dyn Column) -> ColumnModel {
         name: column.name().to_owned(),
         comment: None,
         ty: column.column_type().into(),
+        collation: None,
         nullable: column.nullable(),
         default: column.default().map(DefaultValue::from),
         identity: column.auto_increment().then_some(IdentityModel {

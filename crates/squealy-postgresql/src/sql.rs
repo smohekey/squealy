@@ -671,6 +671,10 @@ pub(crate) mod ddl {
         write_quoted_ident(&column.name, writer)?;
         writer.write_all(b" ")?;
         write_pg_sql_type(&column.ty, writer)?;
+        if let Some(collation) = &column.collation {
+            writer.write_all(b" COLLATE ")?;
+            write_quoted_ident(collation, writer)?;
+        }
         if let Some(identity) = &column.identity {
             match identity.mode {
                 IdentityMode::Always => writer.write_all(b" GENERATED ALWAYS AS IDENTITY")?,

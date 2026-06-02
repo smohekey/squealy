@@ -87,11 +87,15 @@ SELECT
     COLUMN_DEFAULT,
     EXTRA,
     GENERATION_EXPRESSION,
-    COLUMN_COMMENT
-FROM information_schema.COLUMNS
-WHERE TABLE_SCHEMA = :schema
-  AND TABLE_NAME = :table
-ORDER BY ORDINAL_POSITION",
+    COLUMN_COMMENT,
+    NULLIF(COLLATION_NAME, TABLE_COLLATION)
+FROM information_schema.COLUMNS c
+JOIN information_schema.TABLES t
+  ON t.TABLE_SCHEMA = c.TABLE_SCHEMA
+ AND t.TABLE_NAME = c.TABLE_NAME
+WHERE c.TABLE_SCHEMA = :schema
+  AND c.TABLE_NAME = :table
+ORDER BY c.ORDINAL_POSITION",
         params! {
             "schema" => &table_ref.schema,
             "table" => &table_ref.name,
@@ -105,6 +109,7 @@ ORDER BY ORDINAL_POSITION",
             extra,
             generation_expression,
             comment,
+            collation,
         ): (
             String,
             String,
@@ -114,6 +119,7 @@ ORDER BY ORDINAL_POSITION",
             String,
             Option<String>,
             String,
+            Option<String>,
         )| {
             let extra = extra.to_ascii_lowercase();
             let ty = sql_type(&data_type, &column_type);
@@ -121,6 +127,7 @@ ORDER BY ORDINAL_POSITION",
                 name,
                 comment: non_empty(comment),
                 ty: ty.clone(),
+                collation,
                 nullable: is_nullable.eq_ignore_ascii_case("YES"),
                 default: default.map(|value| default_value(&ty, &value)),
                 identity: extra.contains("auto_increment").then_some(IdentityModel {

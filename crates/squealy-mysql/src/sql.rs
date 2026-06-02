@@ -119,6 +119,10 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
     write_quoted_ident(&column.name, writer)?;
     writer.write_all(b" ")?;
     write_mysql_sql_type(&column.ty, writer)?;
+    if let Some(collation) = &column.collation {
+        writer.write_all(b" COLLATE ")?;
+        writer.write_all(collation.as_bytes())?;
+    }
     if !column.nullable {
         writer.write_all(b" NOT NULL")?;
     }
