@@ -14,8 +14,8 @@ mod package;
 pub mod diff;
 
 pub use diff::{
-    ChangeRisk, ClassifiedDatabaseDiffChange, DatabaseDiff, DatabaseDiffChange, TableDiffChange,
-    diff_models,
+    ChangeRisk, ClassifiedDatabaseDiffChange, DatabaseDiff, DatabaseDiffChange, DiffPolicy,
+    DiffPolicyError, TableDiffChange, check_diff_policy, diff_models,
 };
 pub use package::{
     FORMAT_VERSION, PackageError, from_kdl, read_package, read_package_from, to_kdl, write_package,

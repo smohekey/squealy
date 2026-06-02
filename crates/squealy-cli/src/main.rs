@@ -9,9 +9,9 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use squealy_cli::extract::extract_model;
 use squealy_model::{
-    ChangeRisk, DatabaseDiffChange, DatabaseModel, SchemaBackend, SchemaCapabilities,
-    SchemaConnect, TableDiffChange, check_create, diff_models, introspect, publish, read_package,
-    render_create_sql, write_package,
+    ChangeRisk, DatabaseDiffChange, DatabaseModel, DiffPolicy, SchemaBackend, SchemaCapabilities,
+    SchemaConnect, TableDiffChange, check_create, check_diff_policy, diff_models, introspect,
+    publish, read_package, render_create_sql, write_package,
 };
 use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
@@ -60,6 +60,15 @@ enum Command {
         /// Actual/current package.
         #[arg(long)]
         actual: PathBuf,
+        /// Fail when the diff contains changes blocked by policy.
+        #[arg(long)]
+        check_policy: bool,
+        /// Allow destructive changes when checking policy.
+        #[arg(long)]
+        allow_destructive: bool,
+        /// Allow ambiguous changes when checking policy.
+        #[arg(long)]
+        allow_ambiguous: bool,
     },
     /// Introspect a live database and write a `.sqz` schema package.
     Introspect {
@@ -164,11 +173,28 @@ async fn run(cli: Cli) -> Result<(), String> {
             let model = extract_model(&database)?;
             write_package(&model, &output).map_err(|error| format!("write package: {error}"))
         }
-        Command::Diff { desired, actual } => {
+        Command::Diff {
+            desired,
+            actual,
+            check_policy,
+            allow_destructive,
+            allow_ambiguous,
+        } => {
             let desired =
                 read_package(&desired).map_err(|error| format!("read desired: {error}"))?;
             let actual = read_package(&actual).map_err(|error| format!("read actual: {error}"))?;
-            print_diff(&diff_models(&desired, &actual));
+            let diff = diff_models(&desired, &actual);
+            print_diff(&diff);
+            if check_policy {
+                check_diff_policy(
+                    &diff,
+                    DiffPolicy {
+                        allow_destructive,
+                        allow_ambiguous,
+                    },
+                )
+                .map_err(|error| format!("check diff policy: {error}"))?;
+            }
             Ok(())
         }
         Command::Introspect {

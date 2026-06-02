@@ -1,7 +1,7 @@
 use squealy_model::{
     ChangeRisk, CheckModel, ColumnModel, Constraint, DatabaseDiffChange, DatabaseModel,
-    DefaultValue, ForeignKeyAction, ForeignKeyModel, IndexModel, SchemaModel, SqlType,
-    TableDiffChange, TableModel, diff_models,
+    DefaultValue, DiffPolicy, ForeignKeyAction, ForeignKeyModel, IndexModel, SchemaModel, SqlType,
+    TableDiffChange, TableModel, check_diff_policy, diff_models,
 };
 
 #[test]
@@ -270,6 +270,51 @@ fn classifies_table_change_by_highest_child_risk() {
     assert_eq!(safe.risk(), ChangeRisk::Safe);
     assert_eq!(ambiguous.risk(), ChangeRisk::Ambiguous);
     assert_eq!(destructive.risk(), ChangeRisk::Destructive);
+}
+
+#[test]
+fn default_diff_policy_blocks_ambiguous_and_destructive_changes() {
+    let mut desired_events = table("events");
+    desired_events.columns = vec![column("name", SqlType::Text)];
+    let mut actual_events = table("events");
+    actual_events.columns = vec![column("obsolete", SqlType::Text)];
+    let diff = diff_models(
+        &model_with_tables("public", vec![desired_events]),
+        &model_with_tables("public", vec![actual_events]),
+    );
+
+    let error = check_diff_policy(&diff, DiffPolicy::default()).unwrap_err();
+
+    assert_eq!(error.blocked.len(), 1);
+    assert_eq!(error.blocked[0].risk, ChangeRisk::Destructive);
+}
+
+#[test]
+fn diff_policy_can_allow_ambiguous_without_allowing_destructive() {
+    let mut desired_events = table("events");
+    desired_events.columns = vec![column("name", SqlType::Text)];
+    let actual_events = table("events");
+    let diff = diff_models(
+        &model_with_tables("public", vec![desired_events]),
+        &model_with_tables("public", vec![actual_events]),
+    );
+
+    let policy = DiffPolicy {
+        allow_destructive: false,
+        allow_ambiguous: true,
+    };
+
+    assert!(check_diff_policy(&diff, policy).is_ok());
+    assert!(check_diff_policy(&diff, DiffPolicy::default()).is_err());
+}
+
+#[test]
+fn diff_policy_allows_all_risks_when_requested() {
+    let desired = DatabaseModel { schemas: vec![] };
+    let actual = model_with_tables("public", vec![table("events")]);
+    let diff = diff_models(&desired, &actual);
+
+    assert!(check_diff_policy(&diff, DiffPolicy::ALLOW_ALL).is_ok());
 }
 
 fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {

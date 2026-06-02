@@ -5,6 +5,7 @@
 //! renames or render SQL; those are later planning/rendering steps.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, ForeignKeyModel, IndexModel, SchemaModel,
@@ -46,6 +47,72 @@ pub enum ChangeRisk {
     Safe,
     Destructive,
     Ambiguous,
+}
+
+/// Policy for deciding whether a diff is acceptable to apply automatically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiffPolicy {
+    pub allow_destructive: bool,
+    pub allow_ambiguous: bool,
+}
+
+impl DiffPolicy {
+    pub const BLOCK_RISKY: Self = Self {
+        allow_destructive: false,
+        allow_ambiguous: false,
+    };
+
+    pub const ALLOW_ALL: Self = Self {
+        allow_destructive: true,
+        allow_ambiguous: true,
+    };
+
+    pub fn allows(self, risk: ChangeRisk) -> bool {
+        match risk {
+            ChangeRisk::Safe => true,
+            ChangeRisk::Destructive => self.allow_destructive,
+            ChangeRisk::Ambiguous => self.allow_ambiguous,
+        }
+    }
+}
+
+impl Default for DiffPolicy {
+    fn default() -> Self {
+        Self::BLOCK_RISKY
+    }
+}
+
+/// Error returned when a diff contains changes blocked by a [`DiffPolicy`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiffPolicyError {
+    pub blocked: Vec<ClassifiedDatabaseDiffChange>,
+}
+
+impl fmt::Display for DiffPolicyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "diff contains {} blocked change(s)",
+            self.blocked.len()
+        )
+    }
+}
+
+impl std::error::Error for DiffPolicyError {}
+
+/// Checks whether `diff` is allowed by `policy`.
+pub fn check_diff_policy(diff: &DatabaseDiff, policy: DiffPolicy) -> Result<(), DiffPolicyError> {
+    let blocked = diff
+        .classified_changes()
+        .into_iter()
+        .filter(|change| !policy.allows(change.risk))
+        .collect::<Vec<_>>();
+
+    if blocked.is_empty() {
+        Ok(())
+    } else {
+        Err(DiffPolicyError { blocked })
+    }
 }
 
 /// A database-level change.

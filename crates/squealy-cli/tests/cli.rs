@@ -265,6 +265,66 @@ fn diff_reports_package_model_changes() {
 }
 
 #[test]
+fn diff_policy_check_rejects_blocked_changes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let desired = dir.path().join("desired.sqz");
+    let actual = dir.path().join("actual.sqz");
+    let mut desired_model = empty_model();
+    desired_model.schemas[0].tables[0]
+        .columns
+        .push(required_text_column("name"));
+    write_package(&desired_model, &desired).expect("write desired package");
+    write_package(&empty_model(), &actual).expect("write actual package");
+
+    let output = Command::new(SQUEALY)
+        .args(["diff", "--check-policy", "--desired"])
+        .arg(&desired)
+        .args(["--actual"])
+        .arg(&actual)
+        .output()
+        .expect("run squealy");
+
+    assert!(!output.status.success(), "blocked diff should fail");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ambiguous column + public.events.name"),
+        "unexpected stdout: {stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("blocked change"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn diff_policy_check_allows_requested_ambiguous_changes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let desired = dir.path().join("desired.sqz");
+    let actual = dir.path().join("actual.sqz");
+    let mut desired_model = empty_model();
+    desired_model.schemas[0].tables[0]
+        .columns
+        .push(required_text_column("name"));
+    write_package(&desired_model, &desired).expect("write desired package");
+    write_package(&empty_model(), &actual).expect("write actual package");
+
+    let output = Command::new(SQUEALY)
+        .args(["diff", "--check-policy", "--allow-ambiguous", "--desired"])
+        .arg(&desired)
+        .args(["--actual"])
+        .arg(&actual)
+        .output()
+        .expect("run squealy");
+
+    assert!(
+        output.status.success(),
+        "diff should pass: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn check_rejects_unsupported_package_metadata() {
     let dir = tempfile::tempdir().expect("tempdir");
     let package = dir.path().join("schema.sqz");
@@ -598,6 +658,19 @@ fn live_introspection_model() -> DatabaseModel {
                 indexes: vec![],
             }],
         }],
+    }
+}
+
+fn required_text_column(name: &str) -> ColumnModel {
+    ColumnModel {
+        name: name.to_owned(),
+        comment: None,
+        ty: SqlType::Text,
+        collation: None,
+        nullable: false,
+        default: None,
+        identity: None,
+        generated: None,
     }
 }
 
