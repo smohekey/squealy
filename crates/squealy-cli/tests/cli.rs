@@ -26,6 +26,56 @@ fn rejects_injection() {
 }
 
 #[test]
+fn help_explains_backend_support_semantics() {
+    let output = Command::new(SQUEALY)
+        .args(["check", "--help"])
+        .output()
+        .expect("run squealy");
+
+    assert!(
+        output.status.success(),
+        "help failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("render and introspect"),
+        "help should explain backend support semantics: {stdout}"
+    );
+    assert!(
+        stdout.contains("not just SQL syntax"),
+        "help should distinguish round-trip support from syntax support: {stdout}"
+    );
+}
+
+#[test]
+fn unsupported_metadata_error_explains_round_trip_requirement() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = dir.path().join("schema.sqz");
+    let mut model = empty_model();
+    model.schemas[0].tables[0].checks.push(CheckModel {
+        name: "ck_events_id".to_owned(),
+        expression: "id > 0".to_owned(),
+        validation: None,
+        enforcement: Some(squealy_model::ConstraintEnforcement::NotEnforced),
+    });
+    write_package(&model, &package).expect("write package");
+
+    let output = Command::new(SQUEALY)
+        .args(["check", "--package"])
+        .arg(&package)
+        .output()
+        .expect("run squealy");
+
+    assert!(!output.status.success(), "unsupported package should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot render and introspect"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
 fn checks_supported_package() {
     let dir = tempfile::tempdir().expect("tempdir");
     let package = dir.path().join("schema.sqz");

@@ -23,7 +23,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Check whether the model is supported by the target backend.
+    /// Check whether the target backend can render and introspect the model metadata.
     Check {
         #[command(flatten)]
         source: ModelSource,
@@ -63,10 +63,10 @@ enum BackendKind {
     Mysql,
 }
 
-/// Target SQL backend.
+/// Target SQL backend for rendering, capability checks, and publish connections.
 #[derive(clap::Args)]
 struct BackendOption {
-    /// Target backend.
+    /// Target backend. Support means render plus introspection round-trip support, not just SQL syntax.
     #[arg(long, value_enum, default_value_t = BackendKind::Postgres)]
     backend: BackendKind,
 }

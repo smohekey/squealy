@@ -165,7 +165,9 @@ fn validate_capabilities(
 fn unsupported(table: &str, constraint: &str, feature: &str) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::InvalidInput,
-        format!("backend does not support {feature} for constraint `{constraint}` on `{table}`"),
+        format!(
+            "backend cannot render and introspect {feature} for constraint `{constraint}` on `{table}`"
+        ),
     ))
 }
 
