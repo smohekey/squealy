@@ -373,6 +373,53 @@ COMMENT ON COLUMN \"public\".\"events\".\"status\" IS 'Event status';"
 }
 
 #[test]
+fn postgres_rejects_unsupported_changed_column_definitions() {
+    let mut renamed = column("description");
+    renamed.name = "details".to_owned();
+
+    let mut identity = column("description");
+    identity.identity = Some(IdentityModel {
+        mode: IdentityMode::ByDefault,
+    });
+
+    let mut generated = column("description");
+    generated.generated = Some(GeneratedColumnModel {
+        expression: "length(description)".to_owned(),
+        storage: GeneratedStorage::Stored,
+    });
+
+    for after in [renamed, identity, generated] {
+        let plan = DatabasePlan {
+            steps: vec![DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: TablePlanStep::AlterColumn {
+                    before: column("description"),
+                    after,
+                },
+            }],
+        };
+
+        let mut sql = Vec::new();
+        let error = Postgres.render_plan(&plan, &mut sql).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    }
+}
+
+fn column(name: &str) -> ColumnModel {
+    ColumnModel {
+        name: name.to_owned(),
+        comment: None,
+        ty: SqlType::Text,
+        collation: None,
+        nullable: true,
+        default: None,
+        identity: None,
+        generated: None,
+    }
+}
+
+#[test]
 fn postgres_select_uses_numbered_placeholders() {
     let users = Postgres
         .from::<User>()
