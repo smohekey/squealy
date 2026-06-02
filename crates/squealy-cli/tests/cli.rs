@@ -49,6 +49,46 @@ fn help_explains_backend_support_semantics() {
 }
 
 #[test]
+fn postgres_capabilities_are_printed() {
+    let output = Command::new(SQUEALY)
+        .args(["capabilities", "--backend", "postgres"])
+        .output()
+        .expect("run squealy");
+
+    assert!(
+        output.status.success(),
+        "capabilities failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_capability(&stdout, "backend=postgres");
+    assert_capability(&stdout, "constraints.foreign_key_validation=true");
+    assert_capability(&stdout, "constraints.foreign_key_enforcement=false");
+    assert_capability(&stdout, "constraints.check_validation=true");
+    assert_capability(&stdout, "constraints.check_enforcement=false");
+}
+
+#[test]
+fn mysql_capabilities_are_printed() {
+    let output = Command::new(SQUEALY)
+        .args(["capabilities", "--backend", "mysql"])
+        .output()
+        .expect("run squealy");
+
+    assert!(
+        output.status.success(),
+        "capabilities failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_capability(&stdout, "backend=mysql");
+    assert_capability(&stdout, "constraints.foreign_key_validation=false");
+    assert_capability(&stdout, "constraints.foreign_key_enforcement=false");
+    assert_capability(&stdout, "constraints.check_validation=false");
+    assert_capability(&stdout, "constraints.check_enforcement=false");
+}
+
+#[test]
 fn unsupported_metadata_error_explains_round_trip_requirement() {
     let dir = tempfile::tempdir().expect("tempdir");
     let package = dir.path().join("schema.sqz");
@@ -228,4 +268,11 @@ fn empty_model() -> DatabaseModel {
             }],
         }],
     }
+}
+
+fn assert_capability(stdout: &str, expected: &str) {
+    assert!(
+        stdout.lines().any(|line| line == expected),
+        "missing {expected:?} in stdout:\n{stdout}"
+    );
 }

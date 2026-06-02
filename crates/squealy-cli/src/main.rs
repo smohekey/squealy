@@ -9,7 +9,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use squealy_cli::extract::extract_model;
 use squealy_model::{
-    DatabaseModel, SchemaConnect, check_create, publish, read_package, render_create_sql,
+    DatabaseModel, SchemaBackend, SchemaCapabilities, SchemaConnect, check_create, publish,
+    read_package, render_create_sql,
 };
 use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
@@ -23,6 +24,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Print backend schema-management capabilities.
+    Capabilities {
+        #[command(flatten)]
+        backend: BackendOption,
+    },
     /// Check whether the target backend can render and introspect the model metadata.
     Check {
         #[command(flatten)]
@@ -109,6 +115,10 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
+        Command::Capabilities { backend } => {
+            print_capabilities(backend.backend);
+            Ok(())
+        }
         Command::Check { source, backend } => {
             let model = source.load()?;
             match backend.backend {
@@ -161,6 +171,44 @@ async fn run(cli: Cli) -> Result<(), String> {
                         .map_err(|error| format!("publish: {error}"))
                 }
             }
+        }
+    }
+}
+
+fn print_capabilities(backend: BackendKind) {
+    let capabilities = match backend {
+        BackendKind::Postgres => Postgres.capabilities(),
+        BackendKind::Mysql => Mysql.capabilities(),
+    };
+
+    println!("backend={}", backend.value_name());
+    print_schema_capabilities(capabilities);
+}
+
+fn print_schema_capabilities(capabilities: SchemaCapabilities) {
+    println!(
+        "constraints.foreign_key_validation={}",
+        capabilities.constraints.foreign_key_validation
+    );
+    println!(
+        "constraints.foreign_key_enforcement={}",
+        capabilities.constraints.foreign_key_enforcement
+    );
+    println!(
+        "constraints.check_validation={}",
+        capabilities.constraints.check_validation
+    );
+    println!(
+        "constraints.check_enforcement={}",
+        capabilities.constraints.check_enforcement
+    );
+}
+
+impl BackendKind {
+    fn value_name(self) -> &'static str {
+        match self {
+            BackendKind::Postgres => "postgres",
+            BackendKind::Mysql => "mysql",
         }
     }
 }
