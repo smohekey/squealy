@@ -704,7 +704,12 @@ pub(crate) mod ddl {
         }
         writer.write_all(b" (")?;
         write_index_columns(index, writer)?;
-        writer.write_all(b")")
+        writer.write_all(b")")?;
+        if let Some(predicate) = &index.predicate {
+            writer.write_all(b" WHERE ")?;
+            writer.write_all(predicate.as_bytes())?;
+        }
+        Ok(())
     }
 
     fn write_add_foreign_key(

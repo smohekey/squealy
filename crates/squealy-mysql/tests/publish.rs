@@ -210,6 +210,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                     unique: false,
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Asc],
+                    predicate: None,
                 }],
             },
             TableModel {
@@ -336,6 +337,7 @@ fn rich_mysql_model() -> DatabaseModel {
                         unique: false,
                         method: Some(IndexMethod::BTree),
                         directions: Vec::new(),
+                        predicate: None,
                     }],
                 },
                 TableModel {
@@ -473,6 +475,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                     unique: false,
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Asc],
+                    predicate: None,
                 }],
             },
             TableModel {

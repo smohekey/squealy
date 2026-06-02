@@ -216,6 +216,13 @@ fn write_create_index(
     index: &IndexModel,
     writer: &mut impl Write,
 ) -> io::Result<()> {
+    if index.predicate.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support partial index predicates",
+        ));
+    }
+
     writer.write_all(b"CREATE ")?;
     if index.unique {
         writer.write_all(b"UNIQUE ")?;

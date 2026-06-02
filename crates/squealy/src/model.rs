@@ -272,6 +272,8 @@ pub struct IndexModel {
     pub unique: bool,
     pub method: Option<IndexMethod>,
     pub directions: Vec<IndexDirection>,
+    /// Backend-specific predicate for a partial index.
+    pub predicate: Option<String>,
 }
 
 /// Sort direction for an indexed column.
@@ -449,6 +451,7 @@ fn index_from_dyn(table: &str, index: &dyn Index) -> IndexModel {
         unique: index.unique(),
         method: None,
         directions: Vec::new(),
+        predicate: None,
     }
 }
 

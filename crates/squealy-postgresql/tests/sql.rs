@@ -464,3 +464,46 @@ CREATE INDEX \"idx_memberships_tenant_id\" ON \"catalog\".\"memberships\" (\"ten
 ALTER TABLE \"catalog\".\"memberships\" ADD CONSTRAINT \"fk_memberships_tenant_id\" FOREIGN KEY (\"tenant_id\") REFERENCES \"catalog\".\"tenants\" (\"id\") ON DELETE CASCADE;"
     );
 }
+
+#[test]
+fn postgres_renders_partial_indexes() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog".to_owned()),
+            tables: vec![TableModel {
+                name: "memberships".to_owned(),
+                columns: vec![ColumnModel {
+                    name: "tenant_id".to_owned(),
+                    ty: SqlType::I32,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_memberships_tenant_id".to_owned(),
+                    columns: vec!["tenant_id".to_owned()],
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Desc],
+                    predicate: Some("(tenant_id > 0)".to_owned()),
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE INDEX \"idx_memberships_tenant_id\" ON \"catalog\".\"memberships\" USING btree (\"tenant_id\" DESC) WHERE (tenant_id > 0)"
+        ),
+        "partial index not rendered as expected: {sql}"
+    );
+}

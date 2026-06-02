@@ -52,3 +52,39 @@ CREATE INDEX `idx_memberships_tenant_id` ON `shop`.`memberships` (`tenant_id`);\
 ALTER TABLE `shop`.`memberships` ADD CONSTRAINT `fk_memberships_tenant_id` FOREIGN KEY (`tenant_id`) REFERENCES `shop`.`tenants` (`id`) ON DELETE CASCADE;"
     );
 }
+
+#[test]
+fn mysql_rejects_partial_index_predicates() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: vec![TableModel {
+                name: "memberships".to_owned(),
+                columns: vec![ColumnModel {
+                    name: "tenant_id".to_owned(),
+                    ty: SqlType::I32,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_memberships_tenant_id".to_owned(),
+                    columns: vec!["tenant_id".to_owned()],
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    predicate: Some("tenant_id > 0".to_owned()),
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}

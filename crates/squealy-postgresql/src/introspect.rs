@@ -267,7 +267,8 @@ SELECT
         SELECT CASE WHEN (option & 1) = 1 THEN 'DESC' ELSE 'ASC' END
         FROM unnest(i.indoption) WITH ORDINALITY AS opt(option, position)
         ORDER BY position
-    ) AS directions
+    ) AS directions,
+    pg_get_expr(i.indpred, i.indrelid) AS predicate
 FROM pg_index i
 JOIN pg_class c ON c.oid = i.indrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -294,6 +295,7 @@ ORDER BY idx.relname",
                 .into_iter()
                 .map(|direction| index_direction(&direction))
                 .collect(),
+            predicate: row.get(5),
         })
         .collect())
 }

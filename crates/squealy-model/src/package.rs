@@ -303,6 +303,9 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
     if let Some(method) = &index.method {
         node.push(KdlEntry::new_prop("method", index_method(method)));
     }
+    if let Some(predicate) = &index.predicate {
+        node.push(KdlEntry::new_prop("predicate", predicate.clone()));
+    }
     if !index.directions.is_empty() {
         let mut directions = KdlNode::new("directions");
         for direction in &index.directions {
@@ -508,6 +511,7 @@ fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
             .map(index_directions_from_node)
             .transpose()?
             .unwrap_or_default(),
+        predicate: prop(node, "predicate").map(str::to_owned),
     })
 }
 
@@ -825,6 +829,7 @@ mod tests {
                             unique: true,
                             method: None,
                             directions: Vec::new(),
+                            predicate: None,
                         }],
                     },
                     TableModel {
@@ -1130,6 +1135,7 @@ mod tests {
                 unique: false,
                 method: Some(method.clone()),
                 directions: vec![IndexDirection::Desc],
+                predicate: Some("event_id IS NOT NULL".to_owned()),
             })
             .collect();
         let model = DatabaseModel {

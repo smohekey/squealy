@@ -203,6 +203,7 @@ fn rich_model() -> DatabaseModel {
                         unique: false,
                         method: Some(IndexMethod::BTree),
                         directions: vec![IndexDirection::Asc],
+                        predicate: Some("(quota > (0)::numeric)".to_owned()),
                     }],
                 },
                 TableModel {
