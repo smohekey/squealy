@@ -325,6 +325,89 @@ fn diff_policy_check_allows_requested_ambiguous_changes() {
 }
 
 #[test]
+fn plan_renders_incremental_sql_between_packages() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let desired = dir.path().join("desired.sqz");
+    let actual = dir.path().join("actual.sqz");
+    write_package(&empty_model(), &desired).expect("write desired package");
+    write_package(&DatabaseModel { schemas: vec![] }, &actual).expect("write actual package");
+
+    let output = Command::new(SQUEALY)
+        .args(["plan", "--backend", "postgres", "--desired"])
+        .arg(&desired)
+        .args(["--actual"])
+        .arg(&actual)
+        .output()
+        .expect("run squealy");
+
+    assert!(
+        output.status.success(),
+        "plan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("CREATE SCHEMA IF NOT EXISTS \"public\""),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("CREATE TABLE \"public\".\"events\""),
+        "unexpected stdout: {stdout}"
+    );
+}
+
+#[test]
+fn plan_blocks_ambiguous_changes_unless_allowed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let desired = dir.path().join("desired.sqz");
+    let actual = dir.path().join("actual.sqz");
+    let mut desired_model = empty_model();
+    desired_model.schemas[0].tables[0]
+        .columns
+        .push(required_text_column("name"));
+    write_package(&desired_model, &desired).expect("write desired package");
+    write_package(&empty_model(), &actual).expect("write actual package");
+
+    let blocked = Command::new(SQUEALY)
+        .args(["plan", "--backend", "postgres", "--desired"])
+        .arg(&desired)
+        .args(["--actual"])
+        .arg(&actual)
+        .output()
+        .expect("run squealy");
+    assert!(!blocked.status.success(), "ambiguous plan should fail");
+    let stderr = String::from_utf8_lossy(&blocked.stderr);
+    assert!(
+        stderr.contains("blocked change"),
+        "unexpected stderr: {stderr}"
+    );
+
+    let allowed = Command::new(SQUEALY)
+        .args([
+            "plan",
+            "--backend",
+            "postgres",
+            "--allow-ambiguous",
+            "--desired",
+        ])
+        .arg(&desired)
+        .args(["--actual"])
+        .arg(&actual)
+        .output()
+        .expect("run squealy");
+    assert!(
+        allowed.status.success(),
+        "allowed plan failed: {}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&allowed.stdout);
+    assert!(
+        stdout.contains("ALTER TABLE \"public\".\"events\" ADD COLUMN \"name\" text NOT NULL"),
+        "unexpected stdout: {stdout}"
+    );
+}
+
+#[test]
 fn check_rejects_unsupported_package_metadata() {
     let dir = tempfile::tempdir().expect("tempdir");
     let package = dir.path().join("schema.sqz");

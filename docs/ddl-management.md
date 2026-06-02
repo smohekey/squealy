@@ -369,7 +369,7 @@ Done and tested:
 - **Stub-compiling `squealy` CLI** (`squealy-cli`, bin `squealy`): resolves the package via
   `cargo metadata`, validates `--database` as a strict Rust path, generates a stub in a private temp
   dir, compiles + runs it as a subprocess, and harvests the `.sqz`. Commands `check` / `script` /
-  `export` / `introspect` / `publish` / `capabilities`; model-taking commands are sourced from
+  `export` / `diff` / `plan` / `introspect` / `publish` / `capabilities`; model-taking commands are sourced from
   `--database <path>` (compile + run) or `--package <file.sqz>` (no project code runs).
   `introspect --backend <backend> --url <url> <output.sqz>` exports a live database to a package.
   `--backend postgres|mysql` selects backend-specific render/check/introspect/publish behavior.
@@ -390,9 +390,11 @@ Done and tested:
   constraint plan rendering. `squealy-model::render_plan_sql` is the allocating convenience wrapper.
 - **Plan/apply engine APIs**: `plan_from_database` introspects live state and returns a policy-checked
   plan; `apply_plan` renders that plan through the selected backend and executes the resulting DDL.
+- **Plan CLI**: `squealy plan --backend <backend> --desired desired.sqz --actual actual.sqz`
+  renders incremental DDL between packages and enforces `DiffPolicy` by default.
 
 **Sprint 1 is functionally complete, and the diff/policy/neutral-plan layer is underway.** Next:
-CLI exposure for incremental plan/apply, then richer changed-definition rendering and the hybrid
+live incremental apply/publish CLI exposure, then richer changed-definition rendering and the hybrid
 reviewable-script flow.
 
 ## Settled decisions

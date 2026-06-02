@@ -11,7 +11,7 @@ use squealy_cli::extract::extract_model;
 use squealy_model::{
     ChangeRisk, DatabaseDiffChange, DatabaseModel, DiffPolicy, SchemaBackend, SchemaCapabilities,
     SchemaConnect, TableDiffChange, check_create, check_diff_policy, diff_models, introspect,
-    publish, read_package, render_create_sql, write_package,
+    plan_models, publish, read_package, render_create_sql, render_plan_sql, write_package,
 };
 use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
@@ -67,6 +67,23 @@ enum Command {
         #[arg(long)]
         allow_destructive: bool,
         /// Allow ambiguous changes when checking policy.
+        #[arg(long)]
+        allow_ambiguous: bool,
+    },
+    /// Render an incremental DDL plan between two `.sqz` schema packages.
+    Plan {
+        /// Desired target package.
+        #[arg(long)]
+        desired: PathBuf,
+        /// Actual/current package.
+        #[arg(long)]
+        actual: PathBuf,
+        #[command(flatten)]
+        backend: BackendOption,
+        /// Allow destructive changes when planning.
+        #[arg(long)]
+        allow_destructive: bool,
+        /// Allow ambiguous changes when planning.
         #[arg(long)]
         allow_ambiguous: bool,
     },
@@ -195,6 +212,30 @@ async fn run(cli: Cli) -> Result<(), String> {
                 )
                 .map_err(|error| format!("check diff policy: {error}"))?;
             }
+            Ok(())
+        }
+        Command::Plan {
+            desired,
+            actual,
+            backend,
+            allow_destructive,
+            allow_ambiguous,
+        } => {
+            let desired =
+                read_package(&desired).map_err(|error| format!("read desired: {error}"))?;
+            let actual = read_package(&actual).map_err(|error| format!("read actual: {error}"))?;
+            let policy = DiffPolicy {
+                allow_destructive,
+                allow_ambiguous,
+            };
+            let plan = plan_models(&desired, &actual, policy)
+                .map_err(|error| format!("plan schema changes: {error}"))?;
+            let sql = match backend.backend {
+                BackendKind::Postgres => render_plan_sql(&plan, &Postgres),
+                BackendKind::Mysql => render_plan_sql(&plan, &Mysql),
+            }
+            .map_err(|error| format!("render plan: {error}"))?;
+            print!("{sql}");
             Ok(())
         }
         Command::Introspect {
