@@ -6,7 +6,10 @@
 
 use std::process::Command;
 
-use squealy_model::{CheckModel, DatabaseModel, SchemaModel, TableModel, write_package};
+use squealy_model::{
+    CheckModel, ConstraintDeferrability, DatabaseModel, ForeignKeyMatch, ForeignKeyModel,
+    IndexModel, SchemaModel, TableModel, write_package,
+};
 
 const SQUEALY: &str = env!("CARGO_BIN_EXE_squealy");
 
@@ -200,6 +203,76 @@ fn mysql_backend_rejects_postgres_only_metadata() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("check validation metadata"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn mysql_backend_rejects_unsupported_foreign_key_shape_metadata() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = dir.path().join("schema.sqz");
+    let mut model = empty_model();
+    model.schemas[0].tables[0]
+        .foreign_keys
+        .push(ForeignKeyModel {
+            name: "fk_events_user_id".to_owned(),
+            columns: vec!["user_id".to_owned()],
+            references_schema: None,
+            references_table: "users".to_owned(),
+            references_columns: vec!["id".to_owned()],
+            match_type: Some(ForeignKeyMatch::Full),
+            deferrability: Some(ConstraintDeferrability::InitiallyDeferred),
+            validation: None,
+            enforcement: None,
+            on_delete: None,
+            on_update: None,
+        });
+    write_package(&model, &package).expect("write package");
+
+    let output = Command::new(SQUEALY)
+        .args(["check", "--backend", "mysql", "--package"])
+        .arg(&package)
+        .output()
+        .expect("run squealy");
+
+    assert!(!output.status.success(), "unsupported package should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("foreign key match metadata"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn mysql_backend_rejects_unsupported_index_metadata() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = dir.path().join("schema.sqz");
+    let mut model = empty_model();
+    model.schemas[0].tables[0].indexes.push(IndexModel {
+        name: "idx_events_open".to_owned(),
+        columns: vec!["id".to_owned()],
+        expressions: vec![],
+        include_columns: vec![],
+        unique: false,
+        method: None,
+        directions: vec![],
+        nulls: vec![],
+        collations: vec![],
+        operator_classes: vec![],
+        predicate: Some("id > 0".to_owned()),
+    });
+    write_package(&model, &package).expect("write package");
+
+    let output = Command::new(SQUEALY)
+        .args(["check", "--backend", "mysql", "--package"])
+        .arg(&package)
+        .output()
+        .expect("run squealy");
+
+    assert!(!output.status.success(), "unsupported package should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("partial index predicates"),
         "unexpected stderr: {stderr}"
     );
 }
