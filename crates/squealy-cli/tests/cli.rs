@@ -108,6 +108,33 @@ fn mysql_capabilities_are_printed() {
 }
 
 #[test]
+fn introspect_help_explains_live_database_package_export() {
+    let output = Command::new(SQUEALY)
+        .args(["introspect", "--help"])
+        .output()
+        .expect("run squealy");
+
+    assert!(
+        output.status.success(),
+        "help failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Introspect a live database"),
+        "help should explain live database introspection: {stdout}"
+    );
+    assert!(
+        stdout.contains("--url"),
+        "help should include connection URL option: {stdout}"
+    );
+    assert!(
+        stdout.contains("<OUTPUT>"),
+        "help should include output package argument: {stdout}"
+    );
+}
+
+#[test]
 fn unsupported_metadata_error_explains_round_trip_requirement() {
     let dir = tempfile::tempdir().expect("tempdir");
     let package = dir.path().join("schema.sqz");

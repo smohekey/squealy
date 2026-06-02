@@ -9,8 +9,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use squealy_cli::extract::extract_model;
 use squealy_model::{
-    DatabaseModel, SchemaBackend, SchemaCapabilities, SchemaConnect, check_create, publish,
-    read_package, render_create_sql,
+    DatabaseModel, SchemaBackend, SchemaCapabilities, SchemaConnect, check_create, introspect,
+    publish, read_package, render_create_sql, write_package,
 };
 use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
@@ -48,6 +48,16 @@ enum Command {
         /// Database type path within the crate, e.g. `AppDatabase`.
         #[arg(long)]
         database: String,
+        /// Output package path.
+        output: PathBuf,
+    },
+    /// Introspect a live database and write a `.sqz` schema package.
+    Introspect {
+        #[command(flatten)]
+        backend: BackendOption,
+        /// Connection URL.
+        #[arg(long)]
+        url: String,
         /// Output package path.
         output: PathBuf,
     },
@@ -142,9 +152,34 @@ async fn run(cli: Cli) -> Result<(), String> {
         }
         Command::Export { database, output } => {
             let model = extract_model(&database)?;
-            squealy_model::write_package(&model, &output)
-                .map_err(|error| format!("write package: {error}"))
+            write_package(&model, &output).map_err(|error| format!("write package: {error}"))
         }
+        Command::Introspect {
+            backend,
+            url,
+            output,
+        } => match backend.backend {
+            BackendKind::Postgres => {
+                let mut connection = Postgres
+                    .connect(&url)
+                    .await
+                    .map_err(|error| format!("connect: {error}"))?;
+                let model = introspect(&mut connection)
+                    .await
+                    .map_err(|error| format!("introspect: {error}"))?;
+                write_package(&model, &output).map_err(|error| format!("write package: {error}"))
+            }
+            BackendKind::Mysql => {
+                let mut connection = Mysql
+                    .connect(&url)
+                    .await
+                    .map_err(|error| format!("connect: {error}"))?;
+                let model = introspect(&mut connection)
+                    .await
+                    .map_err(|error| format!("introspect: {error}"))?;
+                write_package(&model, &output).map_err(|error| format!("write package: {error}"))
+            }
+        },
         Command::Publish {
             source,
             backend,
