@@ -703,7 +703,7 @@ pub(crate) mod ddl {
             writer.write_all(method.postgres_sql().as_bytes())?;
         }
         writer.write_all(b" (")?;
-        write_index_columns(index, writer)?;
+        write_index_terms(index, writer)?;
         writer.write_all(b")")?;
         if let Some(predicate) = &index.predicate {
             writer.write_all(b" WHERE ")?;
@@ -753,17 +753,34 @@ pub(crate) mod ddl {
         Ok(())
     }
 
-    fn write_index_columns(index: &IndexModel, writer: &mut impl Write) -> io::Result<()> {
+    fn write_index_terms(index: &IndexModel, writer: &mut impl Write) -> io::Result<()> {
         for (position, column) in index.columns.iter().enumerate() {
             if position > 0 {
                 writer.write_all(b", ")?;
             }
             write_quoted_ident(column, writer)?;
-            match index.directions.get(position) {
-                Some(squealy::IndexDirection::Asc) => writer.write_all(b" ASC")?,
-                Some(squealy::IndexDirection::Desc) => writer.write_all(b" DESC")?,
-                None => {}
+            write_index_direction(index, position, writer)?;
+        }
+        for (offset, expression) in index.expressions.iter().enumerate() {
+            let position = index.columns.len() + offset;
+            if position > 0 {
+                writer.write_all(b", ")?;
             }
+            writer.write_all(expression.as_bytes())?;
+            write_index_direction(index, position, writer)?;
+        }
+        Ok(())
+    }
+
+    fn write_index_direction(
+        index: &IndexModel,
+        position: usize,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        match index.directions.get(position) {
+            Some(squealy::IndexDirection::Asc) => writer.write_all(b" ASC")?,
+            Some(squealy::IndexDirection::Desc) => writer.write_all(b" DESC")?,
+            None => {}
         }
         Ok(())
     }

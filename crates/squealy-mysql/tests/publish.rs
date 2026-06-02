@@ -207,6 +207,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                 indexes: vec![IndexModel {
                     name: "idx_parts_widget_id".to_owned(),
                     columns: vec!["widget_id".to_owned()],
+                    expressions: Vec::new(),
                     unique: false,
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Asc],
@@ -334,6 +335,7 @@ fn rich_mysql_model() -> DatabaseModel {
                     indexes: vec![IndexModel {
                         name: "idx_memberships_tenant_id".to_owned(),
                         columns: vec!["tenant_id".to_owned()],
+                        expressions: Vec::new(),
                         unique: false,
                         method: Some(IndexMethod::BTree),
                         directions: Vec::new(),
@@ -472,6 +474,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                 indexes: vec![IndexModel {
                     name: "idx_memberships_tenant_id".to_owned(),
                     columns: vec!["tenant_id".to_owned()],
+                    expressions: Vec::new(),
                     unique: false,
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Asc],

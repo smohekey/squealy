@@ -319,6 +319,7 @@ ORDER BY INDEX_NAME, SEQ_IN_INDEX",
         let index = grouped.entry(name.clone()).or_insert_with(|| IndexModel {
             name,
             columns: Vec::new(),
+            expressions: Vec::new(),
             unique: non_unique == 0,
             method: Some(IndexMethod::from_sql(&index_type)),
             directions: Vec::new(),

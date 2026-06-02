@@ -487,6 +487,7 @@ fn postgres_renders_partial_indexes() {
                 indexes: vec![IndexModel {
                     name: "idx_memberships_tenant_id".to_owned(),
                     columns: vec!["tenant_id".to_owned()],
+                    expressions: Vec::new(),
                     unique: false,
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Desc],
@@ -505,5 +506,49 @@ fn postgres_renders_partial_indexes() {
             "CREATE INDEX \"idx_memberships_tenant_id\" ON \"catalog\".\"memberships\" USING btree (\"tenant_id\" DESC) WHERE (tenant_id > 0)"
         ),
         "partial index not rendered as expected: {sql}"
+    );
+}
+
+#[test]
+fn postgres_renders_expression_indexes() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog".to_owned()),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    ty: SqlType::String,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_tenants_lower_slug".to_owned(),
+                    columns: Vec::new(),
+                    expressions: vec!["lower(slug)".to_owned()],
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE INDEX \"idx_tenants_lower_slug\" ON \"catalog\".\"tenants\" USING btree (lower(slug) ASC)"
+        ),
+        "expression index not rendered as expected: {sql}"
     );
 }

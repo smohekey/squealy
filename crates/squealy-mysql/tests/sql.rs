@@ -75,10 +75,48 @@ fn mysql_rejects_partial_index_predicates() {
                 indexes: vec![IndexModel {
                     name: "idx_memberships_tenant_id".to_owned(),
                     columns: vec!["tenant_id".to_owned()],
+                    expressions: Vec::new(),
                     unique: false,
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Asc],
                     predicate: Some("tenant_id > 0".to_owned()),
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mysql_rejects_expression_indexes() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    ty: SqlType::String,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_tenants_lower_slug".to_owned(),
+                    columns: Vec::new(),
+                    expressions: vec!["lower(slug)".to_owned()],
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    predicate: None,
                 }],
             }],
         }],

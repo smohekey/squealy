@@ -306,13 +306,22 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
     if let Some(predicate) = &index.predicate {
         node.push(KdlEntry::new_prop("predicate", predicate.clone()));
     }
-    if !index.directions.is_empty() {
-        let mut directions = KdlNode::new("directions");
-        for direction in &index.directions {
-            directions.push(KdlEntry::new(index_direction(direction)));
-        }
+    if !index.expressions.is_empty() || !index.directions.is_empty() {
         let mut children = KdlDocument::new();
-        children.nodes_mut().push(directions);
+        if !index.expressions.is_empty() {
+            let mut expressions = KdlNode::new("expressions");
+            for expression in &index.expressions {
+                expressions.push(KdlEntry::new(expression.clone()));
+            }
+            children.nodes_mut().push(expressions);
+        }
+        if !index.directions.is_empty() {
+            let mut directions = KdlNode::new("directions");
+            for direction in &index.directions {
+                directions.push(KdlEntry::new(index_direction(direction)));
+            }
+            children.nodes_mut().push(directions);
+        }
         node.set_children(children);
     }
     node
@@ -504,6 +513,10 @@ fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
     Ok(IndexModel {
         name: required_prop(node, "name")?,
         columns: args(node),
+        expressions: child_nodes(node, "expressions")
+            .next()
+            .map(args)
+            .unwrap_or_default(),
         unique: prop_bool(node, "unique"),
         method: prop(node, "method").map(IndexMethod::from_sql),
         directions: child_nodes(node, "directions")
@@ -826,6 +839,7 @@ mod tests {
                         indexes: vec![IndexModel {
                             name: "uq_orgs_slug_idx".to_owned(),
                             columns: vec!["slug".to_owned()],
+                            expressions: Vec::new(),
                             unique: true,
                             method: None,
                             directions: Vec::new(),
@@ -1132,6 +1146,7 @@ mod tests {
             .map(|(index, method)| IndexModel {
                 name: format!("idx_events_{index}"),
                 columns: vec!["event_id".to_owned()],
+                expressions: Vec::new(),
                 unique: false,
                 method: Some(method.clone()),
                 directions: vec![IndexDirection::Desc],
@@ -1156,6 +1171,39 @@ mod tests {
         let kdl = to_kdl(&model);
         let parsed = from_kdl(&kdl).expect("parse");
         assert_eq!(parsed, model, "index method round-trip diverged:\n{kdl}");
+    }
+
+    #[test]
+    fn kdl_round_trips_index_expressions() {
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "events".to_owned(),
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys: vec![],
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![IndexModel {
+                        name: "idx_events_lower_name".to_owned(),
+                        columns: Vec::new(),
+                        expressions: vec!["lower(event_name)".to_owned()],
+                        unique: false,
+                        method: Some(IndexMethod::BTree),
+                        directions: vec![IndexDirection::Asc],
+                        predicate: None,
+                    }],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(
+            parsed, model,
+            "index expression round-trip diverged:\n{kdl}"
+        );
     }
 
     #[test]

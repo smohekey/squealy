@@ -222,6 +222,12 @@ fn write_create_index(
             "MySQL does not support partial index predicates",
         ));
     }
+    if !index.expressions.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL expression indexes are not supported by squealy yet",
+        ));
+    }
 
     writer.write_all(b"CREATE ")?;
     if index.unique {
