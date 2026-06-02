@@ -118,6 +118,8 @@ fn mysql_rejects_foreign_key_match_types() {
                     references_columns: vec!["id".to_owned()],
                     match_type: Some(ForeignKeyMatch::Full),
                     deferrability: None,
+                    validation: None,
+                    enforcement: None,
                     on_delete: None,
                     on_update: None,
                 }],
@@ -160,11 +162,50 @@ fn mysql_rejects_deferrable_foreign_keys() {
                     references_columns: vec!["id".to_owned()],
                     match_type: None,
                     deferrability: Some(ConstraintDeferrability::InitiallyDeferred),
+                    validation: None,
+                    enforcement: None,
                     on_delete: None,
                     on_update: None,
                 }],
                 uniques: Vec::new(),
                 checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mysql_rejects_check_constraint_enforcement() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: vec![TableModel {
+                name: "memberships".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "tenant_id".to_owned(),
+                    comment: None,
+                    ty: SqlType::I32,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: vec![CheckModel {
+                    name: "ck_memberships_tenant_id".to_owned(),
+                    expression: "tenant_id > 0".to_owned(),
+                    validation: None,
+                    enforcement: Some(ConstraintEnforcement::NotEnforced),
+                }],
                 indexes: Vec::new(),
             }],
         }],

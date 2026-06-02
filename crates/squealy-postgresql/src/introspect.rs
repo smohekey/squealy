@@ -1,8 +1,9 @@
 use squealy::{
-    CheckModel, ColumnModel, Constraint, ConstraintDeferrability, DatabaseModel, DefaultValue,
-    ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage,
-    IdentityMode, IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel,
-    IndexNullsOrder, IndexOperatorClass, SchemaModel, SqlType, TableModel,
+    CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintValidation,
+    DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
+    GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
+    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, SchemaModel,
+    SqlType, TableModel,
 };
 use tokio_postgres::Client;
 
@@ -226,6 +227,7 @@ SELECT
     con.confmatchtype::text,
     con.condeferrable,
     con.condeferred,
+    con.convalidated,
     con.confdeltype::text,
     con.confupdtype::text
 FROM pg_constraint con
@@ -253,8 +255,10 @@ ORDER BY con.conname",
                 references_columns: row.get(4),
                 match_type: match_type(row.get::<_, String>(5).as_str()),
                 deferrability: deferrability(row.get(6), row.get(7)),
-                on_delete: action(row.get::<_, String>(8).as_str()),
-                on_update: action(row.get::<_, String>(9).as_str()),
+                validation: validation(row.get(8)),
+                enforcement: None,
+                on_delete: action(row.get::<_, String>(9).as_str()),
+                on_update: action(row.get::<_, String>(10).as_str()),
             }
         })
         .collect())
@@ -279,11 +283,15 @@ fn deferrability(deferrable: bool, deferred: bool) -> Option<ConstraintDeferrabi
     }
 }
 
+fn validation(validated: bool) -> Option<ConstraintValidation> {
+    (!validated).then_some(ConstraintValidation::NotValidated)
+}
+
 async fn checks(client: &Client, table_ref: &TableRef) -> Result<Vec<CheckModel>, PostgresError> {
     let rows = client
         .query(
             "\
-SELECT con.conname, pg_get_constraintdef(con.oid)
+SELECT con.conname, pg_get_constraintdef(con.oid), con.convalidated
 FROM pg_constraint con
 JOIN pg_class c ON c.oid = con.conrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -300,6 +308,8 @@ ORDER BY con.conname",
         .map(|row| CheckModel {
             name: row.get(0),
             expression: check_expression(&row.get::<_, String>(1)),
+            validation: validation(row.get(2)),
+            enforcement: None,
         })
         .collect())
 }

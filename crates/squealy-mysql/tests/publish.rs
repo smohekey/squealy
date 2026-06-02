@@ -206,6 +206,8 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                     references_columns: vec!["id".to_owned()],
                     match_type: None,
                     deferrability: None,
+                    validation: None,
+                    enforcement: None,
                     on_delete: Some(ForeignKeyAction::Cascade),
                     on_update: None,
                 }],
@@ -355,6 +357,8 @@ fn rich_mysql_model() -> DatabaseModel {
                         references_columns: vec!["id".to_owned()],
                         match_type: None,
                         deferrability: None,
+                        validation: None,
+                        enforcement: None,
                         on_delete: Some(ForeignKeyAction::Cascade),
                         on_update: None,
                     }],
@@ -362,6 +366,8 @@ fn rich_mysql_model() -> DatabaseModel {
                     checks: vec![CheckModel {
                         name: "ck_memberships_quota".to_owned(),
                         expression: "quota > 0".to_owned(),
+                        validation: None,
+                        enforcement: None,
                     }],
                     indexes: vec![IndexModel {
                         name: "idx_memberships_tenant_id".to_owned(),
@@ -520,6 +526,8 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                     references_columns: vec!["id".to_owned()],
                     match_type: None,
                     deferrability: None,
+                    validation: None,
+                    enforcement: None,
                     on_delete: Some(ForeignKeyAction::Cascade),
                     on_update: None,
                 }],
@@ -527,6 +535,8 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                 checks: vec![CheckModel {
                     name: "ck_memberships_quota".to_owned(),
                     expression: "(`quota` > 0)".to_owned(),
+                    validation: None,
+                    enforcement: None,
                 }],
                 indexes: vec![IndexModel {
                     name: "idx_memberships_tenant_id".to_owned(),

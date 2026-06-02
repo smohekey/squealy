@@ -533,6 +533,8 @@ fn postgres_renders_foreign_key_match_type() {
                         references_columns: vec!["id".to_owned()],
                         match_type: Some(ForeignKeyMatch::Full),
                         deferrability: Some(ConstraintDeferrability::InitiallyDeferred),
+                        validation: Some(ConstraintValidation::NotValidated),
+                        enforcement: None,
                         on_delete: Some(ForeignKeyAction::Cascade),
                         on_update: None,
                     }],
@@ -572,6 +574,10 @@ fn postgres_renders_foreign_key_match_type() {
             "ALTER TABLE \"catalog\".\"memberships\" ADD CONSTRAINT \"fk_memberships_tenant_id\" FOREIGN KEY (\"tenant_id\") REFERENCES \"catalog\".\"tenants\" (\"id\") MATCH FULL ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED"
         ),
         "foreign key match type not rendered as expected: {sql}"
+    );
+    assert!(
+        sql.contains(" DEFERRABLE INITIALLY DEFERRED NOT VALID"),
+        "foreign key validation not rendered as expected: {sql}"
     );
 }
 

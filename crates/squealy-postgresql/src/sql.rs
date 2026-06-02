@@ -503,8 +503,8 @@ pub(crate) mod ddl {
     use std::io::{self, Write};
 
     use squealy::{
-        CheckModel, ColumnModel, DatabaseModel, DefaultValue, ForeignKeyModel, IdentityMode,
-        IndexModel, TableModel,
+        CheckModel, ColumnModel, ConstraintEnforcement, ConstraintValidation, DatabaseModel,
+        DefaultValue, ForeignKeyModel, IdentityMode, IndexModel, TableModel,
     };
 
     use super::{write_pg_sql_type, write_qualified_name, write_quoted_ident, write_quoted_text};
@@ -730,10 +730,12 @@ pub(crate) mod ddl {
     }
 
     fn write_check(check: &CheckModel, writer: &mut impl Write) -> io::Result<()> {
+        reject_constraint_enforcement(&check.enforcement)?;
         writer.write_all(b"CONSTRAINT ")?;
         write_quoted_ident(&check.name, writer)?;
         // The check expression is a backend-specific escape hatch, emitted verbatim.
-        write!(writer, " CHECK ({})", check.expression)
+        write!(writer, " CHECK ({})", check.expression)?;
+        write_constraint_validation(&check.validation, writer)
     }
 
     fn write_create_index(
@@ -775,6 +777,7 @@ pub(crate) mod ddl {
         foreign_key: &ForeignKeyModel,
         writer: &mut impl Write,
     ) -> io::Result<()> {
+        reject_constraint_enforcement(&foreign_key.enforcement)?;
         writer.write_all(b"ALTER TABLE ")?;
         write_qualified_name(schema, table, writer)?;
         writer.write_all(b" ADD CONSTRAINT ")?;
@@ -801,6 +804,34 @@ pub(crate) mod ddl {
         }
         if let Some(deferrability) = &foreign_key.deferrability {
             write!(writer, " {}", deferrability.as_sql())?;
+        }
+        write_constraint_validation(&foreign_key.validation, writer)?;
+        Ok(())
+    }
+
+    fn write_constraint_validation(
+        validation: &Option<ConstraintValidation>,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        match validation {
+            Some(ConstraintValidation::NotValidated) => writer.write_all(b" NOT VALID")?,
+            Some(ConstraintValidation::Raw(validation)) => {
+                writer.write_all(b" ")?;
+                writer.write_all(validation.as_bytes())?;
+            }
+            Some(ConstraintValidation::Validated) | None => {}
+        }
+        Ok(())
+    }
+
+    fn reject_constraint_enforcement(
+        enforcement: &Option<ConstraintEnforcement>,
+    ) -> io::Result<()> {
+        if enforcement.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "PostgreSQL constraint enforcement metadata is not supported by squealy yet",
+            ));
         }
         Ok(())
     }

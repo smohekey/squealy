@@ -218,6 +218,18 @@ fn write_named_constraint(
 }
 
 fn write_check(check: &CheckModel, writer: &mut impl Write) -> io::Result<()> {
+    if check.validation.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support constraint validation metadata",
+        ));
+    }
+    if check.enforcement.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL check constraint enforcement metadata is not supported by squealy yet",
+        ));
+    }
     writer.write_all(b"CONSTRAINT ")?;
     write_quoted_ident(&check.name, writer)?;
     write!(writer, " CHECK ({})", check.expression)
@@ -315,6 +327,18 @@ fn write_add_foreign_key(
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "MySQL does not support deferrable foreign keys",
+        ));
+    }
+    if foreign_key.validation.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support foreign key validation metadata",
+        ));
+    }
+    if foreign_key.enforcement.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support foreign key enforcement metadata",
         ));
     }
 

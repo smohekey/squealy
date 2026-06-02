@@ -17,10 +17,11 @@ use std::path::Path;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
-    CheckModel, ColumnModel, Constraint, ConstraintDeferrability, DatabaseModel, DefaultValue,
-    ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage,
-    IdentityMode, IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel,
-    IndexNullsOrder, IndexOperatorClass, SchemaModel, SqlType, TableModel,
+    CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintEnforcement,
+    ConstraintValidation, DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyMatch,
+    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
+    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
+    SchemaModel, SqlType, TableModel,
 };
 
 /// Current package format version, recorded in `manifest.kdl`.
@@ -284,6 +285,18 @@ fn foreign_key_to_node(foreign_key: &ForeignKeyModel) -> KdlNode {
             constraint_deferrability(deferrability),
         ));
     }
+    if let Some(validation) = &foreign_key.validation {
+        node.push(KdlEntry::new_prop(
+            "validation",
+            constraint_validation(validation),
+        ));
+    }
+    if let Some(enforcement) = &foreign_key.enforcement {
+        node.push(KdlEntry::new_prop(
+            "enforcement",
+            constraint_enforcement(enforcement),
+        ));
+    }
     if let Some(on_delete) = &foreign_key.on_delete {
         node.push(KdlEntry::new_prop(
             "on-delete",
@@ -396,6 +409,18 @@ fn check_to_node(check: &CheckModel) -> KdlNode {
     let mut node = KdlNode::new("check");
     node.push(KdlEntry::new_prop("name", check.name.clone()));
     node.push(KdlEntry::new_prop("expr", check.expression.clone()));
+    if let Some(validation) = &check.validation {
+        node.push(KdlEntry::new_prop(
+            "validation",
+            constraint_validation(validation),
+        ));
+    }
+    if let Some(enforcement) = &check.enforcement {
+        node.push(KdlEntry::new_prop(
+            "enforcement",
+            constraint_enforcement(enforcement),
+        ));
+    }
     node
 }
 
@@ -574,6 +599,8 @@ fn foreign_key_from_node(node: &KdlNode) -> Result<ForeignKeyModel, PackageError
             .unwrap_or_default(),
         match_type: prop(node, "match").map(ForeignKeyMatch::from_sql),
         deferrability: prop(node, "deferrable").map(ConstraintDeferrability::from_sql),
+        validation: prop(node, "validation").map(ConstraintValidation::from_sql),
+        enforcement: prop(node, "enforcement").map(ConstraintEnforcement::from_sql),
         on_delete: prop(node, "on-delete").map(ForeignKeyAction::from_sql),
         on_update: prop(node, "on-update").map(ForeignKeyAction::from_sql),
     })
@@ -617,6 +644,8 @@ fn check_from_node(node: &KdlNode) -> Result<CheckModel, PackageError> {
     Ok(CheckModel {
         name: required_prop(node, "name")?,
         expression: required_prop(node, "expr")?,
+        validation: prop(node, "validation").map(ConstraintValidation::from_sql),
+        enforcement: prop(node, "enforcement").map(ConstraintEnforcement::from_sql),
     })
 }
 
@@ -853,6 +882,22 @@ fn constraint_deferrability(deferrability: &ConstraintDeferrability) -> &str {
     }
 }
 
+fn constraint_validation(validation: &ConstraintValidation) -> &str {
+    match validation {
+        ConstraintValidation::Validated => "validated",
+        ConstraintValidation::NotValidated => "not-validated",
+        ConstraintValidation::Raw(validation) => validation,
+    }
+}
+
+fn constraint_enforcement(enforcement: &ConstraintEnforcement) -> &str {
+    match enforcement {
+        ConstraintEnforcement::Enforced => "enforced",
+        ConstraintEnforcement::NotEnforced => "not-enforced",
+        ConstraintEnforcement::Raw(enforcement) => enforcement,
+    }
+}
+
 fn index_method(method: &IndexMethod) -> &str {
     match method {
         IndexMethod::BTree => "btree",
@@ -997,6 +1042,8 @@ mod tests {
                         checks: vec![CheckModel {
                             name: "ck_orgs_slug".to_owned(),
                             expression: "length(slug) > 0".to_owned(),
+                            validation: None,
+                            enforcement: None,
                         }],
                         indexes: vec![IndexModel {
                             name: "uq_orgs_slug_idx".to_owned(),
@@ -1034,6 +1081,8 @@ mod tests {
                             references_columns: vec!["id".to_owned()],
                             match_type: None,
                             deferrability: None,
+                            validation: None,
+                            enforcement: None,
                             on_delete: Some(ForeignKeyAction::Cascade),
                             on_update: None,
                         }],
@@ -1101,6 +1150,8 @@ mod tests {
                         references_columns: vec!["account id".to_owned()],
                         match_type: None,
                         deferrability: None,
+                        validation: None,
+                        enforcement: None,
                         on_delete: None,
                         on_update: None,
                     }],
@@ -1299,6 +1350,8 @@ mod tests {
                 references_columns: vec!["id".to_owned()],
                 match_type: None,
                 deferrability: None,
+                validation: None,
+                enforcement: None,
                 on_delete: Some(action.clone()),
                 on_update: Some(action.clone()),
             })
@@ -1346,6 +1399,8 @@ mod tests {
                 references_columns: vec!["id".to_owned()],
                 match_type: Some(match_type.clone()),
                 deferrability: None,
+                validation: None,
+                enforcement: None,
                 on_delete: None,
                 on_update: None,
             })
@@ -1393,6 +1448,8 @@ mod tests {
                 references_columns: vec!["id".to_owned()],
                 match_type: None,
                 deferrability: Some(deferrability.clone()),
+                validation: None,
+                enforcement: None,
                 on_delete: None,
                 on_update: None,
             })
@@ -1419,6 +1476,114 @@ mod tests {
         assert_eq!(
             parsed, model,
             "foreign-key deferrability round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn kdl_round_trips_constraint_validation() {
+        let values = [
+            ConstraintValidation::Validated,
+            ConstraintValidation::NotValidated,
+            ConstraintValidation::Raw("backend-specific".to_owned()),
+        ];
+        let foreign_keys = values
+            .iter()
+            .enumerate()
+            .map(|(index, validation)| ForeignKeyModel {
+                name: format!("fk_child_parent_validation_{index}"),
+                columns: vec![format!("parent_id_{index}")],
+                references_schema: Some("public".to_owned()),
+                references_table: "parents".to_owned(),
+                references_columns: vec!["id".to_owned()],
+                match_type: None,
+                deferrability: None,
+                validation: Some(validation.clone()),
+                enforcement: None,
+                on_delete: None,
+                on_update: None,
+            })
+            .collect();
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "children".to_owned(),
+                    comment: None,
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys,
+                    uniques: vec![],
+                    checks: vec![CheckModel {
+                        name: "ck_children_parent_id".to_owned(),
+                        expression: "parent_id_0 > 0".to_owned(),
+                        validation: Some(ConstraintValidation::NotValidated),
+                        enforcement: None,
+                    }],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        assert!(kdl.contains("validation=not-validated"));
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(
+            parsed, model,
+            "constraint validation round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn kdl_round_trips_constraint_enforcement() {
+        let values = [
+            ConstraintEnforcement::Enforced,
+            ConstraintEnforcement::NotEnforced,
+            ConstraintEnforcement::Raw("backend-specific".to_owned()),
+        ];
+        let foreign_keys = values
+            .iter()
+            .enumerate()
+            .map(|(index, enforcement)| ForeignKeyModel {
+                name: format!("fk_child_parent_enforcement_{index}"),
+                columns: vec![format!("parent_id_{index}")],
+                references_schema: Some("public".to_owned()),
+                references_table: "parents".to_owned(),
+                references_columns: vec!["id".to_owned()],
+                match_type: None,
+                deferrability: None,
+                validation: None,
+                enforcement: Some(enforcement.clone()),
+                on_delete: None,
+                on_update: None,
+            })
+            .collect();
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "children".to_owned(),
+                    comment: None,
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys,
+                    uniques: vec![],
+                    checks: vec![CheckModel {
+                        name: "ck_children_parent_id".to_owned(),
+                        expression: "parent_id_0 > 0".to_owned(),
+                        validation: None,
+                        enforcement: Some(ConstraintEnforcement::NotEnforced),
+                    }],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        assert!(kdl.contains("enforcement=not-enforced"));
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(
+            parsed, model,
+            "constraint enforcement round-trip diverged:\n{kdl}"
         );
     }
 

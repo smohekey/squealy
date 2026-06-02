@@ -200,6 +200,8 @@ fn rich_model() -> DatabaseModel {
                         references_columns: vec!["id".to_owned()],
                         match_type: Some(ForeignKeyMatch::Full),
                         deferrability: Some(ConstraintDeferrability::InitiallyDeferred),
+                        validation: Some(ConstraintValidation::NotValidated),
+                        enforcement: None,
                         on_delete: Some(ForeignKeyAction::Cascade),
                         on_update: None,
                     }],
@@ -207,6 +209,8 @@ fn rich_model() -> DatabaseModel {
                     checks: vec![CheckModel {
                         name: "ck_memberships_quota".to_owned(),
                         expression: "(quota > (0)::numeric)".to_owned(),
+                        validation: None,
+                        enforcement: None,
                     }],
                     indexes: vec![IndexModel {
                         name: "idx_memberships_tenant_id".to_owned(),

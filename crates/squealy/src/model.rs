@@ -221,8 +221,72 @@ pub struct ForeignKeyModel {
     pub references_columns: Vec<String>,
     pub match_type: Option<ForeignKeyMatch>,
     pub deferrability: Option<ConstraintDeferrability>,
+    pub validation: Option<ConstraintValidation>,
+    pub enforcement: Option<ConstraintEnforcement>,
     pub on_delete: Option<ForeignKeyAction>,
     pub on_update: Option<ForeignKeyAction>,
+}
+
+/// Whether a constraint has been validated against existing data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConstraintValidation {
+    Validated,
+    NotValidated,
+    /// A backend-specific validation state.
+    Raw(String),
+}
+
+impl ConstraintValidation {
+    pub fn from_sql(validation: &str) -> Self {
+        let normalized = validation
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['-', '_'], " ");
+        match normalized.as_str() {
+            "validated" | "valid" => ConstraintValidation::Validated,
+            "not validated" | "not valid" => ConstraintValidation::NotValidated,
+            _ => ConstraintValidation::Raw(validation.to_owned()),
+        }
+    }
+
+    pub fn as_sql(&self) -> &str {
+        match self {
+            ConstraintValidation::Validated => "VALID",
+            ConstraintValidation::NotValidated => "NOT VALID",
+            ConstraintValidation::Raw(validation) => validation,
+        }
+    }
+}
+
+/// Whether a constraint is actively enforced for writes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConstraintEnforcement {
+    Enforced,
+    NotEnforced,
+    /// A backend-specific enforcement state.
+    Raw(String),
+}
+
+impl ConstraintEnforcement {
+    pub fn from_sql(enforcement: &str) -> Self {
+        let normalized = enforcement
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['-', '_'], " ");
+        match normalized.as_str() {
+            "enforced" => ConstraintEnforcement::Enforced,
+            "not enforced" => ConstraintEnforcement::NotEnforced,
+            _ => ConstraintEnforcement::Raw(enforcement.to_owned()),
+        }
+    }
+
+    pub fn as_sql(&self) -> &str {
+        match self {
+            ConstraintEnforcement::Enforced => "ENFORCED",
+            ConstraintEnforcement::NotEnforced => "NOT ENFORCED",
+            ConstraintEnforcement::Raw(enforcement) => enforcement,
+        }
+    }
 }
 
 /// Backend-neutral constraint deferrability.
@@ -332,6 +396,8 @@ impl ForeignKeyAction {
 pub struct CheckModel {
     pub name: String,
     pub expression: String,
+    pub validation: Option<ConstraintValidation>,
+    pub enforcement: Option<ConstraintEnforcement>,
 }
 
 /// A named index.
@@ -489,6 +555,8 @@ fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
             column.check().map(|expression| CheckModel {
                 name: ck_name(&name, column.name()),
                 expression: expression.to_owned(),
+                validation: None,
+                enforcement: None,
             })
         })
         .collect();
@@ -541,6 +609,8 @@ fn foreign_key_from_dyn(table: &str, column: &str, reference: &dyn ForeignKey) -
         references_columns: vec![reference.column().to_owned()],
         match_type: None,
         deferrability: None,
+        validation: None,
+        enforcement: None,
         on_delete: reference.on_delete().map(ForeignKeyAction::from_sql),
         on_update: reference.on_update().map(ForeignKeyAction::from_sql),
     }
@@ -728,6 +798,8 @@ mod tests {
                 references_columns: vec!["id".to_owned()],
                 match_type: None,
                 deferrability: None,
+                validation: None,
+                enforcement: None,
                 on_delete: Some(ForeignKeyAction::Cascade),
                 on_update: None,
             }]

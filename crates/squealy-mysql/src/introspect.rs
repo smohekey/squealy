@@ -304,6 +304,8 @@ ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
                 references_columns: Vec::new(),
                 match_type: match_type(&match_option),
                 deferrability: None,
+                validation: None,
+                enforcement: None,
                 on_delete: action(&delete_rule),
                 on_update: action(&update_rule),
             });
@@ -340,7 +342,12 @@ ORDER BY cc.CONSTRAINT_NAME",
             "schema" => &table_ref.schema,
             "table" => &table_ref.name,
         },
-        |(name, expression)| CheckModel { name, expression },
+        |(name, expression): (String, String)| CheckModel {
+            name,
+            expression,
+            validation: None,
+            enforcement: None,
+        },
     )
     .await
     .map_err(MysqlError::Introspect)
