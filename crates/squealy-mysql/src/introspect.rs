@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use mysql_async::{params, prelude::Queryable};
 use squealy::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyModel, IndexModel,
-    SchemaModel, SqlType, TableModel,
+    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
+    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
+    IndexModel, SchemaModel, SqlType, TableModel,
 };
 
 use crate::MysqlError;
@@ -103,15 +104,16 @@ ORDER BY ORDINAL_POSITION",
             Option<String>,
         )| {
             let extra = extra.to_ascii_lowercase();
+            let ty = sql_type(&data_type, &column_type);
             ColumnModel {
                 name,
-                ty: sql_type(&data_type, &column_type),
+                ty: ty.clone(),
                 nullable: is_nullable.eq_ignore_ascii_case("YES"),
-                default: default.map(DefaultValue::Raw),
-                auto_increment: extra.contains("auto_increment"),
-                generated: generation_expression
-                    .as_deref()
-                    .is_some_and(|expression| !expression.is_empty()),
+                default: default.map(|value| default_value(&ty, &value)),
+                identity: extra.contains("auto_increment").then_some(IdentityModel {
+                    mode: IdentityMode::AutoIncrement,
+                }),
+                generated: generated_model(&extra, generation_expression),
             }
         },
     )
@@ -356,6 +358,21 @@ fn sql_type(data_type: &str, column_type: &str) -> SqlType {
     }
 }
 
+fn generated_model(extra: &str, expression: Option<String>) -> Option<GeneratedColumnModel> {
+    let expression = expression.filter(|expression| !expression.is_empty())?;
+    let storage = if extra.contains("stored generated") {
+        GeneratedStorage::Stored
+    } else if extra.contains("virtual generated") {
+        GeneratedStorage::Virtual
+    } else {
+        GeneratedStorage::Unknown
+    };
+    Some(GeneratedColumnModel {
+        expression,
+        storage,
+    })
+}
+
 fn single_arg_type(column_type: &str, kind: &str) -> Option<u32> {
     let args = type_args(column_type, kind)?;
     args.trim().parse().ok()
@@ -382,12 +399,57 @@ fn type_args<'a>(column_type: &'a str, kind: &str) -> Option<&'a str> {
     Some(&column_type[open + 1..close])
 }
 
-fn action(action: &str) -> Option<String> {
+fn default_value(ty: &SqlType, value: &str) -> DefaultValue {
+    let trimmed = value.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "null" => return DefaultValue::Null,
+        "current_timestamp" | "current_timestamp()" => return DefaultValue::CurrentTimestamp,
+        "current_date" | "current_date()" => return DefaultValue::CurrentDate,
+        "current_time" | "current_time()" => return DefaultValue::CurrentTime,
+        _ => {}
+    }
+
+    match ty {
+        SqlType::Bool => match trimmed.to_ascii_lowercase().as_str() {
+            "1" | "true" => DefaultValue::Bool(true),
+            "0" | "false" => DefaultValue::Bool(false),
+            _ => DefaultValue::Raw(value.to_owned()),
+        },
+        SqlType::I8
+        | SqlType::I16
+        | SqlType::I32
+        | SqlType::I64
+        | SqlType::I128
+        | SqlType::Isize => trimmed
+            .parse()
+            .map(DefaultValue::Int)
+            .unwrap_or_else(|_| DefaultValue::Raw(value.to_owned())),
+        SqlType::U8
+        | SqlType::U16
+        | SqlType::U32
+        | SqlType::U64
+        | SqlType::U128
+        | SqlType::Usize => trimmed
+            .parse()
+            .map(DefaultValue::UInt)
+            .unwrap_or_else(|_| DefaultValue::Raw(value.to_owned())),
+        SqlType::F32 | SqlType::F64 => trimmed
+            .parse()
+            .map(DefaultValue::Float)
+            .unwrap_or_else(|_| DefaultValue::Raw(value.to_owned())),
+        SqlType::String | SqlType::Varchar(_) | SqlType::Char(_) | SqlType::Text => {
+            DefaultValue::Text(value.to_owned())
+        }
+        _ => DefaultValue::Raw(value.to_owned()),
+    }
+}
+
+fn action(action: &str) -> Option<ForeignKeyAction> {
     match action {
-        "CASCADE" => Some("cascade".to_owned()),
-        "RESTRICT" => Some("restrict".to_owned()),
-        "SET NULL" => Some("set null".to_owned()),
-        "SET DEFAULT" => Some("set default".to_owned()),
+        "CASCADE" => Some(ForeignKeyAction::Cascade),
+        "RESTRICT" => Some(ForeignKeyAction::Restrict),
+        "SET NULL" => Some(ForeignKeyAction::SetNull),
+        "SET DEFAULT" => Some(ForeignKeyAction::SetDefault),
         "NO ACTION" => None,
         _ => None,
     }
@@ -449,9 +511,33 @@ mod tests {
     #[test]
     fn maps_foreign_key_actions() {
         assert_eq!(action("NO ACTION"), None);
-        assert_eq!(action("CASCADE"), Some("cascade".to_owned()));
-        assert_eq!(action("RESTRICT"), Some("restrict".to_owned()));
-        assert_eq!(action("SET NULL"), Some("set null".to_owned()));
-        assert_eq!(action("SET DEFAULT"), Some("set default".to_owned()));
+        assert_eq!(action("CASCADE"), Some(ForeignKeyAction::Cascade));
+        assert_eq!(action("RESTRICT"), Some(ForeignKeyAction::Restrict));
+        assert_eq!(action("SET NULL"), Some(ForeignKeyAction::SetNull));
+        assert_eq!(action("SET DEFAULT"), Some(ForeignKeyAction::SetDefault));
+    }
+
+    #[test]
+    fn maps_mysql_defaults_to_neutral_values() {
+        assert_eq!(
+            default_value(&SqlType::Varchar(64), "MB"),
+            DefaultValue::Text("MB".to_owned())
+        );
+        assert_eq!(default_value(&SqlType::Bool, "1"), DefaultValue::Bool(true));
+        assert_eq!(default_value(&SqlType::U32, "42"), DefaultValue::UInt(42));
+        assert_eq!(
+            default_value(&SqlType::Timestamp { tz: true }, "current_timestamp()"),
+            DefaultValue::CurrentTimestamp
+        );
+        assert_eq!(
+            default_value(
+                &SqlType::Decimal {
+                    precision: 10,
+                    scale: 2
+                },
+                "42.00"
+            ),
+            DefaultValue::Raw("42.00".to_owned())
+        );
     }
 }

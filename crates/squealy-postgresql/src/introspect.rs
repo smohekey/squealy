@@ -1,6 +1,7 @@
 use squealy::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyModel, IndexModel,
-    SchemaModel, SqlType, TableModel,
+    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
+    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
+    IndexModel, SchemaModel, SqlType, TableModel,
 };
 use tokio_postgres::Client;
 
@@ -84,8 +85,8 @@ SELECT
     a.attname,
     format_type(a.atttypid, a.atttypmod),
     a.attnotnull,
-    a.attidentity <> '',
-    a.attgenerated <> '',
+    a.attidentity::text,
+    a.attgenerated::text,
     pg_get_expr(ad.adbin, ad.adrelid)
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -105,14 +106,20 @@ ORDER BY a.attnum",
         .into_iter()
         .map(|row| {
             let db_type: String = row.get(1);
+            let ty = sql_type(&db_type);
+            let identity: String = row.get(3);
+            let generated: String = row.get(4);
             let default: Option<String> = row.get(5);
             ColumnModel {
                 name: row.get(0),
-                ty: sql_type(&db_type),
+                ty: ty.clone(),
                 nullable: !row.get::<_, bool>(2),
-                auto_increment: row.get(3),
-                generated: row.get(4),
-                default: default.map(DefaultValue::Raw),
+                default: (generated != "s")
+                    .then(|| default.clone())
+                    .flatten()
+                    .map(|value| default_value(&ty, &value)),
+                identity: identity_model(&identity),
+                generated: generated_model(&generated, default),
             }
         })
         .collect())
@@ -300,6 +307,25 @@ fn sql_type(db_type: &str) -> SqlType {
     }
 }
 
+fn identity_model(identity: &str) -> Option<IdentityModel> {
+    let mode = match identity {
+        "a" => IdentityMode::Always,
+        "d" => IdentityMode::ByDefault,
+        _ => return None,
+    };
+    Some(IdentityModel { mode })
+}
+
+fn generated_model(generated: &str, expression: Option<String>) -> Option<GeneratedColumnModel> {
+    match generated {
+        "s" => Some(GeneratedColumnModel {
+            expression: expression.unwrap_or_default(),
+            storage: GeneratedStorage::Stored,
+        }),
+        _ => None,
+    }
+}
+
 fn parametric_sql_type(db_type: &str) -> Option<SqlType> {
     let open = db_type.find('(')?;
     let close = db_type.rfind(')')?;
@@ -326,13 +352,82 @@ fn parametric_sql_type(db_type: &str) -> Option<SqlType> {
     }
 }
 
-fn action(action: &str) -> Option<String> {
+fn default_value(ty: &SqlType, value: &str) -> DefaultValue {
+    let trimmed = value.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "null" => return DefaultValue::Null,
+        "true" => return DefaultValue::Bool(true),
+        "false" => return DefaultValue::Bool(false),
+        "current_timestamp" | "current_timestamp()" | "now()" => {
+            return DefaultValue::CurrentTimestamp;
+        }
+        "current_date" | "current_date()" => return DefaultValue::CurrentDate,
+        "current_time" | "current_time()" => return DefaultValue::CurrentTime,
+        _ => {}
+    }
+
+    if let Some(text) = postgres_string_literal(trimmed)
+        && matches!(
+            ty,
+            SqlType::String | SqlType::Varchar(_) | SqlType::Char(_) | SqlType::Text
+        )
+    {
+        return DefaultValue::Text(text);
+    }
+
+    match ty {
+        SqlType::I8
+        | SqlType::I16
+        | SqlType::I32
+        | SqlType::I64
+        | SqlType::I128
+        | SqlType::Isize => trimmed
+            .parse()
+            .map(DefaultValue::Int)
+            .unwrap_or_else(|_| DefaultValue::Raw(value.to_owned())),
+        SqlType::U8
+        | SqlType::U16
+        | SqlType::U32
+        | SqlType::U64
+        | SqlType::U128
+        | SqlType::Usize => trimmed
+            .parse()
+            .map(DefaultValue::UInt)
+            .unwrap_or_else(|_| DefaultValue::Raw(value.to_owned())),
+        SqlType::F32 | SqlType::F64 => trimmed
+            .parse()
+            .map(DefaultValue::Float)
+            .unwrap_or_else(|_| DefaultValue::Raw(value.to_owned())),
+        _ => DefaultValue::Raw(value.to_owned()),
+    }
+}
+
+fn postgres_string_literal(value: &str) -> Option<String> {
+    let mut chars = value.strip_prefix('\'')?.chars().peekable();
+    let mut out = String::new();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' {
+            if chars.peek() == Some(&'\'') {
+                chars.next();
+                out.push('\'');
+            } else {
+                let rest = chars.collect::<String>();
+                return (rest.is_empty() || rest.starts_with("::")).then_some(out);
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    None
+}
+
+fn action(action: &str) -> Option<ForeignKeyAction> {
     match action {
         "a" => None,
-        "r" => Some("restrict".to_owned()),
-        "c" => Some("cascade".to_owned()),
-        "n" => Some("set null".to_owned()),
-        "d" => Some("set default".to_owned()),
+        "r" => Some(ForeignKeyAction::Restrict),
+        "c" => Some(ForeignKeyAction::Cascade),
+        "n" => Some(ForeignKeyAction::SetNull),
+        "d" => Some(ForeignKeyAction::SetDefault),
         _ => None,
     }
 }
@@ -399,10 +494,41 @@ mod tests {
     #[test]
     fn maps_foreign_key_actions() {
         assert_eq!(action("a"), None);
-        assert_eq!(action("c"), Some("cascade".to_owned()));
-        assert_eq!(action("r"), Some("restrict".to_owned()));
-        assert_eq!(action("n"), Some("set null".to_owned()));
-        assert_eq!(action("d"), Some("set default".to_owned()));
+        assert_eq!(action("c"), Some(ForeignKeyAction::Cascade));
+        assert_eq!(action("r"), Some(ForeignKeyAction::Restrict));
+        assert_eq!(action("n"), Some(ForeignKeyAction::SetNull));
+        assert_eq!(action("d"), Some(ForeignKeyAction::SetDefault));
+    }
+
+    #[test]
+    fn maps_postgres_defaults_to_neutral_values() {
+        assert_eq!(
+            default_value(&SqlType::Char(2), "'MB'::bpchar"),
+            DefaultValue::Text("MB".to_owned())
+        );
+        assert_eq!(
+            default_value(&SqlType::String, "'can''t'::text"),
+            DefaultValue::Text("can't".to_owned())
+        );
+        assert_eq!(default_value(&SqlType::I32, "42"), DefaultValue::Int(42));
+        assert_eq!(
+            default_value(&SqlType::Bool, "true"),
+            DefaultValue::Bool(true)
+        );
+        assert_eq!(
+            default_value(&SqlType::Timestamp { tz: true }, "now()"),
+            DefaultValue::CurrentTimestamp
+        );
+        assert_eq!(
+            default_value(
+                &SqlType::Decimal {
+                    precision: 10,
+                    scale: 2
+                },
+                "42.00"
+            ),
+            DefaultValue::Raw("42.00".to_owned())
+        );
     }
 
     #[test]

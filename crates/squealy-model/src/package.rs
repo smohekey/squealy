@@ -17,8 +17,9 @@ use std::path::Path;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyModel, IndexModel,
-    SchemaModel, SqlType, TableModel,
+    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
+    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
+    IndexModel, SchemaModel, SqlType, TableModel,
 };
 
 /// Current package format version, recorded in `manifest.kdl`.
@@ -214,11 +215,23 @@ fn column_to_node(column: &ColumnModel) -> KdlNode {
     if column.nullable {
         node.push(KdlEntry::new_prop("nullable", KdlValue::Bool(true)));
     }
-    if column.auto_increment {
-        node.push(KdlEntry::new_prop("auto-increment", KdlValue::Bool(true)));
+    if let Some(identity) = &column.identity {
+        node.push(KdlEntry::new_prop(
+            "identity",
+            identity_mode(&identity.mode),
+        ));
     }
-    if column.generated {
-        node.push(KdlEntry::new_prop("generated", KdlValue::Bool(true)));
+    if let Some(generated) = &column.generated {
+        node.push(KdlEntry::new_prop(
+            "generated",
+            generated_storage(&generated.storage),
+        ));
+        if !generated.expression.is_empty() {
+            node.push(KdlEntry::new_prop(
+                "generated-expr",
+                generated.expression.clone(),
+            ));
+        }
     }
     if let Some(default) = &column.default {
         let (kind, value) = default_parts(default);
@@ -253,10 +266,16 @@ fn foreign_key_to_node(foreign_key: &ForeignKeyModel) -> KdlNode {
         foreign_key.references_table.clone(),
     ));
     if let Some(on_delete) = &foreign_key.on_delete {
-        node.push(KdlEntry::new_prop("on-delete", on_delete.clone()));
+        node.push(KdlEntry::new_prop(
+            "on-delete",
+            foreign_key_action(on_delete),
+        ));
     }
     if let Some(on_update) = &foreign_key.on_update {
-        node.push(KdlEntry::new_prop("on-update", on_update.clone()));
+        node.push(KdlEntry::new_prop(
+            "on-update",
+            foreign_key_action(on_update),
+        ));
     }
 
     // Referenced columns go in a child node as separate KDL values (paired by position with the
@@ -439,8 +458,8 @@ fn column_from_node(node: &KdlNode) -> Result<ColumnModel, PackageError> {
         ty,
         nullable: prop_bool(node, "nullable"),
         default,
-        auto_increment: prop_bool(node, "auto-increment"),
-        generated: prop_bool(node, "generated"),
+        identity: identity_from_node(node)?,
+        generated: generated_from_node(node)?,
     })
 }
 
@@ -461,8 +480,8 @@ fn foreign_key_from_node(node: &KdlNode) -> Result<ForeignKeyModel, PackageError
             .next()
             .map(args)
             .unwrap_or_default(),
-        on_delete: prop(node, "on-delete").map(str::to_owned),
-        on_update: prop(node, "on-update").map(str::to_owned),
+        on_delete: prop(node, "on-delete").map(ForeignKeyAction::from_sql),
+        on_update: prop(node, "on-update").map(ForeignKeyAction::from_sql),
     })
 }
 
@@ -623,6 +642,80 @@ fn required_prop(node: &KdlNode, key: &str) -> Result<String, PackageError> {
         .ok_or_else(|| malformed(format!("`{}` is missing `{key}`", node.name().value())))
 }
 
+fn identity_mode(mode: &IdentityMode) -> &'static str {
+    match mode {
+        IdentityMode::Always => "always",
+        IdentityMode::ByDefault => "by-default",
+        IdentityMode::AutoIncrement => "auto-increment",
+    }
+}
+
+fn generated_storage(storage: &GeneratedStorage) -> &'static str {
+    match storage {
+        GeneratedStorage::Virtual => "virtual",
+        GeneratedStorage::Stored => "stored",
+        GeneratedStorage::Unknown => "unknown",
+    }
+}
+
+fn identity_from_node(node: &KdlNode) -> Result<Option<IdentityModel>, PackageError> {
+    let mode = if let Some(mode) = prop(node, "identity") {
+        match mode {
+            "always" => IdentityMode::Always,
+            "by-default" => IdentityMode::ByDefault,
+            "auto-increment" => IdentityMode::AutoIncrement,
+            other => {
+                return Err(malformed(format!(
+                    "`{}` has unsupported identity mode `{other}`",
+                    node.name().value()
+                )));
+            }
+        }
+    } else if prop_bool(node, "auto-increment") {
+        IdentityMode::AutoIncrement
+    } else {
+        return Ok(None);
+    };
+
+    Ok(Some(IdentityModel { mode }))
+}
+
+fn generated_from_node(node: &KdlNode) -> Result<Option<GeneratedColumnModel>, PackageError> {
+    let storage = if let Some(storage) = prop(node, "generated") {
+        match storage {
+            "virtual" => GeneratedStorage::Virtual,
+            "stored" => GeneratedStorage::Stored,
+            "unknown" => GeneratedStorage::Unknown,
+            other => {
+                return Err(malformed(format!(
+                    "`{}` has unsupported generated storage `{other}`",
+                    node.name().value()
+                )));
+            }
+        }
+    } else if prop_bool(node, "generated") {
+        GeneratedStorage::Unknown
+    } else {
+        return Ok(None);
+    };
+
+    Ok(Some(GeneratedColumnModel {
+        expression: prop(node, "generated-expr").unwrap_or_default().to_owned(),
+        storage,
+    }))
+}
+
+fn foreign_key_action(action: &ForeignKeyAction) -> &str {
+    match action {
+        ForeignKeyAction::NoAction => "no-action",
+        ForeignKeyAction::Restrict => "restrict",
+        ForeignKeyAction::Cascade => "cascade",
+        ForeignKeyAction::SetNull => "set-null",
+        ForeignKeyAction::SetDefault => "set-default",
+        ForeignKeyAction::Raw(action) => action,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,24 +734,26 @@ mod tests {
                                 ty: SqlType::I32,
                                 nullable: false,
                                 default: None,
-                                auto_increment: true,
-                                generated: false,
+                                identity: Some(IdentityModel {
+                                    mode: IdentityMode::ByDefault,
+                                }),
+                                generated: None,
                             },
                             ColumnModel {
                                 name: "slug".to_owned(),
                                 ty: SqlType::String,
                                 nullable: false,
                                 default: Some(DefaultValue::Text("acme".to_owned())),
-                                auto_increment: false,
-                                generated: false,
+                                identity: None,
+                                generated: None,
                             },
                             ColumnModel {
                                 name: "metadata".to_owned(),
                                 ty: SqlType::Raw("jsonb".to_owned()),
                                 nullable: true,
                                 default: Some(DefaultValue::Raw("'{}'::jsonb".to_owned())),
-                                auto_increment: false,
-                                generated: false,
+                                identity: None,
+                                generated: None,
                             },
                         ],
                         primary_key: Some(Constraint {
@@ -687,8 +782,8 @@ mod tests {
                             ty: SqlType::I32,
                             nullable: false,
                             default: None,
-                            auto_increment: false,
-                            generated: false,
+                            identity: None,
+                            generated: None,
                         }],
                         primary_key: None,
                         foreign_keys: vec![ForeignKeyModel {
@@ -697,7 +792,7 @@ mod tests {
                             references_schema: Some("public".to_owned()),
                             references_table: "orgs".to_owned(),
                             references_columns: vec!["id".to_owned()],
-                            on_delete: Some("cascade".to_owned()),
+                            on_delete: Some(ForeignKeyAction::Cascade),
                             on_update: None,
                         }],
                         uniques: vec![],
@@ -746,8 +841,8 @@ mod tests {
                         ty: SqlType::I32,
                         nullable: false,
                         default: None,
-                        auto_increment: false,
-                        generated: false,
+                        identity: None,
+                        generated: None,
                     }],
                     primary_key: None,
                     foreign_keys: vec![ForeignKeyModel {
@@ -802,8 +897,8 @@ mod tests {
                 ty: ty.clone(),
                 nullable: false,
                 default: None,
-                auto_increment: false,
-                generated: false,
+                identity: None,
+                generated: None,
             })
             .collect();
 
@@ -825,5 +920,171 @@ mod tests {
         let kdl = to_kdl(&model);
         let parsed = from_kdl(&kdl).expect("parse");
         assert_eq!(parsed, model, "structured-type round-trip diverged:\n{kdl}");
+    }
+
+    #[test]
+    fn kdl_round_trips_identity_and_generated_columns() {
+        let columns = vec![
+            ColumnModel {
+                name: "id_always".to_owned(),
+                ty: SqlType::I32,
+                nullable: false,
+                default: None,
+                identity: Some(IdentityModel {
+                    mode: IdentityMode::Always,
+                }),
+                generated: None,
+            },
+            ColumnModel {
+                name: "id_by_default".to_owned(),
+                ty: SqlType::I32,
+                nullable: false,
+                default: None,
+                identity: Some(IdentityModel {
+                    mode: IdentityMode::ByDefault,
+                }),
+                generated: None,
+            },
+            ColumnModel {
+                name: "id_auto_increment".to_owned(),
+                ty: SqlType::I32,
+                nullable: false,
+                default: None,
+                identity: Some(IdentityModel {
+                    mode: IdentityMode::AutoIncrement,
+                }),
+                generated: None,
+            },
+            ColumnModel {
+                name: "virtual_generated".to_owned(),
+                ty: SqlType::I32,
+                nullable: true,
+                default: None,
+                identity: None,
+                generated: Some(GeneratedColumnModel {
+                    expression: "length(slug)".to_owned(),
+                    storage: GeneratedStorage::Virtual,
+                }),
+            },
+            ColumnModel {
+                name: "stored_generated".to_owned(),
+                ty: SqlType::I32,
+                nullable: true,
+                default: None,
+                identity: None,
+                generated: Some(GeneratedColumnModel {
+                    expression: "char_length(`slug`)".to_owned(),
+                    storage: GeneratedStorage::Stored,
+                }),
+            },
+            ColumnModel {
+                name: "unknown_generated".to_owned(),
+                ty: SqlType::I32,
+                nullable: true,
+                default: None,
+                identity: None,
+                generated: Some(GeneratedColumnModel {
+                    expression: String::new(),
+                    storage: GeneratedStorage::Unknown,
+                }),
+            },
+        ];
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "derived_columns".to_owned(),
+                    columns,
+                    primary_key: None,
+                    foreign_keys: vec![],
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(
+            parsed, model,
+            "identity/generated round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn kdl_round_trips_foreign_key_actions() {
+        let actions = [
+            ForeignKeyAction::NoAction,
+            ForeignKeyAction::Restrict,
+            ForeignKeyAction::Cascade,
+            ForeignKeyAction::SetNull,
+            ForeignKeyAction::SetDefault,
+            ForeignKeyAction::Raw("match full".to_owned()),
+        ];
+        let foreign_keys = actions
+            .iter()
+            .enumerate()
+            .map(|(index, action)| ForeignKeyModel {
+                name: format!("fk_child_parent_{index}"),
+                columns: vec![format!("parent_id_{index}")],
+                references_schema: Some("public".to_owned()),
+                references_table: "parents".to_owned(),
+                references_columns: vec!["id".to_owned()],
+                on_delete: Some(action.clone()),
+                on_update: Some(action.clone()),
+            })
+            .collect();
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "children".to_owned(),
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys,
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(
+            parsed, model,
+            "foreign-key action round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn kdl_reads_legacy_identity_and_generated_flags() {
+        let kdl = r#"
+database {
+    schema {
+        table "legacy_columns" {
+            column "id" type="i32" auto-increment=#true
+            column "computed" type="i32" generated=#true
+        }
+    }
+}
+"#;
+
+        let parsed = from_kdl(kdl).expect("legacy model.kdl should parse");
+        let columns = &parsed.schemas[0].tables[0].columns;
+        assert_eq!(
+            columns[0].identity,
+            Some(IdentityModel {
+                mode: IdentityMode::AutoIncrement
+            })
+        );
+        assert_eq!(
+            columns[1].generated,
+            Some(GeneratedColumnModel {
+                expression: String::new(),
+                storage: GeneratedStorage::Unknown
+            })
+        );
     }
 }

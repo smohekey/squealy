@@ -8,8 +8,8 @@
 use std::io::{self, Write};
 
 use squealy::{
-    CheckModel, ColumnModel, DatabaseModel, DefaultValue, ForeignKeyModel, IndexModel, SqlType,
-    TableModel,
+    CheckModel, ColumnModel, DatabaseModel, DefaultValue, ForeignKeyModel, GeneratedStorage,
+    IndexModel, SqlType, TableModel,
 };
 
 /// Renders ordered create-from-scratch DDL for a whole model. Statements are `;`-terminated and
@@ -121,8 +121,19 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
         writer.write_all(b" DEFAULT ")?;
         write_default_value(default, writer)?;
     }
-    if column.auto_increment {
+    if column.identity.is_some() {
         writer.write_all(b" AUTO_INCREMENT")?;
+    }
+    if let Some(generated) = &column.generated {
+        writer.write_all(b" GENERATED ALWAYS AS (")?;
+        writer.write_all(generated.expression.as_bytes())?;
+        writer.write_all(b")")?;
+        match generated.storage {
+            GeneratedStorage::Virtual | GeneratedStorage::Unknown => {
+                writer.write_all(b" VIRTUAL")?
+            }
+            GeneratedStorage::Stored => writer.write_all(b" STORED")?,
+        }
     }
     Ok(())
 }
@@ -240,10 +251,10 @@ fn write_add_foreign_key(
     write_quoted_ident_list(&foreign_key.references_columns, writer)?;
     writer.write_all(b")")?;
     if let Some(on_delete) = &foreign_key.on_delete {
-        write!(writer, " ON DELETE {on_delete}")?;
+        write!(writer, " ON DELETE {}", on_delete.as_sql())?;
     }
     if let Some(on_update) = &foreign_key.on_update {
-        write!(writer, " ON UPDATE {on_update}")?;
+        write!(writer, " ON UPDATE {}", on_update.as_sql())?;
     }
     Ok(())
 }
