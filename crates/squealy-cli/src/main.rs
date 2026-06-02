@@ -110,6 +110,9 @@ enum Command {
         /// Introspect the live database and apply an incremental plan instead of create-from-scratch DDL.
         #[arg(long)]
         incremental: bool,
+        /// Print the incremental plan SQL instead of executing it.
+        #[arg(long)]
+        report: bool,
         /// Allow destructive changes when publishing incrementally.
         #[arg(long)]
         allow_destructive: bool,
@@ -279,9 +282,13 @@ async fn run(cli: Cli) -> Result<(), String> {
             backend,
             url,
             incremental,
+            report,
             allow_destructive,
             allow_ambiguous,
         } => {
+            if report && !incremental {
+                return Err("--report currently requires --incremental".to_owned());
+            }
             let model = source.load()?;
             match backend.backend {
                 BackendKind::Postgres => {
@@ -302,9 +309,16 @@ async fn run(cli: Cli) -> Result<(), String> {
                         )
                         .await
                         .map_err(|error| format!("plan: {error}"))?;
-                        apply_plan(&plan, &Postgres, &mut connection)
-                            .await
-                            .map_err(|error| format!("publish: {error}"))
+                        if report {
+                            let sql = render_plan_sql(&plan, &Postgres)
+                                .map_err(|error| format!("render plan: {error}"))?;
+                            print!("{sql}");
+                            Ok(())
+                        } else {
+                            apply_plan(&plan, &Postgres, &mut connection)
+                                .await
+                                .map_err(|error| format!("publish: {error}"))
+                        }
                     } else {
                         publish(&model, &Postgres, &mut connection)
                             .await
@@ -329,9 +343,16 @@ async fn run(cli: Cli) -> Result<(), String> {
                         )
                         .await
                         .map_err(|error| format!("plan: {error}"))?;
-                        apply_plan(&plan, &Mysql, &mut connection)
-                            .await
-                            .map_err(|error| format!("publish: {error}"))
+                        if report {
+                            let sql = render_plan_sql(&plan, &Mysql)
+                                .map_err(|error| format!("render plan: {error}"))?;
+                            print!("{sql}");
+                            Ok(())
+                        } else {
+                            apply_plan(&plan, &Mysql, &mut connection)
+                                .await
+                                .map_err(|error| format!("publish: {error}"))
+                        }
                     } else {
                         publish(&model, &Mysql, &mut connection)
                             .await

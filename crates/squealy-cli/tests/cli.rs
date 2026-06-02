@@ -155,12 +155,37 @@ fn publish_help_exposes_incremental_policy_flags() {
         "help should include incremental publish mode: {stdout}"
     );
     assert!(
+        stdout.contains("--report"),
+        "help should include incremental report mode: {stdout}"
+    );
+    assert!(
         stdout.contains("--allow-ambiguous"),
         "help should include ambiguous-change policy flag: {stdout}"
     );
     assert!(
         stdout.contains("--allow-destructive"),
         "help should include destructive-change policy flag: {stdout}"
+    );
+}
+
+#[test]
+fn publish_report_requires_incremental_mode() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = dir.path().join("schema.sqz");
+    write_package(&empty_model(), &package).expect("write package");
+
+    let output = Command::new(SQUEALY)
+        .args(["publish", "--report", "--package"])
+        .arg(&package)
+        .args(["--url", "postgres://unused"])
+        .output()
+        .expect("run squealy");
+
+    assert!(!output.status.success(), "invalid report mode should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--report currently requires --incremental"),
+        "unexpected stderr: {stderr}"
     );
 }
 
@@ -806,6 +831,92 @@ async fn postgres_incremental_publish_applies_safe_plan() {
 
 #[tokio::test]
 #[ignore]
+async fn postgres_incremental_publish_report_does_not_apply_plan() {
+    let url = postgres_url();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base_package = dir.path().join("base.sqz");
+    let desired_package = dir.path().join("desired.sqz");
+    let introspected_package = dir.path().join("introspected.sqz");
+    let base = live_introspection_model();
+    let desired = live_introspection_model_with_nullable_column("description");
+    write_package(&base, &base_package).expect("write base package");
+    write_package(&desired, &desired_package).expect("write desired package");
+
+    let mut connection = Postgres.connect(&url).await.expect("connect to Postgres");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS \"cli_live_introspect\" CASCADE")
+        .await
+        .expect("drop schema");
+
+    let publish_base = Command::new(SQUEALY)
+        .args(["publish", "--backend", "postgres", "--package"])
+        .arg(&base_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy publish");
+    assert!(
+        publish_base.status.success(),
+        "base publish failed: {}",
+        String::from_utf8_lossy(&publish_base.stderr)
+    );
+
+    let report = Command::new(SQUEALY)
+        .args([
+            "publish",
+            "--incremental",
+            "--report",
+            "--backend",
+            "postgres",
+            "--package",
+        ])
+        .arg(&desired_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy incremental report");
+    assert!(
+        report.status.success(),
+        "incremental report failed: {}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&report.stdout);
+    assert!(
+        stdout.contains(
+            "ALTER TABLE \"cli_live_introspect\".\"events\" ADD COLUMN \"description\" text"
+        ),
+        "unexpected stdout: {stdout}"
+    );
+
+    let introspect = Command::new(SQUEALY)
+        .args(["introspect", "--backend", "postgres", "--url", &url])
+        .arg(&introspected_package)
+        .output()
+        .expect("run squealy introspect");
+    assert!(
+        introspect.status.success(),
+        "introspect failed: {}",
+        String::from_utf8_lossy(&introspect.stderr)
+    );
+
+    let actual = actual_schema(
+        read_package(&introspected_package).expect("read introspected package"),
+        "cli_live_introspect",
+    );
+    assert!(
+        actual.tables[0]
+            .columns
+            .iter()
+            .all(|column| column.name != "description"),
+        "report should not apply the description column: {actual:?}"
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS \"cli_live_introspect\" CASCADE")
+        .await
+        .expect("cleanup schema");
+}
+
+#[tokio::test]
+#[ignore]
 async fn mysql_incremental_publish_applies_safe_plan() {
     let url = mysql_url();
     let dir = tempfile::tempdir().expect("tempdir");
@@ -874,6 +985,90 @@ async fn mysql_incremental_publish_applies_safe_plan() {
             .iter()
             .any(|column| column.name == "description"),
         "incremental publish should add the description column: {actual:?}"
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `cli_live_introspect`")
+        .await
+        .expect("cleanup schema");
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_incremental_publish_report_does_not_apply_plan() {
+    let url = mysql_url();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base_package = dir.path().join("base.sqz");
+    let desired_package = dir.path().join("desired.sqz");
+    let introspected_package = dir.path().join("introspected.sqz");
+    let base = live_introspection_model();
+    let desired = live_introspection_model_with_nullable_column("description");
+    write_package(&base, &base_package).expect("write base package");
+    write_package(&desired, &desired_package).expect("write desired package");
+
+    let mut connection = Mysql.connect(&url).await.expect("connect to MySQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `cli_live_introspect`")
+        .await
+        .expect("drop schema");
+
+    let publish_base = Command::new(SQUEALY)
+        .args(["publish", "--backend", "mysql", "--package"])
+        .arg(&base_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy publish");
+    assert!(
+        publish_base.status.success(),
+        "base publish failed: {}",
+        String::from_utf8_lossy(&publish_base.stderr)
+    );
+
+    let report = Command::new(SQUEALY)
+        .args([
+            "publish",
+            "--incremental",
+            "--report",
+            "--backend",
+            "mysql",
+            "--package",
+        ])
+        .arg(&desired_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy incremental report");
+    assert!(
+        report.status.success(),
+        "incremental report failed: {}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&report.stdout);
+    assert!(
+        stdout.contains("ALTER TABLE `cli_live_introspect`.`events` ADD COLUMN `description` TEXT"),
+        "unexpected stdout: {stdout}"
+    );
+
+    let introspect = Command::new(SQUEALY)
+        .args(["introspect", "--backend", "mysql", "--url", &url])
+        .arg(&introspected_package)
+        .output()
+        .expect("run squealy introspect");
+    assert!(
+        introspect.status.success(),
+        "introspect failed: {}",
+        String::from_utf8_lossy(&introspect.stderr)
+    );
+
+    let actual = actual_schema(
+        read_package(&introspected_package).expect("read introspected package"),
+        "cli_live_introspect",
+    );
+    assert!(
+        actual.tables[0]
+            .columns
+            .iter()
+            .all(|column| column.name != "description"),
+        "report should not apply the description column: {actual:?}"
     );
 
     connection
