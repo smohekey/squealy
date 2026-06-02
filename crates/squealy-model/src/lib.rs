@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 mod package;
+mod plan;
 
 pub mod diff;
 
@@ -20,6 +21,9 @@ pub use diff::{
 pub use package::{
     FORMAT_VERSION, PackageError, from_kdl, read_package, read_package_from, to_kdl, write_package,
     write_package_to,
+};
+pub use plan::{
+    ClassifiedDatabasePlanStep, DatabasePlan, DatabasePlanStep, plan_diff, plan_models,
 };
 pub use squealy::{
     CheckModel, ColumnModel, Constraint, ConstraintCapabilities, ConstraintDeferrability,

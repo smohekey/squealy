@@ -285,8 +285,8 @@ Build the spine and a real, executable create-from-scratch path, plus the packag
 
 **Out of scope this sprint (designed-for, not built)**
 
-- Diff engine / `compare` / incremental `ALTER` plans.
-- Destructive-change policy enforcement (the `PublishOptions` seam is defined; teeth come with diff).
+- Backend-specific incremental `ALTER` rendering and execution.
+- Rename hints and richer ambiguous-change handling, such as type-change `USING` casts.
 
 ### API sketch (subject to change)
 
@@ -305,18 +305,27 @@ pub trait SchemaBackend {
     // future: fn render_alter(plan, ...)
 }
 
-pub struct PublishOptions { /* destructive-change policy; teeth in the diff sprint */ }
+pub struct DiffPolicy {
+    pub allow_destructive: bool,
+    pub allow_ambiguous: bool,
+}
 
 pub fn script<B: SchemaBackend>(model: &DatabaseModel, backend: &B) -> io::Result<String>;
-pub async fn publish<B, C>(model: &DatabaseModel, backend: &B, conn: &C, opts: &PublishOptions)
-    -> Result<(), Error>;
+pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseDiff;
+pub fn plan_models(
+    desired: &DatabaseModel,
+    actual: &DatabaseModel,
+    policy: DiffPolicy,
+) -> Result<DatabasePlan, DiffPolicyError>;
+pub async fn publish<B, C>(model: &DatabaseModel, backend: &B, conn: &C) -> Result<(), Error>;
 ```
 
 ## Roadmap (post-sprint-1)
 
-- **Diff engine:** `compare(desired, actual)` → classified plan (safe / destructive / ambiguous),
-  rename hints, type-change `USING` casts; `script`/`publish` consume the plan.
-- **`PublishOptions` teeth:** configurable handling of drops / lossy changes (block, allow, generate-only).
+- **Incremental ALTER rendering:** backend-owned rendering from the neutral plan, followed by apply
+  paths that consume the plan instead of create-from-scratch SQL.
+- **Richer planning:** rename hints and backend-specific assists for ambiguous changes, such as
+  type-change `USING` casts.
 - **Hybrid flow:** generate a reviewable upgrade script from two models (crate↔crate, package↔package,
   or model↔live), bridging declarative authoring with checked-in, auditable artifacts.
 - **Schema compare CLI** for desired-vs-live and desired-vs-package workflows.
@@ -355,9 +364,16 @@ Done and tested:
   identity/generated columns, foreign-key actions/deferrability/validation, index methods, index
   expressions, include columns, collations, operator classes, and predicates where the backend can
   round-trip them.
+- **Diffing and policy**: `diff_models(desired, actual)` compares packages/models by stable names,
+  classifies changes as safe/destructive/ambiguous, and `DiffPolicy` can block risky changes.
+  `squealy diff` prints risk-prefixed changes and can enforce policy with `--check-policy`,
+  `--allow-ambiguous`, and `--allow-destructive`.
+- **Planning**: `plan_models(desired, actual, policy)` turns a diff into ordered, policy-checked,
+  backend-neutral deployment steps. Backend-specific ALTER rendering/execution is the next layer.
 
-**Sprint 1 is functionally complete.** Next: introspection → diff → incremental ALTER plans (the
-declarative migration core), then `PublishOptions` teeth and the hybrid flow.
+**Sprint 1 is functionally complete, and the diff/policy/neutral-plan layer is underway.** Next:
+backend-specific incremental ALTER rendering, then apply/publish paths that consume plans and the
+hybrid reviewable-script flow.
 
 ## Settled decisions
 
