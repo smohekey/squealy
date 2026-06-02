@@ -13,7 +13,10 @@ mod package;
 
 pub mod diff;
 
-pub use diff::{DatabaseDiff, DatabaseDiffChange, TableDiffChange, diff_models};
+pub use diff::{
+    ChangeRisk, ClassifiedDatabaseDiffChange, DatabaseDiff, DatabaseDiffChange, TableDiffChange,
+    diff_models,
+};
 pub use package::{
     FORMAT_VERSION, PackageError, from_kdl, read_package, read_package_from, to_kdl, write_package,
     write_package_to,

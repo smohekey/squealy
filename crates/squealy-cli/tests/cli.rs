@@ -251,15 +251,15 @@ fn diff_reports_package_model_changes() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("table + public.created"),
+        stdout.contains("safe table + public.created"),
         "unexpected stdout: {stdout}"
     );
     assert!(
-        stdout.contains("table ~ public.events"),
+        stdout.contains("ambiguous table ~ public.events"),
         "unexpected stdout: {stdout}"
     );
     assert!(
-        stdout.contains("column + public.events.name"),
+        stdout.contains("ambiguous column + public.events.name"),
         "unexpected stdout: {stdout}"
     );
 }

@@ -1,6 +1,7 @@
 use squealy_model::{
-    CheckModel, ColumnModel, Constraint, DatabaseDiffChange, DatabaseModel, ForeignKeyAction,
-    ForeignKeyModel, IndexModel, SchemaModel, SqlType, TableDiffChange, TableModel, diff_models,
+    ChangeRisk, CheckModel, ColumnModel, Constraint, DatabaseDiffChange, DatabaseModel,
+    DefaultValue, ForeignKeyAction, ForeignKeyModel, IndexModel, SchemaModel, SqlType,
+    TableDiffChange, TableModel, diff_models,
 };
 
 #[test]
@@ -178,6 +179,97 @@ fn diff_reports_named_constraint_and_index_changes() {
             ],
         }]
     );
+}
+
+#[test]
+fn classifies_safe_database_changes() {
+    let desired = model_with_tables("public", vec![table("events")]);
+    let actual = DatabaseModel { schemas: vec![] };
+
+    let diff = diff_models(&desired, &actual);
+
+    assert_eq!(
+        diff.classified_changes()
+            .iter()
+            .map(|change| change.risk)
+            .collect::<Vec<_>>(),
+        vec![ChangeRisk::Safe, ChangeRisk::Safe]
+    );
+}
+
+#[test]
+fn classifies_destructive_database_changes() {
+    let desired = DatabaseModel { schemas: vec![] };
+    let actual = model_with_tables("public", vec![table("events")]);
+
+    let diff = diff_models(&desired, &actual);
+
+    assert_eq!(
+        diff.classified_changes()
+            .iter()
+            .map(|change| change.risk)
+            .collect::<Vec<_>>(),
+        vec![ChangeRisk::Destructive, ChangeRisk::Destructive]
+    );
+}
+
+#[test]
+fn classifies_added_columns_by_backfill_safety() {
+    let nullable = TableDiffChange::AddColumn {
+        column: ColumnModel {
+            nullable: true,
+            ..column("nickname", SqlType::Text)
+        },
+    };
+    let defaulted = TableDiffChange::AddColumn {
+        column: ColumnModel {
+            default: Some(DefaultValue::Text("pending".to_owned())),
+            ..column("status", SqlType::Text)
+        },
+    };
+    let required = TableDiffChange::AddColumn {
+        column: column("name", SqlType::Text),
+    };
+
+    assert_eq!(nullable.risk(), ChangeRisk::Safe);
+    assert_eq!(defaulted.risk(), ChangeRisk::Safe);
+    assert_eq!(required.risk(), ChangeRisk::Ambiguous);
+}
+
+#[test]
+fn classifies_table_change_by_highest_child_risk() {
+    let safe = DatabaseDiffChange::AlterTable {
+        schema: Some("public".to_owned()),
+        table: "events".to_owned(),
+        changes: vec![TableDiffChange::AddIndex {
+            index: index("idx_events_name", &["name"]),
+        }],
+    };
+    let ambiguous = DatabaseDiffChange::AlterTable {
+        schema: Some("public".to_owned()),
+        table: "events".to_owned(),
+        changes: vec![TableDiffChange::AlterColumn {
+            before: column("name", SqlType::String),
+            after: column("name", SqlType::Text),
+        }],
+    };
+    let destructive = DatabaseDiffChange::AlterTable {
+        schema: Some("public".to_owned()),
+        table: "events".to_owned(),
+        changes: vec![
+            TableDiffChange::AlterColumn {
+                before: column("name", SqlType::String),
+                after: column("name", SqlType::Text),
+            },
+            TableDiffChange::DropColumn {
+                column: column("obsolete", SqlType::Text),
+            },
+        ],
+    };
+
+    assert_eq!(safe.risk(), ChangeRisk::Safe);
+    assert_eq!(ambiguous.risk(), ChangeRisk::Ambiguous);
+    assert_eq!(destructive.risk(), ChangeRisk::Destructive);
 }
 
 fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {

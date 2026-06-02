@@ -9,8 +9,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use squealy_cli::extract::extract_model;
 use squealy_model::{
-    DatabaseDiffChange, DatabaseModel, SchemaBackend, SchemaCapabilities, SchemaConnect,
-    TableDiffChange, check_create, diff_models, introspect, publish, read_package,
+    ChangeRisk, DatabaseDiffChange, DatabaseModel, SchemaBackend, SchemaCapabilities,
+    SchemaConnect, TableDiffChange, check_create, diff_models, introspect, publish, read_package,
     render_create_sql, write_package,
 };
 use squealy_mysql::Mysql;
@@ -234,25 +234,26 @@ fn print_diff(diff: &squealy_model::DatabaseDiff) {
     }
 
     for change in &diff.changes {
+        let risk = risk_name(change.risk());
         match change {
             DatabaseDiffChange::CreateSchema { schema } => {
-                println!("schema + {}", schema_name(schema));
+                println!("{risk} schema + {}", schema_name(schema));
             }
             DatabaseDiffChange::DropSchema { schema } => {
-                println!("schema - {}", schema_name(schema));
+                println!("{risk} schema - {}", schema_name(schema));
             }
             DatabaseDiffChange::CreateTable { schema, table } => {
-                println!("table + {}", qualified(schema, &table.name));
+                println!("{risk} table + {}", qualified(schema, &table.name));
             }
             DatabaseDiffChange::DropTable { schema, table } => {
-                println!("table - {}", qualified(schema, &table.name));
+                println!("{risk} table - {}", qualified(schema, &table.name));
             }
             DatabaseDiffChange::AlterTable {
                 schema,
                 table,
                 changes,
             } => {
-                println!("table ~ {}", qualified(schema, table));
+                println!("{risk} table ~ {}", qualified(schema, table));
                 for table_change in changes {
                     print_table_change(schema, table, table_change);
                 }
@@ -263,42 +264,63 @@ fn print_diff(diff: &squealy_model::DatabaseDiff) {
 
 fn print_table_change(schema: &Option<String>, table: &str, change: &TableDiffChange) {
     let table = qualified(schema, table);
+    let risk = risk_name(change.risk());
     match change {
-        TableDiffChange::SetTableComment { .. } => println!("comment ~ {table}"),
-        TableDiffChange::AddColumn { column } => println!("column + {table}.{}", column.name),
-        TableDiffChange::DropColumn { column } => println!("column - {table}.{}", column.name),
-        TableDiffChange::AlterColumn { after, .. } => println!("column ~ {table}.{}", after.name),
+        TableDiffChange::SetTableComment { .. } => println!("{risk} comment ~ {table}"),
+        TableDiffChange::AddColumn { column } => {
+            println!("{risk} column + {table}.{}", column.name);
+        }
+        TableDiffChange::DropColumn { column } => {
+            println!("{risk} column - {table}.{}", column.name);
+        }
+        TableDiffChange::AlterColumn { after, .. } => {
+            println!("{risk} column ~ {table}.{}", after.name);
+        }
         TableDiffChange::AddPrimaryKey { constraint } => {
-            println!("primary-key + {table}.{}", constraint.name);
+            println!("{risk} primary-key + {table}.{}", constraint.name);
         }
         TableDiffChange::DropPrimaryKey { constraint } => {
-            println!("primary-key - {table}.{}", constraint.name);
+            println!("{risk} primary-key - {table}.{}", constraint.name);
         }
         TableDiffChange::AlterPrimaryKey { after, .. } => {
-            println!("primary-key ~ {table}.{}", after.name);
+            println!("{risk} primary-key ~ {table}.{}", after.name);
         }
         TableDiffChange::AddUnique { constraint } => {
-            println!("unique + {table}.{}", constraint.name)
+            println!("{risk} unique + {table}.{}", constraint.name)
         }
         TableDiffChange::DropUnique { constraint } => {
-            println!("unique - {table}.{}", constraint.name);
+            println!("{risk} unique - {table}.{}", constraint.name);
         }
-        TableDiffChange::AlterUnique { after, .. } => println!("unique ~ {table}.{}", after.name),
+        TableDiffChange::AlterUnique { after, .. } => {
+            println!("{risk} unique ~ {table}.{}", after.name);
+        }
         TableDiffChange::AddForeignKey { foreign_key } => {
-            println!("foreign-key + {table}.{}", foreign_key.name);
+            println!("{risk} foreign-key + {table}.{}", foreign_key.name);
         }
         TableDiffChange::DropForeignKey { foreign_key } => {
-            println!("foreign-key - {table}.{}", foreign_key.name);
+            println!("{risk} foreign-key - {table}.{}", foreign_key.name);
         }
         TableDiffChange::AlterForeignKey { after, .. } => {
-            println!("foreign-key ~ {table}.{}", after.name);
+            println!("{risk} foreign-key ~ {table}.{}", after.name);
         }
-        TableDiffChange::AddCheck { check } => println!("check + {table}.{}", check.name),
-        TableDiffChange::DropCheck { check } => println!("check - {table}.{}", check.name),
-        TableDiffChange::AlterCheck { after, .. } => println!("check ~ {table}.{}", after.name),
-        TableDiffChange::AddIndex { index } => println!("index + {table}.{}", index.name),
-        TableDiffChange::DropIndex { index } => println!("index - {table}.{}", index.name),
-        TableDiffChange::AlterIndex { after, .. } => println!("index ~ {table}.{}", after.name),
+        TableDiffChange::AddCheck { check } => println!("{risk} check + {table}.{}", check.name),
+        TableDiffChange::DropCheck { check } => println!("{risk} check - {table}.{}", check.name),
+        TableDiffChange::AlterCheck { after, .. } => {
+            println!("{risk} check ~ {table}.{}", after.name);
+        }
+        TableDiffChange::AddIndex { index } => println!("{risk} index + {table}.{}", index.name),
+        TableDiffChange::DropIndex { index } => println!("{risk} index - {table}.{}", index.name),
+        TableDiffChange::AlterIndex { after, .. } => {
+            println!("{risk} index ~ {table}.{}", after.name);
+        }
+    }
+}
+
+fn risk_name(risk: ChangeRisk) -> &'static str {
+    match risk {
+        ChangeRisk::Safe => "safe",
+        ChangeRisk::Destructive => "destructive",
+        ChangeRisk::Ambiguous => "ambiguous",
     }
 }
 

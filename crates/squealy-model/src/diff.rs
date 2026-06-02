@@ -21,6 +21,31 @@ impl DatabaseDiff {
     pub fn is_empty(&self) -> bool {
         self.changes.is_empty()
     }
+
+    pub fn classified_changes(&self) -> Vec<ClassifiedDatabaseDiffChange> {
+        self.changes
+            .iter()
+            .map(|change| ClassifiedDatabaseDiffChange {
+                risk: change.risk(),
+                change: change.clone(),
+            })
+            .collect()
+    }
+}
+
+/// A diff change with conservative deployment-risk classification.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClassifiedDatabaseDiffChange {
+    pub risk: ChangeRisk,
+    pub change: DatabaseDiffChange,
+}
+
+/// Conservative risk classification for a schema change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChangeRisk {
+    Safe,
+    Destructive,
+    Ambiguous,
 }
 
 /// A database-level change.
@@ -45,6 +70,20 @@ pub enum DatabaseDiffChange {
         table: String,
         changes: Vec<TableDiffChange>,
     },
+}
+
+impl DatabaseDiffChange {
+    pub fn risk(&self) -> ChangeRisk {
+        match self {
+            DatabaseDiffChange::CreateSchema { .. } | DatabaseDiffChange::CreateTable { .. } => {
+                ChangeRisk::Safe
+            }
+            DatabaseDiffChange::DropSchema { .. } | DatabaseDiffChange::DropTable { .. } => {
+                ChangeRisk::Destructive
+            }
+            DatabaseDiffChange::AlterTable { changes, .. } => classify_table_changes(changes),
+        }
+    }
 }
 
 /// A table-level change.
@@ -114,6 +153,50 @@ pub enum TableDiffChange {
         before: IndexModel,
         after: IndexModel,
     },
+}
+
+impl TableDiffChange {
+    pub fn risk(&self) -> ChangeRisk {
+        match self {
+            TableDiffChange::SetTableComment { .. }
+            | TableDiffChange::AddPrimaryKey { .. }
+            | TableDiffChange::AddUnique { .. }
+            | TableDiffChange::AddForeignKey { .. }
+            | TableDiffChange::AddCheck { .. }
+            | TableDiffChange::AddIndex { .. } => ChangeRisk::Safe,
+            TableDiffChange::DropColumn { .. }
+            | TableDiffChange::DropPrimaryKey { .. }
+            | TableDiffChange::DropUnique { .. }
+            | TableDiffChange::DropForeignKey { .. }
+            | TableDiffChange::DropCheck { .. }
+            | TableDiffChange::DropIndex { .. } => ChangeRisk::Destructive,
+            TableDiffChange::AddColumn { column } => {
+                if column.nullable || column.default.is_some() || column.identity.is_some() {
+                    ChangeRisk::Safe
+                } else {
+                    ChangeRisk::Ambiguous
+                }
+            }
+            TableDiffChange::AlterColumn { .. }
+            | TableDiffChange::AlterPrimaryKey { .. }
+            | TableDiffChange::AlterUnique { .. }
+            | TableDiffChange::AlterForeignKey { .. }
+            | TableDiffChange::AlterCheck { .. }
+            | TableDiffChange::AlterIndex { .. } => ChangeRisk::Ambiguous,
+        }
+    }
+}
+
+fn classify_table_changes(changes: &[TableDiffChange]) -> ChangeRisk {
+    let mut risk = ChangeRisk::Safe;
+    for change in changes {
+        match change.risk() {
+            ChangeRisk::Destructive => return ChangeRisk::Destructive,
+            ChangeRisk::Ambiguous => risk = ChangeRisk::Ambiguous,
+            ChangeRisk::Safe => {}
+        }
+    }
+    risk
 }
 
 /// Compares `desired` with `actual`.
