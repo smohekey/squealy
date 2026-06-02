@@ -1,7 +1,7 @@
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
     ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexMethod, IndexModel, SchemaModel, SqlType, TableModel,
+    IndexDirection, IndexMethod, IndexModel, SchemaModel, SqlType, TableModel,
 };
 use tokio_postgres::Client;
 
@@ -262,7 +262,12 @@ SELECT
         FROM unnest(i.indkey) WITH ORDINALITY AS key(attnum, position)
         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = key.attnum
         ORDER BY key.position
-    ) AS columns
+    ) AS columns,
+    ARRAY(
+        SELECT CASE WHEN (option & 1) = 1 THEN 'DESC' ELSE 'ASC' END
+        FROM unnest(i.indoption) WITH ORDINALITY AS opt(option, position)
+        ORDER BY position
+    ) AS directions
 FROM pg_index i
 JOIN pg_class c ON c.oid = i.indrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -284,6 +289,11 @@ ORDER BY idx.relname",
             unique: row.get(1),
             method: Some(IndexMethod::from_sql(&row.get::<_, String>(2))),
             columns: row.get(3),
+            directions: row
+                .get::<_, Vec<String>>(4)
+                .into_iter()
+                .map(|direction| index_direction(&direction))
+                .collect(),
         })
         .collect())
 }
@@ -432,6 +442,13 @@ fn action(action: &str) -> Option<ForeignKeyAction> {
         "n" => Some(ForeignKeyAction::SetNull),
         "d" => Some(ForeignKeyAction::SetDefault),
         _ => None,
+    }
+}
+
+fn index_direction(direction: &str) -> IndexDirection {
+    match direction {
+        "DESC" => IndexDirection::Desc,
+        _ => IndexDirection::Asc,
     }
 }
 

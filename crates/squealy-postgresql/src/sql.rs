@@ -703,7 +703,7 @@ pub(crate) mod ddl {
             writer.write_all(method.postgres_sql().as_bytes())?;
         }
         writer.write_all(b" (")?;
-        write_quoted_ident_list(&index.columns, writer)?;
+        write_index_columns(index, writer)?;
         writer.write_all(b")")
     }
 
@@ -744,6 +744,21 @@ pub(crate) mod ddl {
                 writer.write_all(b", ")?;
             }
             write_quoted_ident(column, writer)?;
+        }
+        Ok(())
+    }
+
+    fn write_index_columns(index: &IndexModel, writer: &mut impl Write) -> io::Result<()> {
+        for (position, column) in index.columns.iter().enumerate() {
+            if position > 0 {
+                writer.write_all(b", ")?;
+            }
+            write_quoted_ident(column, writer)?;
+            match index.directions.get(position) {
+                Some(squealy::IndexDirection::Asc) => writer.write_all(b" ASC")?,
+                Some(squealy::IndexDirection::Desc) => writer.write_all(b" DESC")?,
+                None => {}
+            }
         }
         Ok(())
     }

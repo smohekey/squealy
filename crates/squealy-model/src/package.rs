@@ -19,7 +19,7 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
     ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexMethod, IndexModel, SchemaModel, SqlType, TableModel,
+    IndexDirection, IndexMethod, IndexModel, SchemaModel, SqlType, TableModel,
 };
 
 /// Current package format version, recorded in `manifest.kdl`.
@@ -303,6 +303,15 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
     if let Some(method) = &index.method {
         node.push(KdlEntry::new_prop("method", index_method(method)));
     }
+    if !index.directions.is_empty() {
+        let mut directions = KdlNode::new("directions");
+        for direction in &index.directions {
+            directions.push(KdlEntry::new(index_direction(direction)));
+        }
+        let mut children = KdlDocument::new();
+        children.nodes_mut().push(directions);
+        node.set_children(children);
+    }
     node
 }
 
@@ -494,6 +503,11 @@ fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
         columns: args(node),
         unique: prop_bool(node, "unique"),
         method: prop(node, "method").map(IndexMethod::from_sql),
+        directions: child_nodes(node, "directions")
+            .next()
+            .map(index_directions_from_node)
+            .transpose()?
+            .unwrap_or_default(),
     })
 }
 
@@ -732,6 +746,26 @@ fn index_method(method: &IndexMethod) -> &str {
     }
 }
 
+fn index_direction(direction: &IndexDirection) -> &'static str {
+    match direction {
+        IndexDirection::Asc => "asc",
+        IndexDirection::Desc => "desc",
+    }
+}
+
+fn index_directions_from_node(node: &KdlNode) -> Result<Vec<IndexDirection>, PackageError> {
+    args(node)
+        .into_iter()
+        .map(|direction| match direction.as_str() {
+            "asc" => Ok(IndexDirection::Asc),
+            "desc" => Ok(IndexDirection::Desc),
+            other => Err(malformed(format!(
+                "`directions` has unsupported index direction `{other}`"
+            ))),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -790,6 +824,7 @@ mod tests {
                             columns: vec!["slug".to_owned()],
                             unique: true,
                             method: None,
+                            directions: Vec::new(),
                         }],
                     },
                     TableModel {
@@ -1094,6 +1129,7 @@ mod tests {
                 columns: vec!["event_id".to_owned()],
                 unique: false,
                 method: Some(method.clone()),
+                directions: vec![IndexDirection::Desc],
             })
             .collect();
         let model = DatabaseModel {

@@ -271,6 +271,14 @@ pub struct IndexModel {
     pub columns: Vec<String>,
     pub unique: bool,
     pub method: Option<IndexMethod>,
+    pub directions: Vec<IndexDirection>,
+}
+
+/// Sort direction for an indexed column.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IndexDirection {
+    Asc,
+    Desc,
 }
 
 /// Backend-neutral index access method.
@@ -440,6 +448,7 @@ fn index_from_dyn(table: &str, index: &dyn Index) -> IndexModel {
         columns: columns.iter().map(|column| (*column).to_owned()).collect(),
         unique: index.unique(),
         method: None,
+        directions: Vec::new(),
     }
 }
 

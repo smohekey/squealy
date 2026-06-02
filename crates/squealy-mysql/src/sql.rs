@@ -222,14 +222,29 @@ fn write_create_index(
     }
     writer.write_all(b"INDEX ")?;
     write_quoted_ident(&index.name, writer)?;
-    writer.write_all(b" ON ")?;
-    write_qualified_name(schema, table, writer)?;
-    writer.write_all(b" (")?;
-    write_quoted_ident_list(&index.columns, writer)?;
-    writer.write_all(b")")?;
     if let Some(method) = &index.method {
         writer.write_all(b" USING ")?;
         writer.write_all(method.mysql_sql().as_bytes())?;
+    }
+    writer.write_all(b" ON ")?;
+    write_qualified_name(schema, table, writer)?;
+    writer.write_all(b" (")?;
+    write_index_columns(index, writer)?;
+    writer.write_all(b")")?;
+    Ok(())
+}
+
+fn write_index_columns(index: &IndexModel, writer: &mut impl Write) -> io::Result<()> {
+    for (position, column) in index.columns.iter().enumerate() {
+        if position > 0 {
+            writer.write_all(b", ")?;
+        }
+        write_quoted_ident(column, writer)?;
+        match index.directions.get(position) {
+            Some(squealy::IndexDirection::Asc) => writer.write_all(b" ASC")?,
+            Some(squealy::IndexDirection::Desc) => writer.write_all(b" DESC")?,
+            None => {}
+        }
     }
     Ok(())
 }

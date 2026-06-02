@@ -202,6 +202,7 @@ fn rich_model() -> DatabaseModel {
                         columns: vec!["tenant_id".to_owned()],
                         unique: false,
                         method: Some(IndexMethod::BTree),
+                        directions: vec![IndexDirection::Asc],
                     }],
                 },
                 TableModel {

@@ -4,7 +4,7 @@ use mysql_async::{params, prelude::Queryable};
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
     ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexMethod, IndexModel, SchemaModel, SqlType, TableModel,
+    IndexDirection, IndexMethod, IndexModel, SchemaModel, SqlType, TableModel,
 };
 
 use crate::MysqlError;
@@ -287,7 +287,7 @@ async fn indexes(
     let rows = conn
         .exec_map(
             "\
-SELECT INDEX_NAME, NON_UNIQUE, INDEX_TYPE, COLUMN_NAME
+SELECT INDEX_NAME, NON_UNIQUE, INDEX_TYPE, COLUMN_NAME, COLLATION
 FROM information_schema.STATISTICS s
 LEFT JOIN information_schema.TABLE_CONSTRAINTS tc
   ON tc.TABLE_SCHEMA = s.TABLE_SCHEMA
@@ -303,22 +303,28 @@ ORDER BY INDEX_NAME, SEQ_IN_INDEX",
                 "schema" => &table_ref.schema,
                 "table" => &table_ref.name,
             },
-            |(name, non_unique, index_type, column): (String, u8, String, String)| {
-                (name, non_unique, index_type, column)
-            },
+            |(name, non_unique, index_type, column, collation): (
+                String,
+                u8,
+                String,
+                String,
+                Option<String>,
+            )| { (name, non_unique, index_type, column, collation) },
         )
         .await
         .map_err(MysqlError::Introspect)?;
 
     let mut grouped = BTreeMap::<String, IndexModel>::new();
-    for (name, non_unique, index_type, column) in rows {
+    for (name, non_unique, index_type, column, collation) in rows {
         let index = grouped.entry(name.clone()).or_insert_with(|| IndexModel {
             name,
             columns: Vec::new(),
             unique: non_unique == 0,
             method: Some(IndexMethod::from_sql(&index_type)),
+            directions: Vec::new(),
         });
         index.columns.push(column);
+        index.directions.push(index_direction(collation.as_deref()));
     }
 
     Ok(grouped.into_values().collect())
@@ -455,6 +461,13 @@ fn action(action: &str) -> Option<ForeignKeyAction> {
         "SET DEFAULT" => Some(ForeignKeyAction::SetDefault),
         "NO ACTION" => None,
         _ => None,
+    }
+}
+
+fn index_direction(collation: Option<&str>) -> IndexDirection {
+    match collation {
+        Some("D") => IndexDirection::Desc,
+        _ => IndexDirection::Asc,
     }
 }
 
