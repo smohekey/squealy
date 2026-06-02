@@ -534,6 +534,27 @@ pub(crate) mod ddl {
 
         for schema in &model.schemas {
             for table in &schema.tables {
+                if let Some(comment) = &table.comment {
+                    statement(writer, &mut first)?;
+                    write_comment_on_table(schema.name.as_deref(), &table.name, comment, writer)?;
+                }
+                for column in &table.columns {
+                    if let Some(comment) = &column.comment {
+                        statement(writer, &mut first)?;
+                        write_comment_on_column(
+                            schema.name.as_deref(),
+                            &table.name,
+                            &column.name,
+                            comment,
+                            writer,
+                        )?;
+                    }
+                }
+            }
+        }
+
+        for schema in &model.schemas {
+            for table in &schema.tables {
                 for index in &table.indexes {
                     statement(writer, &mut first)?;
                     write_create_index(schema.name.as_deref(), &table.name, index, writer)?;
@@ -607,6 +628,33 @@ pub(crate) mod ddl {
         }
 
         writer.write_all(b"\n)")
+    }
+
+    fn write_comment_on_table(
+        schema: Option<&str>,
+        table: &str,
+        comment: &str,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        writer.write_all(b"COMMENT ON TABLE ")?;
+        write_qualified_name(schema, table, writer)?;
+        writer.write_all(b" IS ")?;
+        write_quoted_text(comment, writer)
+    }
+
+    fn write_comment_on_column(
+        schema: Option<&str>,
+        table: &str,
+        column: &str,
+        comment: &str,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        writer.write_all(b"COMMENT ON COLUMN ")?;
+        write_qualified_name(schema, table, writer)?;
+        writer.write_all(b".")?;
+        write_quoted_ident(column, writer)?;
+        writer.write_all(b" IS ")?;
+        write_quoted_text(comment, writer)
     }
 
     /// Separates entries inside a `CREATE TABLE (...)` list: each entry is on its own indented line.

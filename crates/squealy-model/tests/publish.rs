@@ -140,9 +140,11 @@ fn rich_model() -> DatabaseModel {
             tables: vec![
                 TableModel {
                     name: "memberships".to_owned(),
+                    comment: Some("Tenant membership rows".to_owned()),
                     columns: vec![
                         ColumnModel {
                             name: "id".to_owned(),
+                            comment: None,
                             ty: SqlType::I32,
                             nullable: false,
                             default: None,
@@ -153,6 +155,7 @@ fn rich_model() -> DatabaseModel {
                         },
                         ColumnModel {
                             name: "tenant_id".to_owned(),
+                            comment: Some("Referenced tenant id".to_owned()),
                             ty: SqlType::I32,
                             nullable: false,
                             default: None,
@@ -161,6 +164,7 @@ fn rich_model() -> DatabaseModel {
                         },
                         ColumnModel {
                             name: "role_code".to_owned(),
+                            comment: None,
                             ty: SqlType::Char(2),
                             nullable: false,
                             default: Some(DefaultValue::Text("MB".to_owned())),
@@ -169,6 +173,7 @@ fn rich_model() -> DatabaseModel {
                         },
                         ColumnModel {
                             name: "quota".to_owned(),
+                            comment: None,
                             ty: SqlType::Decimal {
                                 precision: 10,
                                 scale: 2,
@@ -213,9 +218,11 @@ fn rich_model() -> DatabaseModel {
                 },
                 TableModel {
                     name: "tenants".to_owned(),
+                    comment: Some("Tenant catalog rows".to_owned()),
                     columns: vec![
                         ColumnModel {
                             name: "id".to_owned(),
+                            comment: None,
                             ty: SqlType::I32,
                             nullable: false,
                             default: None,
@@ -226,6 +233,7 @@ fn rich_model() -> DatabaseModel {
                         },
                         ColumnModel {
                             name: "slug".to_owned(),
+                            comment: Some("Stable tenant slug".to_owned()),
                             ty: SqlType::Varchar(64),
                             nullable: false,
                             default: None,
@@ -234,6 +242,7 @@ fn rich_model() -> DatabaseModel {
                         },
                         ColumnModel {
                             name: "slug_len".to_owned(),
+                            comment: None,
                             ty: SqlType::I32,
                             nullable: true,
                             default: None,
@@ -245,6 +254,7 @@ fn rich_model() -> DatabaseModel {
                         },
                         ColumnModel {
                             name: "settings".to_owned(),
+                            comment: None,
                             ty: SqlType::Jsonb,
                             nullable: true,
                             default: None,

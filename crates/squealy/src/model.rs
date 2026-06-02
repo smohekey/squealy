@@ -36,6 +36,7 @@ pub struct SchemaModel {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableModel {
     pub name: String,
+    pub comment: Option<String>,
     pub columns: Vec<ColumnModel>,
     pub primary_key: Option<Constraint>,
     pub foreign_keys: Vec<ForeignKeyModel>,
@@ -48,6 +49,7 @@ pub struct TableModel {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ColumnModel {
     pub name: String,
+    pub comment: Option<String>,
     pub ty: SqlType,
     pub nullable: bool,
     pub default: Option<DefaultValue>,
@@ -431,6 +433,7 @@ fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
 
     TableModel {
         name,
+        comment: None,
         columns: columns
             .iter()
             .map(|column| column_from_dyn(*column))
@@ -446,6 +449,7 @@ fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
 fn column_from_dyn(column: &dyn Column) -> ColumnModel {
     ColumnModel {
         name: column.name().to_owned(),
+        comment: None,
         ty: column.column_type().into(),
         nullable: column.nullable(),
         default: column.default().map(DefaultValue::from),

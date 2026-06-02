@@ -169,9 +169,11 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
         tables: vec![
             TableModel {
                 name: "parts".to_owned(),
+                comment: None,
                 columns: vec![
                     ColumnModel {
                         name: "id".to_owned(),
+                        comment: None,
                         ty: SqlType::I32,
                         nullable: false,
                         default: None,
@@ -182,6 +184,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                     },
                     ColumnModel {
                         name: "widget_id".to_owned(),
+                        comment: None,
                         ty: SqlType::I32,
                         nullable: false,
                         default: None,
@@ -220,9 +223,11 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
             },
             TableModel {
                 name: "widgets".to_owned(),
+                comment: None,
                 columns: vec![
                     ColumnModel {
                         name: "id".to_owned(),
+                        comment: None,
                         ty: SqlType::I32,
                         nullable: false,
                         default: None,
@@ -233,6 +238,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                     },
                     ColumnModel {
                         name: "name".to_owned(),
+                        comment: None,
                         ty: SqlType::Varchar(255),
                         nullable: false,
                         default: None,
@@ -241,6 +247,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                     },
                     ColumnModel {
                         name: "seats".to_owned(),
+                        comment: None,
                         ty: SqlType::U32,
                         nullable: false,
                         default: None,
@@ -271,9 +278,11 @@ fn rich_mysql_model() -> DatabaseModel {
             tables: vec![
                 TableModel {
                     name: "memberships".to_owned(),
+                    comment: Some("Tenant membership rows".to_owned()),
                     columns: vec![
                         ColumnModel {
                             name: "id".to_owned(),
+                            comment: None,
                             ty: SqlType::I32,
                             nullable: false,
                             default: None,
@@ -284,6 +293,7 @@ fn rich_mysql_model() -> DatabaseModel {
                         },
                         ColumnModel {
                             name: "tenant_id".to_owned(),
+                            comment: Some("Referenced tenant id".to_owned()),
                             ty: SqlType::I32,
                             nullable: false,
                             default: None,
@@ -292,6 +302,7 @@ fn rich_mysql_model() -> DatabaseModel {
                         },
                         ColumnModel {
                             name: "role_code".to_owned(),
+                            comment: None,
                             ty: SqlType::Char(2),
                             nullable: false,
                             default: Some(DefaultValue::Text("MB".to_owned())),
@@ -300,6 +311,7 @@ fn rich_mysql_model() -> DatabaseModel {
                         },
                         ColumnModel {
                             name: "quota".to_owned(),
+                            comment: None,
                             ty: SqlType::Decimal {
                                 precision: 10,
                                 scale: 2,
@@ -311,6 +323,7 @@ fn rich_mysql_model() -> DatabaseModel {
                         },
                         ColumnModel {
                             name: "active".to_owned(),
+                            comment: None,
                             ty: SqlType::Bool,
                             nullable: false,
                             default: Some(DefaultValue::Bool(true)),
@@ -352,9 +365,11 @@ fn rich_mysql_model() -> DatabaseModel {
                 },
                 TableModel {
                     name: "tenants".to_owned(),
+                    comment: Some("Tenant catalog rows".to_owned()),
                     columns: vec![
                         ColumnModel {
                             name: "id".to_owned(),
+                            comment: None,
                             ty: SqlType::I32,
                             nullable: false,
                             default: None,
@@ -365,6 +380,7 @@ fn rich_mysql_model() -> DatabaseModel {
                         },
                         ColumnModel {
                             name: "slug".to_owned(),
+                            comment: Some("Stable tenant slug".to_owned()),
                             ty: SqlType::Varchar(64),
                             nullable: false,
                             default: None,
@@ -373,6 +389,7 @@ fn rich_mysql_model() -> DatabaseModel {
                         },
                         ColumnModel {
                             name: "slug_len".to_owned(),
+                            comment: None,
                             ty: SqlType::I32,
                             nullable: true,
                             default: None,
@@ -384,6 +401,7 @@ fn rich_mysql_model() -> DatabaseModel {
                         },
                         ColumnModel {
                             name: "settings".to_owned(),
+                            comment: None,
                             ty: SqlType::Json,
                             nullable: true,
                             default: None,
@@ -414,9 +432,11 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
         tables: vec![
             TableModel {
                 name: "memberships".to_owned(),
+                comment: Some("Tenant membership rows".to_owned()),
                 columns: vec![
                     ColumnModel {
                         name: "id".to_owned(),
+                        comment: None,
                         ty: SqlType::I32,
                         nullable: false,
                         default: None,
@@ -427,6 +447,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                     },
                     ColumnModel {
                         name: "tenant_id".to_owned(),
+                        comment: Some("Referenced tenant id".to_owned()),
                         ty: SqlType::I32,
                         nullable: false,
                         default: None,
@@ -435,6 +456,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                     },
                     ColumnModel {
                         name: "role_code".to_owned(),
+                        comment: None,
                         ty: SqlType::Char(2),
                         nullable: false,
                         default: Some(DefaultValue::Text("MB".to_owned())),
@@ -443,6 +465,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                     },
                     ColumnModel {
                         name: "quota".to_owned(),
+                        comment: None,
                         ty: SqlType::Decimal {
                             precision: 10,
                             scale: 2,
@@ -454,6 +477,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                     },
                     ColumnModel {
                         name: "active".to_owned(),
+                        comment: None,
                         ty: SqlType::Bool,
                         nullable: false,
                         default: Some(DefaultValue::Bool(true)),
@@ -495,9 +519,11 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
             },
             TableModel {
                 name: "tenants".to_owned(),
+                comment: Some("Tenant catalog rows".to_owned()),
                 columns: vec![
                     ColumnModel {
                         name: "id".to_owned(),
+                        comment: None,
                         ty: SqlType::I32,
                         nullable: false,
                         default: None,
@@ -508,6 +534,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                     },
                     ColumnModel {
                         name: "slug".to_owned(),
+                        comment: Some("Stable tenant slug".to_owned()),
                         ty: SqlType::Varchar(64),
                         nullable: false,
                         default: None,
@@ -516,6 +543,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                     },
                     ColumnModel {
                         name: "slug_len".to_owned(),
+                        comment: None,
                         ty: SqlType::I32,
                         nullable: true,
                         default: None,
@@ -527,6 +555,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                     },
                     ColumnModel {
                         name: "settings".to_owned(),
+                        comment: None,
                         ty: SqlType::Json,
                         nullable: true,
                         default: None,

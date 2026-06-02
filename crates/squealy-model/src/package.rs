@@ -183,6 +183,9 @@ fn schema_to_node(schema: &SchemaModel) -> KdlNode {
 fn table_to_node(table: &TableModel) -> KdlNode {
     let mut node = KdlNode::new("table");
     node.push(KdlEntry::new(table.name.clone()));
+    if let Some(comment) = &table.comment {
+        node.push(KdlEntry::new_prop("comment", comment.clone()));
+    }
 
     let mut body = KdlDocument::new();
     for column in &table.columns {
@@ -211,6 +214,9 @@ fn table_to_node(table: &TableModel) -> KdlNode {
 fn column_to_node(column: &ColumnModel) -> KdlNode {
     let mut node = KdlNode::new("column");
     node.push(KdlEntry::new(column.name.clone()));
+    if let Some(comment) = &column.comment {
+        node.push(KdlEntry::new_prop("comment", comment.clone()));
+    }
 
     write_sql_type(&mut node, &column.ty);
     if column.nullable {
@@ -509,6 +515,7 @@ fn table_from_node(node: &KdlNode) -> Result<TableModel, PackageError> {
 
     Ok(TableModel {
         name,
+        comment: prop(node, "comment").map(str::to_owned),
         columns,
         primary_key,
         foreign_keys,
@@ -526,6 +533,7 @@ fn column_from_node(node: &KdlNode) -> Result<ColumnModel, PackageError> {
     let default = default_from_node(node)?;
     Ok(ColumnModel {
         name,
+        comment: prop(node, "comment").map(str::to_owned),
         ty,
         nullable: prop_bool(node, "nullable"),
         default,
@@ -910,9 +918,11 @@ mod tests {
                 tables: vec![
                     TableModel {
                         name: "orgs".to_owned(),
+                        comment: Some("Organizations in the catalog".to_owned()),
                         columns: vec![
                             ColumnModel {
                                 name: "id".to_owned(),
+                                comment: Some("Synthetic organization id".to_owned()),
                                 ty: SqlType::I32,
                                 nullable: false,
                                 default: None,
@@ -923,6 +933,7 @@ mod tests {
                             },
                             ColumnModel {
                                 name: "slug".to_owned(),
+                                comment: Some("Stable organization slug".to_owned()),
                                 ty: SqlType::String,
                                 nullable: false,
                                 default: Some(DefaultValue::Text("acme".to_owned())),
@@ -931,6 +942,7 @@ mod tests {
                             },
                             ColumnModel {
                                 name: "metadata".to_owned(),
+                                comment: None,
                                 ty: SqlType::Raw("jsonb".to_owned()),
                                 nullable: true,
                                 default: Some(DefaultValue::Raw("'{}'::jsonb".to_owned())),
@@ -967,8 +979,10 @@ mod tests {
                     },
                     TableModel {
                         name: "members".to_owned(),
+                        comment: None,
                         columns: vec![ColumnModel {
                             name: "org_id".to_owned(),
+                            comment: None,
                             ty: SqlType::I32,
                             nullable: false,
                             default: None,
@@ -998,6 +1012,8 @@ mod tests {
     fn kdl_round_trips() {
         let model = sample_model();
         let kdl = to_kdl(&model);
+        assert!(kdl.contains("comment=\"Organizations in the catalog\""));
+        assert!(kdl.contains("comment=\"Synthetic organization id\""));
         let parsed = from_kdl(&kdl).expect("model.kdl should parse");
         assert_eq!(parsed, model, "KDL round-trip diverged:\n{kdl}");
     }
@@ -1026,8 +1042,10 @@ mod tests {
                 name: None,
                 tables: vec![TableModel {
                     name: "events".to_owned(),
+                    comment: None,
                     columns: vec![ColumnModel {
                         name: "user id".to_owned(),
+                        comment: None,
                         ty: SqlType::I32,
                         nullable: false,
                         default: None,
@@ -1084,6 +1102,7 @@ mod tests {
             .enumerate()
             .map(|(index, ty)| ColumnModel {
                 name: format!("c{index}"),
+                comment: None,
                 ty: ty.clone(),
                 nullable: false,
                 default: None,
@@ -1097,6 +1116,7 @@ mod tests {
                 name: None,
                 tables: vec![TableModel {
                     name: "structured".to_owned(),
+                    comment: None,
                     columns,
                     primary_key: None,
                     foreign_keys: vec![],
@@ -1117,6 +1137,7 @@ mod tests {
         let columns = vec![
             ColumnModel {
                 name: "id_always".to_owned(),
+                comment: None,
                 ty: SqlType::I32,
                 nullable: false,
                 default: None,
@@ -1127,6 +1148,7 @@ mod tests {
             },
             ColumnModel {
                 name: "id_by_default".to_owned(),
+                comment: None,
                 ty: SqlType::I32,
                 nullable: false,
                 default: None,
@@ -1137,6 +1159,7 @@ mod tests {
             },
             ColumnModel {
                 name: "id_auto_increment".to_owned(),
+                comment: None,
                 ty: SqlType::I32,
                 nullable: false,
                 default: None,
@@ -1147,6 +1170,7 @@ mod tests {
             },
             ColumnModel {
                 name: "virtual_generated".to_owned(),
+                comment: None,
                 ty: SqlType::I32,
                 nullable: true,
                 default: None,
@@ -1158,6 +1182,7 @@ mod tests {
             },
             ColumnModel {
                 name: "stored_generated".to_owned(),
+                comment: None,
                 ty: SqlType::I32,
                 nullable: true,
                 default: None,
@@ -1169,6 +1194,7 @@ mod tests {
             },
             ColumnModel {
                 name: "unknown_generated".to_owned(),
+                comment: None,
                 ty: SqlType::I32,
                 nullable: true,
                 default: None,
@@ -1184,6 +1210,7 @@ mod tests {
                 name: None,
                 tables: vec![TableModel {
                     name: "derived_columns".to_owned(),
+                    comment: None,
                     columns,
                     primary_key: None,
                     foreign_keys: vec![],
@@ -1230,6 +1257,7 @@ mod tests {
                 name: None,
                 tables: vec![TableModel {
                     name: "children".to_owned(),
+                    comment: None,
                     columns: vec![],
                     primary_key: None,
                     foreign_keys,
@@ -1281,6 +1309,7 @@ mod tests {
                 name: None,
                 tables: vec![TableModel {
                     name: "events".to_owned(),
+                    comment: None,
                     columns: vec![],
                     primary_key: None,
                     foreign_keys: vec![],
@@ -1303,6 +1332,7 @@ mod tests {
                 name: None,
                 tables: vec![TableModel {
                     name: "events".to_owned(),
+                    comment: None,
                     columns: vec![],
                     primary_key: None,
                     foreign_keys: vec![],
@@ -1346,6 +1376,7 @@ mod tests {
                 name: None,
                 tables: vec![TableModel {
                     name: "events".to_owned(),
+                    comment: None,
                     columns: vec![],
                     primary_key: None,
                     foreign_keys: vec![],

@@ -98,7 +98,12 @@ fn write_create_table(
         write_check(check, writer)?;
     }
 
-    writer.write_all(b"\n)")
+    writer.write_all(b"\n)")?;
+    if let Some(comment) = &table.comment {
+        writer.write_all(b" COMMENT=")?;
+        write_quoted_text(comment, writer)?;
+    }
+    Ok(())
 }
 
 fn entry(writer: &mut impl Write, first: &mut bool) -> io::Result<()> {
@@ -134,6 +139,10 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
             }
             GeneratedStorage::Stored => writer.write_all(b" STORED")?,
         }
+    }
+    if let Some(comment) = &column.comment {
+        writer.write_all(b" COMMENT ")?;
+        write_quoted_text(comment, writer)?;
     }
     Ok(())
 }

@@ -466,14 +466,55 @@ ALTER TABLE \"catalog\".\"memberships\" ADD CONSTRAINT \"fk_memberships_tenant_i
 }
 
 #[test]
+fn postgres_renders_table_and_column_comments() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog".to_owned()),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                comment: Some("Tenant records".to_owned()),
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    comment: Some("Tenant's stable slug".to_owned()),
+                    ty: SqlType::String,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "CREATE SCHEMA IF NOT EXISTS \"catalog\";\n\
+CREATE TABLE \"catalog\".\"tenants\" (\n  \"slug\" text NOT NULL\n);\n\
+COMMENT ON TABLE \"catalog\".\"tenants\" IS 'Tenant records';\n\
+COMMENT ON COLUMN \"catalog\".\"tenants\".\"slug\" IS 'Tenant''s stable slug';"
+    );
+}
+
+#[test]
 fn postgres_renders_partial_indexes() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
+                comment: None,
                 columns: vec![ColumnModel {
                     name: "tenant_id".to_owned(),
+                    comment: None,
                     ty: SqlType::I32,
                     nullable: false,
                     default: None,
@@ -520,8 +561,10 @@ fn postgres_renders_expression_indexes() {
             name: Some("catalog".to_owned()),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
+                comment: None,
                 columns: vec![ColumnModel {
                     name: "slug".to_owned(),
+                    comment: None,
                     ty: SqlType::String,
                     nullable: false,
                     default: None,
@@ -568,9 +611,11 @@ fn postgres_renders_covering_indexes() {
             name: Some("catalog".to_owned()),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
+                comment: None,
                 columns: vec![
                     ColumnModel {
                         name: "tenant_id".to_owned(),
+                        comment: None,
                         ty: SqlType::I32,
                         nullable: false,
                         default: None,
@@ -579,6 +624,7 @@ fn postgres_renders_covering_indexes() {
                     },
                     ColumnModel {
                         name: "role_code".to_owned(),
+                        comment: None,
                         ty: SqlType::String,
                         nullable: false,
                         default: None,
@@ -626,8 +672,10 @@ fn postgres_renders_index_null_ordering() {
             name: Some("catalog".to_owned()),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
+                comment: None,
                 columns: vec![ColumnModel {
                     name: "tenant_id".to_owned(),
+                    comment: None,
                     ty: SqlType::I32,
                     nullable: true,
                     default: None,
@@ -674,8 +722,10 @@ fn postgres_renders_index_operator_classes() {
             name: Some("catalog".to_owned()),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
+                comment: None,
                 columns: vec![ColumnModel {
                     name: "slug".to_owned(),
+                    comment: None,
                     ty: SqlType::String,
                     nullable: false,
                     default: None,
@@ -725,8 +775,10 @@ fn postgres_renders_index_collations() {
             name: Some("catalog".to_owned()),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
+                comment: None,
                 columns: vec![ColumnModel {
                     name: "slug".to_owned(),
+                    comment: None,
                     ty: SqlType::String,
                     nullable: false,
                     default: None,

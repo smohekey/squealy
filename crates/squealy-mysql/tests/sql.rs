@@ -54,14 +54,53 @@ ALTER TABLE `shop`.`memberships` ADD CONSTRAINT `fk_memberships_tenant_id` FOREI
 }
 
 #[test]
+fn mysql_renders_table_and_column_comments() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                comment: Some("Tenant records".to_owned()),
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    comment: Some("Tenant's stable slug".to_owned()),
+                    ty: SqlType::String,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "CREATE SCHEMA IF NOT EXISTS `shop`;\n\
+CREATE TABLE `shop`.`tenants` (\n  `slug` VARCHAR(255) NOT NULL COMMENT 'Tenant''s stable slug'\n) COMMENT='Tenant records';"
+    );
+}
+
+#[test]
 fn mysql_rejects_partial_index_predicates() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("shop".to_owned()),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
+                comment: None,
                 columns: vec![ColumnModel {
                     name: "tenant_id".to_owned(),
+                    comment: None,
                     ty: SqlType::I32,
                     nullable: false,
                     default: None,
@@ -101,8 +140,10 @@ fn mysql_rejects_expression_indexes() {
             name: Some("shop".to_owned()),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
+                comment: None,
                 columns: vec![ColumnModel {
                     name: "slug".to_owned(),
+                    comment: None,
                     ty: SqlType::String,
                     nullable: false,
                     default: None,
@@ -142,9 +183,11 @@ fn mysql_rejects_covering_index_include_columns() {
             name: Some("shop".to_owned()),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
+                comment: None,
                 columns: vec![
                     ColumnModel {
                         name: "tenant_id".to_owned(),
+                        comment: None,
                         ty: SqlType::I32,
                         nullable: false,
                         default: None,
@@ -153,6 +196,7 @@ fn mysql_rejects_covering_index_include_columns() {
                     },
                     ColumnModel {
                         name: "role_code".to_owned(),
+                        comment: None,
                         ty: SqlType::String,
                         nullable: false,
                         default: None,
@@ -193,8 +237,10 @@ fn mysql_rejects_index_null_ordering() {
             name: Some("shop".to_owned()),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
+                comment: None,
                 columns: vec![ColumnModel {
                     name: "tenant_id".to_owned(),
+                    comment: None,
                     ty: SqlType::I32,
                     nullable: true,
                     default: None,
@@ -234,8 +280,10 @@ fn mysql_rejects_index_operator_classes() {
             name: Some("shop".to_owned()),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
+                comment: None,
                 columns: vec![ColumnModel {
                     name: "slug".to_owned(),
+                    comment: None,
                     ty: SqlType::String,
                     nullable: false,
                     default: None,
@@ -278,8 +326,10 @@ fn mysql_rejects_index_collations() {
             name: Some("shop".to_owned()),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
+                comment: None,
                 columns: vec![ColumnModel {
                     name: "slug".to_owned(),
+                    comment: None,
                     ty: SqlType::String,
                     nullable: false,
                     default: None,

@@ -69,6 +69,7 @@ async fn table(client: &Client, table_ref: &TableRef) -> Result<TableModel, Post
 
     Ok(TableModel {
         name: table_ref.name.clone(),
+        comment: table_comment(client, table_ref).await?,
         columns,
         primary_key,
         foreign_keys: foreign_keys(client, table_ref).await?,
@@ -88,7 +89,8 @@ SELECT
     a.attnotnull,
     a.attidentity::text,
     a.attgenerated::text,
-    pg_get_expr(ad.adbin, ad.adrelid)
+    pg_get_expr(ad.adbin, ad.adrelid),
+    col_description(c.oid, a.attnum)
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_attribute a ON a.attrelid = c.oid
@@ -113,6 +115,7 @@ ORDER BY a.attnum",
             let default: Option<String> = row.get(5);
             ColumnModel {
                 name: row.get(0),
+                comment: row.get(6),
                 ty: ty.clone(),
                 nullable: !row.get::<_, bool>(2),
                 default: (generated != "s")
@@ -124,6 +127,26 @@ ORDER BY a.attnum",
             }
         })
         .collect())
+}
+
+async fn table_comment(
+    client: &Client,
+    table_ref: &TableRef,
+) -> Result<Option<String>, PostgresError> {
+    let row = client
+        .query_opt(
+            "\
+SELECT obj_description(c.oid, 'pg_class')
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = $1
+  AND c.relname = $2
+  AND c.relkind IN ('r', 'p')",
+            &[&table_ref.schema, &table_ref.name],
+        )
+        .await?;
+
+    Ok(row.and_then(|row| row.get(0)))
 }
 
 async fn key_constraints(

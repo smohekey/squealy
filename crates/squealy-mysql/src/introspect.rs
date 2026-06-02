@@ -63,6 +63,7 @@ async fn table(
 
     Ok(TableModel {
         name: table_ref.name.clone(),
+        comment: table_comment(conn, table_ref).await?,
         columns,
         primary_key,
         foreign_keys: foreign_keys(conn, table_ref).await?,
@@ -85,7 +86,8 @@ SELECT
     IS_NULLABLE,
     COLUMN_DEFAULT,
     EXTRA,
-    GENERATION_EXPRESSION
+    GENERATION_EXPRESSION,
+    COLUMN_COMMENT
 FROM information_schema.COLUMNS
 WHERE TABLE_SCHEMA = :schema
   AND TABLE_NAME = :table
@@ -94,7 +96,16 @@ ORDER BY ORDINAL_POSITION",
             "schema" => &table_ref.schema,
             "table" => &table_ref.name,
         },
-        |(name, data_type, column_type, is_nullable, default, extra, generation_expression): (
+        |(
+            name,
+            data_type,
+            column_type,
+            is_nullable,
+            default,
+            extra,
+            generation_expression,
+            comment,
+        ): (
             String,
             String,
             String,
@@ -102,11 +113,13 @@ ORDER BY ORDINAL_POSITION",
             Option<String>,
             String,
             Option<String>,
+            String,
         )| {
             let extra = extra.to_ascii_lowercase();
             let ty = sql_type(&data_type, &column_type);
             ColumnModel {
                 name,
+                comment: non_empty(comment),
                 ty: ty.clone(),
                 nullable: is_nullable.eq_ignore_ascii_case("YES"),
                 default: default.map(|value| default_value(&ty, &value)),
@@ -119,6 +132,30 @@ ORDER BY ORDINAL_POSITION",
     )
     .await
     .map_err(MysqlError::Introspect)
+}
+
+async fn table_comment(
+    conn: &mut mysql_async::Conn,
+    table_ref: &TableRef,
+) -> Result<Option<String>, MysqlError> {
+    conn.exec_first(
+        "\
+SELECT TABLE_COMMENT
+FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = :schema
+  AND TABLE_NAME = :table",
+        params! {
+            "schema" => &table_ref.schema,
+            "table" => &table_ref.name,
+        },
+    )
+    .await
+    .map(|comment: Option<String>| comment.and_then(non_empty))
+    .map_err(MysqlError::Introspect)
+}
+
+fn non_empty(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
 }
 
 async fn key_constraints(
