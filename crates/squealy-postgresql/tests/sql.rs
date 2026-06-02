@@ -1,3 +1,4 @@
+use squealy::SchemaBackend;
 use squealy::*;
 use squealy_postgresql::Postgres;
 

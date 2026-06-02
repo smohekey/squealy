@@ -1,10 +1,9 @@
 //! MySQL schema-management backend for squealy.
 //!
 //! This crate is deliberately **schema-only** (no query backend): it implements the DDL-management
-//! traits (`SchemaBackend` now; `SchemaConnect` / `DdlExecutor` / introspection to come) against the
-//! core `DatabaseModel`. Its purpose is partly to keep the crate boundaries honest — a second backend
-//! that renders a different dialect (backtick quoting, `AUTO_INCREMENT`, unsigned integers,
-//! `VARCHAR`-backed strings) without touching core or the model.
+//! traits against the core `DatabaseModel`. Its purpose is partly to keep the crate boundaries
+//! honest — a second backend that renders a different dialect (backtick quoting, `AUTO_INCREMENT`,
+//! unsigned integers, `VARCHAR`-backed strings) without touching core or the model.
 
 #![forbid(unsafe_code)]
 
@@ -12,8 +11,9 @@ use std::fmt;
 use std::io::Write;
 
 use mysql_async::prelude::Queryable;
-use squealy::{DatabaseModel, DdlExecutor, SchemaBackend, SchemaConnect};
+use squealy::{DatabaseModel, DdlExecutor, SchemaBackend, SchemaConnect, SchemaIntrospect};
 
+mod introspect;
 mod sql;
 
 /// The MySQL schema backend marker.
@@ -48,6 +48,7 @@ impl fmt::Debug for MysqlConnection {
 pub enum MysqlError {
     Connect(mysql_async::Error),
     Execute(mysql_async::Error),
+    Introspect(mysql_async::Error),
 }
 
 impl fmt::Display for MysqlError {
@@ -55,6 +56,9 @@ impl fmt::Display for MysqlError {
         match self {
             MysqlError::Connect(error) => write!(formatter, "mysql connect error: {error}"),
             MysqlError::Execute(error) => write!(formatter, "mysql ddl error: {error}"),
+            MysqlError::Introspect(error) => {
+                write!(formatter, "mysql introspection error: {error}")
+            }
         }
     }
 }
@@ -62,7 +66,9 @@ impl fmt::Display for MysqlError {
 impl std::error::Error for MysqlError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            MysqlError::Connect(error) | MysqlError::Execute(error) => Some(error),
+            MysqlError::Connect(error)
+            | MysqlError::Execute(error)
+            | MysqlError::Introspect(error) => Some(error),
         }
     }
 }
@@ -95,6 +101,14 @@ impl DdlExecutor for MysqlConnection {
                 .map_err(MysqlError::Execute)?;
         }
         Ok(())
+    }
+}
+
+impl SchemaIntrospect for MysqlConnection {
+    type Error = MysqlError;
+
+    async fn introspect_database(&mut self) -> Result<DatabaseModel, MysqlError> {
+        introspect::database(&mut self.conn).await
     }
 }
 

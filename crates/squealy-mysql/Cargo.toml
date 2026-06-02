@@ -14,4 +14,5 @@ mysql_async = { version = "0.37", default-features = false, features = ["default
 squealy.workspace = true
 
 [dev-dependencies]
+squealy-model.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

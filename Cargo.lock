@@ -1583,6 +1583,7 @@ version = "0.1.0"
 dependencies = [
  "mysql_async",
  "squealy",
+ "squealy-model",
  "tokio",
 ]
 
