@@ -163,6 +163,133 @@ async fn publish_then_introspect_preserves_richer_mysql_schema_facts() {
         .expect("cleanup");
 }
 
+#[tokio::test]
+#[ignore]
+async fn incremental_publish_applies_changed_column_definitions() {
+    let baseline = alter_column_baseline_model();
+    let desired = alter_column_desired_model();
+    let mut connection = Mysql
+        .connect(&database_url())
+        .await
+        .expect("connect to MySQL");
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog_alter`")
+        .await
+        .expect("drop schema");
+
+    squealy_model::publish(&baseline, &Mysql, &mut connection)
+        .await
+        .expect("publish baseline schema");
+
+    let plan = squealy_model::plan_from_database(
+        &desired,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("plan changed columns");
+    assert_eq!(plan.steps.len(), 2);
+
+    squealy_model::apply_plan(&plan, &Mysql, &mut connection)
+        .await
+        .expect("apply changed columns");
+
+    let actual = squealy_model::introspect(&mut connection)
+        .await
+        .expect("introspect altered schema");
+    let actual_schema = actual
+        .schemas
+        .into_iter()
+        .find(|schema| schema.name.as_deref() == Some("catalog_alter"))
+        .expect("altered schema should be introspected");
+
+    assert_eq!(actual_schema, desired.schemas[0]);
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog_alter`")
+        .await
+        .expect("cleanup");
+}
+
+fn alter_column_baseline_model() -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog_alter".to_owned()),
+            tables: vec![TableModel {
+                name: "events".to_owned(),
+                comment: None,
+                columns: vec![
+                    ColumnModel {
+                        name: "description".to_owned(),
+                        comment: Some("Old description".to_owned()),
+                        ty: SqlType::Varchar(255),
+                        collation: None,
+                        nullable: true,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                    ColumnModel {
+                        name: "status".to_owned(),
+                        comment: Some("Event status".to_owned()),
+                        ty: SqlType::Varchar(64),
+                        collation: None,
+                        nullable: false,
+                        default: Some(DefaultValue::Text("draft".to_owned())),
+                        identity: None,
+                        generated: None,
+                    },
+                ],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    }
+}
+
+fn alter_column_desired_model() -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog_alter".to_owned()),
+            tables: vec![TableModel {
+                name: "events".to_owned(),
+                comment: None,
+                columns: vec![
+                    ColumnModel {
+                        name: "description".to_owned(),
+                        comment: Some("New description".to_owned()),
+                        ty: SqlType::Varchar(128),
+                        collation: None,
+                        nullable: false,
+                        default: Some(DefaultValue::Text("new".to_owned())),
+                        identity: None,
+                        generated: None,
+                    },
+                    ColumnModel {
+                        name: "status".to_owned(),
+                        comment: None,
+                        ty: SqlType::Varchar(64),
+                        collation: None,
+                        nullable: true,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                ],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    }
+}
+
 fn mysql_normalized_catalog_schema() -> SchemaModel {
     SchemaModel {
         name: Some("catalog".to_owned()),

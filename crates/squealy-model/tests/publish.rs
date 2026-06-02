@@ -133,6 +133,125 @@ async fn publish_then_introspect_preserves_richer_schema_facts() {
     assert_eq!(actual_schema, expected.schemas[0]);
 }
 
+#[tokio::test]
+#[ignore]
+async fn incremental_publish_applies_changed_column_definitions() {
+    let mut connection = connect().await;
+    let baseline = alter_column_baseline_model();
+    let desired = alter_column_desired_model();
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS \"publish_demo_alter\" CASCADE")
+        .await
+        .expect("drop schema");
+
+    squealy_model::publish(&baseline, &Postgres, &mut connection)
+        .await
+        .expect("publish baseline schema");
+
+    let plan = squealy_model::plan_from_database(
+        &desired,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("plan changed columns");
+    assert_eq!(plan.steps.len(), 2);
+
+    squealy_model::apply_plan(&plan, &Postgres, &mut connection)
+        .await
+        .expect("apply changed columns");
+
+    let actual = squealy_model::introspect(&mut connection)
+        .await
+        .expect("introspect altered schema");
+    let actual_schema = actual
+        .schemas
+        .into_iter()
+        .find(|schema| schema.name.as_deref() == Some("publish_demo_alter"))
+        .expect("altered schema should be introspected");
+
+    assert_eq!(actual_schema, desired.schemas[0]);
+}
+
+fn alter_column_baseline_model() -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("publish_demo_alter".to_owned()),
+            tables: vec![TableModel {
+                name: "events".to_owned(),
+                comment: None,
+                columns: vec![
+                    ColumnModel {
+                        name: "description".to_owned(),
+                        comment: Some("Old description".to_owned()),
+                        ty: SqlType::String,
+                        collation: None,
+                        nullable: true,
+                        default: Some(DefaultValue::Text("old".to_owned())),
+                        identity: None,
+                        generated: None,
+                    },
+                    ColumnModel {
+                        name: "status".to_owned(),
+                        comment: Some("Event status".to_owned()),
+                        ty: SqlType::Text,
+                        collation: None,
+                        nullable: false,
+                        default: Some(DefaultValue::Text("draft".to_owned())),
+                        identity: None,
+                        generated: None,
+                    },
+                ],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    }
+}
+
+fn alter_column_desired_model() -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("publish_demo_alter".to_owned()),
+            tables: vec![TableModel {
+                name: "events".to_owned(),
+                comment: None,
+                columns: vec![
+                    ColumnModel {
+                        name: "description".to_owned(),
+                        comment: None,
+                        ty: SqlType::Varchar(128),
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                    ColumnModel {
+                        name: "status".to_owned(),
+                        comment: None,
+                        ty: SqlType::Text,
+                        collation: None,
+                        nullable: true,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                ],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    }
+}
+
 fn rich_model() -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
