@@ -306,7 +306,10 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
     if let Some(predicate) = &index.predicate {
         node.push(KdlEntry::new_prop("predicate", predicate.clone()));
     }
-    if !index.expressions.is_empty() || !index.directions.is_empty() {
+    if !index.expressions.is_empty()
+        || !index.include_columns.is_empty()
+        || !index.directions.is_empty()
+    {
         let mut children = KdlDocument::new();
         if !index.expressions.is_empty() {
             let mut expressions = KdlNode::new("expressions");
@@ -314,6 +317,13 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
                 expressions.push(KdlEntry::new(expression.clone()));
             }
             children.nodes_mut().push(expressions);
+        }
+        if !index.include_columns.is_empty() {
+            let mut include = KdlNode::new("include");
+            for column in &index.include_columns {
+                include.push(KdlEntry::new(column.clone()));
+            }
+            children.nodes_mut().push(include);
         }
         if !index.directions.is_empty() {
             let mut directions = KdlNode::new("directions");
@@ -514,6 +524,10 @@ fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
         name: required_prop(node, "name")?,
         columns: args(node),
         expressions: child_nodes(node, "expressions")
+            .next()
+            .map(args)
+            .unwrap_or_default(),
+        include_columns: child_nodes(node, "include")
             .next()
             .map(args)
             .unwrap_or_default(),
@@ -840,6 +854,7 @@ mod tests {
                             name: "uq_orgs_slug_idx".to_owned(),
                             columns: vec!["slug".to_owned()],
                             expressions: Vec::new(),
+                            include_columns: Vec::new(),
                             unique: true,
                             method: None,
                             directions: Vec::new(),
@@ -1147,6 +1162,7 @@ mod tests {
                 name: format!("idx_events_{index}"),
                 columns: vec!["event_id".to_owned()],
                 expressions: Vec::new(),
+                include_columns: Vec::new(),
                 unique: false,
                 method: Some(method.clone()),
                 directions: vec![IndexDirection::Desc],
@@ -1189,6 +1205,7 @@ mod tests {
                         name: "idx_events_lower_name".to_owned(),
                         columns: Vec::new(),
                         expressions: vec!["lower(event_name)".to_owned()],
+                        include_columns: Vec::new(),
                         unique: false,
                         method: Some(IndexMethod::BTree),
                         directions: vec![IndexDirection::Asc],
@@ -1203,6 +1220,40 @@ mod tests {
         assert_eq!(
             parsed, model,
             "index expression round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn kdl_round_trips_index_include_columns() {
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "events".to_owned(),
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys: vec![],
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![IndexModel {
+                        name: "idx_events_org_id".to_owned(),
+                        columns: vec!["org_id".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: vec!["event_name".to_owned()],
+                        unique: false,
+                        method: Some(IndexMethod::BTree),
+                        directions: vec![IndexDirection::Asc],
+                        predicate: None,
+                    }],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(
+            parsed, model,
+            "index include column round-trip diverged:\n{kdl}"
         );
     }
 

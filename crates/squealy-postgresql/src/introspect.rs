@@ -257,15 +257,23 @@ SELECT
     idx.relname,
     i.indisunique,
     am.amname,
-    ARRAY(
-        SELECT a.attname::text
-        FROM unnest(i.indkey) WITH ORDINALITY AS key(attnum, position)
-        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = key.attnum
-        ORDER BY key.position
-    ) AS columns,
-    ARRAY(
-        SELECT CASE WHEN (option & 1) = 1 THEN 'DESC' ELSE 'ASC' END
-        FROM unnest(i.indoption) WITH ORDINALITY AS opt(option, position)
+	    ARRAY(
+	        SELECT a.attname::text
+	        FROM unnest(i.indkey) WITH ORDINALITY AS key(attnum, position)
+	        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = key.attnum
+	        WHERE key.position <= i.indnkeyatts
+	        ORDER BY key.position
+	    ) AS columns,
+	    ARRAY(
+	        SELECT a.attname::text
+	        FROM unnest(i.indkey) WITH ORDINALITY AS key(attnum, position)
+	        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = key.attnum
+	        WHERE key.position > i.indnkeyatts
+	        ORDER BY key.position
+	    ) AS include_columns,
+	    ARRAY(
+	        SELECT CASE WHEN (option & 1) = 1 THEN 'DESC' ELSE 'ASC' END
+	        FROM unnest(i.indoption) WITH ORDINALITY AS opt(option, position)
         ORDER BY position
     ) AS directions,
     pg_get_expr(i.indpred, i.indrelid) AS predicate,
@@ -291,13 +299,14 @@ ORDER BY idx.relname",
             unique: row.get(1),
             method: Some(IndexMethod::from_sql(&row.get::<_, String>(2))),
             columns: row.get(3),
-            expressions: row.get::<_, Option<String>>(6).into_iter().collect(),
+            expressions: row.get::<_, Option<String>>(7).into_iter().collect(),
+            include_columns: row.get(4),
             directions: row
-                .get::<_, Vec<String>>(4)
+                .get::<_, Vec<String>>(5)
                 .into_iter()
                 .map(|direction| index_direction(&direction))
                 .collect(),
-            predicate: row.get(5),
+            predicate: row.get(6),
         })
         .collect())
 }

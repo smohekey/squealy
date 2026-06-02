@@ -705,6 +705,11 @@ pub(crate) mod ddl {
         writer.write_all(b" (")?;
         write_index_terms(index, writer)?;
         writer.write_all(b")")?;
+        if !index.include_columns.is_empty() {
+            writer.write_all(b" INCLUDE (")?;
+            write_quoted_ident_list(&index.include_columns, writer)?;
+            writer.write_all(b")")?;
+        }
         if let Some(predicate) = &index.predicate {
             writer.write_all(b" WHERE ")?;
             writer.write_all(predicate.as_bytes())?;

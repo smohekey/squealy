@@ -272,6 +272,8 @@ pub struct IndexModel {
     pub columns: Vec<String>,
     /// Backend-specific expression terms in the index key, emitted verbatim.
     pub expressions: Vec<String>,
+    /// Non-key columns stored with a covering index.
+    pub include_columns: Vec<String>,
     pub unique: bool,
     pub method: Option<IndexMethod>,
     pub directions: Vec<IndexDirection>,
@@ -452,6 +454,7 @@ fn index_from_dyn(table: &str, index: &dyn Index) -> IndexModel {
             .unwrap_or_else(|| idx_name(table, columns)),
         columns: columns.iter().map(|column| (*column).to_owned()).collect(),
         expressions: Vec::new(),
+        include_columns: Vec::new(),
         unique: index.unique(),
         method: None,
         directions: Vec::new(),

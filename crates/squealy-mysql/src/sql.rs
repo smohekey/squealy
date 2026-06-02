@@ -228,6 +228,12 @@ fn write_create_index(
             "MySQL expression indexes are not supported by squealy yet",
         ));
     }
+    if !index.include_columns.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support covering index include columns",
+        ));
+    }
 
     writer.write_all(b"CREATE ")?;
     if index.unique {

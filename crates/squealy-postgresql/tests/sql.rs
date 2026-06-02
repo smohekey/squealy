@@ -488,6 +488,7 @@ fn postgres_renders_partial_indexes() {
                     name: "idx_memberships_tenant_id".to_owned(),
                     columns: vec!["tenant_id".to_owned()],
                     expressions: Vec::new(),
+                    include_columns: Vec::new(),
                     unique: false,
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Desc],
@@ -532,6 +533,7 @@ fn postgres_renders_expression_indexes() {
                     name: "idx_tenants_lower_slug".to_owned(),
                     columns: Vec::new(),
                     expressions: vec!["lower(slug)".to_owned()],
+                    include_columns: Vec::new(),
                     unique: false,
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Asc],
@@ -550,5 +552,60 @@ fn postgres_renders_expression_indexes() {
             "CREATE INDEX \"idx_tenants_lower_slug\" ON \"catalog\".\"tenants\" USING btree (lower(slug) ASC)"
         ),
         "expression index not rendered as expected: {sql}"
+    );
+}
+
+#[test]
+fn postgres_renders_covering_indexes() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog".to_owned()),
+            tables: vec![TableModel {
+                name: "memberships".to_owned(),
+                columns: vec![
+                    ColumnModel {
+                        name: "tenant_id".to_owned(),
+                        ty: SqlType::I32,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                    ColumnModel {
+                        name: "role_code".to_owned(),
+                        ty: SqlType::String,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                ],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_memberships_tenant_id".to_owned(),
+                    columns: vec!["tenant_id".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: vec!["role_code".to_owned()],
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE INDEX \"idx_memberships_tenant_id\" ON \"catalog\".\"memberships\" USING btree (\"tenant_id\" ASC) INCLUDE (\"role_code\")"
+        ),
+        "covering index not rendered as expected: {sql}"
     );
 }
