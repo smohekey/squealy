@@ -281,7 +281,7 @@ Build the spine and a real, executable create-from-scratch path, plus the packag
    against a connection. Targets an empty / `IF NOT EXISTS` baseline, so **no introspection needed
    yet**.
 5. **Stub-compiling global CLI** — the sprint-1 front-end. CLI verbs: `check`, `script`, `export`,
-   `publish`, and `capabilities`.
+   `introspect`, `publish`, and `capabilities`.
 
 **Out of scope this sprint (designed-for, not built)**
 
@@ -346,9 +346,10 @@ Done and tested:
 - **Stub-compiling `squealy` CLI** (`squealy-cli`, bin `squealy`): resolves the package via
   `cargo metadata`, validates `--database` as a strict Rust path, generates a stub in a private temp
   dir, compiles + runs it as a subprocess, and harvests the `.sqz`. Commands `check` / `script` /
-  `export` / `publish` / `capabilities`; model-taking commands are sourced from `--database <path>`
-  (compile + run) or `--package <file.sqz>` (no project code runs). `--backend postgres|mysql`
-  selects backend-specific render/check/publish behavior.
+  `export` / `introspect` / `publish` / `capabilities`; model-taking commands are sourced from
+  `--database <path>` (compile + run) or `--package <file.sqz>` (no project code runs).
+  `introspect --backend <backend> --url <url> <output.sqz>` exports a live database to a package.
+  `--backend postgres|mysql` selects backend-specific render/check/introspect/publish behavior.
 - **Introspection**: Postgres and MySQL schema-management connections implement
   `SchemaIntrospect`; the neutral model preserves richer schema facts such as structured types,
   identity/generated columns, foreign-key actions/deferrability/validation, index methods, index
