@@ -103,6 +103,35 @@ impl<E: std::error::Error + 'static> std::error::Error for PublishError<E> {
     }
 }
 
+/// An error from [`plan_from_database`]: either introspection or policy checking failed.
+#[derive(Debug)]
+pub enum PlanFromDatabaseError<E> {
+    Introspect(E),
+    Policy(DiffPolicyError),
+}
+
+impl<E: fmt::Display> fmt::Display for PlanFromDatabaseError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PlanFromDatabaseError::Introspect(error) => {
+                write!(formatter, "failed to introspect database: {error}")
+            }
+            PlanFromDatabaseError::Policy(error) => {
+                write!(formatter, "schema plan blocked by policy: {error}")
+            }
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for PlanFromDatabaseError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PlanFromDatabaseError::Introspect(error) => Some(error),
+            PlanFromDatabaseError::Policy(error) => Some(error),
+        }
+    }
+}
+
 /// Renders create-from-scratch DDL for `model` and executes it against `connection`.
 ///
 /// The backend executes the batch atomically where it supports transactional DDL, so a failed
@@ -117,6 +146,38 @@ where
     C: DdlExecutor,
 {
     let sql = render_create_sql(model, backend).map_err(PublishError::Render)?;
+    connection
+        .execute_ddl(&sql)
+        .await
+        .map_err(PublishError::Execute)
+}
+
+/// Introspects `connection` and builds an incremental plan from the live model to `desired`.
+pub async fn plan_from_database<C>(
+    desired: &DatabaseModel,
+    connection: &mut C,
+    policy: DiffPolicy,
+) -> Result<DatabasePlan, PlanFromDatabaseError<C::Error>>
+where
+    C: SchemaIntrospect,
+{
+    let actual = introspect(connection)
+        .await
+        .map_err(PlanFromDatabaseError::Introspect)?;
+    plan_models(desired, &actual, policy).map_err(PlanFromDatabaseError::Policy)
+}
+
+/// Renders `plan` using `backend` and executes it against `connection`.
+pub async fn apply_plan<B, C>(
+    plan: &DatabasePlan,
+    backend: &B,
+    connection: &mut C,
+) -> Result<(), PublishError<C::Error>>
+where
+    B: SchemaBackend,
+    C: DdlExecutor,
+{
+    let sql = render_plan_sql(plan, backend).map_err(PublishError::Render)?;
     connection
         .execute_ddl(&sql)
         .await

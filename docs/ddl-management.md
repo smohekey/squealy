@@ -320,6 +320,15 @@ pub fn plan_models(
     actual: &DatabaseModel,
     policy: DiffPolicy,
 ) -> Result<DatabasePlan, DiffPolicyError>;
+pub async fn plan_from_database<C: SchemaIntrospect>(
+    desired: &DatabaseModel,
+    conn: &mut C,
+    policy: DiffPolicy,
+) -> Result<DatabasePlan, PlanFromDatabaseError<C::Error>>;
+pub async fn apply_plan<B, C>(plan: &DatabasePlan, backend: &B, conn: &mut C) -> Result<(), Error>
+where
+    B: SchemaBackend,
+    C: DdlExecutor;
 pub async fn publish<B, C>(model: &DatabaseModel, backend: &B, conn: &C) -> Result<(), Error>;
 ```
 
@@ -379,10 +388,12 @@ Done and tested:
 - **Plan rendering**: core `SchemaBackend::render_plan` lets backends render neutral plans without
   depending on `squealy-model`; Postgres and MySQL implement initial create/drop/add-column/index/
   constraint plan rendering. `squealy-model::render_plan_sql` is the allocating convenience wrapper.
+- **Plan/apply engine APIs**: `plan_from_database` introspects live state and returns a policy-checked
+  plan; `apply_plan` renders that plan through the selected backend and executes the resulting DDL.
 
 **Sprint 1 is functionally complete, and the diff/policy/neutral-plan layer is underway.** Next:
-incremental apply/publish paths that consume plans, then richer changed-definition rendering and the
-hybrid reviewable-script flow.
+CLI exposure for incremental plan/apply, then richer changed-definition rendering and the hybrid
+reviewable-script flow.
 
 ## Settled decisions
 

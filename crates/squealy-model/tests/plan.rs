@@ -1,6 +1,7 @@
 use squealy_model::{
-    ChangeRisk, ColumnModel, DatabaseModel, DatabasePlanStep, DiffPolicy, SchemaModel, SqlType,
-    TableModel, TablePlanStep, classified_plan_steps, plan_models, render_plan_sql,
+    ChangeRisk, ColumnModel, DatabaseModel, DatabasePlanStep, DdlExecutor, DiffPolicy,
+    SchemaIntrospect, SchemaModel, SqlType, TableModel, TablePlanStep, apply_plan,
+    classified_plan_steps, plan_from_database, plan_models, render_plan_sql,
 };
 use squealy_postgresql::Postgres;
 
@@ -90,6 +91,88 @@ fn render_plan_sql_delegates_to_backend_plan_renderer() {
         "CREATE SCHEMA IF NOT EXISTS \"public\";\n\
 CREATE TABLE \"public\".\"events\" (\n\n);"
     );
+}
+
+#[tokio::test]
+async fn plan_from_database_introspects_actual_model_before_planning() {
+    let desired = model_with_tables("public", vec![table("events")]);
+    let mut connection = TestConnection {
+        model: DatabaseModel { schemas: vec![] },
+        executed: Vec::new(),
+    };
+
+    let plan = plan_from_database(&desired, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan from database");
+
+    assert_eq!(plan.steps.len(), 2);
+    assert!(matches!(
+        plan.steps[0],
+        DatabasePlanStep::CreateSchema {
+            schema: Some(ref schema),
+        } if schema == "public"
+    ));
+}
+
+#[tokio::test]
+async fn apply_plan_renders_with_backend_and_executes_sql() {
+    let desired = model_with_tables("public", vec![table("events")]);
+    let actual = DatabaseModel { schemas: vec![] };
+    let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan diff");
+    let mut connection = TestConnection {
+        model: actual,
+        executed: Vec::new(),
+    };
+
+    apply_plan(&plan, &Postgres, &mut connection)
+        .await
+        .expect("apply plan");
+
+    assert_eq!(connection.executed.len(), 1);
+    assert!(
+        connection.executed[0].contains("CREATE SCHEMA IF NOT EXISTS \"public\""),
+        "{}",
+        connection.executed[0]
+    );
+    assert!(
+        connection.executed[0].contains("CREATE TABLE \"public\".\"events\""),
+        "{}",
+        connection.executed[0]
+    );
+}
+
+#[derive(Debug)]
+struct TestConnection {
+    model: DatabaseModel,
+    executed: Vec<String>,
+}
+
+#[derive(Debug)]
+struct TestError;
+
+impl std::fmt::Display for TestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("test error")
+    }
+}
+
+impl std::error::Error for TestError {}
+
+impl SchemaIntrospect for TestConnection {
+    type Error = TestError;
+
+    async fn introspect_database(&mut self) -> Result<DatabaseModel, TestError> {
+        Ok(self.model.clone())
+    }
+}
+
+impl DdlExecutor for TestConnection {
+    type Error = TestError;
+
+    async fn execute_ddl(&mut self, sql: &str) -> Result<(), TestError> {
+        self.executed.push(sql.to_owned());
+        Ok(())
+    }
 }
 
 fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {
