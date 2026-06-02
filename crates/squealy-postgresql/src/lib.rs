@@ -143,6 +143,14 @@ impl squealy::SchemaBackend for Postgres {
     ) -> std::io::Result<()> {
         sql::ddl::write_database(model, writer)
     }
+
+    fn render_plan(
+        &self,
+        plan: &squealy::DatabasePlan,
+        writer: &mut impl std::io::Write,
+    ) -> std::io::Result<()> {
+        sql::ddl::write_plan(plan, writer)
+    }
 }
 
 #[cfg(feature = "schema")]

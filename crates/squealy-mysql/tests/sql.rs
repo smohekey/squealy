@@ -54,6 +54,117 @@ fn mysql_reports_schema_capabilities() {
 }
 
 #[test]
+fn mysql_renders_incremental_schema_plan() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::CreateSchema {
+                schema: Some("shop".to_owned()),
+            },
+            DatabasePlanStep::CreateTable {
+                schema: Some("shop".to_owned()),
+                table: TableModel {
+                    name: "events".to_owned(),
+                    comment: Some("Event records".to_owned()),
+                    columns: vec![ColumnModel {
+                        name: "id".to_owned(),
+                        comment: Some("Event id".to_owned()),
+                        ty: SqlType::I32,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    }],
+                    primary_key: None,
+                    foreign_keys: Vec::new(),
+                    uniques: Vec::new(),
+                    checks: Vec::new(),
+                    indexes: vec![IndexModel {
+                        name: "idx_events_id".to_owned(),
+                        columns: vec!["id".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: Vec::new(),
+                        unique: false,
+                        method: None,
+                        directions: Vec::new(),
+                        nulls: Vec::new(),
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    }],
+                },
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: TablePlanStep::AddColumn {
+                    column: ColumnModel {
+                        name: "name".to_owned(),
+                        comment: Some("Event name".to_owned()),
+                        ty: SqlType::Text,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                },
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: TablePlanStep::DropIndex {
+                    index: IndexModel {
+                        name: "idx_events_id".to_owned(),
+                        columns: vec!["id".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: Vec::new(),
+                        unique: false,
+                        method: None,
+                        directions: Vec::new(),
+                        nulls: Vec::new(),
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    },
+                },
+            },
+            DatabasePlanStep::DropTable {
+                schema: Some("shop".to_owned()),
+                table: TableModel {
+                    name: "old_events".to_owned(),
+                    comment: None,
+                    columns: Vec::new(),
+                    primary_key: None,
+                    foreign_keys: Vec::new(),
+                    uniques: Vec::new(),
+                    checks: Vec::new(),
+                    indexes: Vec::new(),
+                },
+            },
+            DatabasePlanStep::DropSchema {
+                schema: Some("old".to_owned()),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "CREATE SCHEMA IF NOT EXISTS `shop`;\n\
+CREATE TABLE `shop`.`events` (\n  `id` INT NOT NULL COMMENT 'Event id'\n) COMMENT='Event records';\n\
+CREATE INDEX `idx_events_id` ON `shop`.`events` (`id`);\n\
+ALTER TABLE `shop`.`events` ADD COLUMN `name` TEXT NOT NULL COMMENT 'Event name';\n\
+DROP INDEX `idx_events_id` ON `shop`.`events`;\n\
+DROP TABLE `shop`.`old_events`;\n\
+DROP SCHEMA `old`;"
+    );
+}
+
+#[test]
 fn mysql_renders_create_from_scratch() {
     let model = DatabaseModel::from_database::<ShopDb>();
     let mut sql = Vec::new();

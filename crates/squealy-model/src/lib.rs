@@ -52,6 +52,17 @@ pub fn render_create_sql<B: SchemaBackend>(
     Ok(String::from_utf8(buffer).expect("render_create emits valid UTF-8"))
 }
 
+/// Renders incremental DDL for a policy-checked [`DatabasePlan`].
+pub fn render_plan_sql<B: SchemaBackend>(
+    plan: &DatabasePlan,
+    backend: &B,
+) -> std::io::Result<String> {
+    let mut buffer = Vec::new();
+    backend.render_plan(plan, &mut buffer)?;
+    // SchemaBackend renderers emit UTF-8; treat anything else as a renderer bug.
+    Ok(String::from_utf8(buffer).expect("render_plan emits valid UTF-8"))
+}
+
 /// Checks whether `backend` can create `model` without rendering or connecting to a database.
 ///
 /// This validates backend capabilities against the neutral model, so callers can fail fast when a

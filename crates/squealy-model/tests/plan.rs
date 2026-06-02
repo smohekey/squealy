@@ -1,7 +1,8 @@
 use squealy_model::{
     ChangeRisk, ColumnModel, DatabaseModel, DatabasePlanStep, DiffPolicy, SchemaModel, SqlType,
-    TableModel, TablePlanStep, classified_plan_steps, plan_models,
+    TableModel, TablePlanStep, classified_plan_steps, plan_models, render_plan_sql,
 };
+use squealy_postgresql::Postgres;
 
 #[test]
 fn plan_models_flattens_diff_changes_in_order() {
@@ -73,6 +74,21 @@ fn plan_steps_are_classified_individually() {
             .map(|step| step.risk)
             .collect::<Vec<_>>(),
         vec![ChangeRisk::Destructive, ChangeRisk::Destructive]
+    );
+}
+
+#[test]
+fn render_plan_sql_delegates_to_backend_plan_renderer() {
+    let desired = model_with_tables("public", vec![table("events")]);
+    let actual = DatabaseModel { schemas: vec![] };
+    let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan diff");
+
+    let sql = render_plan_sql(&plan, &Postgres).expect("render plan");
+
+    assert_eq!(
+        sql,
+        "CREATE SCHEMA IF NOT EXISTS \"public\";\n\
+CREATE TABLE \"public\".\"events\" (\n\n);"
     );
 }
 

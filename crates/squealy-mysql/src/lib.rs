@@ -31,6 +31,14 @@ impl SchemaBackend for Mysql {
     fn render_create(&self, model: &DatabaseModel, writer: &mut impl Write) -> std::io::Result<()> {
         sql::write_database(model, writer)
     }
+
+    fn render_plan(
+        &self,
+        plan: &squealy::DatabasePlan,
+        writer: &mut impl Write,
+    ) -> std::io::Result<()> {
+        sql::write_plan(plan, writer)
+    }
 }
 
 /// A live MySQL connection used for schema management.

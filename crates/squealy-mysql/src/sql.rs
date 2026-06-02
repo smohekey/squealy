@@ -8,8 +8,8 @@
 use std::io::{self, Write};
 
 use squealy::{
-    CheckModel, ColumnModel, DatabaseModel, DefaultValue, ForeignKeyModel, GeneratedStorage,
-    IndexModel, SqlType, TableModel,
+    CheckModel, ColumnModel, DatabaseModel, DatabasePlan, DatabasePlanStep, DefaultValue,
+    ForeignKeyModel, GeneratedStorage, IndexModel, SqlType, TableModel, TablePlanStep,
 };
 
 /// Renders ordered create-from-scratch DDL for a whole model. Statements are `;`-terminated and
@@ -53,6 +53,169 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
 
     if !first {
         writer.write_all(b";")?;
+    }
+    Ok(())
+}
+
+/// Renders an ordered incremental DDL plan.
+pub(crate) fn write_plan(plan: &DatabasePlan, writer: &mut impl Write) -> io::Result<()> {
+    let mut first = true;
+    for step in &plan.steps {
+        write_plan_step(step, writer, &mut first)?;
+    }
+    if !first {
+        writer.write_all(b";")?;
+    }
+    Ok(())
+}
+
+fn write_plan_step(
+    step: &DatabasePlanStep,
+    writer: &mut impl Write,
+    first: &mut bool,
+) -> io::Result<()> {
+    match step {
+        DatabasePlanStep::CreateSchema { schema } => {
+            if let Some(schema) = schema.as_deref() {
+                statement(writer, first)?;
+                writer.write_all(b"CREATE SCHEMA IF NOT EXISTS ")?;
+                write_quoted_ident(schema, writer)?;
+            }
+        }
+        DatabasePlanStep::DropSchema { schema } => {
+            if let Some(schema) = schema.as_deref() {
+                statement(writer, first)?;
+                writer.write_all(b"DROP SCHEMA ")?;
+                write_quoted_ident(schema, writer)?;
+            }
+        }
+        DatabasePlanStep::CreateTable { schema, table } => {
+            statement(writer, first)?;
+            write_create_table(schema.as_deref(), table, writer)?;
+            write_create_table_extras(schema.as_deref(), table, writer, first)?;
+        }
+        DatabasePlanStep::DropTable { schema, table } => {
+            statement(writer, first)?;
+            writer.write_all(b"DROP TABLE ")?;
+            write_qualified_name(schema.as_deref(), &table.name, writer)?;
+        }
+        DatabasePlanStep::AlterTable {
+            schema,
+            table,
+            change,
+        } => write_table_plan_step(schema.as_deref(), table, change, writer, first)?,
+    }
+    Ok(())
+}
+
+fn write_create_table_extras(
+    schema: Option<&str>,
+    table: &TableModel,
+    writer: &mut impl Write,
+    first: &mut bool,
+) -> io::Result<()> {
+    for index in &table.indexes {
+        statement(writer, first)?;
+        write_create_index(schema, &table.name, index, writer)?;
+    }
+    for foreign_key in &table.foreign_keys {
+        statement(writer, first)?;
+        write_add_foreign_key(schema, &table.name, foreign_key, writer)?;
+    }
+    Ok(())
+}
+
+fn write_table_plan_step(
+    schema: Option<&str>,
+    table: &str,
+    change: &TablePlanStep,
+    writer: &mut impl Write,
+    first: &mut bool,
+) -> io::Result<()> {
+    statement(writer, first)?;
+    match change {
+        TablePlanStep::SetTableComment { after, .. } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" COMMENT = ")?;
+            write_quoted_text(after.as_deref().unwrap_or(""), writer)?;
+        }
+        TablePlanStep::AddColumn { column } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ADD COLUMN ")?;
+            write_column(column, writer)?;
+        }
+        TablePlanStep::DropColumn { column } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP COLUMN ")?;
+            write_quoted_ident(&column.name, writer)?;
+        }
+        TablePlanStep::AddPrimaryKey { constraint } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ADD ")?;
+            write_named_constraint("PRIMARY KEY", &constraint.name, &constraint.columns, writer)?;
+        }
+        TablePlanStep::DropPrimaryKey { .. } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP PRIMARY KEY")?;
+        }
+        TablePlanStep::AddUnique { constraint } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ADD ")?;
+            write_named_constraint("UNIQUE", &constraint.name, &constraint.columns, writer)?;
+        }
+        TablePlanStep::DropUnique { constraint } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP INDEX ")?;
+            write_quoted_ident(&constraint.name, writer)?;
+        }
+        TablePlanStep::AddForeignKey { foreign_key } => {
+            write_add_foreign_key(schema, table, foreign_key, writer)?;
+        }
+        TablePlanStep::DropForeignKey { foreign_key } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP FOREIGN KEY ")?;
+            write_quoted_ident(&foreign_key.name, writer)?;
+        }
+        TablePlanStep::AddCheck { check } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ADD ")?;
+            write_check(check, writer)?;
+        }
+        TablePlanStep::DropCheck { check } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP CHECK ")?;
+            write_quoted_ident(&check.name, writer)?;
+        }
+        TablePlanStep::AddIndex { index } => {
+            write_create_index(schema, table, index, writer)?;
+        }
+        TablePlanStep::DropIndex { index } => {
+            writer.write_all(b"DROP INDEX ")?;
+            write_quoted_ident(&index.name, writer)?;
+            writer.write_all(b" ON ")?;
+            write_qualified_name(schema, table, writer)?;
+        }
+        TablePlanStep::AlterColumn { .. }
+        | TablePlanStep::AlterPrimaryKey { .. }
+        | TablePlanStep::AlterUnique { .. }
+        | TablePlanStep::AlterForeignKey { .. }
+        | TablePlanStep::AlterCheck { .. }
+        | TablePlanStep::AlterIndex { .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "MySQL incremental ALTER rendering for changed definitions is not supported yet",
+            ));
+        }
     }
     Ok(())
 }

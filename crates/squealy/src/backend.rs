@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::io::{self, Write};
 
-use crate::{DatabaseModel, Table};
+use crate::{DatabaseModel, DatabasePlan, Table};
 
 /// Backend-specific row cursor used while decoding a projected row.
 pub trait RowReader: Sized {
@@ -136,6 +136,17 @@ pub trait SchemaBackend {
     /// then foreign keys as separate `ALTER TABLE … ADD CONSTRAINT` statements (so dependency cycles
     /// and ordering do not block creation).
     fn render_create(&self, model: &DatabaseModel, writer: &mut impl Write) -> io::Result<()>;
+
+    /// Renders an ordered incremental DDL plan into `writer`.
+    ///
+    /// Backends own the SQL generation for these neutral plan steps. The default is conservative so
+    /// backend crates can opt into incremental planning deliberately.
+    fn render_plan(&self, _plan: &DatabasePlan, _writer: &mut impl Write) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "backend does not support incremental schema plan rendering",
+        ))
+    }
 }
 
 /// Executes already-rendered DDL against a live connection.

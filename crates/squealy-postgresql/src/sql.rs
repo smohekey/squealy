@@ -504,7 +504,8 @@ pub(crate) mod ddl {
 
     use squealy::{
         CheckModel, ColumnModel, ConstraintEnforcement, ConstraintValidation, DatabaseModel,
-        DefaultValue, ForeignKeyModel, IdentityMode, IndexModel, TableModel,
+        DatabasePlan, DatabasePlanStep, DefaultValue, ForeignKeyModel, IdentityMode, IndexModel,
+        TableModel, TablePlanStep,
     };
 
     use super::{write_pg_sql_type, write_qualified_name, write_quoted_ident, write_quoted_text};
@@ -536,7 +537,12 @@ pub(crate) mod ddl {
             for table in &schema.tables {
                 if let Some(comment) = &table.comment {
                     statement(writer, &mut first)?;
-                    write_comment_on_table(schema.name.as_deref(), &table.name, comment, writer)?;
+                    write_comment_on_table(
+                        schema.name.as_deref(),
+                        &table.name,
+                        Some(comment),
+                        writer,
+                    )?;
                 }
                 for column in &table.columns {
                     if let Some(comment) = &column.comment {
@@ -545,7 +551,7 @@ pub(crate) mod ddl {
                             schema.name.as_deref(),
                             &table.name,
                             &column.name,
-                            comment,
+                            Some(comment),
                             writer,
                         )?;
                     }
@@ -582,6 +588,182 @@ pub(crate) mod ddl {
         }
 
         Ok(())
+    }
+
+    /// Renders an ordered incremental DDL plan.
+    pub(crate) fn write_plan(plan: &DatabasePlan, writer: &mut impl Write) -> io::Result<()> {
+        let mut first = true;
+        for step in &plan.steps {
+            write_plan_step(step, writer, &mut first)?;
+        }
+        if !first {
+            writer.write_all(b";")?;
+        }
+        Ok(())
+    }
+
+    fn write_plan_step(
+        step: &DatabasePlanStep,
+        writer: &mut impl Write,
+        first: &mut bool,
+    ) -> io::Result<()> {
+        match step {
+            DatabasePlanStep::CreateSchema { schema } => {
+                if let Some(schema) = schema.as_deref() {
+                    statement(writer, first)?;
+                    writer.write_all(b"CREATE SCHEMA IF NOT EXISTS ")?;
+                    write_quoted_ident(schema, writer)?;
+                }
+            }
+            DatabasePlanStep::DropSchema { schema } => {
+                if let Some(schema) = schema.as_deref() {
+                    statement(writer, first)?;
+                    writer.write_all(b"DROP SCHEMA ")?;
+                    write_quoted_ident(schema, writer)?;
+                }
+            }
+            DatabasePlanStep::CreateTable { schema, table } => {
+                statement(writer, first)?;
+                write_create_table(schema.as_deref(), table, writer)?;
+                write_create_table_extras(schema.as_deref(), table, writer, first)?;
+            }
+            DatabasePlanStep::DropTable { schema, table } => {
+                statement(writer, first)?;
+                writer.write_all(b"DROP TABLE ")?;
+                write_qualified_name(schema.as_deref(), &table.name, writer)?;
+            }
+            DatabasePlanStep::AlterTable {
+                schema,
+                table,
+                change,
+            } => write_table_plan_step(schema.as_deref(), table, change, writer, first)?,
+        }
+        Ok(())
+    }
+
+    fn write_create_table_extras(
+        schema: Option<&str>,
+        table: &TableModel,
+        writer: &mut impl Write,
+        first: &mut bool,
+    ) -> io::Result<()> {
+        if let Some(comment) = &table.comment {
+            statement(writer, first)?;
+            write_comment_on_table(schema, &table.name, Some(comment), writer)?;
+        }
+        for column in &table.columns {
+            if let Some(comment) = &column.comment {
+                statement(writer, first)?;
+                write_comment_on_column(schema, &table.name, &column.name, Some(comment), writer)?;
+            }
+        }
+        for index in &table.indexes {
+            statement(writer, first)?;
+            write_create_index(schema, &table.name, index, writer)?;
+        }
+        for foreign_key in &table.foreign_keys {
+            statement(writer, first)?;
+            write_add_foreign_key(schema, &table.name, foreign_key, writer)?;
+        }
+        Ok(())
+    }
+
+    fn write_table_plan_step(
+        schema: Option<&str>,
+        table: &str,
+        change: &TablePlanStep,
+        writer: &mut impl Write,
+        first: &mut bool,
+    ) -> io::Result<()> {
+        statement(writer, first)?;
+        match change {
+            TablePlanStep::SetTableComment { after, .. } => {
+                write_comment_on_table(schema, table, after.as_ref(), writer)?;
+            }
+            TablePlanStep::AddColumn { column } => {
+                writer.write_all(b"ALTER TABLE ")?;
+                write_qualified_name(schema, table, writer)?;
+                writer.write_all(b" ADD COLUMN ")?;
+                write_model_column(column, writer)?;
+                if let Some(comment) = &column.comment {
+                    statement(writer, first)?;
+                    write_comment_on_column(schema, table, &column.name, Some(comment), writer)?;
+                }
+            }
+            TablePlanStep::DropColumn { column } => {
+                writer.write_all(b"ALTER TABLE ")?;
+                write_qualified_name(schema, table, writer)?;
+                writer.write_all(b" DROP COLUMN ")?;
+                write_quoted_ident(&column.name, writer)?;
+            }
+            TablePlanStep::AddPrimaryKey { constraint } => {
+                writer.write_all(b"ALTER TABLE ")?;
+                write_qualified_name(schema, table, writer)?;
+                writer.write_all(b" ADD ")?;
+                write_named_constraint(
+                    "PRIMARY KEY",
+                    &constraint.name,
+                    &constraint.columns,
+                    writer,
+                )?;
+            }
+            TablePlanStep::DropPrimaryKey { constraint }
+            | TablePlanStep::DropUnique { constraint } => {
+                write_drop_constraint(schema, table, &constraint.name, writer)?;
+            }
+            TablePlanStep::AddUnique { constraint } => {
+                writer.write_all(b"ALTER TABLE ")?;
+                write_qualified_name(schema, table, writer)?;
+                writer.write_all(b" ADD ")?;
+                write_named_constraint("UNIQUE", &constraint.name, &constraint.columns, writer)?;
+            }
+            TablePlanStep::AddForeignKey { foreign_key } => {
+                write_add_foreign_key(schema, table, foreign_key, writer)?;
+            }
+            TablePlanStep::DropForeignKey { foreign_key } => {
+                write_drop_constraint(schema, table, &foreign_key.name, writer)?;
+            }
+            TablePlanStep::AddCheck { check } => {
+                writer.write_all(b"ALTER TABLE ")?;
+                write_qualified_name(schema, table, writer)?;
+                writer.write_all(b" ADD ")?;
+                write_check(check, writer)?;
+            }
+            TablePlanStep::DropCheck { check } => {
+                write_drop_constraint(schema, table, &check.name, writer)?;
+            }
+            TablePlanStep::AddIndex { index } => {
+                write_create_index(schema, table, index, writer)?;
+            }
+            TablePlanStep::DropIndex { index } => {
+                writer.write_all(b"DROP INDEX ")?;
+                write_qualified_name(schema, &index.name, writer)?;
+            }
+            TablePlanStep::AlterColumn { .. }
+            | TablePlanStep::AlterPrimaryKey { .. }
+            | TablePlanStep::AlterUnique { .. }
+            | TablePlanStep::AlterForeignKey { .. }
+            | TablePlanStep::AlterCheck { .. }
+            | TablePlanStep::AlterIndex { .. } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "PostgreSQL incremental ALTER rendering for changed definitions is not supported yet",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn write_drop_constraint(
+        schema: Option<&str>,
+        table: &str,
+        name: &str,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        writer.write_all(b"ALTER TABLE ")?;
+        write_qualified_name(schema, table, writer)?;
+        writer.write_all(b" DROP CONSTRAINT ")?;
+        write_quoted_ident(name, writer)
     }
 
     /// Terminates the previous statement and starts a new line before every statement after the first,
@@ -633,20 +815,23 @@ pub(crate) mod ddl {
     fn write_comment_on_table(
         schema: Option<&str>,
         table: &str,
-        comment: &str,
+        comment: Option<&String>,
         writer: &mut impl Write,
     ) -> io::Result<()> {
         writer.write_all(b"COMMENT ON TABLE ")?;
         write_qualified_name(schema, table, writer)?;
         writer.write_all(b" IS ")?;
-        write_quoted_text(comment, writer)
+        match comment {
+            Some(comment) => write_quoted_text(comment, writer),
+            None => writer.write_all(b"NULL"),
+        }
     }
 
     fn write_comment_on_column(
         schema: Option<&str>,
         table: &str,
         column: &str,
-        comment: &str,
+        comment: Option<&String>,
         writer: &mut impl Write,
     ) -> io::Result<()> {
         writer.write_all(b"COMMENT ON COLUMN ")?;
@@ -654,7 +839,10 @@ pub(crate) mod ddl {
         writer.write_all(b".")?;
         write_quoted_ident(column, writer)?;
         writer.write_all(b" IS ")?;
-        write_quoted_text(comment, writer)
+        match comment {
+            Some(comment) => write_quoted_text(comment, writer),
+            None => writer.write_all(b"NULL"),
+        }
     }
 
     /// Separates entries inside a `CREATE TABLE (...)` list: each entry is on its own indented line.

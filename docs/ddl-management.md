@@ -304,7 +304,7 @@ impl DatabaseModel {
 // core `squealy` — sibling to Backend; implemented by squealy-postgresql
 pub trait SchemaBackend {
     fn render_create(&self, model: &DatabaseModel, out: &mut dyn Write) -> io::Result<()>;
-    // future: fn render_alter(plan, ...)
+    fn render_plan(&self, plan: &DatabasePlan, out: &mut dyn Write) -> io::Result<()>;
 }
 
 pub struct DiffPolicy {
@@ -313,6 +313,7 @@ pub struct DiffPolicy {
 }
 
 pub fn script<B: SchemaBackend>(model: &DatabaseModel, backend: &B) -> io::Result<String>;
+pub fn render_plan_sql<B: SchemaBackend>(plan: &DatabasePlan, backend: &B) -> io::Result<String>;
 pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseDiff;
 pub fn plan_models(
     desired: &DatabaseModel,
@@ -324,10 +325,10 @@ pub async fn publish<B, C>(model: &DatabaseModel, backend: &B, conn: &C) -> Resu
 
 ## Roadmap (post-sprint-1)
 
-- **Incremental ALTER rendering:** backend-owned rendering from the neutral plan, followed by apply
-  paths that consume the plan instead of create-from-scratch SQL.
-- **Richer planning:** rename hints and backend-specific assists for ambiguous changes, such as
-  type-change `USING` casts.
+- **Incremental apply:** apply/publish paths that consume a rendered plan instead of
+  create-from-scratch SQL.
+- **Richer ALTER rendering:** changed definitions (`ALTER COLUMN`, changed constraints/indexes),
+  rename hints, and backend-specific assists for ambiguous changes such as type-change `USING` casts.
 - **Hybrid flow:** generate a reviewable upgrade script from two models (crate↔crate, package↔package,
   or model↔live), bridging declarative authoring with checked-in, auditable artifacts.
 - **Schema compare CLI** for desired-vs-live and desired-vs-package workflows.
@@ -375,9 +376,12 @@ Done and tested:
 - **Planning**: `squealy-model::plan_models(desired, actual, policy)` turns a diff into ordered,
   policy-checked, backend-neutral `DatabasePlan` steps. Backend-specific ALTER rendering/execution is
   the next layer.
+- **Plan rendering**: core `SchemaBackend::render_plan` lets backends render neutral plans without
+  depending on `squealy-model`; Postgres and MySQL implement initial create/drop/add-column/index/
+  constraint plan rendering. `squealy-model::render_plan_sql` is the allocating convenience wrapper.
 
 **Sprint 1 is functionally complete, and the diff/policy/neutral-plan layer is underway.** Next:
-backend-specific incremental ALTER rendering, then apply/publish paths that consume plans and the
+incremental apply/publish paths that consume plans, then richer changed-definition rendering and the
 hybrid reviewable-script flow.
 
 ## Settled decisions

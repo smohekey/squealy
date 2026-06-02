@@ -48,6 +48,120 @@ fn postgres_reports_schema_capabilities() {
 }
 
 #[test]
+fn postgres_renders_incremental_schema_plan() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::CreateSchema {
+                schema: Some("public".to_owned()),
+            },
+            DatabasePlanStep::CreateTable {
+                schema: Some("public".to_owned()),
+                table: TableModel {
+                    name: "events".to_owned(),
+                    comment: Some("Event records".to_owned()),
+                    columns: vec![ColumnModel {
+                        name: "id".to_owned(),
+                        comment: Some("Event id".to_owned()),
+                        ty: SqlType::I32,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    }],
+                    primary_key: None,
+                    foreign_keys: Vec::new(),
+                    uniques: Vec::new(),
+                    checks: Vec::new(),
+                    indexes: vec![IndexModel {
+                        name: "idx_events_id".to_owned(),
+                        columns: vec!["id".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: Vec::new(),
+                        unique: false,
+                        method: None,
+                        directions: Vec::new(),
+                        nulls: Vec::new(),
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    }],
+                },
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: TablePlanStep::AddColumn {
+                    column: ColumnModel {
+                        name: "name".to_owned(),
+                        comment: Some("Event name".to_owned()),
+                        ty: SqlType::Text,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                },
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: TablePlanStep::DropIndex {
+                    index: IndexModel {
+                        name: "idx_events_id".to_owned(),
+                        columns: vec!["id".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: Vec::new(),
+                        unique: false,
+                        method: None,
+                        directions: Vec::new(),
+                        nulls: Vec::new(),
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    },
+                },
+            },
+            DatabasePlanStep::DropTable {
+                schema: Some("public".to_owned()),
+                table: TableModel {
+                    name: "old_events".to_owned(),
+                    comment: None,
+                    columns: Vec::new(),
+                    primary_key: None,
+                    foreign_keys: Vec::new(),
+                    uniques: Vec::new(),
+                    checks: Vec::new(),
+                    indexes: Vec::new(),
+                },
+            },
+            DatabasePlanStep::DropSchema {
+                schema: Some("old".to_owned()),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "CREATE SCHEMA IF NOT EXISTS \"public\";\n\
+CREATE TABLE \"public\".\"events\" (\n  \"id\" integer NOT NULL\n);\n\
+COMMENT ON TABLE \"public\".\"events\" IS 'Event records';\n\
+COMMENT ON COLUMN \"public\".\"events\".\"id\" IS 'Event id';\n\
+CREATE INDEX \"idx_events_id\" ON \"public\".\"events\" (\"id\");\n\
+ALTER TABLE \"public\".\"events\" ADD COLUMN \"name\" text NOT NULL;\n\
+COMMENT ON COLUMN \"public\".\"events\".\"name\" IS 'Event name';\n\
+DROP INDEX \"public\".\"idx_events_id\";\n\
+DROP TABLE \"public\".\"old_events\";\n\
+DROP SCHEMA \"old\";"
+    );
+}
+
+#[test]
 fn postgres_select_uses_numbered_placeholders() {
     let users = Postgres
         .from::<User>()
