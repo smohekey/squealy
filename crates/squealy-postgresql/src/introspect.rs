@@ -1,7 +1,7 @@
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
     ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexDirection, IndexMethod, IndexModel, SchemaModel, SqlType, TableModel,
+    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, SchemaModel, SqlType, TableModel,
 };
 use tokio_postgres::Client;
 
@@ -257,27 +257,32 @@ SELECT
     idx.relname,
     i.indisunique,
     am.amname,
-	    ARRAY(
-	        SELECT a.attname::text
-	        FROM unnest(i.indkey) WITH ORDINALITY AS key(attnum, position)
-	        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = key.attnum
-	        WHERE key.position <= i.indnkeyatts
-	        ORDER BY key.position
-	    ) AS columns,
-	    ARRAY(
-	        SELECT a.attname::text
-	        FROM unnest(i.indkey) WITH ORDINALITY AS key(attnum, position)
-	        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = key.attnum
-	        WHERE key.position > i.indnkeyatts
-	        ORDER BY key.position
-	    ) AS include_columns,
-	    ARRAY(
-	        SELECT CASE WHEN (option & 1) = 1 THEN 'DESC' ELSE 'ASC' END
-	        FROM unnest(i.indoption) WITH ORDINALITY AS opt(option, position)
+    ARRAY(
+        SELECT a.attname::text
+        FROM unnest(i.indkey) WITH ORDINALITY AS key(attnum, position)
+        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = key.attnum
+        WHERE key.position <= i.indnkeyatts
+        ORDER BY key.position
+    ) AS columns,
+    ARRAY(
+        SELECT a.attname::text
+        FROM unnest(i.indkey) WITH ORDINALITY AS key(attnum, position)
+        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = key.attnum
+        WHERE key.position > i.indnkeyatts
+        ORDER BY key.position
+    ) AS include_columns,
+    ARRAY(
+        SELECT CASE WHEN (option & 1) = 1 THEN 'DESC' ELSE 'ASC' END
+        FROM unnest(i.indoption) WITH ORDINALITY AS opt(option, position)
+	        ORDER BY position
+	    ) AS directions,
+    ARRAY(
+        SELECT CASE WHEN (option & 2) = 2 THEN 'FIRST' ELSE 'LAST' END
+        FROM unnest(i.indoption) WITH ORDINALITY AS opt(option, position)
         ORDER BY position
-    ) AS directions,
-    pg_get_expr(i.indpred, i.indrelid) AS predicate,
-    pg_get_expr(i.indexprs, i.indrelid) AS expressions
+    ) AS nulls,
+	    pg_get_expr(i.indpred, i.indrelid) AS predicate,
+	    pg_get_expr(i.indexprs, i.indrelid) AS expressions
 FROM pg_index i
 JOIN pg_class c ON c.oid = i.indrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -294,19 +299,24 @@ ORDER BY idx.relname",
 
     Ok(rows
         .into_iter()
-        .map(|row| IndexModel {
-            name: row.get(0),
-            unique: row.get(1),
-            method: Some(IndexMethod::from_sql(&row.get::<_, String>(2))),
-            columns: row.get(3),
-            expressions: row.get::<_, Option<String>>(7).into_iter().collect(),
-            include_columns: row.get(4),
-            directions: row
+        .map(|row| {
+            let directions = row
                 .get::<_, Vec<String>>(5)
                 .into_iter()
                 .map(|direction| index_direction(&direction))
-                .collect(),
-            predicate: row.get(6),
+                .collect::<Vec<_>>();
+            let nulls = index_nulls(&directions, row.get(6));
+            IndexModel {
+                name: row.get(0),
+                unique: row.get(1),
+                method: Some(IndexMethod::from_sql(&row.get::<_, String>(2))),
+                columns: row.get(3),
+                expressions: row.get::<_, Option<String>>(8).into_iter().collect(),
+                include_columns: row.get(4),
+                directions,
+                nulls,
+                predicate: row.get(7),
+            }
         })
         .collect())
 }
@@ -463,6 +473,26 @@ fn index_direction(direction: &str) -> IndexDirection {
         "DESC" => IndexDirection::Desc,
         _ => IndexDirection::Asc,
     }
+}
+
+fn index_nulls(directions: &[IndexDirection], nulls: Vec<String>) -> Vec<IndexNullsOrder> {
+    let nulls = nulls
+        .into_iter()
+        .map(|order| match order.as_str() {
+            "FIRST" => IndexNullsOrder::First,
+            _ => IndexNullsOrder::Last,
+        })
+        .collect::<Vec<_>>();
+
+    let all_default = nulls.iter().enumerate().all(|(position, order)| {
+        let direction = directions.get(position).unwrap_or(&IndexDirection::Asc);
+        matches!(
+            (direction, order),
+            (IndexDirection::Asc, IndexNullsOrder::Last)
+                | (IndexDirection::Desc, IndexNullsOrder::First)
+        )
+    });
+    if all_default { Vec::new() } else { nulls }
 }
 
 fn check_expression(definition: &str) -> String {

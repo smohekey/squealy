@@ -19,7 +19,7 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
     ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexDirection, IndexMethod, IndexModel, SchemaModel, SqlType, TableModel,
+    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, SchemaModel, SqlType, TableModel,
 };
 
 /// Current package format version, recorded in `manifest.kdl`.
@@ -309,6 +309,7 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
     if !index.expressions.is_empty()
         || !index.include_columns.is_empty()
         || !index.directions.is_empty()
+        || !index.nulls.is_empty()
     {
         let mut children = KdlDocument::new();
         if !index.expressions.is_empty() {
@@ -331,6 +332,13 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
                 directions.push(KdlEntry::new(index_direction(direction)));
             }
             children.nodes_mut().push(directions);
+        }
+        if !index.nulls.is_empty() {
+            let mut nulls = KdlNode::new("nulls");
+            for order in &index.nulls {
+                nulls.push(KdlEntry::new(index_nulls_order(order)));
+            }
+            children.nodes_mut().push(nulls);
         }
         node.set_children(children);
     }
@@ -536,6 +544,11 @@ fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
         directions: child_nodes(node, "directions")
             .next()
             .map(index_directions_from_node)
+            .transpose()?
+            .unwrap_or_default(),
+        nulls: child_nodes(node, "nulls")
+            .next()
+            .map(index_nulls_from_node)
             .transpose()?
             .unwrap_or_default(),
         predicate: prop(node, "predicate").map(str::to_owned),
@@ -784,6 +797,13 @@ fn index_direction(direction: &IndexDirection) -> &'static str {
     }
 }
 
+fn index_nulls_order(order: &IndexNullsOrder) -> &'static str {
+    match order {
+        IndexNullsOrder::First => "first",
+        IndexNullsOrder::Last => "last",
+    }
+}
+
 fn index_directions_from_node(node: &KdlNode) -> Result<Vec<IndexDirection>, PackageError> {
     args(node)
         .into_iter()
@@ -792,6 +812,19 @@ fn index_directions_from_node(node: &KdlNode) -> Result<Vec<IndexDirection>, Pac
             "desc" => Ok(IndexDirection::Desc),
             other => Err(malformed(format!(
                 "`directions` has unsupported index direction `{other}`"
+            ))),
+        })
+        .collect()
+}
+
+fn index_nulls_from_node(node: &KdlNode) -> Result<Vec<IndexNullsOrder>, PackageError> {
+    args(node)
+        .into_iter()
+        .map(|order| match order.as_str() {
+            "first" => Ok(IndexNullsOrder::First),
+            "last" => Ok(IndexNullsOrder::Last),
+            other => Err(malformed(format!(
+                "`nulls` has unsupported index null ordering `{other}`"
             ))),
         })
         .collect()
@@ -858,6 +891,7 @@ mod tests {
                             unique: true,
                             method: None,
                             directions: Vec::new(),
+                            nulls: Vec::new(),
                             predicate: None,
                         }],
                     },
@@ -1166,6 +1200,7 @@ mod tests {
                 unique: false,
                 method: Some(method.clone()),
                 directions: vec![IndexDirection::Desc],
+                nulls: Vec::new(),
                 predicate: Some("event_id IS NOT NULL".to_owned()),
             })
             .collect();
@@ -1209,6 +1244,7 @@ mod tests {
                         unique: false,
                         method: Some(IndexMethod::BTree),
                         directions: vec![IndexDirection::Asc],
+                        nulls: Vec::new(),
                         predicate: None,
                     }],
                 }],
@@ -1243,6 +1279,7 @@ mod tests {
                         unique: false,
                         method: Some(IndexMethod::BTree),
                         directions: vec![IndexDirection::Asc],
+                        nulls: vec![IndexNullsOrder::Last],
                         predicate: None,
                     }],
                 }],

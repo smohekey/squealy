@@ -277,6 +277,7 @@ pub struct IndexModel {
     pub unique: bool,
     pub method: Option<IndexMethod>,
     pub directions: Vec<IndexDirection>,
+    pub nulls: Vec<IndexNullsOrder>,
     /// Backend-specific predicate for a partial index.
     pub predicate: Option<String>,
 }
@@ -286,6 +287,13 @@ pub struct IndexModel {
 pub enum IndexDirection {
     Asc,
     Desc,
+}
+
+/// Null ordering for an indexed key term.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IndexNullsOrder {
+    First,
+    Last,
 }
 
 /// Backend-neutral index access method.
@@ -458,6 +466,7 @@ fn index_from_dyn(table: &str, index: &dyn Index) -> IndexModel {
         unique: index.unique(),
         method: None,
         directions: Vec::new(),
+        nulls: Vec::new(),
         predicate: None,
     }
 }

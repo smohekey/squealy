@@ -234,6 +234,12 @@ fn write_create_index(
             "MySQL does not support covering index include columns",
         ));
     }
+    if !index.nulls.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support index null ordering",
+        ));
+    }
 
     writer.write_all(b"CREATE ")?;
     if index.unique {

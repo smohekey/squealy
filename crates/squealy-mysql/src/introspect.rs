@@ -324,6 +324,7 @@ ORDER BY INDEX_NAME, SEQ_IN_INDEX",
             unique: non_unique == 0,
             method: Some(IndexMethod::from_sql(&index_type)),
             directions: Vec::new(),
+            nulls: Vec::new(),
             predicate: None,
         });
         index.columns.push(column);

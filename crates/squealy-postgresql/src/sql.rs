@@ -765,6 +765,7 @@ pub(crate) mod ddl {
             }
             write_quoted_ident(column, writer)?;
             write_index_direction(index, position, writer)?;
+            write_index_nulls(index, position, writer)?;
         }
         for (offset, expression) in index.expressions.iter().enumerate() {
             let position = index.columns.len() + offset;
@@ -773,6 +774,7 @@ pub(crate) mod ddl {
             }
             writer.write_all(expression.as_bytes())?;
             write_index_direction(index, position, writer)?;
+            write_index_nulls(index, position, writer)?;
         }
         Ok(())
     }
@@ -785,6 +787,19 @@ pub(crate) mod ddl {
         match index.directions.get(position) {
             Some(squealy::IndexDirection::Asc) => writer.write_all(b" ASC")?,
             Some(squealy::IndexDirection::Desc) => writer.write_all(b" DESC")?,
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn write_index_nulls(
+        index: &IndexModel,
+        position: usize,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        match index.nulls.get(position) {
+            Some(squealy::IndexNullsOrder::First) => writer.write_all(b" NULLS FIRST")?,
+            Some(squealy::IndexNullsOrder::Last) => writer.write_all(b" NULLS LAST")?,
             None => {}
         }
         Ok(())
