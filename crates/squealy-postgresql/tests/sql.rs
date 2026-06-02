@@ -298,6 +298,81 @@ CREATE UNIQUE INDEX \"idx_events_name\" ON \"public\".\"events\" (\"slug\");"
 }
 
 #[test]
+fn postgres_renders_changed_columns_in_schema_plan() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: TablePlanStep::AlterColumn {
+                    before: ColumnModel {
+                        name: "description".to_owned(),
+                        comment: Some("Old description".to_owned()),
+                        ty: SqlType::String,
+                        collation: None,
+                        nullable: true,
+                        default: Some(DefaultValue::Text("old".to_owned())),
+                        identity: None,
+                        generated: None,
+                    },
+                    after: ColumnModel {
+                        name: "description".to_owned(),
+                        comment: None,
+                        ty: SqlType::Varchar(128),
+                        collation: Some("C".to_owned()),
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                },
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: TablePlanStep::AlterColumn {
+                    before: ColumnModel {
+                        name: "status".to_owned(),
+                        comment: None,
+                        ty: SqlType::Text,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                    after: ColumnModel {
+                        name: "status".to_owned(),
+                        comment: Some("Event status".to_owned()),
+                        ty: SqlType::Text,
+                        collation: None,
+                        nullable: true,
+                        default: Some(DefaultValue::Text("new".to_owned())),
+                        identity: None,
+                        generated: None,
+                    },
+                },
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "ALTER TABLE \"public\".\"events\" ALTER COLUMN \"description\" TYPE varchar(128) COLLATE \"C\";\n\
+ALTER TABLE \"public\".\"events\" ALTER COLUMN \"description\" SET NOT NULL;\n\
+ALTER TABLE \"public\".\"events\" ALTER COLUMN \"description\" DROP DEFAULT;\n\
+COMMENT ON COLUMN \"public\".\"events\".\"description\" IS NULL;\n\
+ALTER TABLE \"public\".\"events\" ALTER COLUMN \"status\" DROP NOT NULL;\n\
+ALTER TABLE \"public\".\"events\" ALTER COLUMN \"status\" SET DEFAULT 'new';\n\
+COMMENT ON COLUMN \"public\".\"events\".\"status\" IS 'Event status';"
+    );
+}
+
+#[test]
 fn postgres_select_uses_numbered_placeholders() {
     let users = Postgres
         .from::<User>()

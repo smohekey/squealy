@@ -253,14 +253,43 @@ fn write_table_plan_step(
             statement(writer, first)?;
             write_create_index(schema, table, after, writer)?;
         }
-        TablePlanStep::AlterColumn { .. } => {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "MySQL incremental ALTER rendering for changed columns is not supported yet",
-            ));
+        TablePlanStep::AlterColumn { before, after } => {
+            write_alter_column(schema, table, before, after, writer)?;
         }
     }
     Ok(())
+}
+
+fn write_alter_column(
+    schema: Option<&str>,
+    table: &str,
+    before: &ColumnModel,
+    after: &ColumnModel,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    if before.name != after.name {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "MySQL incremental column rename rendering is not supported yet",
+        ));
+    }
+    if before.identity != after.identity {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "MySQL incremental identity column alteration rendering is not supported yet",
+        ));
+    }
+    if before.generated != after.generated {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "MySQL incremental generated column alteration rendering is not supported yet",
+        ));
+    }
+
+    writer.write_all(b"ALTER TABLE ")?;
+    write_qualified_name(schema, table, writer)?;
+    writer.write_all(b" MODIFY COLUMN ")?;
+    write_column(after, writer)
 }
 
 fn statement(writer: &mut impl Write, first: &mut bool) -> io::Result<()> {

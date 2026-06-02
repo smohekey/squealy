@@ -301,6 +301,76 @@ CREATE UNIQUE INDEX `idx_events_name` ON `shop`.`events` (`slug`);"
 }
 
 #[test]
+fn mysql_renders_changed_columns_in_schema_plan() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: TablePlanStep::AlterColumn {
+                    before: ColumnModel {
+                        name: "description".to_owned(),
+                        comment: Some("Old description".to_owned()),
+                        ty: SqlType::String,
+                        collation: None,
+                        nullable: true,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                    after: ColumnModel {
+                        name: "description".to_owned(),
+                        comment: Some("New description".to_owned()),
+                        ty: SqlType::Varchar(128),
+                        collation: Some("utf8mb4_bin".to_owned()),
+                        nullable: false,
+                        default: Some(DefaultValue::Text("new".to_owned())),
+                        identity: None,
+                        generated: None,
+                    },
+                },
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: TablePlanStep::AlterColumn {
+                    before: ColumnModel {
+                        name: "status".to_owned(),
+                        comment: Some("Event status".to_owned()),
+                        ty: SqlType::Text,
+                        collation: None,
+                        nullable: false,
+                        default: Some(DefaultValue::Text("draft".to_owned())),
+                        identity: None,
+                        generated: None,
+                    },
+                    after: ColumnModel {
+                        name: "status".to_owned(),
+                        comment: None,
+                        ty: SqlType::Text,
+                        collation: None,
+                        nullable: true,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                },
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "ALTER TABLE `shop`.`events` MODIFY COLUMN `description` VARCHAR(128) COLLATE utf8mb4_bin NOT NULL DEFAULT 'new' COMMENT 'New description';\n\
+ALTER TABLE `shop`.`events` MODIFY COLUMN `status` TEXT;"
+    );
+}
+
+#[test]
 fn mysql_renders_create_from_scratch() {
     let model = DatabaseModel::from_database::<ShopDb>();
     let mut sql = Vec::new();

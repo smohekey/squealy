@@ -290,8 +290,8 @@ Build the spine and a real, executable create-from-scratch path, plus the packag
 
 **Out of scope this sprint (designed-for, not built)**
 
-- Backend-specific incremental `ALTER` rendering and execution.
-- Rename hints and richer ambiguous-change handling, such as type-change `USING` casts.
+- Rename hints and richer ambiguous-change handling, such as type-change `USING` casts and
+  backend-specific identity/generated-column transitions.
 
 ### API sketch (subject to change)
 
@@ -337,8 +337,9 @@ pub async fn publish<B, C>(model: &DatabaseModel, backend: &B, conn: &C) -> Resu
 
 ## Roadmap (post-sprint-1)
 
-- **Richer ALTER rendering:** changed definitions (`ALTER COLUMN`, changed constraints/indexes),
-  rename hints, and backend-specific assists for ambiguous changes such as type-change `USING` casts.
+- **Richer ALTER rendering:** rename hints, backend-specific assists for ambiguous changes such as
+  type-change `USING` casts, and identity/generated-column transitions where a backend can apply
+  them safely.
 - **Hybrid flow:** generate a reviewable upgrade script from two models (crate↔crate, package↔package,
   or model↔live), bridging declarative authoring with checked-in, auditable artifacts.
 - **Schema compare CLI** for desired-vs-live and desired-vs-package workflows.
@@ -387,8 +388,10 @@ Done and tested:
   policy-checked, backend-neutral `DatabasePlan` steps. Backend-specific ALTER rendering/execution is
   the next layer.
 - **Plan rendering**: core `SchemaBackend::render_plan` lets backends render neutral plans without
-  depending on `squealy-model`; Postgres and MySQL implement initial create/drop/add-column/index/
-  constraint plan rendering. `squealy-model::render_plan_sql` is the allocating convenience wrapper.
+  depending on `squealy-model`; Postgres and MySQL implement create/drop/add-column/index/constraint
+  plan rendering plus changed column rendering for type, collation, nullability, default, and comment
+  differences. Identity/generated-column transitions and rename/cast hints remain explicit
+  unsupported cases. `squealy-model::render_plan_sql` is the allocating convenience wrapper.
 - **Plan/apply engine APIs**: `plan_from_database` introspects live state and returns a policy-checked
   plan; `apply_plan` renders that plan through the selected backend and executes the resulting DDL.
 - **Plan CLI**: `squealy plan --backend <backend> --desired desired.sqz --actual actual.sqz`
@@ -398,7 +401,8 @@ Done and tested:
   explicitly allowed. `--report` renders the live plan to stdout without applying it.
 
 **Sprint 1 is functionally complete, and the diff/policy/neutral-plan layer is underway.** Next:
-richer changed-definition rendering and the hybrid reviewable-script flow.
+identity/generated-column transition handling, rename/cast hints, and the hybrid reviewable-script
+flow.
 
 ## Settled decisions
 

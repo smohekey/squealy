@@ -774,13 +774,104 @@ pub(crate) mod ddl {
                 statement(writer, first)?;
                 write_create_index(schema, table, after, writer)?;
             }
-            TablePlanStep::AlterColumn { .. } => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "PostgreSQL incremental ALTER rendering for changed columns is not supported yet",
-                ));
+            TablePlanStep::AlterColumn { before, after } => {
+                write_alter_column(schema, table, before, after, writer, first)?;
             }
         }
+        Ok(())
+    }
+
+    fn write_alter_column(
+        schema: Option<&str>,
+        table: &str,
+        before: &ColumnModel,
+        after: &ColumnModel,
+        writer: &mut impl Write,
+        first: &mut bool,
+    ) -> io::Result<()> {
+        if before.name != after.name {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "PostgreSQL incremental column rename rendering is not supported yet",
+            ));
+        }
+        if before.identity != after.identity {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "PostgreSQL incremental identity column alteration rendering is not supported yet",
+            ));
+        }
+        if before.generated != after.generated {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "PostgreSQL incremental generated column alteration rendering is not supported yet",
+            ));
+        }
+
+        let mut wrote = false;
+        if before.ty != after.ty || before.collation != after.collation {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ALTER COLUMN ")?;
+            write_quoted_ident(&after.name, writer)?;
+            writer.write_all(b" TYPE ")?;
+            write_pg_sql_type(&after.ty, writer)?;
+            if let Some(collation) = &after.collation {
+                writer.write_all(b" COLLATE ")?;
+                write_quoted_ident(collation, writer)?;
+            }
+            wrote = true;
+        }
+
+        if before.nullable != after.nullable {
+            if wrote {
+                statement(writer, first)?;
+            }
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ALTER COLUMN ")?;
+            write_quoted_ident(&after.name, writer)?;
+            if after.nullable {
+                writer.write_all(b" DROP NOT NULL")?;
+            } else {
+                writer.write_all(b" SET NOT NULL")?;
+            }
+            wrote = true;
+        }
+
+        if before.default != after.default {
+            if wrote {
+                statement(writer, first)?;
+            }
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ALTER COLUMN ")?;
+            write_quoted_ident(&after.name, writer)?;
+            match &after.default {
+                Some(default) => {
+                    writer.write_all(b" SET DEFAULT ")?;
+                    write_default_value(default, writer)?;
+                }
+                None => writer.write_all(b" DROP DEFAULT")?,
+            }
+            wrote = true;
+        }
+
+        if before.comment != after.comment {
+            if wrote {
+                statement(writer, first)?;
+            }
+            write_comment_on_column(schema, table, &after.name, after.comment.as_ref(), writer)?;
+            wrote = true;
+        }
+
+        if !wrote {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "PostgreSQL incremental column alteration has no renderable changes",
+            ));
+        }
+
         Ok(())
     }
 
