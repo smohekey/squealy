@@ -30,6 +30,16 @@ struct Public {
 }
 
 #[test]
+fn postgres_reports_schema_capabilities() {
+    let capabilities = Postgres.capabilities();
+
+    assert!(capabilities.constraints.foreign_key_validation);
+    assert!(!capabilities.constraints.foreign_key_enforcement);
+    assert!(capabilities.constraints.check_validation);
+    assert!(!capabilities.constraints.check_enforcement);
+}
+
+#[test]
 fn postgres_select_uses_numbered_placeholders() {
     let users = Postgres
         .from::<User>()

@@ -21,6 +21,12 @@ mod sql;
 pub struct Mysql;
 
 impl SchemaBackend for Mysql {
+    fn capabilities(&self) -> squealy::SchemaCapabilities {
+        squealy::SchemaCapabilities {
+            constraints: squealy::ConstraintCapabilities::default(),
+        }
+    }
+
     fn render_create(&self, model: &DatabaseModel, writer: &mut impl Write) -> std::io::Result<()> {
         sql::write_database(model, writer)
     }

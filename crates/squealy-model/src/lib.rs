@@ -16,8 +16,9 @@ pub use package::{
     write_package_to,
 };
 pub use squealy::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, DdlExecutor, DefaultValue,
-    ForeignKeyAction, ForeignKeyModel, IndexDirection, IndexMethod, IndexModel, SchemaBackend,
+    CheckModel, ColumnModel, Constraint, ConstraintCapabilities, ConstraintEnforcement,
+    ConstraintValidation, DatabaseModel, DdlExecutor, DefaultValue, ForeignKeyAction,
+    ForeignKeyModel, IndexDirection, IndexMethod, IndexModel, SchemaBackend, SchemaCapabilities,
     SchemaConnect, SchemaIntrospect, SchemaModel, SqlType, TableModel,
 };
 
@@ -31,6 +32,7 @@ pub fn render_create_sql<B: SchemaBackend>(
     model: &DatabaseModel,
     backend: &B,
 ) -> std::io::Result<String> {
+    validate_capabilities(model, backend.capabilities())?;
     let mut buffer = Vec::new();
     backend.render_create(model, &mut buffer)?;
     // SchemaBackend renderers emit UTF-8; treat anything else as a renderer bug.
@@ -111,4 +113,167 @@ where
     C: SchemaIntrospect,
 {
     connection.introspect_database().await
+}
+
+fn validate_capabilities(
+    model: &DatabaseModel,
+    capabilities: SchemaCapabilities,
+) -> std::io::Result<()> {
+    for schema in &model.schemas {
+        for table in &schema.tables {
+            for foreign_key in &table.foreign_keys {
+                if foreign_key.validation.is_some()
+                    && !capabilities.constraints.foreign_key_validation
+                {
+                    return unsupported(
+                        &table.name,
+                        &foreign_key.name,
+                        "foreign key validation metadata",
+                    );
+                }
+                if foreign_key.enforcement.is_some()
+                    && !capabilities.constraints.foreign_key_enforcement
+                {
+                    return unsupported(
+                        &table.name,
+                        &foreign_key.name,
+                        "foreign key enforcement metadata",
+                    );
+                }
+            }
+            for check in &table.checks {
+                if check.validation.is_some() && !capabilities.constraints.check_validation {
+                    return unsupported(&table.name, &check.name, "check validation metadata");
+                }
+                if check.enforcement.is_some() && !capabilities.constraints.check_enforcement {
+                    return unsupported(&table.name, &check.name, "check enforcement metadata");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn unsupported(table: &str, constraint: &str, feature: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("backend does not support {feature} for constraint `{constraint}` on `{table}`"),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestBackend {
+        capabilities: SchemaCapabilities,
+    }
+
+    impl SchemaBackend for TestBackend {
+        fn capabilities(&self) -> SchemaCapabilities {
+            self.capabilities
+        }
+
+        fn render_create(
+            &self,
+            _model: &DatabaseModel,
+            writer: &mut impl std::io::Write,
+        ) -> std::io::Result<()> {
+            writer.write_all(b"-- rendered")
+        }
+    }
+
+    fn table_with_constraints(foreign_key: ForeignKeyModel, check: CheckModel) -> DatabaseModel {
+        DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "memberships".to_owned(),
+                    comment: None,
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys: vec![foreign_key],
+                    uniques: vec![],
+                    checks: vec![check],
+                    indexes: vec![],
+                }],
+            }],
+        }
+    }
+
+    fn foreign_key() -> ForeignKeyModel {
+        ForeignKeyModel {
+            name: "fk_memberships_tenant_id".to_owned(),
+            columns: vec!["tenant_id".to_owned()],
+            references_schema: None,
+            references_table: "tenants".to_owned(),
+            references_columns: vec!["id".to_owned()],
+            match_type: None,
+            deferrability: None,
+            validation: None,
+            enforcement: None,
+            on_delete: None,
+            on_update: None,
+        }
+    }
+
+    fn check() -> CheckModel {
+        CheckModel {
+            name: "ck_memberships_quota".to_owned(),
+            expression: "quota > 0".to_owned(),
+            validation: None,
+            enforcement: None,
+        }
+    }
+
+    #[test]
+    fn render_create_rejects_unsupported_constraint_capabilities() {
+        let mut foreign_key = foreign_key();
+        foreign_key.validation = Some(ConstraintValidation::NotValidated);
+        let mut check = check();
+        check.enforcement = Some(ConstraintEnforcement::NotEnforced);
+        let model = table_with_constraints(foreign_key, check);
+
+        let error = render_create_sql(
+            &model,
+            &TestBackend {
+                capabilities: SchemaCapabilities::default(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("foreign key validation metadata"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn render_create_allows_reported_constraint_capabilities() {
+        let mut foreign_key = foreign_key();
+        foreign_key.validation = Some(ConstraintValidation::NotValidated);
+        let mut check = check();
+        check.enforcement = Some(ConstraintEnforcement::NotEnforced);
+        let model = table_with_constraints(foreign_key, check);
+
+        let sql = render_create_sql(
+            &model,
+            &TestBackend {
+                capabilities: SchemaCapabilities {
+                    constraints: ConstraintCapabilities {
+                        foreign_key_validation: true,
+                        foreign_key_enforcement: false,
+                        check_validation: false,
+                        check_enforcement: true,
+                    },
+                },
+            },
+        )
+        .expect("reported capabilities should allow rendering");
+
+        assert_eq!(sql, "-- rendered");
+    }
 }

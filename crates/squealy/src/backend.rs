@@ -79,6 +79,27 @@ pub trait Backend: Sized {
     fn write_table(&self, table: &(dyn Table + Sync), writer: &mut impl Write) -> io::Result<()>;
 }
 
+/// Backend schema-management capabilities that are supported for full DDL/introspection
+/// round-trips.
+///
+/// A capability should be `true` only when the backend can render the metadata and read it back into
+/// the neutral model after applying the DDL. Syntax-only support is not enough for schema
+/// management, because it would make publish-then-introspect lose model facts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SchemaCapabilities {
+    pub constraints: ConstraintCapabilities,
+}
+
+/// Constraint metadata capabilities, split by constraint kind because SQL backends often expose
+/// validation/enforcement differently for foreign keys and checks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConstraintCapabilities {
+    pub foreign_key_validation: bool,
+    pub foreign_key_enforcement: bool,
+    pub check_validation: bool,
+    pub check_enforcement: bool,
+}
+
 /// Backend-specific DDL rendering driven by an owned [`DatabaseModel`].
 ///
 /// This is the schema-management counterpart to [`Backend`]: it renders ordered, whole-database
@@ -87,6 +108,14 @@ pub trait Backend: Sized {
 /// drive deployment without depending on any backend. It supersedes [`Backend::write_table`], which
 /// renders only a single table.
 pub trait SchemaBackend {
+    /// Reports backend-wide schema-management capabilities.
+    ///
+    /// The default is conservative: no optional metadata is considered round-trippable unless a
+    /// backend opts in.
+    fn capabilities(&self) -> SchemaCapabilities {
+        SchemaCapabilities::default()
+    }
+
     /// Renders ordered create-from-scratch DDL for the whole model into `writer`.
     ///
     /// Implementations emit namespaces, then tables in foreign-key dependency order, then indexes,

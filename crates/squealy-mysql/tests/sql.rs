@@ -36,6 +36,16 @@ struct ShopDb {
 }
 
 #[test]
+fn mysql_reports_schema_capabilities() {
+    let capabilities = Mysql.capabilities();
+
+    assert!(!capabilities.constraints.foreign_key_validation);
+    assert!(!capabilities.constraints.foreign_key_enforcement);
+    assert!(!capabilities.constraints.check_validation);
+    assert!(!capabilities.constraints.check_enforcement);
+}
+
+#[test]
 fn mysql_renders_create_from_scratch() {
     let model = DatabaseModel::from_database::<ShopDb>();
     let mut sql = Vec::new();

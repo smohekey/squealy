@@ -115,6 +115,17 @@ impl Backend for Postgres {
 
 #[cfg(feature = "schema")]
 impl squealy::SchemaBackend for Postgres {
+    fn capabilities(&self) -> squealy::SchemaCapabilities {
+        squealy::SchemaCapabilities {
+            constraints: squealy::ConstraintCapabilities {
+                foreign_key_validation: true,
+                foreign_key_enforcement: false,
+                check_validation: true,
+                check_enforcement: false,
+            },
+        }
+    }
+
     fn render_create(
         &self,
         model: &squealy::DatabaseModel,

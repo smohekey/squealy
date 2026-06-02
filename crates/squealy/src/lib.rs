@@ -388,8 +388,8 @@ mod schema;
 mod table;
 
 pub use backend::{
-    Backend, DdlExecutor, Decode, DecodeNullable, RowReader, SchemaBackend, SchemaConnect,
-    SchemaIntrospect,
+    Backend, ConstraintCapabilities, DdlExecutor, Decode, DecodeNullable, RowReader, SchemaBackend,
+    SchemaCapabilities, SchemaConnect, SchemaIntrospect,
 };
 pub use column::{
     Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullableValue, ColumnType,
