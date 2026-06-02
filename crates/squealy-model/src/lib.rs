@@ -177,6 +177,9 @@ where
     B: SchemaBackend,
     C: DdlExecutor,
 {
+    if plan.is_empty() {
+        return Ok(());
+    }
     let sql = render_plan_sql(plan, backend).map_err(PublishError::Render)?;
     connection
         .execute_ddl(&sql)

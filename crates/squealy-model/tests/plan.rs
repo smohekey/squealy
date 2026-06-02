@@ -141,6 +141,24 @@ async fn apply_plan_renders_with_backend_and_executes_sql() {
     );
 }
 
+#[tokio::test]
+async fn apply_plan_does_not_execute_empty_plans() {
+    let mut connection = TestConnection {
+        model: DatabaseModel { schemas: vec![] },
+        executed: Vec::new(),
+    };
+
+    apply_plan(
+        &squealy_model::DatabasePlan::default(),
+        &Postgres,
+        &mut connection,
+    )
+    .await
+    .expect("apply empty plan");
+
+    assert!(connection.executed.is_empty());
+}
+
 #[derive(Debug)]
 struct TestConnection {
     model: DatabaseModel,

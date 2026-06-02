@@ -200,7 +200,9 @@ strings — so the crate must be compiled and run):
 **Export-then-publish split (privilege separation):**
 - `squealy export --database … model.sqz` — compile + run stub → package. **No DB, no secrets.**
 - `squealy publish --package model.sqz --url …` — operates on the static artifact; **executes no
-  project code**, just renders DDL and runs it. Right shape for CI/CD with credentials.
+  project code**, just renders DDL and runs it. By default this is create-from-scratch DDL; with
+  `--incremental` it introspects the live database, builds a policy-checked plan, and applies that
+  plan. Right shape for CI/CD with credentials.
 - `squealy publish --database … --url …` (compile+run then deploy in one step) stays available for dev
   convenience, using `SchemaConnect` to open the connection from the URL.
 
@@ -334,8 +336,8 @@ pub async fn publish<B, C>(model: &DatabaseModel, backend: &B, conn: &C) -> Resu
 
 ## Roadmap (post-sprint-1)
 
-- **Incremental apply:** apply/publish paths that consume a rendered plan instead of
-  create-from-scratch SQL.
+- **Live planning dry-run:** render a plan from a desired package/crate against a live database
+  without applying it, so operators can review exactly what `publish --incremental` would execute.
 - **Richer ALTER rendering:** changed definitions (`ALTER COLUMN`, changed constraints/indexes),
   rename hints, and backend-specific assists for ambiguous changes such as type-change `USING` casts.
 - **Hybrid flow:** generate a reviewable upgrade script from two models (crate↔crate, package↔package,
@@ -392,10 +394,13 @@ Done and tested:
   plan; `apply_plan` renders that plan through the selected backend and executes the resulting DDL.
 - **Plan CLI**: `squealy plan --backend <backend> --desired desired.sqz --actual actual.sqz`
   renders incremental DDL between packages and enforces `DiffPolicy` by default.
+- **Incremental publish CLI**: `squealy publish --incremental ...` introspects the live database,
+  builds a policy-checked plan, and applies it. Ambiguous/destructive changes remain blocked unless
+  explicitly allowed.
 
 **Sprint 1 is functionally complete, and the diff/policy/neutral-plan layer is underway.** Next:
-live incremental apply/publish CLI exposure, then richer changed-definition rendering and the hybrid
-reviewable-script flow.
+live incremental dry-run, then richer changed-definition rendering and the hybrid reviewable-script
+flow.
 
 ## Settled decisions
 

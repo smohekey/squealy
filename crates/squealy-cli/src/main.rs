@@ -10,8 +10,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use squealy_cli::extract::extract_model;
 use squealy_model::{
     ChangeRisk, DatabaseDiffChange, DatabaseModel, DiffPolicy, SchemaBackend, SchemaCapabilities,
-    SchemaConnect, TableDiffChange, check_create, check_diff_policy, diff_models, introspect,
-    plan_models, publish, read_package, render_create_sql, render_plan_sql, write_package,
+    SchemaConnect, TableDiffChange, apply_plan, check_create, check_diff_policy, diff_models,
+    introspect, plan_from_database, plan_models, publish, read_package, render_create_sql,
+    render_plan_sql, write_package,
 };
 use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
@@ -97,7 +98,7 @@ enum Command {
         /// Output package path.
         output: PathBuf,
     },
-    /// Create the schema from scratch against a database.
+    /// Publish schema changes against a database.
     Publish {
         #[command(flatten)]
         source: ModelSource,
@@ -106,6 +107,15 @@ enum Command {
         /// Connection URL.
         #[arg(long)]
         url: String,
+        /// Introspect the live database and apply an incremental plan instead of create-from-scratch DDL.
+        #[arg(long)]
+        incremental: bool,
+        /// Allow destructive changes when publishing incrementally.
+        #[arg(long)]
+        allow_destructive: bool,
+        /// Allow ambiguous changes when publishing incrementally.
+        #[arg(long)]
+        allow_ambiguous: bool,
     },
 }
 
@@ -268,6 +278,9 @@ async fn run(cli: Cli) -> Result<(), String> {
             source,
             backend,
             url,
+            incremental,
+            allow_destructive,
+            allow_ambiguous,
         } => {
             let model = source.load()?;
             match backend.backend {
@@ -276,18 +289,54 @@ async fn run(cli: Cli) -> Result<(), String> {
                         .connect(&url)
                         .await
                         .map_err(|error| format!("connect: {error}"))?;
-                    publish(&model, &Postgres, &mut connection)
+                    if incremental {
+                        check_create(&model, &Postgres)
+                            .map_err(|error| format!("check model: {error}"))?;
+                        let plan = plan_from_database(
+                            &model,
+                            &mut connection,
+                            DiffPolicy {
+                                allow_destructive,
+                                allow_ambiguous,
+                            },
+                        )
                         .await
-                        .map_err(|error| format!("publish: {error}"))
+                        .map_err(|error| format!("plan: {error}"))?;
+                        apply_plan(&plan, &Postgres, &mut connection)
+                            .await
+                            .map_err(|error| format!("publish: {error}"))
+                    } else {
+                        publish(&model, &Postgres, &mut connection)
+                            .await
+                            .map_err(|error| format!("publish: {error}"))
+                    }
                 }
                 BackendKind::Mysql => {
                     let mut connection = Mysql
                         .connect(&url)
                         .await
                         .map_err(|error| format!("connect: {error}"))?;
-                    publish(&model, &Mysql, &mut connection)
+                    if incremental {
+                        check_create(&model, &Mysql)
+                            .map_err(|error| format!("check model: {error}"))?;
+                        let plan = plan_from_database(
+                            &model,
+                            &mut connection,
+                            DiffPolicy {
+                                allow_destructive,
+                                allow_ambiguous,
+                            },
+                        )
                         .await
-                        .map_err(|error| format!("publish: {error}"))
+                        .map_err(|error| format!("plan: {error}"))?;
+                        apply_plan(&plan, &Mysql, &mut connection)
+                            .await
+                            .map_err(|error| format!("publish: {error}"))
+                    } else {
+                        publish(&model, &Mysql, &mut connection)
+                            .await
+                            .map_err(|error| format!("publish: {error}"))
+                    }
                 }
             }
         }
