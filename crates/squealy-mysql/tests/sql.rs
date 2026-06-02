@@ -81,6 +81,7 @@ fn mysql_rejects_partial_index_predicates() {
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Asc],
                     nulls: Vec::new(),
+                    collations: Vec::new(),
                     operator_classes: Vec::new(),
                     predicate: Some("tenant_id > 0".to_owned()),
                 }],
@@ -121,6 +122,7 @@ fn mysql_rejects_expression_indexes() {
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Asc],
                     nulls: Vec::new(),
+                    collations: Vec::new(),
                     operator_classes: Vec::new(),
                     predicate: None,
                 }],
@@ -171,6 +173,7 @@ fn mysql_rejects_covering_index_include_columns() {
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Asc],
                     nulls: Vec::new(),
+                    collations: Vec::new(),
                     operator_classes: Vec::new(),
                     predicate: None,
                 }],
@@ -211,6 +214,7 @@ fn mysql_rejects_index_null_ordering() {
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Asc],
                     nulls: vec![IndexNullsOrder::First],
+                    collations: Vec::new(),
                     operator_classes: Vec::new(),
                     predicate: None,
                 }],
@@ -251,10 +255,55 @@ fn mysql_rejects_index_operator_classes() {
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Asc],
                     nulls: Vec::new(),
+                    collations: Vec::new(),
                     operator_classes: vec![IndexOperatorClass {
                         position: 0,
                         name: "text_pattern_ops".to_owned(),
                     }],
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mysql_rejects_index_collations() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    ty: SqlType::String,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_tenants_slug_pattern".to_owned(),
+                    columns: vec!["slug".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    nulls: Vec::new(),
+                    collations: vec![IndexCollation {
+                        position: 0,
+                        name: "C".to_owned(),
+                    }],
+                    operator_classes: Vec::new(),
                     predicate: None,
                 }],
             }],

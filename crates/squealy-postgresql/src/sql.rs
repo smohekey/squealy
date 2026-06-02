@@ -764,6 +764,7 @@ pub(crate) mod ddl {
                 writer.write_all(b", ")?;
             }
             write_quoted_ident(column, writer)?;
+            write_index_collation(index, position, writer)?;
             write_index_operator_class(index, position, writer)?;
             write_index_direction(index, position, writer)?;
             write_index_nulls(index, position, writer)?;
@@ -774,6 +775,7 @@ pub(crate) mod ddl {
                 writer.write_all(b", ")?;
             }
             writer.write_all(expression.as_bytes())?;
+            write_index_collation(index, position, writer)?;
             write_index_operator_class(index, position, writer)?;
             write_index_direction(index, position, writer)?;
             write_index_nulls(index, position, writer)?;
@@ -806,6 +808,22 @@ pub(crate) mod ddl {
         {
             writer.write_all(b" ")?;
             writer.write_all(operator_class.name.as_bytes())?;
+        }
+        Ok(())
+    }
+
+    fn write_index_collation(
+        index: &IndexModel,
+        position: usize,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        if let Some(collation) = index
+            .collations
+            .iter()
+            .find(|collation| collation.position == position)
+        {
+            writer.write_all(b" COLLATE ")?;
+            write_quoted_ident(&collation.name, writer)?;
         }
         Ok(())
     }

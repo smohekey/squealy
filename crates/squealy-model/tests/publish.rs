@@ -206,6 +206,7 @@ fn rich_model() -> DatabaseModel {
                         method: Some(IndexMethod::BTree),
                         directions: vec![IndexDirection::Asc],
                         nulls: vec![IndexNullsOrder::First],
+                        collations: Vec::new(),
                         operator_classes: Vec::new(),
                         predicate: Some("(quota > (0)::numeric)".to_owned()),
                     }],
@@ -270,6 +271,10 @@ fn rich_model() -> DatabaseModel {
                         method: Some(IndexMethod::BTree),
                         directions: vec![IndexDirection::Asc],
                         nulls: Vec::new(),
+                        collations: vec![IndexCollation {
+                            position: 0,
+                            name: "C".to_owned(),
+                        }],
                         operator_classes: vec![IndexOperatorClass {
                             position: 0,
                             name: "text_pattern_ops".to_owned(),

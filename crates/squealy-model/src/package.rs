@@ -19,8 +19,8 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
     ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, SchemaModel,
-    SqlType, TableModel,
+    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
+    SchemaModel, SqlType, TableModel,
 };
 
 /// Current package format version, recorded in `manifest.kdl`.
@@ -311,6 +311,7 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
         || !index.include_columns.is_empty()
         || !index.directions.is_empty()
         || !index.nulls.is_empty()
+        || !index.collations.is_empty()
         || !index.operator_classes.is_empty()
     {
         let mut children = KdlDocument::new();
@@ -342,6 +343,11 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
             }
             children.nodes_mut().push(nulls);
         }
+        for collation in &index.collations {
+            children
+                .nodes_mut()
+                .push(index_collation_to_node(collation));
+        }
         for operator_class in &index.operator_classes {
             children
                 .nodes_mut()
@@ -349,6 +355,13 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
         }
         node.set_children(children);
     }
+    node
+}
+
+fn index_collation_to_node(collation: &IndexCollation) -> KdlNode {
+    let mut node = KdlNode::new("collation");
+    node.push(KdlEntry::new(KdlValue::Integer(collation.position as i128)));
+    node.push(KdlEntry::new(collation.name.clone()));
     node
 }
 
@@ -567,6 +580,9 @@ fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
             .map(index_nulls_from_node)
             .transpose()?
             .unwrap_or_default(),
+        collations: child_nodes(node, "collation")
+            .map(index_collation_from_node)
+            .collect::<Result<Vec<_>, _>>()?,
         operator_classes: child_nodes(node, "operator-class")
             .map(index_operator_class_from_node)
             .collect::<Result<Vec<_>, _>>()?,
@@ -850,6 +866,19 @@ fn index_nulls_from_node(node: &KdlNode) -> Result<Vec<IndexNullsOrder>, Package
 }
 
 fn index_operator_class_from_node(node: &KdlNode) -> Result<IndexOperatorClass, PackageError> {
+    let (position, name) = positioned_index_metadata_from_node(node, "operator-class")?;
+    Ok(IndexOperatorClass { position, name })
+}
+
+fn index_collation_from_node(node: &KdlNode) -> Result<IndexCollation, PackageError> {
+    let (position, name) = positioned_index_metadata_from_node(node, "collation")?;
+    Ok(IndexCollation { position, name })
+}
+
+fn positioned_index_metadata_from_node(
+    node: &KdlNode,
+    kind: &str,
+) -> Result<(usize, String), PackageError> {
     let mut args = node
         .entries()
         .iter()
@@ -858,15 +887,15 @@ fn index_operator_class_from_node(node: &KdlNode) -> Result<IndexOperatorClass, 
     let position = args
         .next()
         .and_then(KdlValue::as_integer)
-        .ok_or_else(|| malformed("`operator-class` is missing integer position"))?;
+        .ok_or_else(|| malformed(format!("`{kind}` is missing integer position")))?;
     let position = usize::try_from(position)
-        .map_err(|_| malformed("`operator-class` position is out of range for usize"))?;
+        .map_err(|_| malformed(format!("`{kind}` position is out of range for usize")))?;
     let name = args
         .next()
         .and_then(KdlValue::as_string)
-        .ok_or_else(|| malformed("`operator-class` is missing class name"))?
+        .ok_or_else(|| malformed(format!("`{kind}` is missing name")))?
         .to_owned();
-    Ok(IndexOperatorClass { position, name })
+    Ok((position, name))
 }
 
 #[cfg(test)]
@@ -931,6 +960,7 @@ mod tests {
                             method: None,
                             directions: Vec::new(),
                             nulls: Vec::new(),
+                            collations: Vec::new(),
                             operator_classes: Vec::new(),
                             predicate: None,
                         }],
@@ -1241,6 +1271,7 @@ mod tests {
                 method: Some(method.clone()),
                 directions: vec![IndexDirection::Desc],
                 nulls: Vec::new(),
+                collations: Vec::new(),
                 operator_classes: Vec::new(),
                 predicate: Some("event_id IS NOT NULL".to_owned()),
             })
@@ -1286,6 +1317,10 @@ mod tests {
                         method: Some(IndexMethod::BTree),
                         directions: vec![IndexDirection::Asc],
                         nulls: Vec::new(),
+                        collations: vec![IndexCollation {
+                            position: 0,
+                            name: "C".to_owned(),
+                        }],
                         operator_classes: vec![IndexOperatorClass {
                             position: 0,
                             name: "text_pattern_ops".to_owned(),
@@ -1325,6 +1360,7 @@ mod tests {
                         method: Some(IndexMethod::BTree),
                         directions: vec![IndexDirection::Asc],
                         nulls: vec![IndexNullsOrder::Last],
+                        collations: Vec::new(),
                         operator_classes: Vec::new(),
                         predicate: None,
                     }],

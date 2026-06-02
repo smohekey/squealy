@@ -493,6 +493,7 @@ fn postgres_renders_partial_indexes() {
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Desc],
                     nulls: Vec::new(),
+                    collations: Vec::new(),
                     operator_classes: Vec::new(),
                     predicate: Some("(tenant_id > 0)".to_owned()),
                 }],
@@ -540,6 +541,7 @@ fn postgres_renders_expression_indexes() {
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Asc],
                     nulls: Vec::new(),
+                    collations: Vec::new(),
                     operator_classes: Vec::new(),
                     predicate: None,
                 }],
@@ -597,6 +599,7 @@ fn postgres_renders_covering_indexes() {
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Asc],
                     nulls: Vec::new(),
+                    collations: Vec::new(),
                     operator_classes: Vec::new(),
                     predicate: None,
                 }],
@@ -644,6 +647,7 @@ fn postgres_renders_index_null_ordering() {
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Asc],
                     nulls: vec![IndexNullsOrder::First],
+                    collations: Vec::new(),
                     operator_classes: Vec::new(),
                     predicate: None,
                 }],
@@ -691,6 +695,7 @@ fn postgres_renders_index_operator_classes() {
                     method: Some(IndexMethod::BTree),
                     directions: vec![IndexDirection::Asc],
                     nulls: Vec::new(),
+                    collations: Vec::new(),
                     operator_classes: vec![IndexOperatorClass {
                         position: 0,
                         name: "text_pattern_ops".to_owned(),
@@ -710,5 +715,59 @@ fn postgres_renders_index_operator_classes() {
             "CREATE INDEX \"idx_tenants_slug_pattern\" ON \"catalog\".\"tenants\" USING btree (\"slug\" text_pattern_ops ASC)"
         ),
         "index operator class not rendered as expected: {sql}"
+    );
+}
+
+#[test]
+fn postgres_renders_index_collations() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog".to_owned()),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    ty: SqlType::String,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_tenants_slug_pattern".to_owned(),
+                    columns: vec!["slug".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    nulls: Vec::new(),
+                    collations: vec![IndexCollation {
+                        position: 0,
+                        name: "C".to_owned(),
+                    }],
+                    operator_classes: vec![IndexOperatorClass {
+                        position: 0,
+                        name: "text_pattern_ops".to_owned(),
+                    }],
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE INDEX \"idx_tenants_slug_pattern\" ON \"catalog\".\"tenants\" USING btree (\"slug\" COLLATE \"C\" text_pattern_ops ASC)"
+        ),
+        "index collation not rendered as expected: {sql}"
     );
 }

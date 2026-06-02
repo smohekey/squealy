@@ -246,6 +246,12 @@ fn write_create_index(
             "MySQL does not support index operator classes",
         ));
     }
+    if !index.collations.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support index collation overrides",
+        ));
+    }
 
     writer.write_all(b"CREATE ")?;
     if index.unique {
