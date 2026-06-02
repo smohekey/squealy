@@ -8,7 +8,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use squealy_cli::extract::extract_model;
-use squealy_model::{DatabaseModel, SchemaConnect, publish, read_package, render_create_sql};
+use squealy_model::{
+    DatabaseModel, SchemaConnect, check_create, publish, read_package, render_create_sql,
+};
 use squealy_postgresql::Postgres;
 
 #[derive(Parser)]
@@ -20,6 +22,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Check whether the model is supported by the target backend.
+    Check {
+        #[command(flatten)]
+        source: ModelSource,
+    },
     /// Print create-from-scratch DDL to stdout.
     Script {
         #[command(flatten)]
@@ -81,6 +88,10 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
+        Command::Check { source } => {
+            let model = source.load()?;
+            check_create(&model, &Postgres).map_err(|error| format!("check model: {error}"))
+        }
         Command::Script { source } => {
             let model = source.load()?;
             let sql = render_create_sql(&model, &Postgres)

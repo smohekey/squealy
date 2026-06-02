@@ -6,6 +6,8 @@
 
 use std::process::Command;
 
+use squealy_model::{CheckModel, DatabaseModel, SchemaModel, TableModel, write_package};
+
 const SQUEALY: &str = env!("CARGO_BIN_EXE_squealy");
 
 #[test]
@@ -20,6 +22,52 @@ fn rejects_injection() {
     assert!(
         stderr.contains("plain Rust path"),
         "expected a path-validation error, got: {stderr}"
+    );
+}
+
+#[test]
+fn checks_supported_package() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = dir.path().join("schema.sqz");
+    write_package(&empty_model(), &package).expect("write package");
+
+    let output = Command::new(SQUEALY)
+        .args(["check", "--package"])
+        .arg(&package)
+        .output()
+        .expect("run squealy");
+
+    assert!(
+        output.status.success(),
+        "check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn check_rejects_unsupported_package_metadata() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = dir.path().join("schema.sqz");
+    let mut model = empty_model();
+    model.schemas[0].tables[0].checks.push(CheckModel {
+        name: "ck_events_id".to_owned(),
+        expression: "id > 0".to_owned(),
+        validation: None,
+        enforcement: Some(squealy_model::ConstraintEnforcement::NotEnforced),
+    });
+    write_package(&model, &package).expect("write package");
+
+    let output = Command::new(SQUEALY)
+        .args(["check", "--package"])
+        .arg(&package)
+        .output()
+        .expect("run squealy");
+
+    assert!(!output.status.success(), "unsupported package should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("check enforcement metadata"),
+        "unexpected stderr: {stderr}"
     );
 }
 
@@ -57,4 +105,22 @@ fn extracts_and_scripts_from_a_crate() {
         stdout.contains("CONSTRAINT \"uq_widgets_name\" UNIQUE (\"name\")"),
         "{stdout}"
     );
+}
+
+fn empty_model() -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("public".to_owned()),
+            tables: vec![TableModel {
+                name: "events".to_owned(),
+                comment: None,
+                columns: vec![],
+                primary_key: None,
+                foreign_keys: vec![],
+                uniques: vec![],
+                checks: vec![],
+                indexes: vec![],
+            }],
+        }],
+    }
 }

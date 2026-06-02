@@ -32,11 +32,19 @@ pub fn render_create_sql<B: SchemaBackend>(
     model: &DatabaseModel,
     backend: &B,
 ) -> std::io::Result<String> {
-    validate_capabilities(model, backend.capabilities())?;
+    check_create(model, backend)?;
     let mut buffer = Vec::new();
     backend.render_create(model, &mut buffer)?;
     // SchemaBackend renderers emit UTF-8; treat anything else as a renderer bug.
     Ok(String::from_utf8(buffer).expect("render_create emits valid UTF-8"))
+}
+
+/// Checks whether `backend` can create `model` without rendering or connecting to a database.
+///
+/// This validates backend capabilities against the neutral model, so callers can fail fast when a
+/// package contains metadata the target backend cannot round-trip.
+pub fn check_create<B: SchemaBackend>(model: &DatabaseModel, backend: &B) -> std::io::Result<()> {
+    validate_capabilities(model, backend.capabilities())
 }
 
 /// Renders create-from-scratch DDL straight from a compile-time [`Database`].
