@@ -505,6 +505,73 @@ COMMENT ON COLUMN \"catalog\".\"tenants\".\"slug\" IS 'Tenant''s stable slug';"
 }
 
 #[test]
+fn postgres_renders_foreign_key_match_type() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog".to_owned()),
+            tables: vec![
+                TableModel {
+                    name: "memberships".to_owned(),
+                    comment: None,
+                    columns: vec![ColumnModel {
+                        name: "tenant_id".to_owned(),
+                        comment: None,
+                        ty: SqlType::I32,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    }],
+                    primary_key: None,
+                    foreign_keys: vec![ForeignKeyModel {
+                        name: "fk_memberships_tenant_id".to_owned(),
+                        columns: vec!["tenant_id".to_owned()],
+                        references_schema: Some("catalog".to_owned()),
+                        references_table: "tenants".to_owned(),
+                        references_columns: vec!["id".to_owned()],
+                        match_type: Some(ForeignKeyMatch::Full),
+                        on_delete: Some(ForeignKeyAction::Cascade),
+                        on_update: None,
+                    }],
+                    uniques: Vec::new(),
+                    checks: Vec::new(),
+                    indexes: Vec::new(),
+                },
+                TableModel {
+                    name: "tenants".to_owned(),
+                    comment: None,
+                    columns: vec![ColumnModel {
+                        name: "id".to_owned(),
+                        comment: None,
+                        ty: SqlType::I32,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    }],
+                    primary_key: None,
+                    foreign_keys: Vec::new(),
+                    uniques: Vec::new(),
+                    checks: Vec::new(),
+                    indexes: Vec::new(),
+                },
+            ],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "ALTER TABLE \"catalog\".\"memberships\" ADD CONSTRAINT \"fk_memberships_tenant_id\" FOREIGN KEY (\"tenant_id\") REFERENCES \"catalog\".\"tenants\" (\"id\") MATCH FULL ON DELETE CASCADE"
+        ),
+        "foreign key match type not rendered as expected: {sql}"
+    );
+}
+
+#[test]
 fn postgres_renders_partial_indexes() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {

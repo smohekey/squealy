@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use mysql_async::{params, prelude::Queryable};
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
-    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexDirection, IndexMethod, IndexModel, SchemaModel, SqlType, TableModel,
+    ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
+    IdentityModel, IndexDirection, IndexMethod, IndexModel, SchemaModel, SqlType, TableModel,
 };
 
 use crate::MysqlError;
@@ -226,6 +226,7 @@ SELECT
     kcu.REFERENCED_TABLE_SCHEMA,
     kcu.REFERENCED_TABLE_NAME,
     kcu.REFERENCED_COLUMN_NAME,
+    rc.MATCH_OPTION,
     rc.DELETE_RULE,
     rc.UPDATE_RULE
 FROM information_schema.KEY_COLUMN_USAGE kcu
@@ -246,15 +247,26 @@ ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
                 references_schema,
                 references_table,
                 references_column,
+                match_option,
                 delete_rule,
                 update_rule,
-            ): (String, String, String, String, String, String, String)| {
+            ): (
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+            )| {
                 (
                     name,
                     column,
                     references_schema,
                     references_table,
                     references_column,
+                    match_option,
                     delete_rule,
                     update_rule,
                 )
@@ -270,6 +282,7 @@ ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
         references_schema,
         references_table,
         references_column,
+        match_option,
         delete_rule,
         update_rule,
     ) in rows
@@ -282,6 +295,7 @@ ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
                 references_schema: Some(references_schema),
                 references_table,
                 references_columns: Vec::new(),
+                match_type: match_type(&match_option),
                 on_delete: action(&delete_rule),
                 on_update: action(&update_rule),
             });
@@ -290,6 +304,13 @@ ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
     }
 
     Ok(grouped.into_values().collect())
+}
+
+fn match_type(value: &str) -> Option<ForeignKeyMatch> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "none" | "simple" => None,
+        other => Some(ForeignKeyMatch::from_sql(other)),
+    }
 }
 
 async fn checks(

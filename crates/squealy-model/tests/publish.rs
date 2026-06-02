@@ -194,6 +194,7 @@ fn rich_model() -> DatabaseModel {
                         references_schema: Some("publish_demo_rich".to_owned()),
                         references_table: "tenants".to_owned(),
                         references_columns: vec!["id".to_owned()],
+                        match_type: Some(ForeignKeyMatch::Full),
                         on_delete: Some(ForeignKeyAction::Cascade),
                         on_update: None,
                     }],

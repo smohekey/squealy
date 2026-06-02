@@ -301,6 +301,13 @@ fn write_add_foreign_key(
     foreign_key: &ForeignKeyModel,
     writer: &mut impl Write,
 ) -> io::Result<()> {
+    if foreign_key.match_type.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support foreign key MATCH clauses",
+        ));
+    }
+
     writer.write_all(b"ALTER TABLE ")?;
     write_qualified_name(schema, table, writer)?;
     writer.write_all(b" ADD CONSTRAINT ")?;

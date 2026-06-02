@@ -18,9 +18,9 @@ use std::path::Path;
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
-    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
-    SchemaModel, SqlType, TableModel,
+    ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
+    IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
+    IndexOperatorClass, SchemaModel, SqlType, TableModel,
 };
 
 /// Current package format version, recorded in `manifest.kdl`.
@@ -272,6 +272,9 @@ fn foreign_key_to_node(foreign_key: &ForeignKeyModel) -> KdlNode {
         "references-table",
         foreign_key.references_table.clone(),
     ));
+    if let Some(match_type) = &foreign_key.match_type {
+        node.push(KdlEntry::new_prop("match", foreign_key_match(match_type)));
+    }
     if let Some(on_delete) = &foreign_key.on_delete {
         node.push(KdlEntry::new_prop(
             "on-delete",
@@ -559,6 +562,7 @@ fn foreign_key_from_node(node: &KdlNode) -> Result<ForeignKeyModel, PackageError
             .next()
             .map(args)
             .unwrap_or_default(),
+        match_type: prop(node, "match").map(ForeignKeyMatch::from_sql),
         on_delete: prop(node, "on-delete").map(ForeignKeyAction::from_sql),
         on_update: prop(node, "on-update").map(ForeignKeyAction::from_sql),
     })
@@ -821,6 +825,15 @@ fn foreign_key_action(action: &ForeignKeyAction) -> &str {
     }
 }
 
+fn foreign_key_match(match_type: &ForeignKeyMatch) -> &str {
+    match match_type {
+        ForeignKeyMatch::Simple => "simple",
+        ForeignKeyMatch::Partial => "partial",
+        ForeignKeyMatch::Full => "full",
+        ForeignKeyMatch::Raw(match_type) => match_type,
+    }
+}
+
 fn index_method(method: &IndexMethod) -> &str {
     match method {
         IndexMethod::BTree => "btree",
@@ -996,6 +1009,7 @@ mod tests {
                             references_schema: Some("public".to_owned()),
                             references_table: "orgs".to_owned(),
                             references_columns: vec!["id".to_owned()],
+                            match_type: None,
                             on_delete: Some(ForeignKeyAction::Cascade),
                             on_update: None,
                         }],
@@ -1059,6 +1073,7 @@ mod tests {
                         references_schema: None,
                         references_table: "users".to_owned(),
                         references_columns: vec!["account id".to_owned()],
+                        match_type: None,
                         on_delete: None,
                         on_update: None,
                     }],
@@ -1248,6 +1263,7 @@ mod tests {
                 references_schema: Some("public".to_owned()),
                 references_table: "parents".to_owned(),
                 references_columns: vec!["id".to_owned()],
+                match_type: None,
                 on_delete: Some(action.clone()),
                 on_update: Some(action.clone()),
             })
@@ -1273,6 +1289,53 @@ mod tests {
         assert_eq!(
             parsed, model,
             "foreign-key action round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn kdl_round_trips_foreign_key_match_types() {
+        let match_types = [
+            ForeignKeyMatch::Simple,
+            ForeignKeyMatch::Partial,
+            ForeignKeyMatch::Full,
+            ForeignKeyMatch::Raw("backend-specific".to_owned()),
+        ];
+        let foreign_keys = match_types
+            .iter()
+            .enumerate()
+            .map(|(index, match_type)| ForeignKeyModel {
+                name: format!("fk_child_parent_match_{index}"),
+                columns: vec![format!("parent_id_{index}")],
+                references_schema: Some("public".to_owned()),
+                references_table: "parents".to_owned(),
+                references_columns: vec!["id".to_owned()],
+                match_type: Some(match_type.clone()),
+                on_delete: None,
+                on_update: None,
+            })
+            .collect();
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "children".to_owned(),
+                    comment: None,
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys,
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        assert!(kdl.contains("match=full"));
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(
+            parsed, model,
+            "foreign-key match round-trip diverged:\n{kdl}"
         );
     }
 

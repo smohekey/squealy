@@ -1,8 +1,8 @@
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
-    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
-    SchemaModel, SqlType, TableModel,
+    ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
+    IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
+    IndexOperatorClass, SchemaModel, SqlType, TableModel,
 };
 use tokio_postgres::Client;
 
@@ -216,6 +216,7 @@ SELECT
         JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = key.attnum
         ORDER BY key.position
     ) AS references_columns,
+    con.confmatchtype::text,
     con.confdeltype::text,
     con.confupdtype::text
 FROM pg_constraint con
@@ -241,11 +242,21 @@ ORDER BY con.conname",
                 references_schema: Some(references_schema),
                 references_table: row.get(3),
                 references_columns: row.get(4),
-                on_delete: action(row.get::<_, String>(5).as_str()),
-                on_update: action(row.get::<_, String>(6).as_str()),
+                match_type: match_type(row.get::<_, String>(5).as_str()),
+                on_delete: action(row.get::<_, String>(6).as_str()),
+                on_update: action(row.get::<_, String>(7).as_str()),
             }
         })
         .collect())
+}
+
+fn match_type(value: &str) -> Option<ForeignKeyMatch> {
+    match value {
+        "s" => None,
+        "f" => Some(ForeignKeyMatch::Full),
+        "p" => Some(ForeignKeyMatch::Partial),
+        other => Some(ForeignKeyMatch::Raw(other.to_owned())),
+    }
 }
 
 async fn checks(client: &Client, table_ref: &TableRef) -> Result<Vec<CheckModel>, PostgresError> {

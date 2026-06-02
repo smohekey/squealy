@@ -786,6 +786,9 @@ pub(crate) mod ddl {
         writer.write_all(b" (")?;
         write_quoted_ident_list(&foreign_key.references_columns, writer)?;
         writer.write_all(b")")?;
+        if let Some(match_type) = &foreign_key.match_type {
+            write!(writer, " MATCH {}", match_type.as_sql())?;
+        }
         if let Some(on_delete) = &foreign_key.on_delete {
             write!(writer, " ON DELETE {}", on_delete.as_sql())?;
         }

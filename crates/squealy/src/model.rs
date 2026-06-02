@@ -218,8 +218,39 @@ pub struct ForeignKeyModel {
     pub references_schema: Option<String>,
     pub references_table: String,
     pub references_columns: Vec<String>,
+    pub match_type: Option<ForeignKeyMatch>,
     pub on_delete: Option<ForeignKeyAction>,
     pub on_update: Option<ForeignKeyAction>,
+}
+
+/// Backend-neutral foreign-key match type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ForeignKeyMatch {
+    Simple,
+    Partial,
+    Full,
+    /// A backend-specific match type, emitted verbatim into DDL.
+    Raw(String),
+}
+
+impl ForeignKeyMatch {
+    pub fn from_sql(match_type: &str) -> Self {
+        match match_type.trim().to_ascii_lowercase().as_str() {
+            "simple" => ForeignKeyMatch::Simple,
+            "partial" => ForeignKeyMatch::Partial,
+            "full" => ForeignKeyMatch::Full,
+            _ => ForeignKeyMatch::Raw(match_type.to_owned()),
+        }
+    }
+
+    pub fn as_sql(&self) -> &str {
+        match self {
+            ForeignKeyMatch::Simple => "SIMPLE",
+            ForeignKeyMatch::Partial => "PARTIAL",
+            ForeignKeyMatch::Full => "FULL",
+            ForeignKeyMatch::Raw(match_type) => match_type,
+        }
+    }
 }
 
 /// Backend-neutral referential action for a foreign key.
@@ -470,6 +501,7 @@ fn foreign_key_from_dyn(table: &str, column: &str, reference: &dyn ForeignKey) -
         references_schema: reference.schema_name().map(str::to_owned),
         references_table: reference.table().to_owned(),
         references_columns: vec![reference.column().to_owned()],
+        match_type: None,
         on_delete: reference.on_delete().map(ForeignKeyAction::from_sql),
         on_update: reference.on_update().map(ForeignKeyAction::from_sql),
     }
@@ -655,6 +687,7 @@ mod tests {
                 references_schema: Some("public".to_owned()),
                 references_table: "users".to_owned(),
                 references_columns: vec!["id".to_owned()],
+                match_type: None,
                 on_delete: Some(ForeignKeyAction::Cascade),
                 on_update: None,
             }]
