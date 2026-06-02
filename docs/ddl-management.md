@@ -1,6 +1,6 @@
 # DDL Management — Design
 
-Status: **draft / discussion** · Branch: `worktree-ddl-management`
+Status: **draft / implementation notes** · Branch: `codex/schema-introspection`
 
 ## Context
 
@@ -280,15 +280,13 @@ Build the spine and a real, executable create-from-scratch path, plus the packag
 4. **`script` (dry-run) and `publish` (apply)** — generic over `D: Database` + backend; publish runs
    against a connection. Targets an empty / `IF NOT EXISTS` baseline, so **no introspection needed
    yet**.
-5. **Per-project bin / `ddl_main!` macro** — the sprint-1 front-end. CLI verbs: `script`, `publish`,
-   `export`, `import`.
+5. **Stub-compiling global CLI** — the sprint-1 front-end. CLI verbs: `check`, `script`, `export`,
+   `publish`, and `capabilities`.
 
 **Out of scope this sprint (designed-for, not built)**
 
-- Introspection (live DB → model).
 - Diff engine / `compare` / incremental `ALTER` plans.
 - Destructive-change policy enforcement (the `PublishOptions` seam is defined; teeth come with diff).
-- Stub-compiling global CLI.
 
 ### API sketch (subject to change)
 
@@ -304,7 +302,7 @@ impl DatabaseModel {
 // core `squealy` — sibling to Backend; implemented by squealy-postgresql
 pub trait SchemaBackend {
     fn render_create(&self, model: &DatabaseModel, out: &mut dyn Write) -> io::Result<()>;
-    // future: fn introspect(...) -> DatabaseModel, fn render_alter(plan, ...)
+    // future: fn render_alter(plan, ...)
 }
 
 pub struct PublishOptions { /* destructive-change policy; teeth in the diff sprint */ }
@@ -316,13 +314,12 @@ pub async fn publish<B, C>(model: &DatabaseModel, backend: &B, conn: &C, opts: &
 
 ## Roadmap (post-sprint-1)
 
-- **Introspection** (Postgres first): live DB → `DatabaseModel` via `information_schema`/`pg_catalog`.
 - **Diff engine:** `compare(desired, actual)` → classified plan (safe / destructive / ambiguous),
   rename hints, type-change `USING` casts; `script`/`publish` consume the plan.
 - **`PublishOptions` teeth:** configurable handling of drops / lossy changes (block, allow, generate-only).
 - **Hybrid flow:** generate a reviewable upgrade script from two models (crate↔crate, package↔package,
   or model↔live), bridging declarative authoring with checked-in, auditable artifacts.
-- **Stub-compiling global CLI** (`squealy-cli`) for a single-binary, sqlpackage-like UX.
+- **Schema compare CLI** for desired-vs-live and desired-vs-package workflows.
 
 ## Implementation status (sprint 1)
 
@@ -330,24 +327,33 @@ Done and tested:
 - **Owned model + walker** in core `squealy` (`DatabaseModel`/`SchemaModel`/`TableModel`/`ColumnModel`
   + named `Constraint`/`ForeignKeyModel`/`CheckModel`/`IndexModel`, owned `SqlType`/`DefaultValue`,
   deterministic constraint names, `DatabaseModel::from_database::<D>()`).
-- **`SchemaBackend` trait** in core; **Postgres `render_create`** (phased create-from-scratch).
+- **`SchemaBackend` trait** in core; **Postgres and MySQL `render_create`** (phased
+  create-from-scratch).
+- **Schema capabilities** in core: backends report the metadata they can render and introspect as a
+  full round-trip. `squealy-model::check_create` preflights models against those capabilities before
+  rendering, and `squealy capabilities --backend <postgres|mysql>` prints the current support matrix.
 - **`.sqz` package** in `squealy-model`: deterministic KDL `model.kdl` + `manifest.kdl` in a zip,
   with full KDL and zip round-trip tests.
 - **`render_create_sql` / `script`** engine entry points.
-- **`publish`** — `DdlExecutor` trait in core; `PostgresConnection` implements it transactionally via
-  `batch_execute` (behind the `schema` feature); `squealy-model::publish`/`publish_database` render
-  then execute. Verified by a live `#[ignore]`d integration test (create-from-scratch → insert →
-  select round-trip).
-- **DDL is feature-gated**: `squealy-postgresql`'s `SchemaBackend`/`DdlExecutor` impls and the
-  whole-DB renderer sit behind a default-off `schema` feature, so query-only users carry none of it.
+- **`publish`** — `DdlExecutor` trait in core; Postgres and MySQL connections implement it;
+  `squealy-model::publish`/`publish_database` render then execute. Verified by live `#[ignore]`d
+  integration tests that publish and introspect the resulting schema.
+- **DDL is feature-gated** for `squealy-postgresql`: schema-management impls and the whole-DB
+  renderer sit behind a default-off `schema` feature, so query-only users carry none of it.
 
-- **`SchemaConnect`** (core trait) + Postgres impl (under `schema`) — opens a connection from a URL,
-  spawning its IO task; used by `publish --database … --url …`.
+- **`SchemaConnect`** (core trait) + Postgres/MySQL impls — opens a connection from a URL; used by
+  `publish --database … --url …` and `publish --package … --url …`.
 - **Stub-compiling `squealy` CLI** (`squealy-cli`, bin `squealy`): resolves the package via
   `cargo metadata`, validates `--database` as a strict Rust path, generates a stub in a private temp
-  dir, compiles + runs it as a subprocess, and harvests the `.sqz`. Commands `script` / `export` /
-  `publish`, each sourced from `--database <path>` (compile + run) or `--package <file.sqz>` (no
-  project code runs). Verified end-to-end against a fixture crate and a live Postgres.
+  dir, compiles + runs it as a subprocess, and harvests the `.sqz`. Commands `check` / `script` /
+  `export` / `publish` / `capabilities`; model-taking commands are sourced from `--database <path>`
+  (compile + run) or `--package <file.sqz>` (no project code runs). `--backend postgres|mysql`
+  selects backend-specific render/check/publish behavior.
+- **Introspection**: Postgres and MySQL schema-management connections implement
+  `SchemaIntrospect`; the neutral model preserves richer schema facts such as structured types,
+  identity/generated columns, foreign-key actions/deferrability/validation, index methods, index
+  expressions, include columns, collations, operator classes, and predicates where the backend can
+  round-trip them.
 
 **Sprint 1 is functionally complete.** Next: introspection → diff → incremental ALTER plans (the
 declarative migration core), then `PublishOptions` teeth and the hybrid flow.
@@ -370,13 +376,15 @@ declarative migration core), then `PublishOptions` teeth and the hybrid flow.
   registry (`linkme`) rejected — it injects unsafe `#[link_section]` into the user crate.
 - **Privilege split**: `export` (compile+run → `.sqz`, no secrets) then `publish --package` (no code
   execution); `publish --database` stays for dev convenience.
-- **`SchemaBackend` trait in core `squealy`**; `squealy-postgresql` implements it; `write_table` is
+- **Backend selection is explicit** for management commands via `--backend`, defaulting to Postgres.
+- **Capability support means full render + introspection round-trip support**, not only SQL syntax.
+  Backends that cannot round-trip a feature should report it unsupported and let `check_create` fail
+  before rendering.
+- **`SchemaBackend` trait in core `squealy`**; backend crates implement it; `write_table` is
   superseded (retirement deferred until nothing depends on it).
 
 ## Open questions
 
-- `publish` execution seam: confirm `DdlExecutor` (raw `batch_execute`) as the capability, and whether
-  publish wraps the script in a transaction (Postgres supports transactional DDL).
 - Exact `PublishOptions` surface (deferred until the diff sprint gives it teeth).
 - Whether `manifest.kdl` should also pin a minimum `squealy-version` for forward-compat.
 - Hash algorithm for `model-hash` (blake3 vs sha256).
