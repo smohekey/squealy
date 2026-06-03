@@ -191,6 +191,36 @@ impl squealy::SchemaIntrospect for PostgresConnection {
     }
 }
 
+#[cfg(feature = "schema")]
+impl squealy::SchemaRefactorStore for PostgresConnection {
+    type Error = PostgresError;
+
+    async fn applied_refactor_ids(&mut self) -> Result<Vec<String>, PostgresError> {
+        let exists = self
+            .client()
+            .query_one(
+                "SELECT to_regclass('\"__squealy\".\"refactors\"') IS NOT NULL",
+                &[],
+            )
+            .await?
+            .get::<_, bool>(0);
+        if !exists {
+            return Ok(Vec::new());
+        }
+
+        Ok(self
+            .client()
+            .query(
+                "SELECT \"id\" FROM \"__squealy\".\"refactors\" ORDER BY \"id\"",
+                &[],
+            )
+            .await?
+            .into_iter()
+            .map(|row| row.get(0))
+            .collect())
+    }
+}
+
 impl QueryBuilder for Postgres {
     type Backend = Postgres;
 

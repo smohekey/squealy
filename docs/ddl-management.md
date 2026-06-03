@@ -405,6 +405,9 @@ Done and tested:
 - **Refactor-aware planning**: `plan_models_with_refactors` consumes explicit `refactor.kdl`
   operations and turns matching drop/add pairs into safe table/column rename plan steps, preserving
   follow-up alterations when the renamed object also changed shape.
+- **Refactor metadata**: rename plan steps produced from `refactor.kdl` carry the stable operation id.
+  Postgres and MySQL write those ids to an internal `__squealy.refactors` metadata table during
+  incremental plan rendering, and expose `SchemaRefactorStore` to read the recorded ids back.
 - **Plan rendering**: core `SchemaBackend::render_plan` lets backends render neutral plans without
   depending on `squealy-model`; Postgres and MySQL implement create/drop/add-column/index/constraint
   plan rendering, table/column rename rendering, plus changed column rendering for type, collation,

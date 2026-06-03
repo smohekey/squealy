@@ -174,6 +174,18 @@ pub trait SchemaIntrospect {
     fn introspect_database(&mut self) -> impl Future<Output = Result<DatabaseModel, Self::Error>>;
 }
 
+/// Reads backend metadata about explicit schema refactors already recorded against a database.
+///
+/// Backends own the physical storage for this metadata. The core contract is intentionally narrow:
+/// return stable refactor operation ids, so the management engine can reason about which package
+/// refactors have already been observed by a target database.
+pub trait SchemaRefactorStore {
+    type Error;
+
+    /// Returns recorded refactor operation ids in deterministic order.
+    fn applied_refactor_ids(&mut self) -> impl Future<Output = Result<Vec<String>, Self::Error>>;
+}
+
 /// Opens a schema-management connection from a connection string.
 ///
 /// Backends implement this so the management engine and CLI can `publish` from a URL without knowing

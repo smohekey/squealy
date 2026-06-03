@@ -11,7 +11,9 @@ use std::fmt;
 use std::io::Write;
 
 use mysql_async::prelude::Queryable;
-use squealy::{DatabaseModel, DdlExecutor, SchemaBackend, SchemaConnect, SchemaIntrospect};
+use squealy::{
+    DatabaseModel, DdlExecutor, SchemaBackend, SchemaConnect, SchemaIntrospect, SchemaRefactorStore,
+};
 
 mod introspect;
 mod sql;
@@ -124,6 +126,37 @@ impl SchemaIntrospect for MysqlConnection {
 
     async fn introspect_database(&mut self) -> Result<DatabaseModel, MysqlError> {
         introspect::database(&mut self.conn).await
+    }
+}
+
+impl SchemaRefactorStore for MysqlConnection {
+    type Error = MysqlError;
+
+    async fn applied_refactor_ids(&mut self) -> Result<Vec<String>, MysqlError> {
+        let exists = self
+            .conn
+            .query_first::<u8, _>(
+                "\
+SELECT 1
+FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = '__squealy'
+  AND TABLE_NAME = 'refactors'
+LIMIT 1",
+            )
+            .await
+            .map_err(MysqlError::Introspect)?
+            .is_some();
+        if !exists {
+            return Ok(Vec::new());
+        }
+
+        self.conn
+            .query_map(
+                "SELECT `id` FROM `__squealy`.`refactors` ORDER BY `id`",
+                |id| id,
+            )
+            .await
+            .map_err(MysqlError::Introspect)
     }
 }
 
