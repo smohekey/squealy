@@ -199,11 +199,12 @@ strings — so the crate must be compiled and run):
 
 **Export-then-publish split (privilege separation):**
 - `squealy export --database … model.sqz` — compile + run stub → package. **No DB, no secrets.**
+  Add `--refactors refactor.kdl` to embed explicit rename/refactor intent in the output package.
 - `squealy publish --package model.sqz --url …` — operates on the static artifact; **executes no
   project code**, just renders DDL and runs it. By default this is create-from-scratch DDL; with
-  `--incremental` it introspects the live database, builds a policy-checked plan, and applies that
-  plan; add `--report` to print that plan without executing it. Right shape for CI/CD with
-  credentials.
+  `--incremental` it introspects the live database, reads any embedded `refactor.kdl`, builds a
+  policy-checked plan, and applies that plan; add `--report` to print that plan without executing
+  it. Right shape for CI/CD with credentials.
 - `squealy publish --database … --url …` (compile+run then deploy in one step) stays available for dev
   convenience, using `SchemaConnect` to open the connection from the URL.
 
@@ -413,10 +414,12 @@ Done and tested:
 - **Plan/apply engine APIs**: `plan_from_database` introspects live state and returns a policy-checked
   plan; `apply_plan` renders that plan through the selected backend and executes the resulting DDL.
 - **Plan CLI**: `squealy plan --backend <backend> --desired desired.sqz --actual actual.sqz`
-  renders incremental DDL between packages and enforces `DiffPolicy` by default.
+  renders incremental DDL between packages and enforces `DiffPolicy` by default. The desired package
+  can carry `refactor.kdl`; matching drop/add pairs are rendered as safe rename steps.
 - **Incremental publish CLI**: `squealy publish --incremental ...` introspects the live database,
-  builds a policy-checked plan, and applies it. Ambiguous/destructive changes remain blocked unless
-  explicitly allowed. `--report` renders the live plan to stdout without applying it.
+  reads package refactors when publishing from `--package`, builds a policy-checked plan, and applies
+  it. Ambiguous/destructive changes remain blocked unless explicitly allowed. `--report` renders the
+  live plan to stdout without applying it.
 
 **Sprint 1 is functionally complete, and the diff/policy/neutral-plan layer is underway.** Next:
 identity/generated-column transition handling, rename/cast hints, and the hybrid reviewable-script

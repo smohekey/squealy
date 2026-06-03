@@ -20,7 +20,7 @@ pub use diff::{
     DiffPolicyError, TableDiffChange, check_diff_policy, diff_models,
 };
 pub use package::{
-    FORMAT_VERSION, PackageError, from_kdl, read_package, read_package_from,
+    FORMAT_VERSION, PackageError, from_kdl, read_package, read_package_from, read_refactor_log,
     read_refactor_log_from_package, refactor_from_kdl, refactor_to_kdl, to_kdl, write_package,
     write_package_to, write_package_with_refactors, write_package_with_refactors_to,
 };
@@ -168,6 +168,23 @@ where
         .await
         .map_err(PlanFromDatabaseError::Introspect)?;
     plan_models(desired, &actual, policy).map_err(PlanFromDatabaseError::Policy)
+}
+
+/// Introspects `connection` and builds an incremental plan using explicit refactor intent.
+pub async fn plan_from_database_with_refactors<C>(
+    desired: &DatabaseModel,
+    refactors: &RefactorLog,
+    connection: &mut C,
+    policy: DiffPolicy,
+) -> Result<DatabasePlan, PlanFromDatabaseError<C::Error>>
+where
+    C: SchemaIntrospect,
+{
+    let actual = introspect(connection)
+        .await
+        .map_err(PlanFromDatabaseError::Introspect)?;
+    plan_models_with_refactors(desired, &actual, refactors, policy)
+        .map_err(PlanFromDatabaseError::Policy)
 }
 
 /// Renders `plan` using `backend` and executes it against `connection`.

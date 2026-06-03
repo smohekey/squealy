@@ -8,8 +8,8 @@ use std::process::Command;
 
 use squealy_model::{
     CheckModel, ColumnModel, ConstraintDeferrability, DatabaseModel, DdlExecutor, ForeignKeyMatch,
-    ForeignKeyModel, IndexModel, SchemaConnect, SchemaModel, SqlType, TableModel, read_package,
-    write_package,
+    ForeignKeyModel, IndexModel, RefactorLog, RefactorOperation, RenameColumn, SchemaConnect,
+    SchemaModel, SqlType, TableModel, read_package, write_package, write_package_with_refactors,
 };
 use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
@@ -455,6 +455,57 @@ fn plan_blocks_ambiguous_changes_unless_allowed() {
     let stdout = String::from_utf8_lossy(&allowed.stdout);
     assert!(
         stdout.contains("ALTER TABLE \"public\".\"events\" ADD COLUMN \"name\" text NOT NULL"),
+        "unexpected stdout: {stdout}"
+    );
+}
+
+#[test]
+fn plan_reads_refactors_from_desired_package() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let desired = dir.path().join("desired.sqz");
+    let actual = dir.path().join("actual.sqz");
+
+    let mut desired_model = empty_model();
+    desired_model.schemas[0].tables[0]
+        .columns
+        .push(required_text_column("name"));
+
+    let mut actual_model = empty_model();
+    actual_model.schemas[0].tables[0]
+        .columns
+        .push(required_text_column("display_name"));
+
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::RenameColumn(RenameColumn {
+            id: "rename-event-display-name".to_owned(),
+            schema: Some("public".to_owned()),
+            table: "events".to_owned(),
+            from: "display_name".to_owned(),
+            to: "name".to_owned(),
+        })],
+    };
+    write_package_with_refactors(&desired_model, &refactors, &desired)
+        .expect("write desired package");
+    write_package(&actual_model, &actual).expect("write actual package");
+
+    let output = Command::new(SQUEALY)
+        .args(["plan", "--backend", "postgres", "--desired"])
+        .arg(&desired)
+        .args(["--actual"])
+        .arg(&actual)
+        .output()
+        .expect("run squealy");
+
+    assert!(
+        output.status.success(),
+        "refactor-aware plan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(
+            "ALTER TABLE \"public\".\"events\" RENAME COLUMN \"display_name\" TO \"name\";"
+        ),
         "unexpected stdout: {stdout}"
     );
 }

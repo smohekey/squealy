@@ -3,16 +3,17 @@
 //! Commands take their model either from the crate (`--database <path>`, via a compiled stub) or from
 //! a prebuilt package (`--package <file.sqz>`, which executes no project code).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use squealy_cli::extract::extract_model;
 use squealy_model::{
-    ChangeRisk, DatabaseDiffChange, DatabaseModel, DiffPolicy, SchemaBackend, SchemaCapabilities,
-    SchemaConnect, TableDiffChange, apply_plan, check_create, check_diff_policy, diff_models,
-    introspect, plan_from_database, plan_models, publish, read_package, render_create_sql,
-    render_plan_sql, write_package,
+    ChangeRisk, DatabaseDiffChange, DatabaseModel, DiffPolicy, RefactorLog, SchemaBackend,
+    SchemaCapabilities, SchemaConnect, TableDiffChange, apply_plan, check_create,
+    check_diff_policy, diff_models, introspect, plan_from_database_with_refactors,
+    plan_models_with_refactors, publish, read_package, read_refactor_log, refactor_from_kdl,
+    render_create_sql, render_plan_sql, write_package, write_package_with_refactors,
 };
 use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
@@ -50,6 +51,9 @@ enum Command {
         /// Database type path within the crate, e.g. `AppDatabase`.
         #[arg(long)]
         database: String,
+        /// Optional refactor.kdl file to embed in the output package.
+        #[arg(long)]
+        refactors: Option<PathBuf>,
         /// Output package path.
         output: PathBuf,
     },
@@ -150,15 +154,31 @@ struct ModelSource {
 
 impl ModelSource {
     fn load(&self) -> Result<DatabaseModel, String> {
+        Ok(self.load_with_refactors()?.model)
+    }
+
+    fn load_with_refactors(&self) -> Result<LoadedModel, String> {
         match (&self.database, &self.package) {
-            (Some(database), None) => extract_model(database),
+            (Some(database), None) => Ok(LoadedModel {
+                model: extract_model(database)?,
+                refactors: RefactorLog::default(),
+            }),
             (None, Some(package)) => {
-                read_package(package).map_err(|error| format!("read package: {error}"))
+                let model =
+                    read_package(package).map_err(|error| format!("read package: {error}"))?;
+                let refactors = read_refactor_log(package)
+                    .map_err(|error| format!("read package refactors: {error}"))?;
+                Ok(LoadedModel { model, refactors })
             }
             // clap's `group(required, multiple=false)` makes the other shapes unreachable.
             _ => Err("provide exactly one of --database or --package".to_owned()),
         }
     }
+}
+
+struct LoadedModel {
+    model: DatabaseModel,
+    refactors: RefactorLog,
 }
 
 #[tokio::main]
@@ -199,9 +219,19 @@ async fn run(cli: Cli) -> Result<(), String> {
             print!("{sql}");
             Ok(())
         }
-        Command::Export { database, output } => {
+        Command::Export {
+            database,
+            refactors,
+            output,
+        } => {
             let model = extract_model(&database)?;
-            write_package(&model, &output).map_err(|error| format!("write package: {error}"))
+            if let Some(refactors) = refactors {
+                let refactors = read_refactor_file(&refactors)?;
+                write_package_with_refactors(&model, &refactors, &output)
+                    .map_err(|error| format!("write package: {error}"))
+            } else {
+                write_package(&model, &output).map_err(|error| format!("write package: {error}"))
+            }
         }
         Command::Diff {
             desired,
@@ -234,6 +264,8 @@ async fn run(cli: Cli) -> Result<(), String> {
             allow_destructive,
             allow_ambiguous,
         } => {
+            let refactors = read_refactor_log(&desired)
+                .map_err(|error| format!("read desired refactors: {error}"))?;
             let desired =
                 read_package(&desired).map_err(|error| format!("read desired: {error}"))?;
             let actual = read_package(&actual).map_err(|error| format!("read actual: {error}"))?;
@@ -241,7 +273,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 allow_destructive,
                 allow_ambiguous,
             };
-            let plan = plan_models(&desired, &actual, policy)
+            let plan = plan_models_with_refactors(&desired, &actual, &refactors, policy)
                 .map_err(|error| format!("plan schema changes: {error}"))?;
             let sql = match backend.backend {
                 BackendKind::Postgres => render_plan_sql(&plan, &Postgres),
@@ -289,7 +321,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             if report && !incremental {
                 return Err("--report currently requires --incremental".to_owned());
             }
-            let model = source.load()?;
+            let loaded = source.load_with_refactors()?;
             match backend.backend {
                 BackendKind::Postgres => {
                     let mut connection = Postgres
@@ -297,10 +329,11 @@ async fn run(cli: Cli) -> Result<(), String> {
                         .await
                         .map_err(|error| format!("connect: {error}"))?;
                     if incremental {
-                        check_create(&model, &Postgres)
+                        check_create(&loaded.model, &Postgres)
                             .map_err(|error| format!("check model: {error}"))?;
-                        let plan = plan_from_database(
-                            &model,
+                        let plan = plan_from_database_with_refactors(
+                            &loaded.model,
+                            &loaded.refactors,
                             &mut connection,
                             DiffPolicy {
                                 allow_destructive,
@@ -320,7 +353,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                                 .map_err(|error| format!("publish: {error}"))
                         }
                     } else {
-                        publish(&model, &Postgres, &mut connection)
+                        publish(&loaded.model, &Postgres, &mut connection)
                             .await
                             .map_err(|error| format!("publish: {error}"))
                     }
@@ -331,10 +364,11 @@ async fn run(cli: Cli) -> Result<(), String> {
                         .await
                         .map_err(|error| format!("connect: {error}"))?;
                     if incremental {
-                        check_create(&model, &Mysql)
+                        check_create(&loaded.model, &Mysql)
                             .map_err(|error| format!("check model: {error}"))?;
-                        let plan = plan_from_database(
-                            &model,
+                        let plan = plan_from_database_with_refactors(
+                            &loaded.model,
+                            &loaded.refactors,
                             &mut connection,
                             DiffPolicy {
                                 allow_destructive,
@@ -354,7 +388,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                                 .map_err(|error| format!("publish: {error}"))
                         }
                     } else {
-                        publish(&model, &Mysql, &mut connection)
+                        publish(&loaded.model, &Mysql, &mut connection)
                             .await
                             .map_err(|error| format!("publish: {error}"))
                     }
@@ -362,6 +396,12 @@ async fn run(cli: Cli) -> Result<(), String> {
             }
         }
     }
+}
+
+fn read_refactor_file(path: &Path) -> Result<RefactorLog, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|error| format!("read refactor file: {error}"))?;
+    refactor_from_kdl(&text).map_err(|error| format!("parse refactor file: {error}"))
 }
 
 fn print_diff(diff: &squealy_model::DatabaseDiff) {

@@ -109,6 +109,12 @@ pub fn read_package(path: &Path) -> Result<DatabaseModel, PackageError> {
     read_package_from(file)
 }
 
+/// Reads the optional refactor log back from a `.sqz` package at `path`.
+pub fn read_refactor_log(path: &Path) -> Result<RefactorLog, PackageError> {
+    let file = std::fs::File::open(path)?;
+    read_refactor_log_from_package(file)
+}
+
 /// Writes a package to any writer (used by [`write_package`]; handy for tests with a `Cursor`).
 pub fn write_package_to<W: Write + io::Seek>(
     model: &DatabaseModel,
