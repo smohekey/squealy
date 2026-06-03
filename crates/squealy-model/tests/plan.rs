@@ -1,8 +1,9 @@
 use squealy_model::{
-    ChangeRisk, ColumnModel, DatabaseModel, DatabasePlanStep, DdlExecutor, DiffPolicy, RefactorLog,
-    RefactorOperation, RenameColumn, RenameTable, SchemaIntrospect, SchemaModel, SqlType,
-    TableModel, TablePlanStep, apply_plan, classified_plan_steps, plan_from_database, plan_models,
-    plan_models_with_refactors, render_plan_sql,
+    AppliedRefactorError, ChangeRisk, ColumnModel, DatabaseModel, DatabasePlanStep, DdlExecutor,
+    DiffPolicy, RefactorLog, RefactorOperation, RenameColumn, RenameTable, SchemaIntrospect,
+    SchemaModel, SchemaRefactorStore, SqlType, TableModel, TablePlanStep, apply_plan,
+    classified_plan_steps, pending_refactors, plan_from_database,
+    plan_from_database_with_refactors, plan_models, plan_models_with_refactors, render_plan_sql,
 };
 use squealy_postgresql::Postgres;
 
@@ -251,6 +252,59 @@ fn plan_models_with_refactors_leaves_unmatched_refactors_blocked_by_policy() {
 }
 
 #[test]
+fn pending_refactors_filters_valid_recorded_renames() {
+    let mut events = table("events");
+    events.columns = vec![column("name", SqlType::Text)];
+    let actual = model_with_tables("public", vec![events]);
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::RenameColumn(RenameColumn {
+            id: "rename-user-name".to_owned(),
+            schema: Some("public".to_owned()),
+            table: "events".to_owned(),
+            from: "display_name".to_owned(),
+            to: "name".to_owned(),
+        })],
+    };
+
+    let pending = pending_refactors(&refactors, &["rename-user-name".to_owned()], &actual)
+        .expect("recorded refactor should validate");
+
+    assert!(pending.is_empty());
+}
+
+#[test]
+fn pending_refactors_rejects_recorded_rename_when_old_column_still_exists() {
+    let mut events = table("events");
+    events.columns = vec![
+        column("display_name", SqlType::Text),
+        column("name", SqlType::Text),
+    ];
+    let actual = model_with_tables("public", vec![events]);
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::RenameColumn(RenameColumn {
+            id: "rename-user-name".to_owned(),
+            schema: Some("public".to_owned()),
+            table: "events".to_owned(),
+            from: "display_name".to_owned(),
+            to: "name".to_owned(),
+        })],
+    };
+
+    let error = pending_refactors(&refactors, &["rename-user-name".to_owned()], &actual)
+        .expect_err("stale applied-refactor metadata should fail");
+
+    assert_eq!(
+        error,
+        AppliedRefactorError::RenameColumnSourceStillExists {
+            id: "rename-user-name".to_owned(),
+            schema: Some("public".to_owned()),
+            table: "events".to_owned(),
+            column: "display_name".to_owned(),
+        }
+    );
+}
+
+#[test]
 fn plan_steps_are_classified_individually() {
     let desired = DatabaseModel { schemas: vec![] };
     let actual = model_with_tables("public", vec![table("events")]);
@@ -286,6 +340,7 @@ async fn plan_from_database_introspects_actual_model_before_planning() {
     let desired = model_with_tables("public", vec![table("events")]);
     let mut connection = TestConnection {
         model: DatabaseModel { schemas: vec![] },
+        applied_refactor_ids: Vec::new(),
         executed: Vec::new(),
     };
 
@@ -303,12 +358,53 @@ async fn plan_from_database_introspects_actual_model_before_planning() {
 }
 
 #[tokio::test]
+async fn plan_from_database_with_refactors_rejects_stale_recorded_refactors() {
+    let mut desired_events = table("events");
+    desired_events.columns = vec![column("name", SqlType::Text)];
+    let desired = model_with_tables("public", vec![desired_events]);
+
+    let mut actual_events = table("events");
+    actual_events.columns = vec![column("display_name", SqlType::Text)];
+    let mut connection = TestConnection {
+        model: model_with_tables("public", vec![actual_events]),
+        applied_refactor_ids: vec!["rename-user-name".to_owned()],
+        executed: Vec::new(),
+    };
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::RenameColumn(RenameColumn {
+            id: "rename-user-name".to_owned(),
+            schema: Some("public".to_owned()),
+            table: "events".to_owned(),
+            from: "display_name".to_owned(),
+            to: "name".to_owned(),
+        })],
+    };
+
+    let error = plan_from_database_with_refactors(
+        &desired,
+        &refactors,
+        &mut connection,
+        DiffPolicy::default(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        squealy_model::PlanFromDatabaseError::AppliedRefactor(
+            AppliedRefactorError::RenameColumnTargetMissing { .. }
+        )
+    ));
+}
+
+#[tokio::test]
 async fn apply_plan_renders_with_backend_and_executes_sql() {
     let desired = model_with_tables("public", vec![table("events")]);
     let actual = DatabaseModel { schemas: vec![] };
     let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan diff");
     let mut connection = TestConnection {
         model: actual,
+        applied_refactor_ids: Vec::new(),
         executed: Vec::new(),
     };
 
@@ -333,6 +429,7 @@ async fn apply_plan_renders_with_backend_and_executes_sql() {
 async fn apply_plan_does_not_execute_empty_plans() {
     let mut connection = TestConnection {
         model: DatabaseModel { schemas: vec![] },
+        applied_refactor_ids: Vec::new(),
         executed: Vec::new(),
     };
 
@@ -350,6 +447,7 @@ async fn apply_plan_does_not_execute_empty_plans() {
 #[derive(Debug)]
 struct TestConnection {
     model: DatabaseModel,
+    applied_refactor_ids: Vec<String>,
     executed: Vec<String>,
 }
 
@@ -369,6 +467,14 @@ impl SchemaIntrospect for TestConnection {
 
     async fn introspect_database(&mut self) -> Result<DatabaseModel, TestError> {
         Ok(self.model.clone())
+    }
+}
+
+impl SchemaRefactorStore for TestConnection {
+    type Error = TestError;
+
+    async fn applied_refactor_ids(&mut self) -> Result<Vec<String>, TestError> {
+        Ok(self.applied_refactor_ids.clone())
     }
 }
 

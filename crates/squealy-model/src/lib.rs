@@ -28,7 +28,10 @@ pub use plan::{
     ClassifiedDatabasePlanStep, classified_plan_steps, plan_diff, plan_models,
     plan_models_with_refactors, plan_step_risk, table_plan_step_risk,
 };
-pub use refactor::{RefactorLog, RefactorOperation, RenameColumn, RenameTable};
+pub use refactor::{
+    AppliedRefactorError, RefactorLog, RefactorOperation, RenameColumn, RenameTable,
+    pending_refactors,
+};
 pub use squealy::{
     CheckModel, ColumnModel, Constraint, ConstraintCapabilities, ConstraintDeferrability,
     ConstraintEnforcement, ConstraintValidation, DatabaseModel, DatabasePlan, DatabasePlanStep,
@@ -110,6 +113,8 @@ impl<E: std::error::Error + 'static> std::error::Error for PublishError<E> {
 #[derive(Debug)]
 pub enum PlanFromDatabaseError<E> {
     Introspect(E),
+    ReadAppliedRefactors(E),
+    AppliedRefactor(AppliedRefactorError),
     Policy(DiffPolicyError),
 }
 
@@ -118,6 +123,12 @@ impl<E: fmt::Display> fmt::Display for PlanFromDatabaseError<E> {
         match self {
             PlanFromDatabaseError::Introspect(error) => {
                 write!(formatter, "failed to introspect database: {error}")
+            }
+            PlanFromDatabaseError::ReadAppliedRefactors(error) => {
+                write!(formatter, "failed to read applied refactors: {error}")
+            }
+            PlanFromDatabaseError::AppliedRefactor(error) => {
+                write!(formatter, "applied refactor metadata mismatch: {error}")
             }
             PlanFromDatabaseError::Policy(error) => {
                 write!(formatter, "schema plan blocked by policy: {error}")
@@ -130,6 +141,8 @@ impl<E: std::error::Error + 'static> std::error::Error for PlanFromDatabaseError
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             PlanFromDatabaseError::Introspect(error) => Some(error),
+            PlanFromDatabaseError::ReadAppliedRefactors(error) => Some(error),
+            PlanFromDatabaseError::AppliedRefactor(error) => Some(error),
             PlanFromDatabaseError::Policy(error) => Some(error),
         }
     }
@@ -176,14 +189,20 @@ pub async fn plan_from_database_with_refactors<C>(
     refactors: &RefactorLog,
     connection: &mut C,
     policy: DiffPolicy,
-) -> Result<DatabasePlan, PlanFromDatabaseError<C::Error>>
+) -> Result<DatabasePlan, PlanFromDatabaseError<<C as SchemaIntrospect>::Error>>
 where
-    C: SchemaIntrospect,
+    C: SchemaIntrospect + SchemaRefactorStore<Error = <C as SchemaIntrospect>::Error>,
 {
     let actual = introspect(connection)
         .await
         .map_err(PlanFromDatabaseError::Introspect)?;
-    plan_models_with_refactors(desired, &actual, refactors, policy)
+    let applied_ids = connection
+        .applied_refactor_ids()
+        .await
+        .map_err(PlanFromDatabaseError::ReadAppliedRefactors)?;
+    let pending_refactors = pending_refactors(refactors, &applied_ids, &actual)
+        .map_err(PlanFromDatabaseError::AppliedRefactor)?;
+    plan_models_with_refactors(desired, &actual, &pending_refactors, policy)
         .map_err(PlanFromDatabaseError::Policy)
 }
 

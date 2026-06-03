@@ -408,6 +408,9 @@ Done and tested:
 - **Refactor metadata**: rename plan steps produced from `refactor.kdl` carry the stable operation id.
   Postgres and MySQL write those ids to an internal `__squealy.refactors` metadata table during
   incremental plan rendering, and expose `SchemaRefactorStore` to read the recorded ids back.
+- **Applied-refactor filtering**: `plan_from_database_with_refactors` reads recorded ids, validates
+  that each recorded refactor's obvious final state is present in the live model, filters those
+  operations from the package refactor log, and then plans with the remaining refactors.
 - **Plan rendering**: core `SchemaBackend::render_plan` lets backends render neutral plans without
   depending on `squealy-model`; Postgres and MySQL implement create/drop/add-column/index/constraint
   plan rendering, table/column rename rendering, plus changed column rendering for type, collation,
