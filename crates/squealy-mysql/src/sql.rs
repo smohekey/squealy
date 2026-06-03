@@ -60,6 +60,10 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
 /// Renders an ordered incremental DDL plan.
 pub(crate) fn write_plan(plan: &DatabasePlan, writer: &mut impl Write) -> io::Result<()> {
     let mut first = true;
+    if plan.steps.iter().any(plan_step_has_refactor_id) {
+        statement(writer, &mut first)?;
+        write_create_refactor_log_table(writer)?;
+    }
     for step in &plan.steps {
         write_plan_step(step, writer, &mut first)?;
     }
@@ -100,13 +104,20 @@ fn write_plan_step(
             write_qualified_name(schema.as_deref(), &table.name, writer)?;
         }
         DatabasePlanStep::RenameTable {
-            schema, from, to, ..
+            refactor_id,
+            schema,
+            from,
+            to,
         } => {
             statement(writer, first)?;
             writer.write_all(b"RENAME TABLE ")?;
             write_qualified_name(schema.as_deref(), from, writer)?;
             writer.write_all(b" TO ")?;
             write_qualified_name(schema.as_deref(), to, writer)?;
+            if let Some(refactor_id) = refactor_id {
+                statement(writer, first)?;
+                write_record_refactor(refactor_id, writer)?;
+            }
         }
         DatabasePlanStep::AlterTable {
             schema,
@@ -132,6 +143,31 @@ fn write_create_table_extras(
         write_add_foreign_key(schema, &table.name, foreign_key, writer)?;
     }
     Ok(())
+}
+
+fn plan_step_has_refactor_id(step: &DatabasePlanStep) -> bool {
+    match step {
+        DatabasePlanStep::RenameTable { refactor_id, .. } => refactor_id.is_some(),
+        DatabasePlanStep::AlterTable { change, .. } => match change {
+            TablePlanStep::RenameColumn { refactor_id, .. } => refactor_id.is_some(),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn write_create_refactor_log_table(writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(
+        b"CREATE TABLE IF NOT EXISTS `__squealy_refactors` (\
+`id` VARCHAR(255) NOT NULL PRIMARY KEY, \
+`applied_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    )
+}
+
+fn write_record_refactor(refactor_id: &str, writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(b"INSERT IGNORE INTO `__squealy_refactors` (`id`) VALUES (")?;
+    write_quoted_text(refactor_id, writer)?;
+    writer.write_all(b")")
 }
 
 fn write_table_plan_step(
@@ -161,13 +197,21 @@ fn write_table_plan_step(
             writer.write_all(b" DROP COLUMN ")?;
             write_quoted_ident(&column.name, writer)?;
         }
-        TablePlanStep::RenameColumn { from, to, .. } => {
+        TablePlanStep::RenameColumn {
+            refactor_id,
+            from,
+            to,
+        } => {
             writer.write_all(b"ALTER TABLE ")?;
             write_qualified_name(schema, table, writer)?;
             writer.write_all(b" RENAME COLUMN ")?;
             write_quoted_ident(from, writer)?;
             writer.write_all(b" TO ")?;
             write_quoted_ident(to, writer)?;
+            if let Some(refactor_id) = refactor_id {
+                statement(writer, first)?;
+                write_record_refactor(refactor_id, writer)?;
+            }
         }
         TablePlanStep::AddPrimaryKey { constraint } => {
             writer.write_all(b"ALTER TABLE ")?;

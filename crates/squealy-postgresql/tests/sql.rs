@@ -406,6 +406,42 @@ ALTER TABLE \"public\".\"users\" RENAME COLUMN \"display_name\" TO \"name\";"
 }
 
 #[test]
+fn postgres_records_refactor_ids_for_rename_steps() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::RenameTable {
+                refactor_id: Some("rename-users".to_owned()),
+                schema: Some("public".to_owned()),
+                from: "app_users".to_owned(),
+                to: "users".to_owned(),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "users".to_owned(),
+                change: TablePlanStep::RenameColumn {
+                    refactor_id: Some("rename-display-name".to_owned()),
+                    from: "display_name".to_owned(),
+                    to: "name".to_owned(),
+                },
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "CREATE TABLE IF NOT EXISTS \"__squealy_refactors\" (\"id\" text PRIMARY KEY, \"applied_at\" timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP);\n\
+ALTER TABLE \"public\".\"app_users\" RENAME TO \"users\";\n\
+INSERT INTO \"__squealy_refactors\" (\"id\") VALUES ('rename-users') ON CONFLICT (\"id\") DO NOTHING;\n\
+ALTER TABLE \"public\".\"users\" RENAME COLUMN \"display_name\" TO \"name\";\n\
+INSERT INTO \"__squealy_refactors\" (\"id\") VALUES ('rename-display-name') ON CONFLICT (\"id\") DO NOTHING;"
+    );
+}
+
+#[test]
 fn postgres_rejects_unsupported_changed_column_definitions() {
     let mut renamed = column("description");
     renamed.name = "details".to_owned();
