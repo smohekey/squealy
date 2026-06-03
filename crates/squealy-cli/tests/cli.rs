@@ -9,7 +9,8 @@ use std::process::Command;
 use squealy_model::{
     CheckModel, ColumnModel, ConstraintDeferrability, DatabaseModel, DdlExecutor, ForeignKeyMatch,
     ForeignKeyModel, IndexModel, RefactorLog, RefactorOperation, RenameColumn, SchemaConnect,
-    SchemaModel, SqlType, TableModel, read_package, write_package, write_package_with_refactors,
+    SchemaModel, SchemaRefactorStore, SqlType, TableModel, read_package, write_package,
+    write_package_with_refactors,
 };
 use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
@@ -968,6 +969,88 @@ async fn postgres_incremental_publish_report_does_not_apply_plan() {
 
 #[tokio::test]
 #[ignore]
+async fn postgres_incremental_publish_records_refactor_ids() {
+    let url = postgres_url();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base_package = dir.path().join("base.sqz");
+    let desired_package = dir.path().join("desired.sqz");
+    let introspected_package = dir.path().join("introspected.sqz");
+    let base = live_introspection_model_with_nullable_column("display_name");
+    let desired = live_introspection_model_with_nullable_column("name");
+    let refactors = live_rename_refactors();
+    write_package(&base, &base_package).expect("write base package");
+    write_package_with_refactors(&desired, &refactors, &desired_package)
+        .expect("write desired package");
+
+    let mut connection = Postgres.connect(&url).await.expect("connect to Postgres");
+    connection
+        .execute_ddl(
+            "DROP SCHEMA IF EXISTS \"cli_live_introspect\" CASCADE;\n\
+DROP SCHEMA IF EXISTS \"__squealy\" CASCADE",
+        )
+        .await
+        .expect("drop schemas");
+
+    let publish_base = Command::new(SQUEALY)
+        .args(["publish", "--backend", "postgres", "--package"])
+        .arg(&base_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy publish");
+    assert!(
+        publish_base.status.success(),
+        "base publish failed: {}",
+        String::from_utf8_lossy(&publish_base.stderr)
+    );
+
+    let publish_incremental = Command::new(SQUEALY)
+        .args([
+            "publish",
+            "--incremental",
+            "--backend",
+            "postgres",
+            "--package",
+        ])
+        .arg(&desired_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy incremental publish");
+    assert!(
+        publish_incremental.status.success(),
+        "incremental publish failed: {}",
+        String::from_utf8_lossy(&publish_incremental.stderr)
+    );
+
+    let introspect = Command::new(SQUEALY)
+        .args(["introspect", "--backend", "postgres", "--url", &url])
+        .arg(&introspected_package)
+        .output()
+        .expect("run squealy introspect");
+    assert!(
+        introspect.status.success(),
+        "introspect failed: {}",
+        String::from_utf8_lossy(&introspect.stderr)
+    );
+    assert_renamed_live_column(read_package(&introspected_package).expect("read package"));
+    assert_eq!(
+        connection
+            .applied_refactor_ids()
+            .await
+            .expect("read applied refactors"),
+        vec!["rename-event-display-name".to_owned()]
+    );
+
+    connection
+        .execute_ddl(
+            "DROP SCHEMA IF EXISTS \"cli_live_introspect\" CASCADE;\n\
+DROP SCHEMA IF EXISTS \"__squealy\" CASCADE",
+        )
+        .await
+        .expect("cleanup schemas");
+}
+
+#[tokio::test]
+#[ignore]
 async fn mysql_incremental_publish_applies_safe_plan() {
     let url = mysql_url();
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1128,6 +1211,88 @@ async fn mysql_incremental_publish_report_does_not_apply_plan() {
         .expect("cleanup schema");
 }
 
+#[tokio::test]
+#[ignore]
+async fn mysql_incremental_publish_records_refactor_ids() {
+    let url = mysql_url();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base_package = dir.path().join("base.sqz");
+    let desired_package = dir.path().join("desired.sqz");
+    let introspected_package = dir.path().join("introspected.sqz");
+    let base = live_introspection_model_with_nullable_column("display_name");
+    let desired = live_introspection_model_with_nullable_column("name");
+    let refactors = live_rename_refactors();
+    write_package(&base, &base_package).expect("write base package");
+    write_package_with_refactors(&desired, &refactors, &desired_package)
+        .expect("write desired package");
+
+    let mut connection = Mysql.connect(&url).await.expect("connect to MySQL");
+    connection
+        .execute_ddl(
+            "DROP SCHEMA IF EXISTS `cli_live_introspect`;\n\
+DROP SCHEMA IF EXISTS `__squealy`",
+        )
+        .await
+        .expect("drop schemas");
+
+    let publish_base = Command::new(SQUEALY)
+        .args(["publish", "--backend", "mysql", "--package"])
+        .arg(&base_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy publish");
+    assert!(
+        publish_base.status.success(),
+        "base publish failed: {}",
+        String::from_utf8_lossy(&publish_base.stderr)
+    );
+
+    let publish_incremental = Command::new(SQUEALY)
+        .args([
+            "publish",
+            "--incremental",
+            "--backend",
+            "mysql",
+            "--package",
+        ])
+        .arg(&desired_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy incremental publish");
+    assert!(
+        publish_incremental.status.success(),
+        "incremental publish failed: {}",
+        String::from_utf8_lossy(&publish_incremental.stderr)
+    );
+
+    let introspect = Command::new(SQUEALY)
+        .args(["introspect", "--backend", "mysql", "--url", &url])
+        .arg(&introspected_package)
+        .output()
+        .expect("run squealy introspect");
+    assert!(
+        introspect.status.success(),
+        "introspect failed: {}",
+        String::from_utf8_lossy(&introspect.stderr)
+    );
+    assert_renamed_live_column(read_package(&introspected_package).expect("read package"));
+    assert_eq!(
+        connection
+            .applied_refactor_ids()
+            .await
+            .expect("read applied refactors"),
+        vec!["rename-event-display-name".to_owned()]
+    );
+
+    connection
+        .execute_ddl(
+            "DROP SCHEMA IF EXISTS `cli_live_introspect`;\n\
+DROP SCHEMA IF EXISTS `__squealy`",
+        )
+        .await
+        .expect("cleanup schemas");
+}
+
 fn empty_model() -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
@@ -1186,6 +1351,36 @@ fn live_introspection_model_with_nullable_column(name: &str) -> DatabaseModel {
         generated: None,
     });
     model
+}
+
+fn live_rename_refactors() -> RefactorLog {
+    RefactorLog {
+        operations: vec![RefactorOperation::RenameColumn(RenameColumn {
+            id: "rename-event-display-name".to_owned(),
+            schema: Some("cli_live_introspect".to_owned()),
+            table: "events".to_owned(),
+            from: "display_name".to_owned(),
+            to: "name".to_owned(),
+        })],
+    }
+}
+
+fn assert_renamed_live_column(model: DatabaseModel) {
+    let actual = actual_schema(model, "cli_live_introspect");
+    assert!(
+        actual.tables[0]
+            .columns
+            .iter()
+            .any(|column| column.name == "name"),
+        "incremental publish should rename display_name to name: {actual:?}"
+    );
+    assert!(
+        actual.tables[0]
+            .columns
+            .iter()
+            .all(|column| column.name != "display_name"),
+        "incremental publish should remove display_name after rename: {actual:?}"
+    );
 }
 
 fn required_text_column(name: &str) -> ColumnModel {

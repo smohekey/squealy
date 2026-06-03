@@ -35,7 +35,7 @@ pub use squealy::{
     DdlExecutor, DefaultValue, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     IndexCapabilities, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
     IndexOperatorClass, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect,
-    SchemaModel, SqlType, TableModel, TablePlanStep,
+    SchemaModel, SchemaRefactorStore, SqlType, TableModel, TablePlanStep,
 };
 
 use std::fmt;
