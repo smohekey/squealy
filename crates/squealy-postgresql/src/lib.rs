@@ -219,6 +219,37 @@ impl squealy::SchemaRefactorStore for PostgresConnection {
             .map(|row| row.get(0))
             .collect())
     }
+
+    async fn record_applied_refactor_ids(&mut self, ids: &[String]) -> Result<(), PostgresError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        self.client()
+            .batch_execute(
+                "\
+CREATE SCHEMA IF NOT EXISTS \"__squealy\";
+CREATE TABLE IF NOT EXISTS \"__squealy\".\"refactors\" (
+    \"id\" text PRIMARY KEY,
+    \"applied_at\" timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+)",
+            )
+            .await?;
+
+        for id in ids {
+            self.client()
+                .execute(
+                    "\
+INSERT INTO \"__squealy\".\"refactors\" (\"id\")
+VALUES ($1)
+ON CONFLICT (\"id\") DO NOTHING",
+                    &[id],
+                )
+                .await?;
+        }
+
+        Ok(())
+    }
 }
 
 impl QueryBuilder for Postgres {

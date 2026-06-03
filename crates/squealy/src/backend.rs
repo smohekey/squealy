@@ -184,6 +184,12 @@ pub trait SchemaRefactorStore {
 
     /// Returns recorded refactor operation ids in deterministic order.
     fn applied_refactor_ids(&mut self) -> impl Future<Output = Result<Vec<String>, Self::Error>>;
+
+    /// Records refactor operation ids as applied, ignoring ids that already exist.
+    fn record_applied_refactor_ids(
+        &mut self,
+        ids: &[String],
+    ) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
 /// Opens a schema-management connection from a connection string.

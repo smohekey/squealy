@@ -4,6 +4,7 @@ use squealy_model::{
     SchemaModel, SchemaRefactorStore, SqlType, TableModel, TablePlanStep, apply_plan,
     classified_plan_steps, pending_refactors, plan_from_database,
     plan_from_database_with_refactors, plan_models, plan_models_with_refactors, render_plan_sql,
+    repair_refactor_metadata,
 };
 use squealy_postgresql::Postgres;
 
@@ -398,6 +399,69 @@ async fn plan_from_database_with_refactors_rejects_stale_recorded_refactors() {
 }
 
 #[tokio::test]
+async fn repair_refactor_metadata_records_valid_missing_refactors() {
+    let mut events = table("events");
+    events.columns = vec![column("name", SqlType::Text)];
+    let mut connection = TestConnection {
+        model: model_with_tables("public", vec![events]),
+        applied_refactor_ids: Vec::new(),
+        executed: Vec::new(),
+    };
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::RenameColumn(RenameColumn {
+            id: "rename-user-name".to_owned(),
+            schema: Some("public".to_owned()),
+            table: "events".to_owned(),
+            from: "display_name".to_owned(),
+            to: "name".to_owned(),
+        })],
+    };
+
+    let report = repair_refactor_metadata(&refactors, &mut connection)
+        .await
+        .expect("repair refactor metadata");
+
+    assert_eq!(report.recorded, vec!["rename-user-name".to_owned()]);
+    assert!(report.already_recorded.is_empty());
+    assert_eq!(
+        connection.applied_refactor_ids,
+        vec!["rename-user-name".to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn repair_refactor_metadata_rejects_unapplied_refactors() {
+    let mut events = table("events");
+    events.columns = vec![column("display_name", SqlType::Text)];
+    let mut connection = TestConnection {
+        model: model_with_tables("public", vec![events]),
+        applied_refactor_ids: Vec::new(),
+        executed: Vec::new(),
+    };
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::RenameColumn(RenameColumn {
+            id: "rename-user-name".to_owned(),
+            schema: Some("public".to_owned()),
+            table: "events".to_owned(),
+            from: "display_name".to_owned(),
+            to: "name".to_owned(),
+        })],
+    };
+
+    let error = repair_refactor_metadata(&refactors, &mut connection)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        squealy_model::RepairRefactorMetadataError::AppliedRefactor(
+            AppliedRefactorError::RenameColumnTargetMissing { .. }
+        )
+    ));
+    assert!(connection.applied_refactor_ids.is_empty());
+}
+
+#[tokio::test]
 async fn apply_plan_renders_with_backend_and_executes_sql() {
     let desired = model_with_tables("public", vec![table("events")]);
     let actual = DatabaseModel { schemas: vec![] };
@@ -475,6 +539,16 @@ impl SchemaRefactorStore for TestConnection {
 
     async fn applied_refactor_ids(&mut self) -> Result<Vec<String>, TestError> {
         Ok(self.applied_refactor_ids.clone())
+    }
+
+    async fn record_applied_refactor_ids(&mut self, ids: &[String]) -> Result<(), TestError> {
+        for id in ids {
+            if !self.applied_refactor_ids.contains(id) {
+                self.applied_refactor_ids.push(id.clone());
+            }
+        }
+        self.applied_refactor_ids.sort();
+        Ok(())
     }
 }
 

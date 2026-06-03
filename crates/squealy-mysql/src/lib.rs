@@ -158,6 +158,39 @@ LIMIT 1",
             .await
             .map_err(MysqlError::Introspect)
     }
+
+    async fn record_applied_refactor_ids(&mut self, ids: &[String]) -> Result<(), MysqlError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        self.conn
+            .query_drop("CREATE SCHEMA IF NOT EXISTS `__squealy`")
+            .await
+            .map_err(MysqlError::Execute)?;
+        self.conn
+            .query_drop(
+                "\
+CREATE TABLE IF NOT EXISTS `__squealy`.`refactors` (
+    `id` VARCHAR(255) NOT NULL PRIMARY KEY,
+    `applied_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+)",
+            )
+            .await
+            .map_err(MysqlError::Execute)?;
+
+        for id in ids {
+            self.conn
+                .exec_drop(
+                    "INSERT IGNORE INTO `__squealy`.`refactors` (`id`) VALUES (?)",
+                    (id.as_str(),),
+                )
+                .await
+                .map_err(MysqlError::Execute)?;
+        }
+
+        Ok(())
+    }
 }
 
 /// Splits a rendered DDL script into individual statements. The renderer separates statements with

@@ -14,7 +14,8 @@ use squealy_model::{
     SchemaCapabilities, SchemaConnect, SchemaRefactorStore, TableDiffChange, apply_plan,
     check_create, check_diff_policy, diff_models, introspect, plan_from_database_with_refactors,
     plan_models_with_refactors, publish, read_package, read_refactor_log, refactor_from_kdl,
-    render_create_sql, render_plan_sql, write_package, write_package_with_refactors,
+    render_create_sql, render_plan_sql, repair_refactor_metadata, write_package,
+    write_package_with_refactors,
 };
 use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
@@ -103,16 +104,10 @@ enum Command {
         /// Output package path.
         output: PathBuf,
     },
-    /// Print applied schema refactors recorded in a live database.
+    /// Inspect or repair schema refactor metadata recorded in a live database.
     Refactors {
-        #[command(flatten)]
-        backend: BackendOption,
-        /// Connection URL.
-        #[arg(long)]
-        url: String,
-        /// Optional package whose refactor log should be compared with the recorded ids.
-        #[arg(long)]
-        package: Option<PathBuf>,
+        #[command(subcommand)]
+        command: RefactorsCommand,
     },
     /// Publish schema changes against a database.
     Publish {
@@ -162,6 +157,32 @@ struct ModelSource {
     /// Prebuilt `.sqz` package (executes no project code).
     #[arg(long)]
     package: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum RefactorsCommand {
+    /// Print applied schema refactors recorded in a live database.
+    List {
+        #[command(flatten)]
+        backend: BackendOption,
+        /// Connection URL.
+        #[arg(long)]
+        url: String,
+        /// Optional package whose refactor log should be compared with the recorded ids.
+        #[arg(long)]
+        package: Option<PathBuf>,
+    },
+    /// Record missing refactor ids after validating that the live schema already reflects them.
+    Repair {
+        #[command(flatten)]
+        backend: BackendOption,
+        /// Connection URL.
+        #[arg(long)]
+        url: String,
+        /// Package whose refactor log should be validated and recorded.
+        #[arg(long)]
+        package: PathBuf,
+    },
 }
 
 impl ModelSource {
@@ -321,21 +342,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 write_package(&model, &output).map_err(|error| format!("write package: {error}"))
             }
         },
-        Command::Refactors {
-            backend,
-            url,
-            package,
-        } => {
-            let applied_ids = applied_refactor_ids(backend.backend, &url).await?;
-            if let Some(package) = package {
-                let refactors = read_refactor_log(&package)
-                    .map_err(|error| format!("read package refactors: {error}"))?;
-                print_refactor_status(&refactors, &applied_ids);
-            } else {
-                print_applied_refactors(&applied_ids);
-            }
-            Ok(())
-        }
+        Command::Refactors { command } => run_refactors(command).await,
         Command::Publish {
             source,
             backend,
@@ -425,6 +432,58 @@ async fn run(cli: Cli) -> Result<(), String> {
     }
 }
 
+async fn run_refactors(command: RefactorsCommand) -> Result<(), String> {
+    match command {
+        RefactorsCommand::List {
+            backend,
+            url,
+            package,
+        } => {
+            let applied_ids = applied_refactor_ids(backend.backend, &url).await?;
+            if let Some(package) = package {
+                let refactors = read_refactor_log(&package)
+                    .map_err(|error| format!("read package refactors: {error}"))?;
+                print_refactor_status(&refactors, &applied_ids);
+            } else {
+                print_applied_refactors(&applied_ids);
+            }
+            Ok(())
+        }
+        RefactorsCommand::Repair {
+            backend,
+            url,
+            package,
+        } => {
+            let refactors = read_refactor_log(&package)
+                .map_err(|error| format!("read package refactors: {error}"))?;
+            match backend.backend {
+                BackendKind::Postgres => {
+                    let mut connection = Postgres
+                        .connect(&url)
+                        .await
+                        .map_err(|error| format!("connect: {error}"))?;
+                    let report = repair_refactor_metadata(&refactors, &mut connection)
+                        .await
+                        .map_err(|error| format!("repair refactor metadata: {error}"))?;
+                    print_refactor_repair_report(&report);
+                    Ok(())
+                }
+                BackendKind::Mysql => {
+                    let mut connection = Mysql
+                        .connect(&url)
+                        .await
+                        .map_err(|error| format!("connect: {error}"))?;
+                    let report = repair_refactor_metadata(&refactors, &mut connection)
+                        .await
+                        .map_err(|error| format!("repair refactor metadata: {error}"))?;
+                    print_refactor_repair_report(&report);
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
 async fn applied_refactor_ids(backend: BackendKind, url: &str) -> Result<Vec<String>, String> {
     match backend {
         BackendKind::Postgres => {
@@ -493,6 +552,21 @@ fn print_refactor_status(refactors: &RefactorLog, applied_ids: &[String]) {
 
     if refactors.is_empty() && applied_ids.is_empty() {
         println!("no refactors");
+    }
+}
+
+fn print_refactor_repair_report(report: &squealy_model::RefactorRepairReport) {
+    if report.recorded.is_empty() && report.already_recorded.is_empty() {
+        println!("no refactors");
+        return;
+    }
+
+    for id in &report.recorded {
+        println!("recorded {id}");
+    }
+
+    for id in &report.already_recorded {
+        println!("already-recorded {id}");
     }
 }
 

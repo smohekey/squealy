@@ -41,6 +41,7 @@ pub use squealy::{
     SchemaModel, SchemaRefactorStore, SqlType, TableModel, TablePlanStep,
 };
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use squealy::Database;
@@ -116,6 +117,54 @@ pub enum PlanFromDatabaseError<E> {
     ReadAppliedRefactors(E),
     AppliedRefactor(AppliedRefactorError),
     Policy(DiffPolicyError),
+}
+
+/// The result of repairing backend refactor metadata from a package refactor log.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RefactorRepairReport {
+    /// Refactor ids inserted into backend metadata during this repair.
+    pub recorded: Vec<String>,
+    /// Refactor ids that were already present in backend metadata.
+    pub already_recorded: Vec<String>,
+}
+
+/// An error from [`repair_refactor_metadata`].
+#[derive(Debug)]
+pub enum RepairRefactorMetadataError<E> {
+    Introspect(E),
+    ReadAppliedRefactors(E),
+    AppliedRefactor(AppliedRefactorError),
+    RecordAppliedRefactors(E),
+}
+
+impl<E: fmt::Display> fmt::Display for RepairRefactorMetadataError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RepairRefactorMetadataError::Introspect(error) => {
+                write!(formatter, "failed to introspect database: {error}")
+            }
+            RepairRefactorMetadataError::ReadAppliedRefactors(error) => {
+                write!(formatter, "failed to read applied refactors: {error}")
+            }
+            RepairRefactorMetadataError::AppliedRefactor(error) => {
+                write!(formatter, "refactor final state mismatch: {error}")
+            }
+            RepairRefactorMetadataError::RecordAppliedRefactors(error) => {
+                write!(formatter, "failed to record applied refactors: {error}")
+            }
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for RepairRefactorMetadataError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RepairRefactorMetadataError::Introspect(error) => Some(error),
+            RepairRefactorMetadataError::ReadAppliedRefactors(error) => Some(error),
+            RepairRefactorMetadataError::AppliedRefactor(error) => Some(error),
+            RepairRefactorMetadataError::RecordAppliedRefactors(error) => Some(error),
+        }
+    }
 }
 
 impl<E: fmt::Display> fmt::Display for PlanFromDatabaseError<E> {
@@ -204,6 +253,59 @@ where
         .map_err(PlanFromDatabaseError::AppliedRefactor)?;
     plan_models_with_refactors(desired, &actual, &pending_refactors, policy)
         .map_err(PlanFromDatabaseError::Policy)
+}
+
+/// Records package refactors as applied when the live schema already reflects their final state.
+///
+/// This repairs backend metadata only. It does not execute application-schema DDL.
+pub async fn repair_refactor_metadata<C>(
+    refactors: &RefactorLog,
+    connection: &mut C,
+) -> Result<RefactorRepairReport, RepairRefactorMetadataError<<C as SchemaIntrospect>::Error>>
+where
+    C: SchemaIntrospect + SchemaRefactorStore<Error = <C as SchemaIntrospect>::Error>,
+{
+    let actual = introspect(connection)
+        .await
+        .map_err(RepairRefactorMetadataError::Introspect)?;
+    let applied_ids = connection
+        .applied_refactor_ids()
+        .await
+        .map_err(RepairRefactorMetadataError::ReadAppliedRefactors)?;
+    let package_ids = refactors
+        .operations
+        .iter()
+        .map(|operation| operation.id().to_owned())
+        .collect::<Vec<_>>();
+
+    pending_refactors(refactors, &package_ids, &actual)
+        .map_err(RepairRefactorMetadataError::AppliedRefactor)?;
+
+    let applied = applied_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut recorded = Vec::new();
+    let mut already_recorded = Vec::new();
+    for id in package_ids {
+        if applied.contains(id.as_str()) {
+            already_recorded.push(id);
+        } else {
+            recorded.push(id);
+        }
+    }
+
+    if !recorded.is_empty() {
+        connection
+            .record_applied_refactor_ids(&recorded)
+            .await
+            .map_err(RepairRefactorMetadataError::RecordAppliedRefactors)?;
+    }
+
+    Ok(RefactorRepairReport {
+        recorded,
+        already_recorded,
+    })
 }
 
 /// Renders `plan` using `backend` and executes it against `connection`.

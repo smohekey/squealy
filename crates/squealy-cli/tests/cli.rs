@@ -199,16 +199,56 @@ fn refactors_help_explains_package_comparison() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
+        stdout.contains("list"),
+        "help should include the list subcommand: {stdout}"
+    );
+    assert!(
+        stdout.contains("repair"),
+        "help should include the repair subcommand: {stdout}"
+    );
+
+    let output = Command::new(SQUEALY)
+        .args(["refactors", "list", "--help"])
+        .output()
+        .expect("run squealy");
+
+    assert!(
+        output.status.success(),
+        "list help failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
         stdout.contains("applied schema refactors"),
-        "help should explain recorded refactor reporting: {stdout}"
+        "list help should explain recorded refactor reporting: {stdout}"
     );
     assert!(
         stdout.contains("--package"),
-        "help should include package comparison option: {stdout}"
+        "list help should include package comparison option: {stdout}"
     );
     assert!(
         stdout.contains("--url"),
-        "help should include connection URL option: {stdout}"
+        "list help should include connection URL option: {stdout}"
+    );
+
+    let output = Command::new(SQUEALY)
+        .args(["refactors", "repair", "--help"])
+        .output()
+        .expect("run squealy");
+
+    assert!(
+        output.status.success(),
+        "repair help failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("validating that the live schema already reflects them"),
+        "repair help should explain final-state validation: {stdout}"
+    );
+    assert!(
+        stdout.contains("--package"),
+        "repair help should require package input: {stdout}"
     );
 }
 
@@ -1086,7 +1126,7 @@ async fn postgres_incremental_publish_records_refactor_ids() {
     );
 
     let refactors = Command::new(SQUEALY)
-        .args(["refactors", "--backend", "postgres", "--url", &url])
+        .args(["refactors", "list", "--backend", "postgres", "--url", &url])
         .output()
         .expect("run squealy refactors");
     assert!(
@@ -1103,6 +1143,7 @@ async fn postgres_incremental_publish_records_refactor_ids() {
     let refactors = Command::new(SQUEALY)
         .args([
             "refactors",
+            "list",
             "--backend",
             "postgres",
             "--url",
@@ -1125,6 +1166,86 @@ async fn postgres_incremental_publish_records_refactor_ids() {
     assert!(
         stdout.contains("pending rename-archived-events"),
         "unexpected refactors stdout: {stdout}"
+    );
+
+    connection
+        .execute_ddl(POSTGRES_RESET_SCHEMAS)
+        .await
+        .expect("cleanup schemas");
+    connection
+        .execute_ddl(POSTGRES_RESTORE_PUBLIC_SCHEMA)
+        .await
+        .expect("restore public schema");
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_refactor_repair_records_valid_missing_refactor_ids() {
+    let url = postgres_url();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let schema_package = dir.path().join("schema.sqz");
+    let repair_package = dir.path().join("repair.sqz");
+    let desired = live_introspection_model_with_nullable_column("name");
+    let refactors = live_rename_refactors();
+    write_package(&desired, &schema_package).expect("write schema package");
+    write_package_with_refactors(&desired, &refactors, &repair_package)
+        .expect("write repair package");
+
+    let mut connection = Postgres.connect(&url).await.expect("connect to Postgres");
+    connection
+        .execute_ddl(POSTGRES_RESET_SCHEMAS)
+        .await
+        .expect("reset schemas");
+
+    let publish_schema = Command::new(SQUEALY)
+        .args(["publish", "--backend", "postgres", "--package"])
+        .arg(&schema_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy publish");
+    assert!(
+        publish_schema.status.success(),
+        "schema publish failed: {}",
+        String::from_utf8_lossy(&publish_schema.stderr)
+    );
+    assert!(
+        connection
+            .applied_refactor_ids()
+            .await
+            .expect("read applied refactors")
+            .is_empty(),
+        "create-from-scratch publish should not record refactor metadata"
+    );
+
+    let repair = Command::new(SQUEALY)
+        .args([
+            "refactors",
+            "repair",
+            "--backend",
+            "postgres",
+            "--url",
+            &url,
+            "--package",
+        ])
+        .arg(&repair_package)
+        .output()
+        .expect("run squealy refactors repair");
+    assert!(
+        repair.status.success(),
+        "refactor repair failed: {}",
+        String::from_utf8_lossy(&repair.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&repair.stdout);
+    assert!(
+        stdout.contains("recorded rename-event-display-name"),
+        "unexpected repair stdout: {stdout}"
+    );
+    assert_eq!(
+        connection
+            .applied_refactor_ids()
+            .await
+            .expect("read applied refactors"),
+        vec!["rename-event-display-name".to_owned()]
     );
 
     connection
@@ -1377,7 +1498,7 @@ DROP SCHEMA IF EXISTS `__squealy`",
     );
 
     let refactors = Command::new(SQUEALY)
-        .args(["refactors", "--backend", "mysql", "--url", &url])
+        .args(["refactors", "list", "--backend", "mysql", "--url", &url])
         .output()
         .expect("run squealy refactors");
     assert!(
@@ -1394,6 +1515,7 @@ DROP SCHEMA IF EXISTS `__squealy`",
     let refactors = Command::new(SQUEALY)
         .args([
             "refactors",
+            "list",
             "--backend",
             "mysql",
             "--url",
@@ -1416,6 +1538,88 @@ DROP SCHEMA IF EXISTS `__squealy`",
     assert!(
         stdout.contains("pending rename-archived-events"),
         "unexpected refactors stdout: {stdout}"
+    );
+
+    connection
+        .execute_ddl(
+            "DROP SCHEMA IF EXISTS `cli_live_introspect`;\n\
+DROP SCHEMA IF EXISTS `__squealy`",
+        )
+        .await
+        .expect("cleanup schemas");
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_refactor_repair_records_valid_missing_refactor_ids() {
+    let url = mysql_url();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let schema_package = dir.path().join("schema.sqz");
+    let repair_package = dir.path().join("repair.sqz");
+    let desired = live_introspection_model_with_nullable_column("name");
+    let refactors = live_rename_refactors();
+    write_package(&desired, &schema_package).expect("write schema package");
+    write_package_with_refactors(&desired, &refactors, &repair_package)
+        .expect("write repair package");
+
+    let mut connection = Mysql.connect(&url).await.expect("connect to MySQL");
+    connection
+        .execute_ddl(
+            "DROP SCHEMA IF EXISTS `cli_live_introspect`;\n\
+DROP SCHEMA IF EXISTS `__squealy`",
+        )
+        .await
+        .expect("drop schemas");
+
+    let publish_schema = Command::new(SQUEALY)
+        .args(["publish", "--backend", "mysql", "--package"])
+        .arg(&schema_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy publish");
+    assert!(
+        publish_schema.status.success(),
+        "schema publish failed: {}",
+        String::from_utf8_lossy(&publish_schema.stderr)
+    );
+    assert!(
+        connection
+            .applied_refactor_ids()
+            .await
+            .expect("read applied refactors")
+            .is_empty(),
+        "create-from-scratch publish should not record refactor metadata"
+    );
+
+    let repair = Command::new(SQUEALY)
+        .args([
+            "refactors",
+            "repair",
+            "--backend",
+            "mysql",
+            "--url",
+            &url,
+            "--package",
+        ])
+        .arg(&repair_package)
+        .output()
+        .expect("run squealy refactors repair");
+    assert!(
+        repair.status.success(),
+        "refactor repair failed: {}",
+        String::from_utf8_lossy(&repair.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&repair.stdout);
+    assert!(
+        stdout.contains("recorded rename-event-display-name"),
+        "unexpected repair stdout: {stdout}"
+    );
+    assert_eq!(
+        connection
+            .applied_refactor_ids()
+            .await
+            .expect("read applied refactors"),
+        vec!["rename-event-display-name".to_owned()]
     );
 
     connection

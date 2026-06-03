@@ -205,9 +205,12 @@ strings — so the crate must be compiled and run):
   `--incremental` it introspects the live database, reads any embedded `refactor.kdl`, builds a
   policy-checked plan, and applies that plan; add `--report` to print that plan without executing
   it. Right shape for CI/CD with credentials.
-- `squealy refactors --url …` — read-only operator view of the applied refactor ids recorded in the
-  backend metadata table. Add `--package model.sqz` to compare recorded ids with the package
+- `squealy refactors list --url …` — read-only operator view of the applied refactor ids recorded
+  in the backend metadata table. Add `--package model.sqz` to compare recorded ids with the package
   `refactor.kdl` and print `applied`, `pending`, or `recorded-only` status lines.
+- `squealy refactors repair --package model.sqz --url …` — metadata-only recovery path for cases
+  where a package refactor's final schema state is already present but the backend metadata row is
+  missing. It validates the live final state before recording the id.
 - `squealy publish --database … --url …` (compile+run then deploy in one step) stays available for dev
   convenience, using `SchemaConnect` to open the connection from the URL.
 
@@ -414,10 +417,12 @@ Done and tested:
 - **Applied-refactor filtering**: `plan_from_database_with_refactors` reads recorded ids, validates
   that each recorded refactor's obvious final state is present in the live model, filters those
   operations from the package refactor log, and then plans with the remaining refactors.
-- **Refactor metadata CLI**: `squealy refactors --backend <backend> --url <url>` prints recorded
-  applied refactor ids. With `--package <file.sqz>` it compares backend metadata with the package
-  refactor log so operators can see which refactors are applied, pending, or recorded outside the
-  package.
+- **Refactor metadata CLI**: `squealy refactors list --backend <backend> --url <url>` prints
+  recorded applied refactor ids. With `--package <file.sqz>` it compares backend metadata with the
+  package refactor log so operators can see which refactors are applied, pending, or recorded
+  outside the package. `squealy refactors repair --package <file.sqz> --url <url>` validates that
+  package refactors already match live final schema state and records missing metadata ids without
+  mutating application schema.
 - **Plan rendering**: core `SchemaBackend::render_plan` lets backends render neutral plans without
   depending on `squealy-model`; Postgres and MySQL implement create/drop/add-column/index/constraint
   plan rendering, table/column rename rendering, plus changed column rendering for type, collation,
