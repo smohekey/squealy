@@ -218,7 +218,8 @@ not a requirement (git tracks the Rust source).
 ```
 package.sqz (zip)
 ├── manifest.kdl     // metadata, read without parsing the whole model
-└── model.kdl        // the DatabaseModel
+├── model.kdl        // the DatabaseModel
+└── refactor.kdl     // optional explicit rename/refactor operations
 ```
 
 **Grammar:** positional args = the column list; name + everything else are properties; repeated
@@ -258,6 +259,19 @@ database {
       primary-key "id" name="pk_organizations"
     }
   }
+}
+```
+
+**`refactor.kdl`:**
+
+Refactors are explicit deployment intent that cannot be inferred safely from schema snapshots. For
+example, a removed table plus an added table may be a rename or a real replacement. The package can
+carry an optional refactor log; packages without it read as an empty log.
+
+```kdl
+refactors {
+  rename-table id="2026-rename-users" schema="public" from="app_users" to="users"
+  rename-column id="2026-rename-user-name" schema="public" table="users" from="display_name" to="name"
 }
 ```
 
@@ -358,7 +372,7 @@ Done and tested:
   full round-trip. `squealy-model::check_create` preflights models against those capabilities before
   rendering, and `squealy capabilities --backend <postgres|mysql>` prints the current support matrix.
 - **`.sqz` package** in `squealy-model`: deterministic KDL `model.kdl` + `manifest.kdl` in a zip,
-  with full KDL and zip round-trip tests.
+  optional `refactor.kdl` explicit rename/refactor log, with full KDL and zip round-trip tests.
 - **`render_create_sql` / `script`** engine entry points.
 - **`publish`** — `DdlExecutor` trait in core; Postgres and MySQL connections implement it;
   `squealy-model::publish`/`publish_database` render then execute. Verified by live `#[ignore]`d

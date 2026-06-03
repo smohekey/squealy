@@ -8,7 +8,8 @@
 //! ```text
 //! package.sqz (zip)
 //! ├── manifest.kdl   metadata
-//! └── model.kdl      the DatabaseModel
+//! ├── model.kdl      the DatabaseModel
+//! └── refactor.kdl   optional explicit refactor operations
 //! ```
 
 use std::fmt;
@@ -24,11 +25,14 @@ use squealy::{
     SchemaModel, SqlType, TableModel,
 };
 
+use crate::{RefactorLog, RefactorOperation, RenameColumn, RenameTable};
+
 /// Current package format version, recorded in `manifest.kdl`.
 pub const FORMAT_VERSION: i128 = 1;
 
 const MODEL_ENTRY: &str = "model.kdl";
 const MANIFEST_ENTRY: &str = "manifest.kdl";
+const REFACTOR_ENTRY: &str = "refactor.kdl";
 
 /// An error produced while reading or writing a `.sqz` package.
 #[derive(Debug)]
@@ -89,6 +93,16 @@ pub fn write_package(model: &DatabaseModel, path: &Path) -> Result<(), PackageEr
     write_package_to(model, file)
 }
 
+/// Writes a `.sqz` package including an optional `refactor.kdl` log.
+pub fn write_package_with_refactors(
+    model: &DatabaseModel,
+    refactors: &RefactorLog,
+    path: &Path,
+) -> Result<(), PackageError> {
+    let file = std::fs::File::create(path)?;
+    write_package_with_refactors_to(model, refactors, file)
+}
+
 /// Reads a model back from a `.sqz` package at `path`.
 pub fn read_package(path: &Path) -> Result<DatabaseModel, PackageError> {
     let file = std::fs::File::open(path)?;
@@ -98,6 +112,15 @@ pub fn read_package(path: &Path) -> Result<DatabaseModel, PackageError> {
 /// Writes a package to any writer (used by [`write_package`]; handy for tests with a `Cursor`).
 pub fn write_package_to<W: Write + io::Seek>(
     model: &DatabaseModel,
+    writer: W,
+) -> Result<(), PackageError> {
+    write_package_with_refactors_to(model, &RefactorLog::default(), writer)
+}
+
+/// Writes a package to any writer, optionally including `refactor.kdl`.
+pub fn write_package_with_refactors_to<W: Write + io::Seek>(
+    model: &DatabaseModel,
+    refactors: &RefactorLog,
     writer: W,
 ) -> Result<(), PackageError> {
     let mut zip = zip::ZipWriter::new(writer);
@@ -113,6 +136,11 @@ pub fn write_package_to<W: Write + io::Seek>(
     zip.start_file(MODEL_ENTRY, options)?;
     zip.write_all(to_kdl(model).as_bytes())?;
 
+    if !refactors.is_empty() {
+        zip.start_file(REFACTOR_ENTRY, options)?;
+        zip.write_all(refactor_to_kdl(refactors).as_bytes())?;
+    }
+
     zip.finish()?;
     Ok(())
 }
@@ -125,6 +153,35 @@ pub fn read_package_from<R: Read + io::Seek>(reader: R) -> Result<DatabaseModel,
         .by_name(MODEL_ENTRY)?
         .read_to_string(&mut model_kdl)?;
     from_kdl(&model_kdl)
+}
+
+/// Reads the optional refactor log from any package reader.
+///
+/// Packages without `refactor.kdl` return an empty log, so older packages remain readable.
+pub fn read_refactor_log_from_package<R: Read + io::Seek>(
+    reader: R,
+) -> Result<RefactorLog, PackageError> {
+    let mut archive = zip::ZipArchive::new(reader)?;
+    let Ok(mut entry) = archive.by_name(REFACTOR_ENTRY) else {
+        return Ok(RefactorLog::default());
+    };
+    let mut refactor_kdl = String::new();
+    entry.read_to_string(&mut refactor_kdl)?;
+    refactor_from_kdl(&refactor_kdl)
+}
+
+/// Serializes a refactor log to canonical `refactor.kdl` text.
+pub fn refactor_to_kdl(refactors: &RefactorLog) -> String {
+    let mut document = refactor_to_document(refactors);
+    document.autoformat();
+    document.to_string()
+}
+
+/// Parses a refactor log from `refactor.kdl` text.
+pub fn refactor_from_kdl(text: &str) -> Result<RefactorLog, PackageError> {
+    let document =
+        KdlDocument::parse_v2(text).map_err(|error| malformed(format!("invalid KDL: {error}")))?;
+    refactor_from_document(&document)
 }
 
 fn manifest_kdl(model: &DatabaseModel) -> String {
@@ -152,6 +209,86 @@ fn manifest_kdl(model: &DatabaseModel) -> String {
     document.nodes_mut().push(manifest);
     document.autoformat();
     document.to_string()
+}
+
+// --- RefactorLog <-> KDL ------------------------------------------------------------------------
+
+fn refactor_to_document(refactors: &RefactorLog) -> KdlDocument {
+    let mut document = KdlDocument::new();
+    let mut root = KdlNode::new("refactors");
+    let mut body = KdlDocument::new();
+
+    for operation in &refactors.operations {
+        body.nodes_mut().push(refactor_operation_to_node(operation));
+    }
+
+    root.set_children(body);
+    document.nodes_mut().push(root);
+    document
+}
+
+fn refactor_operation_to_node(operation: &RefactorOperation) -> KdlNode {
+    match operation {
+        RefactorOperation::RenameTable(operation) => {
+            let mut node = KdlNode::new("rename-table");
+            node.push(KdlEntry::new_prop("id", operation.id.clone()));
+            if let Some(schema) = &operation.schema {
+                node.push(KdlEntry::new_prop("schema", schema.clone()));
+            }
+            node.push(KdlEntry::new_prop("from", operation.from.clone()));
+            node.push(KdlEntry::new_prop("to", operation.to.clone()));
+            node
+        }
+        RefactorOperation::RenameColumn(operation) => {
+            let mut node = KdlNode::new("rename-column");
+            node.push(KdlEntry::new_prop("id", operation.id.clone()));
+            if let Some(schema) = &operation.schema {
+                node.push(KdlEntry::new_prop("schema", schema.clone()));
+            }
+            node.push(KdlEntry::new_prop("table", operation.table.clone()));
+            node.push(KdlEntry::new_prop("from", operation.from.clone()));
+            node.push(KdlEntry::new_prop("to", operation.to.clone()));
+            node
+        }
+    }
+}
+
+fn refactor_from_document(document: &KdlDocument) -> Result<RefactorLog, PackageError> {
+    let root = document
+        .nodes()
+        .iter()
+        .find(|node| node.name().value() == "refactors")
+        .ok_or_else(|| malformed("missing `refactors` node"))?;
+
+    let mut operations = Vec::new();
+    for node in root.children().into_iter().flat_map(KdlDocument::nodes) {
+        operations.push(match node.name().value() {
+            "rename-table" => RefactorOperation::RenameTable(rename_table_from_node(node)?),
+            "rename-column" => RefactorOperation::RenameColumn(rename_column_from_node(node)?),
+            other => return Err(malformed(format!("unknown refactor operation `{other}`"))),
+        });
+    }
+
+    Ok(RefactorLog { operations })
+}
+
+fn rename_table_from_node(node: &KdlNode) -> Result<RenameTable, PackageError> {
+    Ok(RenameTable {
+        id: required_non_empty_prop(node, "id")?,
+        schema: prop(node, "schema").map(str::to_owned),
+        from: required_non_empty_prop(node, "from")?,
+        to: required_non_empty_prop(node, "to")?,
+    })
+}
+
+fn rename_column_from_node(node: &KdlNode) -> Result<RenameColumn, PackageError> {
+    Ok(RenameColumn {
+        id: required_non_empty_prop(node, "id")?,
+        schema: prop(node, "schema").map(str::to_owned),
+        table: required_non_empty_prop(node, "table")?,
+        from: required_non_empty_prop(node, "from")?,
+        to: required_non_empty_prop(node, "to")?,
+    })
 }
 
 // --- Model -> KDL -------------------------------------------------------------------------------
@@ -791,6 +928,18 @@ fn required_prop(node: &KdlNode, key: &str) -> Result<String, PackageError> {
         .ok_or_else(|| malformed(format!("`{}` is missing `{key}`", node.name().value())))
 }
 
+fn required_non_empty_prop(node: &KdlNode, key: &str) -> Result<String, PackageError> {
+    let value = required_prop(node, key)?;
+    if value.is_empty() {
+        Err(malformed(format!(
+            "`{}` has empty `{key}`",
+            node.name().value()
+        )))
+    } else {
+        Ok(value)
+    }
+}
+
 fn identity_mode(mode: &IdentityMode) -> &'static str {
     match mode {
         IdentityMode::Always => "always",
@@ -1119,6 +1268,69 @@ mod tests {
         write_package_to(&model, Cursor::new(&mut buffer)).expect("write package");
         let parsed = read_package_from(Cursor::new(buffer)).expect("read package");
         assert_eq!(parsed, model);
+    }
+
+    #[test]
+    fn refactor_kdl_round_trips() {
+        let refactors = sample_refactor_log();
+        let kdl = refactor_to_kdl(&refactors);
+        assert!(kdl.contains("rename-table"));
+        assert!(kdl.contains("rename-column"));
+        assert!(kdl.contains("id=\"2026-rename-users\""));
+        let parsed = refactor_from_kdl(&kdl).expect("refactor.kdl should parse");
+        assert_eq!(
+            parsed, refactors,
+            "refactor KDL round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn package_zip_round_trips_optional_refactor_log() {
+        let model = sample_model();
+        let refactors = sample_refactor_log();
+        let mut buffer = Vec::new();
+
+        write_package_with_refactors_to(&model, &refactors, Cursor::new(&mut buffer))
+            .expect("write package with refactors");
+
+        let parsed_model = read_package_from(Cursor::new(buffer.clone())).expect("read model");
+        let parsed_refactors =
+            read_refactor_log_from_package(Cursor::new(buffer)).expect("read refactors");
+
+        assert_eq!(parsed_model, model);
+        assert_eq!(parsed_refactors, refactors);
+    }
+
+    #[test]
+    fn package_without_refactor_log_reads_empty_refactor_log() {
+        let model = sample_model();
+        let mut buffer = Vec::new();
+        write_package_to(&model, Cursor::new(&mut buffer)).expect("write package");
+
+        let refactors =
+            read_refactor_log_from_package(Cursor::new(buffer)).expect("read refactors");
+
+        assert!(refactors.is_empty());
+    }
+
+    fn sample_refactor_log() -> RefactorLog {
+        RefactorLog {
+            operations: vec![
+                RefactorOperation::RenameTable(RenameTable {
+                    id: "2026-rename-users".to_owned(),
+                    schema: Some("public".to_owned()),
+                    from: "app_users".to_owned(),
+                    to: "users".to_owned(),
+                }),
+                RefactorOperation::RenameColumn(RenameColumn {
+                    id: "2026-rename-user-name".to_owned(),
+                    schema: Some("public".to_owned()),
+                    table: "users".to_owned(),
+                    from: "display_name".to_owned(),
+                    to: "name".to_owned(),
+                }),
+            ],
+        }
     }
 
     #[test]

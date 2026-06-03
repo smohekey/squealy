@@ -11,6 +11,7 @@
 
 mod package;
 mod plan;
+mod refactor;
 
 pub mod diff;
 
@@ -19,13 +20,15 @@ pub use diff::{
     DiffPolicyError, TableDiffChange, check_diff_policy, diff_models,
 };
 pub use package::{
-    FORMAT_VERSION, PackageError, from_kdl, read_package, read_package_from, to_kdl, write_package,
-    write_package_to,
+    FORMAT_VERSION, PackageError, from_kdl, read_package, read_package_from,
+    read_refactor_log_from_package, refactor_from_kdl, refactor_to_kdl, to_kdl, write_package,
+    write_package_to, write_package_with_refactors, write_package_with_refactors_to,
 };
 pub use plan::{
     ClassifiedDatabasePlanStep, classified_plan_steps, plan_diff, plan_models, plan_step_risk,
     table_plan_step_risk,
 };
+pub use refactor::{RefactorLog, RefactorOperation, RenameColumn, RenameTable};
 pub use squealy::{
     CheckModel, ColumnModel, Constraint, ConstraintCapabilities, ConstraintDeferrability,
     ConstraintEnforcement, ConstraintValidation, DatabaseModel, DatabasePlan, DatabasePlanStep,
