@@ -147,7 +147,9 @@ fn plan_step_as_diff_change(step: &DatabasePlanStep) -> DatabaseDiffChange {
             schema: schema.clone(),
             table: table.clone(),
         },
-        DatabasePlanStep::RenameTable { schema, from, to } => DatabaseDiffChange::AlterTable {
+        DatabasePlanStep::RenameTable {
+            schema, from, to, ..
+        } => DatabaseDiffChange::AlterTable {
             schema: schema.clone(),
             table: from.clone(),
             changes: vec![TableDiffChange::SetTableComment {
@@ -179,7 +181,7 @@ fn table_plan_step_as_diff_change(step: &TablePlanStep) -> TableDiffChange {
         TablePlanStep::DropColumn { column } => TableDiffChange::DropColumn {
             column: column.clone(),
         },
-        TablePlanStep::RenameColumn { from, to } => TableDiffChange::SetTableComment {
+        TablePlanStep::RenameColumn { from, to, .. } => TableDiffChange::SetTableComment {
             before: Some(format!("rename column from {from}")),
             after: Some(format!("rename column to {to}")),
         },
@@ -331,6 +333,7 @@ fn apply_table_rename(steps: &mut Vec<DatabasePlanStep>, operation: &RenameTable
     actual_table.name = operation.to.clone();
     let follow_up_changes = diff_table(&desired_table, &actual_table);
     let mut replacement = vec![DatabasePlanStep::RenameTable {
+        refactor_id: Some(operation.id.clone()),
         schema: operation.schema.clone(),
         from: operation.from.clone(),
         to: operation.to.clone(),
@@ -396,6 +399,7 @@ fn apply_column_rename(steps: &mut Vec<DatabasePlanStep>, operation: &RenameColu
         schema: operation.schema.clone(),
         table: operation.table.clone(),
         change: TablePlanStep::RenameColumn {
+            refactor_id: Some(operation.id.clone()),
             from: operation.from.clone(),
             to: operation.to.clone(),
         },

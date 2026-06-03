@@ -375,6 +375,7 @@ fn mysql_renders_rename_steps_in_schema_plan() {
     let plan = DatabasePlan {
         steps: vec![
             DatabasePlanStep::RenameTable {
+                refactor_id: None,
                 schema: Some("shop".to_owned()),
                 from: "app_users".to_owned(),
                 to: "users".to_owned(),
@@ -383,6 +384,7 @@ fn mysql_renders_rename_steps_in_schema_plan() {
                 schema: Some("shop".to_owned()),
                 table: "users".to_owned(),
                 change: TablePlanStep::RenameColumn {
+                    refactor_id: None,
                     from: "display_name".to_owned(),
                     to: "name".to_owned(),
                 },

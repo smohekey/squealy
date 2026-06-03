@@ -99,7 +99,9 @@ fn write_plan_step(
             writer.write_all(b"DROP TABLE ")?;
             write_qualified_name(schema.as_deref(), &table.name, writer)?;
         }
-        DatabasePlanStep::RenameTable { schema, from, to } => {
+        DatabasePlanStep::RenameTable {
+            schema, from, to, ..
+        } => {
             statement(writer, first)?;
             writer.write_all(b"RENAME TABLE ")?;
             write_qualified_name(schema.as_deref(), from, writer)?;
@@ -159,7 +161,7 @@ fn write_table_plan_step(
             writer.write_all(b" DROP COLUMN ")?;
             write_quoted_ident(&column.name, writer)?;
         }
-        TablePlanStep::RenameColumn { from, to } => {
+        TablePlanStep::RenameColumn { from, to, .. } => {
             writer.write_all(b"ALTER TABLE ")?;
             write_qualified_name(schema, table, writer)?;
             writer.write_all(b" RENAME COLUMN ")?;

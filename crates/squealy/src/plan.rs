@@ -30,6 +30,7 @@ pub enum DatabasePlanStep {
         table: TableModel,
     },
     RenameTable {
+        refactor_id: Option<String>,
         schema: Option<String>,
         from: String,
         to: String,
@@ -55,6 +56,7 @@ pub enum TablePlanStep {
         column: ColumnModel,
     },
     RenameColumn {
+        refactor_id: Option<String>,
         from: String,
         to: String,
     },

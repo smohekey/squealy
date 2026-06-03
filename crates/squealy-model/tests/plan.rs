@@ -82,6 +82,7 @@ fn plan_models_with_refactors_turns_table_drop_add_into_rename() {
     assert_eq!(
         plan.steps,
         vec![DatabasePlanStep::RenameTable {
+            refactor_id: Some("rename-users".to_owned()),
             schema: Some("public".to_owned()),
             from: "app_users".to_owned(),
             to: "users".to_owned(),
@@ -115,6 +116,7 @@ fn plan_models_with_refactors_keeps_table_changes_after_rename() {
         plan.steps,
         vec![
             DatabasePlanStep::RenameTable {
+                refactor_id: Some("rename-users".to_owned()),
                 schema: Some("public".to_owned()),
                 from: "app_users".to_owned(),
                 to: "users".to_owned(),
@@ -160,6 +162,7 @@ fn plan_models_with_refactors_turns_column_drop_add_into_rename() {
             schema: Some("public".to_owned()),
             table: "events".to_owned(),
             change: TablePlanStep::RenameColumn {
+                refactor_id: Some("rename-user-name".to_owned()),
                 from: "display_name".to_owned(),
                 to: "name".to_owned(),
             },
@@ -203,6 +206,7 @@ fn plan_models_with_refactors_keeps_column_changes_after_rename() {
                 schema: Some("public".to_owned()),
                 table: "events".to_owned(),
                 change: TablePlanStep::RenameColumn {
+                    refactor_id: Some("rename-user-name".to_owned()),
                     from: "display_name".to_owned(),
                     to: "name".to_owned(),
                 },
