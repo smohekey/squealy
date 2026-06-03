@@ -595,6 +595,8 @@ pub(crate) mod ddl {
         let mut first = true;
         if plan.steps.iter().any(plan_step_has_refactor_id) {
             statement(writer, &mut first)?;
+            write_create_refactor_log_schema(writer)?;
+            statement(writer, &mut first)?;
             write_create_refactor_log_table(writer)?;
         }
         for step in &plan.steps {
@@ -699,16 +701,20 @@ pub(crate) mod ddl {
         }
     }
 
+    fn write_create_refactor_log_schema(writer: &mut impl Write) -> io::Result<()> {
+        writer.write_all(b"CREATE SCHEMA IF NOT EXISTS \"__squealy\"")
+    }
+
     fn write_create_refactor_log_table(writer: &mut impl Write) -> io::Result<()> {
         writer.write_all(
-            b"CREATE TABLE IF NOT EXISTS \"__squealy_refactors\" (\
+            b"CREATE TABLE IF NOT EXISTS \"__squealy\".\"refactors\" (\
 \"id\" text PRIMARY KEY, \
 \"applied_at\" timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP)",
         )
     }
 
     fn write_record_refactor(refactor_id: &str, writer: &mut impl Write) -> io::Result<()> {
-        writer.write_all(b"INSERT INTO \"__squealy_refactors\" (\"id\") VALUES (")?;
+        writer.write_all(b"INSERT INTO \"__squealy\".\"refactors\" (\"id\") VALUES (")?;
         write_quoted_text(refactor_id, writer)?;
         writer.write_all(b") ON CONFLICT (\"id\") DO NOTHING")
     }

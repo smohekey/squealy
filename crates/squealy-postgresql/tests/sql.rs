@@ -433,11 +433,12 @@ fn postgres_records_refactor_ids_for_rename_steps() {
 
     assert_eq!(
         sql,
-        "CREATE TABLE IF NOT EXISTS \"__squealy_refactors\" (\"id\" text PRIMARY KEY, \"applied_at\" timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP);\n\
+        "CREATE SCHEMA IF NOT EXISTS \"__squealy\";\n\
+CREATE TABLE IF NOT EXISTS \"__squealy\".\"refactors\" (\"id\" text PRIMARY KEY, \"applied_at\" timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP);\n\
 ALTER TABLE \"public\".\"app_users\" RENAME TO \"users\";\n\
-INSERT INTO \"__squealy_refactors\" (\"id\") VALUES ('rename-users') ON CONFLICT (\"id\") DO NOTHING;\n\
+INSERT INTO \"__squealy\".\"refactors\" (\"id\") VALUES ('rename-users') ON CONFLICT (\"id\") DO NOTHING;\n\
 ALTER TABLE \"public\".\"users\" RENAME COLUMN \"display_name\" TO \"name\";\n\
-INSERT INTO \"__squealy_refactors\" (\"id\") VALUES ('rename-display-name') ON CONFLICT (\"id\") DO NOTHING;"
+INSERT INTO \"__squealy\".\"refactors\" (\"id\") VALUES ('rename-display-name') ON CONFLICT (\"id\") DO NOTHING;"
     );
 }
 

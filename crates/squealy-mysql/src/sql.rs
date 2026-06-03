@@ -62,6 +62,8 @@ pub(crate) fn write_plan(plan: &DatabasePlan, writer: &mut impl Write) -> io::Re
     let mut first = true;
     if plan.steps.iter().any(plan_step_has_refactor_id) {
         statement(writer, &mut first)?;
+        write_create_refactor_log_schema(writer)?;
+        statement(writer, &mut first)?;
         write_create_refactor_log_table(writer)?;
     }
     for step in &plan.steps {
@@ -156,16 +158,20 @@ fn plan_step_has_refactor_id(step: &DatabasePlanStep) -> bool {
     }
 }
 
+fn write_create_refactor_log_schema(writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(b"CREATE SCHEMA IF NOT EXISTS `__squealy`")
+}
+
 fn write_create_refactor_log_table(writer: &mut impl Write) -> io::Result<()> {
     writer.write_all(
-        b"CREATE TABLE IF NOT EXISTS `__squealy_refactors` (\
+        b"CREATE TABLE IF NOT EXISTS `__squealy`.`refactors` (\
 `id` VARCHAR(255) NOT NULL PRIMARY KEY, \
 `applied_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
     )
 }
 
 fn write_record_refactor(refactor_id: &str, writer: &mut impl Write) -> io::Result<()> {
-    writer.write_all(b"INSERT IGNORE INTO `__squealy_refactors` (`id`) VALUES (")?;
+    writer.write_all(b"INSERT IGNORE INTO `__squealy`.`refactors` (`id`) VALUES (")?;
     write_quoted_text(refactor_id, writer)?;
     writer.write_all(b")")
 }

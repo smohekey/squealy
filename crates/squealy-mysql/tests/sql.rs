@@ -431,11 +431,12 @@ fn mysql_records_refactor_ids_for_rename_steps() {
 
     assert_eq!(
         sql,
-        "CREATE TABLE IF NOT EXISTS `__squealy_refactors` (`id` VARCHAR(255) NOT NULL PRIMARY KEY, `applied_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);\n\
+        "CREATE SCHEMA IF NOT EXISTS `__squealy`;\n\
+CREATE TABLE IF NOT EXISTS `__squealy`.`refactors` (`id` VARCHAR(255) NOT NULL PRIMARY KEY, `applied_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);\n\
 RENAME TABLE `shop`.`app_users` TO `shop`.`users`;\n\
-INSERT IGNORE INTO `__squealy_refactors` (`id`) VALUES ('rename-users');\n\
+INSERT IGNORE INTO `__squealy`.`refactors` (`id`) VALUES ('rename-users');\n\
 ALTER TABLE `shop`.`users` RENAME COLUMN `display_name` TO `name`;\n\
-INSERT IGNORE INTO `__squealy_refactors` (`id`) VALUES ('rename-display-name');"
+INSERT IGNORE INTO `__squealy`.`refactors` (`id`) VALUES ('rename-display-name');"
     );
 }
 

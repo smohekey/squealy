@@ -46,7 +46,7 @@ async fn table_refs(conn: &mut mysql_async::Conn) -> Result<Vec<TableRef>, Mysql
 SELECT TABLE_SCHEMA, TABLE_NAME
 FROM information_schema.TABLES
 WHERE TABLE_TYPE = 'BASE TABLE'
-  AND TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+  AND TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys', '__squealy')
 ORDER BY TABLE_SCHEMA, TABLE_NAME",
         |(schema, name)| TableRef { schema, name },
     )
