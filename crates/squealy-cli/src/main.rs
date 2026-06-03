@@ -3,6 +3,7 @@
 //! Commands take their model either from the crate (`--database <path>`, via a compiled stub) or from
 //! a prebuilt package (`--package <file.sqz>`, which executes no project code).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -10,8 +11,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use squealy_cli::extract::extract_model;
 use squealy_model::{
     ChangeRisk, DatabaseDiffChange, DatabaseModel, DiffPolicy, RefactorLog, SchemaBackend,
-    SchemaCapabilities, SchemaConnect, TableDiffChange, apply_plan, check_create,
-    check_diff_policy, diff_models, introspect, plan_from_database_with_refactors,
+    SchemaCapabilities, SchemaConnect, SchemaRefactorStore, TableDiffChange, apply_plan,
+    check_create, check_diff_policy, diff_models, introspect, plan_from_database_with_refactors,
     plan_models_with_refactors, publish, read_package, read_refactor_log, refactor_from_kdl,
     render_create_sql, render_plan_sql, write_package, write_package_with_refactors,
 };
@@ -101,6 +102,17 @@ enum Command {
         url: String,
         /// Output package path.
         output: PathBuf,
+    },
+    /// Print applied schema refactors recorded in a live database.
+    Refactors {
+        #[command(flatten)]
+        backend: BackendOption,
+        /// Connection URL.
+        #[arg(long)]
+        url: String,
+        /// Optional package whose refactor log should be compared with the recorded ids.
+        #[arg(long)]
+        package: Option<PathBuf>,
     },
     /// Publish schema changes against a database.
     Publish {
@@ -309,6 +321,21 @@ async fn run(cli: Cli) -> Result<(), String> {
                 write_package(&model, &output).map_err(|error| format!("write package: {error}"))
             }
         },
+        Command::Refactors {
+            backend,
+            url,
+            package,
+        } => {
+            let applied_ids = applied_refactor_ids(backend.backend, &url).await?;
+            if let Some(package) = package {
+                let refactors = read_refactor_log(&package)
+                    .map_err(|error| format!("read package refactors: {error}"))?;
+                print_refactor_status(&refactors, &applied_ids);
+            } else {
+                print_applied_refactors(&applied_ids);
+            }
+            Ok(())
+        }
         Command::Publish {
             source,
             backend,
@@ -398,10 +425,75 @@ async fn run(cli: Cli) -> Result<(), String> {
     }
 }
 
+async fn applied_refactor_ids(backend: BackendKind, url: &str) -> Result<Vec<String>, String> {
+    match backend {
+        BackendKind::Postgres => {
+            let mut connection = Postgres
+                .connect(url)
+                .await
+                .map_err(|error| format!("connect: {error}"))?;
+            connection
+                .applied_refactor_ids()
+                .await
+                .map_err(|error| format!("read applied refactors: {error}"))
+        }
+        BackendKind::Mysql => {
+            let mut connection = Mysql
+                .connect(url)
+                .await
+                .map_err(|error| format!("connect: {error}"))?;
+            connection
+                .applied_refactor_ids()
+                .await
+                .map_err(|error| format!("read applied refactors: {error}"))
+        }
+    }
+}
+
 fn read_refactor_file(path: &Path) -> Result<RefactorLog, String> {
     let text =
         std::fs::read_to_string(path).map_err(|error| format!("read refactor file: {error}"))?;
     refactor_from_kdl(&text).map_err(|error| format!("parse refactor file: {error}"))
+}
+
+fn print_applied_refactors(applied_ids: &[String]) {
+    if applied_ids.is_empty() {
+        println!("no applied refactors");
+        return;
+    }
+
+    for id in applied_ids {
+        println!("applied {id}");
+    }
+}
+
+fn print_refactor_status(refactors: &RefactorLog, applied_ids: &[String]) {
+    let applied = applied_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let package_ids = refactors
+        .operations
+        .iter()
+        .map(|operation| operation.id())
+        .collect::<BTreeSet<_>>();
+
+    for operation in &refactors.operations {
+        let id = operation.id();
+        if applied.contains(id) {
+            println!("applied {id}");
+        } else {
+            println!("pending {id}");
+        }
+    }
+
+    for id in applied.difference(&package_ids) {
+        println!("recorded-only {id}");
+    }
+
+    if refactors.is_empty() && applied_ids.is_empty() {
+        println!("no refactors");
+    }
 }
 
 fn print_diff(diff: &squealy_model::DatabaseDiff) {

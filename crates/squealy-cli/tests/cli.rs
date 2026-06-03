@@ -8,9 +8,9 @@ use std::process::Command;
 
 use squealy_model::{
     CheckModel, ColumnModel, ConstraintDeferrability, DatabaseModel, DdlExecutor, ForeignKeyMatch,
-    ForeignKeyModel, IndexModel, RefactorLog, RefactorOperation, RenameColumn, SchemaConnect,
-    SchemaModel, SchemaRefactorStore, SqlType, TableModel, read_package, write_package,
-    write_package_with_refactors,
+    ForeignKeyModel, IndexModel, RefactorLog, RefactorOperation, RenameColumn, RenameTable,
+    SchemaConnect, SchemaModel, SchemaRefactorStore, SqlType, TableModel, read_package,
+    write_package, write_package_with_refactors,
 };
 use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
@@ -182,6 +182,33 @@ fn publish_help_exposes_incremental_policy_flags() {
     assert!(
         stdout.contains("--allow-destructive"),
         "help should include destructive-change policy flag: {stdout}"
+    );
+}
+
+#[test]
+fn refactors_help_explains_package_comparison() {
+    let output = Command::new(SQUEALY)
+        .args(["refactors", "--help"])
+        .output()
+        .expect("run squealy");
+
+    assert!(
+        output.status.success(),
+        "help failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("applied schema refactors"),
+        "help should explain recorded refactor reporting: {stdout}"
+    );
+    assert!(
+        stdout.contains("--package"),
+        "help should include package comparison option: {stdout}"
+    );
+    assert!(
+        stdout.contains("--url"),
+        "help should include connection URL option: {stdout}"
     );
 }
 
@@ -990,13 +1017,17 @@ async fn postgres_incremental_publish_records_refactor_ids() {
     let dir = tempfile::tempdir().expect("tempdir");
     let base_package = dir.path().join("base.sqz");
     let desired_package = dir.path().join("desired.sqz");
+    let report_package = dir.path().join("report.sqz");
     let introspected_package = dir.path().join("introspected.sqz");
     let base = live_introspection_model_with_nullable_column("display_name");
     let desired = live_introspection_model_with_nullable_column("name");
     let refactors = live_rename_refactors();
+    let report_refactors = live_refactor_report_log();
     write_package(&base, &base_package).expect("write base package");
     write_package_with_refactors(&desired, &refactors, &desired_package)
         .expect("write desired package");
+    write_package_with_refactors(&desired, &report_refactors, &report_package)
+        .expect("write report package");
 
     let mut connection = Postgres.connect(&url).await.expect("connect to Postgres");
     connection
@@ -1052,6 +1083,48 @@ async fn postgres_incremental_publish_records_refactor_ids() {
             .await
             .expect("read applied refactors"),
         vec!["rename-event-display-name".to_owned()]
+    );
+
+    let refactors = Command::new(SQUEALY)
+        .args(["refactors", "--backend", "postgres", "--url", &url])
+        .output()
+        .expect("run squealy refactors");
+    assert!(
+        refactors.status.success(),
+        "refactors failed: {}",
+        String::from_utf8_lossy(&refactors.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&refactors.stdout);
+    assert!(
+        stdout.contains("applied rename-event-display-name"),
+        "unexpected refactors stdout: {stdout}"
+    );
+
+    let refactors = Command::new(SQUEALY)
+        .args([
+            "refactors",
+            "--backend",
+            "postgres",
+            "--url",
+            &url,
+            "--package",
+        ])
+        .arg(&report_package)
+        .output()
+        .expect("run squealy refactors with package");
+    assert!(
+        refactors.status.success(),
+        "refactors package comparison failed: {}",
+        String::from_utf8_lossy(&refactors.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&refactors.stdout);
+    assert!(
+        stdout.contains("applied rename-event-display-name"),
+        "unexpected refactors stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("pending rename-archived-events"),
+        "unexpected refactors stdout: {stdout}"
     );
 
     connection
@@ -1233,13 +1306,17 @@ async fn mysql_incremental_publish_records_refactor_ids() {
     let dir = tempfile::tempdir().expect("tempdir");
     let base_package = dir.path().join("base.sqz");
     let desired_package = dir.path().join("desired.sqz");
+    let report_package = dir.path().join("report.sqz");
     let introspected_package = dir.path().join("introspected.sqz");
     let base = live_introspection_model_with_nullable_column("display_name");
     let desired = live_introspection_model_with_nullable_column("name");
     let refactors = live_rename_refactors();
+    let report_refactors = live_refactor_report_log();
     write_package(&base, &base_package).expect("write base package");
     write_package_with_refactors(&desired, &refactors, &desired_package)
         .expect("write desired package");
+    write_package_with_refactors(&desired, &report_refactors, &report_package)
+        .expect("write report package");
 
     let mut connection = Mysql.connect(&url).await.expect("connect to MySQL");
     connection
@@ -1297,6 +1374,48 @@ DROP SCHEMA IF EXISTS `__squealy`",
             .await
             .expect("read applied refactors"),
         vec!["rename-event-display-name".to_owned()]
+    );
+
+    let refactors = Command::new(SQUEALY)
+        .args(["refactors", "--backend", "mysql", "--url", &url])
+        .output()
+        .expect("run squealy refactors");
+    assert!(
+        refactors.status.success(),
+        "refactors failed: {}",
+        String::from_utf8_lossy(&refactors.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&refactors.stdout);
+    assert!(
+        stdout.contains("applied rename-event-display-name"),
+        "unexpected refactors stdout: {stdout}"
+    );
+
+    let refactors = Command::new(SQUEALY)
+        .args([
+            "refactors",
+            "--backend",
+            "mysql",
+            "--url",
+            &url,
+            "--package",
+        ])
+        .arg(&report_package)
+        .output()
+        .expect("run squealy refactors with package");
+    assert!(
+        refactors.status.success(),
+        "refactors package comparison failed: {}",
+        String::from_utf8_lossy(&refactors.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&refactors.stdout);
+    assert!(
+        stdout.contains("applied rename-event-display-name"),
+        "unexpected refactors stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("pending rename-archived-events"),
+        "unexpected refactors stdout: {stdout}"
     );
 
     connection
@@ -1378,6 +1497,19 @@ fn live_rename_refactors() -> RefactorLog {
             to: "name".to_owned(),
         })],
     }
+}
+
+fn live_refactor_report_log() -> RefactorLog {
+    let mut refactors = live_rename_refactors();
+    refactors
+        .operations
+        .push(RefactorOperation::RenameTable(RenameTable {
+            id: "rename-archived-events".to_owned(),
+            schema: Some("cli_live_introspect".to_owned()),
+            from: "old_archived_events".to_owned(),
+            to: "archived_events".to_owned(),
+        }));
+    refactors
 }
 
 fn assert_renamed_live_column(model: DatabaseModel) {
