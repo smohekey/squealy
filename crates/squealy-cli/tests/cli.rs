@@ -16,6 +16,22 @@ use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
 
 const SQUEALY: &str = env!("CARGO_BIN_EXE_squealy");
+const POSTGRES_RESET_SCHEMAS: &str = "\
+DO $$
+DECLARE
+    schema_name text;
+BEGIN
+    FOR schema_name IN
+        SELECT nspname
+        FROM pg_namespace
+        WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+          AND nspname NOT LIKE 'pg_toast%'
+    LOOP
+        EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', schema_name);
+    END LOOP;
+END
+$$";
+const POSTGRES_RESTORE_PUBLIC_SCHEMA: &str = "CREATE SCHEMA IF NOT EXISTS \"public\"";
 
 #[test]
 fn rejects_injection() {
@@ -984,12 +1000,9 @@ async fn postgres_incremental_publish_records_refactor_ids() {
 
     let mut connection = Postgres.connect(&url).await.expect("connect to Postgres");
     connection
-        .execute_ddl(
-            "DROP SCHEMA IF EXISTS \"cli_live_introspect\" CASCADE;\n\
-DROP SCHEMA IF EXISTS \"__squealy\" CASCADE",
-        )
+        .execute_ddl(POSTGRES_RESET_SCHEMAS)
         .await
-        .expect("drop schemas");
+        .expect("reset schemas");
 
     let publish_base = Command::new(SQUEALY)
         .args(["publish", "--backend", "postgres", "--package"])
@@ -1007,6 +1020,7 @@ DROP SCHEMA IF EXISTS \"__squealy\" CASCADE",
         .args([
             "publish",
             "--incremental",
+            "--allow-ambiguous",
             "--backend",
             "postgres",
             "--package",
@@ -1041,12 +1055,13 @@ DROP SCHEMA IF EXISTS \"__squealy\" CASCADE",
     );
 
     connection
-        .execute_ddl(
-            "DROP SCHEMA IF EXISTS \"cli_live_introspect\" CASCADE;\n\
-DROP SCHEMA IF EXISTS \"__squealy\" CASCADE",
-        )
+        .execute_ddl(POSTGRES_RESET_SCHEMAS)
         .await
         .expect("cleanup schemas");
+    connection
+        .execute_ddl(POSTGRES_RESTORE_PUBLIC_SCHEMA)
+        .await
+        .expect("restore public schema");
 }
 
 #[tokio::test]
