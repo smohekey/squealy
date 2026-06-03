@@ -401,11 +401,15 @@ Done and tested:
 - **Planning**: `squealy-model::plan_models(desired, actual, policy)` turns a diff into ordered,
   policy-checked, backend-neutral `DatabasePlan` steps. Backend-specific ALTER rendering/execution is
   the next layer.
+- **Refactor-aware planning**: `plan_models_with_refactors` consumes explicit `refactor.kdl`
+  operations and turns matching drop/add pairs into safe table/column rename plan steps, preserving
+  follow-up alterations when the renamed object also changed shape.
 - **Plan rendering**: core `SchemaBackend::render_plan` lets backends render neutral plans without
   depending on `squealy-model`; Postgres and MySQL implement create/drop/add-column/index/constraint
-  plan rendering plus changed column rendering for type, collation, nullability, default, and comment
-  differences. Identity/generated-column transitions and rename/cast hints remain explicit
-  unsupported cases. `squealy-model::render_plan_sql` is the allocating convenience wrapper.
+  plan rendering, table/column rename rendering, plus changed column rendering for type, collation,
+  nullability, default, and comment differences. Identity/generated-column transitions and cast hints
+  remain explicit unsupported cases. `squealy-model::render_plan_sql` is the allocating convenience
+  wrapper.
 - **Plan/apply engine APIs**: `plan_from_database` introspects live state and returns a policy-checked
   plan; `apply_plan` renders that plan through the selected backend and executes the resulting DDL.
 - **Plan CLI**: `squealy plan --backend <backend> --desired desired.sqz --actual actual.sqz`

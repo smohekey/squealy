@@ -345,7 +345,7 @@ fn diff_schema(desired: &SchemaModel, actual: &SchemaModel, changes: &mut Vec<Da
     }
 }
 
-fn diff_table(desired: &TableModel, actual: &TableModel) -> Vec<TableDiffChange> {
+pub(crate) fn diff_table(desired: &TableModel, actual: &TableModel) -> Vec<TableDiffChange> {
     let mut changes = Vec::new();
 
     if desired.comment != actual.comment {

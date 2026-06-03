@@ -25,8 +25,8 @@ pub use package::{
     write_package_to, write_package_with_refactors, write_package_with_refactors_to,
 };
 pub use plan::{
-    ClassifiedDatabasePlanStep, classified_plan_steps, plan_diff, plan_models, plan_step_risk,
-    table_plan_step_risk,
+    ClassifiedDatabasePlanStep, classified_plan_steps, plan_diff, plan_models,
+    plan_models_with_refactors, plan_step_risk, table_plan_step_risk,
 };
 pub use refactor::{RefactorLog, RefactorOperation, RenameColumn, RenameTable};
 pub use squealy::{

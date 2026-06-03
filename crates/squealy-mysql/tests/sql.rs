@@ -371,6 +371,37 @@ ALTER TABLE `shop`.`events` MODIFY COLUMN `status` TEXT;"
 }
 
 #[test]
+fn mysql_renders_rename_steps_in_schema_plan() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::RenameTable {
+                schema: Some("shop".to_owned()),
+                from: "app_users".to_owned(),
+                to: "users".to_owned(),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "users".to_owned(),
+                change: TablePlanStep::RenameColumn {
+                    from: "display_name".to_owned(),
+                    to: "name".to_owned(),
+                },
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "RENAME TABLE `shop`.`app_users` TO `shop`.`users`;\n\
+ALTER TABLE `shop`.`users` RENAME COLUMN `display_name` TO `name`;"
+    );
+}
+
+#[test]
 fn mysql_rejects_unsupported_changed_column_definitions() {
     let mut renamed = column("description");
     renamed.name = "details".to_owned();

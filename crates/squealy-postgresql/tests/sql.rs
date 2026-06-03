@@ -373,6 +373,37 @@ COMMENT ON COLUMN \"public\".\"events\".\"status\" IS 'Event status';"
 }
 
 #[test]
+fn postgres_renders_rename_steps_in_schema_plan() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::RenameTable {
+                schema: Some("public".to_owned()),
+                from: "app_users".to_owned(),
+                to: "users".to_owned(),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "users".to_owned(),
+                change: TablePlanStep::RenameColumn {
+                    from: "display_name".to_owned(),
+                    to: "name".to_owned(),
+                },
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "ALTER TABLE \"public\".\"app_users\" RENAME TO \"users\";\n\
+ALTER TABLE \"public\".\"users\" RENAME COLUMN \"display_name\" TO \"name\";"
+    );
+}
+
+#[test]
 fn postgres_rejects_unsupported_changed_column_definitions() {
     let mut renamed = column("description");
     renamed.name = "details".to_owned();

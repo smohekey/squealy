@@ -29,6 +29,11 @@ pub enum DatabasePlanStep {
         schema: Option<String>,
         table: TableModel,
     },
+    RenameTable {
+        schema: Option<String>,
+        from: String,
+        to: String,
+    },
     AlterTable {
         schema: Option<String>,
         table: String,
@@ -48,6 +53,10 @@ pub enum TablePlanStep {
     },
     DropColumn {
         column: ColumnModel,
+    },
+    RenameColumn {
+        from: String,
+        to: String,
     },
     AlterColumn {
         before: ColumnModel,

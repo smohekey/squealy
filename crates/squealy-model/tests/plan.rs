@@ -1,7 +1,8 @@
 use squealy_model::{
-    ChangeRisk, ColumnModel, DatabaseModel, DatabasePlanStep, DdlExecutor, DiffPolicy,
-    SchemaIntrospect, SchemaModel, SqlType, TableModel, TablePlanStep, apply_plan,
-    classified_plan_steps, plan_from_database, plan_models, render_plan_sql,
+    ChangeRisk, ColumnModel, DatabaseModel, DatabasePlanStep, DdlExecutor, DiffPolicy, RefactorLog,
+    RefactorOperation, RenameColumn, RenameTable, SchemaIntrospect, SchemaModel, SqlType,
+    TableModel, TablePlanStep, apply_plan, classified_plan_steps, plan_from_database, plan_models,
+    plan_models_with_refactors, render_plan_sql,
 };
 use squealy_postgresql::Postgres;
 
@@ -54,6 +55,189 @@ fn plan_models_applies_policy_before_returning_steps() {
     let error = plan_models(
         &model_with_tables("public", vec![desired_events]),
         &model_with_tables("public", vec![actual_events]),
+        DiffPolicy::default(),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.blocked.len(), 1);
+    assert_eq!(error.blocked[0].risk, ChangeRisk::Ambiguous);
+}
+
+#[test]
+fn plan_models_with_refactors_turns_table_drop_add_into_rename() {
+    let desired = model_with_tables("public", vec![table("users")]);
+    let actual = model_with_tables("public", vec![table("app_users")]);
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::RenameTable(RenameTable {
+            id: "rename-users".to_owned(),
+            schema: Some("public".to_owned()),
+            from: "app_users".to_owned(),
+            to: "users".to_owned(),
+        })],
+    };
+
+    let plan = plan_models_with_refactors(&desired, &actual, &refactors, DiffPolicy::default())
+        .expect("renames are safe refactors");
+
+    assert_eq!(
+        plan.steps,
+        vec![DatabasePlanStep::RenameTable {
+            schema: Some("public".to_owned()),
+            from: "app_users".to_owned(),
+            to: "users".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn plan_models_with_refactors_keeps_table_changes_after_rename() {
+    let mut desired_users = table("users");
+    desired_users.columns = vec![column("name", SqlType::Text)];
+    let actual_users = table("app_users");
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::RenameTable(RenameTable {
+            id: "rename-users".to_owned(),
+            schema: Some("public".to_owned()),
+            from: "app_users".to_owned(),
+            to: "users".to_owned(),
+        })],
+    };
+
+    let plan = plan_models_with_refactors(
+        &model_with_tables("public", vec![desired_users]),
+        &model_with_tables("public", vec![actual_users]),
+        &refactors,
+        DiffPolicy::ALLOW_ALL,
+    )
+    .expect("plan renamed table with follow-up changes");
+
+    assert_eq!(
+        plan.steps,
+        vec![
+            DatabasePlanStep::RenameTable {
+                schema: Some("public".to_owned()),
+                from: "app_users".to_owned(),
+                to: "users".to_owned(),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "users".to_owned(),
+                change: TablePlanStep::AddColumn {
+                    column: column("name", SqlType::Text),
+                },
+            },
+        ]
+    );
+}
+
+#[test]
+fn plan_models_with_refactors_turns_column_drop_add_into_rename() {
+    let mut desired_events = table("events");
+    desired_events.columns = vec![column("name", SqlType::Text)];
+    let mut actual_events = table("events");
+    actual_events.columns = vec![column("display_name", SqlType::Text)];
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::RenameColumn(RenameColumn {
+            id: "rename-user-name".to_owned(),
+            schema: Some("public".to_owned()),
+            table: "events".to_owned(),
+            from: "display_name".to_owned(),
+            to: "name".to_owned(),
+        })],
+    };
+
+    let plan = plan_models_with_refactors(
+        &model_with_tables("public", vec![desired_events]),
+        &model_with_tables("public", vec![actual_events]),
+        &refactors,
+        DiffPolicy::default(),
+    )
+    .expect("renames are safe refactors");
+
+    assert_eq!(
+        plan.steps,
+        vec![DatabasePlanStep::AlterTable {
+            schema: Some("public".to_owned()),
+            table: "events".to_owned(),
+            change: TablePlanStep::RenameColumn {
+                from: "display_name".to_owned(),
+                to: "name".to_owned(),
+            },
+        }]
+    );
+}
+
+#[test]
+fn plan_models_with_refactors_keeps_column_changes_after_rename() {
+    let mut desired_events = table("events");
+    let mut desired_name = column("name", SqlType::Text);
+    desired_name.nullable = true;
+    desired_events.columns = vec![desired_name.clone()];
+    let mut actual_events = table("events");
+    actual_events.columns = vec![column("display_name", SqlType::Text)];
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::RenameColumn(RenameColumn {
+            id: "rename-user-name".to_owned(),
+            schema: Some("public".to_owned()),
+            table: "events".to_owned(),
+            from: "display_name".to_owned(),
+            to: "name".to_owned(),
+        })],
+    };
+
+    let plan = plan_models_with_refactors(
+        &model_with_tables("public", vec![desired_events]),
+        &model_with_tables("public", vec![actual_events]),
+        &refactors,
+        DiffPolicy::ALLOW_ALL,
+    )
+    .expect("plan renamed column with follow-up changes");
+
+    let mut renamed_before = column("name", SqlType::Text);
+    renamed_before.nullable = false;
+
+    assert_eq!(
+        plan.steps,
+        vec![
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: TablePlanStep::RenameColumn {
+                    from: "display_name".to_owned(),
+                    to: "name".to_owned(),
+                },
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: TablePlanStep::AlterColumn {
+                    before: renamed_before,
+                    after: desired_name,
+                },
+            },
+        ]
+    );
+}
+
+#[test]
+fn plan_models_with_refactors_leaves_unmatched_refactors_blocked_by_policy() {
+    let mut desired_events = table("events");
+    desired_events.columns = vec![column("name", SqlType::Text)];
+    let actual_events = table("events");
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::RenameColumn(RenameColumn {
+            id: "rename-user-name".to_owned(),
+            schema: Some("public".to_owned()),
+            table: "events".to_owned(),
+            from: "display_name".to_owned(),
+            to: "name".to_owned(),
+        })],
+    };
+
+    let error = plan_models_with_refactors(
+        &model_with_tables("public", vec![desired_events]),
+        &model_with_tables("public", vec![actual_events]),
+        &refactors,
         DiffPolicy::default(),
     )
     .unwrap_err();

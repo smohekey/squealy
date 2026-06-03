@@ -99,6 +99,13 @@ fn write_plan_step(
             writer.write_all(b"DROP TABLE ")?;
             write_qualified_name(schema.as_deref(), &table.name, writer)?;
         }
+        DatabasePlanStep::RenameTable { schema, from, to } => {
+            statement(writer, first)?;
+            writer.write_all(b"RENAME TABLE ")?;
+            write_qualified_name(schema.as_deref(), from, writer)?;
+            writer.write_all(b" TO ")?;
+            write_qualified_name(schema.as_deref(), to, writer)?;
+        }
         DatabasePlanStep::AlterTable {
             schema,
             table,
@@ -151,6 +158,14 @@ fn write_table_plan_step(
             write_qualified_name(schema, table, writer)?;
             writer.write_all(b" DROP COLUMN ")?;
             write_quoted_ident(&column.name, writer)?;
+        }
+        TablePlanStep::RenameColumn { from, to } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" RENAME COLUMN ")?;
+            write_quoted_ident(from, writer)?;
+            writer.write_all(b" TO ")?;
+            write_quoted_ident(to, writer)?;
         }
         TablePlanStep::AddPrimaryKey { constraint } => {
             writer.write_all(b"ALTER TABLE ")?;
