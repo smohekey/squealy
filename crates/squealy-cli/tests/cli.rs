@@ -210,6 +210,10 @@ fn status_help_explains_live_package_comparison() {
         stdout.contains("--url"),
         "help should include connection URL option: {stdout}"
     );
+    assert!(
+        stdout.contains("--history"),
+        "help should include publish history limit option: {stdout}"
+    );
 }
 
 #[test]
@@ -1337,6 +1341,52 @@ async fn postgres_refactor_repair_records_valid_missing_refactor_ids() {
         "unexpected status stdout: {stdout}"
     );
 
+    let publish_incremental = Command::new(SQUEALY)
+        .args([
+            "publish",
+            "--incremental",
+            "--backend",
+            "postgres",
+            "--package",
+        ])
+        .arg(&status_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy incremental publish");
+    assert!(
+        publish_incremental.status.success(),
+        "incremental publish failed: {}",
+        String::from_utf8_lossy(&publish_incremental.stderr)
+    );
+
+    let status = Command::new(SQUEALY)
+        .args([
+            "status",
+            "--backend",
+            "postgres",
+            "--history",
+            "2",
+            "--package",
+        ])
+        .arg(&status_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy status with history");
+    assert!(
+        status.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("publish-history latest mode=incremental"),
+        "unexpected status stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("publish-history entry index=2 mode=create"),
+        "unexpected status stdout: {stdout}"
+    );
+
     connection
         .execute_ddl(POSTGRES_RESET_SCHEMAS)
         .await
@@ -1770,6 +1820,52 @@ DROP SCHEMA IF EXISTS `__squealy`",
     );
     assert!(
         stdout.contains("applied rename-event-display-name"),
+        "unexpected status stdout: {stdout}"
+    );
+
+    let publish_incremental = Command::new(SQUEALY)
+        .args([
+            "publish",
+            "--incremental",
+            "--backend",
+            "mysql",
+            "--package",
+        ])
+        .arg(&status_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy incremental publish");
+    assert!(
+        publish_incremental.status.success(),
+        "incremental publish failed: {}",
+        String::from_utf8_lossy(&publish_incremental.stderr)
+    );
+
+    let status = Command::new(SQUEALY)
+        .args([
+            "status",
+            "--backend",
+            "mysql",
+            "--history",
+            "2",
+            "--package",
+        ])
+        .arg(&status_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy status with history");
+    assert!(
+        status.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("publish-history latest mode=incremental"),
+        "unexpected status stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("publish-history entry index=2 mode=create"),
         "unexpected status stdout: {stdout}"
     );
 

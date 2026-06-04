@@ -114,6 +114,9 @@ enum Command {
         /// Connection URL.
         #[arg(long)]
         url: String,
+        /// Number of recent publish history rows to print.
+        #[arg(long, default_value_t = 1)]
+        history: usize,
     },
     /// Inspect or repair schema refactor metadata recorded in a live database.
     Refactors {
@@ -357,11 +360,12 @@ async fn run(cli: Cli) -> Result<(), String> {
             source,
             backend,
             url,
+            history,
         } => {
             let loaded = source.load_with_refactors()?;
             check_model_for_backend(&loaded.model, backend.backend)?;
             let (actual, applied_ids, live_metadata, publish_history) =
-                live_status_inputs(backend.backend, &url).await?;
+                live_status_inputs(backend.backend, &url, history).await?;
             pending_refactors(&loaded.refactors, &applied_ids, &actual)
                 .map_err(|error| format!("applied refactor metadata mismatch: {error}"))?;
             let desired_metadata = package_metadata(&loaded.model, &loaded.refactors);
@@ -484,6 +488,7 @@ fn check_model_for_backend(model: &DatabaseModel, backend: BackendKind) -> Resul
 async fn live_status_inputs(
     backend: BackendKind,
     url: &str,
+    history: usize,
 ) -> Result<
     (
         DatabaseModel,
@@ -511,7 +516,7 @@ async fn live_status_inputs(
                 .await
                 .map_err(|error| format!("read schema metadata: {error}"))?;
             let publish_history = connection
-                .schema_publish_history(1)
+                .schema_publish_history(history)
                 .await
                 .map_err(|error| format!("read publish history: {error}"))?;
             Ok((actual, applied_ids, metadata, publish_history))
@@ -533,7 +538,7 @@ async fn live_status_inputs(
                 .await
                 .map_err(|error| format!("read schema metadata: {error}"))?;
             let publish_history = connection
-                .schema_publish_history(1)
+                .schema_publish_history(history)
                 .await
                 .map_err(|error| format!("read publish history: {error}"))?;
             Ok((actual, applied_ids, metadata, publish_history))
@@ -769,6 +774,17 @@ fn print_publish_history_status(publish_history: &[SchemaPublishRecord]) {
         "publish-history latest mode={} package.content_hash={} package.format_version={} applied_at={}",
         latest.mode, latest.package_hash, latest.package_format_version, latest.applied_at
     );
+
+    for (index, record) in publish_history.iter().enumerate().skip(1) {
+        println!(
+            "publish-history entry index={} mode={} package.content_hash={} package.format_version={} applied_at={}",
+            index + 1,
+            record.mode,
+            record.package_hash,
+            record.package_format_version,
+            record.applied_at
+        );
+    }
 }
 
 fn print_diff(diff: &squealy_model::DatabaseDiff) {
