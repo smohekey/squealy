@@ -3,11 +3,12 @@
 //! Commands take their model either from the crate (`--database <path>`, via a compiled stub) or from
 //! a prebuilt package (`--package <file.sqz>`, which executes no project code).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use serde_json::json;
 use squealy_cli::extract::extract_model;
 use squealy_model::{
     ChangeRisk, DatabaseDiffChange, DatabaseModel, DiffPolicy, RefactorLog, SchemaBackend,
@@ -117,6 +118,9 @@ enum Command {
         /// Number of recent publish history rows to print.
         #[arg(long, default_value_t = 1)]
         history: usize,
+        /// Print machine-readable JSON.
+        #[arg(long)]
+        json: bool,
         /// Exit non-zero when live schema differs from the desired model.
         #[arg(long)]
         check_schema: bool,
@@ -379,6 +383,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             backend,
             url,
             history,
+            json,
             check_schema,
             check_refactors,
             check_metadata,
@@ -391,15 +396,27 @@ async fn run(cli: Cli) -> Result<(), String> {
             pending_refactors(&loaded.refactors, &applied_ids, &actual)
                 .map_err(|error| format!("applied refactor metadata mismatch: {error}"))?;
             let desired_metadata = package_metadata(&loaded.model, &loaded.refactors);
-            print_status(
-                &loaded.model,
-                &actual,
-                &loaded.refactors,
-                &applied_ids,
-                &desired_metadata,
-                &live_metadata,
-                &publish_history,
-            );
+            if json {
+                print_status_json(
+                    &loaded.model,
+                    &actual,
+                    &loaded.refactors,
+                    &applied_ids,
+                    &desired_metadata,
+                    &live_metadata,
+                    &publish_history,
+                )?;
+            } else {
+                print_status(
+                    &loaded.model,
+                    &actual,
+                    &loaded.refactors,
+                    &applied_ids,
+                    &desired_metadata,
+                    &live_metadata,
+                    &publish_history,
+                );
+            }
             let checks = StatusChecks {
                 schema: check_all || check_schema,
                 refactors: check_all || check_refactors,
@@ -710,7 +727,37 @@ fn print_applied_refactors(applied_ids: &[String]) {
 }
 
 fn print_refactor_status(refactors: &RefactorLog, applied_ids: &[String]) {
-    let applied = applied_ids
+    let summary = refactor_status_summary(refactors, applied_ids);
+
+    for id in &summary.applied {
+        println!("applied {id}");
+    }
+
+    for id in &summary.pending {
+        println!("pending {id}");
+    }
+
+    for id in &summary.recorded_only {
+        println!("recorded-only {id}");
+    }
+
+    if summary.applied.is_empty() && summary.pending.is_empty() && summary.recorded_only.is_empty()
+    {
+        println!("no refactors");
+    }
+}
+
+struct RefactorStatusSummary {
+    applied: Vec<String>,
+    pending: Vec<String>,
+    recorded_only: Vec<String>,
+}
+
+fn refactor_status_summary(
+    refactors: &RefactorLog,
+    applied_ids: &[String],
+) -> RefactorStatusSummary {
+    let applied_ids = applied_ids
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
@@ -719,23 +766,128 @@ fn print_refactor_status(refactors: &RefactorLog, applied_ids: &[String]) {
         .iter()
         .map(|operation| operation.id())
         .collect::<BTreeSet<_>>();
+    let mut applied = Vec::new();
+    let mut pending = Vec::new();
 
     for operation in &refactors.operations {
         let id = operation.id();
-        if applied.contains(id) {
-            println!("applied {id}");
+        if applied_ids.contains(id) {
+            applied.push(id.to_owned());
         } else {
-            println!("pending {id}");
+            pending.push(id.to_owned());
         }
     }
 
-    for id in applied.difference(&package_ids) {
-        println!("recorded-only {id}");
-    }
+    let recorded_only = applied_ids
+        .difference(&package_ids)
+        .map(|id| (*id).to_owned())
+        .collect();
 
-    if refactors.is_empty() && applied_ids.is_empty() {
-        println!("no refactors");
+    RefactorStatusSummary {
+        applied,
+        pending,
+        recorded_only,
     }
+}
+
+struct MetadataStatusEntry<'a> {
+    key: &'a str,
+    status: &'static str,
+    desired: &'a str,
+    actual: Option<&'a str>,
+}
+
+fn metadata_status_entries<'a>(
+    desired_metadata: &'a [(String, String)],
+    live_metadata: &'a [(String, String)],
+) -> Vec<MetadataStatusEntry<'a>> {
+    let live = live_metadata
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<BTreeSet<_>>();
+    let live_values = live_metadata
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<BTreeMap<_, _>>();
+
+    desired_metadata
+        .iter()
+        .map(|(key, desired_value)| {
+            let actual = live_values.get(key.as_str()).copied();
+            let status = if live.contains(&(key.as_str(), desired_value.as_str())) {
+                "match"
+            } else if actual.is_some() {
+                "mismatch"
+            } else {
+                "missing"
+            };
+
+            MetadataStatusEntry {
+                key,
+                status,
+                desired: desired_value,
+                actual,
+            }
+        })
+        .collect()
+}
+
+fn print_status_json(
+    desired: &DatabaseModel,
+    actual: &DatabaseModel,
+    refactors: &RefactorLog,
+    applied_ids: &[String],
+    desired_metadata: &[(String, String)],
+    live_metadata: &[(String, String)],
+    publish_history: &[SchemaPublishRecord],
+) -> Result<(), String> {
+    let diff = diff_models(desired, actual);
+    let refactors = refactor_status_summary(refactors, applied_ids);
+    let metadata = metadata_status_entries(desired_metadata, live_metadata)
+        .into_iter()
+        .map(|entry| {
+            json!({
+                "key": entry.key,
+                "status": entry.status,
+                "desired": entry.desired,
+                "actual": entry.actual,
+            })
+        })
+        .collect::<Vec<_>>();
+    let publish_history = publish_history
+        .iter()
+        .enumerate()
+        .map(|(index, record)| {
+            let index = index + 1;
+            json!({
+                "index": index,
+                "label": if index == 1 { "latest" } else { "entry" },
+                "mode": record.mode,
+                "package_hash": record.package_hash,
+                "package_format_version": record.package_format_version,
+                "applied_at": record.applied_at,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let status = json!({
+        "schema": {
+            "clean": diff.is_empty(),
+            "change_count": diff.changes.len(),
+        },
+        "refactors": {
+            "applied": refactors.applied,
+            "pending": refactors.pending,
+            "recorded_only": refactors.recorded_only,
+        },
+        "metadata": metadata,
+        "publish_history": publish_history,
+    });
+
+    let json = serde_json::to_string_pretty(&status)
+        .map_err(|error| format!("render status json: {error}"))?;
+    println!("{json}");
+    Ok(())
 }
 
 fn print_refactor_repair_report(report: &squealy_model::RefactorRepairReport) {
@@ -804,59 +956,25 @@ fn check_status(
 }
 
 fn refactors_need_attention(refactors: &RefactorLog, applied_ids: &[String]) -> bool {
-    let applied = applied_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    let package_ids = refactors
-        .operations
-        .iter()
-        .map(|operation| operation.id())
-        .collect::<BTreeSet<_>>();
-
-    refactors
-        .operations
-        .iter()
-        .any(|operation| !applied.contains(operation.id()))
-        || applied.difference(&package_ids).next().is_some()
+    let summary = refactor_status_summary(refactors, applied_ids);
+    !summary.pending.is_empty() || !summary.recorded_only.is_empty()
 }
 
 fn metadata_needs_attention(
     desired_metadata: &[(String, String)],
     live_metadata: &[(String, String)],
 ) -> bool {
-    let live = live_metadata
+    metadata_status_entries(desired_metadata, live_metadata)
         .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect::<BTreeSet<_>>();
-
-    desired_metadata
-        .iter()
-        .any(|(key, desired_value)| !live.contains(&(key.as_str(), desired_value.as_str())))
+        .any(|entry| entry.status != "match")
 }
 
 fn print_metadata_status(
     desired_metadata: &[(String, String)],
     live_metadata: &[(String, String)],
 ) {
-    let live = live_metadata
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect::<BTreeSet<_>>();
-    let live_keys = live_metadata
-        .iter()
-        .map(|(key, _)| key.as_str())
-        .collect::<BTreeSet<_>>();
-
-    for (key, desired_value) in desired_metadata {
-        let status = if live.contains(&(key.as_str(), desired_value.as_str())) {
-            "match"
-        } else if live_keys.contains(key.as_str()) {
-            "mismatch"
-        } else {
-            "missing"
-        };
-        println!("metadata {key} {status}");
+    for entry in metadata_status_entries(desired_metadata, live_metadata) {
+        println!("metadata {} {}", entry.key, entry.status);
     }
 }
 

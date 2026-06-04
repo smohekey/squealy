@@ -6,6 +6,7 @@
 
 use std::process::Command;
 
+use serde_json::Value;
 use squealy_model::{
     CheckModel, ColumnModel, ConstraintDeferrability, DatabaseModel, DdlExecutor, ForeignKeyMatch,
     ForeignKeyModel, IndexModel, RefactorLog, RefactorOperation, RenameColumn, RenameTable,
@@ -213,6 +214,10 @@ fn status_help_explains_live_package_comparison() {
     assert!(
         stdout.contains("--history"),
         "help should include publish history limit option: {stdout}"
+    );
+    assert!(
+        stdout.contains("--json"),
+        "help should include machine-readable output option: {stdout}"
     );
     assert!(
         stdout.contains("--check-all"),
@@ -1433,6 +1438,28 @@ async fn postgres_refactor_repair_records_valid_missing_refactor_ids() {
         "unexpected status stdout: {stdout}"
     );
 
+    let status_json = Command::new(SQUEALY)
+        .args([
+            "status",
+            "--backend",
+            "postgres",
+            "--history",
+            "2",
+            "--check-all",
+            "--json",
+            "--package",
+        ])
+        .arg(&status_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy json status with history");
+    assert!(
+        status_json.status.success(),
+        "json status failed: {}",
+        String::from_utf8_lossy(&status_json.stderr)
+    );
+    assert_clean_status_json(&status_json.stdout);
+
     connection
         .execute_ddl(POSTGRES_RESET_SCHEMAS)
         .await
@@ -1945,6 +1972,28 @@ DROP SCHEMA IF EXISTS `__squealy`",
         "unexpected status stdout: {stdout}"
     );
 
+    let status_json = Command::new(SQUEALY)
+        .args([
+            "status",
+            "--backend",
+            "mysql",
+            "--history",
+            "2",
+            "--check-all",
+            "--json",
+            "--package",
+        ])
+        .arg(&status_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy json status with history");
+    assert!(
+        status_json.status.success(),
+        "json status failed: {}",
+        String::from_utf8_lossy(&status_json.stderr)
+    );
+    assert_clean_status_json(&status_json.stdout);
+
     connection
         .execute_ddl(
             "DROP SCHEMA IF EXISTS `cli_live_introspect`;\n\
@@ -1952,6 +2001,50 @@ DROP SCHEMA IF EXISTS `__squealy`",
         )
         .await
         .expect("cleanup schemas");
+}
+
+fn assert_clean_status_json(stdout: &[u8]) {
+    let status = serde_json::from_slice::<Value>(stdout)
+        .unwrap_or_else(|error| panic!("status json should parse: {error}"));
+    assert_eq!(
+        status["schema"]["clean"], true,
+        "unexpected status: {status}"
+    );
+    assert_eq!(
+        status["schema"]["change_count"], 0,
+        "unexpected status: {status}"
+    );
+    assert!(
+        status["refactors"]["applied"]
+            .as_array()
+            .expect("applied refactors array")
+            .iter()
+            .any(|id| id == "rename-event-display-name"),
+        "unexpected status: {status}"
+    );
+    assert!(
+        status["refactors"]["pending"]
+            .as_array()
+            .expect("pending refactors array")
+            .is_empty(),
+        "unexpected status: {status}"
+    );
+    assert!(
+        status["metadata"]
+            .as_array()
+            .expect("metadata array")
+            .iter()
+            .any(|entry| entry["key"] == "package.content_hash" && entry["status"] == "match"),
+        "unexpected status: {status}"
+    );
+    assert_eq!(
+        status["publish_history"][0]["mode"], "incremental",
+        "unexpected status: {status}"
+    );
+    assert_eq!(
+        status["publish_history"][1]["mode"], "create",
+        "unexpected status: {status}"
+    );
 }
 
 fn empty_model() -> DatabaseModel {

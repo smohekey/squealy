@@ -452,8 +452,10 @@ Done and tested:
   live schema state, compares it with the desired package, validates recorded refactor metadata
   against the live final state, compares package metadata with `__squealy.metadata`, and prints
   schema/refactor/metadata/latest-publish status without applying changes. `--history <N>` controls
-  how many recent `__squealy.publish_history` rows are included; the default is one. Opt-in check
-  flags (`--check-schema`, `--check-refactors`, `--check-metadata`, `--check-all`) turn the report
+  how many recent `__squealy.publish_history` rows are included; the default is one. `--json` prints
+  machine-readable schema cleanliness, refactor state, metadata comparison, and publish-history rows
+  for deployment tooling that should not parse the human text report. Opt-in check flags
+  (`--check-schema`, `--check-refactors`, `--check-metadata`, `--check-all`) turn either output format
   into a CI-friendly failing check.
 - **Incremental publish CLI**: `squealy publish --incremental ...` introspects the live database,
   reads package refactors when publishing from `--package`, builds a policy-checked plan, and applies
