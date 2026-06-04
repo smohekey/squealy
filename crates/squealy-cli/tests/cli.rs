@@ -1239,6 +1239,7 @@ async fn postgres_refactor_repair_records_valid_missing_refactor_ids() {
     let repair_package = dir.path().join("repair.sqz");
     let introspected_package = dir.path().join("introspected.sqz");
     let status_package = dir.path().join("status.sqz");
+    let changed_package = dir.path().join("changed.sqz");
     let desired = live_introspection_model_with_nullable_column("name");
     let refactors = live_rename_refactors();
     write_package(&desired, &schema_package).expect("write schema package");
@@ -1362,6 +1363,19 @@ async fn postgres_refactor_repair_records_valid_missing_refactor_ids() {
     let actual = read_package(&introspected_package).expect("read introspected package");
     write_package_with_refactors(&actual, &refactors, &status_package)
         .expect("write status package");
+    let mut changed = actual.clone();
+    changed.schemas[0].tables[0].columns.push(ColumnModel {
+        name: "description".to_owned(),
+        comment: None,
+        ty: SqlType::Text,
+        collation: None,
+        nullable: true,
+        default: None,
+        identity: None,
+        generated: None,
+    });
+    write_package_with_refactors(&changed, &refactors, &changed_package)
+        .expect("write changed package");
 
     let status = Command::new(SQUEALY)
         .args([
@@ -1459,6 +1473,19 @@ async fn postgres_refactor_repair_records_valid_missing_refactor_ids() {
         String::from_utf8_lossy(&status_json.stderr)
     );
     assert_clean_status_json(&status_json.stdout);
+
+    let changed_status_json = Command::new(SQUEALY)
+        .args(["status", "--backend", "postgres", "--json", "--package"])
+        .arg(&changed_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy changed json status");
+    assert!(
+        changed_status_json.status.success(),
+        "changed json status failed: {}",
+        String::from_utf8_lossy(&changed_status_json.stderr)
+    );
+    assert_status_json_has_column_add(&changed_status_json.stdout, "description");
 
     connection
         .execute_ddl(POSTGRES_RESET_SCHEMAS)
@@ -1770,6 +1797,7 @@ async fn mysql_refactor_repair_records_valid_missing_refactor_ids() {
     let repair_package = dir.path().join("repair.sqz");
     let introspected_package = dir.path().join("introspected.sqz");
     let status_package = dir.path().join("status.sqz");
+    let changed_package = dir.path().join("changed.sqz");
     let desired = live_introspection_model_with_nullable_column("name");
     let refactors = live_rename_refactors();
     write_package(&desired, &schema_package).expect("write schema package");
@@ -1896,6 +1924,19 @@ DROP SCHEMA IF EXISTS `__squealy`",
     let actual = read_package(&introspected_package).expect("read introspected package");
     write_package_with_refactors(&actual, &refactors, &status_package)
         .expect("write status package");
+    let mut changed = actual.clone();
+    changed.schemas[0].tables[0].columns.push(ColumnModel {
+        name: "description".to_owned(),
+        comment: None,
+        ty: SqlType::Text,
+        collation: None,
+        nullable: true,
+        default: None,
+        identity: None,
+        generated: None,
+    });
+    write_package_with_refactors(&changed, &refactors, &changed_package)
+        .expect("write changed package");
 
     let status = Command::new(SQUEALY)
         .args([
@@ -1994,6 +2035,19 @@ DROP SCHEMA IF EXISTS `__squealy`",
     );
     assert_clean_status_json(&status_json.stdout);
 
+    let changed_status_json = Command::new(SQUEALY)
+        .args(["status", "--backend", "mysql", "--json", "--package"])
+        .arg(&changed_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy changed json status");
+    assert!(
+        changed_status_json.status.success(),
+        "changed json status failed: {}",
+        String::from_utf8_lossy(&changed_status_json.stderr)
+    );
+    assert_status_json_has_column_add(&changed_status_json.stdout, "description");
+
     connection
         .execute_ddl(
             "DROP SCHEMA IF EXISTS `cli_live_introspect`;\n\
@@ -2012,6 +2066,13 @@ fn assert_clean_status_json(stdout: &[u8]) {
     );
     assert_eq!(
         status["schema"]["change_count"], 0,
+        "unexpected status: {status}"
+    );
+    assert!(
+        status["schema"]["changes"]
+            .as_array()
+            .expect("schema changes array")
+            .is_empty(),
         "unexpected status: {status}"
     );
     assert!(
@@ -2043,6 +2104,42 @@ fn assert_clean_status_json(stdout: &[u8]) {
     );
     assert_eq!(
         status["publish_history"][1]["mode"], "create",
+        "unexpected status: {status}"
+    );
+}
+
+fn assert_status_json_has_column_add(stdout: &[u8], column_name: &str) {
+    let status = serde_json::from_slice::<Value>(stdout)
+        .unwrap_or_else(|error| panic!("status json should parse: {error}"));
+    assert_eq!(
+        status["schema"]["clean"], false,
+        "unexpected status: {status}"
+    );
+    assert!(
+        status["schema"]["change_count"]
+            .as_u64()
+            .expect("schema change count")
+            > 0,
+        "unexpected status: {status}"
+    );
+    assert!(
+        status["schema"]["changes"]
+            .as_array()
+            .expect("schema changes array")
+            .iter()
+            .flat_map(|change| {
+                change["changes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+            })
+            .any(|change| {
+                change["kind"] == "column"
+                    && change["action"] == "add"
+                    && change["column"] == column_name
+                    && change["risk"] == "safe"
+            }),
         "unexpected status: {status}"
     );
 }

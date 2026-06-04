@@ -874,6 +874,7 @@ fn print_status_json(
         "schema": {
             "clean": diff.is_empty(),
             "change_count": diff.changes.len(),
+            "changes": diff_changes_json(&diff),
         },
         "refactors": {
             "applied": refactors.applied,
@@ -888,6 +889,197 @@ fn print_status_json(
         .map_err(|error| format!("render status json: {error}"))?;
     println!("{json}");
     Ok(())
+}
+
+fn diff_changes_json(diff: &squealy_model::DatabaseDiff) -> Vec<serde_json::Value> {
+    diff.changes.iter().map(database_diff_change_json).collect()
+}
+
+fn database_diff_change_json(change: &DatabaseDiffChange) -> serde_json::Value {
+    let risk = risk_name(change.risk());
+    match change {
+        DatabaseDiffChange::CreateSchema { schema } => {
+            json!({
+                "kind": "schema",
+                "action": "create",
+                "risk": risk,
+                "schema": schema,
+                "name": schema_name(schema),
+            })
+        }
+        DatabaseDiffChange::DropSchema { schema } => {
+            json!({
+                "kind": "schema",
+                "action": "drop",
+                "risk": risk,
+                "schema": schema,
+                "name": schema_name(schema),
+            })
+        }
+        DatabaseDiffChange::CreateTable { schema, table } => {
+            json!({
+                "kind": "table",
+                "action": "create",
+                "risk": risk,
+                "schema": schema,
+                "table": table.name,
+                "name": qualified(schema, &table.name),
+            })
+        }
+        DatabaseDiffChange::DropTable { schema, table } => {
+            json!({
+                "kind": "table",
+                "action": "drop",
+                "risk": risk,
+                "schema": schema,
+                "table": table.name,
+                "name": qualified(schema, &table.name),
+            })
+        }
+        DatabaseDiffChange::AlterTable {
+            schema,
+            table,
+            changes,
+        } => {
+            let changes = changes
+                .iter()
+                .map(|change| table_diff_change_json(schema, table, change))
+                .collect::<Vec<_>>();
+            json!({
+                "kind": "table",
+                "action": "alter",
+                "risk": risk,
+                "schema": schema,
+                "table": table,
+                "name": qualified(schema, table),
+                "changes": changes,
+            })
+        }
+    }
+}
+
+fn table_diff_change_json(
+    schema: &Option<String>,
+    table: &str,
+    change: &TableDiffChange,
+) -> serde_json::Value {
+    let risk = risk_name(change.risk());
+    let table_name = qualified(schema, table);
+    match change {
+        TableDiffChange::SetTableComment { .. } => {
+            json!({
+                "kind": "table_comment",
+                "action": "set",
+                "risk": risk,
+                "schema": schema,
+                "table": table,
+                "name": table_name,
+            })
+        }
+        TableDiffChange::AddColumn { column } => {
+            json!({
+                "kind": "column",
+                "action": "add",
+                "risk": risk,
+                "schema": schema,
+                "table": table,
+                "column": column.name,
+                "name": format!("{table_name}.{}", column.name),
+            })
+        }
+        TableDiffChange::DropColumn { column } => {
+            json!({
+                "kind": "column",
+                "action": "drop",
+                "risk": risk,
+                "schema": schema,
+                "table": table,
+                "column": column.name,
+                "name": format!("{table_name}.{}", column.name),
+            })
+        }
+        TableDiffChange::AlterColumn { after, .. } => {
+            json!({
+                "kind": "column",
+                "action": "alter",
+                "risk": risk,
+                "schema": schema,
+                "table": table,
+                "column": after.name,
+                "name": format!("{table_name}.{}", after.name),
+            })
+        }
+        TableDiffChange::AddPrimaryKey { constraint } => {
+            constraint_change_json("primary_key", "add", risk, schema, table, &constraint.name)
+        }
+        TableDiffChange::DropPrimaryKey { constraint } => {
+            constraint_change_json("primary_key", "drop", risk, schema, table, &constraint.name)
+        }
+        TableDiffChange::AlterPrimaryKey { after, .. } => {
+            constraint_change_json("primary_key", "alter", risk, schema, table, &after.name)
+        }
+        TableDiffChange::AddUnique { constraint } => {
+            constraint_change_json("unique", "add", risk, schema, table, &constraint.name)
+        }
+        TableDiffChange::DropUnique { constraint } => {
+            constraint_change_json("unique", "drop", risk, schema, table, &constraint.name)
+        }
+        TableDiffChange::AlterUnique { after, .. } => {
+            constraint_change_json("unique", "alter", risk, schema, table, &after.name)
+        }
+        TableDiffChange::AddForeignKey { foreign_key } => {
+            constraint_change_json("foreign_key", "add", risk, schema, table, &foreign_key.name)
+        }
+        TableDiffChange::DropForeignKey { foreign_key } => constraint_change_json(
+            "foreign_key",
+            "drop",
+            risk,
+            schema,
+            table,
+            &foreign_key.name,
+        ),
+        TableDiffChange::AlterForeignKey { after, .. } => {
+            constraint_change_json("foreign_key", "alter", risk, schema, table, &after.name)
+        }
+        TableDiffChange::AddCheck { check } => {
+            constraint_change_json("check", "add", risk, schema, table, &check.name)
+        }
+        TableDiffChange::DropCheck { check } => {
+            constraint_change_json("check", "drop", risk, schema, table, &check.name)
+        }
+        TableDiffChange::AlterCheck { after, .. } => {
+            constraint_change_json("check", "alter", risk, schema, table, &after.name)
+        }
+        TableDiffChange::AddIndex { index } => {
+            constraint_change_json("index", "add", risk, schema, table, &index.name)
+        }
+        TableDiffChange::DropIndex { index } => {
+            constraint_change_json("index", "drop", risk, schema, table, &index.name)
+        }
+        TableDiffChange::AlterIndex { after, .. } => {
+            constraint_change_json("index", "alter", risk, schema, table, &after.name)
+        }
+    }
+}
+
+fn constraint_change_json(
+    kind: &'static str,
+    action: &'static str,
+    risk: &'static str,
+    schema: &Option<String>,
+    table: &str,
+    object_name: &str,
+) -> serde_json::Value {
+    let table_name = qualified(schema, table);
+    json!({
+        "kind": kind,
+        "action": action,
+        "risk": risk,
+        "schema": schema,
+        "table": table,
+        "object": object_name,
+        "name": format!("{table_name}.{object_name}"),
+    })
 }
 
 fn print_refactor_repair_report(report: &squealy_model::RefactorRepairReport) {
