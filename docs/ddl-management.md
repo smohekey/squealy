@@ -205,6 +205,9 @@ strings — so the crate must be compiled and run):
   `--incremental` it introspects the live database, reads any embedded `refactor.kdl`, builds a
   policy-checked plan, and applies that plan; add `--report` to print that plan without executing
   it. Right shape for CI/CD with credentials.
+- `squealy status --package model.sqz --url …` — read-only comparison between a desired package and
+  live database state. It prints whether schema diff is clean/changed and includes refactor metadata
+  status for the package log.
 - `squealy refactors list --url …` — read-only operator view of the applied refactor ids recorded
   in the backend metadata table. Add `--package model.sqz` to compare recorded ids with the package
   `refactor.kdl` and print `applied`, `pending`, or `recorded-only` status lines.
@@ -434,6 +437,9 @@ Done and tested:
 - **Plan CLI**: `squealy plan --backend <backend> --desired desired.sqz --actual actual.sqz`
   renders incremental DDL between packages and enforces `DiffPolicy` by default. The desired package
   can carry `refactor.kdl`; matching drop/add pairs are rendered as safe rename steps.
+- **Status CLI**: `squealy status --backend <backend> --package <file.sqz> --url <url>` introspects
+  live schema state, compares it with the desired package, validates recorded refactor metadata
+  against the live final state, and prints schema/refactor status without applying changes.
 - **Incremental publish CLI**: `squealy publish --incremental ...` introspects the live database,
   reads package refactors when publishing from `--package`, builds a policy-checked plan, and applies
   it. Ambiguous/destructive changes remain blocked unless explicitly allowed. `--report` renders the

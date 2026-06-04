@@ -186,6 +186,33 @@ fn publish_help_exposes_incremental_policy_flags() {
 }
 
 #[test]
+fn status_help_explains_live_package_comparison() {
+    let output = Command::new(SQUEALY)
+        .args(["status", "--help"])
+        .output()
+        .expect("run squealy");
+
+    assert!(
+        output.status.success(),
+        "help failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("live database state"),
+        "help should explain live database comparison: {stdout}"
+    );
+    assert!(
+        stdout.contains("--package"),
+        "help should accept package input: {stdout}"
+    );
+    assert!(
+        stdout.contains("--url"),
+        "help should include connection URL option: {stdout}"
+    );
+}
+
+#[test]
 fn refactors_help_explains_package_comparison() {
     let output = Command::new(SQUEALY)
         .args(["refactors", "--help"])
@@ -1185,6 +1212,8 @@ async fn postgres_refactor_repair_records_valid_missing_refactor_ids() {
     let dir = tempfile::tempdir().expect("tempdir");
     let schema_package = dir.path().join("schema.sqz");
     let repair_package = dir.path().join("repair.sqz");
+    let introspected_package = dir.path().join("introspected.sqz");
+    let status_package = dir.path().join("status.sqz");
     let desired = live_introspection_model_with_nullable_column("name");
     let refactors = live_rename_refactors();
     write_package(&desired, &schema_package).expect("write schema package");
@@ -1246,6 +1275,41 @@ async fn postgres_refactor_repair_records_valid_missing_refactor_ids() {
             .await
             .expect("read applied refactors"),
         vec!["rename-event-display-name".to_owned()]
+    );
+
+    let introspect = Command::new(SQUEALY)
+        .args(["introspect", "--backend", "postgres", "--url", &url])
+        .arg(&introspected_package)
+        .output()
+        .expect("run squealy introspect");
+    assert!(
+        introspect.status.success(),
+        "introspect failed: {}",
+        String::from_utf8_lossy(&introspect.stderr)
+    );
+    let actual = read_package(&introspected_package).expect("read introspected package");
+    write_package_with_refactors(&actual, &refactors, &status_package)
+        .expect("write status package");
+
+    let status = Command::new(SQUEALY)
+        .args(["status", "--backend", "postgres", "--package"])
+        .arg(&status_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy status");
+    assert!(
+        status.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("schema clean"),
+        "unexpected status stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("applied rename-event-display-name"),
+        "unexpected status stdout: {stdout}"
     );
 
     connection
@@ -1556,6 +1620,8 @@ async fn mysql_refactor_repair_records_valid_missing_refactor_ids() {
     let dir = tempfile::tempdir().expect("tempdir");
     let schema_package = dir.path().join("schema.sqz");
     let repair_package = dir.path().join("repair.sqz");
+    let introspected_package = dir.path().join("introspected.sqz");
+    let status_package = dir.path().join("status.sqz");
     let desired = live_introspection_model_with_nullable_column("name");
     let refactors = live_rename_refactors();
     write_package(&desired, &schema_package).expect("write schema package");
@@ -1620,6 +1686,41 @@ DROP SCHEMA IF EXISTS `__squealy`",
             .await
             .expect("read applied refactors"),
         vec!["rename-event-display-name".to_owned()]
+    );
+
+    let introspect = Command::new(SQUEALY)
+        .args(["introspect", "--backend", "mysql", "--url", &url])
+        .arg(&introspected_package)
+        .output()
+        .expect("run squealy introspect");
+    assert!(
+        introspect.status.success(),
+        "introspect failed: {}",
+        String::from_utf8_lossy(&introspect.stderr)
+    );
+    let actual = read_package(&introspected_package).expect("read introspected package");
+    write_package_with_refactors(&actual, &refactors, &status_package)
+        .expect("write status package");
+
+    let status = Command::new(SQUEALY)
+        .args(["status", "--backend", "mysql", "--package"])
+        .arg(&status_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy status");
+    assert!(
+        status.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("schema clean"),
+        "unexpected status stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("applied rename-event-display-name"),
+        "unexpected status stdout: {stdout}"
     );
 
     connection

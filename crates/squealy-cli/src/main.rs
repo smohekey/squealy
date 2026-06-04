@@ -12,10 +12,10 @@ use squealy_cli::extract::extract_model;
 use squealy_model::{
     ChangeRisk, DatabaseDiffChange, DatabaseModel, DiffPolicy, RefactorLog, SchemaBackend,
     SchemaCapabilities, SchemaConnect, SchemaRefactorStore, TableDiffChange, apply_plan,
-    check_create, check_diff_policy, diff_models, introspect, plan_from_database_with_refactors,
-    plan_models_with_refactors, publish, read_package, read_refactor_log, refactor_from_kdl,
-    render_create_sql, render_plan_sql, repair_refactor_metadata, write_package,
-    write_package_with_refactors,
+    check_create, check_diff_policy, diff_models, introspect, pending_refactors,
+    plan_from_database_with_refactors, plan_models_with_refactors, publish, read_package,
+    read_refactor_log, refactor_from_kdl, render_create_sql, render_plan_sql,
+    repair_refactor_metadata, write_package, write_package_with_refactors,
 };
 use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
@@ -103,6 +103,16 @@ enum Command {
         url: String,
         /// Output package path.
         output: PathBuf,
+    },
+    /// Compare a desired model with live database state without applying changes.
+    Status {
+        #[command(flatten)]
+        source: ModelSource,
+        #[command(flatten)]
+        backend: BackendOption,
+        /// Connection URL.
+        #[arg(long)]
+        url: String,
     },
     /// Inspect or repair schema refactor metadata recorded in a live database.
     Refactors {
@@ -342,6 +352,19 @@ async fn run(cli: Cli) -> Result<(), String> {
                 write_package(&model, &output).map_err(|error| format!("write package: {error}"))
             }
         },
+        Command::Status {
+            source,
+            backend,
+            url,
+        } => {
+            let loaded = source.load_with_refactors()?;
+            check_model_for_backend(&loaded.model, backend.backend)?;
+            let (actual, applied_ids) = live_status_inputs(backend.backend, &url).await?;
+            pending_refactors(&loaded.refactors, &applied_ids, &actual)
+                .map_err(|error| format!("applied refactor metadata mismatch: {error}"))?;
+            print_status(&loaded.model, &actual, &loaded.refactors, &applied_ids);
+            Ok(())
+        }
         Command::Refactors { command } => run_refactors(command).await,
         Command::Publish {
             source,
@@ -428,6 +451,53 @@ async fn run(cli: Cli) -> Result<(), String> {
                     }
                 }
             }
+        }
+    }
+}
+
+fn check_model_for_backend(model: &DatabaseModel, backend: BackendKind) -> Result<(), String> {
+    match backend {
+        BackendKind::Postgres => {
+            check_create(model, &Postgres).map_err(|error| format!("check model: {error}"))
+        }
+        BackendKind::Mysql => {
+            check_create(model, &Mysql).map_err(|error| format!("check model: {error}"))
+        }
+    }
+}
+
+async fn live_status_inputs(
+    backend: BackendKind,
+    url: &str,
+) -> Result<(DatabaseModel, Vec<String>), String> {
+    match backend {
+        BackendKind::Postgres => {
+            let mut connection = Postgres
+                .connect(url)
+                .await
+                .map_err(|error| format!("connect: {error}"))?;
+            let actual = introspect(&mut connection)
+                .await
+                .map_err(|error| format!("introspect: {error}"))?;
+            let applied_ids = connection
+                .applied_refactor_ids()
+                .await
+                .map_err(|error| format!("read applied refactors: {error}"))?;
+            Ok((actual, applied_ids))
+        }
+        BackendKind::Mysql => {
+            let mut connection = Mysql
+                .connect(url)
+                .await
+                .map_err(|error| format!("connect: {error}"))?;
+            let actual = introspect(&mut connection)
+                .await
+                .map_err(|error| format!("introspect: {error}"))?;
+            let applied_ids = connection
+                .applied_refactor_ids()
+                .await
+                .map_err(|error| format!("read applied refactors: {error}"))?;
+            Ok((actual, applied_ids))
         }
     }
 }
@@ -568,6 +638,23 @@ fn print_refactor_repair_report(report: &squealy_model::RefactorRepairReport) {
     for id in &report.already_recorded {
         println!("already-recorded {id}");
     }
+}
+
+fn print_status(
+    desired: &DatabaseModel,
+    actual: &DatabaseModel,
+    refactors: &RefactorLog,
+    applied_ids: &[String],
+) {
+    let diff = diff_models(desired, actual);
+    if diff.is_empty() {
+        println!("schema clean");
+    } else {
+        println!("schema changes");
+        print_diff(&diff);
+    }
+
+    print_refactor_status(refactors, applied_ids);
 }
 
 fn print_diff(diff: &squealy_model::DatabaseDiff) {
