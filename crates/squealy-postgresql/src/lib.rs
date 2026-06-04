@@ -318,6 +318,87 @@ SET \"value\" = EXCLUDED.\"value\", \"updated_at\" = CURRENT_TIMESTAMP",
     }
 }
 
+#[cfg(feature = "schema")]
+impl squealy::SchemaPublishHistoryStore for PostgresConnection {
+    type Error = PostgresError;
+
+    async fn schema_publish_history(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<squealy::SchemaPublishRecord>, PostgresError> {
+        let exists = self
+            .client()
+            .query_one(
+                "SELECT to_regclass('\"__squealy\".\"publish_history\"') IS NOT NULL",
+                &[],
+            )
+            .await?
+            .get::<_, bool>(0);
+        if !exists || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        Ok(self
+            .client()
+            .query(
+                "\
+SELECT \"mode\",
+       \"package_hash\",
+       \"package_format_version\",
+       to_char(\"applied_at\" AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+FROM \"__squealy\".\"publish_history\"
+ORDER BY \"id\" DESC
+LIMIT $1",
+                &[&(limit as i64)],
+            )
+            .await?
+            .into_iter()
+            .map(|row| squealy::SchemaPublishRecord {
+                mode: row.get(0),
+                package_hash: row.get(1),
+                package_format_version: row.get(2),
+                applied_at: row.get(3),
+            })
+            .collect())
+    }
+
+    async fn record_schema_publish(
+        &mut self,
+        mode: &str,
+        package_hash: &str,
+        package_format_version: &str,
+    ) -> Result<(), PostgresError> {
+        self.client()
+            .batch_execute(
+                "\
+CREATE SCHEMA IF NOT EXISTS \"__squealy\";
+CREATE TABLE IF NOT EXISTS \"__squealy\".\"publish_history\" (
+    \"id\" bigserial PRIMARY KEY,
+    \"mode\" text NOT NULL,
+    \"package_hash\" text NOT NULL,
+    \"package_format_version\" text NOT NULL,
+    \"applied_at\" timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+)",
+            )
+            .await?;
+
+        self.client()
+            .execute(
+                "\
+INSERT INTO \"__squealy\".\"publish_history\" (
+    \"mode\",
+    \"package_hash\",
+    \"package_format_version\"
+)
+VALUES ($1, $2, $3)",
+                &[&mode, &package_hash, &package_format_version],
+            )
+            .await?;
+
+        Ok(())
+    }
+}
+
 impl QueryBuilder for Postgres {
     type Backend = Postgres;
 

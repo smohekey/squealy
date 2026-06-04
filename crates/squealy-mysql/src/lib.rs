@@ -13,7 +13,7 @@ use std::io::Write;
 use mysql_async::prelude::Queryable;
 use squealy::{
     DatabaseModel, DdlExecutor, SchemaBackend, SchemaConnect, SchemaIntrospect,
-    SchemaMetadataStore, SchemaRefactorStore,
+    SchemaMetadataStore, SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore,
 };
 
 mod introspect;
@@ -260,6 +260,94 @@ ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)",
                 .await
                 .map_err(MysqlError::Execute)?;
         }
+
+        Ok(())
+    }
+}
+
+impl SchemaPublishHistoryStore for MysqlConnection {
+    type Error = MysqlError;
+
+    async fn schema_publish_history(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<SchemaPublishRecord>, MysqlError> {
+        let exists = self
+            .conn
+            .query_first::<u8, _>(
+                "\
+SELECT 1
+FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = '__squealy'
+  AND TABLE_NAME = 'publish_history'
+LIMIT 1",
+            )
+            .await
+            .map_err(MysqlError::Introspect)?
+            .is_some();
+        if !exists || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        self.conn
+            .exec_map(
+                "\
+SELECT `mode`,
+       `package_hash`,
+       `package_format_version`,
+       DATE_FORMAT(`applied_at`, '%Y-%m-%dT%H:%i:%s')
+FROM `__squealy`.`publish_history`
+ORDER BY `id` DESC
+LIMIT ?",
+                (limit as u64,),
+                |(mode, package_hash, package_format_version, applied_at)| SchemaPublishRecord {
+                    mode,
+                    package_hash,
+                    package_format_version,
+                    applied_at,
+                },
+            )
+            .await
+            .map_err(MysqlError::Introspect)
+    }
+
+    async fn record_schema_publish(
+        &mut self,
+        mode: &str,
+        package_hash: &str,
+        package_format_version: &str,
+    ) -> Result<(), MysqlError> {
+        self.conn
+            .query_drop("CREATE SCHEMA IF NOT EXISTS `__squealy`")
+            .await
+            .map_err(MysqlError::Execute)?;
+        self.conn
+            .query_drop(
+                "\
+CREATE TABLE IF NOT EXISTS `__squealy`.`publish_history` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    `mode` VARCHAR(64) NOT NULL,
+    `package_hash` VARCHAR(255) NOT NULL,
+    `package_format_version` VARCHAR(64) NOT NULL,
+    `applied_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+)",
+            )
+            .await
+            .map_err(MysqlError::Execute)?;
+
+        self.conn
+            .exec_drop(
+                "\
+INSERT INTO `__squealy`.`publish_history` (
+    `mode`,
+    `package_hash`,
+    `package_format_version`
+)
+VALUES (?, ?, ?)",
+                (mode, package_hash, package_format_version),
+            )
+            .await
+            .map_err(MysqlError::Execute)?;
 
         Ok(())
     }

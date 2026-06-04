@@ -212,6 +212,37 @@ pub trait SchemaMetadataStore {
     ) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
+/// One append-only schema publish event recorded by a backend.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaPublishRecord {
+    pub mode: String,
+    pub package_hash: String,
+    pub package_format_version: String,
+    pub applied_at: String,
+}
+
+/// Records append-only schema publish history.
+///
+/// This is distinct from [`SchemaMetadataStore`]: metadata is current state, while history is an
+/// audit trail of successful publish operations.
+pub trait SchemaPublishHistoryStore {
+    type Error;
+
+    /// Returns recent publish events, newest first.
+    fn schema_publish_history(
+        &mut self,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<SchemaPublishRecord>, Self::Error>>;
+
+    /// Records one successful publish operation.
+    fn record_schema_publish(
+        &mut self,
+        mode: &str,
+        package_hash: &str,
+        package_format_version: &str,
+    ) -> impl Future<Output = Result<(), Self::Error>>;
+}
+
 /// Opens a schema-management connection from a connection string.
 ///
 /// Backends implement this so the management engine and CLI can `publish` from a URL without knowing

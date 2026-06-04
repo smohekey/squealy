@@ -1266,6 +1266,10 @@ async fn postgres_refactor_repair_records_valid_missing_refactor_ids() {
         stdout.contains("metadata package.content_hash match"),
         "unexpected status stdout: {stdout}"
     );
+    assert!(
+        stdout.contains("publish-history latest mode=create"),
+        "unexpected status stdout: {stdout}"
+    );
 
     let repair = Command::new(SQUEALY)
         .args([
@@ -1696,6 +1700,10 @@ DROP SCHEMA IF EXISTS `__squealy`",
     );
     assert!(
         stdout.contains("metadata package.content_hash match"),
+        "unexpected status stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("publish-history latest mode=create"),
         "unexpected status stdout: {stdout}"
     );
 

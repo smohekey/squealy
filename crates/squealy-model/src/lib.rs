@@ -40,7 +40,8 @@ pub use squealy::{
     DdlExecutor, DefaultValue, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     IndexCapabilities, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
     IndexOperatorClass, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect,
-    SchemaMetadataStore, SchemaModel, SchemaRefactorStore, SqlType, TableModel, TablePlanStep,
+    SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore, SchemaPublishRecord,
+    SchemaRefactorStore, SqlType, TableModel, TablePlanStep,
 };
 
 use std::collections::BTreeSet;

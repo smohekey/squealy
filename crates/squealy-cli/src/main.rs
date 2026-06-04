@@ -11,10 +11,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 use squealy_cli::extract::extract_model;
 use squealy_model::{
     ChangeRisk, DatabaseDiffChange, DatabaseModel, DiffPolicy, RefactorLog, SchemaBackend,
-    SchemaCapabilities, SchemaConnect, SchemaMetadataStore, SchemaRefactorStore, TableDiffChange,
-    apply_plan, check_create, check_diff_policy, diff_models, introspect, package_metadata,
-    pending_refactors, plan_from_database_with_refactors, plan_models_with_refactors, publish,
-    read_package, read_refactor_log, refactor_from_kdl, render_create_sql, render_plan_sql,
+    SchemaCapabilities, SchemaConnect, SchemaMetadataStore, SchemaPublishHistoryStore,
+    SchemaPublishRecord, SchemaRefactorStore, TableDiffChange, apply_plan, check_create,
+    check_diff_policy, diff_models, introspect, package_metadata, pending_refactors,
+    plan_from_database_with_refactors, plan_models_with_refactors, publish, read_package,
+    read_refactor_log, refactor_from_kdl, render_create_sql, render_plan_sql,
     repair_refactor_metadata, write_package, write_package_with_refactors,
 };
 use squealy_mysql::Mysql;
@@ -359,7 +360,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         } => {
             let loaded = source.load_with_refactors()?;
             check_model_for_backend(&loaded.model, backend.backend)?;
-            let (actual, applied_ids, live_metadata) =
+            let (actual, applied_ids, live_metadata, publish_history) =
                 live_status_inputs(backend.backend, &url).await?;
             pending_refactors(&loaded.refactors, &applied_ids, &actual)
                 .map_err(|error| format!("applied refactor metadata mismatch: {error}"))?;
@@ -371,6 +372,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 &applied_ids,
                 &desired_metadata,
                 &live_metadata,
+                &publish_history,
             );
             Ok(())
         }
@@ -417,13 +419,13 @@ async fn run(cli: Cli) -> Result<(), String> {
                             apply_plan(&plan, &Postgres, &mut connection)
                                 .await
                                 .map_err(|error| format!("publish: {error}"))?;
-                            record_package_metadata(&loaded, &mut connection).await
+                            record_publish_metadata(&loaded, "incremental", &mut connection).await
                         }
                     } else {
                         publish(&loaded.model, &Postgres, &mut connection)
                             .await
                             .map_err(|error| format!("publish: {error}"))?;
-                        record_package_metadata(&loaded, &mut connection).await
+                        record_publish_metadata(&loaded, "create", &mut connection).await
                     }
                 }
                 BackendKind::Mysql => {
@@ -454,13 +456,13 @@ async fn run(cli: Cli) -> Result<(), String> {
                             apply_plan(&plan, &Mysql, &mut connection)
                                 .await
                                 .map_err(|error| format!("publish: {error}"))?;
-                            record_package_metadata(&loaded, &mut connection).await
+                            record_publish_metadata(&loaded, "incremental", &mut connection).await
                         }
                     } else {
                         publish(&loaded.model, &Mysql, &mut connection)
                             .await
                             .map_err(|error| format!("publish: {error}"))?;
-                        record_package_metadata(&loaded, &mut connection).await
+                        record_publish_metadata(&loaded, "create", &mut connection).await
                     }
                 }
             }
@@ -482,7 +484,15 @@ fn check_model_for_backend(model: &DatabaseModel, backend: BackendKind) -> Resul
 async fn live_status_inputs(
     backend: BackendKind,
     url: &str,
-) -> Result<(DatabaseModel, Vec<String>, Vec<(String, String)>), String> {
+) -> Result<
+    (
+        DatabaseModel,
+        Vec<String>,
+        Vec<(String, String)>,
+        Vec<SchemaPublishRecord>,
+    ),
+    String,
+> {
     match backend {
         BackendKind::Postgres => {
             let mut connection = Postgres
@@ -500,7 +510,11 @@ async fn live_status_inputs(
                 .schema_metadata()
                 .await
                 .map_err(|error| format!("read schema metadata: {error}"))?;
-            Ok((actual, applied_ids, metadata))
+            let publish_history = connection
+                .schema_publish_history(1)
+                .await
+                .map_err(|error| format!("read publish history: {error}"))?;
+            Ok((actual, applied_ids, metadata, publish_history))
         }
         BackendKind::Mysql => {
             let mut connection = Mysql
@@ -518,21 +532,46 @@ async fn live_status_inputs(
                 .schema_metadata()
                 .await
                 .map_err(|error| format!("read schema metadata: {error}"))?;
-            Ok((actual, applied_ids, metadata))
+            let publish_history = connection
+                .schema_publish_history(1)
+                .await
+                .map_err(|error| format!("read publish history: {error}"))?;
+            Ok((actual, applied_ids, metadata, publish_history))
         }
     }
 }
 
-async fn record_package_metadata<C>(loaded: &LoadedModel, connection: &mut C) -> Result<(), String>
+async fn record_publish_metadata<C>(
+    loaded: &LoadedModel,
+    mode: &str,
+    connection: &mut C,
+) -> Result<(), String>
 where
-    C: SchemaMetadataStore,
-    C::Error: std::fmt::Display,
+    C: SchemaMetadataStore + SchemaPublishHistoryStore<Error = <C as SchemaMetadataStore>::Error>,
+    <C as SchemaMetadataStore>::Error: std::fmt::Display,
 {
     let metadata = package_metadata(&loaded.model, &loaded.refactors);
+    let package_hash = metadata_value(&metadata, "package.content_hash")?;
+    let package_format_version = metadata_value(&metadata, "package.format_version")?;
     connection
         .record_schema_metadata(&metadata)
         .await
-        .map_err(|error| format!("record schema metadata: {error}"))
+        .map_err(|error| format!("record schema metadata: {error}"))?;
+    connection
+        .record_schema_publish(mode, package_hash, package_format_version)
+        .await
+        .map_err(|error| format!("record publish history: {error}"))
+}
+
+fn metadata_value<'metadata>(
+    metadata: &'metadata [(String, String)],
+    key: &str,
+) -> Result<&'metadata str, String> {
+    metadata
+        .iter()
+        .find(|(metadata_key, _)| metadata_key == key)
+        .map(|(_, value)| value.as_str())
+        .ok_or_else(|| format!("missing package metadata key `{key}`"))
 }
 
 async fn run_refactors(command: RefactorsCommand) -> Result<(), String> {
@@ -680,6 +719,7 @@ fn print_status(
     applied_ids: &[String],
     desired_metadata: &[(String, String)],
     live_metadata: &[(String, String)],
+    publish_history: &[SchemaPublishRecord],
 ) {
     let diff = diff_models(desired, actual);
     if diff.is_empty() {
@@ -691,6 +731,7 @@ fn print_status(
 
     print_refactor_status(refactors, applied_ids);
     print_metadata_status(desired_metadata, live_metadata);
+    print_publish_history_status(publish_history);
 }
 
 fn print_metadata_status(
@@ -716,6 +757,18 @@ fn print_metadata_status(
         };
         println!("metadata {key} {status}");
     }
+}
+
+fn print_publish_history_status(publish_history: &[SchemaPublishRecord]) {
+    let Some(latest) = publish_history.first() else {
+        println!("publish-history none");
+        return;
+    };
+
+    println!(
+        "publish-history latest mode={} package.content_hash={} package.format_version={} applied_at={}",
+        latest.mode, latest.package_hash, latest.package_format_version, latest.applied_at
+    );
 }
 
 fn print_diff(diff: &squealy_model::DatabaseDiff) {
