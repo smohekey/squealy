@@ -29,6 +29,9 @@ use crate::{RefactorLog, RefactorOperation, RenameColumn, RenameTable};
 
 /// Current package format version, recorded in `manifest.kdl`.
 pub const FORMAT_VERSION: i128 = 1;
+pub const PACKAGE_FORMAT_VERSION_METADATA_KEY: &str = "package.format_version";
+pub const PACKAGE_CONTENT_HASH_METADATA_KEY: &str = "package.content_hash";
+pub const SQUEALY_MODEL_VERSION_METADATA_KEY: &str = "squealy_model.version";
 
 const MODEL_ENTRY: &str = "model.kdl";
 const MANIFEST_ENTRY: &str = "manifest.kdl";
@@ -183,11 +186,66 @@ pub fn refactor_to_kdl(refactors: &RefactorLog) -> String {
     document.to_string()
 }
 
+/// Returns backend metadata entries that describe a desired package.
+pub fn package_metadata(model: &DatabaseModel, refactors: &RefactorLog) -> Vec<(String, String)> {
+    vec![
+        (
+            PACKAGE_FORMAT_VERSION_METADATA_KEY.to_owned(),
+            FORMAT_VERSION.to_string(),
+        ),
+        (
+            PACKAGE_CONTENT_HASH_METADATA_KEY.to_owned(),
+            package_content_hash(model, refactors),
+        ),
+        (
+            SQUEALY_MODEL_VERSION_METADATA_KEY.to_owned(),
+            env!("CARGO_PKG_VERSION").to_owned(),
+        ),
+    ]
+}
+
+/// Computes a deterministic fingerprint over canonical package content.
+pub fn package_content_hash(model: &DatabaseModel, refactors: &RefactorLog) -> String {
+    let mut hash = Fnv1a64::new();
+    hash.write(b"manifest.kdl\0");
+    hash.write(manifest_kdl(model).as_bytes());
+    hash.write(b"\0model.kdl\0");
+    hash.write(to_kdl(model).as_bytes());
+    if !refactors.is_empty() {
+        hash.write(b"\0refactor.kdl\0");
+        hash.write(refactor_to_kdl(refactors).as_bytes());
+    }
+    format!("fnv1a64:{:016x}", hash.finish())
+}
+
 /// Parses a refactor log from `refactor.kdl` text.
 pub fn refactor_from_kdl(text: &str) -> Result<RefactorLog, PackageError> {
     let document =
         KdlDocument::parse_v2(text).map_err(|error| malformed(format!("invalid KDL: {error}")))?;
     refactor_from_document(&document)
+}
+
+struct Fnv1a64 {
+    value: u64,
+}
+
+impl Fnv1a64 {
+    fn new() -> Self {
+        Self {
+            value: 0xcbf29ce484222325,
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.value ^= u64::from(*byte);
+            self.value = self.value.wrapping_mul(0x100000001b3);
+        }
+    }
+
+    fn finish(self) -> u64 {
+        self.value
+    }
 }
 
 fn manifest_kdl(model: &DatabaseModel) -> String {
@@ -1265,6 +1323,36 @@ mod tests {
     fn kdl_is_deterministic() {
         let model = sample_model();
         assert_eq!(to_kdl(&model), to_kdl(&model));
+    }
+
+    #[test]
+    fn package_content_hash_includes_refactor_log() {
+        let model = sample_model();
+        let empty = RefactorLog::default();
+        let refactors = sample_refactor_log();
+
+        assert_eq!(
+            package_content_hash(&model, &refactors),
+            package_content_hash(&model, &refactors)
+        );
+        assert_ne!(
+            package_content_hash(&model, &empty),
+            package_content_hash(&model, &refactors)
+        );
+
+        let metadata = package_metadata(&model, &refactors);
+        assert!(
+            metadata
+                .iter()
+                .any(|(key, value)| key == PACKAGE_FORMAT_VERSION_METADATA_KEY
+                    && value == &FORMAT_VERSION.to_string())
+        );
+        assert!(
+            metadata
+                .iter()
+                .any(|(key, value)| key == PACKAGE_CONTENT_HASH_METADATA_KEY
+                    && value.starts_with("fnv1a64:"))
+        );
     }
 
     #[test]

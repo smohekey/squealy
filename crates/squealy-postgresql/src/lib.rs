@@ -252,6 +252,72 @@ ON CONFLICT (\"id\") DO NOTHING",
     }
 }
 
+#[cfg(feature = "schema")]
+impl squealy::SchemaMetadataStore for PostgresConnection {
+    type Error = PostgresError;
+
+    async fn schema_metadata(&mut self) -> Result<Vec<(String, String)>, PostgresError> {
+        let exists = self
+            .client()
+            .query_one(
+                "SELECT to_regclass('\"__squealy\".\"metadata\"') IS NOT NULL",
+                &[],
+            )
+            .await?
+            .get::<_, bool>(0);
+        if !exists {
+            return Ok(Vec::new());
+        }
+
+        Ok(self
+            .client()
+            .query(
+                "SELECT \"name\", \"value\" FROM \"__squealy\".\"metadata\" ORDER BY \"name\"",
+                &[],
+            )
+            .await?
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect())
+    }
+
+    async fn record_schema_metadata(
+        &mut self,
+        entries: &[(String, String)],
+    ) -> Result<(), PostgresError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        self.client()
+            .batch_execute(
+                "\
+CREATE SCHEMA IF NOT EXISTS \"__squealy\";
+CREATE TABLE IF NOT EXISTS \"__squealy\".\"metadata\" (
+    \"name\" text PRIMARY KEY,
+    \"value\" text NOT NULL,
+    \"updated_at\" timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+)",
+            )
+            .await?;
+
+        for (name, value) in entries {
+            self.client()
+                .execute(
+                    "\
+INSERT INTO \"__squealy\".\"metadata\" (\"name\", \"value\")
+VALUES ($1, $2)
+ON CONFLICT (\"name\") DO UPDATE
+SET \"value\" = EXCLUDED.\"value\", \"updated_at\" = CURRENT_TIMESTAMP",
+                    &[name, value],
+                )
+                .await?;
+        }
+
+        Ok(())
+    }
+}
+
 impl QueryBuilder for Postgres {
     type Backend = Postgres;
 

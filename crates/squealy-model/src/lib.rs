@@ -20,7 +20,9 @@ pub use diff::{
     DiffPolicyError, TableDiffChange, check_diff_policy, diff_models,
 };
 pub use package::{
-    FORMAT_VERSION, PackageError, from_kdl, read_package, read_package_from, read_refactor_log,
+    FORMAT_VERSION, PACKAGE_CONTENT_HASH_METADATA_KEY, PACKAGE_FORMAT_VERSION_METADATA_KEY,
+    PackageError, SQUEALY_MODEL_VERSION_METADATA_KEY, from_kdl, package_content_hash,
+    package_metadata, read_package, read_package_from, read_refactor_log,
     read_refactor_log_from_package, refactor_from_kdl, refactor_to_kdl, to_kdl, write_package,
     write_package_to, write_package_with_refactors, write_package_with_refactors_to,
 };
@@ -38,7 +40,7 @@ pub use squealy::{
     DdlExecutor, DefaultValue, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     IndexCapabilities, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
     IndexOperatorClass, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect,
-    SchemaModel, SchemaRefactorStore, SqlType, TableModel, TablePlanStep,
+    SchemaMetadataStore, SchemaModel, SchemaRefactorStore, SqlType, TableModel, TablePlanStep,
 };
 
 use std::collections::BTreeSet;

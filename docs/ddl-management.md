@@ -207,7 +207,7 @@ strings — so the crate must be compiled and run):
   it. Right shape for CI/CD with credentials.
 - `squealy status --package model.sqz --url …` — read-only comparison between a desired package and
   live database state. It prints whether schema diff is clean/changed and includes refactor metadata
-  status for the package log.
+  status for the package log, plus package metadata match/mismatch/missing lines.
 - `squealy refactors list --url …` — read-only operator view of the applied refactor ids recorded
   in the backend metadata table. Add `--package model.sqz` to compare recorded ids with the package
   `refactor.kdl` and print `applied`, `pending`, or `recorded-only` status lines.
@@ -417,6 +417,10 @@ Done and tested:
 - **Refactor metadata**: rename plan steps produced from `refactor.kdl` carry the stable operation id.
   Postgres and MySQL write those ids to an internal `__squealy.refactors` metadata table during
   incremental plan rendering, and expose `SchemaRefactorStore` to read the recorded ids back.
+- **Package metadata**: successful publish records current package facts in `__squealy.metadata`,
+  currently package format version, canonical package content hash, and `squealy-model` crate
+  version. The hash is a deterministic fingerprint of canonical `manifest.kdl`, `model.kdl`, and
+  optional `refactor.kdl`; it is for drift visibility, not a security primitive.
 - **Applied-refactor filtering**: `plan_from_database_with_refactors` reads recorded ids, validates
   that each recorded refactor's obvious final state is present in the live model, filters those
   operations from the package refactor log, and then plans with the remaining refactors.
@@ -439,7 +443,8 @@ Done and tested:
   can carry `refactor.kdl`; matching drop/add pairs are rendered as safe rename steps.
 - **Status CLI**: `squealy status --backend <backend> --package <file.sqz> --url <url>` introspects
   live schema state, compares it with the desired package, validates recorded refactor metadata
-  against the live final state, and prints schema/refactor status without applying changes.
+  against the live final state, compares package metadata with `__squealy.metadata`, and prints
+  schema/refactor/metadata status without applying changes.
 - **Incremental publish CLI**: `squealy publish --incremental ...` introspects the live database,
   reads package refactors when publishing from `--package`, builds a policy-checked plan, and applies
   it. Ambiguous/destructive changes remain blocked unless explicitly allowed. `--report` renders the

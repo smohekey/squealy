@@ -1246,6 +1246,27 @@ async fn postgres_refactor_repair_records_valid_missing_refactor_ids() {
         "create-from-scratch publish should not record refactor metadata"
     );
 
+    let status = Command::new(SQUEALY)
+        .args(["status", "--backend", "postgres", "--package"])
+        .arg(&schema_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy status");
+    assert!(
+        status.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("metadata package.format_version match"),
+        "unexpected status stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("metadata package.content_hash match"),
+        "unexpected status stdout: {stdout}"
+    );
+
     let repair = Command::new(SQUEALY)
         .args([
             "refactors",
@@ -1655,6 +1676,27 @@ DROP SCHEMA IF EXISTS `__squealy`",
             .expect("read applied refactors")
             .is_empty(),
         "create-from-scratch publish should not record refactor metadata"
+    );
+
+    let status = Command::new(SQUEALY)
+        .args(["status", "--backend", "mysql", "--package"])
+        .arg(&schema_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy status");
+    assert!(
+        status.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("metadata package.format_version match"),
+        "unexpected status stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("metadata package.content_hash match"),
+        "unexpected status stdout: {stdout}"
     );
 
     let repair = Command::new(SQUEALY)

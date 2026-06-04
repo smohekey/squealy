@@ -12,7 +12,8 @@ use std::io::Write;
 
 use mysql_async::prelude::Queryable;
 use squealy::{
-    DatabaseModel, DdlExecutor, SchemaBackend, SchemaConnect, SchemaIntrospect, SchemaRefactorStore,
+    DatabaseModel, DdlExecutor, SchemaBackend, SchemaConnect, SchemaIntrospect,
+    SchemaMetadataStore, SchemaRefactorStore,
 };
 
 mod introspect;
@@ -184,6 +185,77 @@ CREATE TABLE IF NOT EXISTS `__squealy`.`refactors` (
                 .exec_drop(
                     "INSERT IGNORE INTO `__squealy`.`refactors` (`id`) VALUES (?)",
                     (id.as_str(),),
+                )
+                .await
+                .map_err(MysqlError::Execute)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl SchemaMetadataStore for MysqlConnection {
+    type Error = MysqlError;
+
+    async fn schema_metadata(&mut self) -> Result<Vec<(String, String)>, MysqlError> {
+        let exists = self
+            .conn
+            .query_first::<u8, _>(
+                "\
+SELECT 1
+FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = '__squealy'
+  AND TABLE_NAME = 'metadata'
+LIMIT 1",
+            )
+            .await
+            .map_err(MysqlError::Introspect)?
+            .is_some();
+        if !exists {
+            return Ok(Vec::new());
+        }
+
+        self.conn
+            .query_map(
+                "SELECT `name`, `value` FROM `__squealy`.`metadata` ORDER BY `name`",
+                |(name, value)| (name, value),
+            )
+            .await
+            .map_err(MysqlError::Introspect)
+    }
+
+    async fn record_schema_metadata(
+        &mut self,
+        entries: &[(String, String)],
+    ) -> Result<(), MysqlError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        self.conn
+            .query_drop("CREATE SCHEMA IF NOT EXISTS `__squealy`")
+            .await
+            .map_err(MysqlError::Execute)?;
+        self.conn
+            .query_drop(
+                "\
+CREATE TABLE IF NOT EXISTS `__squealy`.`metadata` (
+    `name` VARCHAR(255) NOT NULL PRIMARY KEY,
+    `value` TEXT NOT NULL,
+    `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+)",
+            )
+            .await
+            .map_err(MysqlError::Execute)?;
+
+        for (name, value) in entries {
+            self.conn
+                .exec_drop(
+                    "\
+INSERT INTO `__squealy`.`metadata` (`name`, `value`)
+VALUES (?, ?)
+ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)",
+                    (name.as_str(), value.as_str()),
                 )
                 .await
                 .map_err(MysqlError::Execute)?;

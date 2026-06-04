@@ -192,6 +192,26 @@ pub trait SchemaRefactorStore {
     ) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
+/// Reads and records backend metadata about schema-management state.
+///
+/// This is backend-owned storage for current Squealy management facts such as the last published
+/// package format and content hash. It is separate from application schema introspection and should
+/// be excluded from the neutral [`DatabaseModel`].
+pub trait SchemaMetadataStore {
+    type Error;
+
+    /// Returns recorded metadata entries in deterministic key order.
+    fn schema_metadata(
+        &mut self,
+    ) -> impl Future<Output = Result<Vec<(String, String)>, Self::Error>>;
+
+    /// Records metadata entries, replacing existing values for the same keys.
+    fn record_schema_metadata(
+        &mut self,
+        entries: &[(String, String)],
+    ) -> impl Future<Output = Result<(), Self::Error>>;
+}
+
 /// Opens a schema-management connection from a connection string.
 ///
 /// Backends implement this so the management engine and CLI can `publish` from a URL without knowing

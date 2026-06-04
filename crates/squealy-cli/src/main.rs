@@ -11,10 +11,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use squealy_cli::extract::extract_model;
 use squealy_model::{
     ChangeRisk, DatabaseDiffChange, DatabaseModel, DiffPolicy, RefactorLog, SchemaBackend,
-    SchemaCapabilities, SchemaConnect, SchemaRefactorStore, TableDiffChange, apply_plan,
-    check_create, check_diff_policy, diff_models, introspect, pending_refactors,
-    plan_from_database_with_refactors, plan_models_with_refactors, publish, read_package,
-    read_refactor_log, refactor_from_kdl, render_create_sql, render_plan_sql,
+    SchemaCapabilities, SchemaConnect, SchemaMetadataStore, SchemaRefactorStore, TableDiffChange,
+    apply_plan, check_create, check_diff_policy, diff_models, introspect, package_metadata,
+    pending_refactors, plan_from_database_with_refactors, plan_models_with_refactors, publish,
+    read_package, read_refactor_log, refactor_from_kdl, render_create_sql, render_plan_sql,
     repair_refactor_metadata, write_package, write_package_with_refactors,
 };
 use squealy_mysql::Mysql;
@@ -359,10 +359,19 @@ async fn run(cli: Cli) -> Result<(), String> {
         } => {
             let loaded = source.load_with_refactors()?;
             check_model_for_backend(&loaded.model, backend.backend)?;
-            let (actual, applied_ids) = live_status_inputs(backend.backend, &url).await?;
+            let (actual, applied_ids, live_metadata) =
+                live_status_inputs(backend.backend, &url).await?;
             pending_refactors(&loaded.refactors, &applied_ids, &actual)
                 .map_err(|error| format!("applied refactor metadata mismatch: {error}"))?;
-            print_status(&loaded.model, &actual, &loaded.refactors, &applied_ids);
+            let desired_metadata = package_metadata(&loaded.model, &loaded.refactors);
+            print_status(
+                &loaded.model,
+                &actual,
+                &loaded.refactors,
+                &applied_ids,
+                &desired_metadata,
+                &live_metadata,
+            );
             Ok(())
         }
         Command::Refactors { command } => run_refactors(command).await,
@@ -407,12 +416,14 @@ async fn run(cli: Cli) -> Result<(), String> {
                         } else {
                             apply_plan(&plan, &Postgres, &mut connection)
                                 .await
-                                .map_err(|error| format!("publish: {error}"))
+                                .map_err(|error| format!("publish: {error}"))?;
+                            record_package_metadata(&loaded, &mut connection).await
                         }
                     } else {
                         publish(&loaded.model, &Postgres, &mut connection)
                             .await
-                            .map_err(|error| format!("publish: {error}"))
+                            .map_err(|error| format!("publish: {error}"))?;
+                        record_package_metadata(&loaded, &mut connection).await
                     }
                 }
                 BackendKind::Mysql => {
@@ -442,12 +453,14 @@ async fn run(cli: Cli) -> Result<(), String> {
                         } else {
                             apply_plan(&plan, &Mysql, &mut connection)
                                 .await
-                                .map_err(|error| format!("publish: {error}"))
+                                .map_err(|error| format!("publish: {error}"))?;
+                            record_package_metadata(&loaded, &mut connection).await
                         }
                     } else {
                         publish(&loaded.model, &Mysql, &mut connection)
                             .await
-                            .map_err(|error| format!("publish: {error}"))
+                            .map_err(|error| format!("publish: {error}"))?;
+                        record_package_metadata(&loaded, &mut connection).await
                     }
                 }
             }
@@ -469,7 +482,7 @@ fn check_model_for_backend(model: &DatabaseModel, backend: BackendKind) -> Resul
 async fn live_status_inputs(
     backend: BackendKind,
     url: &str,
-) -> Result<(DatabaseModel, Vec<String>), String> {
+) -> Result<(DatabaseModel, Vec<String>, Vec<(String, String)>), String> {
     match backend {
         BackendKind::Postgres => {
             let mut connection = Postgres
@@ -483,7 +496,11 @@ async fn live_status_inputs(
                 .applied_refactor_ids()
                 .await
                 .map_err(|error| format!("read applied refactors: {error}"))?;
-            Ok((actual, applied_ids))
+            let metadata = connection
+                .schema_metadata()
+                .await
+                .map_err(|error| format!("read schema metadata: {error}"))?;
+            Ok((actual, applied_ids, metadata))
         }
         BackendKind::Mysql => {
             let mut connection = Mysql
@@ -497,9 +514,25 @@ async fn live_status_inputs(
                 .applied_refactor_ids()
                 .await
                 .map_err(|error| format!("read applied refactors: {error}"))?;
-            Ok((actual, applied_ids))
+            let metadata = connection
+                .schema_metadata()
+                .await
+                .map_err(|error| format!("read schema metadata: {error}"))?;
+            Ok((actual, applied_ids, metadata))
         }
     }
+}
+
+async fn record_package_metadata<C>(loaded: &LoadedModel, connection: &mut C) -> Result<(), String>
+where
+    C: SchemaMetadataStore,
+    C::Error: std::fmt::Display,
+{
+    let metadata = package_metadata(&loaded.model, &loaded.refactors);
+    connection
+        .record_schema_metadata(&metadata)
+        .await
+        .map_err(|error| format!("record schema metadata: {error}"))
 }
 
 async fn run_refactors(command: RefactorsCommand) -> Result<(), String> {
@@ -645,6 +678,8 @@ fn print_status(
     actual: &DatabaseModel,
     refactors: &RefactorLog,
     applied_ids: &[String],
+    desired_metadata: &[(String, String)],
+    live_metadata: &[(String, String)],
 ) {
     let diff = diff_models(desired, actual);
     if diff.is_empty() {
@@ -655,6 +690,32 @@ fn print_status(
     }
 
     print_refactor_status(refactors, applied_ids);
+    print_metadata_status(desired_metadata, live_metadata);
+}
+
+fn print_metadata_status(
+    desired_metadata: &[(String, String)],
+    live_metadata: &[(String, String)],
+) {
+    let live = live_metadata
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<BTreeSet<_>>();
+    let live_keys = live_metadata
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<BTreeSet<_>>();
+
+    for (key, desired_value) in desired_metadata {
+        let status = if live.contains(&(key.as_str(), desired_value.as_str())) {
+            "match"
+        } else if live_keys.contains(key.as_str()) {
+            "mismatch"
+        } else {
+            "missing"
+        };
+        println!("metadata {key} {status}");
+    }
 }
 
 fn print_diff(diff: &squealy_model::DatabaseDiff) {
