@@ -214,6 +214,22 @@ fn status_help_explains_live_package_comparison() {
         stdout.contains("--history"),
         "help should include publish history limit option: {stdout}"
     );
+    assert!(
+        stdout.contains("--check-all"),
+        "help should include combined status check option: {stdout}"
+    );
+    assert!(
+        stdout.contains("--check-schema"),
+        "help should include schema check option: {stdout}"
+    );
+    assert!(
+        stdout.contains("--check-refactors"),
+        "help should include refactor check option: {stdout}"
+    );
+    assert!(
+        stdout.contains("--check-metadata"),
+        "help should include metadata check option: {stdout}"
+    );
 }
 
 #[test]
@@ -1275,6 +1291,28 @@ async fn postgres_refactor_repair_records_valid_missing_refactor_ids() {
         "unexpected status stdout: {stdout}"
     );
 
+    let status_check = Command::new(SQUEALY)
+        .args([
+            "status",
+            "--backend",
+            "postgres",
+            "--check-refactors",
+            "--package",
+        ])
+        .arg(&repair_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy status refactor check");
+    assert!(
+        !status_check.status.success(),
+        "pending refactor check should fail"
+    );
+    let stderr = String::from_utf8_lossy(&status_check.stderr);
+    assert!(
+        stderr.contains("status check failed: refactors"),
+        "unexpected status stderr: {stderr}"
+    );
+
     let repair = Command::new(SQUEALY)
         .args([
             "refactors",
@@ -1321,7 +1359,14 @@ async fn postgres_refactor_repair_records_valid_missing_refactor_ids() {
         .expect("write status package");
 
     let status = Command::new(SQUEALY)
-        .args(["status", "--backend", "postgres", "--package"])
+        .args([
+            "status",
+            "--backend",
+            "postgres",
+            "--check-schema",
+            "--check-refactors",
+            "--package",
+        ])
         .arg(&status_package)
         .args(["--url", &url])
         .output()
@@ -1366,6 +1411,7 @@ async fn postgres_refactor_repair_records_valid_missing_refactor_ids() {
             "postgres",
             "--history",
             "2",
+            "--check-all",
             "--package",
         ])
         .arg(&status_package)
@@ -1757,6 +1803,28 @@ DROP SCHEMA IF EXISTS `__squealy`",
         "unexpected status stdout: {stdout}"
     );
 
+    let status_check = Command::new(SQUEALY)
+        .args([
+            "status",
+            "--backend",
+            "mysql",
+            "--check-refactors",
+            "--package",
+        ])
+        .arg(&repair_package)
+        .args(["--url", &url])
+        .output()
+        .expect("run squealy status refactor check");
+    assert!(
+        !status_check.status.success(),
+        "pending refactor check should fail"
+    );
+    let stderr = String::from_utf8_lossy(&status_check.stderr);
+    assert!(
+        stderr.contains("status check failed: refactors"),
+        "unexpected status stderr: {stderr}"
+    );
+
     let repair = Command::new(SQUEALY)
         .args([
             "refactors",
@@ -1803,7 +1871,14 @@ DROP SCHEMA IF EXISTS `__squealy`",
         .expect("write status package");
 
     let status = Command::new(SQUEALY)
-        .args(["status", "--backend", "mysql", "--package"])
+        .args([
+            "status",
+            "--backend",
+            "mysql",
+            "--check-schema",
+            "--check-refactors",
+            "--package",
+        ])
         .arg(&status_package)
         .args(["--url", &url])
         .output()
@@ -1848,6 +1923,7 @@ DROP SCHEMA IF EXISTS `__squealy`",
             "mysql",
             "--history",
             "2",
+            "--check-all",
             "--package",
         ])
         .arg(&status_package)

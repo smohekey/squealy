@@ -117,6 +117,18 @@ enum Command {
         /// Number of recent publish history rows to print.
         #[arg(long, default_value_t = 1)]
         history: usize,
+        /// Exit non-zero when live schema differs from the desired model.
+        #[arg(long)]
+        check_schema: bool,
+        /// Exit non-zero when package refactors are pending or recorded ids are outside the package.
+        #[arg(long)]
+        check_refactors: bool,
+        /// Exit non-zero when package metadata is missing or mismatched.
+        #[arg(long)]
+        check_metadata: bool,
+        /// Enable all status checks.
+        #[arg(long)]
+        check_all: bool,
     },
     /// Inspect or repair schema refactor metadata recorded in a live database.
     Refactors {
@@ -226,6 +238,12 @@ impl ModelSource {
 struct LoadedModel {
     model: DatabaseModel,
     refactors: RefactorLog,
+}
+
+struct StatusChecks {
+    schema: bool,
+    refactors: bool,
+    metadata: bool,
 }
 
 #[tokio::main]
@@ -361,6 +379,10 @@ async fn run(cli: Cli) -> Result<(), String> {
             backend,
             url,
             history,
+            check_schema,
+            check_refactors,
+            check_metadata,
+            check_all,
         } => {
             let loaded = source.load_with_refactors()?;
             check_model_for_backend(&loaded.model, backend.backend)?;
@@ -378,6 +400,20 @@ async fn run(cli: Cli) -> Result<(), String> {
                 &live_metadata,
                 &publish_history,
             );
+            let checks = StatusChecks {
+                schema: check_all || check_schema,
+                refactors: check_all || check_refactors,
+                metadata: check_all || check_metadata,
+            };
+            check_status(
+                &checks,
+                &loaded.model,
+                &actual,
+                &loaded.refactors,
+                &applied_ids,
+                &desired_metadata,
+                &live_metadata,
+            )?;
             Ok(())
         }
         Command::Refactors { command } => run_refactors(command).await,
@@ -737,6 +773,66 @@ fn print_status(
     print_refactor_status(refactors, applied_ids);
     print_metadata_status(desired_metadata, live_metadata);
     print_publish_history_status(publish_history);
+}
+
+fn check_status(
+    checks: &StatusChecks,
+    desired: &DatabaseModel,
+    actual: &DatabaseModel,
+    refactors: &RefactorLog,
+    applied_ids: &[String],
+    desired_metadata: &[(String, String)],
+    live_metadata: &[(String, String)],
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+
+    if checks.schema && !diff_models(desired, actual).is_empty() {
+        failures.push("schema");
+    }
+    if checks.refactors && refactors_need_attention(refactors, applied_ids) {
+        failures.push("refactors");
+    }
+    if checks.metadata && metadata_needs_attention(desired_metadata, live_metadata) {
+        failures.push("metadata");
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("status check failed: {}", failures.join(", ")))
+    }
+}
+
+fn refactors_need_attention(refactors: &RefactorLog, applied_ids: &[String]) -> bool {
+    let applied = applied_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let package_ids = refactors
+        .operations
+        .iter()
+        .map(|operation| operation.id())
+        .collect::<BTreeSet<_>>();
+
+    refactors
+        .operations
+        .iter()
+        .any(|operation| !applied.contains(operation.id()))
+        || applied.difference(&package_ids).next().is_some()
+}
+
+fn metadata_needs_attention(
+    desired_metadata: &[(String, String)],
+    live_metadata: &[(String, String)],
+) -> bool {
+    let live = live_metadata
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<BTreeSet<_>>();
+
+    desired_metadata
+        .iter()
+        .any(|(key, desired_value)| !live.contains(&(key.as_str(), desired_value.as_str())))
 }
 
 fn print_metadata_status(
