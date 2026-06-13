@@ -1619,6 +1619,7 @@ dependencies = [
 name = "squealy-mysql"
 version = "0.1.0"
 dependencies = [
+ "futures-core",
  "mysql_async",
  "squealy",
  "squealy-model",
