@@ -392,6 +392,7 @@ pub use backend::{
     Backend, ConstraintCapabilities, DdlExecutor, Decode, DecodeNullable, IndexCapabilities,
     RowReader, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect,
     SchemaMetadataStore, SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore,
+    SupportsReturning,
 };
 pub use column::{
     Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullableValue, ColumnType,
