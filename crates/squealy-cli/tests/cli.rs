@@ -305,11 +305,13 @@ fn refactors_help_explains_package_comparison() {
 }
 
 #[test]
-fn publish_report_requires_incremental_mode() {
+fn publish_report_without_incremental_is_an_offline_create_dry_run() {
     let dir = tempfile::tempdir().expect("tempdir");
     let package = dir.path().join("schema.sqz");
-    write_package(&empty_model(), &package).expect("write package");
+    write_package(&live_introspection_model(), &package).expect("write package");
 
+    // --report without --incremental renders the create-from-scratch DDL without connecting, so an
+    // unreachable URL is fine.
     let output = Command::new(SQUEALY)
         .args(["publish", "--report", "--package"])
         .arg(&package)
@@ -317,11 +319,15 @@ fn publish_report_requires_incremental_mode() {
         .output()
         .expect("run squealy");
 
-    assert!(!output.status.success(), "invalid report mode should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--report currently requires --incremental"),
-        "unexpected stderr: {stderr}"
+        output.status.success(),
+        "create dry-run should succeed offline: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("CREATE TABLE"),
+        "expected create DDL, got: {stdout}"
     );
 }
 

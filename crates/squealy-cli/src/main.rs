@@ -11,13 +11,14 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
 use squealy_cli::extract::extract_model;
 use squealy_model::{
-    ChangeRisk, DatabaseDiffChange, DatabaseModel, DdlExecutor, DiffPolicy, RefactorLog,
-    SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaMetadataStore,
+    ChangeRisk, DatabaseDiffChange, DatabaseModel, DatabasePlan, DatabasePlanStep, DdlExecutor,
+    DiffPolicy, RefactorLog, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaMetadataStore,
     SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore, TableDiffChange,
-    apply_plan, check_create, check_diff_policy, diff_models, introspect, package_metadata,
-    pending_refactors, plan_from_database_with_refactors, plan_models_with_refactors, publish,
-    read_package, read_refactor_log, refactor_from_kdl, render_create_sql, render_plan_sql,
-    repair_refactor_metadata, write_package, write_package_with_refactors,
+    TablePlanStep, apply_plan, check_create, check_diff_policy, classified_plan_steps, diff_models,
+    introspect, package_metadata, pending_refactors, plan_from_database_with_refactors,
+    plan_models_with_refactors, publish, read_package, read_refactor_log, refactor_from_kdl,
+    render_create_sql, render_plan_sql, repair_refactor_metadata, write_package,
+    write_package_with_refactors,
 };
 use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
@@ -169,6 +170,10 @@ enum Command {
         /// `statement_timeout`; ignored by MySQL, which has no DDL statement timeout).
         #[arg(long)]
         statement_timeout: Option<u64>,
+        /// Apply destructive changes without the interactive confirmation prompt (required to apply
+        /// destructive changes when stdin is not a terminal, e.g. in CI).
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -456,12 +461,20 @@ async fn run(cli: Cli) -> Result<(), String> {
             allow_ambiguous,
             lock_timeout,
             statement_timeout,
+            yes,
         } => {
+            let loaded = source.load_with_refactors()?;
+            // Create-from-scratch dry-run: render the DDL without touching a database.
             if report && !incremental {
-                return Err("--report currently requires --incremental".to_owned());
+                let sql = match backend.backend {
+                    BackendKind::Postgres => render_create_sql(&loaded.model, &Postgres),
+                    BackendKind::Mysql => render_create_sql(&loaded.model, &Mysql),
+                }
+                .map_err(|error| format!("render DDL: {error}"))?;
+                print!("{sql}");
+                return Ok(());
             }
             validate_url(backend.backend, &url)?;
-            let loaded = source.load_with_refactors()?;
             match backend.backend {
                 BackendKind::Postgres => {
                     let mut connection = Postgres.connect(&url).await.map_err(|error| {
@@ -496,6 +509,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                             print!("{sql}");
                             Ok(())
                         } else {
+                            confirm_destructive(&plan, yes)?;
                             apply_plan(&plan, &Postgres, &mut connection)
                                 .await
                                 .map_err(|error| format!("publish: {error}"))?;
@@ -541,6 +555,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                             print!("{sql}");
                             Ok(())
                         } else {
+                            confirm_destructive(&plan, yes)?;
                             apply_plan(&plan, &Mysql, &mut connection)
                                 .await
                                 .map_err(|error| format!("publish: {error}"))?;
@@ -817,6 +832,108 @@ where
         .execute_ddl(&statements.join(";\n"))
         .await
         .map_err(|error| format!("set session timeouts: {error}"))
+}
+
+/// Requires explicit confirmation before applying a plan that contains destructive steps. With
+/// `assume_yes` the confirmation is taken as given (for automation); otherwise an interactive
+/// terminal is prompted, and a non-interactive stdin is refused so destructive changes are never
+/// applied unattended.
+fn confirm_destructive(plan: &DatabasePlan, assume_yes: bool) -> Result<(), String> {
+    use std::io::{IsTerminal, Write};
+
+    let destructive: Vec<_> = classified_plan_steps(plan)
+        .into_iter()
+        .filter(|classified| matches!(classified.risk, ChangeRisk::Destructive))
+        .collect();
+    if destructive.is_empty() {
+        return Ok(());
+    }
+
+    eprintln!(
+        "This publish includes {} destructive change(s):",
+        destructive.len()
+    );
+    for classified in &destructive {
+        eprintln!("  - {}", describe_plan_step(&classified.step));
+    }
+
+    if assume_yes {
+        eprintln!("Proceeding because --yes was given.");
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(
+            "destructive changes require confirmation; re-run with --yes to apply".to_owned(),
+        );
+    }
+    eprint!("Type 'yes' to apply these changes: ");
+    std::io::stderr().flush().ok();
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| format!("read confirmation: {error}"))?;
+    if answer.trim() == "yes" {
+        Ok(())
+    } else {
+        Err("aborted: destructive changes were not confirmed".to_owned())
+    }
+}
+
+/// A short human description of a plan step, used in the destructive-change confirmation prompt.
+fn describe_plan_step(step: &DatabasePlanStep) -> String {
+    match step {
+        DatabasePlanStep::CreateSchema { schema } => {
+            format!("create schema {}", schema_name(schema))
+        }
+        DatabasePlanStep::DropSchema { schema } => format!("drop schema {}", schema_name(schema)),
+        DatabasePlanStep::CreateTable { schema, table } => {
+            format!("create table {}", qualified(schema, &table.name))
+        }
+        DatabasePlanStep::DropTable { schema, table } => {
+            format!("drop table {}", qualified(schema, &table.name))
+        }
+        DatabasePlanStep::RenameTable {
+            schema, from, to, ..
+        } => format!("rename table {} to {to}", qualified(schema, from)),
+        DatabasePlanStep::AlterTable {
+            schema,
+            table,
+            change,
+        } => format!(
+            "{} on {}",
+            describe_table_plan_step(change),
+            qualified(schema, table)
+        ),
+    }
+}
+
+fn describe_table_plan_step(step: &TablePlanStep) -> String {
+    match step {
+        TablePlanStep::SetTableComment { .. } => "set comment".to_owned(),
+        TablePlanStep::AddColumn { column } => format!("add column {}", column.name),
+        TablePlanStep::DropColumn { column } => format!("drop column {}", column.name),
+        TablePlanStep::RenameColumn { from, to, .. } => format!("rename column {from} to {to}"),
+        TablePlanStep::AlterColumn { after, .. } => format!("alter column {}", after.name),
+        TablePlanStep::AddPrimaryKey { .. } => "add primary key".to_owned(),
+        TablePlanStep::DropPrimaryKey { .. } => "drop primary key".to_owned(),
+        TablePlanStep::AlterPrimaryKey { .. } => "alter primary key".to_owned(),
+        TablePlanStep::AddUnique { constraint } => format!("add unique {}", constraint.name),
+        TablePlanStep::DropUnique { constraint } => format!("drop unique {}", constraint.name),
+        TablePlanStep::AlterUnique { after, .. } => format!("alter unique {}", after.name),
+        TablePlanStep::AddForeignKey { foreign_key } => {
+            format!("add foreign key {}", foreign_key.name)
+        }
+        TablePlanStep::DropForeignKey { foreign_key } => {
+            format!("drop foreign key {}", foreign_key.name)
+        }
+        TablePlanStep::AlterForeignKey { after, .. } => format!("alter foreign key {}", after.name),
+        TablePlanStep::AddCheck { check } => format!("add check {}", check.name),
+        TablePlanStep::DropCheck { check } => format!("drop check {}", check.name),
+        TablePlanStep::AlterCheck { after, .. } => format!("alter check {}", after.name),
+        TablePlanStep::AddIndex { index } => format!("add index {}", index.name),
+        TablePlanStep::DropIndex { index } => format!("drop index {}", index.name),
+        TablePlanStep::AlterIndex { after, .. } => format!("alter index {}", after.name),
+    }
 }
 
 /// Builds the backend-specific `SET` statements for the requested session timeouts (empty when none
@@ -1497,7 +1614,9 @@ impl BackendKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendKind, redact_secret, url_password, validate_url};
+    use super::{
+        BackendKind, DatabasePlan, DatabasePlanStep, redact_secret, url_password, validate_url,
+    };
 
     #[test]
     fn validate_url_accepts_matching_scheme() {
@@ -1518,6 +1637,36 @@ mod tests {
         let error = validate_url(BackendKind::Postgres, "postgres://u:s3cret@/db").unwrap_err();
         assert!(error.contains("missing host"));
         assert!(!error.contains("s3cret"));
+    }
+
+    #[test]
+    fn confirm_destructive_allows_non_destructive_plan() {
+        use super::confirm_destructive;
+        assert!(confirm_destructive(&DatabasePlan::default(), false).is_ok());
+    }
+
+    #[test]
+    fn confirm_destructive_proceeds_with_assume_yes() {
+        use super::confirm_destructive;
+        let plan = DatabasePlan {
+            steps: vec![DatabasePlanStep::DropSchema {
+                schema: Some("old".to_owned()),
+            }],
+        };
+        assert!(confirm_destructive(&plan, true).is_ok());
+    }
+
+    #[test]
+    fn confirm_destructive_refuses_without_tty_or_yes() {
+        use super::confirm_destructive;
+        let plan = DatabasePlan {
+            steps: vec![DatabasePlanStep::DropSchema {
+                schema: Some("old".to_owned()),
+            }],
+        };
+        // Test stdin is not a terminal, so confirmation must be refused without --yes.
+        let error = confirm_destructive(&plan, false).unwrap_err();
+        assert!(error.contains("--yes"));
     }
 
     #[test]
