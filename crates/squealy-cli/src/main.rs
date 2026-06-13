@@ -20,7 +20,8 @@ use squealy_model::{
     diff_models, introspect, package_metadata, pending_refactors,
     plan_from_database_with_refactors, plan_models_with_refactors, publish, read_package,
     read_refactor_log, refactor_from_kdl, render_create_sql, render_plan_sql,
-    repair_refactor_metadata, write_package, write_package_with_refactors,
+    render_plan_with_options, repair_refactor_metadata, write_package,
+    write_package_with_refactors,
 };
 use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
@@ -621,9 +622,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                             .await,
                         )?;
                         if report {
-                            let sql = render_plan_sql(&plan, &Postgres).map_err(|error| {
-                                CliError::Message(format!("render plan: {error}"))
-                            })?;
+                            let sql = render_plan_with_options(&plan, &Postgres, apply_options)
+                                .map_err(|error| {
+                                    CliError::Message(format!("render plan: {error}"))
+                                })?;
                             print!("{sql}");
                             Ok(())
                         } else {
@@ -677,9 +679,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                             .await,
                         )?;
                         if report {
-                            let sql = render_plan_sql(&plan, &Mysql).map_err(|error| {
-                                CliError::Message(format!("render plan: {error}"))
-                            })?;
+                            let sql = render_plan_with_options(&plan, &Mysql, apply_options)
+                                .map_err(|error| {
+                                    CliError::Message(format!("render plan: {error}"))
+                                })?;
                             print!("{sql}");
                             Ok(())
                         } else {

@@ -602,6 +602,7 @@ pub(crate) mod ddl {
         for step in &plan.steps {
             write_plan_step(step, writer, &mut first)?;
         }
+        write_deferred_foreign_keys(plan, writer, &mut first)?;
         if !first {
             writer.write_all(b";")?;
         }
@@ -630,6 +631,7 @@ pub(crate) mod ddl {
                 write_plan_step(step, writer, &mut first)?;
             }
         }
+        write_deferred_foreign_keys(plan, writer, &mut first)?;
         if !first {
             writer.write_all(b";")?;
         }
@@ -711,9 +713,25 @@ pub(crate) mod ddl {
             statement(writer, first)?;
             write_create_index(schema, &table.name, index, false, writer)?;
         }
-        for foreign_key in &table.foreign_keys {
-            statement(writer, first)?;
-            write_add_foreign_key(schema, &table.name, foreign_key, writer)?;
+        Ok(())
+    }
+
+    /// Emits the `ADD FOREIGN KEY` constraints for every table created in `plan`, deferred until all
+    /// `CreateTable` steps have rendered. A single plan can create several tables in name order, so a
+    /// foreign key pointing at a later-created table would otherwise reference a table that does not
+    /// exist yet; running the constraints in a second pass makes the create order irrelevant.
+    fn write_deferred_foreign_keys(
+        plan: &DatabasePlan,
+        writer: &mut impl Write,
+        first: &mut bool,
+    ) -> io::Result<()> {
+        for step in &plan.steps {
+            if let DatabasePlanStep::CreateTable { schema, table } = step {
+                for foreign_key in &table.foreign_keys {
+                    statement(writer, first)?;
+                    write_add_foreign_key(schema.as_deref(), &table.name, foreign_key, writer)?;
+                }
+            }
         }
         Ok(())
     }

@@ -1508,3 +1508,73 @@ fn postgres_renders_index_collations() {
         "index collation not rendered as expected: {sql}"
     );
 }
+
+/// Builds a single-column `id` table optionally referencing `references_table` via a foreign key, for
+/// the multi-table create-ordering test below.
+fn fk_test_table(name: &str, references_table: Option<&str>) -> Box<TableModel> {
+    let foreign_keys = references_table
+        .map(|target| ForeignKeyModel {
+            name: format!("fk_{name}_{target}"),
+            columns: vec!["id".to_owned()],
+            references_schema: Some("public".to_owned()),
+            references_table: target.to_owned(),
+            references_columns: vec!["id".to_owned()],
+            match_type: None,
+            deferrability: None,
+            validation: None,
+            enforcement: None,
+            on_delete: None,
+            on_update: None,
+        })
+        .into_iter()
+        .collect();
+    Box::new(TableModel {
+        name: name.to_owned(),
+        comment: None,
+        columns: vec![ColumnModel {
+            name: "id".to_owned(),
+            comment: None,
+            ty: SqlType::I32,
+            collation: None,
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+        }],
+        primary_key: None,
+        foreign_keys,
+        uniques: Vec::new(),
+        checks: Vec::new(),
+        indexes: Vec::new(),
+    })
+}
+
+#[test]
+fn postgres_defers_foreign_keys_until_all_tables_are_created() {
+    // `comments` is created first but references `posts`, created second. The foreign key must be
+    // deferred until after both `CREATE TABLE`s, or it would reference a table that does not exist yet.
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::CreateTable {
+                schema: Some("public".to_owned()),
+                table: fk_test_table("comments", Some("posts")),
+            },
+            DatabasePlanStep::CreateTable {
+                schema: Some("public".to_owned()),
+                table: fk_test_table("posts", None),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    let comments_create = sql.find("CREATE TABLE \"public\".\"comments\"").unwrap();
+    let posts_create = sql.find("CREATE TABLE \"public\".\"posts\"").unwrap();
+    let fk = sql.find("ADD CONSTRAINT \"fk_comments_posts\"").unwrap();
+    assert!(
+        comments_create < posts_create && posts_create < fk,
+        "foreign key not deferred until after both tables were created: {sql}"
+    );
+}

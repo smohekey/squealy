@@ -4,7 +4,8 @@ use squealy_model::{
     RenameColumn, RenameTable, SchemaIntrospect, SchemaModel, SchemaRefactorStore, SqlType,
     TableModel, TablePlanStep, apply_plan, apply_plan_with_options, classified_plan_steps,
     pending_refactors, plan_from_database, plan_from_database_with_refactors, plan_models,
-    plan_models_with_refactors, render_plan_sql, repair_refactor_metadata,
+    plan_models_with_refactors, render_plan_sql, render_plan_with_options,
+    repair_refactor_metadata,
 };
 use squealy_postgresql::Postgres;
 
@@ -573,6 +574,65 @@ async fn apply_plan_with_concurrent_indexes_splits_index_creation() {
         "concurrent batch: {}",
         connection.executed[1]
     );
+}
+
+#[test]
+fn render_plan_with_options_reports_the_concurrent_form_it_will_apply() {
+    let plan = squealy_model::DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AddColumn {
+                    column: column("slug", SqlType::Text),
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AddIndex {
+                    index: IndexModel {
+                        name: "idx_events_slug".to_owned(),
+                        columns: vec!["slug".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: Vec::new(),
+                        unique: false,
+                        method: None,
+                        directions: Vec::new(),
+                        nulls: Vec::new(),
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    },
+                }),
+            },
+        ],
+    };
+
+    // The dry-run report must reflect what `apply_plan_with_options` actually applies: the index is
+    // built `CONCURRENTLY` outside the transaction, after the transactional `ADD COLUMN`.
+    let concurrent = render_plan_with_options(
+        &plan,
+        &Postgres,
+        PlanApplyOptions {
+            concurrent_indexes: true,
+        },
+    )
+    .expect("render concurrent report");
+    let add_column = concurrent.find("ADD COLUMN \"slug\"").expect("add column");
+    let concurrent_index = concurrent
+        .find("CREATE INDEX CONCURRENTLY \"idx_events_slug\"")
+        .expect("concurrent index");
+    assert!(
+        add_column < concurrent_index,
+        "transactional step should render before the concurrent index: {concurrent}"
+    );
+
+    // Without the option it stays byte-identical to the plain renderer (plain, transactional index).
+    let plain = render_plan_with_options(&plan, &Postgres, PlanApplyOptions::default())
+        .expect("render plain report");
+    assert_eq!(plain, render_plan_sql(&plan, &Postgres).unwrap());
+    assert!(!plain.contains("CONCURRENTLY"), "plain report: {plain}");
 }
 
 #[derive(Debug)]

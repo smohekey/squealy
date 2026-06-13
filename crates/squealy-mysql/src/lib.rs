@@ -110,7 +110,7 @@ impl DdlExecutor for MysqlConnection {
     /// many statements were already committed and which statement failed so the operator can
     /// recover the partially-applied schema.
     async fn execute_ddl(&mut self, sql: &str) -> Result<(), MysqlError> {
-        let statements: Vec<&str> = split_statements(sql).collect();
+        let statements = split_statements(sql);
         let total = statements.len();
         for (index, statement) in statements.into_iter().enumerate() {
             self.conn
@@ -132,6 +132,23 @@ impl SchemaIntrospect for MysqlConnection {
 
     async fn introspect_database(&mut self) -> Result<DatabaseModel, MysqlError> {
         introspect::database(&mut self.conn).await
+    }
+
+    /// MySQL renders bare `String` as `VARCHAR(255)` (it has no key-usable unbounded `text`), which
+    /// introspects back as `Varchar(255)`; map `String` to that physical form so a desired model
+    /// using `String` does not churn as an ambiguous type change against the live schema.
+    fn canonical_sql_type(&self, ty: &squealy::SqlType) -> squealy::SqlType {
+        canonical_sql_type(ty)
+    }
+}
+
+/// Maps a neutral [`SqlType`](squealy::SqlType) to the physical form the MySQL introspector reads
+/// back, so a desired model does not churn against a live schema. MySQL has no key-usable unbounded
+/// `text`, so bare `String` is rendered (and read back) as `VARCHAR(255)`.
+fn canonical_sql_type(ty: &squealy::SqlType) -> squealy::SqlType {
+    match ty {
+        squealy::SqlType::String => squealy::SqlType::Varchar(255),
+        other => other.clone(),
     }
 }
 
@@ -359,9 +376,78 @@ VALUES (?, ?, ?)",
 }
 
 /// Splits a rendered DDL script into individual statements. The renderer separates statements with
-/// `;\n` and terminates the last with `;`, and never emits `;\n` inside a statement.
-fn split_statements(sql: &str) -> impl Iterator<Item = &str> {
-    sql.split(";\n")
-        .map(|statement| statement.trim().trim_end_matches(';').trim())
-        .filter(|statement| !statement.is_empty())
+/// `;\n` and terminates the last with `;`. A comment or text default can itself contain `;\n`
+/// inside a single-quoted literal, so the scan is quote-aware and only breaks outside a string —
+/// otherwise a literal like `'a;\nb'` would be cut in two and, since MySQL auto-commits each
+/// statement, fail the batch after earlier DDL had already committed.
+fn split_statements(sql: &str) -> Vec<&str> {
+    let bytes = sql.as_bytes();
+    let mut statements = Vec::new();
+    let mut start = 0;
+    let mut in_string = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            // The renderer escapes an embedded quote by doubling it (`''`); a simple toggle nets out
+            // across the pair, correctly tracking both the quotes and the escape.
+            b'\'' => in_string = !in_string,
+            b';' if !in_string && bytes.get(index + 1) == Some(&b'\n') => {
+                push_statement(&mut statements, &sql[start..index]);
+                index += 1; // skip the '\n'
+                start = index + 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    push_statement(&mut statements, &sql[start..]);
+    statements
+}
+
+fn push_statement<'sql>(statements: &mut Vec<&'sql str>, statement: &'sql str) {
+    let statement = statement.trim().trim_end_matches(';').trim();
+    if !statement.is_empty() {
+        statements.push(statement);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{canonical_sql_type, split_statements};
+    use squealy::SqlType;
+
+    #[test]
+    fn canonical_sql_type_maps_string_to_introspected_varchar() {
+        // `String` renders as `VARCHAR(255)` and introspects back as `Varchar(255)`; canonicalizing the
+        // desired side to that form is what keeps an incremental plan from churning forever.
+        assert_eq!(canonical_sql_type(&SqlType::String), SqlType::Varchar(255));
+        // Everything else is left untouched, including an explicitly-authored `Varchar`.
+        assert_eq!(
+            canonical_sql_type(&SqlType::Varchar(64)),
+            SqlType::Varchar(64)
+        );
+        assert_eq!(canonical_sql_type(&SqlType::Text), SqlType::Text);
+        assert_eq!(canonical_sql_type(&SqlType::I32), SqlType::I32);
+    }
+
+    #[test]
+    fn split_statements_respects_string_literals() {
+        // A `;\n` inside a single-quoted literal (e.g. a column comment) must not split the batch.
+        let sql = "ALTER TABLE `t` MODIFY `c` INT COMMENT 'first;\nsecond';\n\
+CREATE INDEX `i` ON `t` (`c`);";
+        let statements = split_statements(sql);
+        assert_eq!(
+            statements,
+            vec![
+                "ALTER TABLE `t` MODIFY `c` INT COMMENT 'first;\nsecond'",
+                "CREATE INDEX `i` ON `t` (`c`)",
+            ]
+        );
+    }
+
+    #[test]
+    fn split_statements_handles_escaped_quotes() {
+        let statements = split_statements("SET @x = 'a''b';\nSET @y = 1;");
+        assert_eq!(statements, vec!["SET @x = 'a''b'", "SET @y = 1"]);
+    }
 }

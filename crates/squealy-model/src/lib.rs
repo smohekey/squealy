@@ -72,6 +72,41 @@ pub fn render_plan_sql<B: SchemaBackend>(
     bytes_to_sql(buffer)
 }
 
+/// Renders incremental DDL exactly as [`apply_plan_with_options`] would execute it, so a dry-run
+/// report reflects the real publish.
+///
+/// Without `concurrent_indexes` this is byte-identical to [`render_plan_sql`]. With it, index-add
+/// steps are split out and rendered in the backend's concurrent form (PostgreSQL
+/// `CREATE INDEX CONCURRENTLY`) after the transactional steps, under a comment marking that those
+/// statements run outside the transaction — matching what `apply_plan_with_options` actually applies.
+pub fn render_plan_with_options<B: SchemaBackend>(
+    plan: &DatabasePlan,
+    backend: &B,
+    options: PlanApplyOptions,
+) -> std::io::Result<String> {
+    if !options.concurrent_indexes {
+        return render_plan_sql(plan, backend);
+    }
+
+    let (transactional, concurrent) = split_concurrent_index_steps(plan);
+    let mut sql = if transactional.is_empty() {
+        String::new()
+    } else {
+        render_plan_sql(&transactional, backend)?
+    };
+    if !concurrent.is_empty() {
+        let mut buffer = Vec::new();
+        backend.render_plan_concurrent(&concurrent, &mut buffer)?;
+        let concurrent_sql = bytes_to_sql(buffer)?;
+        if !sql.is_empty() {
+            sql.push('\n');
+        }
+        sql.push_str("-- Applied outside the transaction (one statement per round-trip):\n");
+        sql.push_str(&concurrent_sql);
+    }
+    Ok(sql)
+}
+
 /// Converts rendered DDL bytes to a `String`, returning an `InvalidData` error instead of panicking
 /// if a backend renderer ever emits non-UTF-8 (the [`SchemaBackend`] contract forbids it).
 fn bytes_to_sql(buffer: Vec<u8>) -> std::io::Result<String> {
