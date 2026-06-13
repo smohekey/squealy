@@ -6,7 +6,6 @@
 //! transitions between truths.
 
 use std::collections::BTreeSet;
-use std::fmt;
 
 use squealy::DatabaseModel;
 
@@ -60,29 +59,49 @@ pub struct RenameColumn {
 }
 
 /// A recorded refactor id does not match the live schema state it claims to represent.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AppliedRefactorError {
+    #[error(
+        "recorded refactor `{id}` expects table {} to exist",
+        qualified(schema, table)
+    )]
     RenameTableTargetMissing {
         id: String,
         schema: Option<String>,
         table: String,
     },
+    #[error(
+        "recorded refactor `{id}` expects old table {} to be absent",
+        qualified(schema, table)
+    )]
     RenameTableSourceStillExists {
         id: String,
         schema: Option<String>,
         table: String,
     },
+    #[error(
+        "recorded refactor `{id}` expects table {} to exist",
+        qualified(schema, table)
+    )]
     RenameColumnTableMissing {
         id: String,
         schema: Option<String>,
         table: String,
     },
+    #[error(
+        "recorded refactor `{id}` expects column {}.{column} to exist",
+        qualified(schema, table)
+    )]
     RenameColumnTargetMissing {
         id: String,
         schema: Option<String>,
         table: String,
         column: String,
     },
+    #[error(
+        "recorded refactor `{id}` expects old column {}.{column} to be absent",
+        qualified(schema, table)
+    )]
     RenameColumnSourceStillExists {
         id: String,
         schema: Option<String>,
@@ -90,50 +109,6 @@ pub enum AppliedRefactorError {
         column: String,
     },
 }
-
-impl fmt::Display for AppliedRefactorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AppliedRefactorError::RenameTableTargetMissing { id, schema, table } => write!(
-                formatter,
-                "recorded refactor `{id}` expects table {} to exist",
-                qualified(schema, table)
-            ),
-            AppliedRefactorError::RenameTableSourceStillExists { id, schema, table } => write!(
-                formatter,
-                "recorded refactor `{id}` expects old table {} to be absent",
-                qualified(schema, table)
-            ),
-            AppliedRefactorError::RenameColumnTableMissing { id, schema, table } => write!(
-                formatter,
-                "recorded refactor `{id}` expects table {} to exist",
-                qualified(schema, table)
-            ),
-            AppliedRefactorError::RenameColumnTargetMissing {
-                id,
-                schema,
-                table,
-                column,
-            } => write!(
-                formatter,
-                "recorded refactor `{id}` expects column {}.{column} to exist",
-                qualified(schema, table)
-            ),
-            AppliedRefactorError::RenameColumnSourceStillExists {
-                id,
-                schema,
-                table,
-                column,
-            } => write!(
-                formatter,
-                "recorded refactor `{id}` expects old column {}.{column} to be absent",
-                qualified(schema, table)
-            ),
-        }
-    }
-}
-
-impl std::error::Error for AppliedRefactorError {}
 
 /// Removes already-recorded refactors from `refactors` after validating their obvious final state.
 pub fn pending_refactors(

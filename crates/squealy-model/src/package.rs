@@ -12,7 +12,6 @@
 //! └── refactor.kdl   optional explicit refactor operations
 //! ```
 
-use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
@@ -43,40 +42,19 @@ const REFACTOR_ENTRY: &str = "refactor.kdl";
 const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 
 /// An error produced while reading or writing a `.sqz` package.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PackageError {
-    Io(io::Error),
+    #[error("package io error: {0}")]
+    Io(#[from] io::Error),
+    #[error("package archive error: {0}")]
     Zip(String),
     /// The KDL failed to parse, or did not match the expected schema-model shape.
+    #[error("malformed package: {0}")]
     Malformed(String),
     /// A package entry was larger than [`MAX_ENTRY_BYTES`], so it was refused before being read
     /// fully into memory.
-    TooLarge {
-        entry: &'static str,
-        limit: u64,
-    },
-}
-
-impl fmt::Display for PackageError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PackageError::Io(error) => write!(formatter, "package io error: {error}"),
-            PackageError::Zip(error) => write!(formatter, "package archive error: {error}"),
-            PackageError::Malformed(error) => write!(formatter, "malformed package: {error}"),
-            PackageError::TooLarge { entry, limit } => write!(
-                formatter,
-                "package entry `{entry}` exceeds the {limit}-byte read limit"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for PackageError {}
-
-impl From<io::Error> for PackageError {
-    fn from(error: io::Error) -> Self {
-        PackageError::Io(error)
-    }
+    #[error("package entry `{entry}` exceeds the {limit}-byte read limit")]
+    TooLarge { entry: &'static str, limit: u64 },
 }
 
 impl From<zip::result::ZipError> for PackageError {

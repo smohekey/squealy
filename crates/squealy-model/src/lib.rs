@@ -45,7 +45,6 @@ pub use squealy::{
 };
 
 use std::collections::BTreeSet;
-use std::fmt;
 
 use squealy::Database;
 
@@ -89,37 +88,25 @@ pub fn script<D: Database, B: SchemaBackend>(backend: &B) -> std::io::Result<Str
 }
 
 /// An error from [`publish`]: either rendering the DDL or executing it failed.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PublishError<E> {
-    Render(std::io::Error),
-    Execute(E),
-}
-
-impl<E: fmt::Display> fmt::Display for PublishError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PublishError::Render(error) => write!(formatter, "failed to render DDL: {error}"),
-            PublishError::Execute(error) => write!(formatter, "failed to execute DDL: {error}"),
-        }
-    }
-}
-
-impl<E: std::error::Error + 'static> std::error::Error for PublishError<E> {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            PublishError::Render(error) => Some(error),
-            PublishError::Execute(error) => Some(error),
-        }
-    }
+    #[error("failed to render DDL: {0}")]
+    Render(#[source] std::io::Error),
+    #[error("failed to execute DDL: {0}")]
+    Execute(#[source] E),
 }
 
 /// An error from [`plan_from_database`]: either introspection or policy checking failed.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PlanFromDatabaseError<E> {
-    Introspect(E),
-    ReadAppliedRefactors(E),
-    AppliedRefactor(AppliedRefactorError),
-    Policy(DiffPolicyError),
+    #[error("failed to introspect database: {0}")]
+    Introspect(#[source] E),
+    #[error("failed to read applied refactors: {0}")]
+    ReadAppliedRefactors(#[source] E),
+    #[error("applied refactor metadata mismatch: {0}")]
+    AppliedRefactor(#[source] AppliedRefactorError),
+    #[error("schema plan blocked by policy: {0}")]
+    Policy(#[source] DiffPolicyError),
 }
 
 /// The result of repairing backend refactor metadata from a package refactor log.
@@ -132,72 +119,16 @@ pub struct RefactorRepairReport {
 }
 
 /// An error from [`repair_refactor_metadata`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RepairRefactorMetadataError<E> {
-    Introspect(E),
-    ReadAppliedRefactors(E),
-    AppliedRefactor(AppliedRefactorError),
-    RecordAppliedRefactors(E),
-}
-
-impl<E: fmt::Display> fmt::Display for RepairRefactorMetadataError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RepairRefactorMetadataError::Introspect(error) => {
-                write!(formatter, "failed to introspect database: {error}")
-            }
-            RepairRefactorMetadataError::ReadAppliedRefactors(error) => {
-                write!(formatter, "failed to read applied refactors: {error}")
-            }
-            RepairRefactorMetadataError::AppliedRefactor(error) => {
-                write!(formatter, "refactor final state mismatch: {error}")
-            }
-            RepairRefactorMetadataError::RecordAppliedRefactors(error) => {
-                write!(formatter, "failed to record applied refactors: {error}")
-            }
-        }
-    }
-}
-
-impl<E: std::error::Error + 'static> std::error::Error for RepairRefactorMetadataError<E> {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            RepairRefactorMetadataError::Introspect(error) => Some(error),
-            RepairRefactorMetadataError::ReadAppliedRefactors(error) => Some(error),
-            RepairRefactorMetadataError::AppliedRefactor(error) => Some(error),
-            RepairRefactorMetadataError::RecordAppliedRefactors(error) => Some(error),
-        }
-    }
-}
-
-impl<E: fmt::Display> fmt::Display for PlanFromDatabaseError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PlanFromDatabaseError::Introspect(error) => {
-                write!(formatter, "failed to introspect database: {error}")
-            }
-            PlanFromDatabaseError::ReadAppliedRefactors(error) => {
-                write!(formatter, "failed to read applied refactors: {error}")
-            }
-            PlanFromDatabaseError::AppliedRefactor(error) => {
-                write!(formatter, "applied refactor metadata mismatch: {error}")
-            }
-            PlanFromDatabaseError::Policy(error) => {
-                write!(formatter, "schema plan blocked by policy: {error}")
-            }
-        }
-    }
-}
-
-impl<E: std::error::Error + 'static> std::error::Error for PlanFromDatabaseError<E> {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            PlanFromDatabaseError::Introspect(error) => Some(error),
-            PlanFromDatabaseError::ReadAppliedRefactors(error) => Some(error),
-            PlanFromDatabaseError::AppliedRefactor(error) => Some(error),
-            PlanFromDatabaseError::Policy(error) => Some(error),
-        }
-    }
+    #[error("failed to introspect database: {0}")]
+    Introspect(#[source] E),
+    #[error("failed to read applied refactors: {0}")]
+    ReadAppliedRefactors(#[source] E),
+    #[error("refactor final state mismatch: {0}")]
+    AppliedRefactor(#[source] AppliedRefactorError),
+    #[error("failed to record applied refactors: {0}")]
+    RecordAppliedRefactors(#[source] E),
 }
 
 /// Renders create-from-scratch DDL for `model` and executes it against `connection`.

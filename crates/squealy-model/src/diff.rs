@@ -5,7 +5,6 @@
 //! renames or render SQL; those are later planning/rendering steps.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, ForeignKeyModel, IndexModel, SchemaModel,
@@ -83,22 +82,11 @@ impl Default for DiffPolicy {
 }
 
 /// Error returned when a diff contains changes blocked by a [`DiffPolicy`].
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[error("diff contains {} blocked change(s)", blocked.len())]
 pub struct DiffPolicyError {
     pub blocked: Vec<ClassifiedDatabaseDiffChange>,
 }
-
-impl fmt::Display for DiffPolicyError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "diff contains {} blocked change(s)",
-            self.blocked.len()
-        )
-    }
-}
-
-impl std::error::Error for DiffPolicyError {}
 
 /// Checks whether `diff` is allowed by `policy`.
 pub fn check_diff_policy(diff: &DatabaseDiff, policy: DiffPolicy) -> Result<(), DiffPolicyError> {
