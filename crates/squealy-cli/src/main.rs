@@ -11,12 +11,12 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
 use squealy_cli::extract::extract_model;
 use squealy_model::{
-    ChangeRisk, DatabaseDiffChange, DatabaseModel, DiffPolicy, RefactorLog, SchemaBackend,
-    SchemaCapabilities, SchemaConnect, SchemaMetadataStore, SchemaPublishHistoryStore,
-    SchemaPublishRecord, SchemaRefactorStore, TableDiffChange, apply_plan, check_create,
-    check_diff_policy, diff_models, introspect, package_metadata, pending_refactors,
-    plan_from_database_with_refactors, plan_models_with_refactors, publish, read_package,
-    read_refactor_log, refactor_from_kdl, render_create_sql, render_plan_sql,
+    ChangeRisk, DatabaseDiffChange, DatabaseModel, DdlExecutor, DiffPolicy, RefactorLog,
+    SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaMetadataStore,
+    SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore, TableDiffChange,
+    apply_plan, check_create, check_diff_policy, diff_models, introspect, package_metadata,
+    pending_refactors, plan_from_database_with_refactors, plan_models_with_refactors, publish,
+    read_package, read_refactor_log, refactor_from_kdl, render_create_sql, render_plan_sql,
     repair_refactor_metadata, write_package, write_package_with_refactors,
 };
 use squealy_mysql::Mysql;
@@ -160,6 +160,15 @@ enum Command {
         /// Allow ambiguous changes when publishing incrementally.
         #[arg(long)]
         allow_ambiguous: bool,
+        /// Abort if a required lock cannot be acquired within this many seconds (sets Postgres
+        /// `lock_timeout` / MySQL `lock_wait_timeout`). Recommended in production so a publish fails
+        /// fast instead of blocking — and queuing other queries — behind a held lock.
+        #[arg(long)]
+        lock_timeout: Option<u64>,
+        /// Abort any single statement that runs longer than this many seconds (Postgres
+        /// `statement_timeout`; ignored by MySQL, which has no DDL statement timeout).
+        #[arg(long)]
+        statement_timeout: Option<u64>,
     },
 }
 
@@ -445,6 +454,8 @@ async fn run(cli: Cli) -> Result<(), String> {
             report,
             allow_destructive,
             allow_ambiguous,
+            lock_timeout,
+            statement_timeout,
         } => {
             if report && !incremental {
                 return Err("--report currently requires --incremental".to_owned());
@@ -456,6 +467,15 @@ async fn run(cli: Cli) -> Result<(), String> {
                     let mut connection = Postgres.connect(&url).await.map_err(|error| {
                         format!("connect: {}", redact_secret(&error.to_string(), url))
                     })?;
+                    if !report {
+                        apply_session_timeouts(
+                            &mut connection,
+                            BackendKind::Postgres,
+                            lock_timeout,
+                            statement_timeout,
+                        )
+                        .await?;
+                    }
                     if incremental {
                         check_create(&loaded.model, &Postgres)
                             .map_err(|error| format!("check model: {error}"))?;
@@ -492,6 +512,15 @@ async fn run(cli: Cli) -> Result<(), String> {
                     let mut connection = Mysql.connect(&url).await.map_err(|error| {
                         format!("connect: {}", redact_secret(&error.to_string(), url))
                     })?;
+                    if !report {
+                        apply_session_timeouts(
+                            &mut connection,
+                            BackendKind::Mysql,
+                            lock_timeout,
+                            statement_timeout,
+                        )
+                        .await?;
+                    }
                     if incremental {
                         check_create(&loaded.model, &Mysql)
                             .map_err(|error| format!("check model: {error}"))?;
@@ -763,6 +792,57 @@ fn validate_url(backend: BackendKind, url: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Sets session-level lock/statement timeouts before a publish so a migration cannot block
+/// indefinitely behind a held lock. The `SET`s are session-scoped and persist for the connection.
+async fn apply_session_timeouts<C>(
+    connection: &mut C,
+    backend: BackendKind,
+    lock_timeout: Option<u64>,
+    statement_timeout: Option<u64>,
+) -> Result<(), String>
+where
+    C: DdlExecutor,
+    C::Error: std::fmt::Display,
+{
+    if matches!(backend, BackendKind::Mysql) && statement_timeout.is_some() {
+        eprintln!("squealy: --statement-timeout is ignored for MySQL (no DDL statement timeout)");
+    }
+    let statements = session_timeout_statements(backend, lock_timeout, statement_timeout);
+    if statements.is_empty() {
+        return Ok(());
+    }
+    connection
+        .execute_ddl(&statements.join(";\n"))
+        .await
+        .map_err(|error| format!("set session timeouts: {error}"))
+}
+
+/// Builds the backend-specific `SET` statements for the requested session timeouts (empty when none
+/// are requested). MySQL has no DDL statement timeout, so `statement_timeout` is dropped there.
+fn session_timeout_statements(
+    backend: BackendKind,
+    lock_timeout: Option<u64>,
+    statement_timeout: Option<u64>,
+) -> Vec<String> {
+    let mut statements = Vec::new();
+    match backend {
+        BackendKind::Postgres => {
+            if let Some(secs) = lock_timeout {
+                statements.push(format!("SET lock_timeout = '{secs}s'"));
+            }
+            if let Some(secs) = statement_timeout {
+                statements.push(format!("SET statement_timeout = '{secs}s'"));
+            }
+        }
+        BackendKind::Mysql => {
+            if let Some(secs) = lock_timeout {
+                statements.push(format!("SET SESSION lock_wait_timeout = {secs}"));
+            }
+        }
+    }
+    statements
 }
 
 fn read_refactor_file(path: &Path) -> Result<RefactorLog, String> {
@@ -1438,6 +1518,24 @@ mod tests {
         let error = validate_url(BackendKind::Postgres, "postgres://u:s3cret@/db").unwrap_err();
         assert!(error.contains("missing host"));
         assert!(!error.contains("s3cret"));
+    }
+
+    #[test]
+    fn session_timeouts_render_per_backend() {
+        use super::session_timeout_statements;
+        assert_eq!(
+            session_timeout_statements(BackendKind::Postgres, Some(5), Some(30)),
+            vec![
+                "SET lock_timeout = '5s'".to_owned(),
+                "SET statement_timeout = '30s'".to_owned(),
+            ]
+        );
+        // MySQL has no DDL statement timeout, so only the lock timeout is emitted.
+        assert_eq!(
+            session_timeout_statements(BackendKind::Mysql, Some(5), Some(30)),
+            vec!["SET SESSION lock_wait_timeout = 5".to_owned()]
+        );
+        assert!(session_timeout_statements(BackendKind::Postgres, None, None).is_empty());
     }
 
     #[test]
