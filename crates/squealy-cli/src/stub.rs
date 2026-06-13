@@ -1,22 +1,26 @@
 //! Generation of the throwaway extraction stub, plus the strict validation that keeps the
 //! user-supplied `--database` path from injecting arbitrary code into it.
 
+use crate::CliError;
+
 /// Validates `--database` as a bare Rust path (`ident(::ident)*`).
 ///
 /// The value is interpolated into generated source, so anything beyond identifiers and `::` — generics,
 /// whitespace, punctuation — is rejected to prevent code injection when the argument is not trusted.
-pub fn validate_database_path(input: &str) -> Result<String, String> {
+pub fn validate_database_path(input: &str) -> Result<String, CliError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err("`--database` must not be empty".to_owned());
+        return Err(CliError::Message(
+            "`--database` must not be empty".to_owned(),
+        ));
     }
 
     let segments = trimmed.split("::").collect::<Vec<_>>();
     for segment in &segments {
         if !is_plain_ident(segment) {
-            return Err(format!(
+            return Err(CliError::Message(format!(
                 "`--database` must be a plain Rust path (ident::ident); invalid segment `{segment}`"
-            ));
+            )));
         }
     }
 

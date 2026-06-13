@@ -1553,6 +1553,7 @@ dependencies = [
  "squealy-mysql",
  "squealy-postgresql",
  "tempfile",
+ "thiserror",
  "tokio",
 ]
 
@@ -1573,6 +1574,7 @@ dependencies = [
  "kdl",
  "squealy",
  "squealy-postgresql",
+ "thiserror",
  "tokio",
  "tokio-postgres",
  "zip",

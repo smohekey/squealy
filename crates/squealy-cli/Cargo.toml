@@ -20,4 +20,5 @@ squealy-model.workspace = true
 squealy-mysql.workspace = true
 squealy-postgresql = { workspace = true, features = ["schema"] }
 tempfile = "3"
+thiserror.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

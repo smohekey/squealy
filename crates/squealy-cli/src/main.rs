@@ -9,6 +9,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
+use squealy_cli::CliError;
 use squealy_cli::extract::extract_model;
 use squealy_model::{
     ChangeRisk, DatabaseDiffChange, DatabaseModel, DatabasePlan, DatabasePlanStep, DdlExecutor,
@@ -230,25 +231,28 @@ enum RefactorsCommand {
 }
 
 impl ModelSource {
-    fn load(&self) -> Result<DatabaseModel, String> {
+    fn load(&self) -> Result<DatabaseModel, CliError> {
         Ok(self.load_with_refactors()?.model)
     }
 
-    fn load_with_refactors(&self) -> Result<LoadedModel, String> {
+    fn load_with_refactors(&self) -> Result<LoadedModel, CliError> {
         match (&self.database, &self.package) {
             (Some(database), None) => Ok(LoadedModel {
                 model: extract_model(database)?,
                 refactors: RefactorLog::default(),
             }),
             (None, Some(package)) => {
-                let model =
-                    read_package(package).map_err(|error| format!("read package: {error}"))?;
-                let refactors = read_refactor_log(package)
-                    .map_err(|error| format!("read package refactors: {error}"))?;
+                let model = read_package(package)
+                    .map_err(|error| CliError::Message(format!("read package: {error}")))?;
+                let refactors = read_refactor_log(package).map_err(|error| {
+                    CliError::Message(format!("read package refactors: {error}"))
+                })?;
                 Ok(LoadedModel { model, refactors })
             }
             // clap's `group(required, multiple=false)` makes the other shapes unreachable.
-            _ => Err("provide exactly one of --database or --package".to_owned()),
+            _ => Err(CliError::Message(
+                "provide exactly one of --database or --package".to_owned(),
+            )),
         }
     }
 }
@@ -275,7 +279,7 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(cli: Cli) -> Result<(), String> {
+async fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         Command::Capabilities { backend } => {
             print_capabilities(backend.backend);
@@ -284,12 +288,10 @@ async fn run(cli: Cli) -> Result<(), String> {
         Command::Check { source, backend } => {
             let model = source.load()?;
             match backend.backend {
-                BackendKind::Postgres => {
-                    check_create(&model, &Postgres).map_err(|error| format!("check model: {error}"))
-                }
-                BackendKind::Mysql => {
-                    check_create(&model, &Mysql).map_err(|error| format!("check model: {error}"))
-                }
+                BackendKind::Postgres => check_create(&model, &Postgres)
+                    .map_err(|error| CliError::Message(format!("check model: {error}"))),
+                BackendKind::Mysql => check_create(&model, &Mysql)
+                    .map_err(|error| CliError::Message(format!("check model: {error}"))),
             }
         }
         Command::Script { source, backend } => {
@@ -298,7 +300,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 BackendKind::Postgres => render_create_sql(&model, &Postgres),
                 BackendKind::Mysql => render_create_sql(&model, &Mysql),
             }
-            .map_err(|error| format!("render DDL: {error}"))?;
+            .map_err(|error| CliError::Message(format!("render DDL: {error}")))?;
             print!("{sql}");
             Ok(())
         }
@@ -311,9 +313,10 @@ async fn run(cli: Cli) -> Result<(), String> {
             if let Some(refactors) = refactors {
                 let refactors = read_refactor_file(&refactors)?;
                 write_package_with_refactors(&model, &refactors, &output)
-                    .map_err(|error| format!("write package: {error}"))
+                    .map_err(|error| CliError::Message(format!("write package: {error}")))
             } else {
-                write_package(&model, &output).map_err(|error| format!("write package: {error}"))
+                write_package(&model, &output)
+                    .map_err(|error| CliError::Message(format!("write package: {error}")))
             }
         }
         Command::Diff {
@@ -323,9 +326,10 @@ async fn run(cli: Cli) -> Result<(), String> {
             allow_destructive,
             allow_ambiguous,
         } => {
-            let desired =
-                read_package(&desired).map_err(|error| format!("read desired: {error}"))?;
-            let actual = read_package(&actual).map_err(|error| format!("read actual: {error}"))?;
+            let desired = read_package(&desired)
+                .map_err(|error| CliError::Message(format!("read desired: {error}")))?;
+            let actual = read_package(&actual)
+                .map_err(|error| CliError::Message(format!("read actual: {error}")))?;
             let diff = diff_models(&desired, &actual);
             print_diff(&diff);
             if check_policy {
@@ -336,7 +340,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                         allow_ambiguous,
                     },
                 )
-                .map_err(|error| format!("check diff policy: {error}"))?;
+                .map_err(|error| CliError::Message(format!("check diff policy: {error}")))?;
             }
             Ok(())
         }
@@ -348,21 +352,22 @@ async fn run(cli: Cli) -> Result<(), String> {
             allow_ambiguous,
         } => {
             let refactors = read_refactor_log(&desired)
-                .map_err(|error| format!("read desired refactors: {error}"))?;
-            let desired =
-                read_package(&desired).map_err(|error| format!("read desired: {error}"))?;
-            let actual = read_package(&actual).map_err(|error| format!("read actual: {error}"))?;
+                .map_err(|error| CliError::Message(format!("read desired refactors: {error}")))?;
+            let desired = read_package(&desired)
+                .map_err(|error| CliError::Message(format!("read desired: {error}")))?;
+            let actual = read_package(&actual)
+                .map_err(|error| CliError::Message(format!("read actual: {error}")))?;
             let policy = DiffPolicy {
                 allow_destructive,
                 allow_ambiguous,
             };
             let plan = plan_models_with_refactors(&desired, &actual, &refactors, policy)
-                .map_err(|error| format!("plan schema changes: {error}"))?;
+                .map_err(|error| CliError::Message(format!("plan schema changes: {error}")))?;
             let sql = match backend.backend {
                 BackendKind::Postgres => render_plan_sql(&plan, &Postgres),
                 BackendKind::Mysql => render_plan_sql(&plan, &Mysql),
             }
-            .map_err(|error| format!("render plan: {error}"))?;
+            .map_err(|error| CliError::Message(format!("render plan: {error}")))?;
             print!("{sql}");
             Ok(())
         }
@@ -375,23 +380,29 @@ async fn run(cli: Cli) -> Result<(), String> {
             match backend.backend {
                 BackendKind::Postgres => {
                     let mut connection = Postgres.connect(&url).await.map_err(|error| {
-                        format!("connect: {}", redact_secret(&error.to_string(), url))
+                        CliError::Message(format!(
+                            "connect: {}",
+                            redact_secret(&error.to_string(), url)
+                        ))
                     })?;
                     let model = introspect(&mut connection)
                         .await
-                        .map_err(|error| format!("introspect: {error}"))?;
+                        .map_err(|error| CliError::Message(format!("introspect: {error}")))?;
                     write_package(&model, &output)
-                        .map_err(|error| format!("write package: {error}"))
+                        .map_err(|error| CliError::Message(format!("write package: {error}")))
                 }
                 BackendKind::Mysql => {
                     let mut connection = Mysql.connect(&url).await.map_err(|error| {
-                        format!("connect: {}", redact_secret(&error.to_string(), url))
+                        CliError::Message(format!(
+                            "connect: {}",
+                            redact_secret(&error.to_string(), url)
+                        ))
                     })?;
                     let model = introspect(&mut connection)
                         .await
-                        .map_err(|error| format!("introspect: {error}"))?;
+                        .map_err(|error| CliError::Message(format!("introspect: {error}")))?;
                     write_package(&model, &output)
-                        .map_err(|error| format!("write package: {error}"))
+                        .map_err(|error| CliError::Message(format!("write package: {error}")))
                 }
             }
         }
@@ -410,8 +421,9 @@ async fn run(cli: Cli) -> Result<(), String> {
             check_model_for_backend(&loaded.model, backend.backend)?;
             let (actual, applied_ids, live_metadata, publish_history) =
                 live_status_inputs(backend.backend, &url, history).await?;
-            pending_refactors(&loaded.refactors, &applied_ids, &actual)
-                .map_err(|error| format!("applied refactor metadata mismatch: {error}"))?;
+            pending_refactors(&loaded.refactors, &applied_ids, &actual).map_err(|error| {
+                CliError::Message(format!("applied refactor metadata mismatch: {error}"))
+            })?;
             let desired_metadata = package_metadata(&loaded.model, &loaded.refactors);
             if json {
                 print_status_json(
@@ -470,7 +482,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     BackendKind::Postgres => render_create_sql(&loaded.model, &Postgres),
                     BackendKind::Mysql => render_create_sql(&loaded.model, &Mysql),
                 }
-                .map_err(|error| format!("render DDL: {error}"))?;
+                .map_err(|error| CliError::Message(format!("render DDL: {error}")))?;
                 print!("{sql}");
                 return Ok(());
             }
@@ -478,7 +490,10 @@ async fn run(cli: Cli) -> Result<(), String> {
             match backend.backend {
                 BackendKind::Postgres => {
                     let mut connection = Postgres.connect(&url).await.map_err(|error| {
-                        format!("connect: {}", redact_secret(&error.to_string(), url))
+                        CliError::Message(format!(
+                            "connect: {}",
+                            redact_secret(&error.to_string(), url)
+                        ))
                     })?;
                     if !report {
                         apply_session_timeouts(
@@ -491,7 +506,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     }
                     if incremental {
                         check_create(&loaded.model, &Postgres)
-                            .map_err(|error| format!("check model: {error}"))?;
+                            .map_err(|error| CliError::Message(format!("check model: {error}")))?;
                         let plan = plan_from_database_with_refactors(
                             &loaded.model,
                             &loaded.refactors,
@@ -502,29 +517,33 @@ async fn run(cli: Cli) -> Result<(), String> {
                             },
                         )
                         .await
-                        .map_err(|error| format!("plan: {error}"))?;
+                        .map_err(|error| CliError::Message(format!("plan: {error}")))?;
                         if report {
-                            let sql = render_plan_sql(&plan, &Postgres)
-                                .map_err(|error| format!("render plan: {error}"))?;
+                            let sql = render_plan_sql(&plan, &Postgres).map_err(|error| {
+                                CliError::Message(format!("render plan: {error}"))
+                            })?;
                             print!("{sql}");
                             Ok(())
                         } else {
                             confirm_destructive(&plan, yes)?;
                             apply_plan(&plan, &Postgres, &mut connection)
                                 .await
-                                .map_err(|error| format!("publish: {error}"))?;
+                                .map_err(|error| CliError::Message(format!("publish: {error}")))?;
                             record_publish_metadata(&loaded, "incremental", &mut connection).await
                         }
                     } else {
                         publish(&loaded.model, &Postgres, &mut connection)
                             .await
-                            .map_err(|error| format!("publish: {error}"))?;
+                            .map_err(|error| CliError::Message(format!("publish: {error}")))?;
                         record_publish_metadata(&loaded, "create", &mut connection).await
                     }
                 }
                 BackendKind::Mysql => {
                     let mut connection = Mysql.connect(&url).await.map_err(|error| {
-                        format!("connect: {}", redact_secret(&error.to_string(), url))
+                        CliError::Message(format!(
+                            "connect: {}",
+                            redact_secret(&error.to_string(), url)
+                        ))
                     })?;
                     if !report {
                         apply_session_timeouts(
@@ -537,7 +556,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     }
                     if incremental {
                         check_create(&loaded.model, &Mysql)
-                            .map_err(|error| format!("check model: {error}"))?;
+                            .map_err(|error| CliError::Message(format!("check model: {error}")))?;
                         let plan = plan_from_database_with_refactors(
                             &loaded.model,
                             &loaded.refactors,
@@ -548,23 +567,24 @@ async fn run(cli: Cli) -> Result<(), String> {
                             },
                         )
                         .await
-                        .map_err(|error| format!("plan: {error}"))?;
+                        .map_err(|error| CliError::Message(format!("plan: {error}")))?;
                         if report {
-                            let sql = render_plan_sql(&plan, &Mysql)
-                                .map_err(|error| format!("render plan: {error}"))?;
+                            let sql = render_plan_sql(&plan, &Mysql).map_err(|error| {
+                                CliError::Message(format!("render plan: {error}"))
+                            })?;
                             print!("{sql}");
                             Ok(())
                         } else {
                             confirm_destructive(&plan, yes)?;
                             apply_plan(&plan, &Mysql, &mut connection)
                                 .await
-                                .map_err(|error| format!("publish: {error}"))?;
+                                .map_err(|error| CliError::Message(format!("publish: {error}")))?;
                             record_publish_metadata(&loaded, "incremental", &mut connection).await
                         }
                     } else {
                         publish(&loaded.model, &Mysql, &mut connection)
                             .await
-                            .map_err(|error| format!("publish: {error}"))?;
+                            .map_err(|error| CliError::Message(format!("publish: {error}")))?;
                         record_publish_metadata(&loaded, "create", &mut connection).await
                     }
                 }
@@ -573,14 +593,12 @@ async fn run(cli: Cli) -> Result<(), String> {
     }
 }
 
-fn check_model_for_backend(model: &DatabaseModel, backend: BackendKind) -> Result<(), String> {
+fn check_model_for_backend(model: &DatabaseModel, backend: BackendKind) -> Result<(), CliError> {
     match backend {
-        BackendKind::Postgres => {
-            check_create(model, &Postgres).map_err(|error| format!("check model: {error}"))
-        }
-        BackendKind::Mysql => {
-            check_create(model, &Mysql).map_err(|error| format!("check model: {error}"))
-        }
+        BackendKind::Postgres => check_create(model, &Postgres)
+            .map_err(|error| CliError::Message(format!("check model: {error}"))),
+        BackendKind::Mysql => check_create(model, &Mysql)
+            .map_err(|error| CliError::Message(format!("check model: {error}"))),
     }
 }
 
@@ -595,52 +613,56 @@ async fn live_status_inputs(
         Vec<(String, String)>,
         Vec<SchemaPublishRecord>,
     ),
-    String,
+    CliError,
 > {
     validate_url(backend, url)?;
     match backend {
         BackendKind::Postgres => {
-            let mut connection = Postgres
-                .connect(url)
-                .await
-                .map_err(|error| format!("connect: {}", redact_secret(&error.to_string(), url)))?;
+            let mut connection = Postgres.connect(url).await.map_err(|error| {
+                CliError::Message(format!(
+                    "connect: {}",
+                    redact_secret(&error.to_string(), url)
+                ))
+            })?;
             let actual = introspect(&mut connection)
                 .await
-                .map_err(|error| format!("introspect: {error}"))?;
+                .map_err(|error| CliError::Message(format!("introspect: {error}")))?;
             let applied_ids = connection
                 .applied_refactor_ids()
                 .await
-                .map_err(|error| format!("read applied refactors: {error}"))?;
+                .map_err(|error| CliError::Message(format!("read applied refactors: {error}")))?;
             let metadata = connection
                 .schema_metadata()
                 .await
-                .map_err(|error| format!("read schema metadata: {error}"))?;
+                .map_err(|error| CliError::Message(format!("read schema metadata: {error}")))?;
             let publish_history = connection
                 .schema_publish_history(history)
                 .await
-                .map_err(|error| format!("read publish history: {error}"))?;
+                .map_err(|error| CliError::Message(format!("read publish history: {error}")))?;
             Ok((actual, applied_ids, metadata, publish_history))
         }
         BackendKind::Mysql => {
-            let mut connection = Mysql
-                .connect(url)
-                .await
-                .map_err(|error| format!("connect: {}", redact_secret(&error.to_string(), url)))?;
+            let mut connection = Mysql.connect(url).await.map_err(|error| {
+                CliError::Message(format!(
+                    "connect: {}",
+                    redact_secret(&error.to_string(), url)
+                ))
+            })?;
             let actual = introspect(&mut connection)
                 .await
-                .map_err(|error| format!("introspect: {error}"))?;
+                .map_err(|error| CliError::Message(format!("introspect: {error}")))?;
             let applied_ids = connection
                 .applied_refactor_ids()
                 .await
-                .map_err(|error| format!("read applied refactors: {error}"))?;
+                .map_err(|error| CliError::Message(format!("read applied refactors: {error}")))?;
             let metadata = connection
                 .schema_metadata()
                 .await
-                .map_err(|error| format!("read schema metadata: {error}"))?;
+                .map_err(|error| CliError::Message(format!("read schema metadata: {error}")))?;
             let publish_history = connection
                 .schema_publish_history(history)
                 .await
-                .map_err(|error| format!("read publish history: {error}"))?;
+                .map_err(|error| CliError::Message(format!("read publish history: {error}")))?;
             Ok((actual, applied_ids, metadata, publish_history))
         }
     }
@@ -650,7 +672,7 @@ async fn record_publish_metadata<C>(
     loaded: &LoadedModel,
     mode: &str,
     connection: &mut C,
-) -> Result<(), String>
+) -> Result<(), CliError>
 where
     C: SchemaMetadataStore + SchemaPublishHistoryStore<Error = <C as SchemaMetadataStore>::Error>,
     <C as SchemaMetadataStore>::Error: std::fmt::Display,
@@ -661,25 +683,25 @@ where
     connection
         .record_schema_metadata(&metadata)
         .await
-        .map_err(|error| format!("record schema metadata: {error}"))?;
+        .map_err(|error| CliError::Message(format!("record schema metadata: {error}")))?;
     connection
         .record_schema_publish(mode, package_hash, package_format_version)
         .await
-        .map_err(|error| format!("record publish history: {error}"))
+        .map_err(|error| CliError::Message(format!("record publish history: {error}")))
 }
 
 fn metadata_value<'metadata>(
     metadata: &'metadata [(String, String)],
     key: &str,
-) -> Result<&'metadata str, String> {
+) -> Result<&'metadata str, CliError> {
     metadata
         .iter()
         .find(|(metadata_key, _)| metadata_key == key)
         .map(|(_, value)| value.as_str())
-        .ok_or_else(|| format!("missing package metadata key `{key}`"))
+        .ok_or_else(|| CliError::Message(format!("missing package metadata key `{key}`")))
 }
 
-async fn run_refactors(command: RefactorsCommand) -> Result<(), String> {
+async fn run_refactors(command: RefactorsCommand) -> Result<(), CliError> {
     match command {
         RefactorsCommand::List {
             backend,
@@ -688,8 +710,9 @@ async fn run_refactors(command: RefactorsCommand) -> Result<(), String> {
         } => {
             let applied_ids = applied_refactor_ids(backend.backend, &url).await?;
             if let Some(package) = package {
-                let refactors = read_refactor_log(&package)
-                    .map_err(|error| format!("read package refactors: {error}"))?;
+                let refactors = read_refactor_log(&package).map_err(|error| {
+                    CliError::Message(format!("read package refactors: {error}"))
+                })?;
                 print_refactor_status(&refactors, &applied_ids);
             } else {
                 print_applied_refactors(&applied_ids);
@@ -703,25 +726,35 @@ async fn run_refactors(command: RefactorsCommand) -> Result<(), String> {
         } => {
             validate_url(backend.backend, &url)?;
             let refactors = read_refactor_log(&package)
-                .map_err(|error| format!("read package refactors: {error}"))?;
+                .map_err(|error| CliError::Message(format!("read package refactors: {error}")))?;
             match backend.backend {
                 BackendKind::Postgres => {
                     let mut connection = Postgres.connect(&url).await.map_err(|error| {
-                        format!("connect: {}", redact_secret(&error.to_string(), url))
+                        CliError::Message(format!(
+                            "connect: {}",
+                            redact_secret(&error.to_string(), url)
+                        ))
                     })?;
                     let report = repair_refactor_metadata(&refactors, &mut connection)
                         .await
-                        .map_err(|error| format!("repair refactor metadata: {error}"))?;
+                        .map_err(|error| {
+                            CliError::Message(format!("repair refactor metadata: {error}"))
+                        })?;
                     print_refactor_repair_report(&report);
                     Ok(())
                 }
                 BackendKind::Mysql => {
                     let mut connection = Mysql.connect(&url).await.map_err(|error| {
-                        format!("connect: {}", redact_secret(&error.to_string(), url))
+                        CliError::Message(format!(
+                            "connect: {}",
+                            redact_secret(&error.to_string(), url)
+                        ))
                     })?;
                     let report = repair_refactor_metadata(&refactors, &mut connection)
                         .await
-                        .map_err(|error| format!("repair refactor metadata: {error}"))?;
+                        .map_err(|error| {
+                            CliError::Message(format!("repair refactor metadata: {error}"))
+                        })?;
                     print_refactor_repair_report(&report);
                     Ok(())
                 }
@@ -730,28 +763,32 @@ async fn run_refactors(command: RefactorsCommand) -> Result<(), String> {
     }
 }
 
-async fn applied_refactor_ids(backend: BackendKind, url: &str) -> Result<Vec<String>, String> {
+async fn applied_refactor_ids(backend: BackendKind, url: &str) -> Result<Vec<String>, CliError> {
     validate_url(backend, url)?;
     match backend {
         BackendKind::Postgres => {
-            let mut connection = Postgres
-                .connect(url)
-                .await
-                .map_err(|error| format!("connect: {}", redact_secret(&error.to_string(), url)))?;
+            let mut connection = Postgres.connect(url).await.map_err(|error| {
+                CliError::Message(format!(
+                    "connect: {}",
+                    redact_secret(&error.to_string(), url)
+                ))
+            })?;
             connection
                 .applied_refactor_ids()
                 .await
-                .map_err(|error| format!("read applied refactors: {error}"))
+                .map_err(|error| CliError::Message(format!("read applied refactors: {error}")))
         }
         BackendKind::Mysql => {
-            let mut connection = Mysql
-                .connect(url)
-                .await
-                .map_err(|error| format!("connect: {}", redact_secret(&error.to_string(), url)))?;
+            let mut connection = Mysql.connect(url).await.map_err(|error| {
+                CliError::Message(format!(
+                    "connect: {}",
+                    redact_secret(&error.to_string(), url)
+                ))
+            })?;
             connection
                 .applied_refactor_ids()
                 .await
-                .map_err(|error| format!("read applied refactors: {error}"))
+                .map_err(|error| CliError::Message(format!("read applied refactors: {error}")))
         }
     }
 }
@@ -778,12 +815,12 @@ fn url_password(url: &str) -> Option<&str> {
 /// Validates a connection URL before we hand it to a driver, so a malformed URL or a
 /// backend/scheme mismatch fails with a clear, credential-free message instead of a cryptic
 /// driver error. Any URL echoed in an error is password-redacted.
-fn validate_url(backend: BackendKind, url: &str) -> Result<(), String> {
+fn validate_url(backend: BackendKind, url: &str) -> Result<(), CliError> {
     let Some((scheme, after)) = url.split_once("://") else {
-        return Err(format!(
+        return Err(CliError::Message(format!(
             "invalid connection URL `{}`: expected `scheme://...`",
             redact_secret(url, url)
-        ));
+        )));
     };
     let scheme = scheme.to_ascii_lowercase();
     let scheme_ok = match backend {
@@ -791,20 +828,20 @@ fn validate_url(backend: BackendKind, url: &str) -> Result<(), String> {
         BackendKind::Mysql => scheme == "mysql",
     };
     if !scheme_ok {
-        return Err(format!(
+        return Err(CliError::Message(format!(
             "connection URL scheme `{scheme}` does not match backend `{}`",
             backend.value_name()
-        ));
+        )));
     }
     let authority = &after[..after.find(['/', '?', '#']).unwrap_or(after.len())];
     let host = authority
         .rsplit_once('@')
         .map_or(authority, |(_userinfo, host)| host);
     if host.is_empty() {
-        return Err(format!(
+        return Err(CliError::Message(format!(
             "invalid connection URL `{}`: missing host",
             redact_secret(url, url)
-        ));
+        )));
     }
     Ok(())
 }
@@ -816,7 +853,7 @@ async fn apply_session_timeouts<C>(
     backend: BackendKind,
     lock_timeout: Option<u64>,
     statement_timeout: Option<u64>,
-) -> Result<(), String>
+) -> Result<(), CliError>
 where
     C: DdlExecutor,
     C::Error: std::fmt::Display,
@@ -831,14 +868,14 @@ where
     connection
         .execute_ddl(&statements.join(";\n"))
         .await
-        .map_err(|error| format!("set session timeouts: {error}"))
+        .map_err(|error| CliError::Message(format!("set session timeouts: {error}")))
 }
 
 /// Requires explicit confirmation before applying a plan that contains destructive steps. With
 /// `assume_yes` the confirmation is taken as given (for automation); otherwise an interactive
 /// terminal is prompted, and a non-interactive stdin is refused so destructive changes are never
 /// applied unattended.
-fn confirm_destructive(plan: &DatabasePlan, assume_yes: bool) -> Result<(), String> {
+fn confirm_destructive(plan: &DatabasePlan, assume_yes: bool) -> Result<(), CliError> {
     use std::io::{IsTerminal, Write};
 
     let destructive: Vec<_> = classified_plan_steps(plan)
@@ -862,20 +899,22 @@ fn confirm_destructive(plan: &DatabasePlan, assume_yes: bool) -> Result<(), Stri
         return Ok(());
     }
     if !std::io::stdin().is_terminal() {
-        return Err(
+        return Err(CliError::Message(
             "destructive changes require confirmation; re-run with --yes to apply".to_owned(),
-        );
+        ));
     }
     eprint!("Type 'yes' to apply these changes: ");
     std::io::stderr().flush().ok();
     let mut answer = String::new();
     std::io::stdin()
         .read_line(&mut answer)
-        .map_err(|error| format!("read confirmation: {error}"))?;
+        .map_err(|error| CliError::Message(format!("read confirmation: {error}")))?;
     if answer.trim() == "yes" {
         Ok(())
     } else {
-        Err("aborted: destructive changes were not confirmed".to_owned())
+        Err(CliError::Message(
+            "aborted: destructive changes were not confirmed".to_owned(),
+        ))
     }
 }
 
@@ -962,10 +1001,11 @@ fn session_timeout_statements(
     statements
 }
 
-fn read_refactor_file(path: &Path) -> Result<RefactorLog, String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|error| format!("read refactor file: {error}"))?;
-    refactor_from_kdl(&text).map_err(|error| format!("parse refactor file: {error}"))
+fn read_refactor_file(path: &Path) -> Result<RefactorLog, CliError> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| CliError::Message(format!("read refactor file: {error}")))?;
+    refactor_from_kdl(&text)
+        .map_err(|error| CliError::Message(format!("parse refactor file: {error}")))
 }
 
 fn print_applied_refactors(applied_ids: &[String]) {
@@ -1093,7 +1133,7 @@ fn print_status_json(
     desired_metadata: &[(String, String)],
     live_metadata: &[(String, String)],
     publish_history: &[SchemaPublishRecord],
-) -> Result<(), String> {
+) -> Result<(), CliError> {
     let diff = diff_models(desired, actual);
     let refactors = refactor_status_summary(refactors, applied_ids);
     let metadata = metadata_status_entries(desired_metadata, live_metadata)
@@ -1139,7 +1179,7 @@ fn print_status_json(
     });
 
     let json = serde_json::to_string_pretty(&status)
-        .map_err(|error| format!("render status json: {error}"))?;
+        .map_err(|error| CliError::Message(format!("render status json: {error}")))?;
     println!("{json}");
     Ok(())
 }
@@ -1380,7 +1420,7 @@ fn check_status(
     applied_ids: &[String],
     desired_metadata: &[(String, String)],
     live_metadata: &[(String, String)],
-) -> Result<(), String> {
+) -> Result<(), CliError> {
     let mut failures = Vec::new();
 
     if checks.schema && !diff_models(desired, actual).is_empty() {
@@ -1396,7 +1436,10 @@ fn check_status(
     if failures.is_empty() {
         Ok(())
     } else {
-        Err(format!("status check failed: {}", failures.join(", ")))
+        Err(CliError::Message(format!(
+            "status check failed: {}",
+            failures.join(", ")
+        )))
     }
 }
 
@@ -1627,14 +1670,18 @@ mod tests {
 
     #[test]
     fn validate_url_rejects_backend_scheme_mismatch() {
-        let error = validate_url(BackendKind::Mysql, "postgres://host/db").unwrap_err();
+        let error = validate_url(BackendKind::Mysql, "postgres://host/db")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("does not match backend `mysql`"));
     }
 
     #[test]
     fn validate_url_rejects_malformed_and_redacts() {
         assert!(validate_url(BackendKind::Postgres, "host/db").is_err());
-        let error = validate_url(BackendKind::Postgres, "postgres://u:s3cret@/db").unwrap_err();
+        let error = validate_url(BackendKind::Postgres, "postgres://u:s3cret@/db")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("missing host"));
         assert!(!error.contains("s3cret"));
     }
@@ -1665,7 +1712,7 @@ mod tests {
             }],
         };
         // Test stdin is not a terminal, so confirmation must be refused without --yes.
-        let error = confirm_destructive(&plan, false).unwrap_err();
+        let error = confirm_destructive(&plan, false).unwrap_err().to_string();
         assert!(error.contains("--yes"));
     }
 
