@@ -37,6 +37,11 @@ const MODEL_ENTRY: &str = "model.kdl";
 const MANIFEST_ENTRY: &str = "manifest.kdl";
 const REFACTOR_ENTRY: &str = "refactor.kdl";
 
+/// Maximum number of bytes read from any single package entry. Reading is bounded so a malicious
+/// or corrupt archive (for example a zip bomb that declares a huge uncompressed size) cannot
+/// exhaust memory. 64 MiB is far larger than any realistic schema document.
+const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+
 /// An error produced while reading or writing a `.sqz` package.
 #[derive(Debug)]
 pub enum PackageError {
@@ -44,6 +49,12 @@ pub enum PackageError {
     Zip(String),
     /// The KDL failed to parse, or did not match the expected schema-model shape.
     Malformed(String),
+    /// A package entry was larger than [`MAX_ENTRY_BYTES`], so it was refused before being read
+    /// fully into memory.
+    TooLarge {
+        entry: &'static str,
+        limit: u64,
+    },
 }
 
 impl fmt::Display for PackageError {
@@ -52,6 +63,10 @@ impl fmt::Display for PackageError {
             PackageError::Io(error) => write!(formatter, "package io error: {error}"),
             PackageError::Zip(error) => write!(formatter, "package archive error: {error}"),
             PackageError::Malformed(error) => write!(formatter, "malformed package: {error}"),
+            PackageError::TooLarge { entry, limit } => write!(
+                formatter,
+                "package entry `{entry}` exceeds the {limit}-byte read limit"
+            ),
         }
     }
 }
@@ -72,6 +87,26 @@ impl From<zip::result::ZipError> for PackageError {
 
 fn malformed(message: impl Into<String>) -> PackageError {
     PackageError::Malformed(message.into())
+}
+
+/// Reads a package `entry` into a string, refusing anything larger than [`MAX_ENTRY_BYTES`] so a
+/// hostile archive cannot exhaust memory. Memory use is bounded regardless of the size the archive
+/// header declares, because the reader itself is capped.
+fn read_entry_to_string(entry: impl Read, name: &'static str) -> Result<String, PackageError> {
+    read_entry_to_string_limited(entry, name, MAX_ENTRY_BYTES)
+}
+
+fn read_entry_to_string_limited(
+    entry: impl Read,
+    name: &'static str,
+    limit: u64,
+) -> Result<String, PackageError> {
+    let mut text = String::new();
+    let read = entry.take(limit + 1).read_to_string(&mut text)?;
+    if read as u64 > limit {
+        return Err(PackageError::TooLarge { entry: name, limit });
+    }
+    Ok(text)
 }
 
 // --- Public API ---------------------------------------------------------------------------------
@@ -157,10 +192,7 @@ pub fn write_package_with_refactors_to<W: Write + io::Seek>(
 /// Reads a model from any package reader (used by [`read_package`]).
 pub fn read_package_from<R: Read + io::Seek>(reader: R) -> Result<DatabaseModel, PackageError> {
     let mut archive = zip::ZipArchive::new(reader)?;
-    let mut model_kdl = String::new();
-    archive
-        .by_name(MODEL_ENTRY)?
-        .read_to_string(&mut model_kdl)?;
+    let model_kdl = read_entry_to_string(archive.by_name(MODEL_ENTRY)?, MODEL_ENTRY)?;
     from_kdl(&model_kdl)
 }
 
@@ -171,11 +203,10 @@ pub fn read_refactor_log_from_package<R: Read + io::Seek>(
     reader: R,
 ) -> Result<RefactorLog, PackageError> {
     let mut archive = zip::ZipArchive::new(reader)?;
-    let Ok(mut entry) = archive.by_name(REFACTOR_ENTRY) else {
+    let Ok(entry) = archive.by_name(REFACTOR_ENTRY) else {
         return Ok(RefactorLog::default());
     };
-    let mut refactor_kdl = String::new();
-    entry.read_to_string(&mut refactor_kdl)?;
+    let refactor_kdl = read_entry_to_string(entry, REFACTOR_ENTRY)?;
     refactor_from_kdl(&refactor_kdl)
 }
 
@@ -1200,6 +1231,27 @@ fn positioned_index_metadata_from_node(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn read_entry_rejects_oversized_input() {
+        let oversized = vec![b'x'; 64];
+        let error =
+            read_entry_to_string_limited(Cursor::new(&oversized), "model.kdl", 16).unwrap_err();
+        assert!(matches!(
+            error,
+            PackageError::TooLarge {
+                entry: "model.kdl",
+                limit: 16
+            }
+        ));
+    }
+
+    #[test]
+    fn read_entry_accepts_input_at_the_limit() {
+        let data = vec![b'x'; 16];
+        let text = read_entry_to_string_limited(Cursor::new(&data), "model.kdl", 16).unwrap();
+        assert_eq!(text.len(), 16);
+    }
 
     fn sample_model() -> DatabaseModel {
         DatabaseModel {
