@@ -12,6 +12,7 @@ categories.workspace = true
 [dependencies]
 kdl.workspace = true
 squealy.workspace = true
+thiserror.workspace = true
 zip.workspace = true
 
 [dev-dependencies]

@@ -14,6 +14,16 @@ use crate::{
 
 type ErrorOf<Builder> = <<Builder as QueryBuilder>::Backend as Backend>::Error;
 
+/// Result of collecting every row of a query together with the affected-row count.
+type RowsWithAffected<Row, Builder> = Result<(Vec<Row>, u64), ErrorOf<Builder>>;
+
+/// Result of fetching an optional row together with the affected-row count.
+type OptionalRowWithAffected<Row, Builder> = Result<(Option<Row>, u64), ErrorOf<Builder>>;
+
+/// The row list produced by appending one `InsertRow` of `Values` to the existing `Rows`.
+type PushedInsertRows<S, Columns, Rows, Values> =
+    <Rows as PushBack<InsertRow<<Columns as InsertColumnValues<S, Values>>::Assignments>>>::Output;
+
 /// Type-level identity for a table column that can be assigned in mutations.
 #[doc(hidden)]
 pub trait ColumnKey: ExprKind {
@@ -259,6 +269,15 @@ where
 {
     pub fn new() -> Self {
         Self { _kind: PhantomData }
+    }
+}
+
+impl<K> Default for RuntimeAssignmentValue<K>
+where
+    K: ExprKind,
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1278,7 +1297,7 @@ pub trait PreparedMutationQuery<'conn> {
     fn collect_with_affected<'query, ParamValues>(
         &'query self,
         params: ParamValues,
-    ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), ErrorOf<Self::Builder>>> + Send + 'query
+    ) -> impl Future<Output = RowsWithAffected<Self::Row, Self::Builder>> + Send + 'query
     where
         'conn: 'query,
         ParamValues: crate::PreparedParamValues<Self::Params> + 'query,
@@ -1308,7 +1327,7 @@ pub trait PreparedMutationQuery<'conn> {
     fn fetch_optional_with_affected<'query, ParamValues>(
         &'query self,
         params: ParamValues,
-    ) -> impl Future<Output = Result<(Option<Self::Row>, u64), ErrorOf<Self::Builder>>> + Send + 'query
+    ) -> impl Future<Output = OptionalRowWithAffected<Self::Row, Self::Builder>> + Send + 'query
     where
         'conn: 'query,
         ParamValues: crate::PreparedParamValues<Self::Params> + 'query,
@@ -1504,7 +1523,7 @@ where
 
     fn collect_with_affected<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), ErrorOf<Self::Builder>>> + Send + 'query
+    ) -> impl Future<Output = RowsWithAffected<Self::Row, Self::Builder>> + Send + 'query
     where
         'conn: 'query,
         Rows: 'query,
@@ -1533,7 +1552,7 @@ where
 
     fn fetch_optional_with_affected<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<(Option<Self::Row>, u64), ErrorOf<Self::Builder>>> + Send + 'query
+    ) -> impl Future<Output = OptionalRowWithAffected<Self::Row, Self::Builder>> + Send + 'query
     where
         'conn: 'query,
         Rows: 'query,
@@ -1642,13 +1661,7 @@ where
     pub fn row<Values>(
         self,
         values: Values,
-    ) -> ToColumns<
-        'conn,
-        Conn,
-        S,
-        Columns,
-        <Rows as PushBack<InsertRow<<Columns as InsertColumnValues<S, Values>>::Assignments>>>::Output,
-    >
+    ) -> ToColumns<'conn, Conn, S, Columns, PushedInsertRows<S, Columns, Rows, Values>>
     where
         Columns: InsertColumnValues<S, Values>,
         Rows: PushBack<InsertRow<<Columns as InsertColumnValues<S, Values>>::Assignments>>,
@@ -1918,7 +1931,7 @@ where
 
     fn collect_with_affected<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), ErrorOf<Self::Builder>>> + Send + 'query
+    ) -> impl Future<Output = RowsWithAffected<Self::Row, Self::Builder>> + Send + 'query
     where
         'conn: 'query,
         Columns: 'query,
@@ -1949,7 +1962,7 @@ where
 
     fn fetch_optional_with_affected<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<(Option<Self::Row>, u64), ErrorOf<Self::Builder>>> + Send + 'query
+    ) -> impl Future<Output = OptionalRowWithAffected<Self::Row, Self::Builder>> + Send + 'query
     where
         'conn: 'query,
         Columns: 'query,
@@ -2110,7 +2123,7 @@ where
 
     fn collect_with_affected<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<(Vec<Self::Row>, u64), ErrorOf<Self::Builder>>> + Send + 'query
+    ) -> impl Future<Output = RowsWithAffected<Self::Row, Self::Builder>> + Send + 'query
     where
         'conn: 'query,
         Filters: 'query,
@@ -2139,7 +2152,7 @@ where
 
     fn fetch_optional_with_affected<'query>(
         &'query self,
-    ) -> impl Future<Output = Result<(Option<Self::Row>, u64), ErrorOf<Self::Builder>>> + Send + 'query
+    ) -> impl Future<Output = OptionalRowWithAffected<Self::Row, Self::Builder>> + Send + 'query
     where
         'conn: 'query,
         Filters: 'query,

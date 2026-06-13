@@ -861,6 +861,11 @@ impl<'scope, K> Clone for ColumnRef<'scope, K> {
 
 impl<'scope, K> Copy for ColumnRef<'scope, K> {}
 
+/// The predicate produced by a [`ColumnRef`] comparison helper (`equals`, `less_than`, ...):
+/// a comparison between this column's expression and the right-hand side's AST.
+pub type ColumnComparison<'scope, Cmp, K, RhsAst> =
+    Predicate<'scope, Cmp, ComparePredicateAst<ColumnExprAst<K>, RhsAst>>;
+
 impl<'scope, K> ColumnRef<'scope, K>
 where
     K: ExprKind,
@@ -906,7 +911,7 @@ where
     pub fn equals<'other, R>(
         self,
         other: R,
-    ) -> Predicate<'scope, EqualsPredicate<K, R::Kind>, ComparePredicateAst<ColumnExprAst<K>, R::Ast>>
+    ) -> ColumnComparison<'scope, EqualsPredicate<K, R::Kind>, K, R::Ast>
     where
         R: IntoExpr<'other>,
         R::Kind: ExprKind<Value = K::Value>,
@@ -919,11 +924,7 @@ where
     pub fn not_equals<'other, R>(
         self,
         other: R,
-    ) -> Predicate<
-        'scope,
-        NotEqualsPredicate<K, R::Kind>,
-        ComparePredicateAst<ColumnExprAst<K>, R::Ast>,
-    >
+    ) -> ColumnComparison<'scope, NotEqualsPredicate<K, R::Kind>, K, R::Ast>
     where
         R: IntoExpr<'other>,
         R::Kind: ExprKind<Value = K::Value>,
@@ -936,11 +937,7 @@ where
     pub fn less_than<'other, R>(
         self,
         other: R,
-    ) -> Predicate<
-        'scope,
-        LessThanPredicate<K, R::Kind>,
-        ComparePredicateAst<ColumnExprAst<K>, R::Ast>,
-    >
+    ) -> ColumnComparison<'scope, LessThanPredicate<K, R::Kind>, K, R::Ast>
     where
         R: IntoExpr<'other>,
         R::Kind: ExprKind<Value = K::Value>,
@@ -953,11 +950,7 @@ where
     pub fn less_than_or_equals<'other, R>(
         self,
         other: R,
-    ) -> Predicate<
-        'scope,
-        LessThanOrEqualsPredicate<K, R::Kind>,
-        ComparePredicateAst<ColumnExprAst<K>, R::Ast>,
-    >
+    ) -> ColumnComparison<'scope, LessThanOrEqualsPredicate<K, R::Kind>, K, R::Ast>
     where
         R: IntoExpr<'other>,
         R::Kind: ExprKind<Value = K::Value>,
@@ -970,11 +963,7 @@ where
     pub fn greater_than<'other, R>(
         self,
         other: R,
-    ) -> Predicate<
-        'scope,
-        GreaterThanPredicate<K, R::Kind>,
-        ComparePredicateAst<ColumnExprAst<K>, R::Ast>,
-    >
+    ) -> ColumnComparison<'scope, GreaterThanPredicate<K, R::Kind>, K, R::Ast>
     where
         R: IntoExpr<'other>,
         R::Kind: ExprKind<Value = K::Value>,
@@ -987,11 +976,7 @@ where
     pub fn greater_than_or_equals<'other, R>(
         self,
         other: R,
-    ) -> Predicate<
-        'scope,
-        GreaterThanOrEqualsPredicate<K, R::Kind>,
-        ComparePredicateAst<ColumnExprAst<K>, R::Ast>,
-    >
+    ) -> ColumnComparison<'scope, GreaterThanOrEqualsPredicate<K, R::Kind>, K, R::Ast>
     where
         R: IntoExpr<'other>,
         R::Kind: ExprKind<Value = K::Value>,
@@ -1011,64 +996,8 @@ where
     }
 }
 
-impl<'scope, K> ColumnRef<'scope, K>
-where
-    K: ExprKind,
-    K::Value: SqlNumber,
-{
-    /// SQL numeric addition.
-    pub fn add<R>(
-        self,
-        other: R,
-    ) -> Expr<'scope, AddExpr<K, R::Kind>, BinaryExprAst<ColumnExprAst<K>, R::Ast>>
-    where
-        R: IntoExpr<'scope>,
-        R::Kind: ExprKind<Value = K::Value>,
-        <ColumnExprAst<K> as ExprAst>::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
-    {
-        self.into_expr() + other
-    }
-
-    /// SQL numeric subtraction.
-    pub fn subtract<R>(
-        self,
-        other: R,
-    ) -> Expr<'scope, SubtractExpr<K, R::Kind>, BinaryExprAst<ColumnExprAst<K>, R::Ast>>
-    where
-        R: IntoExpr<'scope>,
-        R::Kind: ExprKind<Value = K::Value>,
-        <ColumnExprAst<K> as ExprAst>::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
-    {
-        self.into_expr() - other
-    }
-
-    /// SQL numeric multiplication.
-    pub fn multiply<R>(
-        self,
-        other: R,
-    ) -> Expr<'scope, MultiplyExpr<K, R::Kind>, BinaryExprAst<ColumnExprAst<K>, R::Ast>>
-    where
-        R: IntoExpr<'scope>,
-        R::Kind: ExprKind<Value = K::Value>,
-        <ColumnExprAst<K> as ExprAst>::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
-    {
-        self.into_expr() * other
-    }
-
-    /// SQL numeric division.
-    pub fn divide<R>(
-        self,
-        other: R,
-    ) -> Expr<'scope, DivideExpr<K, R::Kind>, BinaryExprAst<ColumnExprAst<K>, R::Ast>>
-    where
-        R: IntoExpr<'scope>,
-        R::Kind: ExprKind<Value = K::Value>,
-        K::Value: SqlDivide,
-        <ColumnExprAst<K> as ExprAst>::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
-    {
-        self.into_expr() / other
-    }
-}
+// Numeric arithmetic on a `ColumnRef` is provided by the `Add`/`Sub`/`Mul`/`Div` operator impls
+// below (`column + other`, etc.); the equivalent inherent helpers were redundant with them.
 
 impl<'scope, K> Expr<'scope, K, ColumnExprAst<K>>
 where

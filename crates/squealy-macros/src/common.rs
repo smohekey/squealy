@@ -304,14 +304,13 @@ pub(crate) fn parse_db_type(db_type: &str) -> proc_macro2::TokenStream {
             }
             "decimal" | "numeric" => {
                 let parts = args.split(',').map(str::trim).collect::<Vec<_>>();
-                if let [precision, scale] = parts[..] {
-                    if let (Ok(precision), Ok(scale)) =
+                if let [precision, scale] = parts[..]
+                    && let (Ok(precision), Ok(scale)) =
                         (precision.parse::<u32>(), scale.parse::<u32>())
-                    {
-                        return quote::quote! {
-                            ::squealy::ColumnType::Decimal { precision: #precision, scale: #scale }
-                        };
-                    }
+                {
+                    return quote::quote! {
+                        ::squealy::ColumnType::Decimal { precision: #precision, scale: #scale }
+                    };
                 }
             }
             _ => {}

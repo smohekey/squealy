@@ -8,8 +8,8 @@
 use std::io::{self, Write};
 
 use squealy::{
-    CheckModel, ColumnModel, DatabaseModel, DefaultValue, ForeignKeyModel, IndexModel, SqlType,
-    TableModel,
+    CheckModel, ColumnModel, DatabaseModel, DatabasePlan, DatabasePlanStep, DefaultValue,
+    ForeignKeyModel, GeneratedStorage, IndexModel, SqlType, TableModel, TablePlanStep,
 };
 
 /// Renders ordered create-from-scratch DDL for a whole model. Statements are `;`-terminated and
@@ -57,6 +57,318 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
     Ok(())
 }
 
+/// Renders an ordered incremental DDL plan.
+pub(crate) fn write_plan(plan: &DatabasePlan, writer: &mut impl Write) -> io::Result<()> {
+    let mut first = true;
+    if plan.steps.iter().any(plan_step_has_refactor_id) {
+        statement(writer, &mut first)?;
+        write_create_refactor_log_schema(writer)?;
+        statement(writer, &mut first)?;
+        write_create_refactor_log_table(writer)?;
+    }
+    for step in &plan.steps {
+        write_plan_step(step, writer, &mut first)?;
+    }
+    write_deferred_foreign_keys(plan, writer, &mut first)?;
+    if !first {
+        writer.write_all(b";")?;
+    }
+    Ok(())
+}
+
+/// Emits the `ADD FOREIGN KEY` constraints for every table created in `plan`, deferred until all
+/// `CreateTable` steps have rendered, so a foreign key pointing at a later-created table does not
+/// reference a table that does not exist yet (a single plan can create several tables in name order).
+fn write_deferred_foreign_keys(
+    plan: &DatabasePlan,
+    writer: &mut impl Write,
+    first: &mut bool,
+) -> io::Result<()> {
+    for step in &plan.steps {
+        if let DatabasePlanStep::CreateTable { schema, table } = step {
+            for foreign_key in &table.foreign_keys {
+                statement(writer, first)?;
+                write_add_foreign_key(schema.as_deref(), &table.name, foreign_key, writer)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_plan_step(
+    step: &DatabasePlanStep,
+    writer: &mut impl Write,
+    first: &mut bool,
+) -> io::Result<()> {
+    match step {
+        DatabasePlanStep::CreateSchema { schema } => {
+            if let Some(schema) = schema.as_deref() {
+                statement(writer, first)?;
+                writer.write_all(b"CREATE SCHEMA IF NOT EXISTS ")?;
+                write_quoted_ident(schema, writer)?;
+            }
+        }
+        DatabasePlanStep::DropSchema { schema } => {
+            if let Some(schema) = schema.as_deref() {
+                statement(writer, first)?;
+                writer.write_all(b"DROP SCHEMA ")?;
+                write_quoted_ident(schema, writer)?;
+            }
+        }
+        DatabasePlanStep::CreateTable { schema, table } => {
+            statement(writer, first)?;
+            write_create_table(schema.as_deref(), table, writer)?;
+            write_create_table_extras(schema.as_deref(), table, writer, first)?;
+        }
+        DatabasePlanStep::DropTable { schema, table } => {
+            statement(writer, first)?;
+            writer.write_all(b"DROP TABLE ")?;
+            write_qualified_name(schema.as_deref(), &table.name, writer)?;
+        }
+        DatabasePlanStep::RenameTable {
+            refactor_id,
+            schema,
+            from,
+            to,
+        } => {
+            statement(writer, first)?;
+            writer.write_all(b"RENAME TABLE ")?;
+            write_qualified_name(schema.as_deref(), from, writer)?;
+            writer.write_all(b" TO ")?;
+            write_qualified_name(schema.as_deref(), to, writer)?;
+            if let Some(refactor_id) = refactor_id {
+                statement(writer, first)?;
+                write_record_refactor(refactor_id, writer)?;
+            }
+        }
+        DatabasePlanStep::AlterTable {
+            schema,
+            table,
+            change,
+        } => write_table_plan_step(schema.as_deref(), table, change, writer, first)?,
+    }
+    Ok(())
+}
+
+fn write_create_table_extras(
+    schema: Option<&str>,
+    table: &TableModel,
+    writer: &mut impl Write,
+    first: &mut bool,
+) -> io::Result<()> {
+    for index in &table.indexes {
+        statement(writer, first)?;
+        write_create_index(schema, &table.name, index, writer)?;
+    }
+    Ok(())
+}
+
+fn plan_step_has_refactor_id(step: &DatabasePlanStep) -> bool {
+    match step {
+        DatabasePlanStep::RenameTable { refactor_id, .. } => refactor_id.is_some(),
+        DatabasePlanStep::AlterTable { change, .. } => match change.as_ref() {
+            TablePlanStep::RenameColumn { refactor_id, .. } => refactor_id.is_some(),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn write_create_refactor_log_schema(writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(b"CREATE SCHEMA IF NOT EXISTS `__squealy`")
+}
+
+fn write_create_refactor_log_table(writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(
+        b"CREATE TABLE IF NOT EXISTS `__squealy`.`refactors` (\
+`id` VARCHAR(255) NOT NULL PRIMARY KEY, \
+`applied_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    )
+}
+
+fn write_record_refactor(refactor_id: &str, writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(b"INSERT IGNORE INTO `__squealy`.`refactors` (`id`) VALUES (")?;
+    write_quoted_text(refactor_id, writer)?;
+    writer.write_all(b")")
+}
+
+fn write_table_plan_step(
+    schema: Option<&str>,
+    table: &str,
+    change: &TablePlanStep,
+    writer: &mut impl Write,
+    first: &mut bool,
+) -> io::Result<()> {
+    statement(writer, first)?;
+    match change {
+        TablePlanStep::SetTableComment { after, .. } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" COMMENT = ")?;
+            write_quoted_text(after.as_deref().unwrap_or(""), writer)?;
+        }
+        TablePlanStep::AddColumn { column } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ADD COLUMN ")?;
+            write_column(column, writer)?;
+        }
+        TablePlanStep::DropColumn { column } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP COLUMN ")?;
+            write_quoted_ident(&column.name, writer)?;
+        }
+        TablePlanStep::RenameColumn {
+            refactor_id,
+            from,
+            to,
+        } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" RENAME COLUMN ")?;
+            write_quoted_ident(from, writer)?;
+            writer.write_all(b" TO ")?;
+            write_quoted_ident(to, writer)?;
+            if let Some(refactor_id) = refactor_id {
+                statement(writer, first)?;
+                write_record_refactor(refactor_id, writer)?;
+            }
+        }
+        TablePlanStep::AddPrimaryKey { constraint } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ADD ")?;
+            write_named_constraint("PRIMARY KEY", &constraint.name, &constraint.columns, writer)?;
+        }
+        TablePlanStep::DropPrimaryKey { .. } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP PRIMARY KEY")?;
+        }
+        TablePlanStep::AddUnique { constraint } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ADD ")?;
+            write_named_constraint("UNIQUE", &constraint.name, &constraint.columns, writer)?;
+        }
+        TablePlanStep::DropUnique { constraint } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP INDEX ")?;
+            write_quoted_ident(&constraint.name, writer)?;
+        }
+        TablePlanStep::AddForeignKey { foreign_key } => {
+            write_add_foreign_key(schema, table, foreign_key, writer)?;
+        }
+        TablePlanStep::DropForeignKey { foreign_key } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP FOREIGN KEY ")?;
+            write_quoted_ident(&foreign_key.name, writer)?;
+        }
+        TablePlanStep::AddCheck { check } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ADD ")?;
+            write_check(check, writer)?;
+        }
+        TablePlanStep::DropCheck { check } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP CHECK ")?;
+            write_quoted_ident(&check.name, writer)?;
+        }
+        TablePlanStep::AddIndex { index } => {
+            write_create_index(schema, table, index, writer)?;
+        }
+        TablePlanStep::DropIndex { index } => {
+            writer.write_all(b"DROP INDEX ")?;
+            write_quoted_ident(&index.name, writer)?;
+            writer.write_all(b" ON ")?;
+            write_qualified_name(schema, table, writer)?;
+        }
+        TablePlanStep::AlterPrimaryKey { after, .. } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP PRIMARY KEY")?;
+            statement(writer, first)?;
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ADD ")?;
+            write_named_constraint("PRIMARY KEY", &after.name, &after.columns, writer)?;
+        }
+        TablePlanStep::AlterUnique { before, after } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP INDEX ")?;
+            write_quoted_ident(&before.name, writer)?;
+            statement(writer, first)?;
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ADD ")?;
+            write_named_constraint("UNIQUE", &after.name, &after.columns, writer)?;
+        }
+        TablePlanStep::AlterForeignKey { before, after } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP FOREIGN KEY ")?;
+            write_quoted_ident(&before.name, writer)?;
+            statement(writer, first)?;
+            write_add_foreign_key(schema, table, after, writer)?;
+        }
+        TablePlanStep::AlterCheck { before, after } => {
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" DROP CHECK ")?;
+            write_quoted_ident(&before.name, writer)?;
+            statement(writer, first)?;
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ADD ")?;
+            write_check(after, writer)?;
+        }
+        TablePlanStep::AlterIndex { before, after } => {
+            writer.write_all(b"DROP INDEX ")?;
+            write_quoted_ident(&before.name, writer)?;
+            writer.write_all(b" ON ")?;
+            write_qualified_name(schema, table, writer)?;
+            statement(writer, first)?;
+            write_create_index(schema, table, after, writer)?;
+        }
+        // MySQL has no `USING` cast clause; `MODIFY COLUMN` performs the conversion implicitly, so
+        // any `type_cast` hint is ignored here.
+        TablePlanStep::AlterColumn { before, after, .. } => {
+            write_alter_column(schema, table, before, after, writer)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_alter_column(
+    schema: Option<&str>,
+    table: &str,
+    before: &ColumnModel,
+    after: &ColumnModel,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    if before.name != after.name {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "MySQL incremental column rename rendering is not supported yet",
+        ));
+    }
+
+    // `MODIFY COLUMN` re-specifies the whole column, so identity (`AUTO_INCREMENT`) and generated
+    // transitions are carried by re-emitting the target definition. MySQL rejects the genuinely
+    // impossible transitions (e.g. switching a generated column between VIRTUAL and STORED) at apply
+    // time.
+    writer.write_all(b"ALTER TABLE ")?;
+    write_qualified_name(schema, table, writer)?;
+    writer.write_all(b" MODIFY COLUMN ")?;
+    write_column(after, writer)
+}
+
 fn statement(writer: &mut impl Write, first: &mut bool) -> io::Result<()> {
     if *first {
         *first = false;
@@ -98,7 +410,12 @@ fn write_create_table(
         write_check(check, writer)?;
     }
 
-    writer.write_all(b"\n)")
+    writer.write_all(b"\n)")?;
+    if let Some(comment) = &table.comment {
+        writer.write_all(b" COMMENT=")?;
+        write_quoted_text(comment, writer)?;
+    }
+    Ok(())
 }
 
 fn entry(writer: &mut impl Write, first: &mut bool) -> io::Result<()> {
@@ -114,6 +431,10 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
     write_quoted_ident(&column.name, writer)?;
     writer.write_all(b" ")?;
     write_mysql_sql_type(&column.ty, writer)?;
+    if let Some(collation) = &column.collation {
+        writer.write_all(b" COLLATE ")?;
+        writer.write_all(collation.as_bytes())?;
+    }
     if !column.nullable {
         writer.write_all(b" NOT NULL")?;
     }
@@ -121,8 +442,23 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
         writer.write_all(b" DEFAULT ")?;
         write_default_value(default, writer)?;
     }
-    if column.auto_increment {
+    if column.identity.is_some() {
         writer.write_all(b" AUTO_INCREMENT")?;
+    }
+    if let Some(generated) = &column.generated {
+        writer.write_all(b" GENERATED ALWAYS AS (")?;
+        writer.write_all(generated.expression.as_bytes())?;
+        writer.write_all(b")")?;
+        match generated.storage {
+            GeneratedStorage::Virtual | GeneratedStorage::Unknown => {
+                writer.write_all(b" VIRTUAL")?
+            }
+            GeneratedStorage::Stored => writer.write_all(b" STORED")?,
+        }
+    }
+    if let Some(comment) = &column.comment {
+        writer.write_all(b" COMMENT ")?;
+        write_quoted_text(comment, writer)?;
     }
     Ok(())
 }
@@ -194,6 +530,18 @@ fn write_named_constraint(
 }
 
 fn write_check(check: &CheckModel, writer: &mut impl Write) -> io::Result<()> {
+    if check.validation.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support constraint validation metadata",
+        ));
+    }
+    if check.enforcement.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL check constraint enforcement metadata is not supported by squealy yet",
+        ));
+    }
     writer.write_all(b"CONSTRAINT ")?;
     write_quoted_ident(&check.name, writer)?;
     write!(writer, " CHECK ({})", check.expression)
@@ -205,17 +553,74 @@ fn write_create_index(
     index: &IndexModel,
     writer: &mut impl Write,
 ) -> io::Result<()> {
+    if index.predicate.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support partial index predicates",
+        ));
+    }
+    if !index.expressions.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL expression indexes are not supported by squealy yet",
+        ));
+    }
+    if !index.include_columns.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support covering index include columns",
+        ));
+    }
+    if !index.nulls.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support index null ordering",
+        ));
+    }
+    if !index.operator_classes.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support index operator classes",
+        ));
+    }
+    if !index.collations.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support index collation overrides",
+        ));
+    }
+
     writer.write_all(b"CREATE ")?;
     if index.unique {
         writer.write_all(b"UNIQUE ")?;
     }
     writer.write_all(b"INDEX ")?;
     write_quoted_ident(&index.name, writer)?;
+    if let Some(method) = &index.method {
+        writer.write_all(b" USING ")?;
+        writer.write_all(method.mysql_sql().as_bytes())?;
+    }
     writer.write_all(b" ON ")?;
     write_qualified_name(schema, table, writer)?;
     writer.write_all(b" (")?;
-    write_quoted_ident_list(&index.columns, writer)?;
-    writer.write_all(b")")
+    write_index_columns(index, writer)?;
+    writer.write_all(b")")?;
+    Ok(())
+}
+
+fn write_index_columns(index: &IndexModel, writer: &mut impl Write) -> io::Result<()> {
+    for (position, column) in index.columns.iter().enumerate() {
+        if position > 0 {
+            writer.write_all(b", ")?;
+        }
+        write_quoted_ident(column, writer)?;
+        match index.directions.get(position) {
+            Some(squealy::IndexDirection::Asc) => writer.write_all(b" ASC")?,
+            Some(squealy::IndexDirection::Desc) => writer.write_all(b" DESC")?,
+            None => {}
+        }
+    }
+    Ok(())
 }
 
 fn write_add_foreign_key(
@@ -224,6 +629,31 @@ fn write_add_foreign_key(
     foreign_key: &ForeignKeyModel,
     writer: &mut impl Write,
 ) -> io::Result<()> {
+    if foreign_key.match_type.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support foreign key MATCH clauses",
+        ));
+    }
+    if foreign_key.deferrability.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support deferrable foreign keys",
+        ));
+    }
+    if foreign_key.validation.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support foreign key validation metadata",
+        ));
+    }
+    if foreign_key.enforcement.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MySQL does not support foreign key enforcement metadata",
+        ));
+    }
+
     writer.write_all(b"ALTER TABLE ")?;
     write_qualified_name(schema, table, writer)?;
     writer.write_all(b" ADD CONSTRAINT ")?;
@@ -240,10 +670,10 @@ fn write_add_foreign_key(
     write_quoted_ident_list(&foreign_key.references_columns, writer)?;
     writer.write_all(b")")?;
     if let Some(on_delete) = &foreign_key.on_delete {
-        write!(writer, " ON DELETE {on_delete}")?;
+        write!(writer, " ON DELETE {}", on_delete.as_sql())?;
     }
     if let Some(on_update) = &foreign_key.on_update {
-        write!(writer, " ON UPDATE {on_update}")?;
+        write!(writer, " ON UPDATE {}", on_update.as_sql())?;
     }
     Ok(())
 }
@@ -278,12 +708,12 @@ fn write_delimited(value: &str, delimiter: char, writer: &mut impl Write) -> io:
     writer.write_all(delim)?;
     let mut start = 0;
     for (index, _) in value.match_indices(delimiter) {
-        writer.write_all(value[start..index].as_bytes())?;
+        writer.write_all(&value.as_bytes()[start..index])?;
         writer.write_all(delim)?;
         writer.write_all(delim)?;
         start = index + delimiter.len_utf8();
     }
-    writer.write_all(value[start..].as_bytes())?;
+    writer.write_all(&value.as_bytes()[start..])?;
     writer.write_all(delim)
 }
 

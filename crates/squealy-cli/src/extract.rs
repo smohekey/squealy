@@ -9,10 +9,10 @@ use std::process::Command;
 
 use squealy_model::{DatabaseModel, read_package};
 
-use crate::stub;
+use crate::{CliError, stub};
 
 /// Builds and runs an extraction stub for `database` and returns the harvested model.
-pub fn extract_model(database: &str) -> Result<DatabaseModel, String> {
+pub fn extract_model(database: &str) -> Result<DatabaseModel, CliError> {
     let validated = stub::validate_database_path(database)?;
     let package = current_package()?;
     // The stub imports the crate by its *library target* name, which may differ from the package name
@@ -22,10 +22,10 @@ pub fn extract_model(database: &str) -> Result<DatabaseModel, String> {
     let temp = tempfile::Builder::new()
         .prefix("squealy-stub-")
         .tempdir()
-        .map_err(|error| format!("create temp dir: {error}"))?;
+        .map_err(|error| CliError::Message(format!("create temp dir: {error}")))?;
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("src"))
-        .map_err(|error| format!("create stub src: {error}"))?;
+        .map_err(|error| CliError::Message(format!("create stub src: {error}")))?;
 
     let crate_dir = package
         .dir
@@ -40,12 +40,12 @@ pub fn extract_model(database: &str) -> Result<DatabaseModel, String> {
         dir.join("Cargo.toml"),
         stub::stub_cargo_toml(&package.name, &crate_dir, &model_dependency),
     )
-    .map_err(|error| format!("write stub manifest: {error}"))?;
+    .map_err(|error| CliError::Message(format!("write stub manifest: {error}")))?;
     std::fs::write(
         dir.join("src/main.rs"),
         stub::stub_main_rs(&package.lib_name, &type_path),
     )
-    .map_err(|error| format!("write stub main: {error}"))?;
+    .map_err(|error| CliError::Message(format!("write stub main: {error}")))?;
 
     let out = dir.join("model.sqz");
     let status = Command::new(cargo())
@@ -55,12 +55,15 @@ pub fn extract_model(database: &str) -> Result<DatabaseModel, String> {
         .arg(dir.join("Cargo.toml"))
         .env("SQUEALY_STUB_OUT", &out)
         .status()
-        .map_err(|error| format!("run extraction stub: {error}"))?;
+        .map_err(|error| CliError::Message(format!("run extraction stub: {error}")))?;
     if !status.success() {
-        return Err("extraction stub failed to compile or run".to_owned());
+        return Err(CliError::Message(
+            "extraction stub failed to compile or run".to_owned(),
+        ));
     }
 
-    read_package(&out).map_err(|error| format!("read extracted package: {error}"))
+    read_package(&out)
+        .map_err(|error| CliError::Message(format!("read extracted package: {error}")))
 }
 
 fn cargo() -> String {
@@ -78,25 +81,25 @@ struct Package {
 }
 
 /// Resolves the current crate via `cargo metadata`.
-fn current_package() -> Result<Package, String> {
+fn current_package() -> Result<Package, CliError> {
     let output = Command::new(cargo())
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .output()
-        .map_err(|error| format!("run cargo metadata: {error}"))?;
+        .map_err(|error| CliError::Message(format!("run cargo metadata: {error}")))?;
     if !output.status.success() {
-        return Err(format!(
+        return Err(CliError::Message(format!(
             "cargo metadata failed: {}",
             String::from_utf8_lossy(&output.stderr)
-        ));
+        )));
     }
 
     let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("parse cargo metadata: {error}"))?;
+        .map_err(|error| CliError::Message(format!("parse cargo metadata: {error}")))?;
     let packages = metadata["packages"]
         .as_array()
         .ok_or("cargo metadata returned no packages")?;
 
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let cwd = std::env::current_dir().map_err(|error| CliError::Message(error.to_string()))?;
     let cwd = cwd.canonicalize().unwrap_or(cwd);
 
     // Prefer the package rooted at the current directory; fall back to the sole package.
@@ -126,16 +129,16 @@ fn current_package() -> Result<Package, String> {
 
     match (packages.len(), fallback) {
         (1, Some(found)) => Ok(found),
-        _ => Err(
+        _ => Err(CliError::Message(
             "could not determine the current package; run `squealy` from the crate directory"
                 .to_owned(),
-        ),
+        )),
     }
 }
 
 /// Returns the package's library target name (the extern-crate name used in `use` paths), which the
 /// default underscored package name does not capture when `[lib] name = "…"` is set.
-fn library_target_name(package: &serde_json::Value) -> Result<String, String> {
+fn library_target_name(package: &serde_json::Value) -> Result<String, CliError> {
     let targets = package["targets"]
         .as_array()
         .ok_or("package without targets")?;
@@ -144,11 +147,13 @@ fn library_target_name(package: &serde_json::Value) -> Result<String, String> {
         .find(|target| {
             target["kind"]
                 .as_array()
-                .is_some_and(|kinds| kinds.iter().any(|kind| is_library_kind(kind)))
+                .is_some_and(|kinds| kinds.iter().any(is_library_kind))
         })
         .and_then(|target| target["name"].as_str())
         .map(str::to_owned)
-        .ok_or_else(|| "crate has no library target to extract a database from".to_owned())
+        .ok_or_else(|| {
+            CliError::Message("crate has no library target to extract a database from".to_owned())
+        })
 }
 
 fn is_library_kind(kind: &serde_json::Value) -> bool {

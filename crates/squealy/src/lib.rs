@@ -382,13 +382,16 @@ mod foreign_key;
 mod index;
 mod list;
 mod model;
+mod plan;
 mod projection;
 mod query;
 mod schema;
 mod table;
 
 pub use backend::{
-    Backend, DdlExecutor, Decode, DecodeNullable, RowReader, SchemaBackend, SchemaConnect,
+    Backend, ConstraintCapabilities, DdlExecutor, Decode, DecodeNullable, IndexCapabilities,
+    RowReader, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect,
+    SchemaMetadataStore, SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore,
 };
 pub use column::{
     Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullableValue, ColumnType,
@@ -413,9 +416,13 @@ pub use list::{
     NoRuntimeParams, PreparedParamValues, PushBack, ToTuple, TupleAppend, TupleConcat,
 };
 pub use model::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyModel, IndexModel,
+    CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintEnforcement,
+    ConstraintValidation, DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyMatch,
+    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
+    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
     SchemaModel, SqlType, TableModel,
 };
+pub use plan::{DatabasePlan, DatabasePlanStep, TablePlanStep};
 pub use projection::{Maybe, Projectable, ProjectionShape, ProjectionVisitor, TableProjection};
 pub use query::{
     AllRows, AssignmentNode, AssignmentValueNode, AssignmentValueVisitor, AssignmentVisitor,

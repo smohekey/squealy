@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::io::{self, Write};
 
-use crate::{DatabaseModel, Table};
+use crate::{DatabaseModel, DatabasePlan, SqlType, Table};
 
 /// Backend-specific row cursor used while decoding a projected row.
 pub trait RowReader: Sized {
@@ -79,6 +79,41 @@ pub trait Backend: Sized {
     fn write_table(&self, table: &(dyn Table + Sync), writer: &mut impl Write) -> io::Result<()>;
 }
 
+/// Backend schema-management capabilities that are supported for full DDL/introspection
+/// round-trips.
+///
+/// A capability should be `true` only when the backend can render the metadata and read it back into
+/// the neutral model after applying the DDL. Syntax-only support is not enough for schema
+/// management, because it would make publish-then-introspect lose model facts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SchemaCapabilities {
+    pub constraints: ConstraintCapabilities,
+    pub indexes: IndexCapabilities,
+}
+
+/// Constraint metadata capabilities, split by constraint kind because SQL backends often expose
+/// validation/enforcement differently for foreign keys and checks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConstraintCapabilities {
+    pub foreign_key_match_type: bool,
+    pub foreign_key_deferrability: bool,
+    pub foreign_key_validation: bool,
+    pub foreign_key_enforcement: bool,
+    pub check_validation: bool,
+    pub check_enforcement: bool,
+}
+
+/// Index metadata capabilities for features that are not uniformly available across SQL backends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IndexCapabilities {
+    pub predicates: bool,
+    pub expressions: bool,
+    pub include_columns: bool,
+    pub null_ordering: bool,
+    pub collations: bool,
+    pub operator_classes: bool,
+}
+
 /// Backend-specific DDL rendering driven by an owned [`DatabaseModel`].
 ///
 /// This is the schema-management counterpart to [`Backend`]: it renders ordered, whole-database
@@ -87,12 +122,46 @@ pub trait Backend: Sized {
 /// drive deployment without depending on any backend. It supersedes [`Backend::write_table`], which
 /// renders only a single table.
 pub trait SchemaBackend {
+    /// Reports backend-wide schema-management capabilities.
+    ///
+    /// The default is conservative: no optional metadata is considered round-trippable unless a
+    /// backend opts in.
+    fn capabilities(&self) -> SchemaCapabilities {
+        SchemaCapabilities::default()
+    }
+
     /// Renders ordered create-from-scratch DDL for the whole model into `writer`.
     ///
     /// Implementations emit namespaces, then tables in foreign-key dependency order, then indexes,
     /// then foreign keys as separate `ALTER TABLE … ADD CONSTRAINT` statements (so dependency cycles
     /// and ordering do not block creation).
     fn render_create(&self, model: &DatabaseModel, writer: &mut impl Write) -> io::Result<()>;
+
+    /// Renders an ordered incremental DDL plan into `writer`.
+    ///
+    /// Backends own the SQL generation for these neutral plan steps. The default is conservative so
+    /// backend crates can opt into incremental planning deliberately.
+    fn render_plan(&self, _plan: &DatabasePlan, _writer: &mut impl Write) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "backend does not support incremental schema plan rendering",
+        ))
+    }
+
+    /// Renders an incremental plan whose index-creation steps should use the backend's concurrent,
+    /// non-locking form (e.g. PostgreSQL `CREATE INDEX CONCURRENTLY`).
+    ///
+    /// The default delegates to [`render_plan`](Self::render_plan), so backends without a concurrent
+    /// form render identically. Callers pair this with
+    /// [`DdlExecutor::execute_ddl_unmanaged`](DdlExecutor::execute_ddl_unmanaged), since the
+    /// concurrent form usually cannot run inside a transaction.
+    fn render_plan_concurrent(
+        &self,
+        plan: &DatabasePlan,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        self.render_plan(plan, writer)
+    }
 }
 
 /// Executes already-rendered DDL against a live connection.
@@ -106,6 +175,110 @@ pub trait DdlExecutor {
 
     /// Executes one or more `;`-separated DDL statements as a single batch.
     fn execute_ddl(&mut self, sql: &str) -> impl Future<Output = Result<(), Self::Error>>;
+
+    /// Executes `;`-separated DDL statements that must run *outside* a managing transaction, one at a
+    /// time (e.g. PostgreSQL `CREATE INDEX CONCURRENTLY`).
+    ///
+    /// The default delegates to [`execute_ddl`](Self::execute_ddl); backends that wrap `execute_ddl`
+    /// in a transaction override this to run each statement without one.
+    fn execute_ddl_unmanaged(
+        &mut self,
+        sql: &str,
+    ) -> impl Future<Output = Result<(), Self::Error>> {
+        self.execute_ddl(sql)
+    }
+}
+
+/// Reads a live database schema into the neutral [`DatabaseModel`].
+///
+/// This is the introspection half of schema management. Backends implement it on their live
+/// schema-management connection type, alongside [`DdlExecutor`], so the model engine can compare a
+/// declared/package model with the database state without knowing backend catalog details.
+pub trait SchemaIntrospect {
+    type Error;
+
+    /// Introspects the current database visible to this connection.
+    fn introspect_database(&mut self) -> impl Future<Output = Result<DatabaseModel, Self::Error>>;
+
+    /// Canonicalizes a logical [`SqlType`] to the form this backend's introspection produces for it.
+    ///
+    /// Some logical types are physically identical in a backend — PostgreSQL renders both
+    /// [`SqlType::String`] and [`SqlType::Text`] as `text`, which introspects back as `String`. A
+    /// desired model is canonicalized through this before being diffed against an introspected one,
+    /// so such types do not produce spurious, never-settling type-change churn. The default is the
+    /// identity, which suits backends that keep the logical types distinct (e.g. MySQL).
+    fn canonical_sql_type(&self, ty: &SqlType) -> SqlType {
+        ty.clone()
+    }
+}
+
+/// Reads backend metadata about explicit schema refactors already recorded against a database.
+///
+/// Backends own the physical storage for this metadata. The core contract is intentionally narrow:
+/// return stable refactor operation ids, so the management engine can reason about which package
+/// refactors have already been observed by a target database.
+pub trait SchemaRefactorStore {
+    type Error;
+
+    /// Returns recorded refactor operation ids in deterministic order.
+    fn applied_refactor_ids(&mut self) -> impl Future<Output = Result<Vec<String>, Self::Error>>;
+
+    /// Records refactor operation ids as applied, ignoring ids that already exist.
+    fn record_applied_refactor_ids(
+        &mut self,
+        ids: &[String],
+    ) -> impl Future<Output = Result<(), Self::Error>>;
+}
+
+/// Reads and records backend metadata about schema-management state.
+///
+/// This is backend-owned storage for current Squealy management facts such as the last published
+/// package format and content hash. It is separate from application schema introspection and should
+/// be excluded from the neutral [`DatabaseModel`].
+pub trait SchemaMetadataStore {
+    type Error;
+
+    /// Returns recorded metadata entries in deterministic key order.
+    fn schema_metadata(
+        &mut self,
+    ) -> impl Future<Output = Result<Vec<(String, String)>, Self::Error>>;
+
+    /// Records metadata entries, replacing existing values for the same keys.
+    fn record_schema_metadata(
+        &mut self,
+        entries: &[(String, String)],
+    ) -> impl Future<Output = Result<(), Self::Error>>;
+}
+
+/// One append-only schema publish event recorded by a backend.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaPublishRecord {
+    pub mode: String,
+    pub package_hash: String,
+    pub package_format_version: String,
+    pub applied_at: String,
+}
+
+/// Records append-only schema publish history.
+///
+/// This is distinct from [`SchemaMetadataStore`]: metadata is current state, while history is an
+/// audit trail of successful publish operations.
+pub trait SchemaPublishHistoryStore {
+    type Error;
+
+    /// Returns recent publish events, newest first.
+    fn schema_publish_history(
+        &mut self,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<SchemaPublishRecord>, Self::Error>>;
+
+    /// Records one successful publish operation.
+    fn record_schema_publish(
+        &mut self,
+        mode: &str,
+        package_hash: &str,
+        package_format_version: &str,
+    ) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
 /// Opens a schema-management connection from a connection string.
