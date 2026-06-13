@@ -195,6 +195,15 @@ impl squealy::SchemaIntrospect for PostgresConnection {
     async fn introspect_database(&mut self) -> Result<squealy::DatabaseModel, PostgresError> {
         introspect::database(self.client()).await
     }
+
+    /// PostgreSQL renders both `String` and `Text` as `text`, which introspects back as `String`;
+    /// map `Text` to `String` so a desired model using `Text` does not churn against the live schema.
+    fn canonical_sql_type(&self, ty: &squealy::SqlType) -> squealy::SqlType {
+        match ty {
+            squealy::SqlType::Text => squealy::SqlType::String,
+            other => other.clone(),
+        }
+    }
 }
 
 #[cfg(feature = "schema")]

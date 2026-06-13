@@ -170,7 +170,8 @@ where
     let actual = introspect(connection)
         .await
         .map_err(PlanFromDatabaseError::Introspect)?;
-    plan_models(desired, &actual, policy).map_err(PlanFromDatabaseError::Policy)
+    let desired = canonicalize_types(desired, |ty| connection.canonical_sql_type(ty));
+    plan_models(&desired, &actual, policy).map_err(PlanFromDatabaseError::Policy)
 }
 
 /// Introspects `connection` and builds an incremental plan using explicit refactor intent.
@@ -192,8 +193,27 @@ where
         .map_err(PlanFromDatabaseError::ReadAppliedRefactors)?;
     let pending_refactors = pending_refactors(refactors, &applied_ids, &actual)
         .map_err(PlanFromDatabaseError::AppliedRefactor)?;
-    plan_models_with_refactors(desired, &actual, &pending_refactors, policy)
+    let desired = canonicalize_types(desired, |ty| connection.canonical_sql_type(ty));
+    plan_models_with_refactors(&desired, &actual, &pending_refactors, policy)
         .map_err(PlanFromDatabaseError::Policy)
+}
+
+/// Returns a copy of `model` with every column type mapped through `canonical`, used to align a
+/// desired model with a backend's introspection canonical form before diffing (see
+/// [`SchemaIntrospect::canonical_sql_type`]).
+fn canonicalize_types(
+    model: &DatabaseModel,
+    canonical: impl Fn(&SqlType) -> SqlType,
+) -> DatabaseModel {
+    let mut model = model.clone();
+    for schema in &mut model.schemas {
+        for table in &mut schema.tables {
+            for column in &mut table.columns {
+                column.ty = canonical(&column.ty);
+            }
+        }
+    }
+    model
 }
 
 /// Records package refactors as applied when the live schema already reflects their final state.

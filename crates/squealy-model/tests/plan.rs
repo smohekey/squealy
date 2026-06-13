@@ -599,6 +599,51 @@ impl SchemaIntrospect for TestConnection {
     async fn introspect_database(&mut self) -> Result<DatabaseModel, TestError> {
         Ok(self.model.clone())
     }
+
+    // Mimics PostgreSQL, where `String` and `Text` both render to `text` and introspect as `String`.
+    fn canonical_sql_type(&self, ty: &SqlType) -> SqlType {
+        match ty {
+            SqlType::Text => SqlType::String,
+            other => other.clone(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn plan_from_database_canonicalizes_backend_equivalent_types() {
+    // The live schema introspects the column as `String`; the desired model authored it as `Text`.
+    // On a backend where they are the same physical type, this must not produce a type-change.
+    let live = model_with_tables(
+        "public",
+        vec![{
+            let mut events = table("events");
+            events.columns = vec![column("note", SqlType::String)];
+            events
+        }],
+    );
+    let desired = model_with_tables(
+        "public",
+        vec![{
+            let mut events = table("events");
+            events.columns = vec![column("note", SqlType::Text)];
+            events
+        }],
+    );
+    let mut connection = TestConnection {
+        model: live,
+        applied_refactor_ids: Vec::new(),
+        executed: Vec::new(),
+    };
+
+    let plan = plan_from_database(&desired, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan");
+
+    assert!(
+        plan.is_empty(),
+        "String/Text are equivalent on this backend; expected no changes, got {:?}",
+        plan.steps
+    );
 }
 
 impl SchemaRefactorStore for TestConnection {

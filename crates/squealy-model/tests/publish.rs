@@ -195,7 +195,7 @@ fn alter_column_baseline_model() -> DatabaseModel {
                     ColumnModel {
                         name: "status".to_owned(),
                         comment: Some("Event status".to_owned()),
-                        ty: SqlType::Text,
+                        ty: SqlType::String,
                         collation: None,
                         nullable: false,
                         default: Some(DefaultValue::Text("draft".to_owned())),
@@ -234,7 +234,7 @@ fn alter_column_desired_model() -> DatabaseModel {
                     ColumnModel {
                         name: "status".to_owned(),
                         comment: None,
-                        ty: SqlType::Text,
+                        ty: SqlType::String,
                         collation: None,
                         nullable: true,
                         default: None,
