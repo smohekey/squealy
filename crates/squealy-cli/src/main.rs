@@ -270,6 +270,7 @@ struct StatusChecks {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    init_tracing();
     match run(Cli::parse()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -277,6 +278,75 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Installs the `tracing` subscriber that emits diagnostics and operational events to stderr.
+///
+/// Verbosity follows `RUST_LOG` (default: `warn`), so normal runs stay quiet and stdout — where the
+/// commands write their actual output (SQL, JSON, reports) — is never touched. All output passes
+/// through [`RedactingMakeWriter`] so a credential can never reach the logs.
+fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, fmt};
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    fmt()
+        .with_env_filter(filter)
+        .with_writer(RedactingMakeWriter)
+        .with_target(false)
+        .without_time()
+        .init();
+}
+
+/// A `MakeWriter` that scrubs connection-URL passwords from every log line before it reaches stderr,
+/// as a defense-in-depth backstop on top of redacting at the source.
+struct RedactingMakeWriter;
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for RedactingMakeWriter {
+    type Writer = RedactingWriter;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        RedactingWriter
+    }
+}
+
+struct RedactingWriter;
+
+impl std::io::Write for RedactingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let redacted = redact_credentials(&String::from_utf8_lossy(buf));
+        std::io::stderr().write_all(redacted.as_bytes())?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::stderr().flush()
+    }
+}
+
+/// Replaces the password in any `scheme://user:password@host` URL found in `text` with `***`.
+fn redact_credentials(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(position) = rest.find("://") {
+        let (before, after) = rest.split_at(position + 3);
+        out.push_str(before);
+        let authority_end = after
+            .find(['/', '?', '#', ' ', '"', '\'', '\n'])
+            .unwrap_or(after.len());
+        let authority = &after[..authority_end];
+        match authority.split_once('@') {
+            Some((userinfo, host)) if userinfo.contains(':') => {
+                let (user, _password) = userinfo.split_once(':').expect("contains ':'");
+                out.push_str(user);
+                out.push_str(":***@");
+                out.push_str(host);
+            }
+            _ => out.push_str(authority),
+        }
+        rest = &after[authority_end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 async fn run(cli: Cli) -> Result<(), CliError> {
@@ -487,6 +557,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 return Ok(());
             }
             validate_url(backend.backend, &url)?;
+            tracing::info!(
+                backend = backend.backend.value_name(),
+                mode = if incremental { "incremental" } else { "create" },
+                report,
+                "publishing schema"
+            );
             match backend.backend {
                 BackendKind::Postgres => {
                     let mut connection = Postgres.connect(&url).await.map_err(|error| {
@@ -859,7 +935,7 @@ where
     C::Error: std::fmt::Display,
 {
     if matches!(backend, BackendKind::Mysql) && statement_timeout.is_some() {
-        eprintln!("squealy: --statement-timeout is ignored for MySQL (no DDL statement timeout)");
+        tracing::warn!("--statement-timeout is ignored for MySQL (no DDL statement timeout)");
     }
     let statements = session_timeout_statements(backend, lock_timeout, statement_timeout);
     if statements.is_empty() {
@@ -1714,6 +1790,22 @@ mod tests {
         // Test stdin is not a terminal, so confirmation must be refused without --yes.
         let error = confirm_destructive(&plan, false).unwrap_err().to_string();
         assert!(error.contains("--yes"));
+    }
+
+    #[test]
+    fn redact_credentials_masks_passwords_in_log_lines() {
+        use super::redact_credentials;
+        let redacted =
+            redact_credentials("connecting to postgres://user:s3cret@db:5432/app timed out");
+        assert!(!redacted.contains("s3cret"));
+        assert!(redacted.contains("postgres://user:***@db:5432/app"));
+        // No userinfo password: left untouched.
+        assert_eq!(
+            redact_credentials("mysql://root@host/db"),
+            "mysql://root@host/db"
+        );
+        // Text without a URL is unchanged.
+        assert_eq!(redact_credentials("schema clean"), "schema clean");
     }
 
     #[test]

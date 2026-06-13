@@ -149,12 +149,12 @@ impl squealy::SchemaConnect for Postgres {
     async fn connect(&self, url: &str) -> Result<PostgresConnection, PostgresError> {
         let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls).await?;
         // Drive the connection's IO task in the background for the life of the client. If it ends
-        // with an error (for example the server dropped the connection) report it on stderr rather
-        // than discarding it, so the failure isn't only visible as a confusing later query error.
-        // A structured-logging layer would replace this stderr write.
+        // with an error (for example the server dropped the connection) report it through `tracing`
+        // rather than discarding it, so the failure isn't only visible as a confusing later query
+        // error. The driver error does not contain the connection password.
         tokio::spawn(async move {
             if let Err(error) = connection.await {
-                eprintln!("squealy-postgresql: connection closed with error: {error}");
+                tracing::error!(%error, "postgres connection closed with error");
             }
         });
         Ok(PostgresConnection::new(client))

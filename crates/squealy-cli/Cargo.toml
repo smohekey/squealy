@@ -22,3 +22,5 @@ squealy-postgresql = { workspace = true, features = ["schema"] }
 tempfile = "3"
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
