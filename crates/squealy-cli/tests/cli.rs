@@ -5,8 +5,10 @@
 //! (slow, nested cargo); run it with `cargo test -p squealy-cli -- --ignored`.
 
 use std::process::Command;
+use std::sync::OnceLock;
 
 use serde_json::Value;
+use tokio::sync::Mutex;
 use squealy_model::{
     CheckModel, ColumnModel, ConstraintDeferrability, DatabaseModel, DdlExecutor, ForeignKeyMatch,
     ForeignKeyModel, IndexModel, RefactorLog, RefactorOperation, RenameColumn, RenameTable,
@@ -33,6 +35,15 @@ BEGIN
 END
 $$";
 const POSTGRES_RESTORE_PUBLIC_SCHEMA: &str = "CREATE SCHEMA IF NOT EXISTS \"public\"";
+
+/// Serializes the live-database tests in this binary. They share the Postgres and MySQL test
+/// databases and reset whole-schema state, so two running concurrently would clobber each other's
+/// fixtures. Each such test holds this guard for its duration. (One lock for both backends keeps it
+/// simple; these tests are `#[ignore]`d and only run in the integration job.)
+fn db_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[test]
 fn rejects_injection() {
@@ -866,6 +877,7 @@ fn extracts_and_scripts_from_a_crate() {
 #[tokio::test]
 #[ignore]
 async fn postgres_introspects_live_database_to_package() {
+    let _db_guard = db_lock().lock().await;
     let url = postgres_url();
     let dir = tempfile::tempdir().expect("tempdir");
     let source_package = dir.path().join("source.sqz");
@@ -918,6 +930,7 @@ async fn postgres_introspects_live_database_to_package() {
 #[tokio::test]
 #[ignore]
 async fn mysql_introspects_live_database_to_package() {
+    let _db_guard = db_lock().lock().await;
     let url = mysql_url();
     let dir = tempfile::tempdir().expect("tempdir");
     let source_package = dir.path().join("source.sqz");
@@ -970,6 +983,7 @@ async fn mysql_introspects_live_database_to_package() {
 #[tokio::test]
 #[ignore]
 async fn postgres_incremental_publish_applies_safe_plan() {
+    let _db_guard = db_lock().lock().await;
     let url = postgres_url();
     let dir = tempfile::tempdir().expect("tempdir");
     let base_package = dir.path().join("base.sqz");
@@ -1048,6 +1062,7 @@ async fn postgres_incremental_publish_applies_safe_plan() {
 #[tokio::test]
 #[ignore]
 async fn postgres_incremental_publish_report_does_not_apply_plan() {
+    let _db_guard = db_lock().lock().await;
     let url = postgres_url();
     let dir = tempfile::tempdir().expect("tempdir");
     let base_package = dir.path().join("base.sqz");
@@ -1134,6 +1149,7 @@ async fn postgres_incremental_publish_report_does_not_apply_plan() {
 #[tokio::test]
 #[ignore]
 async fn postgres_incremental_publish_records_refactor_ids() {
+    let _db_guard = db_lock().lock().await;
     let url = postgres_url();
     let dir = tempfile::tempdir().expect("tempdir");
     let base_package = dir.path().join("base.sqz");
@@ -1262,6 +1278,7 @@ async fn postgres_incremental_publish_records_refactor_ids() {
 #[tokio::test]
 #[ignore]
 async fn postgres_refactor_repair_records_valid_missing_refactor_ids() {
+    let _db_guard = db_lock().lock().await;
     let url = postgres_url();
     let dir = tempfile::tempdir().expect("tempdir");
     let schema_package = dir.path().join("schema.sqz");
@@ -1529,6 +1546,7 @@ async fn postgres_refactor_repair_records_valid_missing_refactor_ids() {
 #[tokio::test]
 #[ignore]
 async fn mysql_incremental_publish_applies_safe_plan() {
+    let _db_guard = db_lock().lock().await;
     let url = mysql_url();
     let dir = tempfile::tempdir().expect("tempdir");
     let base_package = dir.path().join("base.sqz");
@@ -1607,6 +1625,7 @@ async fn mysql_incremental_publish_applies_safe_plan() {
 #[tokio::test]
 #[ignore]
 async fn mysql_incremental_publish_report_does_not_apply_plan() {
+    let _db_guard = db_lock().lock().await;
     let url = mysql_url();
     let dir = tempfile::tempdir().expect("tempdir");
     let base_package = dir.path().join("base.sqz");
@@ -1691,6 +1710,7 @@ async fn mysql_incremental_publish_report_does_not_apply_plan() {
 #[tokio::test]
 #[ignore]
 async fn mysql_incremental_publish_records_refactor_ids() {
+    let _db_guard = db_lock().lock().await;
     let url = mysql_url();
     let dir = tempfile::tempdir().expect("tempdir");
     let base_package = dir.path().join("base.sqz");
@@ -1820,6 +1840,7 @@ DROP SCHEMA IF EXISTS `__squealy`",
 #[tokio::test]
 #[ignore]
 async fn mysql_refactor_repair_records_valid_missing_refactor_ids() {
+    let _db_guard = db_lock().lock().await;
     let url = mysql_url();
     let dir = tempfile::tempdir().expect("tempdir");
     let schema_package = dir.path().join("schema.sqz");

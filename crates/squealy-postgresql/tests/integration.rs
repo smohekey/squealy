@@ -1,9 +1,19 @@
 use std::future::poll_fn;
+use std::sync::OnceLock;
 
 use futures_core::Stream;
 use squealy::*;
 use squealy_postgresql::{Postgres, PostgresConnection, PostgresError};
+use tokio::sync::Mutex;
 use tokio_postgres::NoTls;
+
+/// Serializes the live-database tests in this binary. They share one Postgres database and create or
+/// drop fixture tables in `public`, so two running concurrently would clobber each other. Each test
+/// holds this guard for its duration.
+fn db_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[derive(Clone, Debug, PartialEq, Table)]
 struct IntegrationUser<'scope, C: ColumnMode = ColumnExpr> {
@@ -112,6 +122,7 @@ async fn connect() -> tokio_postgres::Client {
 #[tokio::test]
 #[ignore]
 async fn postgres_executes_insert_returning_and_selects_rows() {
+    let _db_guard = db_lock().lock().await;
     let client = connect().await;
     client
         .batch_execute(
@@ -398,6 +409,7 @@ async fn postgres_executes_insert_returning_and_selects_rows() {
 #[tokio::test]
 #[ignore]
 async fn postgres_inner_joins_across_tables() {
+    let _db_guard = db_lock().lock().await;
     let client = connect().await;
     client
         .batch_execute("DROP TABLE IF EXISTS join_posts; DROP TABLE IF EXISTS join_users")
@@ -491,6 +503,7 @@ async fn postgres_inner_joins_across_tables() {
 #[tokio::test]
 #[ignore]
 async fn postgres_inserts_multiple_rows() {
+    let _db_guard = db_lock().lock().await;
     let client = connect().await;
     client
         .batch_execute("DROP TABLE IF EXISTS integration_users")
@@ -536,6 +549,7 @@ async fn postgres_inserts_multiple_rows() {
 #[tokio::test]
 #[ignore]
 async fn postgres_round_trips_primitive_types() {
+    let _db_guard = db_lock().lock().await;
     let client = connect().await;
     client
         .batch_execute("DROP TABLE IF EXISTS integration_typess")
@@ -596,6 +610,7 @@ async fn postgres_round_trips_primitive_types() {
 #[tokio::test]
 #[ignore]
 async fn postgres_round_trips_transparent_newtypes() {
+    let _db_guard = db_lock().lock().await;
     let client = connect().await;
     client
         .batch_execute("DROP TABLE IF EXISTS integration_newtypes")
@@ -635,6 +650,7 @@ async fn postgres_round_trips_transparent_newtypes() {
 #[tokio::test]
 #[ignore]
 async fn postgres_surfaces_database_errors() {
+    let _db_guard = db_lock().lock().await;
     let client = connect().await;
     client
         .batch_execute("DROP TABLE IF EXISTS missing_tables")
@@ -658,6 +674,7 @@ async fn postgres_surfaces_database_errors() {
 #[tokio::test]
 #[ignore]
 async fn postgres_runs_transaction_closures() {
+    let _db_guard = db_lock().lock().await;
     let client = connect().await;
     client
         .batch_execute("DROP TABLE IF EXISTS transaction_users")

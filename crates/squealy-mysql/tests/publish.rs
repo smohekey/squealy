@@ -3,8 +3,19 @@
 //! `#[ignore]`d like the other backend integration tests; run with a database via:
 //! `SQUEALY_MYSQL_URL=... cargo test -p squealy-mysql --test publish -- --ignored`.
 
+use std::sync::OnceLock;
+
 use squealy::*;
 use squealy_mysql::Mysql;
+use tokio::sync::Mutex;
+
+/// Serializes the live-database tests in this binary. They share one MySQL database, and the
+/// incremental test introspects the *whole* database, so two tests running concurrently would see
+/// each other's schemas. Each test holds this guard for its duration.
+fn db_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(Catalog)]
@@ -48,6 +59,7 @@ fn database_url() -> String {
 #[tokio::test]
 #[ignore]
 async fn publishes_create_from_scratch() {
+    let _db_guard = db_lock().lock().await;
     let model = DatabaseModel::from_database::<CatalogDb>();
     let mut sql = Vec::new();
     Mysql.render_create(&model, &mut sql).unwrap();
@@ -86,6 +98,7 @@ async fn publishes_create_from_scratch() {
 #[tokio::test]
 #[ignore]
 async fn publish_then_introspect_round_trips_mysql_schema_shape() {
+    let _db_guard = db_lock().lock().await;
     let model = DatabaseModel::from_database::<CatalogDb>();
     let mut sql = Vec::new();
     Mysql.render_create(&model, &mut sql).unwrap();
@@ -126,6 +139,7 @@ async fn publish_then_introspect_round_trips_mysql_schema_shape() {
 #[tokio::test]
 #[ignore]
 async fn publish_then_introspect_preserves_richer_mysql_schema_facts() {
+    let _db_guard = db_lock().lock().await;
     let model = rich_mysql_model();
     let mut sql = Vec::new();
     Mysql.render_create(&model, &mut sql).unwrap();
@@ -166,6 +180,7 @@ async fn publish_then_introspect_preserves_richer_mysql_schema_facts() {
 #[tokio::test]
 #[ignore]
 async fn incremental_publish_applies_changed_column_definitions() {
+    let _db_guard = db_lock().lock().await;
     let baseline = alter_column_baseline_model();
     let desired = alter_column_desired_model();
     let mut connection = Mysql

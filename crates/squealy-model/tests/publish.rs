@@ -3,9 +3,41 @@
 //! `#[ignore]`d like the other PostgreSQL integration tests; run with a database via:
 //! `SQUEALY_POSTGRES_URL=... cargo test -p squealy-model --test publish -- --ignored`.
 
+use std::sync::OnceLock;
+
 use squealy::*;
 use squealy_postgresql::{Postgres, PostgresConnection};
+use tokio::sync::{Mutex, MutexGuard};
 use tokio_postgres::NoTls;
+
+/// Serializes the live-database tests in this binary. They all share one database, and
+/// `plan_from_database`/`introspect` read the *whole* database, so two tests running concurrently
+/// would each see the other's schemas — as spurious drop steps, or by dropping each other's objects.
+/// The guard returned by [`connect`] is held for the test's duration.
+fn db_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Drops every user schema (including squealy's `__squealy` metadata schema) so each test starts from
+/// a clean slate regardless of what earlier tests left behind, then restores the default `public`
+/// schema. Run while holding [`db_lock`].
+const RESET_DATABASE: &str = "\
+DO $$
+DECLARE
+    schema_name text;
+BEGIN
+    FOR schema_name IN
+        SELECT nspname
+        FROM pg_namespace
+        WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+          AND nspname NOT LIKE 'pg_toast%'
+    LOOP
+        EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', schema_name);
+    END LOOP;
+END
+$$;
+CREATE SCHEMA IF NOT EXISTS \"public\"";
 
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(PublishDemo)]
@@ -33,7 +65,10 @@ fn database_url() -> String {
         .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:55432/squealy_test".to_owned())
 }
 
-async fn connect() -> PostgresConnection {
+/// Connects, takes the serialization lock, and resets the database to a clean slate. The returned
+/// guard must be held for the test's duration (bind it, e.g. `let (mut connection, _guard) = ...`).
+async fn connect() -> (PostgresConnection, MutexGuard<'static, ()>) {
+    let guard = db_lock().lock().await;
     let (client, connection) = tokio_postgres::connect(&database_url(), NoTls)
         .await
         .expect("connect to PostgreSQL");
@@ -42,19 +77,19 @@ async fn connect() -> PostgresConnection {
             panic!("PostgreSQL connection failed: {error}");
         }
     });
-    PostgresConnection::new(client)
+    let mut connection = PostgresConnection::new(client);
+    connection
+        .execute_ddl(RESET_DATABASE)
+        .await
+        .expect("reset database to a clean slate");
+    (connection, guard)
 }
 
 #[tokio::test]
 #[ignore]
 async fn publish_creates_schema_then_round_trips_rows() {
-    let mut connection = connect().await;
-
-    // Clean slate so the test is re-runnable (render_create emits CREATE TABLE, not IF NOT EXISTS).
-    connection
-        .execute_ddl("DROP SCHEMA IF EXISTS \"publish_demo\" CASCADE")
-        .await
-        .expect("drop schema");
+    // `connect` resets to a clean slate, so `render_create`'s plain `CREATE TABLE` is re-runnable.
+    let (mut connection, _guard) = connect().await;
 
     squealy_model::publish_database::<PublishDemoDb, _, _>(&Postgres, &mut connection)
         .await
@@ -82,13 +117,8 @@ async fn publish_creates_schema_then_round_trips_rows() {
 #[tokio::test]
 #[ignore]
 async fn publish_then_introspect_round_trips_schema_model() {
-    let mut connection = connect().await;
+    let (mut connection, _guard) = connect().await;
     let expected = DatabaseModel::from_database::<PublishDemoDb>();
-
-    connection
-        .execute_ddl("DROP SCHEMA IF EXISTS \"publish_demo\" CASCADE")
-        .await
-        .expect("drop schema");
 
     squealy_model::publish(&expected, &Postgres, &mut connection)
         .await
@@ -109,13 +139,8 @@ async fn publish_then_introspect_round_trips_schema_model() {
 #[tokio::test]
 #[ignore]
 async fn publish_then_introspect_preserves_richer_schema_facts() {
-    let mut connection = connect().await;
+    let (mut connection, _guard) = connect().await;
     let expected = rich_model();
-
-    connection
-        .execute_ddl("DROP SCHEMA IF EXISTS \"publish_demo_rich\" CASCADE")
-        .await
-        .expect("drop schema");
 
     squealy_model::publish(&expected, &Postgres, &mut connection)
         .await
@@ -136,14 +161,9 @@ async fn publish_then_introspect_preserves_richer_schema_facts() {
 #[tokio::test]
 #[ignore]
 async fn incremental_publish_applies_changed_column_definitions() {
-    let mut connection = connect().await;
+    let (mut connection, _guard) = connect().await;
     let baseline = alter_column_baseline_model();
     let desired = alter_column_desired_model();
-
-    connection
-        .execute_ddl("DROP SCHEMA IF EXISTS \"publish_demo_alter\" CASCADE")
-        .await
-        .expect("drop schema");
 
     squealy_model::publish(&baseline, &Postgres, &mut connection)
         .await
