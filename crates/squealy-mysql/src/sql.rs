@@ -320,7 +320,9 @@ fn write_table_plan_step(
             statement(writer, first)?;
             write_create_index(schema, table, after, writer)?;
         }
-        TablePlanStep::AlterColumn { before, after } => {
+        // MySQL has no `USING` cast clause; `MODIFY COLUMN` performs the conversion implicitly, so
+        // any `type_cast` hint is ignored here.
+        TablePlanStep::AlterColumn { before, after, .. } => {
             write_alter_column(schema, table, before, after, writer)?;
         }
     }

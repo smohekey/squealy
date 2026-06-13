@@ -5,9 +5,9 @@
 
 use crate::diff::diff_table;
 use crate::{
-    ChangeRisk, ClassifiedDatabaseDiffChange, DatabaseDiff, DatabaseDiffChange, DatabaseModel,
-    DiffPolicy, DiffPolicyError, RefactorLog, RefactorOperation, RenameColumn, RenameTable,
-    TableDiffChange, check_diff_policy, diff_models,
+    CastColumn, ChangeRisk, ClassifiedDatabaseDiffChange, DatabaseDiff, DatabaseDiffChange,
+    DatabaseModel, DiffPolicy, DiffPolicyError, RefactorLog, RefactorOperation, RenameColumn,
+    RenameTable, TableDiffChange, check_diff_policy, diff_models,
 };
 use squealy::{DatabasePlan, DatabasePlanStep, TablePlanStep};
 
@@ -185,7 +185,7 @@ fn table_plan_step_as_diff_change(step: &TablePlanStep) -> TableDiffChange {
             before: Some(format!("rename column from {from}")),
             after: Some(format!("rename column to {to}")),
         },
-        TablePlanStep::AlterColumn { before, after } => TableDiffChange::AlterColumn {
+        TablePlanStep::AlterColumn { before, after, .. } => TableDiffChange::AlterColumn {
             before: before.clone(),
             after: after.clone(),
         },
@@ -295,6 +295,36 @@ fn apply_refactors(steps: &mut Vec<DatabasePlanStep>, refactors: &RefactorLog) {
             RefactorOperation::RenameColumn(operation) => {
                 apply_column_rename(steps, operation);
             }
+            RefactorOperation::CastColumn(operation) => {
+                apply_column_cast(steps, operation);
+            }
+        }
+    }
+}
+
+/// Attaches the `USING` cast from a `cast-column` hint to the matching column type-change step.
+fn apply_column_cast(steps: &mut [DatabasePlanStep], operation: &CastColumn) {
+    for step in steps.iter_mut() {
+        let DatabasePlanStep::AlterTable {
+            schema,
+            table,
+            change,
+        } = step
+        else {
+            continue;
+        };
+        if schema != &operation.schema || table != &operation.table {
+            continue;
+        }
+        if let TablePlanStep::AlterColumn {
+            before,
+            after,
+            type_cast,
+        } = change.as_mut()
+            && after.name == operation.column
+            && before.ty != after.ty
+        {
+            *type_cast = Some(operation.using.clone());
         }
     }
 }
@@ -415,6 +445,7 @@ fn apply_column_rename(steps: &mut Vec<DatabasePlanStep>, operation: &RenameColu
             change: Box::new(TablePlanStep::AlterColumn {
                 before: before_column,
                 after: after_column,
+                type_cast: None,
             }),
         });
     }
@@ -448,6 +479,7 @@ fn table_plan_step(change: &TableDiffChange) -> TablePlanStep {
         TableDiffChange::AlterColumn { before, after } => TablePlanStep::AlterColumn {
             before: before.clone(),
             after: after.clone(),
+            type_cast: None,
         },
         TableDiffChange::AddPrimaryKey { constraint } => TablePlanStep::AddPrimaryKey {
             constraint: constraint.clone(),

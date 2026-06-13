@@ -1,8 +1,8 @@
 use squealy_model::{
-    AppliedRefactorError, ChangeRisk, ColumnModel, DatabaseModel, DatabasePlanStep, DdlExecutor,
-    DiffPolicy, RefactorLog, RefactorOperation, RenameColumn, RenameTable, SchemaIntrospect,
-    SchemaModel, SchemaRefactorStore, SqlType, TableModel, TablePlanStep, apply_plan,
-    classified_plan_steps, pending_refactors, plan_from_database,
+    AppliedRefactorError, CastColumn, ChangeRisk, ColumnModel, DatabaseModel, DatabasePlanStep,
+    DdlExecutor, DiffPolicy, RefactorLog, RefactorOperation, RenameColumn, RenameTable,
+    SchemaIntrospect, SchemaModel, SchemaRefactorStore, SqlType, TableModel, TablePlanStep,
+    apply_plan, classified_plan_steps, pending_refactors, plan_from_database,
     plan_from_database_with_refactors, plan_models, plan_models_with_refactors, render_plan_sql,
     repair_refactor_metadata,
 };
@@ -217,6 +217,7 @@ fn plan_models_with_refactors_keeps_column_changes_after_rename() {
                 schema: Some("public".to_owned()),
                 table: "events".to_owned(),
                 change: Box::new(TablePlanStep::AlterColumn {
+                    type_cast: None,
                     before: renamed_before,
                     after: desired_name,
                 }),
@@ -559,6 +560,44 @@ impl DdlExecutor for TestConnection {
         self.executed.push(sql.to_owned());
         Ok(())
     }
+}
+
+#[test]
+fn cast_column_refactor_renders_using_clause_on_a_type_change() {
+    let mut desired = table("events");
+    desired.columns = vec![column(
+        "total",
+        SqlType::Decimal {
+            precision: 12,
+            scale: 2,
+        },
+    )];
+    let mut actual = table("events");
+    actual.columns = vec![column("total", SqlType::Text)];
+
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::CastColumn(CastColumn {
+            id: "cast-total".to_owned(),
+            schema: Some("public".to_owned()),
+            table: "events".to_owned(),
+            column: "total".to_owned(),
+            using: "total::numeric".to_owned(),
+        })],
+    };
+
+    let plan = plan_models_with_refactors(
+        &model_with_tables("public", vec![desired]),
+        &model_with_tables("public", vec![actual]),
+        &refactors,
+        DiffPolicy::ALLOW_ALL,
+    )
+    .expect("type change is allowed by ALLOW_ALL");
+
+    let sql = render_plan_sql(&plan, &Postgres).expect("render");
+    assert!(
+        sql.contains("ALTER COLUMN \"total\" TYPE numeric(12,2) USING total::numeric"),
+        "{sql}"
+    );
 }
 
 fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {

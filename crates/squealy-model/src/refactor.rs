@@ -26,6 +26,7 @@ impl RefactorLog {
 pub enum RefactorOperation {
     RenameTable(RenameTable),
     RenameColumn(RenameColumn),
+    CastColumn(CastColumn),
 }
 
 impl RefactorOperation {
@@ -33,6 +34,7 @@ impl RefactorOperation {
         match self {
             RefactorOperation::RenameTable(operation) => &operation.id,
             RefactorOperation::RenameColumn(operation) => &operation.id,
+            RefactorOperation::CastColumn(operation) => &operation.id,
         }
     }
 }
@@ -56,6 +58,21 @@ pub struct RenameColumn {
     pub table: String,
     pub from: String,
     pub to: String,
+}
+
+/// A `USING` cast supplied for a column type change, so a non-trivial conversion the planner would
+/// otherwise emit as a bare `ALTER COLUMN ... TYPE` becomes a `... TYPE ... USING <expr>`.
+///
+/// Casts are naturally idempotent (once the type matches, no type-change step is planned), so unlike
+/// renames they are not recorded in backend applied-refactor metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CastColumn {
+    pub id: String,
+    pub schema: Option<String>,
+    pub table: String,
+    pub column: String,
+    /// The SQL expression emitted after `USING` (e.g. `total::numeric`).
+    pub using: String,
 }
 
 /// A recorded refactor id does not match the live schema state it claims to represent.
@@ -187,6 +204,9 @@ fn validate_applied_refactor(
                 });
             }
         }
+        // Casts are not recorded as applied refactors (they are idempotent rendering hints), so this
+        // validation of recorded ids never runs for them.
+        RefactorOperation::CastColumn(_) => {}
     }
 
     Ok(())

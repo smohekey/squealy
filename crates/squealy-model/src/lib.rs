@@ -31,7 +31,7 @@ pub use plan::{
     plan_models_with_refactors, plan_step_risk, table_plan_step_risk,
 };
 pub use refactor::{
-    AppliedRefactorError, RefactorLog, RefactorOperation, RenameColumn, RenameTable,
+    AppliedRefactorError, CastColumn, RefactorLog, RefactorOperation, RenameColumn, RenameTable,
     pending_refactors,
 };
 pub use squealy::{

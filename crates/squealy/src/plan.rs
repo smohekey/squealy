@@ -66,6 +66,9 @@ pub enum TablePlanStep {
     AlterColumn {
         before: ColumnModel,
         after: ColumnModel,
+        /// Optional `USING <expr>` cast for a type change, supplied by a `cast-column` refactor hint.
+        /// Backends that support it (PostgreSQL) emit it on the `ALTER COLUMN ... TYPE` statement.
+        type_cast: Option<String>,
     },
     AddPrimaryKey {
         constraint: Constraint,

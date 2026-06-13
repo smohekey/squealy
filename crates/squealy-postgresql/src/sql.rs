@@ -841,8 +841,20 @@ pub(crate) mod ddl {
                 statement(writer, first)?;
                 write_create_index(schema, table, after, writer)?;
             }
-            TablePlanStep::AlterColumn { before, after } => {
-                write_alter_column(schema, table, before, after, writer, first)?;
+            TablePlanStep::AlterColumn {
+                before,
+                after,
+                type_cast,
+            } => {
+                write_alter_column(
+                    schema,
+                    table,
+                    before,
+                    after,
+                    type_cast.as_deref(),
+                    writer,
+                    first,
+                )?;
             }
         }
         Ok(())
@@ -853,6 +865,7 @@ pub(crate) mod ddl {
         table: &str,
         before: &ColumnModel,
         after: &ColumnModel,
+        type_cast: Option<&str>,
         writer: &mut impl Write,
         first: &mut bool,
     ) -> io::Result<()> {
@@ -884,6 +897,12 @@ pub(crate) mod ddl {
             if let Some(collation) = &after.collation {
                 writer.write_all(b" COLLATE ")?;
                 write_quoted_ident(collation, writer)?;
+            }
+            // A `cast-column` refactor hint supplies the `USING` expression for a non-trivial type
+            // conversion that Postgres cannot perform implicitly.
+            if let Some(cast) = type_cast {
+                writer.write_all(b" USING ")?;
+                writer.write_all(cast.as_bytes())?;
             }
             wrote = true;
         }

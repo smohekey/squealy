@@ -24,7 +24,7 @@ use squealy::{
     SchemaModel, SqlType, TableModel,
 };
 
-use crate::{RefactorLog, RefactorOperation, RenameColumn, RenameTable};
+use crate::{CastColumn, RefactorLog, RefactorOperation, RenameColumn, RenameTable};
 
 /// Current package format version, recorded in `manifest.kdl`.
 pub const FORMAT_VERSION: i128 = 1;
@@ -323,6 +323,17 @@ fn refactor_operation_to_node(operation: &RefactorOperation) -> KdlNode {
             node.push(KdlEntry::new_prop("to", operation.to.clone()));
             node
         }
+        RefactorOperation::CastColumn(operation) => {
+            let mut node = KdlNode::new("cast-column");
+            node.push(KdlEntry::new_prop("id", operation.id.clone()));
+            if let Some(schema) = &operation.schema {
+                node.push(KdlEntry::new_prop("schema", schema.clone()));
+            }
+            node.push(KdlEntry::new_prop("table", operation.table.clone()));
+            node.push(KdlEntry::new_prop("column", operation.column.clone()));
+            node.push(KdlEntry::new_prop("using", operation.using.clone()));
+            node
+        }
     }
 }
 
@@ -338,6 +349,7 @@ fn refactor_from_document(document: &KdlDocument) -> Result<RefactorLog, Package
         operations.push(match node.name().value() {
             "rename-table" => RefactorOperation::RenameTable(rename_table_from_node(node)?),
             "rename-column" => RefactorOperation::RenameColumn(rename_column_from_node(node)?),
+            "cast-column" => RefactorOperation::CastColumn(cast_column_from_node(node)?),
             other => return Err(malformed(format!("unknown refactor operation `{other}`"))),
         });
     }
@@ -361,6 +373,16 @@ fn rename_column_from_node(node: &KdlNode) -> Result<RenameColumn, PackageError>
         table: required_non_empty_prop(node, "table")?,
         from: required_non_empty_prop(node, "from")?,
         to: required_non_empty_prop(node, "to")?,
+    })
+}
+
+fn cast_column_from_node(node: &KdlNode) -> Result<CastColumn, PackageError> {
+    Ok(CastColumn {
+        id: required_non_empty_prop(node, "id")?,
+        schema: prop(node, "schema").map(str::to_owned),
+        table: required_non_empty_prop(node, "table")?,
+        column: required_non_empty_prop(node, "column")?,
+        using: required_non_empty_prop(node, "using")?,
     })
 }
 
@@ -1452,6 +1474,13 @@ mod tests {
                     table: "users".to_owned(),
                     from: "display_name".to_owned(),
                     to: "name".to_owned(),
+                }),
+                RefactorOperation::CastColumn(CastColumn {
+                    id: "2026-cast-user-score".to_owned(),
+                    schema: Some("public".to_owned()),
+                    table: "users".to_owned(),
+                    column: "score".to_owned(),
+                    using: "score::numeric".to_owned(),
                 }),
             ],
         }

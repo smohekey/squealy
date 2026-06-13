@@ -308,6 +308,7 @@ fn mysql_renders_changed_columns_in_schema_plan() {
                 schema: Some("shop".to_owned()),
                 table: "events".to_owned(),
                 change: Box::new(TablePlanStep::AlterColumn {
+                    type_cast: None,
                     before: ColumnModel {
                         name: "description".to_owned(),
                         comment: Some("Old description".to_owned()),
@@ -334,6 +335,7 @@ fn mysql_renders_changed_columns_in_schema_plan() {
                 schema: Some("shop".to_owned()),
                 table: "events".to_owned(),
                 change: Box::new(TablePlanStep::AlterColumn {
+                    type_cast: None,
                     before: ColumnModel {
                         name: "status".to_owned(),
                         comment: Some("Event status".to_owned()),
@@ -451,6 +453,7 @@ fn mysql_rejects_unsupported_changed_column_definitions() {
             schema: Some("shop".to_owned()),
             table: "events".to_owned(),
             change: Box::new(TablePlanStep::AlterColumn {
+                type_cast: None,
                 before: column("description"),
                 after: renamed,
             }),
@@ -481,7 +484,11 @@ fn mysql_renders_identity_and_generated_transitions() {
     let alter = |before: ColumnModel, after: ColumnModel| DatabasePlanStep::AlterTable {
         schema: Some("shop".to_owned()),
         table: "events".to_owned(),
-        change: Box::new(TablePlanStep::AlterColumn { before, after }),
+        change: Box::new(TablePlanStep::AlterColumn {
+            before,
+            after,
+            type_cast: None,
+        }),
     };
     let plan = DatabasePlan {
         steps: vec![alter(id_before, id_after), alter(total_before, total_after)],

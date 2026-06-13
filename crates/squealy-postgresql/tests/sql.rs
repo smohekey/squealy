@@ -305,6 +305,7 @@ fn postgres_renders_changed_columns_in_schema_plan() {
                 schema: Some("public".to_owned()),
                 table: "events".to_owned(),
                 change: Box::new(TablePlanStep::AlterColumn {
+                    type_cast: None,
                     before: ColumnModel {
                         name: "description".to_owned(),
                         comment: Some("Old description".to_owned()),
@@ -331,6 +332,7 @@ fn postgres_renders_changed_columns_in_schema_plan() {
                 schema: Some("public".to_owned()),
                 table: "events".to_owned(),
                 change: Box::new(TablePlanStep::AlterColumn {
+                    type_cast: None,
                     before: ColumnModel {
                         name: "status".to_owned(),
                         comment: None,
@@ -391,7 +393,11 @@ fn postgres_renders_identity_and_generated_transitions() {
     let alter = |before: ColumnModel, after: ColumnModel| DatabasePlanStep::AlterTable {
         schema: Some("public".to_owned()),
         table: "events".to_owned(),
-        change: Box::new(TablePlanStep::AlterColumn { before, after }),
+        change: Box::new(TablePlanStep::AlterColumn {
+            before,
+            after,
+            type_cast: None,
+        }),
     };
 
     let plan = DatabasePlan {
@@ -455,7 +461,11 @@ fn postgres_rejects_adding_a_generated_column_in_place() {
         steps: vec![DatabasePlanStep::AlterTable {
             schema: Some("public".to_owned()),
             table: "orders".to_owned(),
-            change: Box::new(TablePlanStep::AlterColumn { before, after }),
+            change: Box::new(TablePlanStep::AlterColumn {
+                before,
+                after,
+                type_cast: None,
+            }),
         }],
     };
 
@@ -551,6 +561,7 @@ fn postgres_rejects_unsupported_changed_column_definitions() {
                 schema: Some("public".to_owned()),
                 table: "events".to_owned(),
                 change: Box::new(TablePlanStep::AlterColumn {
+                    type_cast: None,
                     before: column("description"),
                     after,
                 }),
