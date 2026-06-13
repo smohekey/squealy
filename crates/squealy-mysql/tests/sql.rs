@@ -442,36 +442,60 @@ INSERT IGNORE INTO `__squealy`.`refactors` (`id`) VALUES ('rename-display-name')
 
 #[test]
 fn mysql_rejects_unsupported_changed_column_definitions() {
+    // Column rename is still expressed via explicit refactor steps, not an in-place `MODIFY`.
     let mut renamed = column("description");
     renamed.name = "details".to_owned();
 
-    let mut identity = column("description");
-    identity.identity = Some(IdentityModel {
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterTable {
+            schema: Some("shop".to_owned()),
+            table: "events".to_owned(),
+            change: Box::new(TablePlanStep::AlterColumn {
+                before: column("description"),
+                after: renamed,
+            }),
+        }],
+    };
+
+    let error = Mysql.render_plan(&plan, &mut Vec::new()).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
+fn mysql_renders_identity_and_generated_transitions() {
+    let mut id_before = column("id");
+    id_before.ty = SqlType::I32;
+    id_before.nullable = false;
+    let mut id_after = id_before.clone();
+    id_after.identity = Some(IdentityModel {
         mode: IdentityMode::AutoIncrement,
     });
 
-    let mut generated = column("description");
-    generated.generated = Some(GeneratedColumnModel {
-        expression: "char_length(`description`)".to_owned(),
+    let total_before = column("total");
+    let mut total_after = total_before.clone();
+    total_after.generated = Some(GeneratedColumnModel {
+        expression: "`a` + `b`".to_owned(),
         storage: GeneratedStorage::Virtual,
     });
 
-    for after in [renamed, identity, generated] {
-        let plan = DatabasePlan {
-            steps: vec![DatabasePlanStep::AlterTable {
-                schema: Some("shop".to_owned()),
-                table: "events".to_owned(),
-                change: Box::new(TablePlanStep::AlterColumn {
-                    before: column("description"),
-                    after,
-                }),
-            }],
-        };
+    let alter = |before: ColumnModel, after: ColumnModel| DatabasePlanStep::AlterTable {
+        schema: Some("shop".to_owned()),
+        table: "events".to_owned(),
+        change: Box::new(TablePlanStep::AlterColumn { before, after }),
+    };
+    let plan = DatabasePlan {
+        steps: vec![alter(id_before, id_after), alter(total_before, total_after)],
+    };
 
-        let mut sql = Vec::new();
-        let error = Mysql.render_plan(&plan, &mut sql).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
-    }
+    let mut sql = Vec::new();
+    Mysql.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "ALTER TABLE `shop`.`events` MODIFY COLUMN `id` INT NOT NULL AUTO_INCREMENT;\n\
+ALTER TABLE `shop`.`events` MODIFY COLUMN `total` TEXT GENERATED ALWAYS AS (`a` + `b`) VIRTUAL;"
+    );
 }
 
 fn column(name: &str) -> ColumnModel {

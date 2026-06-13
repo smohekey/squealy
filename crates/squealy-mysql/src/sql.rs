@@ -340,19 +340,11 @@ fn write_alter_column(
             "MySQL incremental column rename rendering is not supported yet",
         ));
     }
-    if before.identity != after.identity {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "MySQL incremental identity column alteration rendering is not supported yet",
-        ));
-    }
-    if before.generated != after.generated {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "MySQL incremental generated column alteration rendering is not supported yet",
-        ));
-    }
 
+    // `MODIFY COLUMN` re-specifies the whole column, so identity (`AUTO_INCREMENT`) and generated
+    // transitions are carried by re-emitting the target definition. MySQL rejects the genuinely
+    // impossible transitions (e.g. switching a generated column between VIRTUAL and STORED) at apply
+    // time.
     writer.write_all(b"ALTER TABLE ")?;
     write_qualified_name(schema, table, writer)?;
     writer.write_all(b" MODIFY COLUMN ")?;

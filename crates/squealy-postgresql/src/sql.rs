@@ -862,16 +862,14 @@ pub(crate) mod ddl {
                 "PostgreSQL incremental column rename rendering is not supported yet",
             ));
         }
-        if before.identity != after.identity {
+        // Postgres cannot turn an existing column into a generated column (or change its expression)
+        // in place; only dropping the generated-ness is possible. Adding/changing requires a
+        // drop-and-recreate, which the planner expresses as separate column steps.
+        if generated_requires_recreate(before, after) {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "PostgreSQL incremental identity column alteration rendering is not supported yet",
-            ));
-        }
-        if before.generated != after.generated {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "PostgreSQL incremental generated column alteration rendering is not supported yet",
+                "PostgreSQL cannot add or change a generated column in place; drop and recreate the \
+                 column instead",
             ));
         }
 
@@ -924,6 +922,44 @@ pub(crate) mod ddl {
             wrote = true;
         }
 
+        if before.identity != after.identity {
+            if wrote {
+                statement(writer, first)?;
+            }
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ALTER COLUMN ")?;
+            write_quoted_ident(&after.name, writer)?;
+            match (&before.identity, &after.identity) {
+                (None, Some(identity)) => {
+                    writer.write_all(b" ADD GENERATED ")?;
+                    write_pg_identity_mode(&identity.mode, writer)?;
+                    writer.write_all(b" AS IDENTITY")?;
+                }
+                (Some(_), Some(identity)) => {
+                    writer.write_all(b" SET GENERATED ")?;
+                    write_pg_identity_mode(&identity.mode, writer)?;
+                }
+                (Some(_), None) => writer.write_all(b" DROP IDENTITY IF EXISTS")?,
+                (None, None) => unreachable!("identity differs"),
+            }
+            wrote = true;
+        }
+
+        // The only generated-column transition Postgres supports in place: dropping it, which keeps
+        // the already-computed values as a plain column.
+        if before.generated.is_some() && after.generated.is_none() {
+            if wrote {
+                statement(writer, first)?;
+            }
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ALTER COLUMN ")?;
+            write_quoted_ident(&after.name, writer)?;
+            writer.write_all(b" DROP EXPRESSION IF EXISTS")?;
+            wrote = true;
+        }
+
         if before.comment != after.comment {
             if wrote {
                 statement(writer, first)?;
@@ -940,6 +976,24 @@ pub(crate) mod ddl {
         }
 
         Ok(())
+    }
+
+    /// Whether a generated-column change needs a drop-and-recreate (Postgres cannot add a generated
+    /// expression to an existing column, nor change one, in place — only drop it).
+    fn generated_requires_recreate(before: &ColumnModel, after: &ColumnModel) -> bool {
+        match (&before.generated, &after.generated) {
+            (_, None) => false,
+            (before, after) => before != after,
+        }
+    }
+
+    fn write_pg_identity_mode(mode: &IdentityMode, writer: &mut impl Write) -> io::Result<()> {
+        match mode {
+            IdentityMode::Always => writer.write_all(b"ALWAYS"),
+            IdentityMode::ByDefault | IdentityMode::AutoIncrement => {
+                writer.write_all(b"BY DEFAULT")
+            }
+        }
     }
 
     fn write_drop_constraint(
