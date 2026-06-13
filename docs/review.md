@@ -196,24 +196,26 @@ Operational guardrails for applying changes to live databases:
 
 ## 6. Prioritized action list
 
-| Priority | Item | Section |
-|----------|------|---------|
-| **P0** | Redact credentials from all error/log output (URL redaction helper) | 3b |
-| **P0** | Document MySQL non-transactional apply; add per-statement progress + recovery guidance | 3b / 5 |
-| **P0** | Add `cargo clippy -D warnings` and `cargo audit` to CI | 3c |
-| **P0** | Surface (stop swallowing) Postgres connection-task errors | 3a |
-| **P1** | Introduce structured `thiserror` error types across crates | 3a |
-| **P1** | Bound `.sqz` entry sizes before KDL parse | 3d |
-| **P1** | Adopt `tracing` with a redaction layer for publish operations | 3d |
-| **P1** | Validate connection strings up front (redacted on failure) | 3b |
-| **P1** | First-class publish dry-run + destructive-change confirmation | 5 |
-| **P1** | Add `cargo deny` + MSRV (1.85) CI jobs | 3c |
-| **P1** | Lock/statement timeouts on the publish session | 5 |
-| **P2** | Identity / generated-column transition planning | 4 |
-| **P2** | Type-change cast hints in `refactor.kdl` | 4 |
-| **P2** | Hybrid reviewable-script flow | 4 |
-| **P2** | Online/low-lock DDL strategies (e.g. `CONCURRENTLY`) | 5 |
-| **P2** | Document/propagate the `from_utf8` invariant in SQL rendering | 3a |
+Status legend: ✅ done · ⬜ outstanding.
+
+| Priority | Item | Section | Status |
+|----------|------|---------|--------|
+| **P0** | Redact credentials from all error/log output (URL redaction helper) | 3b | ✅ |
+| **P0** | Document MySQL non-transactional apply; add per-statement progress + recovery guidance | 3b / 5 | ✅ |
+| **P0** | Add `cargo clippy -D warnings` and `cargo audit` to CI | 3c | ✅ |
+| **P0** | Surface (stop swallowing) Postgres connection-task errors | 3a | ✅ |
+| **P1** | Introduce structured `thiserror` error types across crates | 3a | ⬜ |
+| **P1** | Bound `.sqz` entry sizes before KDL parse | 3d | ⬜ |
+| **P1** | Adopt `tracing` with a redaction layer for publish operations | 3d | ⬜ |
+| **P1** | Validate connection strings up front (redacted on failure) | 3b | ⬜ |
+| **P1** | First-class publish dry-run + destructive-change confirmation | 5 | ⬜ |
+| **P1** | Add `cargo deny` + MSRV (1.85) CI jobs | 3c | ⬜ |
+| **P1** | Lock/statement timeouts on the publish session | 5 | ⬜ |
+| **P2** | Identity / generated-column transition planning | 4 | ⬜ |
+| **P2** | Type-change cast hints in `refactor.kdl` | 4 | ⬜ |
+| **P2** | Hybrid reviewable-script flow | 4 | ⬜ |
+| **P2** | Online/low-lock DDL strategies (e.g. `CONCURRENTLY`) | 5 | ⬜ |
+| **P2** | Document/propagate the `from_utf8` invariant in SQL rendering | 3a | ⬜ |
 
 The P0/P1/P2 split is the recommended execution order for a follow-up implementation pass and
 should be treated as the acceptance checklist for that work.
