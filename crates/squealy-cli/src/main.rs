@@ -358,20 +358,18 @@ async fn run(cli: Cli) -> Result<(), String> {
             output,
         } => match backend.backend {
             BackendKind::Postgres => {
-                let mut connection = Postgres
-                    .connect(&url)
-                    .await
-                    .map_err(|error| format!("connect: {error}"))?;
+                let mut connection = Postgres.connect(&url).await.map_err(|error| {
+                    format!("connect: {}", redact_secret(&error.to_string(), url))
+                })?;
                 let model = introspect(&mut connection)
                     .await
                     .map_err(|error| format!("introspect: {error}"))?;
                 write_package(&model, &output).map_err(|error| format!("write package: {error}"))
             }
             BackendKind::Mysql => {
-                let mut connection = Mysql
-                    .connect(&url)
-                    .await
-                    .map_err(|error| format!("connect: {error}"))?;
+                let mut connection = Mysql.connect(&url).await.map_err(|error| {
+                    format!("connect: {}", redact_secret(&error.to_string(), url))
+                })?;
                 let model = introspect(&mut connection)
                     .await
                     .map_err(|error| format!("introspect: {error}"))?;
@@ -449,10 +447,9 @@ async fn run(cli: Cli) -> Result<(), String> {
             let loaded = source.load_with_refactors()?;
             match backend.backend {
                 BackendKind::Postgres => {
-                    let mut connection = Postgres
-                        .connect(&url)
-                        .await
-                        .map_err(|error| format!("connect: {error}"))?;
+                    let mut connection = Postgres.connect(&url).await.map_err(|error| {
+                        format!("connect: {}", redact_secret(&error.to_string(), url))
+                    })?;
                     if incremental {
                         check_create(&loaded.model, &Postgres)
                             .map_err(|error| format!("check model: {error}"))?;
@@ -486,10 +483,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                     }
                 }
                 BackendKind::Mysql => {
-                    let mut connection = Mysql
-                        .connect(&url)
-                        .await
-                        .map_err(|error| format!("connect: {error}"))?;
+                    let mut connection = Mysql.connect(&url).await.map_err(|error| {
+                        format!("connect: {}", redact_secret(&error.to_string(), url))
+                    })?;
                     if incremental {
                         check_create(&loaded.model, &Mysql)
                             .map_err(|error| format!("check model: {error}"))?;
@@ -556,7 +552,7 @@ async fn live_status_inputs(
             let mut connection = Postgres
                 .connect(url)
                 .await
-                .map_err(|error| format!("connect: {error}"))?;
+                .map_err(|error| format!("connect: {}", redact_secret(&error.to_string(), url)))?;
             let actual = introspect(&mut connection)
                 .await
                 .map_err(|error| format!("introspect: {error}"))?;
@@ -578,7 +574,7 @@ async fn live_status_inputs(
             let mut connection = Mysql
                 .connect(url)
                 .await
-                .map_err(|error| format!("connect: {error}"))?;
+                .map_err(|error| format!("connect: {}", redact_secret(&error.to_string(), url)))?;
             let actual = introspect(&mut connection)
                 .await
                 .map_err(|error| format!("introspect: {error}"))?;
@@ -658,10 +654,9 @@ async fn run_refactors(command: RefactorsCommand) -> Result<(), String> {
                 .map_err(|error| format!("read package refactors: {error}"))?;
             match backend.backend {
                 BackendKind::Postgres => {
-                    let mut connection = Postgres
-                        .connect(&url)
-                        .await
-                        .map_err(|error| format!("connect: {error}"))?;
+                    let mut connection = Postgres.connect(&url).await.map_err(|error| {
+                        format!("connect: {}", redact_secret(&error.to_string(), url))
+                    })?;
                     let report = repair_refactor_metadata(&refactors, &mut connection)
                         .await
                         .map_err(|error| format!("repair refactor metadata: {error}"))?;
@@ -669,10 +664,9 @@ async fn run_refactors(command: RefactorsCommand) -> Result<(), String> {
                     Ok(())
                 }
                 BackendKind::Mysql => {
-                    let mut connection = Mysql
-                        .connect(&url)
-                        .await
-                        .map_err(|error| format!("connect: {error}"))?;
+                    let mut connection = Mysql.connect(&url).await.map_err(|error| {
+                        format!("connect: {}", redact_secret(&error.to_string(), url))
+                    })?;
                     let report = repair_refactor_metadata(&refactors, &mut connection)
                         .await
                         .map_err(|error| format!("repair refactor metadata: {error}"))?;
@@ -690,7 +684,7 @@ async fn applied_refactor_ids(backend: BackendKind, url: &str) -> Result<Vec<Str
             let mut connection = Postgres
                 .connect(url)
                 .await
-                .map_err(|error| format!("connect: {error}"))?;
+                .map_err(|error| format!("connect: {}", redact_secret(&error.to_string(), url)))?;
             connection
                 .applied_refactor_ids()
                 .await
@@ -700,13 +694,32 @@ async fn applied_refactor_ids(backend: BackendKind, url: &str) -> Result<Vec<Str
             let mut connection = Mysql
                 .connect(url)
                 .await
-                .map_err(|error| format!("connect: {error}"))?;
+                .map_err(|error| format!("connect: {}", redact_secret(&error.to_string(), url)))?;
             connection
                 .applied_refactor_ids()
                 .await
                 .map_err(|error| format!("read applied refactors: {error}"))
         }
     }
+}
+
+/// Masks the password from a connection URL wherever it appears in `message`, so credentials
+/// never leak into error output or logs even if a driver echoes the DSN it was given.
+fn redact_secret(message: &str, url: impl AsRef<str>) -> String {
+    match url_password(url.as_ref()) {
+        Some(password) if !password.is_empty() => message.replace(password, "***"),
+        _ => message.to_owned(),
+    }
+}
+
+/// Extracts the password component of a `scheme://user:password@host/...` connection URL.
+fn url_password(url: &str) -> Option<&str> {
+    let after_scheme = url.split_once("://")?.1;
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let userinfo = after_scheme[..authority_end].rsplit_once('@')?.0;
+    Some(userinfo.split_once(':')?.1)
 }
 
 fn read_refactor_file(path: &Path) -> Result<RefactorLog, String> {
@@ -1356,5 +1369,36 @@ impl BackendKind {
             BackendKind::Postgres => "postgres",
             BackendKind::Mysql => "mysql",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{redact_secret, url_password};
+
+    #[test]
+    fn url_password_extracts_password_component() {
+        assert_eq!(
+            url_password("postgres://user:s3cret@localhost:5432/db"),
+            Some("s3cret")
+        );
+        assert_eq!(url_password("mysql://root@127.0.0.1:3306/db"), None);
+        assert_eq!(url_password("postgres://localhost/db"), None);
+        assert_eq!(url_password("not-a-url"), None);
+    }
+
+    #[test]
+    fn redact_secret_masks_password_in_messages() {
+        let url = "postgres://user:s3cret@localhost:5432/db";
+        let message = "error connecting with postgres://user:s3cret@localhost:5432/db: timed out";
+        let redacted = redact_secret(message, url);
+        assert!(!redacted.contains("s3cret"));
+        assert!(redacted.contains("***"));
+    }
+
+    #[test]
+    fn redact_secret_is_noop_without_password() {
+        let message = "could not resolve host";
+        assert_eq!(redact_secret(message, "mysql://root@127.0.0.1/db"), message);
     }
 }
