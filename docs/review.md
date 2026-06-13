@@ -208,9 +208,9 @@ Status legend: ✅ done · ⬜ outstanding.
 | **P1** | Bound `.sqz` entry sizes before KDL parse | 3d | ✅ |
 | **P1** | Adopt `tracing` with a redaction layer for publish operations | 3d | ⬜ |
 | **P1** | Validate connection strings up front (redacted on failure) | 3b | ✅ |
-| **P1** | First-class publish dry-run + destructive-change confirmation | 5 | ⬜ |
+| **P1** | First-class publish dry-run + destructive-change confirmation | 5 | ✅ |
 | **P1** | Add `cargo deny` + MSRV CI jobs (MSRV corrected 1.85→1.92; it never built on 1.85) | 3c | ✅ |
-| **P1** | Lock/statement timeouts on the publish session | 5 | ⬜ |
+| **P1** | Lock/statement timeouts on the publish session | 5 | ✅ |
 | **P2** | Identity / generated-column transition planning | 4 | ⬜ |
 | **P2** | Type-change cast hints in `refactor.kdl` | 4 | ⬜ |
 | **P2** | Hybrid reviewable-script flow | 4 | ⬜ |
