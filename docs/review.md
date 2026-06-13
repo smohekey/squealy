@@ -204,7 +204,7 @@ Status legend: ✅ done · ⬜ outstanding.
 | **P0** | Document MySQL non-transactional apply; add per-statement progress + recovery guidance | 3b / 5 | ✅ |
 | **P0** | Add `cargo clippy -D warnings` and `cargo audit` to CI | 3c | ✅ |
 | **P0** | Surface (stop swallowing) Postgres connection-task errors | 3a | ✅ |
-| **P1** | Introduce structured `thiserror` error types across crates | 3a | ⬜ |
+| **P1** | Introduce structured `thiserror` error types across crates (incl. CLI `CliError`) | 3a | ✅ |
 | **P1** | Bound `.sqz` entry sizes before KDL parse | 3d | ✅ |
 | **P1** | Adopt `tracing` with a redaction layer for publish operations | 3d | ⬜ |
 | **P1** | Validate connection strings up front (redacted on failure) | 3b | ✅ |
