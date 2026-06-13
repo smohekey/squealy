@@ -12,11 +12,12 @@ use serde_json::json;
 use squealy_cli::CliError;
 use squealy_cli::extract::extract_model;
 use squealy_model::{
-    ChangeRisk, DatabaseDiffChange, DatabaseModel, DatabasePlan, DatabasePlanStep, DdlExecutor,
-    DiffPolicy, PlanApplyOptions, RefactorLog, SchemaBackend, SchemaCapabilities, SchemaConnect,
-    SchemaMetadataStore, SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore,
-    TableDiffChange, TablePlanStep, apply_plan_with_options, check_create, check_diff_policy,
-    classified_plan_steps, diff_models, introspect, package_metadata, pending_refactors,
+    ChangeRisk, ClassifiedDatabaseDiffChange, DatabaseDiffChange, DatabaseModel, DatabasePlan,
+    DatabasePlanStep, DdlExecutor, DiffPolicy, PlanApplyOptions, PlanFromDatabaseError,
+    RefactorLog, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaMetadataStore,
+    SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore, TableDiffChange,
+    TablePlanStep, apply_plan_with_options, check_create, check_diff_policy, classified_plan_steps,
+    diff_models, introspect, package_metadata, pending_refactors,
     plan_from_database_with_refactors, plan_models_with_refactors, publish, read_package,
     read_refactor_log, refactor_from_kdl, render_create_sql, render_plan_sql,
     repair_refactor_metadata, write_package, write_package_with_refactors,
@@ -431,7 +432,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         allow_ambiguous,
                     },
                 )
-                .map_err(|error| CliError::Message(format!("check diff policy: {error}")))?;
+                .map_err(|error| policy_blocked_error(&error.blocked))?;
             }
             Ok(())
         }
@@ -453,7 +454,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             };
             let plan =
                 plan_models_with_refactors(&desired.model, &actual, &desired.refactors, policy)
-                    .map_err(|error| CliError::Message(format!("plan schema changes: {error}")))?;
+                    .map_err(|error| policy_blocked_error(&error.blocked))?;
             let sql = match backend.backend {
                 BackendKind::Postgres => render_plan_sql(&plan, &Postgres),
                 BackendKind::Mysql => render_plan_sql(&plan, &Mysql),
@@ -606,17 +607,18 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     if incremental {
                         check_create(&loaded.model, &Postgres)
                             .map_err(|error| CliError::Message(format!("check model: {error}")))?;
-                        let plan = plan_from_database_with_refactors(
-                            &loaded.model,
-                            &loaded.refactors,
-                            &mut connection,
-                            DiffPolicy {
-                                allow_destructive,
-                                allow_ambiguous,
-                            },
-                        )
-                        .await
-                        .map_err(|error| CliError::Message(format!("plan: {error}")))?;
+                        let plan = plan_from_database_result(
+                            plan_from_database_with_refactors(
+                                &loaded.model,
+                                &loaded.refactors,
+                                &mut connection,
+                                DiffPolicy {
+                                    allow_destructive,
+                                    allow_ambiguous,
+                                },
+                            )
+                            .await,
+                        )?;
                         if report {
                             let sql = render_plan_sql(&plan, &Postgres).map_err(|error| {
                                 CliError::Message(format!("render plan: {error}"))
@@ -661,17 +663,18 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     if incremental {
                         check_create(&loaded.model, &Mysql)
                             .map_err(|error| CliError::Message(format!("check model: {error}")))?;
-                        let plan = plan_from_database_with_refactors(
-                            &loaded.model,
-                            &loaded.refactors,
-                            &mut connection,
-                            DiffPolicy {
-                                allow_destructive,
-                                allow_ambiguous,
-                            },
-                        )
-                        .await
-                        .map_err(|error| CliError::Message(format!("plan: {error}")))?;
+                        let plan = plan_from_database_result(
+                            plan_from_database_with_refactors(
+                                &loaded.model,
+                                &loaded.refactors,
+                                &mut connection,
+                                DiffPolicy {
+                                    allow_destructive,
+                                    allow_ambiguous,
+                                },
+                            )
+                            .await,
+                        )?;
                         if report {
                             let sql = render_plan_sql(&plan, &Mysql).map_err(|error| {
                                 CliError::Message(format!("render plan: {error}"))
@@ -1737,6 +1740,57 @@ fn risk_name(risk: ChangeRisk) -> &'static str {
     }
 }
 
+/// Builds the error shown when a plan is refused because it contains destructive or ambiguous
+/// changes. Lists each blocked change with its risk and points at the flags that force them.
+fn policy_blocked_error(blocked: &[ClassifiedDatabaseDiffChange]) -> CliError {
+    let mut message = format!(
+        "refusing to apply {} change(s) blocked by policy:",
+        blocked.len()
+    );
+    for classified in blocked {
+        message.push_str(&format!(
+            "\n  {} {}",
+            risk_name(classified.risk),
+            describe_diff_change(&classified.change)
+        ));
+    }
+    message.push_str(
+        "\nre-run with --allow-destructive and/or --allow-ambiguous to force these changes.",
+    );
+    CliError::Message(message)
+}
+
+/// A one-line description of a top-level diff change, for the policy-block message.
+fn describe_diff_change(change: &DatabaseDiffChange) -> String {
+    match change {
+        DatabaseDiffChange::CreateSchema { schema } => {
+            format!("create schema {}", schema_name(schema))
+        }
+        DatabaseDiffChange::DropSchema { schema } => format!("drop schema {}", schema_name(schema)),
+        DatabaseDiffChange::CreateTable { schema, table } => {
+            format!("create table {}", qualified(schema, &table.name))
+        }
+        DatabaseDiffChange::DropTable { schema, table } => {
+            format!("drop table {}", qualified(schema, &table.name))
+        }
+        DatabaseDiffChange::AlterTable { schema, table, .. } => {
+            format!("alter table {}", qualified(schema, table))
+        }
+    }
+}
+
+/// Resolves a plan-from-database result, turning a policy block into the actionable
+/// [`policy_blocked_error`] and any other failure into a contextual message.
+fn plan_from_database_result<E: std::fmt::Display>(
+    result: Result<DatabasePlan, PlanFromDatabaseError<E>>,
+) -> Result<DatabasePlan, CliError> {
+    match result {
+        Ok(plan) => Ok(plan),
+        Err(PlanFromDatabaseError::Policy(error)) => Err(policy_blocked_error(&error.blocked)),
+        Err(other) => Err(CliError::Message(format!("plan: {other}"))),
+    }
+}
+
 fn qualified(schema: &Option<String>, name: &str) -> String {
     format!("{}.{}", schema_name(schema), name)
 }
@@ -1809,8 +1863,23 @@ impl BackendKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackendKind, DatabasePlan, DatabasePlanStep, redact_secret, url_password, validate_url,
+        BackendKind, ChangeRisk, ClassifiedDatabaseDiffChange, DatabaseDiffChange, DatabasePlan,
+        DatabasePlanStep, policy_blocked_error, redact_secret, url_password, validate_url,
     };
+
+    #[test]
+    fn policy_blocked_error_lists_changes_and_force_flags() {
+        let blocked = vec![ClassifiedDatabaseDiffChange {
+            risk: ChangeRisk::Destructive,
+            change: DatabaseDiffChange::DropSchema {
+                schema: Some("old".to_owned()),
+            },
+        }];
+        let error = policy_blocked_error(&blocked).to_string();
+        assert!(error.contains("destructive drop schema old"), "{error}");
+        assert!(error.contains("--allow-destructive"), "{error}");
+        assert!(error.contains("--allow-ambiguous"), "{error}");
+    }
 
     #[test]
     fn validate_url_accepts_matching_scheme() {

@@ -509,7 +509,7 @@ fn diff_policy_check_rejects_blocked_changes() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("blocked change"),
+        stderr.contains("blocked by policy") && stderr.contains("--allow-ambiguous"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -595,7 +595,7 @@ fn plan_blocks_ambiguous_changes_unless_allowed() {
     assert!(!blocked.status.success(), "ambiguous plan should fail");
     let stderr = String::from_utf8_lossy(&blocked.stderr);
     assert!(
-        stderr.contains("blocked change"),
+        stderr.contains("blocked by policy") && stderr.contains("--allow-ambiguous"),
         "unexpected stderr: {stderr}"
     );
 
