@@ -10,6 +10,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  msrv:
+    name: MSRV (1.92)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust 1.92
+        uses: dtolnay/rust-toolchain@1.92
+      - name: Check on MSRV
+        run: cargo check --workspace --all-targets --all-features
+
   test:
     runs-on: ubuntu-latest
 
