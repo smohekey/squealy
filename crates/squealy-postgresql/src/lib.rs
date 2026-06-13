@@ -55,44 +55,18 @@ impl fmt::Debug for PostgresConnection {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PostgresError {
+    #[error("query returned no rows")]
     NoRows,
+    #[error("unsupported bind value: {0:?}")]
     UnsupportedBind(BindValue),
-    Database(tokio_postgres::Error),
-    Decode(tokio_postgres::Error),
+    #[error("database error: {0}")]
+    Database(#[from] tokio_postgres::Error),
+    #[error("decode error: {0}")]
+    Decode(#[source] tokio_postgres::Error),
+    #[error("could not convert value to {0}")]
     Conversion(&'static str),
-}
-
-impl From<tokio_postgres::Error> for PostgresError {
-    fn from(error: tokio_postgres::Error) -> Self {
-        Self::Database(error)
-    }
-}
-
-impl fmt::Display for PostgresError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PostgresError::NoRows => formatter.write_str("query returned no rows"),
-            PostgresError::UnsupportedBind(value) => {
-                write!(formatter, "unsupported bind value: {value:?}")
-            }
-            PostgresError::Database(error) => write!(formatter, "database error: {error}"),
-            PostgresError::Decode(error) => write!(formatter, "decode error: {error}"),
-            PostgresError::Conversion(target) => {
-                write!(formatter, "could not convert value to {target}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for PostgresError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            PostgresError::Database(error) | PostgresError::Decode(error) => Some(error),
-            _ => None,
-        }
-    }
 }
 
 impl Backend for Postgres {

@@ -20,6 +20,7 @@ schema = ["dep:tokio"]
 bytes = "1"
 futures-core.workspace = true
 squealy.workspace = true
+thiserror.workspace = true
 tokio = { version = "1", features = ["rt"], optional = true }
 tokio-postgres = "0.7"
 

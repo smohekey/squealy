@@ -62,55 +62,29 @@ impl fmt::Debug for MysqlConnection {
 }
 
 /// An error connecting to or executing DDL against MySQL.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum MysqlError {
-    Connect(mysql_async::Error),
-    Execute(mysql_async::Error),
-    Introspect(mysql_async::Error),
+    #[error("mysql connect error: {0}")]
+    Connect(#[source] mysql_async::Error),
+    #[error("mysql ddl error: {0}")]
+    Execute(#[source] mysql_async::Error),
+    #[error("mysql introspection error: {0}")]
+    Introspect(#[source] mysql_async::Error),
     /// A statement in a multi-statement DDL batch failed. MySQL auto-commits DDL, so the
     /// `applied` statements before it are already committed and were not rolled back.
+    #[error(
+        "mysql ddl error after applying {applied} of {total} statement(s): MySQL auto-commits DDL, \
+         so those {applied} statement(s) are already committed and were not rolled back — the \
+         schema is partially applied and may need manual inspection before retrying. Failed on \
+         `{statement}`: {source}"
+    )]
     PartialDdl {
         applied: usize,
         total: usize,
         statement: String,
+        #[source]
         source: mysql_async::Error,
     },
-}
-
-impl fmt::Display for MysqlError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            MysqlError::Connect(error) => write!(formatter, "mysql connect error: {error}"),
-            MysqlError::Execute(error) => write!(formatter, "mysql ddl error: {error}"),
-            MysqlError::Introspect(error) => {
-                write!(formatter, "mysql introspection error: {error}")
-            }
-            MysqlError::PartialDdl {
-                applied,
-                total,
-                statement,
-                source,
-            } => write!(
-                formatter,
-                "mysql ddl error after applying {applied} of {total} statement(s): MySQL \
-                 auto-commits DDL, so those {applied} statement(s) are already committed and were \
-                 not rolled back — the schema is partially applied and may need manual inspection \
-                 before retrying. Failed on statement {failed} of {total} `{statement}`: {source}",
-                failed = applied + 1,
-            ),
-        }
-    }
-}
-
-impl std::error::Error for MysqlError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            MysqlError::Connect(error)
-            | MysqlError::Execute(error)
-            | MysqlError::Introspect(error) => Some(error),
-            MysqlError::PartialDdl { source, .. } => Some(source),
-        }
-    }
 }
 
 impl SchemaConnect for Mysql {

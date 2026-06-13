@@ -1585,6 +1585,7 @@ dependencies = [
  "mysql_async",
  "squealy",
  "squealy-model",
+ "thiserror",
  "tokio",
 ]
 
@@ -1595,6 +1596,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "squealy",
+ "thiserror",
  "tokio",
  "tokio-postgres",
 ]

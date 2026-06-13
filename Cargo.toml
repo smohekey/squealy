@@ -30,5 +30,6 @@ squealy-postgresql = { version = "0.1.0", path = "crates/squealy-postgresql" }
 squealy-test = { version = "0.1.0", path = "crates/squealy-test" }
 futures-core = "0.3"
 kdl = "6.5"
+thiserror = "2"
 trybuild = "1.0"
 zip = { version = "7.2", default-features = false }
