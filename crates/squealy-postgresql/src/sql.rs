@@ -2141,10 +2141,10 @@ where
 
     fn visit_column(&mut self, alias: SourceAlias, column: &str) -> Result<(), Self::Error> {
         if self.insert_returning {
-            write_quoted_ident(column, self.writer)
+            squealy::Dialect::write_quoted_ident(&PostgresDialect, column, &mut *self.writer)
         } else {
             write!(self.writer, "{alias}.")?;
-            write_quoted_ident(column, self.writer)
+            squealy::Dialect::write_quoted_ident(&PostgresDialect, column, &mut *self.writer)
         }
     }
 
@@ -2165,11 +2165,18 @@ where
         R: FnOnce(&mut Self) -> Result<(), Self::Error>,
     {
         if op == ArithmeticOp::Divide {
+            // PostgreSQL integer `/` is integer division, so operands are cast to float to match the
+            // builder's division semantics. (MySQL's `/` is already float division — that divergence
+            // is why a shared renderer needs a dialect division hook, not just a cast-type name.)
             self.writer.write_all(b"(CAST(")?;
             left(self)?;
-            self.writer.write_all(b" AS double precision) / CAST(")?;
+            self.writer.write_all(b" AS ")?;
+            squealy::Dialect::write_cast_type(&PostgresDialect, &SqlType::F64, &mut *self.writer)?;
+            self.writer.write_all(b") / CAST(")?;
             right(self)?;
-            return self.writer.write_all(b" AS double precision))");
+            self.writer.write_all(b" AS ")?;
+            squealy::Dialect::write_cast_type(&PostgresDialect, &SqlType::F64, &mut *self.writer)?;
+            return self.writer.write_all(b"))");
         }
 
         self.writer.write_all(b"(")?;
