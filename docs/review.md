@@ -206,7 +206,7 @@ Status legend: ✅ done · ⬜ outstanding.
 | **P0** | Surface (stop swallowing) Postgres connection-task errors | 3a | ✅ |
 | **P1** | Introduce structured `thiserror` error types across crates (incl. CLI `CliError`) | 3a | ✅ |
 | **P1** | Bound `.sqz` entry sizes before KDL parse | 3d | ✅ |
-| **P1** | Adopt `tracing` with a redaction layer for publish operations | 3d | ⬜ |
+| **P1** | Adopt `tracing` with a redaction layer for publish operations | 3d | ✅ |
 | **P1** | Validate connection strings up front (redacted on failure) | 3b | ✅ |
 | **P1** | First-class publish dry-run + destructive-change confirmation | 5 | ✅ |
 | **P1** | Add `cargo deny` + MSRV CI jobs (MSRV corrected 1.85→1.92; it never built on 1.85) | 3c | ✅ |
