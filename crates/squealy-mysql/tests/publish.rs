@@ -227,6 +227,48 @@ async fn incremental_publish_applies_changed_column_definitions() {
         .expect("cleanup");
 }
 
+#[tokio::test]
+#[ignore]
+async fn replan_after_publish_is_empty() {
+    let _db_guard = db_lock().lock().await;
+    let model = DatabaseModel::from_database::<CatalogDb>();
+    let mut connection = Mysql
+        .connect(&database_url())
+        .await
+        .expect("connect to MySQL");
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog`")
+        .await
+        .expect("drop schema");
+
+    squealy_model::publish(&model, &Mysql, &mut connection)
+        .await
+        .expect("publish create-from-scratch");
+
+    // Re-planning the same crate model against the freshly published schema must converge to an
+    // empty plan. The crate model carries `auto_increment` identity as `ByDefault` and plain indexes
+    // with no method/directions, while MySQL introspects `AutoIncrement` and `BTREE`/ASC; without
+    // canonicalization these churn as never-settling AlterColumn/AlterIndex steps forever.
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan against published schema");
+    assert!(
+        plan.steps.is_empty(),
+        "expected empty plan after publish, got: {:?}",
+        plan.steps
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog`")
+        .await
+        .expect("cleanup");
+}
+
 fn alter_column_baseline_model() -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {

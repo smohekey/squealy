@@ -60,6 +60,30 @@ struct PublishDemoDb {
     publish_demo: PublishDemo,
 }
 
+// A table with a plain secondary index, used to prove a crate-declared index converges after publish.
+// PostgreSQL introspects a plain index with an explicit `btree` method and ASC directions, while the
+// crate model leaves both unset.
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(IndexDemo)]
+struct Indexed<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    #[column(index)]
+    code: C::Type<'scope, i32>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct IndexDemo {
+    indexed: Indexed<'static, ColumnName>,
+}
+
+#[allow(dead_code)]
+#[derive(Database)]
+struct IndexDemoDb {
+    index_demo: IndexDemo,
+}
+
 fn database_url() -> String {
     std::env::var("SQUEALY_POSTGRES_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:55432/squealy_test".to_owned())
@@ -112,6 +136,34 @@ async fn publish_creates_schema_then_round_trips_rows() {
         .expect("select from published table");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].1, "gadget");
+}
+
+#[tokio::test]
+#[ignore]
+async fn replan_after_publish_is_empty() {
+    let (mut connection, _guard) = connect().await;
+    let model = DatabaseModel::from_database::<IndexDemoDb>();
+
+    squealy_model::publish(&model, &Postgres, &mut connection)
+        .await
+        .expect("publish create-from-scratch");
+
+    // Re-planning the same crate model against the freshly published schema must converge to an
+    // empty plan. The crate model's plain `#[column(index)]` carries no method/directions, while
+    // PostgreSQL introspects an explicit `btree` method with ASC directions; without canonicalization
+    // this churns as a never-settling AlterIndex forever.
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan against published schema");
+    assert!(
+        plan.steps.is_empty(),
+        "expected empty plan after publish, got: {:?}",
+        plan.steps
+    );
 }
 
 #[tokio::test]

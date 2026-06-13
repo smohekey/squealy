@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::io::{self, Write};
 
-use crate::{DatabaseModel, DatabasePlan, SqlType, Table};
+use crate::{DatabaseModel, DatabasePlan, IdentityMode, IndexMethod, SqlType, Table};
 
 /// Backend-specific row cursor used while decoding a projected row.
 pub trait RowReader: Sized {
@@ -209,6 +209,41 @@ pub trait SchemaIntrospect {
     /// identity, which suits backends that keep the logical types distinct (e.g. MySQL).
     fn canonical_sql_type(&self, ty: &SqlType) -> SqlType {
         ty.clone()
+    }
+
+    /// Canonicalizes a logical [`IdentityMode`] to the form this backend's introspection produces.
+    ///
+    /// A crate-declared `auto_increment` column enters the desired model as
+    /// [`IdentityMode::ByDefault`], but a backend may render and read it back as a different mode —
+    /// MySQL renders `AUTO_INCREMENT` and introspects [`IdentityMode::AutoIncrement`]. Without this
+    /// the same primary key diffs as a never-settling identity change after every publish. The
+    /// default is the identity, which suits backends whose introspection preserves the logical mode
+    /// (e.g. PostgreSQL).
+    fn canonical_identity_mode(&self, mode: &IdentityMode) -> IdentityMode {
+        mode.clone()
+    }
+
+    /// Canonicalizes a primary-key constraint name to the form this backend's introspection reports.
+    ///
+    /// MySQL ignores the declared constraint name and always reports a table's primary key as
+    /// `PRIMARY`, so a crate-declared `pk_<table>` would otherwise diff as a never-settling
+    /// `AlterPrimaryKey` after every publish. A desired model is canonicalized through this before
+    /// diffing. The default is the identity, which suits backends that preserve the declared name
+    /// (e.g. PostgreSQL).
+    fn canonical_primary_key_name(&self, name: &str) -> String {
+        name.to_owned()
+    }
+
+    /// The index access method this backend's introspection reports for an index declared without an
+    /// explicit method, or `None` if it leaves the method unset.
+    ///
+    /// A crate-declared index enters the desired model with `method: None` and empty `directions`,
+    /// while both live backends read defaults back as an explicit method (e.g. `Some(BTree)`) and
+    /// ASC directions. A desired model is canonicalized through this (filling an absent method and
+    /// treating empty directions as all-ASC) before diffing, so a plain index does not produce a
+    /// never-settling `AlterIndex` after publish. The default is `None` (leave the method unset).
+    fn default_index_method(&self) -> Option<IndexMethod> {
+        None
     }
 }
 

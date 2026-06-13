@@ -205,7 +205,7 @@ where
     let actual = introspect(connection)
         .await
         .map_err(PlanFromDatabaseError::Introspect)?;
-    let desired = canonicalize_types(desired, |ty| connection.canonical_sql_type(ty));
+    let desired = canonicalize_model(connection, desired);
     plan_models(&desired, &actual, policy).map_err(PlanFromDatabaseError::Policy)
 }
 
@@ -228,27 +228,54 @@ where
         .map_err(PlanFromDatabaseError::ReadAppliedRefactors)?;
     let pending_refactors = pending_refactors(refactors, &applied_ids, &actual)
         .map_err(PlanFromDatabaseError::AppliedRefactor)?;
-    let desired = canonicalize_types(desired, |ty| connection.canonical_sql_type(ty));
+    let desired = canonicalize_model(connection, desired);
     plan_models_with_refactors(&desired, &actual, &pending_refactors, policy)
         .map_err(PlanFromDatabaseError::Policy)
 }
 
-/// Returns a copy of `model` with every column type mapped through `canonical`, used to align a
-/// desired model with a backend's introspection canonical form before diffing (see
-/// [`SchemaIntrospect::canonical_sql_type`]).
-fn canonicalize_types(
+/// Returns a copy of `model` aligned with the form `connection`'s introspection produces, so a
+/// desired model does not churn against a live schema. Column types go through
+/// [`SchemaIntrospect::canonical_sql_type`], identity modes through
+/// [`SchemaIntrospect::canonical_identity_mode`], and an index declared without an explicit method /
+/// directions has them filled to the backend default (see
+/// [`SchemaIntrospect::default_index_method`], empty directions becoming all-ASC). This is the same
+/// canonicalization [`plan_from_database`] applies, exposed so callers that diff a desired model
+/// against a live schema directly (e.g. `status --check-schema`) align it identically.
+pub fn canonicalize_model<C: SchemaIntrospect>(
+    connection: &C,
     model: &DatabaseModel,
-    canonical: impl Fn(&SqlType) -> SqlType,
 ) -> DatabaseModel {
+    let default_method = connection.default_index_method();
     let mut model = model.clone();
     for schema in &mut model.schemas {
         for table in &mut schema.tables {
             for column in &mut table.columns {
-                column.ty = canonical(&column.ty);
+                column.ty = connection.canonical_sql_type(&column.ty);
+                if let Some(identity) = &mut column.identity {
+                    identity.mode = connection.canonical_identity_mode(&identity.mode);
+                }
+            }
+            if let Some(primary_key) = &mut table.primary_key {
+                primary_key.name = connection.canonical_primary_key_name(&primary_key.name);
+            }
+            for index in &mut table.indexes {
+                canonicalize_index(index, &default_method);
             }
         }
     }
     model
+}
+
+/// Fills an index's absent method / directions with the backend defaults so a plain crate-declared
+/// index matches the explicit metadata introspection reads back.
+fn canonicalize_index(index: &mut IndexModel, default_method: &Option<IndexMethod>) {
+    if index.method.is_none() {
+        index.method = default_method.clone();
+    }
+    if index.directions.is_empty() {
+        let terms = index.columns.len() + index.expressions.len();
+        index.directions = vec![IndexDirection::Asc; terms];
+    }
 }
 
 /// Records package refactors as applied when the live schema already reflects their final state.
@@ -630,6 +657,79 @@ mod tests {
             operator_classes: vec![],
             predicate: None,
         }
+    }
+
+    /// A backend whose introspection canonical form mirrors MySQL: bare `String` reads back as
+    /// `Varchar(255)`, any identity is `AUTO_INCREMENT`, and a plain index has an explicit `BTREE`
+    /// method with ASC directions.
+    struct CanonBackend;
+
+    impl SchemaIntrospect for CanonBackend {
+        type Error = std::io::Error;
+
+        async fn introspect_database(&mut self) -> Result<DatabaseModel, Self::Error> {
+            unreachable!("canonicalize_model never introspects")
+        }
+
+        fn canonical_sql_type(&self, ty: &SqlType) -> SqlType {
+            match ty {
+                SqlType::String => SqlType::Varchar(255),
+                other => other.clone(),
+            }
+        }
+
+        fn canonical_identity_mode(&self, _mode: &squealy::IdentityMode) -> squealy::IdentityMode {
+            squealy::IdentityMode::AutoIncrement
+        }
+
+        fn default_index_method(&self) -> Option<IndexMethod> {
+            Some(IndexMethod::BTree)
+        }
+
+        fn canonical_primary_key_name(&self, _name: &str) -> String {
+            "PRIMARY".to_owned()
+        }
+    }
+
+    #[test]
+    fn canonicalize_model_aligns_identity_index_and_type_with_introspection() {
+        let mut model = table_with_index(index());
+        model.schemas[0].tables[0].columns.push(ColumnModel {
+            name: "id".to_owned(),
+            comment: None,
+            ty: SqlType::String,
+            collation: None,
+            nullable: false,
+            default: None,
+            identity: Some(squealy::IdentityModel {
+                mode: squealy::IdentityMode::ByDefault,
+            }),
+            generated: None,
+        });
+        model.schemas[0].tables[0].primary_key = Some(Constraint {
+            name: "pk_memberships".to_owned(),
+            columns: vec!["id".to_owned()],
+        });
+
+        let canonical = canonicalize_model(&CanonBackend, &model);
+        let table = &canonical.schemas[0].tables[0];
+
+        let column = &table.columns[0];
+        assert_eq!(column.ty, SqlType::Varchar(255));
+        assert_eq!(
+            column.identity.as_ref().unwrap().mode,
+            squealy::IdentityMode::AutoIncrement
+        );
+
+        assert_eq!(table.primary_key.as_ref().unwrap().name, "PRIMARY");
+
+        let index = &table.indexes[0];
+        assert_eq!(index.method, Some(IndexMethod::BTree));
+        assert_eq!(index.directions, vec![IndexDirection::Asc]);
+
+        // The canonicalized desired model now matches what introspection reads back, so a diff after
+        // a clean publish is empty instead of a never-settling AlterColumn/AlterIndex.
+        assert!(diff_models(&canonical, &canonical).is_empty());
     }
 
     #[test]
