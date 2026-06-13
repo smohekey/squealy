@@ -1,3 +1,4 @@
+use squealy::SchemaBackend;
 use squealy::*;
 use squealy_postgresql::Postgres;
 
@@ -26,6 +27,607 @@ struct Counter<'scope, C: ColumnMode = ColumnExpr> {
 #[derive(Schema)]
 struct Public {
     users: User<'static, ColumnName>,
+}
+
+#[test]
+fn postgres_reports_schema_capabilities() {
+    let capabilities = Postgres.capabilities();
+
+    assert!(capabilities.constraints.foreign_key_match_type);
+    assert!(capabilities.constraints.foreign_key_deferrability);
+    assert!(capabilities.constraints.foreign_key_validation);
+    assert!(!capabilities.constraints.foreign_key_enforcement);
+    assert!(capabilities.constraints.check_validation);
+    assert!(!capabilities.constraints.check_enforcement);
+    assert!(capabilities.indexes.predicates);
+    assert!(capabilities.indexes.expressions);
+    assert!(capabilities.indexes.include_columns);
+    assert!(capabilities.indexes.null_ordering);
+    assert!(capabilities.indexes.collations);
+    assert!(capabilities.indexes.operator_classes);
+}
+
+#[test]
+fn postgres_renders_incremental_schema_plan() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::CreateSchema {
+                schema: Some("public".to_owned()),
+            },
+            DatabasePlanStep::CreateTable {
+                schema: Some("public".to_owned()),
+                table: Box::new(TableModel {
+                    name: "events".to_owned(),
+                    comment: Some("Event records".to_owned()),
+                    columns: vec![ColumnModel {
+                        name: "id".to_owned(),
+                        comment: Some("Event id".to_owned()),
+                        ty: SqlType::I32,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    }],
+                    primary_key: None,
+                    foreign_keys: Vec::new(),
+                    uniques: Vec::new(),
+                    checks: Vec::new(),
+                    indexes: vec![IndexModel {
+                        name: "idx_events_id".to_owned(),
+                        columns: vec!["id".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: Vec::new(),
+                        unique: false,
+                        method: None,
+                        directions: Vec::new(),
+                        nulls: Vec::new(),
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    }],
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AddColumn {
+                    column: ColumnModel {
+                        name: "name".to_owned(),
+                        comment: Some("Event name".to_owned()),
+                        ty: SqlType::Text,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::DropIndex {
+                    index: IndexModel {
+                        name: "idx_events_id".to_owned(),
+                        columns: vec!["id".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: Vec::new(),
+                        unique: false,
+                        method: None,
+                        directions: Vec::new(),
+                        nulls: Vec::new(),
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    },
+                }),
+            },
+            DatabasePlanStep::DropTable {
+                schema: Some("public".to_owned()),
+                table: Box::new(TableModel {
+                    name: "old_events".to_owned(),
+                    comment: None,
+                    columns: Vec::new(),
+                    primary_key: None,
+                    foreign_keys: Vec::new(),
+                    uniques: Vec::new(),
+                    checks: Vec::new(),
+                    indexes: Vec::new(),
+                }),
+            },
+            DatabasePlanStep::DropSchema {
+                schema: Some("old".to_owned()),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "CREATE SCHEMA IF NOT EXISTS \"public\";\n\
+CREATE TABLE \"public\".\"events\" (\n  \"id\" integer NOT NULL\n);\n\
+COMMENT ON TABLE \"public\".\"events\" IS 'Event records';\n\
+COMMENT ON COLUMN \"public\".\"events\".\"id\" IS 'Event id';\n\
+CREATE INDEX \"idx_events_id\" ON \"public\".\"events\" (\"id\");\n\
+ALTER TABLE \"public\".\"events\" ADD COLUMN \"name\" text NOT NULL;\n\
+COMMENT ON COLUMN \"public\".\"events\".\"name\" IS 'Event name';\n\
+DROP INDEX \"public\".\"idx_events_id\";\n\
+DROP TABLE \"public\".\"old_events\";\n\
+DROP SCHEMA \"old\";"
+    );
+}
+
+#[test]
+fn postgres_renders_changed_constraints_and_indexes_in_schema_plan() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterPrimaryKey {
+                    before: Constraint {
+                        name: "pk_events".to_owned(),
+                        columns: vec!["id".to_owned()],
+                    },
+                    after: Constraint {
+                        name: "pk_events".to_owned(),
+                        columns: vec!["event_id".to_owned()],
+                    },
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterUnique {
+                    before: Constraint {
+                        name: "uq_events_name".to_owned(),
+                        columns: vec!["name".to_owned()],
+                    },
+                    after: Constraint {
+                        name: "uq_events_name".to_owned(),
+                        columns: vec!["slug".to_owned()],
+                    },
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterForeignKey {
+                    before: ForeignKeyModel {
+                        name: "fk_events_user_id".to_owned(),
+                        columns: vec!["user_id".to_owned()],
+                        references_schema: Some("public".to_owned()),
+                        references_table: "users".to_owned(),
+                        references_columns: vec!["id".to_owned()],
+                        match_type: None,
+                        deferrability: None,
+                        validation: None,
+                        enforcement: None,
+                        on_delete: None,
+                        on_update: None,
+                    },
+                    after: ForeignKeyModel {
+                        name: "fk_events_user_id".to_owned(),
+                        columns: vec!["owner_id".to_owned()],
+                        references_schema: Some("public".to_owned()),
+                        references_table: "users".to_owned(),
+                        references_columns: vec!["id".to_owned()],
+                        match_type: None,
+                        deferrability: None,
+                        validation: None,
+                        enforcement: None,
+                        on_delete: Some(ForeignKeyAction::Cascade),
+                        on_update: None,
+                    },
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterCheck {
+                    before: CheckModel {
+                        name: "ck_events_id".to_owned(),
+                        expression: "id > 0".to_owned(),
+                        validation: None,
+                        enforcement: None,
+                    },
+                    after: CheckModel {
+                        name: "ck_events_id".to_owned(),
+                        expression: "event_id > 0".to_owned(),
+                        validation: None,
+                        enforcement: None,
+                    },
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterIndex {
+                    before: IndexModel {
+                        name: "idx_events_name".to_owned(),
+                        columns: vec!["name".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: Vec::new(),
+                        unique: false,
+                        method: None,
+                        directions: Vec::new(),
+                        nulls: Vec::new(),
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    },
+                    after: IndexModel {
+                        name: "idx_events_name".to_owned(),
+                        columns: vec!["slug".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: Vec::new(),
+                        unique: true,
+                        method: None,
+                        directions: Vec::new(),
+                        nulls: Vec::new(),
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    },
+                }),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "ALTER TABLE \"public\".\"events\" DROP CONSTRAINT \"pk_events\";\n\
+ALTER TABLE \"public\".\"events\" ADD CONSTRAINT \"pk_events\" PRIMARY KEY (\"event_id\");\n\
+ALTER TABLE \"public\".\"events\" DROP CONSTRAINT \"uq_events_name\";\n\
+ALTER TABLE \"public\".\"events\" ADD CONSTRAINT \"uq_events_name\" UNIQUE (\"slug\");\n\
+ALTER TABLE \"public\".\"events\" DROP CONSTRAINT \"fk_events_user_id\";\n\
+ALTER TABLE \"public\".\"events\" ADD CONSTRAINT \"fk_events_user_id\" FOREIGN KEY (\"owner_id\") REFERENCES \"public\".\"users\" (\"id\") ON DELETE CASCADE;\n\
+ALTER TABLE \"public\".\"events\" DROP CONSTRAINT \"ck_events_id\";\n\
+ALTER TABLE \"public\".\"events\" ADD CONSTRAINT \"ck_events_id\" CHECK (event_id > 0);\n\
+DROP INDEX \"public\".\"idx_events_name\";\n\
+CREATE UNIQUE INDEX \"idx_events_name\" ON \"public\".\"events\" (\"slug\");"
+    );
+}
+
+#[test]
+fn postgres_renders_changed_columns_in_schema_plan() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterColumn {
+                    type_cast: None,
+                    before: ColumnModel {
+                        name: "description".to_owned(),
+                        comment: Some("Old description".to_owned()),
+                        ty: SqlType::String,
+                        collation: None,
+                        nullable: true,
+                        default: Some(DefaultValue::Text("old".to_owned())),
+                        identity: None,
+                        generated: None,
+                    },
+                    after: ColumnModel {
+                        name: "description".to_owned(),
+                        comment: None,
+                        ty: SqlType::Varchar(128),
+                        collation: Some("C".to_owned()),
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterColumn {
+                    type_cast: None,
+                    before: ColumnModel {
+                        name: "status".to_owned(),
+                        comment: None,
+                        ty: SqlType::Text,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                    after: ColumnModel {
+                        name: "status".to_owned(),
+                        comment: Some("Event status".to_owned()),
+                        ty: SqlType::Text,
+                        collation: None,
+                        nullable: true,
+                        default: Some(DefaultValue::Text("new".to_owned())),
+                        identity: None,
+                        generated: None,
+                    },
+                }),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "ALTER TABLE \"public\".\"events\" ALTER COLUMN \"description\" TYPE varchar(128) COLLATE \"C\";\n\
+ALTER TABLE \"public\".\"events\" ALTER COLUMN \"description\" SET NOT NULL;\n\
+ALTER TABLE \"public\".\"events\" ALTER COLUMN \"description\" DROP DEFAULT;\n\
+COMMENT ON COLUMN \"public\".\"events\".\"description\" IS NULL;\n\
+ALTER TABLE \"public\".\"events\" ALTER COLUMN \"status\" DROP NOT NULL;\n\
+ALTER TABLE \"public\".\"events\" ALTER COLUMN \"status\" SET DEFAULT 'new';\n\
+COMMENT ON COLUMN \"public\".\"events\".\"status\" IS 'Event status';"
+    );
+}
+
+#[test]
+fn postgres_renders_identity_and_generated_transitions() {
+    let plain = |name: &str| ColumnModel {
+        name: name.to_owned(),
+        comment: None,
+        ty: SqlType::I64,
+        collation: None,
+        nullable: false,
+        default: None,
+        identity: None,
+        generated: None,
+    };
+    let with_identity = |name: &str, mode: IdentityMode| ColumnModel {
+        identity: Some(IdentityModel { mode }),
+        ..plain(name)
+    };
+    let alter = |before: ColumnModel, after: ColumnModel| DatabasePlanStep::AlterTable {
+        schema: Some("public".to_owned()),
+        table: "events".to_owned(),
+        change: Box::new(TablePlanStep::AlterColumn {
+            before,
+            after,
+            type_cast: None,
+        }),
+    };
+
+    let plan = DatabasePlan {
+        steps: vec![
+            // Add identity.
+            alter(plain("a"), with_identity("a", IdentityMode::Always)),
+            // Change identity mode.
+            alter(
+                with_identity("b", IdentityMode::Always),
+                with_identity("b", IdentityMode::ByDefault),
+            ),
+            // Drop identity.
+            alter(with_identity("c", IdentityMode::ByDefault), plain("c")),
+            // Drop a generated expression.
+            alter(
+                ColumnModel {
+                    generated: Some(GeneratedColumnModel {
+                        expression: "1 + 1".to_owned(),
+                        storage: GeneratedStorage::Stored,
+                    }),
+                    ..plain("d")
+                },
+                plain("d"),
+            ),
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "ALTER TABLE \"public\".\"events\" ALTER COLUMN \"a\" ADD GENERATED ALWAYS AS IDENTITY;\n\
+ALTER TABLE \"public\".\"events\" ALTER COLUMN \"b\" SET GENERATED BY DEFAULT;\n\
+ALTER TABLE \"public\".\"events\" ALTER COLUMN \"c\" DROP IDENTITY IF EXISTS;\n\
+ALTER TABLE \"public\".\"events\" ALTER COLUMN \"d\" DROP EXPRESSION IF EXISTS;"
+    );
+}
+
+#[test]
+fn postgres_rejects_adding_a_generated_column_in_place() {
+    let before = ColumnModel {
+        name: "total".to_owned(),
+        comment: None,
+        ty: SqlType::I64,
+        collation: None,
+        nullable: false,
+        default: None,
+        identity: None,
+        generated: None,
+    };
+    let after = ColumnModel {
+        generated: Some(GeneratedColumnModel {
+            expression: "price * qty".to_owned(),
+            storage: GeneratedStorage::Stored,
+        }),
+        ..before.clone()
+    };
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterTable {
+            schema: Some("public".to_owned()),
+            table: "orders".to_owned(),
+            change: Box::new(TablePlanStep::AlterColumn {
+                before,
+                after,
+                type_cast: None,
+            }),
+        }],
+    };
+
+    let error = Postgres.render_plan(&plan, &mut Vec::new()).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
+fn postgres_drops_identity_before_setting_a_default() {
+    // Identity and default are mutually exclusive, so DROP IDENTITY must come before SET DEFAULT.
+    let before = ColumnModel {
+        name: "counter".to_owned(),
+        comment: None,
+        ty: SqlType::I64,
+        collation: None,
+        nullable: false,
+        default: None,
+        identity: Some(IdentityModel {
+            mode: IdentityMode::ByDefault,
+        }),
+        generated: None,
+    };
+    let after = ColumnModel {
+        identity: None,
+        default: Some(DefaultValue::Text("ready".to_owned())),
+        ..before.clone()
+    };
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterTable {
+            schema: Some("public".to_owned()),
+            table: "events".to_owned(),
+            change: Box::new(TablePlanStep::AlterColumn {
+                before,
+                after,
+                type_cast: None,
+            }),
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "ALTER TABLE \"public\".\"events\" ALTER COLUMN \"counter\" DROP IDENTITY IF EXISTS;\n\
+ALTER TABLE \"public\".\"events\" ALTER COLUMN \"counter\" SET DEFAULT 'ready';"
+    );
+}
+
+#[test]
+fn postgres_renders_rename_steps_in_schema_plan() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::RenameTable {
+                refactor_id: None,
+                schema: Some("public".to_owned()),
+                from: "app_users".to_owned(),
+                to: "users".to_owned(),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "users".to_owned(),
+                change: Box::new(TablePlanStep::RenameColumn {
+                    refactor_id: None,
+                    from: "display_name".to_owned(),
+                    to: "name".to_owned(),
+                }),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "ALTER TABLE \"public\".\"app_users\" RENAME TO \"users\";\n\
+ALTER TABLE \"public\".\"users\" RENAME COLUMN \"display_name\" TO \"name\";"
+    );
+}
+
+#[test]
+fn postgres_records_refactor_ids_for_rename_steps() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::RenameTable {
+                refactor_id: Some("rename-users".to_owned()),
+                schema: Some("public".to_owned()),
+                from: "app_users".to_owned(),
+                to: "users".to_owned(),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "users".to_owned(),
+                change: Box::new(TablePlanStep::RenameColumn {
+                    refactor_id: Some("rename-display-name".to_owned()),
+                    from: "display_name".to_owned(),
+                    to: "name".to_owned(),
+                }),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "CREATE SCHEMA IF NOT EXISTS \"__squealy\";\n\
+CREATE TABLE IF NOT EXISTS \"__squealy\".\"refactors\" (\"id\" text PRIMARY KEY, \"applied_at\" timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP);\n\
+ALTER TABLE \"public\".\"app_users\" RENAME TO \"users\";\n\
+INSERT INTO \"__squealy\".\"refactors\" (\"id\") VALUES ('rename-users') ON CONFLICT (\"id\") DO NOTHING;\n\
+ALTER TABLE \"public\".\"users\" RENAME COLUMN \"display_name\" TO \"name\";\n\
+INSERT INTO \"__squealy\".\"refactors\" (\"id\") VALUES ('rename-display-name') ON CONFLICT (\"id\") DO NOTHING;"
+    );
+}
+
+#[test]
+fn postgres_rejects_unsupported_changed_column_definitions() {
+    let mut renamed = column("description");
+    renamed.name = "details".to_owned();
+
+    // Adding a generated expression to an existing column is not possible in place on Postgres.
+    let mut generated = column("description");
+    generated.generated = Some(GeneratedColumnModel {
+        expression: "length(description)".to_owned(),
+        storage: GeneratedStorage::Stored,
+    });
+
+    for after in [renamed, generated] {
+        let plan = DatabasePlan {
+            steps: vec![DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterColumn {
+                    type_cast: None,
+                    before: column("description"),
+                    after,
+                }),
+            }],
+        };
+
+        let mut sql = Vec::new();
+        let error = Postgres.render_plan(&plan, &mut sql).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    }
+}
+
+fn column(name: &str) -> ColumnModel {
+    ColumnModel {
+        name: name.to_owned(),
+        comment: None,
+        ty: SqlType::Text,
+        collation: None,
+        nullable: true,
+        default: None,
+        identity: None,
+        generated: None,
+    }
 }
 
 #[test]
@@ -460,6 +1062,519 @@ fn postgres_renders_create_from_scratch() {
 CREATE TABLE \"catalog\".\"tenants\" (\n  \"id\" integer GENERATED BY DEFAULT AS IDENTITY NOT NULL,\n  \"slug\" text NOT NULL,\n  CONSTRAINT \"pk_tenants\" PRIMARY KEY (\"id\"),\n  CONSTRAINT \"uq_tenants_slug\" UNIQUE (\"slug\")\n);\n\
 CREATE TABLE \"catalog\".\"memberships\" (\n  \"id\" integer GENERATED BY DEFAULT AS IDENTITY NOT NULL,\n  \"tenant_id\" integer NOT NULL,\n  CONSTRAINT \"pk_memberships\" PRIMARY KEY (\"id\")\n);\n\
 CREATE INDEX \"idx_memberships_tenant_id\" ON \"catalog\".\"memberships\" (\"tenant_id\");\n\
-ALTER TABLE \"catalog\".\"memberships\" ADD CONSTRAINT \"fk_memberships_tenant_id\" FOREIGN KEY (\"tenant_id\") REFERENCES \"catalog\".\"tenants\" (\"id\") ON DELETE cascade;"
+ALTER TABLE \"catalog\".\"memberships\" ADD CONSTRAINT \"fk_memberships_tenant_id\" FOREIGN KEY (\"tenant_id\") REFERENCES \"catalog\".\"tenants\" (\"id\") ON DELETE CASCADE;"
+    );
+}
+
+#[test]
+fn postgres_renders_table_and_column_comments() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog".to_owned()),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                comment: Some("Tenant records".to_owned()),
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    comment: Some("Tenant's stable slug".to_owned()),
+                    ty: SqlType::String,
+                    collation: Some("C".to_owned()),
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "CREATE SCHEMA IF NOT EXISTS \"catalog\";\n\
+CREATE TABLE \"catalog\".\"tenants\" (\n  \"slug\" text COLLATE \"C\" NOT NULL\n);\n\
+COMMENT ON TABLE \"catalog\".\"tenants\" IS 'Tenant records';\n\
+COMMENT ON COLUMN \"catalog\".\"tenants\".\"slug\" IS 'Tenant''s stable slug';"
+    );
+}
+
+#[test]
+fn postgres_renders_foreign_key_match_type() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog".to_owned()),
+            tables: vec![
+                TableModel {
+                    name: "memberships".to_owned(),
+                    comment: None,
+                    columns: vec![ColumnModel {
+                        name: "tenant_id".to_owned(),
+                        comment: None,
+                        ty: SqlType::I32,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    }],
+                    primary_key: None,
+                    foreign_keys: vec![ForeignKeyModel {
+                        name: "fk_memberships_tenant_id".to_owned(),
+                        columns: vec!["tenant_id".to_owned()],
+                        references_schema: Some("catalog".to_owned()),
+                        references_table: "tenants".to_owned(),
+                        references_columns: vec!["id".to_owned()],
+                        match_type: Some(ForeignKeyMatch::Full),
+                        deferrability: Some(ConstraintDeferrability::InitiallyDeferred),
+                        validation: Some(ConstraintValidation::NotValidated),
+                        enforcement: None,
+                        on_delete: Some(ForeignKeyAction::Cascade),
+                        on_update: None,
+                    }],
+                    uniques: Vec::new(),
+                    checks: Vec::new(),
+                    indexes: Vec::new(),
+                },
+                TableModel {
+                    name: "tenants".to_owned(),
+                    comment: None,
+                    columns: vec![ColumnModel {
+                        name: "id".to_owned(),
+                        comment: None,
+                        ty: SqlType::I32,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    }],
+                    primary_key: None,
+                    foreign_keys: Vec::new(),
+                    uniques: Vec::new(),
+                    checks: Vec::new(),
+                    indexes: Vec::new(),
+                },
+            ],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "ALTER TABLE \"catalog\".\"memberships\" ADD CONSTRAINT \"fk_memberships_tenant_id\" FOREIGN KEY (\"tenant_id\") REFERENCES \"catalog\".\"tenants\" (\"id\") MATCH FULL ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED"
+        ),
+        "foreign key match type not rendered as expected: {sql}"
+    );
+    assert!(
+        sql.contains(" DEFERRABLE INITIALLY DEFERRED NOT VALID"),
+        "foreign key validation not rendered as expected: {sql}"
+    );
+}
+
+#[test]
+fn postgres_renders_partial_indexes() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog".to_owned()),
+            tables: vec![TableModel {
+                name: "memberships".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "tenant_id".to_owned(),
+                    comment: None,
+                    ty: SqlType::I32,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_memberships_tenant_id".to_owned(),
+                    columns: vec!["tenant_id".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Desc],
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    predicate: Some("(tenant_id > 0)".to_owned()),
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE INDEX \"idx_memberships_tenant_id\" ON \"catalog\".\"memberships\" USING btree (\"tenant_id\" DESC) WHERE (tenant_id > 0)"
+        ),
+        "partial index not rendered as expected: {sql}"
+    );
+}
+
+#[test]
+fn postgres_renders_expression_indexes() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog".to_owned()),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    comment: None,
+                    ty: SqlType::String,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_tenants_lower_slug".to_owned(),
+                    columns: Vec::new(),
+                    expressions: vec!["lower(slug)".to_owned()],
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE INDEX \"idx_tenants_lower_slug\" ON \"catalog\".\"tenants\" USING btree (lower(slug) ASC)"
+        ),
+        "expression index not rendered as expected: {sql}"
+    );
+}
+
+#[test]
+fn postgres_renders_covering_indexes() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog".to_owned()),
+            tables: vec![TableModel {
+                name: "memberships".to_owned(),
+                comment: None,
+                columns: vec![
+                    ColumnModel {
+                        name: "tenant_id".to_owned(),
+                        comment: None,
+                        ty: SqlType::I32,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                    ColumnModel {
+                        name: "role_code".to_owned(),
+                        comment: None,
+                        ty: SqlType::String,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                ],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_memberships_tenant_id".to_owned(),
+                    columns: vec!["tenant_id".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: vec!["role_code".to_owned()],
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE INDEX \"idx_memberships_tenant_id\" ON \"catalog\".\"memberships\" USING btree (\"tenant_id\" ASC) INCLUDE (\"role_code\")"
+        ),
+        "covering index not rendered as expected: {sql}"
+    );
+}
+
+#[test]
+fn postgres_renders_index_null_ordering() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog".to_owned()),
+            tables: vec![TableModel {
+                name: "memberships".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "tenant_id".to_owned(),
+                    comment: None,
+                    ty: SqlType::I32,
+                    collation: None,
+                    nullable: true,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_memberships_tenant_id".to_owned(),
+                    columns: vec!["tenant_id".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    nulls: vec![IndexNullsOrder::First],
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE INDEX \"idx_memberships_tenant_id\" ON \"catalog\".\"memberships\" USING btree (\"tenant_id\" ASC NULLS FIRST)"
+        ),
+        "index null ordering not rendered as expected: {sql}"
+    );
+}
+
+#[test]
+fn postgres_renders_index_operator_classes() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog".to_owned()),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    comment: None,
+                    ty: SqlType::String,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_tenants_slug_pattern".to_owned(),
+                    columns: vec!["slug".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: vec![IndexOperatorClass {
+                        position: 0,
+                        name: "text_pattern_ops".to_owned(),
+                    }],
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE INDEX \"idx_tenants_slug_pattern\" ON \"catalog\".\"tenants\" USING btree (\"slug\" text_pattern_ops ASC)"
+        ),
+        "index operator class not rendered as expected: {sql}"
+    );
+}
+
+#[test]
+fn postgres_renders_index_collations() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog".to_owned()),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    comment: None,
+                    ty: SqlType::String,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_tenants_slug_pattern".to_owned(),
+                    columns: vec!["slug".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    nulls: Vec::new(),
+                    collations: vec![IndexCollation {
+                        position: 0,
+                        name: "C".to_owned(),
+                    }],
+                    operator_classes: vec![IndexOperatorClass {
+                        position: 0,
+                        name: "text_pattern_ops".to_owned(),
+                    }],
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE INDEX \"idx_tenants_slug_pattern\" ON \"catalog\".\"tenants\" USING btree (\"slug\" COLLATE \"C\" text_pattern_ops ASC)"
+        ),
+        "index collation not rendered as expected: {sql}"
+    );
+}
+
+/// Builds a single-column `id` table optionally referencing `references_table` via a foreign key, for
+/// the multi-table create-ordering test below.
+fn fk_test_table(name: &str, references_table: Option<&str>) -> Box<TableModel> {
+    let foreign_keys = references_table
+        .map(|target| ForeignKeyModel {
+            name: format!("fk_{name}_{target}"),
+            columns: vec!["id".to_owned()],
+            references_schema: Some("public".to_owned()),
+            references_table: target.to_owned(),
+            references_columns: vec!["id".to_owned()],
+            match_type: None,
+            deferrability: None,
+            validation: None,
+            enforcement: None,
+            on_delete: None,
+            on_update: None,
+        })
+        .into_iter()
+        .collect();
+    Box::new(TableModel {
+        name: name.to_owned(),
+        comment: None,
+        columns: vec![ColumnModel {
+            name: "id".to_owned(),
+            comment: None,
+            ty: SqlType::I32,
+            collation: None,
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+        }],
+        primary_key: None,
+        foreign_keys,
+        uniques: Vec::new(),
+        checks: Vec::new(),
+        indexes: Vec::new(),
+    })
+}
+
+#[test]
+fn postgres_defers_foreign_keys_until_all_tables_are_created() {
+    // `comments` is created first but references `posts`, created second. The foreign key must be
+    // deferred until after both `CREATE TABLE`s, or it would reference a table that does not exist yet.
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::CreateTable {
+                schema: Some("public".to_owned()),
+                table: fk_test_table("comments", Some("posts")),
+            },
+            DatabasePlanStep::CreateTable {
+                schema: Some("public".to_owned()),
+                table: fk_test_table("posts", None),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    let comments_create = sql.find("CREATE TABLE \"public\".\"comments\"").unwrap();
+    let posts_create = sql.find("CREATE TABLE \"public\".\"posts\"").unwrap();
+    let fk = sql.find("ADD CONSTRAINT \"fk_comments_posts\"").unwrap();
+    assert!(
+        comments_create < posts_create && posts_create < fk,
+        "foreign key not deferred until after both tables were created: {sql}"
     );
 }

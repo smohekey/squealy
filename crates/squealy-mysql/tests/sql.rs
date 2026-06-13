@@ -36,6 +36,489 @@ struct ShopDb {
 }
 
 #[test]
+fn mysql_reports_schema_capabilities() {
+    let capabilities = Mysql.capabilities();
+
+    assert!(!capabilities.constraints.foreign_key_match_type);
+    assert!(!capabilities.constraints.foreign_key_deferrability);
+    assert!(!capabilities.constraints.foreign_key_validation);
+    assert!(!capabilities.constraints.foreign_key_enforcement);
+    assert!(!capabilities.constraints.check_validation);
+    assert!(!capabilities.constraints.check_enforcement);
+    assert!(!capabilities.indexes.predicates);
+    assert!(!capabilities.indexes.expressions);
+    assert!(!capabilities.indexes.include_columns);
+    assert!(!capabilities.indexes.null_ordering);
+    assert!(!capabilities.indexes.collations);
+    assert!(!capabilities.indexes.operator_classes);
+}
+
+#[test]
+fn mysql_renders_incremental_schema_plan() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::CreateSchema {
+                schema: Some("shop".to_owned()),
+            },
+            DatabasePlanStep::CreateTable {
+                schema: Some("shop".to_owned()),
+                table: Box::new(TableModel {
+                    name: "events".to_owned(),
+                    comment: Some("Event records".to_owned()),
+                    columns: vec![ColumnModel {
+                        name: "id".to_owned(),
+                        comment: Some("Event id".to_owned()),
+                        ty: SqlType::I32,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    }],
+                    primary_key: None,
+                    foreign_keys: Vec::new(),
+                    uniques: Vec::new(),
+                    checks: Vec::new(),
+                    indexes: vec![IndexModel {
+                        name: "idx_events_id".to_owned(),
+                        columns: vec!["id".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: Vec::new(),
+                        unique: false,
+                        method: None,
+                        directions: Vec::new(),
+                        nulls: Vec::new(),
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    }],
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AddColumn {
+                    column: ColumnModel {
+                        name: "name".to_owned(),
+                        comment: Some("Event name".to_owned()),
+                        ty: SqlType::Text,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::DropIndex {
+                    index: IndexModel {
+                        name: "idx_events_id".to_owned(),
+                        columns: vec!["id".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: Vec::new(),
+                        unique: false,
+                        method: None,
+                        directions: Vec::new(),
+                        nulls: Vec::new(),
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    },
+                }),
+            },
+            DatabasePlanStep::DropTable {
+                schema: Some("shop".to_owned()),
+                table: Box::new(TableModel {
+                    name: "old_events".to_owned(),
+                    comment: None,
+                    columns: Vec::new(),
+                    primary_key: None,
+                    foreign_keys: Vec::new(),
+                    uniques: Vec::new(),
+                    checks: Vec::new(),
+                    indexes: Vec::new(),
+                }),
+            },
+            DatabasePlanStep::DropSchema {
+                schema: Some("old".to_owned()),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "CREATE SCHEMA IF NOT EXISTS `shop`;\n\
+CREATE TABLE `shop`.`events` (\n  `id` INT NOT NULL COMMENT 'Event id'\n) COMMENT='Event records';\n\
+CREATE INDEX `idx_events_id` ON `shop`.`events` (`id`);\n\
+ALTER TABLE `shop`.`events` ADD COLUMN `name` TEXT NOT NULL COMMENT 'Event name';\n\
+DROP INDEX `idx_events_id` ON `shop`.`events`;\n\
+DROP TABLE `shop`.`old_events`;\n\
+DROP SCHEMA `old`;"
+    );
+}
+
+#[test]
+fn mysql_renders_changed_constraints_and_indexes_in_schema_plan() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterPrimaryKey {
+                    before: Constraint {
+                        name: "pk_events".to_owned(),
+                        columns: vec!["id".to_owned()],
+                    },
+                    after: Constraint {
+                        name: "pk_events".to_owned(),
+                        columns: vec!["event_id".to_owned()],
+                    },
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterUnique {
+                    before: Constraint {
+                        name: "uq_events_name".to_owned(),
+                        columns: vec!["name".to_owned()],
+                    },
+                    after: Constraint {
+                        name: "uq_events_name".to_owned(),
+                        columns: vec!["slug".to_owned()],
+                    },
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterForeignKey {
+                    before: ForeignKeyModel {
+                        name: "fk_events_user_id".to_owned(),
+                        columns: vec!["user_id".to_owned()],
+                        references_schema: Some("shop".to_owned()),
+                        references_table: "users".to_owned(),
+                        references_columns: vec!["id".to_owned()],
+                        match_type: None,
+                        deferrability: None,
+                        validation: None,
+                        enforcement: None,
+                        on_delete: None,
+                        on_update: None,
+                    },
+                    after: ForeignKeyModel {
+                        name: "fk_events_user_id".to_owned(),
+                        columns: vec!["owner_id".to_owned()],
+                        references_schema: Some("shop".to_owned()),
+                        references_table: "users".to_owned(),
+                        references_columns: vec!["id".to_owned()],
+                        match_type: None,
+                        deferrability: None,
+                        validation: None,
+                        enforcement: None,
+                        on_delete: Some(ForeignKeyAction::Cascade),
+                        on_update: None,
+                    },
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterCheck {
+                    before: CheckModel {
+                        name: "ck_events_id".to_owned(),
+                        expression: "id > 0".to_owned(),
+                        validation: None,
+                        enforcement: None,
+                    },
+                    after: CheckModel {
+                        name: "ck_events_id".to_owned(),
+                        expression: "event_id > 0".to_owned(),
+                        validation: None,
+                        enforcement: None,
+                    },
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterIndex {
+                    before: IndexModel {
+                        name: "idx_events_name".to_owned(),
+                        columns: vec!["name".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: Vec::new(),
+                        unique: false,
+                        method: None,
+                        directions: Vec::new(),
+                        nulls: Vec::new(),
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    },
+                    after: IndexModel {
+                        name: "idx_events_name".to_owned(),
+                        columns: vec!["slug".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: Vec::new(),
+                        unique: true,
+                        method: None,
+                        directions: Vec::new(),
+                        nulls: Vec::new(),
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    },
+                }),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "ALTER TABLE `shop`.`events` DROP PRIMARY KEY;\n\
+ALTER TABLE `shop`.`events` ADD CONSTRAINT `pk_events` PRIMARY KEY (`event_id`);\n\
+ALTER TABLE `shop`.`events` DROP INDEX `uq_events_name`;\n\
+ALTER TABLE `shop`.`events` ADD CONSTRAINT `uq_events_name` UNIQUE (`slug`);\n\
+ALTER TABLE `shop`.`events` DROP FOREIGN KEY `fk_events_user_id`;\n\
+ALTER TABLE `shop`.`events` ADD CONSTRAINT `fk_events_user_id` FOREIGN KEY (`owner_id`) REFERENCES `shop`.`users` (`id`) ON DELETE CASCADE;\n\
+ALTER TABLE `shop`.`events` DROP CHECK `ck_events_id`;\n\
+ALTER TABLE `shop`.`events` ADD CONSTRAINT `ck_events_id` CHECK (event_id > 0);\n\
+DROP INDEX `idx_events_name` ON `shop`.`events`;\n\
+CREATE UNIQUE INDEX `idx_events_name` ON `shop`.`events` (`slug`);"
+    );
+}
+
+#[test]
+fn mysql_renders_changed_columns_in_schema_plan() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterColumn {
+                    type_cast: None,
+                    before: ColumnModel {
+                        name: "description".to_owned(),
+                        comment: Some("Old description".to_owned()),
+                        ty: SqlType::String,
+                        collation: None,
+                        nullable: true,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                    after: ColumnModel {
+                        name: "description".to_owned(),
+                        comment: Some("New description".to_owned()),
+                        ty: SqlType::Varchar(128),
+                        collation: Some("utf8mb4_bin".to_owned()),
+                        nullable: false,
+                        default: Some(DefaultValue::Text("new".to_owned())),
+                        identity: None,
+                        generated: None,
+                    },
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterColumn {
+                    type_cast: None,
+                    before: ColumnModel {
+                        name: "status".to_owned(),
+                        comment: Some("Event status".to_owned()),
+                        ty: SqlType::Text,
+                        collation: None,
+                        nullable: false,
+                        default: Some(DefaultValue::Text("draft".to_owned())),
+                        identity: None,
+                        generated: None,
+                    },
+                    after: ColumnModel {
+                        name: "status".to_owned(),
+                        comment: None,
+                        ty: SqlType::Text,
+                        collation: None,
+                        nullable: true,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                }),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "ALTER TABLE `shop`.`events` MODIFY COLUMN `description` VARCHAR(128) COLLATE utf8mb4_bin NOT NULL DEFAULT 'new' COMMENT 'New description';\n\
+ALTER TABLE `shop`.`events` MODIFY COLUMN `status` TEXT;"
+    );
+}
+
+#[test]
+fn mysql_renders_rename_steps_in_schema_plan() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::RenameTable {
+                refactor_id: None,
+                schema: Some("shop".to_owned()),
+                from: "app_users".to_owned(),
+                to: "users".to_owned(),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "users".to_owned(),
+                change: Box::new(TablePlanStep::RenameColumn {
+                    refactor_id: None,
+                    from: "display_name".to_owned(),
+                    to: "name".to_owned(),
+                }),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "RENAME TABLE `shop`.`app_users` TO `shop`.`users`;\n\
+ALTER TABLE `shop`.`users` RENAME COLUMN `display_name` TO `name`;"
+    );
+}
+
+#[test]
+fn mysql_records_refactor_ids_for_rename_steps() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::RenameTable {
+                refactor_id: Some("rename-users".to_owned()),
+                schema: Some("shop".to_owned()),
+                from: "app_users".to_owned(),
+                to: "users".to_owned(),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "users".to_owned(),
+                change: Box::new(TablePlanStep::RenameColumn {
+                    refactor_id: Some("rename-display-name".to_owned()),
+                    from: "display_name".to_owned(),
+                    to: "name".to_owned(),
+                }),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "CREATE SCHEMA IF NOT EXISTS `__squealy`;\n\
+CREATE TABLE IF NOT EXISTS `__squealy`.`refactors` (`id` VARCHAR(255) NOT NULL PRIMARY KEY, `applied_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);\n\
+RENAME TABLE `shop`.`app_users` TO `shop`.`users`;\n\
+INSERT IGNORE INTO `__squealy`.`refactors` (`id`) VALUES ('rename-users');\n\
+ALTER TABLE `shop`.`users` RENAME COLUMN `display_name` TO `name`;\n\
+INSERT IGNORE INTO `__squealy`.`refactors` (`id`) VALUES ('rename-display-name');"
+    );
+}
+
+#[test]
+fn mysql_rejects_unsupported_changed_column_definitions() {
+    // Column rename is still expressed via explicit refactor steps, not an in-place `MODIFY`.
+    let mut renamed = column("description");
+    renamed.name = "details".to_owned();
+
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterTable {
+            schema: Some("shop".to_owned()),
+            table: "events".to_owned(),
+            change: Box::new(TablePlanStep::AlterColumn {
+                type_cast: None,
+                before: column("description"),
+                after: renamed,
+            }),
+        }],
+    };
+
+    let error = Mysql.render_plan(&plan, &mut Vec::new()).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
+fn mysql_renders_identity_and_generated_transitions() {
+    let mut id_before = column("id");
+    id_before.ty = SqlType::I32;
+    id_before.nullable = false;
+    let mut id_after = id_before.clone();
+    id_after.identity = Some(IdentityModel {
+        mode: IdentityMode::AutoIncrement,
+    });
+
+    let total_before = column("total");
+    let mut total_after = total_before.clone();
+    total_after.generated = Some(GeneratedColumnModel {
+        expression: "`a` + `b`".to_owned(),
+        storage: GeneratedStorage::Virtual,
+    });
+
+    let alter = |before: ColumnModel, after: ColumnModel| DatabasePlanStep::AlterTable {
+        schema: Some("shop".to_owned()),
+        table: "events".to_owned(),
+        change: Box::new(TablePlanStep::AlterColumn {
+            before,
+            after,
+            type_cast: None,
+        }),
+    };
+    let plan = DatabasePlan {
+        steps: vec![alter(id_before, id_after), alter(total_before, total_after)],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "ALTER TABLE `shop`.`events` MODIFY COLUMN `id` INT NOT NULL AUTO_INCREMENT;\n\
+ALTER TABLE `shop`.`events` MODIFY COLUMN `total` TEXT GENERATED ALWAYS AS (`a` + `b`) VIRTUAL;"
+    );
+}
+
+fn column(name: &str) -> ColumnModel {
+    ColumnModel {
+        name: name.to_owned(),
+        comment: None,
+        ty: SqlType::Text,
+        collation: None,
+        nullable: true,
+        default: None,
+        identity: None,
+        generated: None,
+    }
+}
+
+#[test]
 fn mysql_renders_create_from_scratch() {
     let model = DatabaseModel::from_database::<ShopDb>();
     let mut sql = Vec::new();
@@ -49,6 +532,521 @@ fn mysql_renders_create_from_scratch() {
 CREATE TABLE `shop`.`tenants` (\n  `id` INT NOT NULL AUTO_INCREMENT,\n  `slug` VARCHAR(255) NOT NULL,\n  CONSTRAINT `pk_tenants` PRIMARY KEY (`id`),\n  CONSTRAINT `uq_tenants_slug` UNIQUE (`slug`)\n);\n\
 CREATE TABLE `shop`.`memberships` (\n  `id` INT NOT NULL AUTO_INCREMENT,\n  `tenant_id` INT NOT NULL,\n  `seats` SMALLINT UNSIGNED NOT NULL,\n  CONSTRAINT `pk_memberships` PRIMARY KEY (`id`)\n);\n\
 CREATE INDEX `idx_memberships_tenant_id` ON `shop`.`memberships` (`tenant_id`);\n\
-ALTER TABLE `shop`.`memberships` ADD CONSTRAINT `fk_memberships_tenant_id` FOREIGN KEY (`tenant_id`) REFERENCES `shop`.`tenants` (`id`) ON DELETE cascade;"
+ALTER TABLE `shop`.`memberships` ADD CONSTRAINT `fk_memberships_tenant_id` FOREIGN KEY (`tenant_id`) REFERENCES `shop`.`tenants` (`id`) ON DELETE CASCADE;"
+    );
+}
+
+#[test]
+fn mysql_renders_table_and_column_comments() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                comment: Some("Tenant records".to_owned()),
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    comment: Some("Tenant's stable slug".to_owned()),
+                    ty: SqlType::String,
+                    collation: Some("utf8mb4_bin".to_owned()),
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "CREATE SCHEMA IF NOT EXISTS `shop`;\n\
+CREATE TABLE `shop`.`tenants` (\n  `slug` VARCHAR(255) COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant''s stable slug'\n) COMMENT='Tenant records';"
+    );
+}
+
+#[test]
+fn mysql_rejects_foreign_key_match_types() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: vec![TableModel {
+                name: "memberships".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "tenant_id".to_owned(),
+                    comment: None,
+                    ty: SqlType::I32,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: vec![ForeignKeyModel {
+                    name: "fk_memberships_tenant_id".to_owned(),
+                    columns: vec!["tenant_id".to_owned()],
+                    references_schema: Some("shop".to_owned()),
+                    references_table: "tenants".to_owned(),
+                    references_columns: vec!["id".to_owned()],
+                    match_type: Some(ForeignKeyMatch::Full),
+                    deferrability: None,
+                    validation: None,
+                    enforcement: None,
+                    on_delete: None,
+                    on_update: None,
+                }],
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mysql_rejects_deferrable_foreign_keys() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: vec![TableModel {
+                name: "memberships".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "tenant_id".to_owned(),
+                    comment: None,
+                    ty: SqlType::I32,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: vec![ForeignKeyModel {
+                    name: "fk_memberships_tenant_id".to_owned(),
+                    columns: vec!["tenant_id".to_owned()],
+                    references_schema: Some("shop".to_owned()),
+                    references_table: "tenants".to_owned(),
+                    references_columns: vec!["id".to_owned()],
+                    match_type: None,
+                    deferrability: Some(ConstraintDeferrability::InitiallyDeferred),
+                    validation: None,
+                    enforcement: None,
+                    on_delete: None,
+                    on_update: None,
+                }],
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mysql_rejects_check_constraint_enforcement() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: vec![TableModel {
+                name: "memberships".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "tenant_id".to_owned(),
+                    comment: None,
+                    ty: SqlType::I32,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: vec![CheckModel {
+                    name: "ck_memberships_tenant_id".to_owned(),
+                    expression: "tenant_id > 0".to_owned(),
+                    validation: None,
+                    enforcement: Some(ConstraintEnforcement::NotEnforced),
+                }],
+                indexes: Vec::new(),
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mysql_rejects_partial_index_predicates() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: vec![TableModel {
+                name: "memberships".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "tenant_id".to_owned(),
+                    comment: None,
+                    ty: SqlType::I32,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_memberships_tenant_id".to_owned(),
+                    columns: vec!["tenant_id".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    predicate: Some("tenant_id > 0".to_owned()),
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mysql_rejects_expression_indexes() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    comment: None,
+                    ty: SqlType::String,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_tenants_lower_slug".to_owned(),
+                    columns: Vec::new(),
+                    expressions: vec!["lower(slug)".to_owned()],
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mysql_rejects_covering_index_include_columns() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: vec![TableModel {
+                name: "memberships".to_owned(),
+                comment: None,
+                columns: vec![
+                    ColumnModel {
+                        name: "tenant_id".to_owned(),
+                        comment: None,
+                        ty: SqlType::I32,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                    ColumnModel {
+                        name: "role_code".to_owned(),
+                        comment: None,
+                        ty: SqlType::String,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    },
+                ],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_memberships_tenant_id".to_owned(),
+                    columns: vec!["tenant_id".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: vec!["role_code".to_owned()],
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mysql_rejects_index_null_ordering() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: vec![TableModel {
+                name: "memberships".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "tenant_id".to_owned(),
+                    comment: None,
+                    ty: SqlType::I32,
+                    collation: None,
+                    nullable: true,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_memberships_tenant_id".to_owned(),
+                    columns: vec!["tenant_id".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    nulls: vec![IndexNullsOrder::First],
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mysql_rejects_index_operator_classes() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    comment: None,
+                    ty: SqlType::String,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_tenants_slug_pattern".to_owned(),
+                    columns: vec!["slug".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: vec![IndexOperatorClass {
+                        position: 0,
+                        name: "text_pattern_ops".to_owned(),
+                    }],
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mysql_rejects_index_collations() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    comment: None,
+                    ty: SqlType::String,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_tenants_slug_pattern".to_owned(),
+                    columns: vec!["slug".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    nulls: Vec::new(),
+                    collations: vec![IndexCollation {
+                        position: 0,
+                        name: "C".to_owned(),
+                    }],
+                    operator_classes: Vec::new(),
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+/// Builds a single-column `id` table optionally referencing `references_table` via a foreign key, for
+/// the multi-table create-ordering test below.
+fn fk_test_table(name: &str, references_table: Option<&str>) -> Box<TableModel> {
+    let foreign_keys = references_table
+        .map(|target| ForeignKeyModel {
+            name: format!("fk_{name}_{target}"),
+            columns: vec!["id".to_owned()],
+            references_schema: Some("shop".to_owned()),
+            references_table: target.to_owned(),
+            references_columns: vec!["id".to_owned()],
+            match_type: None,
+            deferrability: None,
+            validation: None,
+            enforcement: None,
+            on_delete: None,
+            on_update: None,
+        })
+        .into_iter()
+        .collect();
+    Box::new(TableModel {
+        name: name.to_owned(),
+        comment: None,
+        columns: vec![ColumnModel {
+            name: "id".to_owned(),
+            comment: None,
+            ty: SqlType::I32,
+            collation: None,
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+        }],
+        primary_key: None,
+        foreign_keys,
+        uniques: Vec::new(),
+        checks: Vec::new(),
+        indexes: Vec::new(),
+    })
+}
+
+#[test]
+fn mysql_defers_foreign_keys_until_all_tables_are_created() {
+    // `comments` is created first but references `posts`, created second. The foreign key must be
+    // deferred until after both `CREATE TABLE`s, or it would reference a table that does not exist yet.
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::CreateTable {
+                schema: Some("shop".to_owned()),
+                table: fk_test_table("comments", Some("posts")),
+            },
+            DatabasePlanStep::CreateTable {
+                schema: Some("shop".to_owned()),
+                table: fk_test_table("posts", None),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    let comments_create = sql.find("CREATE TABLE `shop`.`comments`").unwrap();
+    let posts_create = sql.find("CREATE TABLE `shop`.`posts`").unwrap();
+    let fk = sql.find("ADD CONSTRAINT `fk_comments_posts`").unwrap();
+    assert!(
+        comments_create < posts_create && posts_create < fk,
+        "foreign key not deferred until after both tables were created: {sql}"
     );
 }

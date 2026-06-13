@@ -10,6 +10,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  msrv:
+    name: MSRV (1.92)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust 1.92
+        uses: dtolnay/rust-toolchain@1.92
+      - name: Check on MSRV
+        run: cargo check --workspace --all-targets --all-features
+
   test:
     runs-on: ubuntu-latest
 
@@ -47,16 +57,32 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Check formatting
         run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Install cargo-rdme
         run: cargo install cargo-rdme --version 1.5.0 --locked
 
       - name: Check README
         run: cargo rdme --workspace-project squealy --readme-path README.md --check
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.1 --locked
+
+      - name: Audit dependencies
+        run: cargo audit
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.16.4 --locked
+
+      # Advisories are covered by `cargo audit`; cargo-deny enforces license, source, and ban policy.
+      - name: Check dependency policy
+        run: cargo deny check licenses bans sources
 
       - name: Build
         run: cargo build --workspace --all-targets
@@ -78,4 +104,12 @@ jobs:
 
       # Compiles + runs an extraction stub against a fixture crate (no database needed).
       - name: CLI extraction test
-        run: cargo test -p squealy-cli --test cli -- --ignored
+        run: cargo test -p squealy-cli --test cli extracts_and_scripts_from_a_crate -- --ignored
+
+      - name: CLI live introspection tests
+        env:
+          SQUEALY_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/squealy_test
+          SQUEALY_MYSQL_URL: mysql://root:root@127.0.0.1:3306/squealy_test
+        run: |
+          cargo test -p squealy-cli --test cli postgres_introspects_live_database_to_package -- --ignored --test-threads=1
+          cargo test -p squealy-cli --test cli mysql_introspects_live_database_to_package -- --ignored --test-threads=1

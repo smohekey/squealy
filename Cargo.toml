@@ -12,8 +12,10 @@ resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
+# The async-RPIT query builder does not borrow-check on 1.88; 1.92 is the verified floor and is
+# enforced by the `msrv` CI job. (The previous 1.85 value did not actually build.)
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 license = "MIT"
 repository = "https://github.com/smohekey/squealy"
 keywords = ["sql", "orm", "query-builder", "postgres", "database"]
@@ -23,9 +25,11 @@ categories = ["database"]
 squealy = { version = "0.1.0", path = "crates/squealy" }
 squealy-macros = { version = "0.1.0", path = "crates/squealy-macros" }
 squealy-model = { version = "0.1.0", path = "crates/squealy-model" }
+squealy-mysql = { version = "0.1.0", path = "crates/squealy-mysql" }
 squealy-postgresql = { version = "0.1.0", path = "crates/squealy-postgresql" }
 squealy-test = { version = "0.1.0", path = "crates/squealy-test" }
 futures-core = "0.3"
 kdl = "6.5"
+thiserror = "2"
 trybuild = "1.0"
 zip = { version = "7.2", default-features = false }

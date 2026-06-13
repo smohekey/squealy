@@ -94,10 +94,10 @@ impl ConnectionWithTransaction for TestConnection {
     where
         Self: 'conn;
 
-    fn transaction<'conn, T, F>(
+    async fn transaction<'conn, T, F>(
         &'conn mut self,
         f: F,
-    ) -> impl std::future::Future<Output = Result<T, <Self::Backend as Backend>::Error>> + 'conn
+    ) -> Result<T, <Self::Backend as Backend>::Error>
     where
         T: 'conn,
         F: for<'tx> AsyncFnOnce(
@@ -105,9 +105,7 @@ impl ConnectionWithTransaction for TestConnection {
             ) -> Result<T, <Self::Backend as Backend>::Error>
             + 'conn,
     {
-        async move {
-            let mut transaction = TestConnection;
-            f(&mut transaction).await
-        }
+        let mut transaction = TestConnection;
+        f(&mut transaction).await
     }
 }

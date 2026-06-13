@@ -1547,10 +1547,10 @@ fn has_scope_and_mode(generic_tokens: &[TokenTree]) -> bool {
             }
             // A lifetime is a `'` punct joined to the following identifier.
             TokenTree::Punct(punct) if punct.as_char() == '\'' && depth == 1 => {
-                if let Some(TokenTree::Ident(name)) = generic_tokens.get(start + offset + 1) {
-                    if name.to_string() == "scope" {
-                        has_scope = true;
-                    }
+                if let Some(TokenTree::Ident(name)) = generic_tokens.get(start + offset + 1)
+                    && name.to_string() == "scope"
+                {
+                    has_scope = true;
                 }
             }
             TokenTree::Ident(ident) if depth == 1 && ident.to_string() == "C" => has_mode = true,

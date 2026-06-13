@@ -8,50 +8,53 @@
 //! ```text
 //! package.sqz (zip)
 //! ├── manifest.kdl   metadata
-//! └── model.kdl      the DatabaseModel
+//! ├── model.kdl      the DatabaseModel
+//! └── refactor.kdl   optional explicit refactor operations
 //! ```
 
-use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyModel, IndexModel,
+    CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintEnforcement,
+    ConstraintValidation, DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyMatch,
+    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
+    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
     SchemaModel, SqlType, TableModel,
 };
 
+use crate::{CastColumn, RefactorLog, RefactorOperation, RenameColumn, RenameTable};
+
 /// Current package format version, recorded in `manifest.kdl`.
 pub const FORMAT_VERSION: i128 = 1;
+pub const PACKAGE_FORMAT_VERSION_METADATA_KEY: &str = "package.format_version";
+pub const PACKAGE_CONTENT_HASH_METADATA_KEY: &str = "package.content_hash";
+pub const SQUEALY_MODEL_VERSION_METADATA_KEY: &str = "squealy_model.version";
 
 const MODEL_ENTRY: &str = "model.kdl";
 const MANIFEST_ENTRY: &str = "manifest.kdl";
+const REFACTOR_ENTRY: &str = "refactor.kdl";
+
+/// Maximum number of bytes read from any single package entry. Reading is bounded so a malicious
+/// or corrupt archive (for example a zip bomb that declares a huge uncompressed size) cannot
+/// exhaust memory. 64 MiB is far larger than any realistic schema document.
+const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 
 /// An error produced while reading or writing a `.sqz` package.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PackageError {
-    Io(io::Error),
+    #[error("package io error: {0}")]
+    Io(#[from] io::Error),
+    #[error("package archive error: {0}")]
     Zip(String),
     /// The KDL failed to parse, or did not match the expected schema-model shape.
+    #[error("malformed package: {0}")]
     Malformed(String),
-}
-
-impl fmt::Display for PackageError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PackageError::Io(error) => write!(formatter, "package io error: {error}"),
-            PackageError::Zip(error) => write!(formatter, "package archive error: {error}"),
-            PackageError::Malformed(error) => write!(formatter, "malformed package: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for PackageError {}
-
-impl From<io::Error> for PackageError {
-    fn from(error: io::Error) -> Self {
-        PackageError::Io(error)
-    }
+    /// A package entry was larger than [`MAX_ENTRY_BYTES`], so it was refused before being read
+    /// fully into memory.
+    #[error("package entry `{entry}` exceeds the {limit}-byte read limit")]
+    TooLarge { entry: &'static str, limit: u64 },
 }
 
 impl From<zip::result::ZipError> for PackageError {
@@ -62,6 +65,26 @@ impl From<zip::result::ZipError> for PackageError {
 
 fn malformed(message: impl Into<String>) -> PackageError {
     PackageError::Malformed(message.into())
+}
+
+/// Reads a package `entry` into a string, refusing anything larger than [`MAX_ENTRY_BYTES`] so a
+/// hostile archive cannot exhaust memory. Memory use is bounded regardless of the size the archive
+/// header declares, because the reader itself is capped.
+fn read_entry_to_string(entry: impl Read, name: &'static str) -> Result<String, PackageError> {
+    read_entry_to_string_limited(entry, name, MAX_ENTRY_BYTES)
+}
+
+fn read_entry_to_string_limited(
+    entry: impl Read,
+    name: &'static str,
+    limit: u64,
+) -> Result<String, PackageError> {
+    let mut text = String::new();
+    let read = entry.take(limit + 1).read_to_string(&mut text)?;
+    if read as u64 > limit {
+        return Err(PackageError::TooLarge { entry: name, limit });
+    }
+    Ok(text)
 }
 
 // --- Public API ---------------------------------------------------------------------------------
@@ -86,15 +109,40 @@ pub fn write_package(model: &DatabaseModel, path: &Path) -> Result<(), PackageEr
     write_package_to(model, file)
 }
 
+/// Writes a `.sqz` package including an optional `refactor.kdl` log.
+pub fn write_package_with_refactors(
+    model: &DatabaseModel,
+    refactors: &RefactorLog,
+    path: &Path,
+) -> Result<(), PackageError> {
+    let file = std::fs::File::create(path)?;
+    write_package_with_refactors_to(model, refactors, file)
+}
+
 /// Reads a model back from a `.sqz` package at `path`.
 pub fn read_package(path: &Path) -> Result<DatabaseModel, PackageError> {
     let file = std::fs::File::open(path)?;
     read_package_from(file)
 }
 
+/// Reads the optional refactor log back from a `.sqz` package at `path`.
+pub fn read_refactor_log(path: &Path) -> Result<RefactorLog, PackageError> {
+    let file = std::fs::File::open(path)?;
+    read_refactor_log_from_package(file)
+}
+
 /// Writes a package to any writer (used by [`write_package`]; handy for tests with a `Cursor`).
 pub fn write_package_to<W: Write + io::Seek>(
     model: &DatabaseModel,
+    writer: W,
+) -> Result<(), PackageError> {
+    write_package_with_refactors_to(model, &RefactorLog::default(), writer)
+}
+
+/// Writes a package to any writer, optionally including `refactor.kdl`.
+pub fn write_package_with_refactors_to<W: Write + io::Seek>(
+    model: &DatabaseModel,
+    refactors: &RefactorLog,
     writer: W,
 ) -> Result<(), PackageError> {
     let mut zip = zip::ZipWriter::new(writer);
@@ -110,6 +158,11 @@ pub fn write_package_to<W: Write + io::Seek>(
     zip.start_file(MODEL_ENTRY, options)?;
     zip.write_all(to_kdl(model).as_bytes())?;
 
+    if !refactors.is_empty() {
+        zip.start_file(REFACTOR_ENTRY, options)?;
+        zip.write_all(refactor_to_kdl(refactors).as_bytes())?;
+    }
+
     zip.finish()?;
     Ok(())
 }
@@ -117,11 +170,91 @@ pub fn write_package_to<W: Write + io::Seek>(
 /// Reads a model from any package reader (used by [`read_package`]).
 pub fn read_package_from<R: Read + io::Seek>(reader: R) -> Result<DatabaseModel, PackageError> {
     let mut archive = zip::ZipArchive::new(reader)?;
-    let mut model_kdl = String::new();
-    archive
-        .by_name(MODEL_ENTRY)?
-        .read_to_string(&mut model_kdl)?;
+    let model_kdl = read_entry_to_string(archive.by_name(MODEL_ENTRY)?, MODEL_ENTRY)?;
     from_kdl(&model_kdl)
+}
+
+/// Reads the optional refactor log from any package reader.
+///
+/// Packages without `refactor.kdl` return an empty log, so older packages remain readable.
+pub fn read_refactor_log_from_package<R: Read + io::Seek>(
+    reader: R,
+) -> Result<RefactorLog, PackageError> {
+    let mut archive = zip::ZipArchive::new(reader)?;
+    let Ok(entry) = archive.by_name(REFACTOR_ENTRY) else {
+        return Ok(RefactorLog::default());
+    };
+    let refactor_kdl = read_entry_to_string(entry, REFACTOR_ENTRY)?;
+    refactor_from_kdl(&refactor_kdl)
+}
+
+/// Serializes a refactor log to canonical `refactor.kdl` text.
+pub fn refactor_to_kdl(refactors: &RefactorLog) -> String {
+    let mut document = refactor_to_document(refactors);
+    document.autoformat();
+    document.to_string()
+}
+
+/// Returns backend metadata entries that describe a desired package.
+pub fn package_metadata(model: &DatabaseModel, refactors: &RefactorLog) -> Vec<(String, String)> {
+    vec![
+        (
+            PACKAGE_FORMAT_VERSION_METADATA_KEY.to_owned(),
+            FORMAT_VERSION.to_string(),
+        ),
+        (
+            PACKAGE_CONTENT_HASH_METADATA_KEY.to_owned(),
+            package_content_hash(model, refactors),
+        ),
+        (
+            SQUEALY_MODEL_VERSION_METADATA_KEY.to_owned(),
+            env!("CARGO_PKG_VERSION").to_owned(),
+        ),
+    ]
+}
+
+/// Computes a deterministic fingerprint over canonical package content.
+pub fn package_content_hash(model: &DatabaseModel, refactors: &RefactorLog) -> String {
+    let mut hash = Fnv1a64::new();
+    hash.write(b"manifest.kdl\0");
+    hash.write(manifest_kdl(model).as_bytes());
+    hash.write(b"\0model.kdl\0");
+    hash.write(to_kdl(model).as_bytes());
+    if !refactors.is_empty() {
+        hash.write(b"\0refactor.kdl\0");
+        hash.write(refactor_to_kdl(refactors).as_bytes());
+    }
+    format!("fnv1a64:{:016x}", hash.finish())
+}
+
+/// Parses a refactor log from `refactor.kdl` text.
+pub fn refactor_from_kdl(text: &str) -> Result<RefactorLog, PackageError> {
+    let document =
+        KdlDocument::parse_v2(text).map_err(|error| malformed(format!("invalid KDL: {error}")))?;
+    refactor_from_document(&document)
+}
+
+struct Fnv1a64 {
+    value: u64,
+}
+
+impl Fnv1a64 {
+    fn new() -> Self {
+        Self {
+            value: 0xcbf29ce484222325,
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.value ^= u64::from(*byte);
+            self.value = self.value.wrapping_mul(0x100000001b3);
+        }
+    }
+
+    fn finish(self) -> u64 {
+        self.value
+    }
 }
 
 fn manifest_kdl(model: &DatabaseModel) -> String {
@@ -149,6 +282,108 @@ fn manifest_kdl(model: &DatabaseModel) -> String {
     document.nodes_mut().push(manifest);
     document.autoformat();
     document.to_string()
+}
+
+// --- RefactorLog <-> KDL ------------------------------------------------------------------------
+
+fn refactor_to_document(refactors: &RefactorLog) -> KdlDocument {
+    let mut document = KdlDocument::new();
+    let mut root = KdlNode::new("refactors");
+    let mut body = KdlDocument::new();
+
+    for operation in &refactors.operations {
+        body.nodes_mut().push(refactor_operation_to_node(operation));
+    }
+
+    root.set_children(body);
+    document.nodes_mut().push(root);
+    document
+}
+
+fn refactor_operation_to_node(operation: &RefactorOperation) -> KdlNode {
+    match operation {
+        RefactorOperation::RenameTable(operation) => {
+            let mut node = KdlNode::new("rename-table");
+            node.push(KdlEntry::new_prop("id", operation.id.clone()));
+            if let Some(schema) = &operation.schema {
+                node.push(KdlEntry::new_prop("schema", schema.clone()));
+            }
+            node.push(KdlEntry::new_prop("from", operation.from.clone()));
+            node.push(KdlEntry::new_prop("to", operation.to.clone()));
+            node
+        }
+        RefactorOperation::RenameColumn(operation) => {
+            let mut node = KdlNode::new("rename-column");
+            node.push(KdlEntry::new_prop("id", operation.id.clone()));
+            if let Some(schema) = &operation.schema {
+                node.push(KdlEntry::new_prop("schema", schema.clone()));
+            }
+            node.push(KdlEntry::new_prop("table", operation.table.clone()));
+            node.push(KdlEntry::new_prop("from", operation.from.clone()));
+            node.push(KdlEntry::new_prop("to", operation.to.clone()));
+            node
+        }
+        RefactorOperation::CastColumn(operation) => {
+            let mut node = KdlNode::new("cast-column");
+            node.push(KdlEntry::new_prop("id", operation.id.clone()));
+            if let Some(schema) = &operation.schema {
+                node.push(KdlEntry::new_prop("schema", schema.clone()));
+            }
+            node.push(KdlEntry::new_prop("table", operation.table.clone()));
+            node.push(KdlEntry::new_prop("column", operation.column.clone()));
+            node.push(KdlEntry::new_prop("using", operation.using.clone()));
+            node
+        }
+    }
+}
+
+fn refactor_from_document(document: &KdlDocument) -> Result<RefactorLog, PackageError> {
+    let root = document
+        .nodes()
+        .iter()
+        .find(|node| node.name().value() == "refactors")
+        .ok_or_else(|| malformed("missing `refactors` node"))?;
+
+    let mut operations = Vec::new();
+    for node in root.children().into_iter().flat_map(KdlDocument::nodes) {
+        operations.push(match node.name().value() {
+            "rename-table" => RefactorOperation::RenameTable(rename_table_from_node(node)?),
+            "rename-column" => RefactorOperation::RenameColumn(rename_column_from_node(node)?),
+            "cast-column" => RefactorOperation::CastColumn(cast_column_from_node(node)?),
+            other => return Err(malformed(format!("unknown refactor operation `{other}`"))),
+        });
+    }
+
+    Ok(RefactorLog { operations })
+}
+
+fn rename_table_from_node(node: &KdlNode) -> Result<RenameTable, PackageError> {
+    Ok(RenameTable {
+        id: required_non_empty_prop(node, "id")?,
+        schema: prop(node, "schema").map(str::to_owned),
+        from: required_non_empty_prop(node, "from")?,
+        to: required_non_empty_prop(node, "to")?,
+    })
+}
+
+fn rename_column_from_node(node: &KdlNode) -> Result<RenameColumn, PackageError> {
+    Ok(RenameColumn {
+        id: required_non_empty_prop(node, "id")?,
+        schema: prop(node, "schema").map(str::to_owned),
+        table: required_non_empty_prop(node, "table")?,
+        from: required_non_empty_prop(node, "from")?,
+        to: required_non_empty_prop(node, "to")?,
+    })
+}
+
+fn cast_column_from_node(node: &KdlNode) -> Result<CastColumn, PackageError> {
+    Ok(CastColumn {
+        id: required_non_empty_prop(node, "id")?,
+        schema: prop(node, "schema").map(str::to_owned),
+        table: required_non_empty_prop(node, "table")?,
+        column: required_non_empty_prop(node, "column")?,
+        using: required_non_empty_prop(node, "using")?,
+    })
 }
 
 // --- Model -> KDL -------------------------------------------------------------------------------
@@ -181,6 +416,9 @@ fn schema_to_node(schema: &SchemaModel) -> KdlNode {
 fn table_to_node(table: &TableModel) -> KdlNode {
     let mut node = KdlNode::new("table");
     node.push(KdlEntry::new(table.name.clone()));
+    if let Some(comment) = &table.comment {
+        node.push(KdlEntry::new_prop("comment", comment.clone()));
+    }
 
     let mut body = KdlDocument::new();
     for column in &table.columns {
@@ -209,16 +447,34 @@ fn table_to_node(table: &TableModel) -> KdlNode {
 fn column_to_node(column: &ColumnModel) -> KdlNode {
     let mut node = KdlNode::new("column");
     node.push(KdlEntry::new(column.name.clone()));
+    if let Some(comment) = &column.comment {
+        node.push(KdlEntry::new_prop("comment", comment.clone()));
+    }
 
     write_sql_type(&mut node, &column.ty);
+    if let Some(collation) = &column.collation {
+        node.push(KdlEntry::new_prop("collation", collation.clone()));
+    }
     if column.nullable {
         node.push(KdlEntry::new_prop("nullable", KdlValue::Bool(true)));
     }
-    if column.auto_increment {
-        node.push(KdlEntry::new_prop("auto-increment", KdlValue::Bool(true)));
+    if let Some(identity) = &column.identity {
+        node.push(KdlEntry::new_prop(
+            "identity",
+            identity_mode(&identity.mode),
+        ));
     }
-    if column.generated {
-        node.push(KdlEntry::new_prop("generated", KdlValue::Bool(true)));
+    if let Some(generated) = &column.generated {
+        node.push(KdlEntry::new_prop(
+            "generated",
+            generated_storage(&generated.storage),
+        ));
+        if !generated.expression.is_empty() {
+            node.push(KdlEntry::new_prop(
+                "generated-expr",
+                generated.expression.clone(),
+            ));
+        }
     }
     if let Some(default) = &column.default {
         let (kind, value) = default_parts(default);
@@ -252,11 +508,38 @@ fn foreign_key_to_node(foreign_key: &ForeignKeyModel) -> KdlNode {
         "references-table",
         foreign_key.references_table.clone(),
     ));
+    if let Some(match_type) = &foreign_key.match_type {
+        node.push(KdlEntry::new_prop("match", foreign_key_match(match_type)));
+    }
+    if let Some(deferrability) = &foreign_key.deferrability {
+        node.push(KdlEntry::new_prop(
+            "deferrable",
+            constraint_deferrability(deferrability),
+        ));
+    }
+    if let Some(validation) = &foreign_key.validation {
+        node.push(KdlEntry::new_prop(
+            "validation",
+            constraint_validation(validation),
+        ));
+    }
+    if let Some(enforcement) = &foreign_key.enforcement {
+        node.push(KdlEntry::new_prop(
+            "enforcement",
+            constraint_enforcement(enforcement),
+        ));
+    }
     if let Some(on_delete) = &foreign_key.on_delete {
-        node.push(KdlEntry::new_prop("on-delete", on_delete.clone()));
+        node.push(KdlEntry::new_prop(
+            "on-delete",
+            foreign_key_action(on_delete),
+        ));
     }
     if let Some(on_update) = &foreign_key.on_update {
-        node.push(KdlEntry::new_prop("on-update", on_update.clone()));
+        node.push(KdlEntry::new_prop(
+            "on-update",
+            foreign_key_action(on_update),
+        ));
     }
 
     // Referenced columns go in a child node as separate KDL values (paired by position with the
@@ -281,6 +564,76 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
     if index.unique {
         node.push(KdlEntry::new_prop("unique", KdlValue::Bool(true)));
     }
+    if let Some(method) = &index.method {
+        node.push(KdlEntry::new_prop("method", index_method(method)));
+    }
+    if let Some(predicate) = &index.predicate {
+        node.push(KdlEntry::new_prop("predicate", predicate.clone()));
+    }
+    if !index.expressions.is_empty()
+        || !index.include_columns.is_empty()
+        || !index.directions.is_empty()
+        || !index.nulls.is_empty()
+        || !index.collations.is_empty()
+        || !index.operator_classes.is_empty()
+    {
+        let mut children = KdlDocument::new();
+        if !index.expressions.is_empty() {
+            let mut expressions = KdlNode::new("expressions");
+            for expression in &index.expressions {
+                expressions.push(KdlEntry::new(expression.clone()));
+            }
+            children.nodes_mut().push(expressions);
+        }
+        if !index.include_columns.is_empty() {
+            let mut include = KdlNode::new("include");
+            for column in &index.include_columns {
+                include.push(KdlEntry::new(column.clone()));
+            }
+            children.nodes_mut().push(include);
+        }
+        if !index.directions.is_empty() {
+            let mut directions = KdlNode::new("directions");
+            for direction in &index.directions {
+                directions.push(KdlEntry::new(index_direction(direction)));
+            }
+            children.nodes_mut().push(directions);
+        }
+        if !index.nulls.is_empty() {
+            let mut nulls = KdlNode::new("nulls");
+            for order in &index.nulls {
+                nulls.push(KdlEntry::new(index_nulls_order(order)));
+            }
+            children.nodes_mut().push(nulls);
+        }
+        for collation in &index.collations {
+            children
+                .nodes_mut()
+                .push(index_collation_to_node(collation));
+        }
+        for operator_class in &index.operator_classes {
+            children
+                .nodes_mut()
+                .push(index_operator_class_to_node(operator_class));
+        }
+        node.set_children(children);
+    }
+    node
+}
+
+fn index_collation_to_node(collation: &IndexCollation) -> KdlNode {
+    let mut node = KdlNode::new("collation");
+    node.push(KdlEntry::new(KdlValue::Integer(collation.position as i128)));
+    node.push(KdlEntry::new(collation.name.clone()));
+    node
+}
+
+fn index_operator_class_to_node(operator_class: &IndexOperatorClass) -> KdlNode {
+    let mut node = KdlNode::new("operator-class");
+    node.push(KdlEntry::new(KdlValue::Integer(
+        operator_class.position as i128,
+    )));
+    node.push(KdlEntry::new(operator_class.name.clone()));
     node
 }
 
@@ -288,6 +641,18 @@ fn check_to_node(check: &CheckModel) -> KdlNode {
     let mut node = KdlNode::new("check");
     node.push(KdlEntry::new_prop("name", check.name.clone()));
     node.push(KdlEntry::new_prop("expr", check.expression.clone()));
+    if let Some(validation) = &check.validation {
+        node.push(KdlEntry::new_prop(
+            "validation",
+            constraint_validation(validation),
+        ));
+    }
+    if let Some(enforcement) = &check.enforcement {
+        node.push(KdlEntry::new_prop(
+            "enforcement",
+            constraint_enforcement(enforcement),
+        ));
+    }
     node
 }
 
@@ -419,6 +784,7 @@ fn table_from_node(node: &KdlNode) -> Result<TableModel, PackageError> {
 
     Ok(TableModel {
         name,
+        comment: prop(node, "comment").map(str::to_owned),
         columns,
         primary_key,
         foreign_keys,
@@ -436,11 +802,13 @@ fn column_from_node(node: &KdlNode) -> Result<ColumnModel, PackageError> {
     let default = default_from_node(node)?;
     Ok(ColumnModel {
         name,
+        comment: prop(node, "comment").map(str::to_owned),
         ty,
+        collation: prop(node, "collation").map(str::to_owned),
         nullable: prop_bool(node, "nullable"),
         default,
-        auto_increment: prop_bool(node, "auto-increment"),
-        generated: prop_bool(node, "generated"),
+        identity: identity_from_node(node)?,
+        generated: generated_from_node(node)?,
     })
 }
 
@@ -461,8 +829,12 @@ fn foreign_key_from_node(node: &KdlNode) -> Result<ForeignKeyModel, PackageError
             .next()
             .map(args)
             .unwrap_or_default(),
-        on_delete: prop(node, "on-delete").map(str::to_owned),
-        on_update: prop(node, "on-update").map(str::to_owned),
+        match_type: prop(node, "match").map(ForeignKeyMatch::from_sql),
+        deferrability: prop(node, "deferrable").map(ConstraintDeferrability::from_sql),
+        validation: prop(node, "validation").map(ConstraintValidation::from_sql),
+        enforcement: prop(node, "enforcement").map(ConstraintEnforcement::from_sql),
+        on_delete: prop(node, "on-delete").map(ForeignKeyAction::from_sql),
+        on_update: prop(node, "on-update").map(ForeignKeyAction::from_sql),
     })
 }
 
@@ -470,7 +842,33 @@ fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
     Ok(IndexModel {
         name: required_prop(node, "name")?,
         columns: args(node),
+        expressions: child_nodes(node, "expressions")
+            .next()
+            .map(args)
+            .unwrap_or_default(),
+        include_columns: child_nodes(node, "include")
+            .next()
+            .map(args)
+            .unwrap_or_default(),
         unique: prop_bool(node, "unique"),
+        method: prop(node, "method").map(IndexMethod::from_sql),
+        directions: child_nodes(node, "directions")
+            .next()
+            .map(index_directions_from_node)
+            .transpose()?
+            .unwrap_or_default(),
+        nulls: child_nodes(node, "nulls")
+            .next()
+            .map(index_nulls_from_node)
+            .transpose()?
+            .unwrap_or_default(),
+        collations: child_nodes(node, "collation")
+            .map(index_collation_from_node)
+            .collect::<Result<Vec<_>, _>>()?,
+        operator_classes: child_nodes(node, "operator-class")
+            .map(index_operator_class_from_node)
+            .collect::<Result<Vec<_>, _>>()?,
+        predicate: prop(node, "predicate").map(str::to_owned),
     })
 }
 
@@ -478,6 +876,8 @@ fn check_from_node(node: &KdlNode) -> Result<CheckModel, PackageError> {
     Ok(CheckModel {
         name: required_prop(node, "name")?,
         expression: required_prop(node, "expr")?,
+        validation: prop(node, "validation").map(ConstraintValidation::from_sql),
+        enforcement: prop(node, "enforcement").map(ConstraintEnforcement::from_sql),
     })
 }
 
@@ -623,10 +1023,235 @@ fn required_prop(node: &KdlNode, key: &str) -> Result<String, PackageError> {
         .ok_or_else(|| malformed(format!("`{}` is missing `{key}`", node.name().value())))
 }
 
+fn required_non_empty_prop(node: &KdlNode, key: &str) -> Result<String, PackageError> {
+    let value = required_prop(node, key)?;
+    if value.is_empty() {
+        Err(malformed(format!(
+            "`{}` has empty `{key}`",
+            node.name().value()
+        )))
+    } else {
+        Ok(value)
+    }
+}
+
+fn identity_mode(mode: &IdentityMode) -> &'static str {
+    match mode {
+        IdentityMode::Always => "always",
+        IdentityMode::ByDefault => "by-default",
+        IdentityMode::AutoIncrement => "auto-increment",
+    }
+}
+
+fn generated_storage(storage: &GeneratedStorage) -> &'static str {
+    match storage {
+        GeneratedStorage::Virtual => "virtual",
+        GeneratedStorage::Stored => "stored",
+        GeneratedStorage::Unknown => "unknown",
+    }
+}
+
+fn identity_from_node(node: &KdlNode) -> Result<Option<IdentityModel>, PackageError> {
+    let mode = if let Some(mode) = prop(node, "identity") {
+        match mode {
+            "always" => IdentityMode::Always,
+            "by-default" => IdentityMode::ByDefault,
+            "auto-increment" => IdentityMode::AutoIncrement,
+            other => {
+                return Err(malformed(format!(
+                    "`{}` has unsupported identity mode `{other}`",
+                    node.name().value()
+                )));
+            }
+        }
+    } else if prop_bool(node, "auto-increment") {
+        IdentityMode::AutoIncrement
+    } else {
+        return Ok(None);
+    };
+
+    Ok(Some(IdentityModel { mode }))
+}
+
+fn generated_from_node(node: &KdlNode) -> Result<Option<GeneratedColumnModel>, PackageError> {
+    let storage = if let Some(storage) = prop(node, "generated") {
+        match storage {
+            "virtual" => GeneratedStorage::Virtual,
+            "stored" => GeneratedStorage::Stored,
+            "unknown" => GeneratedStorage::Unknown,
+            other => {
+                return Err(malformed(format!(
+                    "`{}` has unsupported generated storage `{other}`",
+                    node.name().value()
+                )));
+            }
+        }
+    } else if prop_bool(node, "generated") {
+        GeneratedStorage::Unknown
+    } else {
+        return Ok(None);
+    };
+
+    Ok(Some(GeneratedColumnModel {
+        expression: prop(node, "generated-expr").unwrap_or_default().to_owned(),
+        storage,
+    }))
+}
+
+fn foreign_key_action(action: &ForeignKeyAction) -> &str {
+    match action {
+        ForeignKeyAction::NoAction => "no-action",
+        ForeignKeyAction::Restrict => "restrict",
+        ForeignKeyAction::Cascade => "cascade",
+        ForeignKeyAction::SetNull => "set-null",
+        ForeignKeyAction::SetDefault => "set-default",
+        ForeignKeyAction::Raw(action) => action,
+    }
+}
+
+fn foreign_key_match(match_type: &ForeignKeyMatch) -> &str {
+    match match_type {
+        ForeignKeyMatch::Simple => "simple",
+        ForeignKeyMatch::Partial => "partial",
+        ForeignKeyMatch::Full => "full",
+        ForeignKeyMatch::Raw(match_type) => match_type,
+    }
+}
+
+fn constraint_deferrability(deferrability: &ConstraintDeferrability) -> &str {
+    match deferrability {
+        ConstraintDeferrability::InitiallyImmediate => "initially-immediate",
+        ConstraintDeferrability::InitiallyDeferred => "initially-deferred",
+        ConstraintDeferrability::Raw(deferrability) => deferrability,
+    }
+}
+
+fn constraint_validation(validation: &ConstraintValidation) -> &str {
+    match validation {
+        ConstraintValidation::Validated => "validated",
+        ConstraintValidation::NotValidated => "not-validated",
+        ConstraintValidation::Raw(validation) => validation,
+    }
+}
+
+fn constraint_enforcement(enforcement: &ConstraintEnforcement) -> &str {
+    match enforcement {
+        ConstraintEnforcement::Enforced => "enforced",
+        ConstraintEnforcement::NotEnforced => "not-enforced",
+        ConstraintEnforcement::Raw(enforcement) => enforcement,
+    }
+}
+
+fn index_method(method: &IndexMethod) -> &str {
+    match method {
+        IndexMethod::BTree => "btree",
+        IndexMethod::Hash => "hash",
+        IndexMethod::Gin => "gin",
+        IndexMethod::Gist => "gist",
+        IndexMethod::SpGist => "spgist",
+        IndexMethod::Brin => "brin",
+        IndexMethod::Raw(method) => method,
+    }
+}
+
+fn index_direction(direction: &IndexDirection) -> &'static str {
+    match direction {
+        IndexDirection::Asc => "asc",
+        IndexDirection::Desc => "desc",
+    }
+}
+
+fn index_nulls_order(order: &IndexNullsOrder) -> &'static str {
+    match order {
+        IndexNullsOrder::First => "first",
+        IndexNullsOrder::Last => "last",
+    }
+}
+
+fn index_directions_from_node(node: &KdlNode) -> Result<Vec<IndexDirection>, PackageError> {
+    args(node)
+        .into_iter()
+        .map(|direction| match direction.as_str() {
+            "asc" => Ok(IndexDirection::Asc),
+            "desc" => Ok(IndexDirection::Desc),
+            other => Err(malformed(format!(
+                "`directions` has unsupported index direction `{other}`"
+            ))),
+        })
+        .collect()
+}
+
+fn index_nulls_from_node(node: &KdlNode) -> Result<Vec<IndexNullsOrder>, PackageError> {
+    args(node)
+        .into_iter()
+        .map(|order| match order.as_str() {
+            "first" => Ok(IndexNullsOrder::First),
+            "last" => Ok(IndexNullsOrder::Last),
+            other => Err(malformed(format!(
+                "`nulls` has unsupported index null ordering `{other}`"
+            ))),
+        })
+        .collect()
+}
+
+fn index_operator_class_from_node(node: &KdlNode) -> Result<IndexOperatorClass, PackageError> {
+    let (position, name) = positioned_index_metadata_from_node(node, "operator-class")?;
+    Ok(IndexOperatorClass { position, name })
+}
+
+fn index_collation_from_node(node: &KdlNode) -> Result<IndexCollation, PackageError> {
+    let (position, name) = positioned_index_metadata_from_node(node, "collation")?;
+    Ok(IndexCollation { position, name })
+}
+
+fn positioned_index_metadata_from_node(
+    node: &KdlNode,
+    kind: &str,
+) -> Result<(usize, String), PackageError> {
+    let mut args = node
+        .entries()
+        .iter()
+        .filter(|entry| entry.name().is_none())
+        .map(KdlEntry::value);
+    let position = args
+        .next()
+        .and_then(KdlValue::as_integer)
+        .ok_or_else(|| malformed(format!("`{kind}` is missing integer position")))?;
+    let position = usize::try_from(position)
+        .map_err(|_| malformed(format!("`{kind}` position is out of range for usize")))?;
+    let name = args
+        .next()
+        .and_then(KdlValue::as_string)
+        .ok_or_else(|| malformed(format!("`{kind}` is missing name")))?
+        .to_owned();
+    Ok((position, name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn read_entry_rejects_oversized_input() {
+        let oversized = vec![b'x'; 64];
+        let error =
+            read_entry_to_string_limited(Cursor::new(&oversized), "model.kdl", 16).unwrap_err();
+        assert!(matches!(
+            error,
+            PackageError::TooLarge {
+                entry: "model.kdl",
+                limit: 16
+            }
+        ));
+    }
+
+    #[test]
+    fn read_entry_accepts_input_at_the_limit() {
+        let data = vec![b'x'; 16];
+        let text = read_entry_to_string_limited(Cursor::new(&data), "model.kdl", 16).unwrap();
+        assert_eq!(text.len(), 16);
+    }
 
     fn sample_model() -> DatabaseModel {
         DatabaseModel {
@@ -635,30 +1260,39 @@ mod tests {
                 tables: vec![
                     TableModel {
                         name: "orgs".to_owned(),
+                        comment: Some("Organizations in the catalog".to_owned()),
                         columns: vec![
                             ColumnModel {
                                 name: "id".to_owned(),
+                                comment: Some("Synthetic organization id".to_owned()),
                                 ty: SqlType::I32,
+                                collation: None,
                                 nullable: false,
                                 default: None,
-                                auto_increment: true,
-                                generated: false,
+                                identity: Some(IdentityModel {
+                                    mode: IdentityMode::ByDefault,
+                                }),
+                                generated: None,
                             },
                             ColumnModel {
                                 name: "slug".to_owned(),
+                                comment: Some("Stable organization slug".to_owned()),
                                 ty: SqlType::String,
+                                collation: Some("C".to_owned()),
                                 nullable: false,
                                 default: Some(DefaultValue::Text("acme".to_owned())),
-                                auto_increment: false,
-                                generated: false,
+                                identity: None,
+                                generated: None,
                             },
                             ColumnModel {
                                 name: "metadata".to_owned(),
+                                comment: None,
                                 ty: SqlType::Raw("jsonb".to_owned()),
+                                collation: None,
                                 nullable: true,
                                 default: Some(DefaultValue::Raw("'{}'::jsonb".to_owned())),
-                                auto_increment: false,
-                                generated: false,
+                                identity: None,
+                                generated: None,
                             },
                         ],
                         primary_key: Some(Constraint {
@@ -673,22 +1307,35 @@ mod tests {
                         checks: vec![CheckModel {
                             name: "ck_orgs_slug".to_owned(),
                             expression: "length(slug) > 0".to_owned(),
+                            validation: None,
+                            enforcement: None,
                         }],
                         indexes: vec![IndexModel {
                             name: "uq_orgs_slug_idx".to_owned(),
                             columns: vec!["slug".to_owned()],
+                            expressions: Vec::new(),
+                            include_columns: Vec::new(),
                             unique: true,
+                            method: None,
+                            directions: Vec::new(),
+                            nulls: Vec::new(),
+                            collations: Vec::new(),
+                            operator_classes: Vec::new(),
+                            predicate: None,
                         }],
                     },
                     TableModel {
                         name: "members".to_owned(),
+                        comment: None,
                         columns: vec![ColumnModel {
                             name: "org_id".to_owned(),
+                            comment: None,
                             ty: SqlType::I32,
+                            collation: None,
                             nullable: false,
                             default: None,
-                            auto_increment: false,
-                            generated: false,
+                            identity: None,
+                            generated: None,
                         }],
                         primary_key: None,
                         foreign_keys: vec![ForeignKeyModel {
@@ -697,7 +1344,11 @@ mod tests {
                             references_schema: Some("public".to_owned()),
                             references_table: "orgs".to_owned(),
                             references_columns: vec!["id".to_owned()],
-                            on_delete: Some("cascade".to_owned()),
+                            match_type: None,
+                            deferrability: None,
+                            validation: None,
+                            enforcement: None,
+                            on_delete: Some(ForeignKeyAction::Cascade),
                             on_update: None,
                         }],
                         uniques: vec![],
@@ -713,6 +1364,9 @@ mod tests {
     fn kdl_round_trips() {
         let model = sample_model();
         let kdl = to_kdl(&model);
+        assert!(kdl.contains("comment=\"Organizations in the catalog\""));
+        assert!(kdl.contains("comment=\"Synthetic organization id\""));
+        assert!(kdl.contains("collation=C"));
         let parsed = from_kdl(&kdl).expect("model.kdl should parse");
         assert_eq!(parsed, model, "KDL round-trip diverged:\n{kdl}");
     }
@@ -721,6 +1375,36 @@ mod tests {
     fn kdl_is_deterministic() {
         let model = sample_model();
         assert_eq!(to_kdl(&model), to_kdl(&model));
+    }
+
+    #[test]
+    fn package_content_hash_includes_refactor_log() {
+        let model = sample_model();
+        let empty = RefactorLog::default();
+        let refactors = sample_refactor_log();
+
+        assert_eq!(
+            package_content_hash(&model, &refactors),
+            package_content_hash(&model, &refactors)
+        );
+        assert_ne!(
+            package_content_hash(&model, &empty),
+            package_content_hash(&model, &refactors)
+        );
+
+        let metadata = package_metadata(&model, &refactors);
+        assert!(
+            metadata
+                .iter()
+                .any(|(key, value)| key == PACKAGE_FORMAT_VERSION_METADATA_KEY
+                    && value == &FORMAT_VERSION.to_string())
+        );
+        assert!(
+            metadata
+                .iter()
+                .any(|(key, value)| key == PACKAGE_CONTENT_HASH_METADATA_KEY
+                    && value.starts_with("fnv1a64:"))
+        );
     }
 
     #[test]
@@ -733,6 +1417,76 @@ mod tests {
     }
 
     #[test]
+    fn refactor_kdl_round_trips() {
+        let refactors = sample_refactor_log();
+        let kdl = refactor_to_kdl(&refactors);
+        assert!(kdl.contains("rename-table"));
+        assert!(kdl.contains("rename-column"));
+        assert!(kdl.contains("id=\"2026-rename-users\""));
+        let parsed = refactor_from_kdl(&kdl).expect("refactor.kdl should parse");
+        assert_eq!(
+            parsed, refactors,
+            "refactor KDL round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn package_zip_round_trips_optional_refactor_log() {
+        let model = sample_model();
+        let refactors = sample_refactor_log();
+        let mut buffer = Vec::new();
+
+        write_package_with_refactors_to(&model, &refactors, Cursor::new(&mut buffer))
+            .expect("write package with refactors");
+
+        let parsed_model = read_package_from(Cursor::new(buffer.clone())).expect("read model");
+        let parsed_refactors =
+            read_refactor_log_from_package(Cursor::new(buffer)).expect("read refactors");
+
+        assert_eq!(parsed_model, model);
+        assert_eq!(parsed_refactors, refactors);
+    }
+
+    #[test]
+    fn package_without_refactor_log_reads_empty_refactor_log() {
+        let model = sample_model();
+        let mut buffer = Vec::new();
+        write_package_to(&model, Cursor::new(&mut buffer)).expect("write package");
+
+        let refactors =
+            read_refactor_log_from_package(Cursor::new(buffer)).expect("read refactors");
+
+        assert!(refactors.is_empty());
+    }
+
+    fn sample_refactor_log() -> RefactorLog {
+        RefactorLog {
+            operations: vec![
+                RefactorOperation::RenameTable(RenameTable {
+                    id: "2026-rename-users".to_owned(),
+                    schema: Some("public".to_owned()),
+                    from: "app_users".to_owned(),
+                    to: "users".to_owned(),
+                }),
+                RefactorOperation::RenameColumn(RenameColumn {
+                    id: "2026-rename-user-name".to_owned(),
+                    schema: Some("public".to_owned()),
+                    table: "users".to_owned(),
+                    from: "display_name".to_owned(),
+                    to: "name".to_owned(),
+                }),
+                RefactorOperation::CastColumn(CastColumn {
+                    id: "2026-cast-user-score".to_owned(),
+                    schema: Some("public".to_owned()),
+                    table: "users".to_owned(),
+                    column: "score".to_owned(),
+                    using: "score::numeric".to_owned(),
+                }),
+            ],
+        }
+    }
+
+    #[test]
     fn kdl_round_trips_names_with_whitespace() {
         // Column names can contain whitespace (e.g. `#[column(name = "user id")]`); local and
         // referenced foreign-key columns must survive the round-trip as distinct values.
@@ -741,13 +1495,16 @@ mod tests {
                 name: None,
                 tables: vec![TableModel {
                     name: "events".to_owned(),
+                    comment: None,
                     columns: vec![ColumnModel {
                         name: "user id".to_owned(),
+                        comment: None,
                         ty: SqlType::I32,
+                        collation: None,
                         nullable: false,
                         default: None,
-                        auto_increment: false,
-                        generated: false,
+                        identity: None,
+                        generated: None,
                     }],
                     primary_key: None,
                     foreign_keys: vec![ForeignKeyModel {
@@ -756,6 +1513,10 @@ mod tests {
                         references_schema: None,
                         references_table: "users".to_owned(),
                         references_columns: vec!["account id".to_owned()],
+                        match_type: None,
+                        deferrability: None,
+                        validation: None,
+                        enforcement: None,
                         on_delete: None,
                         on_update: None,
                     }],
@@ -799,11 +1560,13 @@ mod tests {
             .enumerate()
             .map(|(index, ty)| ColumnModel {
                 name: format!("c{index}"),
+                comment: None,
                 ty: ty.clone(),
+                collation: None,
                 nullable: false,
                 default: None,
-                auto_increment: false,
-                generated: false,
+                identity: None,
+                generated: None,
             })
             .collect();
 
@@ -812,6 +1575,7 @@ mod tests {
                 name: None,
                 tables: vec![TableModel {
                     name: "structured".to_owned(),
+                    comment: None,
                     columns,
                     primary_key: None,
                     foreign_keys: vec![],
@@ -825,5 +1589,527 @@ mod tests {
         let kdl = to_kdl(&model);
         let parsed = from_kdl(&kdl).expect("parse");
         assert_eq!(parsed, model, "structured-type round-trip diverged:\n{kdl}");
+    }
+
+    #[test]
+    fn kdl_round_trips_identity_and_generated_columns() {
+        let columns = vec![
+            ColumnModel {
+                name: "id_always".to_owned(),
+                comment: None,
+                ty: SqlType::I32,
+                collation: None,
+                nullable: false,
+                default: None,
+                identity: Some(IdentityModel {
+                    mode: IdentityMode::Always,
+                }),
+                generated: None,
+            },
+            ColumnModel {
+                name: "id_by_default".to_owned(),
+                comment: None,
+                ty: SqlType::I32,
+                collation: None,
+                nullable: false,
+                default: None,
+                identity: Some(IdentityModel {
+                    mode: IdentityMode::ByDefault,
+                }),
+                generated: None,
+            },
+            ColumnModel {
+                name: "id_auto_increment".to_owned(),
+                comment: None,
+                ty: SqlType::I32,
+                collation: None,
+                nullable: false,
+                default: None,
+                identity: Some(IdentityModel {
+                    mode: IdentityMode::AutoIncrement,
+                }),
+                generated: None,
+            },
+            ColumnModel {
+                name: "virtual_generated".to_owned(),
+                comment: None,
+                ty: SqlType::I32,
+                collation: None,
+                nullable: true,
+                default: None,
+                identity: None,
+                generated: Some(GeneratedColumnModel {
+                    expression: "length(slug)".to_owned(),
+                    storage: GeneratedStorage::Virtual,
+                }),
+            },
+            ColumnModel {
+                name: "stored_generated".to_owned(),
+                comment: None,
+                ty: SqlType::I32,
+                collation: None,
+                nullable: true,
+                default: None,
+                identity: None,
+                generated: Some(GeneratedColumnModel {
+                    expression: "char_length(`slug`)".to_owned(),
+                    storage: GeneratedStorage::Stored,
+                }),
+            },
+            ColumnModel {
+                name: "unknown_generated".to_owned(),
+                comment: None,
+                ty: SqlType::I32,
+                collation: None,
+                nullable: true,
+                default: None,
+                identity: None,
+                generated: Some(GeneratedColumnModel {
+                    expression: String::new(),
+                    storage: GeneratedStorage::Unknown,
+                }),
+            },
+        ];
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "derived_columns".to_owned(),
+                    comment: None,
+                    columns,
+                    primary_key: None,
+                    foreign_keys: vec![],
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(
+            parsed, model,
+            "identity/generated round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn kdl_round_trips_foreign_key_actions() {
+        let actions = [
+            ForeignKeyAction::NoAction,
+            ForeignKeyAction::Restrict,
+            ForeignKeyAction::Cascade,
+            ForeignKeyAction::SetNull,
+            ForeignKeyAction::SetDefault,
+            ForeignKeyAction::Raw("match full".to_owned()),
+        ];
+        let foreign_keys = actions
+            .iter()
+            .enumerate()
+            .map(|(index, action)| ForeignKeyModel {
+                name: format!("fk_child_parent_{index}"),
+                columns: vec![format!("parent_id_{index}")],
+                references_schema: Some("public".to_owned()),
+                references_table: "parents".to_owned(),
+                references_columns: vec!["id".to_owned()],
+                match_type: None,
+                deferrability: None,
+                validation: None,
+                enforcement: None,
+                on_delete: Some(action.clone()),
+                on_update: Some(action.clone()),
+            })
+            .collect();
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "children".to_owned(),
+                    comment: None,
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys,
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(
+            parsed, model,
+            "foreign-key action round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn kdl_round_trips_foreign_key_match_types() {
+        let match_types = [
+            ForeignKeyMatch::Simple,
+            ForeignKeyMatch::Partial,
+            ForeignKeyMatch::Full,
+            ForeignKeyMatch::Raw("backend-specific".to_owned()),
+        ];
+        let foreign_keys = match_types
+            .iter()
+            .enumerate()
+            .map(|(index, match_type)| ForeignKeyModel {
+                name: format!("fk_child_parent_match_{index}"),
+                columns: vec![format!("parent_id_{index}")],
+                references_schema: Some("public".to_owned()),
+                references_table: "parents".to_owned(),
+                references_columns: vec!["id".to_owned()],
+                match_type: Some(match_type.clone()),
+                deferrability: None,
+                validation: None,
+                enforcement: None,
+                on_delete: None,
+                on_update: None,
+            })
+            .collect();
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "children".to_owned(),
+                    comment: None,
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys,
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        assert!(kdl.contains("match=full"));
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(
+            parsed, model,
+            "foreign-key match round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn kdl_round_trips_foreign_key_deferrability() {
+        let values = [
+            ConstraintDeferrability::InitiallyImmediate,
+            ConstraintDeferrability::InitiallyDeferred,
+            ConstraintDeferrability::Raw("backend-specific".to_owned()),
+        ];
+        let foreign_keys = values
+            .iter()
+            .enumerate()
+            .map(|(index, deferrability)| ForeignKeyModel {
+                name: format!("fk_child_parent_deferrable_{index}"),
+                columns: vec![format!("parent_id_{index}")],
+                references_schema: Some("public".to_owned()),
+                references_table: "parents".to_owned(),
+                references_columns: vec!["id".to_owned()],
+                match_type: None,
+                deferrability: Some(deferrability.clone()),
+                validation: None,
+                enforcement: None,
+                on_delete: None,
+                on_update: None,
+            })
+            .collect();
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "children".to_owned(),
+                    comment: None,
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys,
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        assert!(kdl.contains("deferrable=initially-deferred"));
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(
+            parsed, model,
+            "foreign-key deferrability round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn kdl_round_trips_constraint_validation() {
+        let values = [
+            ConstraintValidation::Validated,
+            ConstraintValidation::NotValidated,
+            ConstraintValidation::Raw("backend-specific".to_owned()),
+        ];
+        let foreign_keys = values
+            .iter()
+            .enumerate()
+            .map(|(index, validation)| ForeignKeyModel {
+                name: format!("fk_child_parent_validation_{index}"),
+                columns: vec![format!("parent_id_{index}")],
+                references_schema: Some("public".to_owned()),
+                references_table: "parents".to_owned(),
+                references_columns: vec!["id".to_owned()],
+                match_type: None,
+                deferrability: None,
+                validation: Some(validation.clone()),
+                enforcement: None,
+                on_delete: None,
+                on_update: None,
+            })
+            .collect();
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "children".to_owned(),
+                    comment: None,
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys,
+                    uniques: vec![],
+                    checks: vec![CheckModel {
+                        name: "ck_children_parent_id".to_owned(),
+                        expression: "parent_id_0 > 0".to_owned(),
+                        validation: Some(ConstraintValidation::NotValidated),
+                        enforcement: None,
+                    }],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        assert!(kdl.contains("validation=not-validated"));
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(
+            parsed, model,
+            "constraint validation round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn kdl_round_trips_constraint_enforcement() {
+        let values = [
+            ConstraintEnforcement::Enforced,
+            ConstraintEnforcement::NotEnforced,
+            ConstraintEnforcement::Raw("backend-specific".to_owned()),
+        ];
+        let foreign_keys = values
+            .iter()
+            .enumerate()
+            .map(|(index, enforcement)| ForeignKeyModel {
+                name: format!("fk_child_parent_enforcement_{index}"),
+                columns: vec![format!("parent_id_{index}")],
+                references_schema: Some("public".to_owned()),
+                references_table: "parents".to_owned(),
+                references_columns: vec!["id".to_owned()],
+                match_type: None,
+                deferrability: None,
+                validation: None,
+                enforcement: Some(enforcement.clone()),
+                on_delete: None,
+                on_update: None,
+            })
+            .collect();
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "children".to_owned(),
+                    comment: None,
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys,
+                    uniques: vec![],
+                    checks: vec![CheckModel {
+                        name: "ck_children_parent_id".to_owned(),
+                        expression: "parent_id_0 > 0".to_owned(),
+                        validation: None,
+                        enforcement: Some(ConstraintEnforcement::NotEnforced),
+                    }],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        assert!(kdl.contains("enforcement=not-enforced"));
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(
+            parsed, model,
+            "constraint enforcement round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn kdl_round_trips_index_methods() {
+        let methods = [
+            IndexMethod::BTree,
+            IndexMethod::Hash,
+            IndexMethod::Gin,
+            IndexMethod::Gist,
+            IndexMethod::SpGist,
+            IndexMethod::Brin,
+            IndexMethod::Raw("custom_method".to_owned()),
+        ];
+        let indexes = methods
+            .iter()
+            .enumerate()
+            .map(|(index, method)| IndexModel {
+                name: format!("idx_events_{index}"),
+                columns: vec!["event_id".to_owned()],
+                expressions: Vec::new(),
+                include_columns: Vec::new(),
+                unique: false,
+                method: Some(method.clone()),
+                directions: vec![IndexDirection::Desc],
+                nulls: Vec::new(),
+                collations: Vec::new(),
+                operator_classes: Vec::new(),
+                predicate: Some("event_id IS NOT NULL".to_owned()),
+            })
+            .collect();
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "events".to_owned(),
+                    comment: None,
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys: vec![],
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes,
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(parsed, model, "index method round-trip diverged:\n{kdl}");
+    }
+
+    #[test]
+    fn kdl_round_trips_index_expressions() {
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "events".to_owned(),
+                    comment: None,
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys: vec![],
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![IndexModel {
+                        name: "idx_events_lower_name".to_owned(),
+                        columns: Vec::new(),
+                        expressions: vec!["lower(event_name)".to_owned()],
+                        include_columns: Vec::new(),
+                        unique: false,
+                        method: Some(IndexMethod::BTree),
+                        directions: vec![IndexDirection::Asc],
+                        nulls: Vec::new(),
+                        collations: vec![IndexCollation {
+                            position: 0,
+                            name: "C".to_owned(),
+                        }],
+                        operator_classes: vec![IndexOperatorClass {
+                            position: 0,
+                            name: "text_pattern_ops".to_owned(),
+                        }],
+                        predicate: None,
+                    }],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(
+            parsed, model,
+            "index expression round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn kdl_round_trips_index_include_columns() {
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "events".to_owned(),
+                    comment: None,
+                    columns: vec![],
+                    primary_key: None,
+                    foreign_keys: vec![],
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![IndexModel {
+                        name: "idx_events_org_id".to_owned(),
+                        columns: vec!["org_id".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: vec!["event_name".to_owned()],
+                        unique: false,
+                        method: Some(IndexMethod::BTree),
+                        directions: vec![IndexDirection::Asc],
+                        nulls: vec![IndexNullsOrder::Last],
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    }],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(
+            parsed, model,
+            "index include column round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
+    fn kdl_reads_legacy_identity_and_generated_flags() {
+        let kdl = r#"
+database {
+    schema {
+        table "legacy_columns" {
+            column "id" type="i32" auto-increment=#true
+            column "computed" type="i32" generated=#true
+        }
+    }
+}
+"#;
+
+        let parsed = from_kdl(kdl).expect("legacy model.kdl should parse");
+        let columns = &parsed.schemas[0].tables[0].columns;
+        assert_eq!(
+            columns[0].identity,
+            Some(IdentityModel {
+                mode: IdentityMode::AutoIncrement
+            })
+        );
+        assert_eq!(
+            columns[1].generated,
+            Some(GeneratedColumnModel {
+                expression: String::new(),
+                storage: GeneratedStorage::Unknown
+            })
+        );
     }
 }
