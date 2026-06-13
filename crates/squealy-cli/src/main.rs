@@ -63,14 +63,20 @@ enum Command {
         /// Output package path.
         output: PathBuf,
     },
-    /// Compare two `.sqz` schema packages.
+    /// Compare two schema models, each from a crate database type or a `.sqz` package.
     Diff {
-        /// Desired target package.
+        /// Desired model from a crate database type (compiles and runs the crate).
+        #[arg(long = "desired-database", conflicts_with = "desired")]
+        desired_database: Option<String>,
+        /// Desired model from a `.sqz` package.
         #[arg(long)]
-        desired: PathBuf,
-        /// Actual/current package.
+        desired: Option<PathBuf>,
+        /// Actual model from a crate database type.
+        #[arg(long = "actual-database", conflicts_with = "actual")]
+        actual_database: Option<String>,
+        /// Actual model from a `.sqz` package.
         #[arg(long)]
-        actual: PathBuf,
+        actual: Option<PathBuf>,
         /// Fail when the diff contains changes blocked by policy.
         #[arg(long)]
         check_policy: bool,
@@ -81,14 +87,24 @@ enum Command {
         #[arg(long)]
         allow_ambiguous: bool,
     },
-    /// Render an incremental DDL plan between two `.sqz` schema packages.
+    /// Render an incremental DDL plan between two schema models (crate database type or `.sqz`).
     Plan {
-        /// Desired target package.
+        /// Desired model from a crate database type (compiles and runs the crate).
+        #[arg(long = "desired-database", conflicts_with = "desired")]
+        desired_database: Option<String>,
+        /// Desired model from a `.sqz` package.
         #[arg(long)]
-        desired: PathBuf,
-        /// Actual/current package.
+        desired: Option<PathBuf>,
+        /// refactor.kdl applied to the desired side when it comes from a crate (a package carries
+        /// its own embedded refactor log).
         #[arg(long)]
-        actual: PathBuf,
+        refactors: Option<PathBuf>,
+        /// Actual model from a crate database type.
+        #[arg(long = "actual-database", conflicts_with = "actual")]
+        actual_database: Option<String>,
+        /// Actual model from a `.sqz` package.
+        #[arg(long)]
+        actual: Option<PathBuf>,
         #[command(flatten)]
         backend: BackendOption,
         /// Allow destructive changes when planning.
@@ -390,16 +406,16 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
         }
         Command::Diff {
+            desired_database,
             desired,
+            actual_database,
             actual,
             check_policy,
             allow_destructive,
             allow_ambiguous,
         } => {
-            let desired = read_package(&desired)
-                .map_err(|error| CliError::Message(format!("read desired: {error}")))?;
-            let actual = read_package(&actual)
-                .map_err(|error| CliError::Message(format!("read actual: {error}")))?;
+            let desired = load_model(desired_database, desired, "desired")?;
+            let actual = load_model(actual_database, actual, "actual")?;
             let diff = diff_models(&desired, &actual);
             print_diff(&diff);
             if check_policy {
@@ -415,24 +431,24 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             Ok(())
         }
         Command::Plan {
+            desired_database,
             desired,
+            refactors,
+            actual_database,
             actual,
             backend,
             allow_destructive,
             allow_ambiguous,
         } => {
-            let refactors = read_refactor_log(&desired)
-                .map_err(|error| CliError::Message(format!("read desired refactors: {error}")))?;
-            let desired = read_package(&desired)
-                .map_err(|error| CliError::Message(format!("read desired: {error}")))?;
-            let actual = read_package(&actual)
-                .map_err(|error| CliError::Message(format!("read actual: {error}")))?;
+            let desired = load_desired_model(desired_database, desired, refactors)?;
+            let actual = load_model(actual_database, actual, "actual")?;
             let policy = DiffPolicy {
                 allow_destructive,
                 allow_ambiguous,
             };
-            let plan = plan_models_with_refactors(&desired, &actual, &refactors, policy)
-                .map_err(|error| CliError::Message(format!("plan schema changes: {error}")))?;
+            let plan =
+                plan_models_with_refactors(&desired.model, &actual, &desired.refactors, policy)
+                    .map_err(|error| CliError::Message(format!("plan schema changes: {error}")))?;
             let sql = match backend.backend {
                 BackendKind::Postgres => render_plan_sql(&plan, &Postgres),
                 BackendKind::Mysql => render_plan_sql(&plan, &Mysql),
@@ -1075,6 +1091,53 @@ fn session_timeout_statements(
         }
     }
     statements
+}
+
+/// Loads a model for `diff`/`plan` from either a crate database type or a `.sqz` package. `side` is
+/// the argument prefix (`desired`/`actual`) used in error and usage messages.
+fn load_model(
+    database: Option<String>,
+    package: Option<PathBuf>,
+    side: &str,
+) -> Result<DatabaseModel, CliError> {
+    match (database, package) {
+        (Some(database), None) => extract_model(&database),
+        (None, Some(package)) => read_package(&package)
+            .map_err(|error| CliError::Message(format!("read {side}: {error}"))),
+        _ => Err(CliError::Message(format!(
+            "provide exactly one of --{side}-database or --{side}"
+        ))),
+    }
+}
+
+/// Loads the desired model plus its refactor log for `plan`: from a `.sqz` package (which carries an
+/// embedded refactor log) or a crate database type (whose refactors come from an optional `--refactors`
+/// file).
+fn load_desired_model(
+    database: Option<String>,
+    package: Option<PathBuf>,
+    refactors: Option<PathBuf>,
+) -> Result<LoadedModel, CliError> {
+    match (database, package) {
+        (Some(database), None) => {
+            let model = extract_model(&database)?;
+            let refactors = match refactors {
+                Some(path) => read_refactor_file(&path)?,
+                None => RefactorLog::default(),
+            };
+            Ok(LoadedModel { model, refactors })
+        }
+        (None, Some(package)) => {
+            let model = read_package(&package)
+                .map_err(|error| CliError::Message(format!("read desired: {error}")))?;
+            let refactors = read_refactor_log(&package)
+                .map_err(|error| CliError::Message(format!("read desired refactors: {error}")))?;
+            Ok(LoadedModel { model, refactors })
+        }
+        _ => Err(CliError::Message(
+            "provide exactly one of --desired-database or --desired".to_owned(),
+        )),
+    }
 }
 
 fn read_refactor_file(path: &Path) -> Result<RefactorLog, CliError> {

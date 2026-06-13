@@ -400,6 +400,29 @@ fn diff_reports_no_changes_for_identical_packages() {
 }
 
 #[test]
+fn diff_requires_a_desired_source() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = dir.path().join("schema.sqz");
+    write_package(&empty_model(), &package).expect("write package");
+
+    let output = Command::new(SQUEALY)
+        .args(["diff", "--actual"])
+        .arg(&package)
+        .output()
+        .expect("run squealy");
+
+    assert!(
+        !output.status.success(),
+        "missing desired source should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--desired-database or --desired"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
 fn diff_reports_package_model_changes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let desired = dir.path().join("desired.sqz");
