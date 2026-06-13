@@ -2,6 +2,10 @@
 
 Status: **draft / implementation notes** · Branch: `codex/schema-introspection`
 
+> See also [review.md](review.md) — a repository review and prioritized
+> hardening/completion roadmap (sprint-1 hardening, the documented feature gaps, and
+> publish-time safety).
+
 ## Context
 
 Squealy already has a strong *declarative* source of truth: the `#[derive(Table/Schema/Database)]`
