@@ -57,8 +57,9 @@ pub fn render_create_sql<B: SchemaBackend>(
     check_create(model, backend)?;
     let mut buffer = Vec::new();
     backend.render_create(model, &mut buffer)?;
-    // SchemaBackend renderers emit UTF-8; treat anything else as a renderer bug.
-    Ok(String::from_utf8(buffer).expect("render_create emits valid UTF-8"))
+    // SchemaBackend renderers are expected to emit UTF-8; surface a clear error rather than panicking
+    // if a backend ever violates that invariant.
+    bytes_to_sql(buffer)
 }
 
 /// Renders incremental DDL for a policy-checked [`DatabasePlan`].
@@ -68,8 +69,14 @@ pub fn render_plan_sql<B: SchemaBackend>(
 ) -> std::io::Result<String> {
     let mut buffer = Vec::new();
     backend.render_plan(plan, &mut buffer)?;
-    // SchemaBackend renderers emit UTF-8; treat anything else as a renderer bug.
-    Ok(String::from_utf8(buffer).expect("render_plan emits valid UTF-8"))
+    bytes_to_sql(buffer)
+}
+
+/// Converts rendered DDL bytes to a `String`, returning an `InvalidData` error instead of panicking
+/// if a backend renderer ever emits non-UTF-8 (the [`SchemaBackend`] contract forbids it).
+fn bytes_to_sql(buffer: Vec<u8>) -> std::io::Result<String> {
+    String::from_utf8(buffer)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
 /// Checks whether `backend` can create `model` without rendering or connecting to a database.
