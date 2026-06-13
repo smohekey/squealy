@@ -67,6 +67,14 @@ pub enum MysqlError {
     Connect(mysql_async::Error),
     Execute(mysql_async::Error),
     Introspect(mysql_async::Error),
+    /// A statement in a multi-statement DDL batch failed. MySQL auto-commits DDL, so the
+    /// `applied` statements before it are already committed and were not rolled back.
+    PartialDdl {
+        applied: usize,
+        total: usize,
+        statement: String,
+        source: mysql_async::Error,
+    },
 }
 
 impl fmt::Display for MysqlError {
@@ -77,6 +85,19 @@ impl fmt::Display for MysqlError {
             MysqlError::Introspect(error) => {
                 write!(formatter, "mysql introspection error: {error}")
             }
+            MysqlError::PartialDdl {
+                applied,
+                total,
+                statement,
+                source,
+            } => write!(
+                formatter,
+                "mysql ddl error after applying {applied} of {total} statement(s): MySQL \
+                 auto-commits DDL, so those {applied} statement(s) are already committed and were \
+                 not rolled back — the schema is partially applied and may need manual inspection \
+                 before retrying. Failed on statement {failed} of {total} `{statement}`: {source}",
+                failed = applied + 1,
+            ),
         }
     }
 }
@@ -87,6 +108,7 @@ impl std::error::Error for MysqlError {
             MysqlError::Connect(error)
             | MysqlError::Execute(error)
             | MysqlError::Introspect(error) => Some(error),
+            MysqlError::PartialDdl { source, .. } => Some(source),
         }
     }
 }
@@ -109,14 +131,23 @@ impl DdlExecutor for MysqlConnection {
     /// Runs the DDL batch one statement at a time.
     ///
     /// MySQL has **no transactional DDL** — each `CREATE`/`ALTER` auto-commits — so unlike the
-    /// PostgreSQL backend this is *not* atomic: a mid-batch failure leaves earlier statements applied.
-    /// (A real boundary difference the `DdlExecutor` contract anticipates.)
+    /// PostgreSQL backend this is *not* atomic: a mid-batch failure leaves earlier statements
+    /// applied. A failure is therefore reported as [`MysqlError::PartialDdl`], which records how
+    /// many statements were already committed and which statement failed so the operator can
+    /// recover the partially-applied schema.
     async fn execute_ddl(&mut self, sql: &str) -> Result<(), MysqlError> {
-        for statement in split_statements(sql) {
+        let statements: Vec<&str> = split_statements(sql).collect();
+        let total = statements.len();
+        for (index, statement) in statements.into_iter().enumerate() {
             self.conn
                 .query_drop(statement)
                 .await
-                .map_err(MysqlError::Execute)?;
+                .map_err(|source| MysqlError::PartialDdl {
+                    applied: index,
+                    total,
+                    statement: statement.to_owned(),
+                    source,
+                })?;
         }
         Ok(())
     }
