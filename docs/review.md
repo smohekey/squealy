@@ -211,11 +211,11 @@ Status legend: ✅ done · ⬜ outstanding.
 | **P1** | First-class publish dry-run + destructive-change confirmation | 5 | ✅ |
 | **P1** | Add `cargo deny` + MSRV CI jobs (MSRV corrected 1.85→1.92; it never built on 1.85) | 3c | ✅ |
 | **P1** | Lock/statement timeouts on the publish session | 5 | ✅ |
-| **P2** | Identity / generated-column transition planning | 4 | ⬜ |
+| **P2** | Identity / generated-column transition planning | 4 | ✅ |
 | **P2** | Type-change cast hints in `refactor.kdl` | 4 | ⬜ |
 | **P2** | Hybrid reviewable-script flow | 4 | ⬜ |
 | **P2** | Online/low-lock DDL strategies (e.g. `CONCURRENTLY`) | 5 | ⬜ |
-| **P2** | Document/propagate the `from_utf8` invariant in SQL rendering | 3a | ⬜ |
+| **P2** | Document/propagate the `from_utf8` invariant in SQL rendering | 3a | ✅ |
 
 The P0/P1/P2 split is the recommended execution order for a follow-up implementation pass and
 should be treated as the acceptance checklist for that work.
