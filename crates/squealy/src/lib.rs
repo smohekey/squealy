@@ -377,6 +377,7 @@ mod backend;
 mod column;
 mod connection;
 mod database;
+mod dialect;
 mod expr;
 mod foreign_key;
 mod index;
@@ -400,6 +401,7 @@ pub use column::{
 };
 pub use connection::{Connection, ConnectionWithTransaction, QueryBuilder};
 pub use database::Database;
+pub use dialect::Dialect;
 pub use expr::{
     AddExpr, AndPredicate, AnyPredicate, ArithmeticOp, BinaryExprAst, BindValue, BindValueKind,
     ColumnExprAst, ColumnRef, CompareOp, ComparePredicateAst, DivideExpr, EqualsPredicate, Expr,

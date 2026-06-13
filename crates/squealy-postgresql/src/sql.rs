@@ -11,6 +11,27 @@ use squealy::{
     UpdateAssignments, UpdateableTable,
 };
 
+/// PostgreSQL's [`Dialect`]: positional `$n` placeholders, `"`-quoted identifiers, and `double
+/// precision` casts. The query renderer routes its dialect-specific output through this so the sink
+/// logic can be shared (see [`squealy::Dialect`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PostgresDialect;
+
+impl squealy::Dialect for PostgresDialect {
+    fn write_placeholder(&self, index: usize, writer: &mut dyn Write) -> io::Result<()> {
+        // PostgreSQL parameters are 1-based and positional.
+        write!(writer, "${}", index + 1)
+    }
+
+    fn write_quoted_ident(&self, ident: &str, mut writer: &mut dyn Write) -> io::Result<()> {
+        write_quoted_ident(ident, &mut writer)
+    }
+
+    fn write_cast_type(&self, ty: &SqlType, mut writer: &mut dyn Write) -> io::Result<()> {
+        write_pg_sql_type(ty, &mut writer)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Renderer {
     next_param: usize,
@@ -19,8 +40,9 @@ struct Renderer {
 
 impl Renderer {
     fn write_placeholder(&mut self, writer: &mut impl Write) -> io::Result<()> {
+        let index = self.next_param;
         self.next_param += 1;
-        write!(writer, "${}", self.next_param)
+        squealy::Dialect::write_placeholder(&PostgresDialect, index, writer)
     }
 
     fn next_runtime_param(&mut self) -> usize {
