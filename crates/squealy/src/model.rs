@@ -521,15 +521,29 @@ fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
     let name = table.name().to_owned();
     let columns = table.columns();
 
-    let pk_columns = columns
-        .iter()
-        .filter(|column| column.primary_key())
-        .map(|column| column.name().to_owned())
-        .collect::<Vec<_>>();
-    let primary_key = (!pk_columns.is_empty()).then(|| Constraint {
-        name: pk_name(&name),
-        columns: pk_columns,
-    });
+    // Prefer an explicit table-level primary key (which carries column ordering and an optional
+    // name); otherwise hoist every column marked `#[column(primary_key)]` into one constraint.
+    let primary_key = match table.primary_key() {
+        Some(pk) => Some(Constraint {
+            name: pk.name.map(str::to_owned).unwrap_or_else(|| pk_name(&name)),
+            columns: pk
+                .columns
+                .iter()
+                .map(|column| (*column).to_owned())
+                .collect(),
+        }),
+        None => {
+            let pk_columns = columns
+                .iter()
+                .filter(|column| column.primary_key())
+                .map(|column| column.name().to_owned())
+                .collect::<Vec<_>>();
+            (!pk_columns.is_empty()).then(|| Constraint {
+                name: pk_name(&name),
+                columns: pk_columns,
+            })
+        }
+    };
 
     let uniques = columns
         .iter()
@@ -762,6 +776,64 @@ mod tests {
             })
         );
         assert!(!id.nullable);
+    }
+
+    #[derive(Clone, Debug, PartialEq, Table)]
+    #[schema(Public)]
+    #[primary_key(columns = [tenant_id, id])]
+    struct Membership<'scope, C: ColumnMode = ColumnExpr> {
+        tenant_id: C::Type<'scope, i64>,
+        id: C::Type<'scope, i64>,
+        role: C::Type<'scope, String>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Table)]
+    #[schema(Public)]
+    #[primary_key(name = "membership_pk", columns = [tenant_id, id])]
+    struct NamedMembership<'scope, C: ColumnMode = ColumnExpr> {
+        tenant_id: C::Type<'scope, i64>,
+        id: C::Type<'scope, i64>,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Schema)]
+    struct CompositePublic {
+        memberships: Membership<'static, ColumnName>,
+        named_memberships: NamedMembership<'static, ColumnName>,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Database)]
+    struct CompositeApp {
+        public: CompositePublic,
+    }
+
+    #[test]
+    fn table_level_compound_primary_key_preserves_column_order() {
+        let model = DatabaseModel::from_database::<CompositeApp>();
+        let memberships = table(&model, "memberships");
+
+        assert_eq!(
+            memberships.primary_key,
+            Some(Constraint {
+                name: "pk_memberships".to_owned(),
+                columns: vec!["tenant_id".to_owned(), "id".to_owned()],
+            })
+        );
+    }
+
+    #[test]
+    fn table_level_primary_key_name_override_flows_through() {
+        let model = DatabaseModel::from_database::<CompositeApp>();
+        let named = table(&model, "named_memberships");
+
+        assert_eq!(
+            named.primary_key,
+            Some(Constraint {
+                name: "membership_pk".to_owned(),
+                columns: vec!["tenant_id".to_owned(), "id".to_owned()],
+            })
+        );
     }
 
     #[test]

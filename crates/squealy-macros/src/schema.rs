@@ -57,6 +57,10 @@ impl SchemaStruct {
                         fn indexes(&self) -> &'static [&'static dyn ::squealy::Index] {
                             <#table_type as ::squealy::SchemaTable>::indexes()
                         }
+
+                        fn primary_key(&self) -> Option<::squealy::TablePrimaryKey> {
+                            <#table_type as ::squealy::SchemaTable>::primary_key()
+                        }
                     }
                 }
             })

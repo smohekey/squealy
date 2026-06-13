@@ -1066,6 +1066,39 @@ ALTER TABLE \"catalog\".\"memberships\" ADD CONSTRAINT \"fk_memberships_tenant_i
     );
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Catalog)]
+#[primary_key(columns = [tenant_id, id])]
+struct Seat<'scope, C: ColumnMode = ColumnExpr> {
+    tenant_id: C::Type<'scope, i32>,
+    id: C::Type<'scope, i32>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct SeatCatalog {
+    seats: Seat<'static, ColumnName>,
+}
+
+#[allow(dead_code)]
+#[derive(Database)]
+struct SeatDb {
+    catalog: SeatCatalog,
+}
+
+#[test]
+fn postgres_renders_compound_primary_key() {
+    let model = DatabaseModel::from_database::<SeatDb>();
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains("CONSTRAINT \"pk_seats\" PRIMARY KEY (\"tenant_id\", \"id\")"),
+        "expected compound PRIMARY KEY in: {sql}"
+    );
+}
+
 #[test]
 fn postgres_renders_table_and_column_comments() {
     let model = DatabaseModel {

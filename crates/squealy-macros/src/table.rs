@@ -19,6 +19,7 @@ struct TableStruct {
     visibility: TokenStream2,
     fields: Vec<Field>,
     indexes: Vec<IndexAttrs>,
+    primary_key: Option<PrimaryKeyAttrs>,
     schema: Option<proc_macro2::TokenStream>,
 }
 
@@ -34,9 +35,15 @@ struct IndexAttrs {
     unique: bool,
 }
 
+struct PrimaryKeyAttrs {
+    name: Option<String>,
+    columns: Vec<Ident>,
+}
+
 #[derive(Default)]
 struct TableAttrs {
     indexes: Vec<IndexAttrs>,
+    primary_key: Option<PrimaryKeyAttrs>,
     schema: Option<proc_macro2::TokenStream>,
 }
 
@@ -233,6 +240,49 @@ impl TableStruct {
         let indexes_static = generated_ident(&ident, "indexes", "Static");
         let columns_len = Literal::usize_unsuffixed(column_idents.len());
         let indexes_len = Literal::usize_unsuffixed(index_idents.len());
+        // When a table-level `#[primary_key(...)]` is declared, emit a static column-name list and
+        // override `primary_key()` on both trait impls. Otherwise emit nothing and let the trait
+        // defaults return `None`, leaving the per-column hoist in the model builder untouched.
+        let primary_key_static = generated_ident(&ident, "primary_key", "Static");
+        let (primary_key_static_def, table_primary_key_method, schema_primary_key_method) =
+            match self.primary_key.as_ref() {
+                Some(primary_key) => {
+                    let name = option_literal(primary_key.name.as_deref());
+                    let pk_columns = primary_key
+                        .columns
+                        .iter()
+                        .map(|column| {
+                            let column = column.to_string();
+                            let field = self
+                                .fields
+                                .iter()
+                                .find(|field| field.ident.to_string() == column)
+                                .expect("primary key fields are validated before code generation");
+                            Literal::string(&field.column_name())
+                        })
+                        .collect::<Vec<_>>();
+                    let pk_len = Literal::usize_unsuffixed(pk_columns.len());
+                    (
+                        quote::quote! {
+                            static #primary_key_static: [&'static str; #pk_len] = [#( #pk_columns, )*];
+                        },
+                        quote::quote! {
+                            fn primary_key(&self) -> Option<::squealy::TablePrimaryKey> {
+                                <Self as ::squealy::SchemaTable>::primary_key()
+                            }
+                        },
+                        quote::quote! {
+                            fn primary_key() -> Option<::squealy::TablePrimaryKey> {
+                                Some(::squealy::TablePrimaryKey {
+                                    name: #name,
+                                    columns: &#primary_key_static,
+                                })
+                            }
+                        },
+                    )
+                }
+                None => (quote::quote! {}, quote::quote! {}, quote::quote! {}),
+            };
         let schema = self
             .schema
             .clone()
@@ -346,6 +396,7 @@ impl TableStruct {
 
             static #columns_static: [&'static dyn ::squealy::Column; #columns_len] = [#( &#column_idents, )*];
             static #indexes_static: [&'static dyn ::squealy::Index; #indexes_len] = [#( &#index_idents, )*];
+            #primary_key_static_def
 
             impl<'scope, C: ::squealy::ColumnMode> ::squealy::Table for #ident <'scope, C> {
                 fn schema_name(&self) -> Option<&'static str> {
@@ -363,6 +414,8 @@ impl TableStruct {
                 fn indexes(&self) -> &'static [&'static dyn ::squealy::Index] {
                     <Self as ::squealy::SchemaTable>::indexes()
                 }
+
+                #table_primary_key_method
             }
 
             impl<'scope, C: ::squealy::ColumnMode> ::squealy::SchemaTable for #ident <'scope, C> {
@@ -387,6 +440,8 @@ impl TableStruct {
                 fn indexes() -> &'static [&'static dyn ::squealy::Index] {
                     &#indexes_static
                 }
+
+                #schema_primary_key_method
 
                 fn column_names() -> Self::WithColumn<'static, ::squealy::ColumnName> {
                     #ident { #( #fields: #field_literals, )* }
@@ -1510,6 +1565,7 @@ fn table_struct(input: TokenStream) -> Result<TableStruct, MacroError> {
     };
     let table_attrs = table_attributes(&tokens[..struct_index])?;
     validate_index_columns(&table_attrs.indexes, &fields)?;
+    validate_primary_key(table_attrs.primary_key.as_ref(), &fields)?;
     validate_field_attrs(&fields)?;
 
     Ok(TableStruct {
@@ -1517,8 +1573,46 @@ fn table_struct(input: TokenStream) -> Result<TableStruct, MacroError> {
         visibility: struct_visibility(&tokens, struct_index),
         fields,
         indexes: table_attrs.indexes,
+        primary_key: table_attrs.primary_key,
         schema: table_attrs.schema,
     })
+}
+
+/// Validates a table-level `#[primary_key(columns = [..])]` against the struct's fields:
+/// every referenced column must exist and be non-nullable, and it must not be combined with
+/// any per-column `#[column(primary_key)]` marker (which is the single-column form).
+fn validate_primary_key(
+    primary_key: Option<&PrimaryKeyAttrs>,
+    fields: &[Field],
+) -> Result<(), String> {
+    let Some(primary_key) = primary_key else {
+        return Ok(());
+    };
+
+    if fields.iter().any(|field| field.attrs.primary_key) {
+        return Err(
+            "a table cannot combine `#[primary_key(...)]` with per-column `#[column(primary_key)]`; \
+             use one form"
+                .to_owned(),
+        );
+    }
+
+    for column in &primary_key.columns {
+        let column = column.to_string();
+        let Some(field) = fields
+            .iter()
+            .find(|field| field.ident.to_string() == column)
+        else {
+            return Err(format!("primary key references unknown field `{column}`"));
+        };
+        if field.attrs.nullable == Some(true) {
+            return Err(format!(
+                "primary key column `{column}` cannot be `nullable`"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Structurally verifies the generic parameter list contains a `'scope` lifetime
@@ -1625,6 +1719,20 @@ fn apply_table_attribute(group: &Group, attrs: &mut TableAttrs) -> Result<(), St
                 .indexes
                 .push(parse_index(meta.stream().into_iter().collect::<Vec<_>>())?);
         }
+        "primary_key" => {
+            let Some(TokenTree::Group(meta)) = tokens.next() else {
+                return Err(
+                    "table-level #[primary_key(...)] requires metadata inside parentheses"
+                        .to_owned(),
+                );
+            };
+            if attrs.primary_key.is_some() {
+                return Err("a table may declare at most one #[primary_key(...)]".to_owned());
+            }
+            attrs.primary_key = Some(parse_primary_key(
+                meta.stream().into_iter().collect::<Vec<_>>(),
+            )?);
+        }
         "schema" => {
             let Some(TokenTree::Group(schema)) = tokens.next() else {
                 return Err("table-level #[schema(...)] requires a schema type".to_owned());
@@ -1696,6 +1804,68 @@ fn parse_index(tokens: Vec<TokenTree>) -> Result<IndexAttrs, String> {
 
     if attrs.columns.is_empty() {
         return Err("table-level indexes require at least one column".to_owned());
+    }
+
+    Ok(attrs)
+}
+
+fn parse_primary_key(tokens: Vec<TokenTree>) -> Result<PrimaryKeyAttrs, String> {
+    let mut index = 0;
+    let mut attrs = PrimaryKeyAttrs {
+        name: None,
+        columns: Vec::new(),
+    };
+
+    while index < tokens.len() {
+        while matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == ',') {
+            index += 1;
+        }
+
+        let Some(TokenTree::Ident(name)) = tokens.get(index) else {
+            break;
+        };
+        let name = name.to_string();
+        index += 1;
+
+        match name.as_str() {
+            "name" => {
+                if !matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '=')
+                {
+                    return Err("primary key option `name` requires a string value".to_owned());
+                }
+                index += 1;
+                attrs.name = Some(match tokens.get(index) {
+                    Some(TokenTree::Literal(literal)) => literal_string(literal),
+                    Some(token) => token.to_string(),
+                    None => return Err("primary key option `name` is missing a value".to_owned()),
+                });
+                index += 1;
+            }
+            "columns" => {
+                if !matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '=')
+                {
+                    return Err(
+                        "primary key option `columns` requires a bracketed field list".to_owned(),
+                    );
+                }
+                index += 1;
+                let Some(TokenTree::Group(columns)) = tokens.get(index) else {
+                    return Err(
+                        "primary key option `columns` requires a bracketed field list".to_owned(),
+                    );
+                };
+                if columns.delimiter() != Delimiter::Bracket {
+                    return Err("primary key option `columns` requires square brackets".to_owned());
+                }
+                attrs.columns = parse_index_columns(columns)?;
+                index += 1;
+            }
+            _ => return Err(format!("unsupported primary key option `{name}`")),
+        }
+    }
+
+    if attrs.columns.is_empty() {
+        return Err("table-level #[primary_key(...)] requires at least one column".to_owned());
     }
 
     Ok(attrs)

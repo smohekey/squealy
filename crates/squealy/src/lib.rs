@@ -443,4 +443,6 @@ pub use query::{
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{ColumnType, Database, Schema, Table};
-pub use table::{InsertableTable, SchemaTable, Table, UpdateableTable, WriteableTable};
+pub use table::{
+    InsertableTable, SchemaTable, Table, TablePrimaryKey, UpdateableTable, WriteableTable,
+};
