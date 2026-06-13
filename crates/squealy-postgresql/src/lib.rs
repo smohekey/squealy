@@ -125,6 +125,14 @@ impl squealy::SchemaBackend for Postgres {
     ) -> std::io::Result<()> {
         sql::ddl::write_plan(plan, writer)
     }
+
+    fn render_plan_concurrent(
+        &self,
+        plan: &squealy::DatabasePlan,
+        writer: &mut impl std::io::Write,
+    ) -> std::io::Result<()> {
+        sql::ddl::write_plan_concurrent(plan, writer)
+    }
 }
 
 #[cfg(feature = "schema")]
@@ -139,6 +147,25 @@ impl squealy::DdlExecutor for PostgresConnection {
         transaction.commit().await?;
         Ok(())
     }
+
+    /// Runs each statement on its own, without a transaction, so statements that cannot run inside a
+    /// transaction block (`CREATE INDEX CONCURRENTLY`) work. A failure here leaves earlier statements
+    /// applied — that is inherent to non-transactional concurrent index builds.
+    async fn execute_ddl_unmanaged(&mut self, sql: &str) -> Result<(), PostgresError> {
+        for statement in split_ddl_statements(sql) {
+            self.client().batch_execute(statement).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Splits a `;`-separated DDL batch into individual statements (trimming the trailing `;`), so each
+/// can be executed on its own outside a transaction.
+#[cfg(feature = "schema")]
+fn split_ddl_statements(sql: &str) -> impl Iterator<Item = &str> {
+    sql.split(";\n")
+        .map(|statement| statement.trim().trim_end_matches(';').trim())
+        .filter(|statement| !statement.is_empty())
 }
 
 #[cfg(feature = "schema")]

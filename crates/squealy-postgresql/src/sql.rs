@@ -563,7 +563,7 @@ pub(crate) mod ddl {
             for table in &schema.tables {
                 for index in &table.indexes {
                     statement(writer, &mut first)?;
-                    write_create_index(schema.name.as_deref(), &table.name, index, writer)?;
+                    write_create_index(schema.name.as_deref(), &table.name, index, false, writer)?;
                 }
             }
         }
@@ -601,6 +601,34 @@ pub(crate) mod ddl {
         }
         for step in &plan.steps {
             write_plan_step(step, writer, &mut first)?;
+        }
+        if !first {
+            writer.write_all(b";")?;
+        }
+        Ok(())
+    }
+
+    /// Renders index-add steps with `CREATE INDEX CONCURRENTLY`. Statements are `;`-separated so the
+    /// caller (`execute_ddl_unmanaged`) can run each one outside a transaction, as `CONCURRENTLY`
+    /// requires. Non-index steps fall back to normal rendering (the planner partitions them out).
+    pub(crate) fn write_plan_concurrent(
+        plan: &DatabasePlan,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        let mut first = true;
+        for step in &plan.steps {
+            if let DatabasePlanStep::AlterTable {
+                schema,
+                table,
+                change,
+            } = step
+                && let TablePlanStep::AddIndex { index } = change.as_ref()
+            {
+                statement(writer, &mut first)?;
+                write_create_index(schema.as_deref(), table, index, true, writer)?;
+            } else {
+                write_plan_step(step, writer, &mut first)?;
+            }
         }
         if !first {
             writer.write_all(b";")?;
@@ -681,7 +709,7 @@ pub(crate) mod ddl {
         }
         for index in &table.indexes {
             statement(writer, first)?;
-            write_create_index(schema, &table.name, index, writer)?;
+            write_create_index(schema, &table.name, index, false, writer)?;
         }
         for foreign_key in &table.foreign_keys {
             statement(writer, first)?;
@@ -800,7 +828,7 @@ pub(crate) mod ddl {
                 write_drop_constraint(schema, table, &check.name, writer)?;
             }
             TablePlanStep::AddIndex { index } => {
-                write_create_index(schema, table, index, writer)?;
+                write_create_index(schema, table, index, false, writer)?;
             }
             TablePlanStep::DropIndex { index } => {
                 writer.write_all(b"DROP INDEX ")?;
@@ -839,7 +867,7 @@ pub(crate) mod ddl {
                 writer.write_all(b"DROP INDEX ")?;
                 write_qualified_name(schema, &before.name, writer)?;
                 statement(writer, first)?;
-                write_create_index(schema, table, after, writer)?;
+                write_create_index(schema, table, after, false, writer)?;
             }
             TablePlanStep::AlterColumn {
                 before,
@@ -1191,6 +1219,7 @@ pub(crate) mod ddl {
         schema: Option<&str>,
         table: &str,
         index: &IndexModel,
+        concurrent: bool,
         writer: &mut impl Write,
     ) -> io::Result<()> {
         writer.write_all(b"CREATE ")?;
@@ -1198,6 +1227,9 @@ pub(crate) mod ddl {
             writer.write_all(b"UNIQUE ")?;
         }
         writer.write_all(b"INDEX ")?;
+        if concurrent {
+            writer.write_all(b"CONCURRENTLY ")?;
+        }
         write_quoted_ident(&index.name, writer)?;
         writer.write_all(b" ON ")?;
         write_qualified_name(schema, table, writer)?;

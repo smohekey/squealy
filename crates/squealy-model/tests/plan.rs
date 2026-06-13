@@ -1,10 +1,10 @@
 use squealy_model::{
     AppliedRefactorError, CastColumn, ChangeRisk, ColumnModel, DatabaseModel, DatabasePlanStep,
-    DdlExecutor, DiffPolicy, RefactorLog, RefactorOperation, RenameColumn, RenameTable,
-    SchemaIntrospect, SchemaModel, SchemaRefactorStore, SqlType, TableModel, TablePlanStep,
-    apply_plan, classified_plan_steps, pending_refactors, plan_from_database,
-    plan_from_database_with_refactors, plan_models, plan_models_with_refactors, render_plan_sql,
-    repair_refactor_metadata,
+    DdlExecutor, DiffPolicy, IndexModel, PlanApplyOptions, RefactorLog, RefactorOperation,
+    RenameColumn, RenameTable, SchemaIntrospect, SchemaModel, SchemaRefactorStore, SqlType,
+    TableModel, TablePlanStep, apply_plan, apply_plan_with_options, classified_plan_steps,
+    pending_refactors, plan_from_database, plan_from_database_with_refactors, plan_models,
+    plan_models_with_refactors, render_plan_sql, repair_refactor_metadata,
 };
 use squealy_postgresql::Postgres;
 
@@ -507,6 +507,72 @@ async fn apply_plan_does_not_execute_empty_plans() {
     .expect("apply empty plan");
 
     assert!(connection.executed.is_empty());
+}
+
+#[tokio::test]
+async fn apply_plan_with_concurrent_indexes_splits_index_creation() {
+    let plan = squealy_model::DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AddColumn {
+                    column: column("slug", SqlType::Text),
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AddIndex {
+                    index: IndexModel {
+                        name: "idx_events_slug".to_owned(),
+                        columns: vec!["slug".to_owned()],
+                        expressions: Vec::new(),
+                        include_columns: Vec::new(),
+                        unique: false,
+                        method: None,
+                        directions: Vec::new(),
+                        nulls: Vec::new(),
+                        collations: Vec::new(),
+                        operator_classes: Vec::new(),
+                        predicate: None,
+                    },
+                }),
+            },
+        ],
+    };
+    let mut connection = TestConnection {
+        model: DatabaseModel {
+            schemas: Vec::new(),
+        },
+        applied_refactor_ids: Vec::new(),
+        executed: Vec::new(),
+    };
+
+    apply_plan_with_options(
+        &plan,
+        &Postgres,
+        &mut connection,
+        PlanApplyOptions {
+            concurrent_indexes: true,
+        },
+    )
+    .await
+    .expect("apply plan");
+
+    // Transactional steps run first, the concurrent index second (on its own execution).
+    assert_eq!(connection.executed.len(), 2);
+    assert!(
+        connection.executed[0].contains("ADD COLUMN \"slug\"")
+            && !connection.executed[0].contains("CONCURRENTLY"),
+        "transactional batch: {}",
+        connection.executed[0]
+    );
+    assert!(
+        connection.executed[1].contains("CREATE INDEX CONCURRENTLY \"idx_events_slug\""),
+        "concurrent batch: {}",
+        connection.executed[1]
+    );
 }
 
 #[derive(Debug)]

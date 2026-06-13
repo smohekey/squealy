@@ -13,13 +13,13 @@ use squealy_cli::CliError;
 use squealy_cli::extract::extract_model;
 use squealy_model::{
     ChangeRisk, DatabaseDiffChange, DatabaseModel, DatabasePlan, DatabasePlanStep, DdlExecutor,
-    DiffPolicy, RefactorLog, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaMetadataStore,
-    SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore, TableDiffChange,
-    TablePlanStep, apply_plan, check_create, check_diff_policy, classified_plan_steps, diff_models,
-    introspect, package_metadata, pending_refactors, plan_from_database_with_refactors,
-    plan_models_with_refactors, publish, read_package, read_refactor_log, refactor_from_kdl,
-    render_create_sql, render_plan_sql, repair_refactor_metadata, write_package,
-    write_package_with_refactors,
+    DiffPolicy, PlanApplyOptions, RefactorLog, SchemaBackend, SchemaCapabilities, SchemaConnect,
+    SchemaMetadataStore, SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore,
+    TableDiffChange, TablePlanStep, apply_plan_with_options, check_create, check_diff_policy,
+    classified_plan_steps, diff_models, introspect, package_metadata, pending_refactors,
+    plan_from_database_with_refactors, plan_models_with_refactors, publish, read_package,
+    read_refactor_log, refactor_from_kdl, render_create_sql, render_plan_sql,
+    repair_refactor_metadata, write_package, write_package_with_refactors,
 };
 use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
@@ -191,6 +191,11 @@ enum Command {
         /// destructive changes when stdin is not a terminal, e.g. in CI).
         #[arg(long)]
         yes: bool,
+        /// Create new indexes concurrently, outside the transaction (PostgreSQL `CREATE INDEX
+        /// CONCURRENTLY`), so the table is not locked against writes while they build. Trades the
+        /// atomic all-or-nothing apply for non-blocking index creation. Only affects `--incremental`.
+        #[arg(long)]
+        concurrent_indexes: bool,
     },
 }
 
@@ -560,7 +565,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             lock_timeout,
             statement_timeout,
             yes,
+            concurrent_indexes,
         } => {
+            let apply_options = PlanApplyOptions { concurrent_indexes };
             let loaded = source.load_with_refactors()?;
             // Create-from-scratch dry-run: render the DDL without touching a database.
             if report && !incremental {
@@ -618,9 +625,14 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                             Ok(())
                         } else {
                             confirm_destructive(&plan, yes)?;
-                            apply_plan(&plan, &Postgres, &mut connection)
-                                .await
-                                .map_err(|error| CliError::Message(format!("publish: {error}")))?;
+                            apply_plan_with_options(
+                                &plan,
+                                &Postgres,
+                                &mut connection,
+                                apply_options,
+                            )
+                            .await
+                            .map_err(|error| CliError::Message(format!("publish: {error}")))?;
                             record_publish_metadata(&loaded, "incremental", &mut connection).await
                         }
                     } else {
@@ -668,7 +680,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                             Ok(())
                         } else {
                             confirm_destructive(&plan, yes)?;
-                            apply_plan(&plan, &Mysql, &mut connection)
+                            apply_plan_with_options(&plan, &Mysql, &mut connection, apply_options)
                                 .await
                                 .map_err(|error| CliError::Message(format!("publish: {error}")))?;
                             record_publish_metadata(&loaded, "incremental", &mut connection).await

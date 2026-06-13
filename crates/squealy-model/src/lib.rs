@@ -249,6 +249,15 @@ where
     })
 }
 
+/// Options controlling how [`apply_plan_with_options`] executes a plan.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlanApplyOptions {
+    /// Create indexes with the backend's concurrent, non-locking form outside the transaction
+    /// (PostgreSQL `CREATE INDEX CONCURRENTLY`). Index-add steps are applied after the transactional
+    /// steps, each on its own connection round-trip, so they are not part of the atomic batch.
+    pub concurrent_indexes: bool,
+}
+
 /// Renders `plan` using `backend` and executes it against `connection`.
 pub async fn apply_plan<B, C>(
     plan: &DatabasePlan,
@@ -259,14 +268,82 @@ where
     B: SchemaBackend,
     C: DdlExecutor,
 {
+    apply_plan_with_options(plan, backend, connection, PlanApplyOptions::default()).await
+}
+
+/// Renders and executes `plan`, honouring [`PlanApplyOptions`].
+///
+/// With `concurrent_indexes`, index-add steps are split out and applied after the transactional
+/// steps using the backend's concurrent index form outside a transaction. This trades the plan's
+/// all-or-nothing guarantee (a concurrent index can fail independently, leaving an invalid index to
+/// drop and retry) for not locking the table against writes while the index builds.
+pub async fn apply_plan_with_options<B, C>(
+    plan: &DatabasePlan,
+    backend: &B,
+    connection: &mut C,
+    options: PlanApplyOptions,
+) -> Result<(), PublishError<C::Error>>
+where
+    B: SchemaBackend,
+    C: DdlExecutor,
+{
     if plan.is_empty() {
         return Ok(());
     }
-    let sql = render_plan_sql(plan, backend).map_err(PublishError::Render)?;
-    connection
-        .execute_ddl(&sql)
-        .await
-        .map_err(PublishError::Execute)
+    if !options.concurrent_indexes {
+        let sql = render_plan_sql(plan, backend).map_err(PublishError::Render)?;
+        return connection
+            .execute_ddl(&sql)
+            .await
+            .map_err(PublishError::Execute);
+    }
+
+    let (transactional, concurrent) = split_concurrent_index_steps(plan);
+    if !transactional.is_empty() {
+        let sql = render_plan_sql(&transactional, backend).map_err(PublishError::Render)?;
+        connection
+            .execute_ddl(&sql)
+            .await
+            .map_err(PublishError::Execute)?;
+    }
+    if !concurrent.is_empty() {
+        let mut buffer = Vec::new();
+        backend
+            .render_plan_concurrent(&concurrent, &mut buffer)
+            .map_err(PublishError::Render)?;
+        let sql = bytes_to_sql(buffer).map_err(PublishError::Render)?;
+        connection
+            .execute_ddl_unmanaged(&sql)
+            .await
+            .map_err(PublishError::Execute)?;
+    }
+    Ok(())
+}
+
+/// Splits a plan into its transactional steps and its index-add steps (which can be created
+/// concurrently), preserving order within each group. Index additions sort after the transactional
+/// steps that may create the columns they reference.
+fn split_concurrent_index_steps(plan: &DatabasePlan) -> (DatabasePlan, DatabasePlan) {
+    let mut transactional = Vec::new();
+    let mut concurrent = Vec::new();
+    for step in &plan.steps {
+        let is_add_index = matches!(
+            step,
+            DatabasePlanStep::AlterTable { change, .. }
+                if matches!(change.as_ref(), TablePlanStep::AddIndex { .. })
+        );
+        if is_add_index {
+            concurrent.push(step.clone());
+        } else {
+            transactional.push(step.clone());
+        }
+    }
+    (
+        DatabasePlan {
+            steps: transactional,
+        },
+        DatabasePlan { steps: concurrent },
+    )
 }
 
 /// Publishes create-from-scratch DDL straight from a compile-time [`Database`].

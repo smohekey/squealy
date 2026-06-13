@@ -147,6 +147,21 @@ pub trait SchemaBackend {
             "backend does not support incremental schema plan rendering",
         ))
     }
+
+    /// Renders an incremental plan whose index-creation steps should use the backend's concurrent,
+    /// non-locking form (e.g. PostgreSQL `CREATE INDEX CONCURRENTLY`).
+    ///
+    /// The default delegates to [`render_plan`](Self::render_plan), so backends without a concurrent
+    /// form render identically. Callers pair this with
+    /// [`DdlExecutor::execute_ddl_unmanaged`](DdlExecutor::execute_ddl_unmanaged), since the
+    /// concurrent form usually cannot run inside a transaction.
+    fn render_plan_concurrent(
+        &self,
+        plan: &DatabasePlan,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        self.render_plan(plan, writer)
+    }
 }
 
 /// Executes already-rendered DDL against a live connection.
@@ -160,6 +175,18 @@ pub trait DdlExecutor {
 
     /// Executes one or more `;`-separated DDL statements as a single batch.
     fn execute_ddl(&mut self, sql: &str) -> impl Future<Output = Result<(), Self::Error>>;
+
+    /// Executes `;`-separated DDL statements that must run *outside* a managing transaction, one at a
+    /// time (e.g. PostgreSQL `CREATE INDEX CONCURRENTLY`).
+    ///
+    /// The default delegates to [`execute_ddl`](Self::execute_ddl); backends that wrap `execute_ddl`
+    /// in a transaction override this to run each statement without one.
+    fn execute_ddl_unmanaged(
+        &mut self,
+        sql: &str,
+    ) -> impl Future<Output = Result<(), Self::Error>> {
+        self.execute_ddl(sql)
+    }
 }
 
 /// Reads a live database schema into the neutral [`DatabaseModel`].
