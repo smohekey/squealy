@@ -8,7 +8,6 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use serde_json::Value;
-use tokio::sync::Mutex;
 use squealy_model::{
     CheckModel, ColumnModel, ConstraintDeferrability, DatabaseModel, DdlExecutor, ForeignKeyMatch,
     ForeignKeyModel, IndexModel, RefactorLog, RefactorOperation, RenameColumn, RenameTable,
@@ -17,6 +16,7 @@ use squealy_model::{
 };
 use squealy_mysql::Mysql;
 use squealy_postgresql::Postgres;
+use tokio::sync::Mutex;
 
 const SQUEALY: &str = env!("CARGO_BIN_EXE_squealy");
 const POSTGRES_RESET_SCHEMAS: &str = "\
