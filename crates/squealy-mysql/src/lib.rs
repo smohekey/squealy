@@ -1,9 +1,10 @@
-//! MySQL schema-management backend for squealy.
+//! MySQL backend for squealy.
 //!
-//! This crate is deliberately **schema-only** (no query backend): it implements the DDL-management
-//! traits against the core `DatabaseModel`. Its purpose is partly to keep the crate boundaries
-//! honest — a second backend that renders a different dialect (backtick quoting, `AUTO_INCREMENT`,
-//! unsigned integers, `VARCHAR`-backed strings) without touching core or the model.
+//! Renders the MySQL dialect (backtick quoting, `AUTO_INCREMENT` identity, unsigned integers,
+//! `VARCHAR`-backed strings) for both schema management (DDL/introspection against the core
+//! `DatabaseModel`) and query execution. The query runtime lives in [`query`]; the single driver
+//! `Conn` is held behind a [`tokio::sync::Mutex`] so the `&self` execution API can obtain the
+//! `&mut Conn` that `mysql_async` requires.
 
 #![forbid(unsafe_code)]
 
@@ -17,7 +18,10 @@ use squealy::{
 };
 
 mod introspect;
+mod query;
 mod sql;
+
+pub use query::MysqlRowReader;
 
 /// The MySQL schema backend marker.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -74,7 +78,7 @@ impl fmt::Debug for MysqlConnection {
     }
 }
 
-/// An error connecting to or executing DDL against MySQL.
+/// An error connecting to, executing DDL against, or querying MySQL.
 #[derive(Debug, thiserror::Error)]
 pub enum MysqlError {
     #[error("mysql connect error: {0}")]
@@ -83,6 +87,20 @@ pub enum MysqlError {
     Execute(#[source] mysql_async::Error),
     #[error("mysql introspection error: {0}")]
     Introspect(#[source] mysql_async::Error),
+    #[error("mysql query error: {0}")]
+    Query(#[source] mysql_async::Error),
+    #[error("query returned no rows")]
+    NoRows,
+    #[error("row is missing column {0}")]
+    MissingColumn(usize),
+    #[error("could not decode column {column}: {source}")]
+    Decode {
+        column: usize,
+        #[source]
+        source: mysql_async::FromValueError,
+    },
+    #[error("could not convert value to {0}")]
+    Conversion(&'static str),
     /// A statement in a multi-statement DDL batch failed. MySQL auto-commits DDL, so the
     /// `applied` statements before it are already committed and were not rolled back.
     #[error(

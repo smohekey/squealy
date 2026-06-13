@@ -8,8 +8,9 @@
 use std::io::{self, Write};
 
 use squealy::{
-    CheckModel, ColumnModel, DatabaseModel, DatabasePlan, DatabasePlanStep, DefaultValue,
-    ForeignKeyModel, GeneratedStorage, IndexModel, SqlType, TableModel, TablePlanStep,
+    CheckModel, ColumnDefault, ColumnModel, DatabaseModel, DatabasePlan, DatabasePlanStep,
+    DefaultValue, ForeignKeyModel, GeneratedStorage, IndexModel, SqlType, Table, TableModel,
+    TablePlanStep,
 };
 
 /// Renders ordered create-from-scratch DDL for a whole model. Statements are `;`-terminated and
@@ -725,6 +726,117 @@ fn write_quoted_ident_list(columns: &[String], writer: &mut impl Write) -> io::R
         write_quoted_ident(column, writer)?;
     }
     Ok(())
+}
+
+/// Renders a `CREATE TABLE` (plus any secondary indexes) for a query-builder [`Table`], used by the
+/// `to::<T>()` create path. This is the query-side counterpart to [`write_database`], which renders
+/// from the owned [`DatabaseModel`]; here the source is the derived `Table` trait.
+///
+/// Foreign keys are emitted as table-level `FOREIGN KEY` clauses rather than inline column
+/// `REFERENCES`, which MySQL parses but silently does not enforce.
+pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(b"CREATE TABLE ")?;
+    write_qualified_name(table.schema_name(), table.name(), writer)?;
+    writer.write_all(b" (")?;
+    for (index, column) in table.columns().iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        write_quoted_ident(column.name(), writer)?;
+        writer.write_all(b" ")?;
+        write_mysql_sql_type(&column.column_type().into(), writer)?;
+        if !column.nullable() {
+            writer.write_all(b" NOT NULL")?;
+        }
+        if column.auto_increment() {
+            writer.write_all(b" AUTO_INCREMENT")?;
+        }
+        if column.primary_key() {
+            writer.write_all(b" PRIMARY KEY")?;
+        }
+        if let Some(default) = column.default() {
+            writer.write_all(b" DEFAULT ")?;
+            write_column_default(default, writer)?;
+        }
+    }
+    for column in table.columns() {
+        if let Some(reference) = column.references() {
+            writer.write_all(b", FOREIGN KEY (")?;
+            write_quoted_ident(column.name(), writer)?;
+            writer.write_all(b") REFERENCES ")?;
+            write_qualified_name(reference.schema_name(), reference.table(), writer)?;
+            writer.write_all(b" (")?;
+            write_quoted_ident(reference.column(), writer)?;
+            writer.write_all(b")")?;
+            if let Some(on_delete) = reference.on_delete() {
+                write!(writer, " ON DELETE {on_delete}")?;
+            }
+            if let Some(on_update) = reference.on_update() {
+                write!(writer, " ON UPDATE {on_update}")?;
+            }
+        }
+    }
+    writer.write_all(b")")?;
+
+    for (position, index) in table.indexes().iter().enumerate() {
+        let unique = if index.unique() { "UNIQUE " } else { "" };
+        write!(writer, "\nCREATE {unique}INDEX ")?;
+        match index.name() {
+            Some(name) => write_quoted_ident(name, writer)?,
+            None => write_quoted_ident(&derived_index_name(table, *index, position), writer)?,
+        }
+        writer.write_all(b" ON ")?;
+        write_qualified_name(table.schema_name(), table.name(), writer)?;
+        writer.write_all(b" (")?;
+        write_quoted_idents(index.columns(), writer)?;
+        writer.write_all(b")")?;
+    }
+
+    Ok(())
+}
+
+/// Builds a deterministic, unique name for an index that did not supply one, so two unnamed indexes
+/// on a table do not collide.
+fn derived_index_name(
+    table: &(dyn Table + Sync),
+    index: &dyn squealy::Index,
+    position: usize,
+) -> String {
+    let mut name = format!("idx_{}", table.name());
+    for column in index.columns() {
+        name.push('_');
+        name.push_str(column);
+    }
+    if index.columns().is_empty() {
+        name.push_str(&format!("_{position}"));
+    }
+    name
+}
+
+fn write_quoted_idents(values: &[&'static str], writer: &mut impl Write) -> io::Result<()> {
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        write_quoted_ident(value, writer)?;
+    }
+    Ok(())
+}
+
+fn write_column_default(default: ColumnDefault, writer: &mut impl Write) -> io::Result<()> {
+    match default {
+        ColumnDefault::Null => writer.write_all(b"NULL"),
+        ColumnDefault::Int(value) => write!(writer, "{value}"),
+        ColumnDefault::UInt(value) => write!(writer, "{value}"),
+        ColumnDefault::Float(value) => write!(writer, "{value}"),
+        ColumnDefault::Text(value) => write_quoted_text(value, writer),
+        ColumnDefault::Bool(true) => writer.write_all(b"TRUE"),
+        ColumnDefault::Bool(false) => writer.write_all(b"FALSE"),
+        ColumnDefault::CurrentTimestamp => writer.write_all(b"CURRENT_TIMESTAMP"),
+        ColumnDefault::CurrentDate => writer.write_all(b"(CURRENT_DATE)"),
+        ColumnDefault::CurrentTime => writer.write_all(b"(CURRENT_TIME)"),
+        ColumnDefault::Raw(value) => writer.write_all(value.as_bytes()),
+    }
 }
 
 #[cfg(test)]
