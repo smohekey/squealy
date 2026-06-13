@@ -47,16 +47,25 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Check formatting
         run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Install cargo-rdme
         run: cargo install cargo-rdme --version 1.5.0 --locked
 
       - name: Check README
         run: cargo rdme --workspace-project squealy --readme-path README.md --check
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.1 --locked
+
+      - name: Audit dependencies
+        run: cargo audit
 
       - name: Build
         run: cargo build --workspace --all-targets

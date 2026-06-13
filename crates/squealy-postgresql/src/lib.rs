@@ -541,10 +541,10 @@ impl ConnectionWithTransaction for PostgresConnection {
     where
         Self: 'conn;
 
-    fn transaction<'conn, T, F>(
+    async fn transaction<'conn, T, F>(
         &'conn mut self,
         f: F,
-    ) -> impl std::future::Future<Output = Result<T, <Self::Backend as Backend>::Error>> + 'conn
+    ) -> Result<T, <Self::Backend as Backend>::Error>
     where
         T: 'conn,
         F: for<'tx> AsyncFnOnce(
@@ -552,31 +552,29 @@ impl ConnectionWithTransaction for PostgresConnection {
             ) -> Result<T, <Self::Backend as Backend>::Error>
             + 'conn,
     {
-        async move {
-            let transaction = self
-                .client_mut()
-                .transaction()
-                .await
-                .map_err(PostgresError::Database)?;
-            let mut transaction: Self::Transaction<'conn> = PostgresTransaction { transaction };
+        let transaction = self
+            .client_mut()
+            .transaction()
+            .await
+            .map_err(PostgresError::Database)?;
+        let mut transaction: Self::Transaction<'conn> = PostgresTransaction { transaction };
 
-            match f(&mut transaction).await {
-                Ok(value) => {
-                    transaction
-                        .transaction
-                        .commit()
-                        .await
-                        .map_err(PostgresError::Database)?;
-                    Ok(value)
-                }
-                Err(error) => {
-                    transaction
-                        .transaction
-                        .rollback()
-                        .await
-                        .map_err(PostgresError::Database)?;
-                    Err(error)
-                }
+        match f(&mut transaction).await {
+            Ok(value) => {
+                transaction
+                    .transaction
+                    .commit()
+                    .await
+                    .map_err(PostgresError::Database)?;
+                Ok(value)
+            }
+            Err(error) => {
+                transaction
+                    .transaction
+                    .rollback()
+                    .await
+                    .map_err(PostgresError::Database)?;
+                Err(error)
             }
         }
     }

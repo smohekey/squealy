@@ -27,22 +27,22 @@ fn plan_models_flattens_diff_changes_in_order() {
         vec![
             DatabasePlanStep::CreateTable {
                 schema: Some("public".to_owned()),
-                table: table("created"),
+                table: Box::new(table("created")),
             },
             DatabasePlanStep::AlterTable {
                 schema: Some("public".to_owned()),
                 table: "events".to_owned(),
-                change: TablePlanStep::SetTableComment {
+                change: Box::new(TablePlanStep::SetTableComment {
                     before: None,
                     after: Some("new comment".to_owned()),
-                },
+                }),
             },
             DatabasePlanStep::AlterTable {
                 schema: Some("public".to_owned()),
                 table: "events".to_owned(),
-                change: TablePlanStep::AddColumn {
+                change: Box::new(TablePlanStep::AddColumn {
                     column: column("name", SqlType::Text),
-                },
+                }),
             },
         ]
     );
@@ -126,9 +126,9 @@ fn plan_models_with_refactors_keeps_table_changes_after_rename() {
             DatabasePlanStep::AlterTable {
                 schema: Some("public".to_owned()),
                 table: "users".to_owned(),
-                change: TablePlanStep::AddColumn {
+                change: Box::new(TablePlanStep::AddColumn {
                     column: column("name", SqlType::Text),
-                },
+                }),
             },
         ]
     );
@@ -163,11 +163,11 @@ fn plan_models_with_refactors_turns_column_drop_add_into_rename() {
         vec![DatabasePlanStep::AlterTable {
             schema: Some("public".to_owned()),
             table: "events".to_owned(),
-            change: TablePlanStep::RenameColumn {
+            change: Box::new(TablePlanStep::RenameColumn {
                 refactor_id: Some("rename-user-name".to_owned()),
                 from: "display_name".to_owned(),
                 to: "name".to_owned(),
-            },
+            }),
         }]
     );
 }
@@ -207,19 +207,19 @@ fn plan_models_with_refactors_keeps_column_changes_after_rename() {
             DatabasePlanStep::AlterTable {
                 schema: Some("public".to_owned()),
                 table: "events".to_owned(),
-                change: TablePlanStep::RenameColumn {
+                change: Box::new(TablePlanStep::RenameColumn {
                     refactor_id: Some("rename-user-name".to_owned()),
                     from: "display_name".to_owned(),
                     to: "name".to_owned(),
-                },
+                }),
             },
             DatabasePlanStep::AlterTable {
                 schema: Some("public".to_owned()),
                 table: "events".to_owned(),
-                change: TablePlanStep::AlterColumn {
+                change: Box::new(TablePlanStep::AlterColumn {
                     before: renamed_before,
                     after: desired_name,
-                },
+                }),
             },
         ]
     );

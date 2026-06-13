@@ -23,11 +23,13 @@ pub enum DatabasePlanStep {
     },
     CreateTable {
         schema: Option<String>,
-        table: TableModel,
+        // Boxed to keep `DatabasePlanStep` small: `TableModel` is by far the heaviest payload,
+        // so storing it inline would bloat every variant (clippy::large_enum_variant).
+        table: Box<TableModel>,
     },
     DropTable {
         schema: Option<String>,
-        table: TableModel,
+        table: Box<TableModel>,
     },
     RenameTable {
         refactor_id: Option<String>,
@@ -38,7 +40,8 @@ pub enum DatabasePlanStep {
     AlterTable {
         schema: Option<String>,
         table: String,
-        change: TablePlanStep,
+        // Boxed for the same reason as the `TableModel` payloads above.
+        change: Box<TablePlanStep>,
     },
 }
 

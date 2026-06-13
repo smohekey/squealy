@@ -144,7 +144,7 @@ fn library_target_name(package: &serde_json::Value) -> Result<String, String> {
         .find(|target| {
             target["kind"]
                 .as_array()
-                .is_some_and(|kinds| kinds.iter().any(|kind| is_library_kind(kind)))
+                .is_some_and(|kinds| kinds.iter().any(is_library_kind))
         })
         .and_then(|target| target["name"].as_str())
         .map(str::to_owned)

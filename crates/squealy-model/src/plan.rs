@@ -141,11 +141,11 @@ fn plan_step_as_diff_change(step: &DatabasePlanStep) -> DatabaseDiffChange {
         },
         DatabasePlanStep::CreateTable { schema, table } => DatabaseDiffChange::CreateTable {
             schema: schema.clone(),
-            table: table.clone(),
+            table: table.as_ref().clone(),
         },
         DatabasePlanStep::DropTable { schema, table } => DatabaseDiffChange::DropTable {
             schema: schema.clone(),
-            table: table.clone(),
+            table: table.as_ref().clone(),
         },
         DatabasePlanStep::RenameTable {
             schema, from, to, ..
@@ -259,13 +259,13 @@ fn flatten_diff(diff: &DatabaseDiff) -> Vec<DatabasePlanStep> {
             DatabaseDiffChange::CreateTable { schema, table } => {
                 steps.push(DatabasePlanStep::CreateTable {
                     schema: schema.clone(),
-                    table: table.clone(),
+                    table: Box::new(table.clone()),
                 });
             }
             DatabaseDiffChange::DropTable { schema, table } => {
                 steps.push(DatabasePlanStep::DropTable {
                     schema: schema.clone(),
-                    table: table.clone(),
+                    table: Box::new(table.clone()),
                 });
             }
             DatabaseDiffChange::AlterTable {
@@ -277,7 +277,7 @@ fn flatten_diff(diff: &DatabaseDiff) -> Vec<DatabasePlanStep> {
                     steps.push(DatabasePlanStep::AlterTable {
                         schema: schema.clone(),
                         table: table.clone(),
-                        change: table_plan_step(table_change),
+                        change: Box::new(table_plan_step(table_change)),
                     });
                 }
             }
@@ -344,7 +344,7 @@ fn apply_table_rename(steps: &mut Vec<DatabasePlanStep>, operation: &RenameTable
             .map(|change| DatabasePlanStep::AlterTable {
                 schema: operation.schema.clone(),
                 table: operation.to.clone(),
-                change: table_plan_step(&change),
+                change: Box::new(table_plan_step(&change)),
             }),
     );
     steps.insert(insert_position, replacement.remove(0));
@@ -361,12 +361,14 @@ fn apply_column_rename(steps: &mut Vec<DatabasePlanStep>, operation: &RenameColu
             DatabasePlanStep::AlterTable {
                 schema,
                 table,
-                change: TablePlanStep::DropColumn { column },
-            } if schema == &operation.schema
-                && table == &operation.table
-                && column.name == operation.from =>
-            {
-                Some((position, column.clone()))
+                change,
+            } if schema == &operation.schema && table == &operation.table => {
+                match change.as_ref() {
+                    TablePlanStep::DropColumn { column } if column.name == operation.from => {
+                        Some((position, column.clone()))
+                    }
+                    _ => None,
+                }
             }
             _ => None,
         });
@@ -377,12 +379,14 @@ fn apply_column_rename(steps: &mut Vec<DatabasePlanStep>, operation: &RenameColu
             DatabasePlanStep::AlterTable {
                 schema,
                 table,
-                change: TablePlanStep::AddColumn { column },
-            } if schema == &operation.schema
-                && table == &operation.table
-                && column.name == operation.to =>
-            {
-                Some((position, column.clone()))
+                change,
+            } if schema == &operation.schema && table == &operation.table => {
+                match change.as_ref() {
+                    TablePlanStep::AddColumn { column } if column.name == operation.to => {
+                        Some((position, column.clone()))
+                    }
+                    _ => None,
+                }
             }
             _ => None,
         });
@@ -398,20 +402,20 @@ fn apply_column_rename(steps: &mut Vec<DatabasePlanStep>, operation: &RenameColu
     let mut replacement = vec![DatabasePlanStep::AlterTable {
         schema: operation.schema.clone(),
         table: operation.table.clone(),
-        change: TablePlanStep::RenameColumn {
+        change: Box::new(TablePlanStep::RenameColumn {
             refactor_id: Some(operation.id.clone()),
             from: operation.from.clone(),
             to: operation.to.clone(),
-        },
+        }),
     }];
     if before_column != after_column {
         replacement.push(DatabasePlanStep::AlterTable {
             schema: operation.schema.clone(),
             table: operation.table.clone(),
-            change: TablePlanStep::AlterColumn {
+            change: Box::new(TablePlanStep::AlterColumn {
                 before: before_column,
                 after: after_column,
-            },
+            }),
         });
     }
     for (offset, step) in replacement.into_iter().enumerate() {

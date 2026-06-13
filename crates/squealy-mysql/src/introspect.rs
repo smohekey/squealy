@@ -73,6 +73,19 @@ async fn table(
     })
 }
 
+/// Raw `information_schema.COLUMNS` row shape returned by the column query in [`columns`].
+type ColumnRow = (
+    String,         // COLUMN_NAME
+    String,         // DATA_TYPE
+    String,         // COLUMN_TYPE
+    String,         // IS_NULLABLE
+    Option<String>, // COLUMN_DEFAULT
+    String,         // EXTRA
+    Option<String>, // GENERATION_EXPRESSION
+    String,         // COLUMN_COMMENT
+    Option<String>, // collation (NULL when it matches the table default)
+);
+
 async fn columns(
     conn: &mut mysql_async::Conn,
     table_ref: &TableRef,
@@ -110,17 +123,7 @@ ORDER BY c.ORDINAL_POSITION",
             generation_expression,
             comment,
             collation,
-        ): (
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            String,
-            Option<String>,
-            String,
-            Option<String>,
-        )| {
+        ): ColumnRow| {
             let extra = extra.to_ascii_lowercase();
             let ty = sql_type(&data_type, &column_type);
             ColumnModel {

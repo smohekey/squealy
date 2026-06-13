@@ -62,7 +62,7 @@ fn mysql_renders_incremental_schema_plan() {
             },
             DatabasePlanStep::CreateTable {
                 schema: Some("shop".to_owned()),
-                table: TableModel {
+                table: Box::new(TableModel {
                     name: "events".to_owned(),
                     comment: Some("Event records".to_owned()),
                     columns: vec![ColumnModel {
@@ -92,12 +92,12 @@ fn mysql_renders_incremental_schema_plan() {
                         operator_classes: Vec::new(),
                         predicate: None,
                     }],
-                },
+                }),
             },
             DatabasePlanStep::AlterTable {
                 schema: Some("shop".to_owned()),
                 table: "events".to_owned(),
-                change: TablePlanStep::AddColumn {
+                change: Box::new(TablePlanStep::AddColumn {
                     column: ColumnModel {
                         name: "name".to_owned(),
                         comment: Some("Event name".to_owned()),
@@ -108,12 +108,12 @@ fn mysql_renders_incremental_schema_plan() {
                         identity: None,
                         generated: None,
                     },
-                },
+                }),
             },
             DatabasePlanStep::AlterTable {
                 schema: Some("shop".to_owned()),
                 table: "events".to_owned(),
-                change: TablePlanStep::DropIndex {
+                change: Box::new(TablePlanStep::DropIndex {
                     index: IndexModel {
                         name: "idx_events_id".to_owned(),
                         columns: vec!["id".to_owned()],
@@ -127,11 +127,11 @@ fn mysql_renders_incremental_schema_plan() {
                         operator_classes: Vec::new(),
                         predicate: None,
                     },
-                },
+                }),
             },
             DatabasePlanStep::DropTable {
                 schema: Some("shop".to_owned()),
-                table: TableModel {
+                table: Box::new(TableModel {
                     name: "old_events".to_owned(),
                     comment: None,
                     columns: Vec::new(),
@@ -140,7 +140,7 @@ fn mysql_renders_incremental_schema_plan() {
                     uniques: Vec::new(),
                     checks: Vec::new(),
                     indexes: Vec::new(),
-                },
+                }),
             },
             DatabasePlanStep::DropSchema {
                 schema: Some("old".to_owned()),
@@ -171,7 +171,7 @@ fn mysql_renders_changed_constraints_and_indexes_in_schema_plan() {
             DatabasePlanStep::AlterTable {
                 schema: Some("shop".to_owned()),
                 table: "events".to_owned(),
-                change: TablePlanStep::AlterPrimaryKey {
+                change: Box::new(TablePlanStep::AlterPrimaryKey {
                     before: Constraint {
                         name: "pk_events".to_owned(),
                         columns: vec!["id".to_owned()],
@@ -180,12 +180,12 @@ fn mysql_renders_changed_constraints_and_indexes_in_schema_plan() {
                         name: "pk_events".to_owned(),
                         columns: vec!["event_id".to_owned()],
                     },
-                },
+                }),
             },
             DatabasePlanStep::AlterTable {
                 schema: Some("shop".to_owned()),
                 table: "events".to_owned(),
-                change: TablePlanStep::AlterUnique {
+                change: Box::new(TablePlanStep::AlterUnique {
                     before: Constraint {
                         name: "uq_events_name".to_owned(),
                         columns: vec!["name".to_owned()],
@@ -194,12 +194,12 @@ fn mysql_renders_changed_constraints_and_indexes_in_schema_plan() {
                         name: "uq_events_name".to_owned(),
                         columns: vec!["slug".to_owned()],
                     },
-                },
+                }),
             },
             DatabasePlanStep::AlterTable {
                 schema: Some("shop".to_owned()),
                 table: "events".to_owned(),
-                change: TablePlanStep::AlterForeignKey {
+                change: Box::new(TablePlanStep::AlterForeignKey {
                     before: ForeignKeyModel {
                         name: "fk_events_user_id".to_owned(),
                         columns: vec!["user_id".to_owned()],
@@ -226,12 +226,12 @@ fn mysql_renders_changed_constraints_and_indexes_in_schema_plan() {
                         on_delete: Some(ForeignKeyAction::Cascade),
                         on_update: None,
                     },
-                },
+                }),
             },
             DatabasePlanStep::AlterTable {
                 schema: Some("shop".to_owned()),
                 table: "events".to_owned(),
-                change: TablePlanStep::AlterCheck {
+                change: Box::new(TablePlanStep::AlterCheck {
                     before: CheckModel {
                         name: "ck_events_id".to_owned(),
                         expression: "id > 0".to_owned(),
@@ -244,12 +244,12 @@ fn mysql_renders_changed_constraints_and_indexes_in_schema_plan() {
                         validation: None,
                         enforcement: None,
                     },
-                },
+                }),
             },
             DatabasePlanStep::AlterTable {
                 schema: Some("shop".to_owned()),
                 table: "events".to_owned(),
-                change: TablePlanStep::AlterIndex {
+                change: Box::new(TablePlanStep::AlterIndex {
                     before: IndexModel {
                         name: "idx_events_name".to_owned(),
                         columns: vec!["name".to_owned()],
@@ -276,7 +276,7 @@ fn mysql_renders_changed_constraints_and_indexes_in_schema_plan() {
                         operator_classes: Vec::new(),
                         predicate: None,
                     },
-                },
+                }),
             },
         ],
     };
@@ -307,7 +307,7 @@ fn mysql_renders_changed_columns_in_schema_plan() {
             DatabasePlanStep::AlterTable {
                 schema: Some("shop".to_owned()),
                 table: "events".to_owned(),
-                change: TablePlanStep::AlterColumn {
+                change: Box::new(TablePlanStep::AlterColumn {
                     before: ColumnModel {
                         name: "description".to_owned(),
                         comment: Some("Old description".to_owned()),
@@ -328,12 +328,12 @@ fn mysql_renders_changed_columns_in_schema_plan() {
                         identity: None,
                         generated: None,
                     },
-                },
+                }),
             },
             DatabasePlanStep::AlterTable {
                 schema: Some("shop".to_owned()),
                 table: "events".to_owned(),
-                change: TablePlanStep::AlterColumn {
+                change: Box::new(TablePlanStep::AlterColumn {
                     before: ColumnModel {
                         name: "status".to_owned(),
                         comment: Some("Event status".to_owned()),
@@ -354,7 +354,7 @@ fn mysql_renders_changed_columns_in_schema_plan() {
                         identity: None,
                         generated: None,
                     },
-                },
+                }),
             },
         ],
     };
@@ -383,11 +383,11 @@ fn mysql_renders_rename_steps_in_schema_plan() {
             DatabasePlanStep::AlterTable {
                 schema: Some("shop".to_owned()),
                 table: "users".to_owned(),
-                change: TablePlanStep::RenameColumn {
+                change: Box::new(TablePlanStep::RenameColumn {
                     refactor_id: None,
                     from: "display_name".to_owned(),
                     to: "name".to_owned(),
-                },
+                }),
             },
         ],
     };
@@ -416,11 +416,11 @@ fn mysql_records_refactor_ids_for_rename_steps() {
             DatabasePlanStep::AlterTable {
                 schema: Some("shop".to_owned()),
                 table: "users".to_owned(),
-                change: TablePlanStep::RenameColumn {
+                change: Box::new(TablePlanStep::RenameColumn {
                     refactor_id: Some("rename-display-name".to_owned()),
                     from: "display_name".to_owned(),
                     to: "name".to_owned(),
-                },
+                }),
             },
         ],
     };
@@ -461,10 +461,10 @@ fn mysql_rejects_unsupported_changed_column_definitions() {
             steps: vec![DatabasePlanStep::AlterTable {
                 schema: Some("shop".to_owned()),
                 table: "events".to_owned(),
-                change: TablePlanStep::AlterColumn {
+                change: Box::new(TablePlanStep::AlterColumn {
                     before: column("description"),
                     after,
-                },
+                }),
             }],
         };
 

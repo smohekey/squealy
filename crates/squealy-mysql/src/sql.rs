@@ -150,7 +150,7 @@ fn write_create_table_extras(
 fn plan_step_has_refactor_id(step: &DatabasePlanStep) -> bool {
     match step {
         DatabasePlanStep::RenameTable { refactor_id, .. } => refactor_id.is_some(),
-        DatabasePlanStep::AlterTable { change, .. } => match change {
+        DatabasePlanStep::AlterTable { change, .. } => match change.as_ref() {
             TablePlanStep::RenameColumn { refactor_id, .. } => refactor_id.is_some(),
             _ => false,
         },
@@ -698,12 +698,12 @@ fn write_delimited(value: &str, delimiter: char, writer: &mut impl Write) -> io:
     writer.write_all(delim)?;
     let mut start = 0;
     for (index, _) in value.match_indices(delimiter) {
-        writer.write_all(value[start..index].as_bytes())?;
+        writer.write_all(&value.as_bytes()[start..index])?;
         writer.write_all(delim)?;
         writer.write_all(delim)?;
         start = index + delimiter.len_utf8();
     }
-    writer.write_all(value[start..].as_bytes())?;
+    writer.write_all(&value.as_bytes()[start..])?;
     writer.write_all(delim)
 }
 
