@@ -67,6 +67,13 @@ jobs:
       - name: Audit dependencies
         run: cargo audit
 
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.16.4 --locked
+
+      # Advisories are covered by `cargo audit`; cargo-deny enforces license, source, and ban policy.
+      - name: Check dependency policy
+        run: cargo deny check licenses bans sources
+
       - name: Build
         run: cargo build --workspace --all-targets
 
