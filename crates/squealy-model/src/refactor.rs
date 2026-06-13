@@ -37,6 +37,13 @@ impl RefactorOperation {
             RefactorOperation::CastColumn(operation) => &operation.id,
         }
     }
+
+    /// Whether this operation's id is tracked in backend applied-refactor metadata. Renames are
+    /// recorded so a drop/add can be re-interpreted; casts are idempotent rendering hints that are
+    /// re-applied on every plan, so they are never recorded.
+    pub fn is_recorded(&self) -> bool {
+        !matches!(self, RefactorOperation::CastColumn(_))
+    }
 }
 
 /// A table rename in one schema namespace.

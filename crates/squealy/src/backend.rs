@@ -203,7 +203,7 @@ pub trait SchemaIntrospect {
     /// Canonicalizes a logical [`SqlType`] to the form this backend's introspection produces for it.
     ///
     /// Some logical types are physically identical in a backend — PostgreSQL renders both
-    /// [`SqlType::String`] and [`SqlType::Text`] as `text`, which introspects back as `Text`. A
+    /// [`SqlType::String`] and [`SqlType::Text`] as `text`, which introspects back as `String`. A
     /// desired model is canonicalized through this before being diffed against an introspected one,
     /// so such types do not produce spurious, never-settling type-change churn. The default is the
     /// identity, which suits backends that keep the logical types distinct (e.g. MySQL).

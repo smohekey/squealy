@@ -162,10 +162,36 @@ impl squealy::DdlExecutor for PostgresConnection {
 /// Splits a `;`-separated DDL batch into individual statements (trimming the trailing `;`), so each
 /// can be executed on its own outside a transaction.
 #[cfg(feature = "schema")]
-fn split_ddl_statements(sql: &str) -> impl Iterator<Item = &str> {
-    sql.split(";\n")
-        .map(|statement| statement.trim().trim_end_matches(';').trim())
-        .filter(|statement| !statement.is_empty())
+fn split_ddl_statements(sql: &str) -> Vec<&str> {
+    let bytes = sql.as_bytes();
+    let mut statements = Vec::new();
+    let mut start = 0;
+    let mut in_string = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            // A doubled quote (`''`) is an escaped quote inside a string literal; toggling twice
+            // nets out, so a simple toggle correctly tracks both quotes and the escape.
+            b'\'' => in_string = !in_string,
+            b';' if !in_string && bytes.get(index + 1) == Some(&b'\n') => {
+                push_ddl_statement(&mut statements, &sql[start..index]);
+                index += 1; // skip the '\n'
+                start = index + 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    push_ddl_statement(&mut statements, &sql[start..]);
+    statements
+}
+
+#[cfg(feature = "schema")]
+fn push_ddl_statement<'sql>(statements: &mut Vec<&'sql str>, statement: &'sql str) {
+    let statement = statement.trim().trim_end_matches(';').trim();
+    if !statement.is_empty() {
+        statements.push(statement);
+    }
 }
 
 #[cfg(feature = "schema")]
@@ -592,5 +618,31 @@ impl ConnectionWithTransaction for PostgresConnection {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "schema"))]
+mod tests {
+    use super::split_ddl_statements;
+
+    #[test]
+    fn split_ddl_statements_respects_string_literals() {
+        // A `;\n` inside a single-quoted literal (e.g. an index predicate) must not split the batch.
+        let sql = "CREATE INDEX CONCURRENTLY i ON t (c) WHERE note = 'a;\nb';\n\
+CREATE INDEX CONCURRENTLY j ON t (d);";
+        let statements = split_ddl_statements(sql);
+        assert_eq!(
+            statements,
+            vec![
+                "CREATE INDEX CONCURRENTLY i ON t (c) WHERE note = 'a;\nb'",
+                "CREATE INDEX CONCURRENTLY j ON t (d)",
+            ]
+        );
+    }
+
+    #[test]
+    fn split_ddl_statements_handles_escaped_quotes() {
+        let statements = split_ddl_statements("SET x = 'a''b';\nSET y = 1;");
+        assert_eq!(statements, vec!["SET x = 'a''b'", "SET y = 1"]);
     }
 }

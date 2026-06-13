@@ -356,7 +356,8 @@ fn redact_credentials(text: &str) -> String {
             .find(['/', '?', '#', ' ', '"', '\'', '\n'])
             .unwrap_or(after.len());
         let authority = &after[..authority_end];
-        match authority.split_once('@') {
+        // Split on the *last* `@` so a password that itself contains `@` is fully masked.
+        match authority.rsplit_once('@') {
             Some((userinfo, host)) if userinfo.contains(':') => {
                 let (user, _password) = userinfo.split_once(':').expect("contains ':'");
                 out.push_str(user);
@@ -1943,6 +1944,10 @@ mod tests {
             redact_credentials("connecting to postgres://user:s3cret@db:5432/app timed out");
         assert!(!redacted.contains("s3cret"));
         assert!(redacted.contains("postgres://user:***@db:5432/app"));
+        // A password containing `@` must still be fully masked (split on the last `@`).
+        let at = redact_credentials("postgres://user:p@ss@db/app");
+        assert!(!at.contains("p@ss") && !at.contains("ss@db"), "{at}");
+        assert_eq!(at, "postgres://user:***@db/app");
         // No userinfo password: left untouched.
         assert_eq!(
             redact_credentials("mysql://root@host/db"),

@@ -474,6 +474,49 @@ fn postgres_rejects_adding_a_generated_column_in_place() {
 }
 
 #[test]
+fn postgres_drops_identity_before_setting_a_default() {
+    // Identity and default are mutually exclusive, so DROP IDENTITY must come before SET DEFAULT.
+    let before = ColumnModel {
+        name: "counter".to_owned(),
+        comment: None,
+        ty: SqlType::I64,
+        collation: None,
+        nullable: false,
+        default: None,
+        identity: Some(IdentityModel {
+            mode: IdentityMode::ByDefault,
+        }),
+        generated: None,
+    };
+    let after = ColumnModel {
+        identity: None,
+        default: Some(DefaultValue::Text("ready".to_owned())),
+        ..before.clone()
+    };
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterTable {
+            schema: Some("public".to_owned()),
+            table: "events".to_owned(),
+            change: Box::new(TablePlanStep::AlterColumn {
+                before,
+                after,
+                type_cast: None,
+            }),
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "ALTER TABLE \"public\".\"events\" ALTER COLUMN \"counter\" DROP IDENTITY IF EXISTS;\n\
+ALTER TABLE \"public\".\"events\" ALTER COLUMN \"counter\" SET DEFAULT 'ready';"
+    );
+}
+
+#[test]
 fn postgres_renders_rename_steps_in_schema_plan() {
     let plan = DatabasePlan {
         steps: vec![

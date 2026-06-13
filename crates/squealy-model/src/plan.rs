@@ -287,17 +287,19 @@ fn flatten_diff(diff: &DatabaseDiff) -> Vec<DatabasePlanStep> {
 }
 
 fn apply_refactors(steps: &mut Vec<DatabasePlanStep>, refactors: &RefactorLog) {
+    // Renames first: they create or transform the `AlterColumn` steps that casts attach to. Casts
+    // run in a second pass so a `cast-column` works regardless of its position relative to the
+    // `rename-column` for the same column.
     for operation in &refactors.operations {
         match operation {
-            RefactorOperation::RenameTable(operation) => {
-                apply_table_rename(steps, operation);
-            }
-            RefactorOperation::RenameColumn(operation) => {
-                apply_column_rename(steps, operation);
-            }
-            RefactorOperation::CastColumn(operation) => {
-                apply_column_cast(steps, operation);
-            }
+            RefactorOperation::RenameTable(operation) => apply_table_rename(steps, operation),
+            RefactorOperation::RenameColumn(operation) => apply_column_rename(steps, operation),
+            RefactorOperation::CastColumn(_) => {}
+        }
+    }
+    for operation in &refactors.operations {
+        if let RefactorOperation::CastColumn(operation) = operation {
+            apply_column_cast(steps, operation);
         }
     }
 }

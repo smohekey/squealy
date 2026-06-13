@@ -711,6 +711,56 @@ fn cast_column_refactor_renders_using_clause_on_a_type_change() {
     );
 }
 
+#[test]
+fn cast_column_applies_after_rename_regardless_of_log_order() {
+    let mut desired = table("events");
+    desired.columns = vec![column(
+        "total",
+        SqlType::Decimal {
+            precision: 12,
+            scale: 2,
+        },
+    )];
+    let mut actual = table("events");
+    actual.columns = vec![column("old_total", SqlType::Text)];
+
+    // The cast is listed BEFORE the rename that creates the column it targets; the cast must still
+    // attach to the rename's type-change step.
+    let refactors = RefactorLog {
+        operations: vec![
+            RefactorOperation::CastColumn(CastColumn {
+                id: "cast-total".to_owned(),
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                column: "total".to_owned(),
+                using: "old_total::numeric".to_owned(),
+            }),
+            RefactorOperation::RenameColumn(RenameColumn {
+                id: "rename-total".to_owned(),
+                schema: Some("public".to_owned()),
+                table: "events".to_owned(),
+                from: "old_total".to_owned(),
+                to: "total".to_owned(),
+            }),
+        ],
+    };
+
+    let plan = plan_models_with_refactors(
+        &model_with_tables("public", vec![desired]),
+        &model_with_tables("public", vec![actual]),
+        &refactors,
+        DiffPolicy::ALLOW_ALL,
+    )
+    .expect("rename + cast allowed by ALLOW_ALL");
+
+    let sql = render_plan_sql(&plan, &Postgres).expect("render");
+    assert!(sql.contains("RENAME COLUMN"), "expected a rename: {sql}");
+    assert!(
+        sql.contains("USING old_total::numeric"),
+        "cast must survive being listed before the rename: {sql}"
+    );
+}
+
 fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {

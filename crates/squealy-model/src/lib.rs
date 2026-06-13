@@ -233,9 +233,12 @@ where
         .applied_refactor_ids()
         .await
         .map_err(RepairRefactorMetadataError::ReadAppliedRefactors)?;
+    // Casts are idempotent rendering hints, never recorded as applied refactors — recording one
+    // would make `pending_refactors` filter it out and silently drop its `USING` clause.
     let package_ids = refactors
         .operations
         .iter()
+        .filter(|operation| operation.is_recorded())
         .map(|operation| operation.id().to_owned())
         .collect::<Vec<_>>();
 

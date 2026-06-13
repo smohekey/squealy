@@ -951,45 +951,51 @@ pub(crate) mod ddl {
             wrote = true;
         }
 
-        if before.default != after.default {
+        // A column cannot be both an identity column and have a default in PostgreSQL, so the drops
+        // must precede the adds: e.g. `SET DEFAULT` is rejected while the column is still an identity
+        // column, and `ADD … AS IDENTITY` is rejected while it still has a default.
+        if before.identity.is_some() && after.identity.is_none() {
             if wrote {
                 statement(writer, first)?;
             }
-            writer.write_all(b"ALTER TABLE ")?;
-            write_qualified_name(schema, table, writer)?;
-            writer.write_all(b" ALTER COLUMN ")?;
-            write_quoted_ident(&after.name, writer)?;
-            match &after.default {
-                Some(default) => {
-                    writer.write_all(b" SET DEFAULT ")?;
-                    write_default_value(default, writer)?;
-                }
-                None => writer.write_all(b" DROP DEFAULT")?,
+            write_alter_column_prefix(schema, table, &after.name, writer)?;
+            writer.write_all(b" DROP IDENTITY IF EXISTS")?;
+            wrote = true;
+        }
+        if before.default.is_some() && after.default.is_none() {
+            if wrote {
+                statement(writer, first)?;
+            }
+            write_alter_column_prefix(schema, table, &after.name, writer)?;
+            writer.write_all(b" DROP DEFAULT")?;
+            wrote = true;
+        }
+        if let Some(identity) = &after.identity
+            && before.identity.as_ref() != Some(identity)
+        {
+            if wrote {
+                statement(writer, first)?;
+            }
+            write_alter_column_prefix(schema, table, &after.name, writer)?;
+            if before.identity.is_none() {
+                writer.write_all(b" ADD GENERATED ")?;
+                write_pg_identity_mode(&identity.mode, writer)?;
+                writer.write_all(b" AS IDENTITY")?;
+            } else {
+                writer.write_all(b" SET GENERATED ")?;
+                write_pg_identity_mode(&identity.mode, writer)?;
             }
             wrote = true;
         }
-
-        if before.identity != after.identity {
+        if let Some(default) = &after.default
+            && before.default.as_ref() != Some(default)
+        {
             if wrote {
                 statement(writer, first)?;
             }
-            writer.write_all(b"ALTER TABLE ")?;
-            write_qualified_name(schema, table, writer)?;
-            writer.write_all(b" ALTER COLUMN ")?;
-            write_quoted_ident(&after.name, writer)?;
-            match (&before.identity, &after.identity) {
-                (None, Some(identity)) => {
-                    writer.write_all(b" ADD GENERATED ")?;
-                    write_pg_identity_mode(&identity.mode, writer)?;
-                    writer.write_all(b" AS IDENTITY")?;
-                }
-                (Some(_), Some(identity)) => {
-                    writer.write_all(b" SET GENERATED ")?;
-                    write_pg_identity_mode(&identity.mode, writer)?;
-                }
-                (Some(_), None) => writer.write_all(b" DROP IDENTITY IF EXISTS")?,
-                (None, None) => unreachable!("identity differs"),
-            }
+            write_alter_column_prefix(schema, table, &after.name, writer)?;
+            writer.write_all(b" SET DEFAULT ")?;
+            write_default_value(default, writer)?;
             wrote = true;
         }
 
@@ -1041,6 +1047,18 @@ pub(crate) mod ddl {
                 writer.write_all(b"BY DEFAULT")
             }
         }
+    }
+
+    fn write_alter_column_prefix(
+        schema: Option<&str>,
+        table: &str,
+        column: &str,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        writer.write_all(b"ALTER TABLE ")?;
+        write_qualified_name(schema, table, writer)?;
+        writer.write_all(b" ALTER COLUMN ")?;
+        write_quoted_ident(column, writer)
     }
 
     fn write_drop_constraint(
