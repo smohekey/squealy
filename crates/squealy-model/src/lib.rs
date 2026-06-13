@@ -268,9 +268,16 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
 
 /// Fills an index's absent method / directions with the backend defaults so a plain crate-declared
 /// index matches the explicit metadata introspection reads back.
+///
+/// Only runs when the backend reports a default index method. A backend that leaves default index
+/// metadata unset (the trait default, `None`) also introspects directions as empty, so filling either
+/// here would itself create a never-settling `AlterIndex` against that backend.
 fn canonicalize_index(index: &mut IndexModel, default_method: &Option<IndexMethod>) {
+    let Some(default_method) = default_method else {
+        return;
+    };
     if index.method.is_none() {
-        index.method = default_method.clone();
+        index.method = Some(default_method.clone());
     }
     if index.directions.is_empty() {
         let terms = index.columns.len() + index.expressions.len();
@@ -730,6 +737,32 @@ mod tests {
         // The canonicalized desired model now matches what introspection reads back, so a diff after
         // a clean publish is empty instead of a never-settling AlterColumn/AlterIndex.
         assert!(diff_models(&canonical, &canonical).is_empty());
+    }
+
+    /// A backend using the trait defaults: it leaves default index metadata unset, so introspection
+    /// reports `method: None` / `directions: []`. Canonicalization must not invent a `BTree` method or
+    /// ASC directions for it, which would itself create a never-settling `AlterIndex`.
+    struct DefaultBackend;
+
+    impl SchemaIntrospect for DefaultBackend {
+        type Error = std::io::Error;
+
+        async fn introspect_database(&mut self) -> Result<DatabaseModel, Self::Error> {
+            unreachable!("canonicalize_model never introspects")
+        }
+    }
+
+    #[test]
+    fn canonicalize_model_leaves_index_defaults_for_backends_that_do_not_fill_them() {
+        let model = table_with_index(index());
+
+        let canonical = canonicalize_model(&DefaultBackend, &model);
+        let canonical_index = &canonical.schemas[0].tables[0].indexes[0];
+
+        assert_eq!(canonical_index.method, None);
+        assert!(canonical_index.directions.is_empty());
+        // The desired index is unchanged, so it still matches what such a backend introspects.
+        assert!(diff_models(&canonical, &model).is_empty());
     }
 
     #[test]
