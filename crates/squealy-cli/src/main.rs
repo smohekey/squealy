@@ -356,26 +356,31 @@ async fn run(cli: Cli) -> Result<(), String> {
             backend,
             url,
             output,
-        } => match backend.backend {
-            BackendKind::Postgres => {
-                let mut connection = Postgres.connect(&url).await.map_err(|error| {
-                    format!("connect: {}", redact_secret(&error.to_string(), url))
-                })?;
-                let model = introspect(&mut connection)
-                    .await
-                    .map_err(|error| format!("introspect: {error}"))?;
-                write_package(&model, &output).map_err(|error| format!("write package: {error}"))
+        } => {
+            validate_url(backend.backend, &url)?;
+            match backend.backend {
+                BackendKind::Postgres => {
+                    let mut connection = Postgres.connect(&url).await.map_err(|error| {
+                        format!("connect: {}", redact_secret(&error.to_string(), url))
+                    })?;
+                    let model = introspect(&mut connection)
+                        .await
+                        .map_err(|error| format!("introspect: {error}"))?;
+                    write_package(&model, &output)
+                        .map_err(|error| format!("write package: {error}"))
+                }
+                BackendKind::Mysql => {
+                    let mut connection = Mysql.connect(&url).await.map_err(|error| {
+                        format!("connect: {}", redact_secret(&error.to_string(), url))
+                    })?;
+                    let model = introspect(&mut connection)
+                        .await
+                        .map_err(|error| format!("introspect: {error}"))?;
+                    write_package(&model, &output)
+                        .map_err(|error| format!("write package: {error}"))
+                }
             }
-            BackendKind::Mysql => {
-                let mut connection = Mysql.connect(&url).await.map_err(|error| {
-                    format!("connect: {}", redact_secret(&error.to_string(), url))
-                })?;
-                let model = introspect(&mut connection)
-                    .await
-                    .map_err(|error| format!("introspect: {error}"))?;
-                write_package(&model, &output).map_err(|error| format!("write package: {error}"))
-            }
-        },
+        }
         Command::Status {
             source,
             backend,
@@ -444,6 +449,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             if report && !incremental {
                 return Err("--report currently requires --incremental".to_owned());
             }
+            validate_url(backend.backend, &url)?;
             let loaded = source.load_with_refactors()?;
             match backend.backend {
                 BackendKind::Postgres => {
@@ -547,6 +553,7 @@ async fn live_status_inputs(
     ),
     String,
 > {
+    validate_url(backend, url)?;
     match backend {
         BackendKind::Postgres => {
             let mut connection = Postgres
@@ -650,6 +657,7 @@ async fn run_refactors(command: RefactorsCommand) -> Result<(), String> {
             url,
             package,
         } => {
+            validate_url(backend.backend, &url)?;
             let refactors = read_refactor_log(&package)
                 .map_err(|error| format!("read package refactors: {error}"))?;
             match backend.backend {
@@ -679,6 +687,7 @@ async fn run_refactors(command: RefactorsCommand) -> Result<(), String> {
 }
 
 async fn applied_refactor_ids(backend: BackendKind, url: &str) -> Result<Vec<String>, String> {
+    validate_url(backend, url)?;
     match backend {
         BackendKind::Postgres => {
             let mut connection = Postgres
@@ -720,6 +729,40 @@ fn url_password(url: &str) -> Option<&str> {
         .unwrap_or(after_scheme.len());
     let userinfo = after_scheme[..authority_end].rsplit_once('@')?.0;
     Some(userinfo.split_once(':')?.1)
+}
+
+/// Validates a connection URL before we hand it to a driver, so a malformed URL or a
+/// backend/scheme mismatch fails with a clear, credential-free message instead of a cryptic
+/// driver error. Any URL echoed in an error is password-redacted.
+fn validate_url(backend: BackendKind, url: &str) -> Result<(), String> {
+    let Some((scheme, after)) = url.split_once("://") else {
+        return Err(format!(
+            "invalid connection URL `{}`: expected `scheme://...`",
+            redact_secret(url, url)
+        ));
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    let scheme_ok = match backend {
+        BackendKind::Postgres => matches!(scheme.as_str(), "postgres" | "postgresql"),
+        BackendKind::Mysql => scheme == "mysql",
+    };
+    if !scheme_ok {
+        return Err(format!(
+            "connection URL scheme `{scheme}` does not match backend `{}`",
+            backend.value_name()
+        ));
+    }
+    let authority = &after[..after.find(['/', '?', '#']).unwrap_or(after.len())];
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_userinfo, host)| host);
+    if host.is_empty() {
+        return Err(format!(
+            "invalid connection URL `{}`: missing host",
+            redact_secret(url, url)
+        ));
+    }
+    Ok(())
 }
 
 fn read_refactor_file(path: &Path) -> Result<RefactorLog, String> {
@@ -1374,7 +1417,28 @@ impl BackendKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{redact_secret, url_password};
+    use super::{BackendKind, redact_secret, url_password, validate_url};
+
+    #[test]
+    fn validate_url_accepts_matching_scheme() {
+        assert!(validate_url(BackendKind::Postgres, "postgres://u:p@host:5432/db").is_ok());
+        assert!(validate_url(BackendKind::Postgres, "postgresql://host/db").is_ok());
+        assert!(validate_url(BackendKind::Mysql, "mysql://root@127.0.0.1:3306/db").is_ok());
+    }
+
+    #[test]
+    fn validate_url_rejects_backend_scheme_mismatch() {
+        let error = validate_url(BackendKind::Mysql, "postgres://host/db").unwrap_err();
+        assert!(error.contains("does not match backend `mysql`"));
+    }
+
+    #[test]
+    fn validate_url_rejects_malformed_and_redacts() {
+        assert!(validate_url(BackendKind::Postgres, "host/db").is_err());
+        let error = validate_url(BackendKind::Postgres, "postgres://u:s3cret@/db").unwrap_err();
+        assert!(error.contains("missing host"));
+        assert!(!error.contains("s3cret"));
+    }
 
     #[test]
     fn url_password_extracts_password_component() {
