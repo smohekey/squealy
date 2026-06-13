@@ -205,11 +205,11 @@ Status legend: ✅ done · ⬜ outstanding.
 | **P0** | Add `cargo clippy -D warnings` and `cargo audit` to CI | 3c | ✅ |
 | **P0** | Surface (stop swallowing) Postgres connection-task errors | 3a | ✅ |
 | **P1** | Introduce structured `thiserror` error types across crates | 3a | ⬜ |
-| **P1** | Bound `.sqz` entry sizes before KDL parse | 3d | ⬜ |
+| **P1** | Bound `.sqz` entry sizes before KDL parse | 3d | ✅ |
 | **P1** | Adopt `tracing` with a redaction layer for publish operations | 3d | ⬜ |
-| **P1** | Validate connection strings up front (redacted on failure) | 3b | ⬜ |
+| **P1** | Validate connection strings up front (redacted on failure) | 3b | ✅ |
 | **P1** | First-class publish dry-run + destructive-change confirmation | 5 | ⬜ |
-| **P1** | Add `cargo deny` + MSRV (1.85) CI jobs | 3c | ⬜ |
+| **P1** | Add `cargo deny` + MSRV CI jobs (MSRV corrected 1.85→1.92; it never built on 1.85) | 3c | ✅ |
 | **P1** | Lock/statement timeouts on the publish session | 5 | ⬜ |
 | **P2** | Identity / generated-column transition planning | 4 | ⬜ |
 | **P2** | Type-change cast hints in `refactor.kdl` | 4 | ⬜ |
