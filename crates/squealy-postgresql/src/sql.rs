@@ -32,17 +32,29 @@ impl squealy::Dialect for PostgresDialect {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Threads the active [`Dialect`](squealy::Dialect) and the running parameter counters through the
+/// renderer. The dialect is `&'static` (backend dialects are zero-sized unit values), so carrying it
+/// adds no lifetime to the renderer or the rendering structs.
+#[derive(Clone, Copy)]
 struct Renderer {
+    dialect: &'static dyn squealy::Dialect,
     next_param: usize,
     next_runtime_param: usize,
 }
 
 impl Renderer {
+    fn new(dialect: &'static dyn squealy::Dialect) -> Self {
+        Self {
+            dialect,
+            next_param: 0,
+            next_runtime_param: 0,
+        }
+    }
+
     fn write_placeholder(&mut self, writer: &mut impl Write) -> io::Result<()> {
         let index = self.next_param;
         self.next_param += 1;
-        squealy::Dialect::write_placeholder(&PostgresDialect, index, writer)
+        self.dialect.write_placeholder(index, writer)
     }
 
     fn next_runtime_param(&mut self) -> usize {
@@ -205,7 +217,7 @@ where
         writer.write_all(b"SELECT ")?;
         Ok(Self {
             writer,
-            renderer: Renderer::default(),
+            renderer: Renderer::new(&PostgresDialect),
             columns: 0,
             sources: 0,
             filters: 0,
@@ -1637,7 +1649,7 @@ where
     Returning: Projectable,
     Writer: SqlWriter,
 {
-    let mut renderer = Renderer::default();
+    let mut renderer = Renderer::new(&PostgresDialect);
     writer.write_all(b"INSERT INTO ")?;
     write_schema_table_ref::<S>(writer)?;
     if rows.len() == 1 && rows.first_row_len() == 0 {
@@ -1775,7 +1787,7 @@ where
     Returning: Projectable,
     Writer: SqlWriter,
 {
-    let mut renderer = Renderer::default();
+    let mut renderer = Renderer::new(&PostgresDialect);
     writer.write_all(b"UPDATE ")?;
     write_schema_table_ref::<S>(writer)?;
     write!(writer, " AS {alias} SET ")?;
@@ -1847,7 +1859,7 @@ where
     Returning: Projectable,
     Writer: SqlWriter,
 {
-    let mut renderer = Renderer::default();
+    let mut renderer = Renderer::new(&PostgresDialect);
     writer.write_all(b"DELETE FROM ")?;
     write_table_ref::<S>(writer)?;
     write!(writer, " AS {alias}")?;
@@ -2141,10 +2153,14 @@ where
 
     fn visit_column(&mut self, alias: SourceAlias, column: &str) -> Result<(), Self::Error> {
         if self.insert_returning {
-            squealy::Dialect::write_quoted_ident(&PostgresDialect, column, &mut *self.writer)
+            self.renderer
+                .dialect
+                .write_quoted_ident(column, &mut *self.writer)
         } else {
             write!(self.writer, "{alias}.")?;
-            squealy::Dialect::write_quoted_ident(&PostgresDialect, column, &mut *self.writer)
+            self.renderer
+                .dialect
+                .write_quoted_ident(column, &mut *self.writer)
         }
     }
 
@@ -2168,14 +2184,15 @@ where
             // PostgreSQL integer `/` is integer division, so operands are cast to float to match the
             // builder's division semantics. (MySQL's `/` is already float division — that divergence
             // is why a shared renderer needs a dialect division hook, not just a cast-type name.)
+            let dialect = self.renderer.dialect;
             self.writer.write_all(b"(CAST(")?;
             left(self)?;
             self.writer.write_all(b" AS ")?;
-            squealy::Dialect::write_cast_type(&PostgresDialect, &SqlType::F64, &mut *self.writer)?;
+            dialect.write_cast_type(&SqlType::F64, &mut *self.writer)?;
             self.writer.write_all(b") / CAST(")?;
             right(self)?;
             self.writer.write_all(b" AS ")?;
-            squealy::Dialect::write_cast_type(&PostgresDialect, &SqlType::F64, &mut *self.writer)?;
+            dialect.write_cast_type(&SqlType::F64, &mut *self.writer)?;
             return self.writer.write_all(b"))");
         }
 
