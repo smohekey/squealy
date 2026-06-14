@@ -154,6 +154,24 @@ impl HasColumnType for uuid::Uuid {
     const COLUMN_TYPE: ColumnType = ColumnType::Uuid;
 }
 
+/// Native timestamp columns. Each maps to a timezone-aware `timestamptz` column, so no
+/// `#[column(db_type = "...")]` override is needed. The matching `Encode`/`Decode` lives in each
+/// backend crate behind the same feature.
+#[cfg(feature = "systemtime")]
+impl HasColumnType for std::time::SystemTime {
+    const COLUMN_TYPE: ColumnType = ColumnType::Timestamp { tz: true };
+}
+
+#[cfg(feature = "time")]
+impl HasColumnType for time::OffsetDateTime {
+    const COLUMN_TYPE: ColumnType = ColumnType::Timestamp { tz: true };
+}
+
+#[cfg(feature = "chrono")]
+impl HasColumnType for chrono::DateTime<chrono::Utc> {
+    const COLUMN_TYPE: ColumnType = ColumnType::Timestamp { tz: true };
+}
+
 /// Database schema metadata for a single column.
 pub trait Column: Sync {
     fn name(&self) -> &'static str;

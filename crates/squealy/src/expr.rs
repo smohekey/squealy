@@ -357,6 +357,14 @@ impl ExprKind for uuid::Uuid {
     type Value = uuid::Uuid;
 }
 
+// Native timestamp values can be used as literal predicate operands and write-builder setters.
+#[cfg(feature = "systemtime")]
+impl_value_expr_kind!(std::time::SystemTime);
+#[cfg(feature = "time")]
+impl_value_expr_kind!(time::OffsetDateTime);
+#[cfg(feature = "chrono")]
+impl_value_expr_kind!(chrono::DateTime<chrono::Utc>);
+
 /// Type-level identity for a nullable SQL expression.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Nullable<K> {
