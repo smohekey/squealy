@@ -551,6 +551,37 @@ fn mysql_renders_compound_primary_key() {
     );
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Shop)]
+#[unique(columns = [organization_id, slug])]
+struct Repository<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, i32>,
+    organization_id: C::Type<'scope, i32>,
+    slug: C::Type<'scope, String>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct RepositoryShop {
+    repositorys: Repository<'static, ColumnName>,
+}
+
+#[test]
+fn mysql_backend_writes_composite_unique_ddl() {
+    // The query-side single-table `write_table` path must also emit table-level `#[unique(..)]`
+    // constraints, otherwise duplicates are allowed even though `render_create` forbids them.
+    let mut sql = Vec::new();
+    let tables = <RepositoryShop as Schema>::tables().collect::<Vec<_>>();
+    Mysql.write_table(tables[0], &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains("UNIQUE (`organization_id`, `slug`)"),
+        "expected composite UNIQUE constraint in write_table output: {sql}"
+    );
+}
+
 #[test]
 fn mysql_renders_create_from_scratch() {
     let model = DatabaseModel::from_database::<ShopDb>();

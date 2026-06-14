@@ -15,6 +15,18 @@ pub struct TablePrimaryKey {
     pub columns: &'static [&'static str],
 }
 
+/// A table-level unique constraint declared with the `#[unique(columns = [..])]` attribute.
+///
+/// Unlike [`TablePrimaryKey`], a table may declare several of these, so they are exposed as a
+/// slice. The single-column `#[column(unique)]` form is handled separately by the model builder;
+/// this type carries only the composite / table-level declarations. When `name` is `None` the
+/// model builder falls back to the deterministic `uq_<table>_<columns>` convention.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableUnique {
+    pub name: Option<&'static str>,
+    pub columns: &'static [&'static str],
+}
+
 /// Object-safe table metadata exposed through schema membership.
 pub trait Table {
     fn schema_name(&self) -> Option<&'static str>;
@@ -37,6 +49,13 @@ pub trait Table {
     /// hoisted into a constraint by the model builder instead.
     fn primary_key(&self) -> Option<TablePrimaryKey> {
         None
+    }
+
+    /// Returns the composite unique constraints declared with `#[unique(columns = [..])]`.
+    /// Single-column `#[column(unique)]` markers are not reported here; they are hoisted into
+    /// constraints by the model builder instead.
+    fn uniques(&self) -> &'static [TableUnique] {
+        &[]
     }
 }
 
@@ -93,6 +112,15 @@ pub trait SchemaTable: Table {
         Self: Sized,
     {
         None
+    }
+
+    /// Returns the composite unique constraints declared on this model. See [`Table::uniques`]
+    /// for how single-column `#[column(unique)]` markers are handled instead.
+    fn uniques() -> &'static [TableUnique]
+    where
+        Self: Sized,
+    {
+        &[]
     }
 
     /// Returns the database column names for this model.
