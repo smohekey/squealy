@@ -8,13 +8,14 @@ use bytes::{Buf, BufMut, BytesMut};
 use futures_core::Stream;
 
 use squealy::{
-    Backend, BindSink, BindValue, BindValueKind, Connection, Decode, DeleteQuery,
-    ExecutableDeleteQuery, ExecutableInsertQuery, ExecutableSelectQuery, ExecutableUpdateQuery,
-    FloatWidth, HAppend, HList, HNil, InsertQuery, InsertRows, InsertableTable, IntWidth,
-    NoRuntimeParams, PredicateNodes, PreparableDeleteQuery, PreparableInsertQuery,
-    PreparableSelectQuery, PreparableUpdateQuery, PreparedMutationQuery, PreparedParamValues,
-    PreparedSelectQuery, Projectable, ProjectionShape, QueryBuilder, RowsAffected, SelectAst,
-    SelectQuery, Selected, SourceAlias, TableProjection, UIntWidth, UpdateQuery, UpdateableTable,
+    Backend, Connection, Decode, DeleteQuery, Encode, ExecutableDeleteQuery, ExecutableInsertQuery,
+    ExecutableSelectQuery, ExecutableUpdateQuery, HAppend, HList, HNil, InsertQuery, InsertRows,
+    InsertableTable, NoRuntimeParams, ParamWriter, PredicateNodes, PreparableDeleteQuery,
+    PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery, PreparedMutationQuery,
+    PreparedParamValues, PreparedSelectQuery, Projectable, ProjectionShape, QueryBuilder,
+    RenderInsertRows, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
+    RenderUpdateAssignments, RowsAffected, SelectAst, SelectQuery, Selected, SourceAlias,
+    TableProjection, UpdateQuery, UpdateableTable,
 };
 use tokio_postgres::{
     GenericClient,
@@ -293,6 +294,7 @@ impl<Row, Conn> RowsAffected for PostgresRows<'_, Row, Conn> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
 #[doc(hidden)]
 pub enum PostgresParam {
     Int16(i16),
@@ -304,6 +306,31 @@ pub enum PostgresParam {
     Text(String),
     Bool(bool),
     Null(PostgresNull),
+    #[cfg(feature = "uuid")]
+    Uuid(uuid::Uuid),
+    #[cfg(feature = "serde")]
+    Json(serde_json::Value),
+}
+
+/// Encodes a single value into one native [`PostgresParam`] via [`Encode`], asserting the
+/// one-literal-one-parameter invariant the renderer relies on. Used by the codec unit tests.
+#[cfg(test)]
+pub(crate) fn encode_to_param<T>(value: &T) -> Result<PostgresParam, PostgresError>
+where
+    T: Encode<Postgres>,
+{
+    let mut params = Vec::with_capacity(1);
+    value.encode(&mut PostgresParamWriter::new(&mut params))?;
+    let mut params = params.into_iter();
+    let param = params
+        .next()
+        .ok_or(PostgresError::Conversion("bind produced no parameter"))?;
+    if params.next().is_some() {
+        return Err(PostgresError::Conversion(
+            "bind produced more than one parameter",
+        ));
+    }
+    Ok(param)
 }
 
 impl PostgresParam {
@@ -318,6 +345,171 @@ impl PostgresParam {
             Self::Text(value) => value,
             Self::Bool(value) => value,
             Self::Null(value) => value,
+            #[cfg(feature = "uuid")]
+            Self::Uuid(value) => value,
+            #[cfg(feature = "serde")]
+            Self::Json(value) => value,
+        }
+    }
+}
+
+/// A serde-backed `jsonb` column wrapper.
+///
+/// Any `T: Serialize + DeserializeOwned` stored as `Json<T>` encodes to and decodes from a
+/// native PostgreSQL `jsonb` column. This is the backend-local serde stack — the wrapper
+/// lives here (not in core) because Rust's orphan rule forbids a shared `core::Json<T>` with
+/// a per-backend `Encode<Postgres>` impl, and because the physical storage (`jsonb`) is
+/// backend-specific.
+#[cfg(feature = "serde")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Json<T>(pub T);
+
+#[cfg(feature = "serde")]
+impl<T> squealy::HasColumnType for Json<T> {
+    const COLUMN_TYPE: squealy::ColumnType = squealy::ColumnType::Jsonb;
+}
+
+#[cfg(feature = "serde")]
+impl<T> squealy::ExprKind for Json<T> {
+    type Value = Self;
+}
+
+#[cfg(feature = "serde")]
+impl<T> Encode<Postgres> for Json<T>
+where
+    T: serde::Serialize,
+{
+    fn encode(&self, out: &mut PostgresParamWriter<'_>) -> Result<(), PostgresError> {
+        let value = serde_json::to_value(&self.0)
+            .map_err(|_| PostgresError::Conversion("serialize jsonb"))?;
+        out.push(PostgresParam::Json(value));
+        Ok(())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<T> Decode<Postgres> for Json<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    fn decode(row: &mut <Postgres as Backend>::RowReader<'_>) -> Result<Self, PostgresError> {
+        let value = row.take_sql::<serde_json::Value>()?;
+        let inner = serde_json::from_value(value)
+            .map_err(|_| PostgresError::Conversion("deserialize jsonb"))?;
+        Ok(Json(inner))
+    }
+}
+
+/// Native `uuid` column support: `uuid::Uuid` encodes to and decodes from a real
+/// PostgreSQL `uuid` column. Pair with `#[column_type(db_type = "uuid")]` on a newtype.
+#[cfg(feature = "uuid")]
+impl Encode<Postgres> for uuid::Uuid {
+    fn encode(&self, out: &mut PostgresParamWriter<'_>) -> Result<(), PostgresError> {
+        out.push(PostgresParam::Uuid(*self));
+        Ok(())
+    }
+}
+
+#[cfg(feature = "uuid")]
+impl Decode<Postgres> for uuid::Uuid {
+    fn decode(row: &mut <Postgres as Backend>::RowReader<'_>) -> Result<Self, PostgresError> {
+        row.take_sql()
+    }
+}
+
+/// Encode-side mirror of [`PostgresRowReader`]: appends native [`PostgresParam`]s.
+#[doc(hidden)]
+pub struct PostgresParamWriter<'param> {
+    params: &'param mut Vec<PostgresParam>,
+}
+
+impl<'param> PostgresParamWriter<'param> {
+    pub(crate) fn new(params: &'param mut Vec<PostgresParam>) -> Self {
+        Self { params }
+    }
+
+    pub fn push(&mut self, param: PostgresParam) {
+        self.params.push(param);
+    }
+
+    pub fn push_null(&mut self) {
+        self.params.push(PostgresParam::Null(PostgresNull));
+    }
+}
+
+impl ParamWriter for PostgresParamWriter<'_> {
+    type Backend = Postgres;
+
+    fn write<T>(&mut self, value: &T) -> Result<(), PostgresError>
+    where
+        T: Encode<Postgres>,
+    {
+        value.encode(self)
+    }
+}
+
+macro_rules! impl_postgres_encode {
+    ($($ty:ty => |$value:ident| $param:expr),* $(,)?) => {
+        $(impl Encode<Postgres> for $ty {
+            fn encode(&self, out: &mut PostgresParamWriter<'_>) -> Result<(), PostgresError> {
+                let $value = self;
+                out.push($param);
+                Ok(())
+            }
+        })*
+    };
+}
+
+impl_postgres_encode! {
+    i8 => |v| PostgresParam::Int16(i16::from(*v)),
+    i16 => |v| PostgresParam::Int16(*v),
+    i32 => |v| PostgresParam::Int32(*v),
+    i64 => |v| PostgresParam::Int64(*v),
+    isize => |v| PostgresParam::Int64(*v as i64),
+    i128 => |v| PostgresParam::Numeric(PostgresNumericInteger::signed(*v)),
+    u8 => |v| PostgresParam::Int32(i32::from(*v)),
+    u16 => |v| PostgresParam::Int32(i32::from(*v)),
+    u32 => |v| PostgresParam::Int64(i64::from(*v)),
+    u64 => |v| PostgresParam::Numeric(PostgresNumericInteger::unsigned(u128::from(*v))),
+    u128 => |v| PostgresParam::Numeric(PostgresNumericInteger::unsigned(*v)),
+    f32 => |v| PostgresParam::Float32(*v),
+    f64 => |v| PostgresParam::Float64(*v),
+    bool => |v| PostgresParam::Bool(*v),
+}
+
+impl Encode<Postgres> for usize {
+    fn encode(&self, out: &mut PostgresParamWriter<'_>) -> Result<(), PostgresError> {
+        let value = i64::try_from(*self).map_err(|_| PostgresError::Conversion("usize"))?;
+        out.push(PostgresParam::Int64(value));
+        Ok(())
+    }
+}
+
+impl Encode<Postgres> for str {
+    fn encode(&self, out: &mut PostgresParamWriter<'_>) -> Result<(), PostgresError> {
+        out.push(PostgresParam::Text(self.to_owned()));
+        Ok(())
+    }
+}
+
+impl Encode<Postgres> for String {
+    fn encode(&self, out: &mut PostgresParamWriter<'_>) -> Result<(), PostgresError> {
+        out.push(PostgresParam::Text(self.clone()));
+        Ok(())
+    }
+}
+
+impl<T> Encode<Postgres> for Option<T>
+where
+    T: Encode<Postgres>,
+{
+    fn encode(&self, out: &mut PostgresParamWriter<'_>) -> Result<(), PostgresError> {
+        match self {
+            Some(value) => value.encode(out),
+            None => {
+                out.push_null();
+                Ok(())
+            }
         }
     }
 }
@@ -549,36 +741,7 @@ fn numeric_place(exponent: u32) -> Result<u128, Box<dyn Error + Sync + Send>> {
     Ok(place)
 }
 
-struct PostgresBindSink {
-    params: Vec<PostgresParam>,
-}
-
-impl PostgresBindSink {
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            params: Vec::with_capacity(capacity),
-        }
-    }
-
-    fn into_params(self) -> Vec<PostgresParam> {
-        self.params
-    }
-}
-
-impl BindSink for PostgresBindSink {
-    type Error = PostgresError;
-
-    fn reserve_bind_values(&mut self, additional: usize) {
-        self.params.reserve(additional);
-    }
-
-    fn push_bind_value(&mut self, value: BindValue) -> Result<(), Self::Error> {
-        self.params.push(postgres_param(value)?);
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[doc(hidden)]
 pub struct PostgresNull;
 
@@ -596,15 +759,6 @@ impl ToSql for PostgresNull {
     }
 
     to_sql_checked!();
-}
-
-#[cfg(test)]
-fn postgres_params(params: Vec<BindValue>) -> Result<Vec<PostgresParam>, PostgresError> {
-    let mut sink = PostgresBindSink::with_capacity(params.len());
-    for param in params {
-        sink.push_bind_value(param)?;
-    }
-    Ok(sink.into_params())
 }
 
 struct StringSql {
@@ -646,11 +800,11 @@ fn rendered_sql(write: impl FnOnce(&mut StringSql) -> std::io::Result<()>) -> St
 
 fn collect_postgres_params(
     capacity: usize,
-    write: impl FnOnce(&mut PostgresBindSink) -> Result<(), PostgresError>,
+    write: impl FnOnce(&mut Vec<PostgresParam>) -> Result<(), PostgresError>,
 ) -> Result<Vec<PostgresParam>, PostgresError> {
-    let mut sink = PostgresBindSink::with_capacity(capacity);
-    write(&mut sink)?;
-    Ok(sink.into_params())
+    let mut params = Vec::with_capacity(capacity);
+    write(&mut params)?;
+    Ok(params)
 }
 
 fn execute_error<'query>(
@@ -659,75 +813,27 @@ fn execute_error<'query>(
     Box::pin(std::future::ready(Err(error)))
 }
 
-fn postgres_param(param: BindValue) -> Result<PostgresParam, PostgresError> {
-    match param.into_kind() {
-        BindValueKind::Int { value, width } => postgres_signed_int(value, width),
-        BindValueKind::UInt { value, width } => postgres_unsigned_int(value, width),
-        BindValueKind::Float { value, width } => postgres_float(value, width),
-        BindValueKind::Text(value) => Ok(PostgresParam::Text(value)),
-        BindValueKind::Bool(value) => Ok(PostgresParam::Bool(value)),
-        BindValueKind::Null => Ok(PostgresParam::Null(PostgresNull)),
-    }
-}
-
 fn resolve_prepared_params<Shape, Params>(
-    bindings: &[render::SqlParam],
+    bindings: &[render::SqlParam<Postgres>],
     params: &Params,
 ) -> Result<Vec<PostgresParam>, PostgresError>
 where
     Shape: HList,
-    Params: PreparedParamValues<Shape>,
+    Params: PreparedParamValues<Shape, Postgres>,
 {
-    let mut sink = PostgresBindSink::with_capacity(bindings.len());
-    for param in bindings {
-        match param {
-            render::SqlParam::Static(value) => sink.push_bind_value(value.clone())?,
+    let mut values = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        match binding {
+            render::SqlParam::Static(param) => values.push(param.clone()),
             render::SqlParam::Runtime(index) => {
-                if !params.write_bind_value_at(*index, &mut sink)? {
+                let mut writer = PostgresParamWriter::new(&mut values);
+                if !params.write_param_at(*index, &mut writer)? {
                     return Err(PostgresError::Conversion("prepared parameter"));
                 }
             }
         }
     }
-    Ok(sink.into_params())
-}
-
-fn postgres_signed_int(value: i128, width: IntWidth) -> Result<PostgresParam, PostgresError> {
-    match width {
-        IntWidth::I8 | IntWidth::I16 => i16::try_from(value)
-            .map(PostgresParam::Int16)
-            .map_err(|_| PostgresError::UnsupportedBind(BindValue::Int(value))),
-        IntWidth::I32 => i32::try_from(value)
-            .map(PostgresParam::Int32)
-            .map_err(|_| PostgresError::UnsupportedBind(BindValue::Int(value))),
-        IntWidth::I64 | IntWidth::Isize => i64::try_from(value)
-            .map(PostgresParam::Int64)
-            .map_err(|_| PostgresError::UnsupportedBind(BindValue::Int(value))),
-        IntWidth::I128 => Ok(PostgresParam::Numeric(PostgresNumericInteger::signed(
-            value,
-        ))),
-    }
-}
-
-fn postgres_unsigned_int(value: u128, width: UIntWidth) -> Result<PostgresParam, PostgresError> {
-    match width {
-        UIntWidth::U8 | UIntWidth::U16 => i32::try_from(value)
-            .map(PostgresParam::Int32)
-            .map_err(|_| PostgresError::UnsupportedBind(BindValue::UInt(value))),
-        UIntWidth::U32 | UIntWidth::Usize => i64::try_from(value)
-            .map(PostgresParam::Int64)
-            .map_err(|_| PostgresError::UnsupportedBind(BindValue::UInt(value))),
-        UIntWidth::U64 | UIntWidth::U128 => Ok(PostgresParam::Numeric(
-            PostgresNumericInteger::unsigned(value),
-        )),
-    }
-}
-
-fn postgres_float(value: f64, width: FloatWidth) -> Result<PostgresParam, PostgresError> {
-    match width {
-        FloatWidth::F32 => Ok(PostgresParam::Float32(value as f32)),
-        FloatWidth::F64 => Ok(PostgresParam::Float64(value)),
-    }
+    Ok(values)
 }
 
 async fn query_with_params<Client>(
@@ -1006,7 +1112,7 @@ where
 {
     connection: &'conn Conn,
     statement: tokio_postgres::Statement,
-    params: Vec<render::SqlParam>,
+    params: Vec<render::SqlParam<Postgres>>,
     _row: PhantomData<Row>,
     _params: PhantomData<ParamShape>,
 }
@@ -1018,7 +1124,7 @@ where
 {
     connection: &'conn Conn,
     statement: tokio_postgres::Statement,
-    params: Vec<render::SqlParam>,
+    params: Vec<render::SqlParam<Postgres>>,
     _row: PhantomData<Row>,
     _params: PhantomData<ParamShape>,
 }
@@ -1031,7 +1137,7 @@ where
     fn new(
         connection: &'conn Conn,
         statement: tokio_postgres::Statement,
-        params: Vec<render::SqlParam>,
+        params: Vec<render::SqlParam<Postgres>>,
     ) -> Self {
         Self {
             connection,
@@ -1051,7 +1157,7 @@ where
     fn new(
         connection: &'conn Conn,
         statement: tokio_postgres::Statement,
-        params: Vec<render::SqlParam>,
+        params: Vec<render::SqlParam<Postgres>>,
     ) -> Self {
         Self {
             connection,
@@ -1082,7 +1188,11 @@ where
         }
     }
 
-    fn prepared_sql(&self) -> render::PreparedSql {
+    fn prepared_sql(&self) -> render::PreparedSql<Postgres>
+    where
+        Base: RenderSelectAst<'conn, 'scope, Conn, Postgres>,
+        Projection: RenderProjectable<Postgres>,
+    {
         let mut buffer = render::PreparedSql::default();
         render::render_selected_prepared::<Conn, Base, Shape, Projection>(
             &PostgresDialect,
@@ -1092,7 +1202,11 @@ where
         buffer
     }
 
-    fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
+    fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError>
+    where
+        Base: RenderSelectAst<'conn, 'scope, Conn, Postgres>,
+        Projection: RenderProjectable<Postgres>,
+    {
         let sql = rendered_sql(|writer| {
             render::write_selected_into::<Conn, Base, Shape, Projection, _>(
                 &PostgresDialect,
@@ -1100,11 +1214,11 @@ where
                 writer,
             )
         });
-        let params = collect_postgres_params(0, |sink| {
-            render::write_selected_params::<Conn, Base, Shape, Projection, _>(
+        let params = collect_postgres_params(0, |params| {
+            render::write_selected_params::<Conn, Base, Shape, Projection>(
                 &PostgresDialect,
                 &self.selected,
-                sink,
+                params,
             )
         })?;
         Ok((sql, params))
@@ -1129,9 +1243,13 @@ where
         }
     }
 
-    fn prepared_sql(&self) -> render::PreparedSql {
+    fn prepared_sql(&self) -> render::PreparedSql<Postgres>
+    where
+        Rows: RenderInsertRows<Postgres>,
+        Returning: RenderProjectable<Postgres>,
+    {
         let mut buffer = render::PreparedSql::default();
-        render::render_insert_prepared::<S, _, _>(
+        render::render_insert_prepared::<S, Postgres, _, _>(
             &PostgresDialect,
             &self.columns,
             &self.returning,
@@ -1140,24 +1258,30 @@ where
         buffer
     }
 
-    fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
+    fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError>
+    where
+        Rows: RenderInsertRows<Postgres>,
+        Returning: RenderProjectable<Postgres>,
+    {
         let sql = rendered_sql(|writer| {
-            render::write_insert::<S, _, _>(
+            render::write_insert::<S, Postgres, _, _>(
                 &PostgresDialect,
                 &self.columns,
                 &self.returning,
                 writer,
             )
         });
-        let params =
-            collect_postgres_params(self.columns.first_row_len() * self.columns.len(), |sink| {
-                render::write_insert_params::<S, _, _, _>(
+        let params = collect_postgres_params(
+            self.columns.first_row_len() * self.columns.len(),
+            |params| {
+                render::write_insert_params::<S, Postgres, _, _>(
                     &PostgresDialect,
                     &self.columns,
                     &self.returning,
-                    sink,
+                    params,
                 )
-            })?;
+            },
+        )?;
         Ok((sql, params))
     }
 }
@@ -1187,9 +1311,13 @@ where
         }
     }
 
-    fn prepared_sql(&self) -> render::PreparedSql {
+    fn prepared_sql(&self) -> render::PreparedSql<Postgres>
+    where
+        Filters: RenderPredicateNodes<Postgres>,
+        Returning: RenderProjectable<Postgres>,
+    {
         let mut buffer = render::PreparedSql::default();
-        render::render_delete_prepared::<S, _, _>(
+        render::render_delete_prepared::<S, Postgres, _, _>(
             &PostgresDialect,
             self.alias,
             &self.filters,
@@ -1199,9 +1327,13 @@ where
         buffer
     }
 
-    fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
+    fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError>
+    where
+        Filters: RenderPredicateNodes<Postgres>,
+        Returning: RenderProjectable<Postgres>,
+    {
         let sql = rendered_sql(|writer| {
-            render::write_delete::<S, _, _>(
+            render::write_delete::<S, Postgres, _, _>(
                 &PostgresDialect,
                 self.alias,
                 &self.filters,
@@ -1209,13 +1341,13 @@ where
                 writer,
             )
         });
-        let params = collect_postgres_params(self.filters.len(), |sink| {
-            render::write_delete_params::<S, _, _, _>(
+        let params = collect_postgres_params(self.filters.len(), |params| {
+            render::write_delete_params::<S, Postgres, _, _>(
                 &PostgresDialect,
                 self.alias,
                 &self.filters,
                 &self.returning,
-                sink,
+                params,
             )
         })?;
         Ok((sql, params))
@@ -1250,9 +1382,14 @@ where
         }
     }
 
-    fn prepared_sql(&self) -> render::PreparedSql {
+    fn prepared_sql(&self) -> render::PreparedSql<Postgres>
+    where
+        Columns: RenderUpdateAssignments<Postgres>,
+        Filters: RenderPredicateNodes<Postgres>,
+        Returning: RenderProjectable<Postgres>,
+    {
         let mut buffer = render::PreparedSql::default();
-        render::render_update_prepared::<S, _, _, _>(
+        render::render_update_prepared::<S, Postgres, _, _, _>(
             &PostgresDialect,
             self.alias,
             &self.columns,
@@ -1263,9 +1400,14 @@ where
         buffer
     }
 
-    fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
+    fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError>
+    where
+        Columns: RenderUpdateAssignments<Postgres>,
+        Filters: RenderPredicateNodes<Postgres>,
+        Returning: RenderProjectable<Postgres>,
+    {
         let sql = rendered_sql(|writer| {
-            render::write_update::<S, _, _, _>(
+            render::write_update::<S, Postgres, _, _, _>(
                 &PostgresDialect,
                 self.alias,
                 &self.columns,
@@ -1274,14 +1416,14 @@ where
                 writer,
             )
         });
-        let params = collect_postgres_params(self.columns.len() + self.filters.len(), |sink| {
-            render::write_update_params::<S, _, _, _, _>(
+        let params = collect_postgres_params(self.columns.len() + self.filters.len(), |params| {
+            render::write_update_params::<S, Postgres, _, _, _>(
                 &PostgresDialect,
                 self.alias,
                 &self.columns,
                 &self.filters,
                 &self.returning,
-                sink,
+                params,
             )
         })?;
         Ok((sql, params))
@@ -1316,9 +1458,9 @@ where
     Shape: ProjectionShape,
     Conn: PostgresExecutor + 'conn,
     Shape::Row: Decode<Postgres>,
-    Base: SelectAst<'conn, 'scope, Conn>,
+    Base: RenderSelectAst<'conn, 'scope, Conn, Postgres>,
     Base::Params: NoRuntimeParams,
-    Projection: Projectable,
+    Projection: RenderProjectable<Postgres>,
 {
     type RowStream<'query>
         = PostgresRows<'query, Self::Row, Conn>
@@ -1351,7 +1493,7 @@ where
 
     fn fetch<'query, ParamValues>(&'query self, params: ParamValues) -> Self::RowStream<'query>
     where
-        ParamValues: PreparedParamValues<Self::Params>,
+        ParamValues: PreparedParamValues<Self::Params, Postgres>,
     {
         match resolve_prepared_params::<ParamShape, _>(&self.params, &params) {
             Ok(params) => PostgresRows::prepared(self.connection, &self.statement, params),
@@ -1385,7 +1527,7 @@ where
     + 'query
     where
         'conn: 'query,
-        ParamValues: PreparedParamValues<Self::Params> + 'query,
+        ParamValues: PreparedParamValues<Self::Params, Postgres> + 'query,
     {
         match resolve_prepared_params::<ParamShape, _>(&self.params, &params) {
             Ok(params) => self.connection.execute_statement(&self.statement, params),
@@ -1395,7 +1537,7 @@ where
 
     fn fetch<'query, ParamValues>(&'query self, params: ParamValues) -> Self::RowStream<'query>
     where
-        ParamValues: PreparedParamValues<Self::Params>,
+        ParamValues: PreparedParamValues<Self::Params, Postgres>,
     {
         match resolve_prepared_params::<ParamShape, _>(&self.params, &params) {
             Ok(params) => PostgresRows::prepared(self.connection, &self.statement, params),
@@ -1411,9 +1553,9 @@ where
     Shape: ProjectionShape,
     Conn: PostgresExecutor + 'conn,
     Shape::Row: Decode<Postgres> + Send,
-    Base: SelectAst<'conn, 'scope, Conn>,
+    Base: RenderSelectAst<'conn, 'scope, Conn, Postgres>,
     Base::Params: HList,
-    Projection: Projectable,
+    Projection: RenderProjectable<Postgres>,
 {
     type Params = Base::Params;
 
@@ -1440,8 +1582,9 @@ where
         Base: 'prepared,
         Projection: 'prepared,
     {
-        let (sql, params) = self.prepared_sql().into_parts();
+        let prepared = self.prepared_sql().into_parts();
         async move {
+            let (sql, params) = prepared?;
             let statement = self.connection.prepare_sql(sql).await?;
             Ok(PostgresPreparedSelect::new(
                 self.connection,
@@ -1479,9 +1622,9 @@ where
     Shape: ProjectionShape,
     Conn: PostgresExecutor + 'conn,
     Shape::Row: Decode<Postgres>,
-    Rows: InsertRows,
+    Rows: RenderInsertRows<Postgres>,
     Rows::Params: NoRuntimeParams,
-    Returning: Projectable,
+    Returning: RenderProjectable<Postgres>,
 {
     type RowStream<'query>
         = PostgresRows<'query, Self::Row, Conn>
@@ -1515,9 +1658,9 @@ where
     Shape: ProjectionShape,
     Conn: PostgresExecutor + 'conn,
     Shape::Row: Decode<Postgres> + Send,
-    Rows: InsertRows,
+    Rows: RenderInsertRows<Postgres>,
     Rows::Params: HList,
-    Returning: Projectable,
+    Returning: RenderProjectable<Postgres>,
 {
     type Params = Rows::Params;
 
@@ -1542,8 +1685,9 @@ where
         Rows: 'prepared,
         Returning: 'prepared,
     {
-        let (sql, params) = self.prepared_sql().into_parts();
+        let prepared = self.prepared_sql().into_parts();
         async move {
+            let (sql, params) = prepared?;
             let statement = self.connection.prepare_sql(sql).await?;
             Ok(PostgresPreparedMutation::new(
                 self.connection,
@@ -1586,9 +1730,9 @@ where
     Shape: ProjectionShape,
     Conn: PostgresExecutor + 'conn,
     Shape::Row: Decode<Postgres>,
-    Filters: PredicateNodes,
+    Filters: RenderPredicateNodes<Postgres>,
     Filters::Params: NoRuntimeParams,
-    Returning: Projectable,
+    Returning: RenderProjectable<Postgres>,
 {
     type RowStream<'query>
         = PostgresRows<'query, Self::Row, Conn>
@@ -1622,9 +1766,9 @@ where
     Shape: ProjectionShape,
     Conn: PostgresExecutor + 'conn,
     Shape::Row: Decode<Postgres> + Send,
-    Filters: PredicateNodes,
+    Filters: RenderPredicateNodes<Postgres>,
     Filters::Params: HList,
-    Returning: Projectable,
+    Returning: RenderProjectable<Postgres>,
 {
     type Params = Filters::Params;
 
@@ -1649,8 +1793,9 @@ where
         Filters: 'prepared,
         Returning: 'prepared,
     {
-        let (sql, params) = self.prepared_sql().into_parts();
+        let prepared = self.prepared_sql().into_parts();
         async move {
+            let (sql, params) = prepared?;
             let statement = self.connection.prepare_sql(sql).await?;
             Ok(PostgresPreparedMutation::new(
                 self.connection,
@@ -1697,11 +1842,11 @@ where
     Shape: ProjectionShape,
     Conn: PostgresExecutor + 'conn,
     Shape::Row: Decode<Postgres>,
-    Columns: squealy::UpdateAssignments,
+    Columns: RenderUpdateAssignments<Postgres>,
     Columns::Params: NoRuntimeParams,
-    Filters: PredicateNodes,
+    Filters: RenderPredicateNodes<Postgres>,
     Filters::Params: NoRuntimeParams,
-    Returning: Projectable,
+    Returning: RenderProjectable<Postgres>,
 {
     type RowStream<'query>
         = PostgresRows<'query, Self::Row, Conn>
@@ -1736,11 +1881,11 @@ where
     Shape: ProjectionShape,
     Conn: PostgresExecutor + 'conn,
     Shape::Row: Decode<Postgres> + Send,
-    Columns: squealy::UpdateAssignments,
-    Filters: PredicateNodes,
+    Columns: RenderUpdateAssignments<Postgres>,
+    Filters: RenderPredicateNodes<Postgres>,
     Columns::Params: HAppend<Filters::Params>,
     <Columns::Params as HAppend<Filters::Params>>::Output: HList,
-    Returning: Projectable,
+    Returning: RenderProjectable<Postgres>,
 {
     type Params = <Columns::Params as HAppend<Filters::Params>>::Output;
 
@@ -1772,8 +1917,9 @@ where
         Filters: 'prepared,
         Returning: 'prepared,
     {
-        let (sql, params) = self.prepared_sql().into_parts();
+        let prepared = self.prepared_sql().into_parts();
         async move {
+            let (sql, params) = prepared?;
             let statement = self.connection.prepare_sql(sql).await?;
             Ok(PostgresPreparedMutation::new(
                 self.connection,
@@ -1789,8 +1935,8 @@ impl<'conn, 'scope, Shape, Base, Projection, Conn>
 where
     Shape: ProjectionShape,
     Conn: QueryBuilder<Backend = Postgres>,
-    Base: SelectAst<'conn, 'scope, Conn>,
-    Projection: Projectable,
+    Base: RenderSelectAst<'conn, 'scope, Conn, Postgres>,
+    Projection: RenderProjectable<Postgres>,
 {
     /// Render this query into a newly allocated SQL string.
     ///
@@ -1808,26 +1954,22 @@ where
         )
     }
 
-    /// Write bind parameters into a caller-provided sink.
-    pub fn write_params<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
-    where
-        Sink: BindSink,
-    {
-        render::write_selected_params::<Conn, Base, Shape, Projection, _>(
+    /// Write bind parameters into a caller-provided native param vector.
+    pub fn write_params(&self, params: &mut Vec<PostgresParam>) -> Result<(), PostgresError> {
+        render::write_selected_params::<Conn, Base, Shape, Projection>(
             &PostgresDialect,
             &self.selected,
-            sink,
+            params,
         )
     }
 
     /// Collect bind parameters into a newly allocated vector.
     ///
     /// Use [`Self::write_params`] to inspect parameters without allocating a vector.
-    pub fn collect_params(&self) -> Vec<BindValue> {
+    pub fn collect_params(&self) -> Result<Vec<PostgresParam>, PostgresError> {
         let mut params = Vec::new();
-        self.write_params(&mut params)
-            .unwrap_or_else(|error| match error {});
-        params
+        self.write_params(&mut params)?;
+        Ok(params)
     }
 }
 
@@ -1835,8 +1977,8 @@ impl<S, Shape, Rows, Returning, Conn> PostgresInsert<'_, S, Shape, Rows, Returni
 where
     S: InsertableTable,
     Shape: ProjectionShape,
-    Rows: InsertRows,
-    Returning: Projectable,
+    Rows: RenderInsertRows<Postgres>,
+    Returning: RenderProjectable<Postgres>,
     Conn: QueryBuilder<Backend = Postgres>,
 {
     /// Render this query into a newly allocated SQL string.
@@ -1848,30 +1990,31 @@ where
 
     /// Stream SQL into caller-provided storage without allocating a SQL string.
     pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-        render::write_insert::<S, _, _>(&PostgresDialect, &self.columns, &self.returning, writer)
-    }
-
-    /// Write bind parameters into a caller-provided sink.
-    pub fn write_params<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
-    where
-        Sink: BindSink,
-    {
-        render::write_insert_params::<S, _, _, _>(
+        render::write_insert::<S, Postgres, _, _>(
             &PostgresDialect,
             &self.columns,
             &self.returning,
-            sink,
+            writer,
+        )
+    }
+
+    /// Write bind parameters into a caller-provided native param vector.
+    pub fn write_params(&self, params: &mut Vec<PostgresParam>) -> Result<(), PostgresError> {
+        render::write_insert_params::<S, Postgres, _, _>(
+            &PostgresDialect,
+            &self.columns,
+            &self.returning,
+            params,
         )
     }
 
     /// Collect bind parameters into a newly allocated vector.
     ///
     /// Use [`Self::write_params`] to inspect parameters without allocating a vector.
-    pub fn collect_params(&self) -> Vec<BindValue> {
+    pub fn collect_params(&self) -> Result<Vec<PostgresParam>, PostgresError> {
         let mut params = Vec::new();
-        self.write_params(&mut params)
-            .unwrap_or_else(|error| match error {});
-        params
+        self.write_params(&mut params)?;
+        Ok(params)
     }
 }
 
@@ -1879,8 +2022,8 @@ impl<S, Shape, Filters, Returning, Conn> PostgresDelete<'_, S, Shape, Filters, R
 where
     S: TableProjection,
     Shape: ProjectionShape,
-    Filters: PredicateNodes,
-    Returning: Projectable,
+    Filters: RenderPredicateNodes<Postgres>,
+    Returning: RenderProjectable<Postgres>,
     Conn: QueryBuilder<Backend = Postgres>,
 {
     /// Render this query into a newly allocated SQL string.
@@ -1892,7 +2035,7 @@ where
 
     /// Stream SQL into caller-provided storage without allocating a SQL string.
     pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-        render::write_delete::<S, _, _>(
+        render::write_delete::<S, Postgres, _, _>(
             &PostgresDialect,
             self.alias,
             &self.filters,
@@ -1901,28 +2044,24 @@ where
         )
     }
 
-    /// Write bind parameters into a caller-provided sink.
-    pub fn write_params<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
-    where
-        Sink: BindSink,
-    {
-        render::write_delete_params::<S, _, _, _>(
+    /// Write bind parameters into a caller-provided native param vector.
+    pub fn write_params(&self, params: &mut Vec<PostgresParam>) -> Result<(), PostgresError> {
+        render::write_delete_params::<S, Postgres, _, _>(
             &PostgresDialect,
             self.alias,
             &self.filters,
             &self.returning,
-            sink,
+            params,
         )
     }
 
     /// Collect bind parameters into a newly allocated vector.
     ///
     /// Use [`Self::write_params`] to inspect parameters without allocating a vector.
-    pub fn collect_params(&self) -> Vec<BindValue> {
+    pub fn collect_params(&self) -> Result<Vec<PostgresParam>, PostgresError> {
         let mut params = Vec::new();
-        self.write_params(&mut params)
-            .unwrap_or_else(|error| match error {});
-        params
+        self.write_params(&mut params)?;
+        Ok(params)
     }
 }
 
@@ -1931,9 +2070,9 @@ impl<S, Shape, Columns, Filters, Returning, Conn>
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
-    Columns: squealy::UpdateAssignments,
-    Filters: PredicateNodes,
-    Returning: Projectable,
+    Columns: RenderUpdateAssignments<Postgres>,
+    Filters: RenderPredicateNodes<Postgres>,
+    Returning: RenderProjectable<Postgres>,
     Conn: QueryBuilder<Backend = Postgres>,
 {
     /// Render this query into a newly allocated SQL string.
@@ -1945,7 +2084,7 @@ where
 
     /// Stream SQL into caller-provided storage without allocating a SQL string.
     pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-        render::write_update::<S, _, _, _>(
+        render::write_update::<S, Postgres, _, _, _>(
             &PostgresDialect,
             self.alias,
             &self.columns,
@@ -1955,29 +2094,25 @@ where
         )
     }
 
-    /// Write bind parameters into a caller-provided sink.
-    pub fn write_params<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
-    where
-        Sink: BindSink,
-    {
-        render::write_update_params::<S, _, _, _, _>(
+    /// Write bind parameters into a caller-provided native param vector.
+    pub fn write_params(&self, params: &mut Vec<PostgresParam>) -> Result<(), PostgresError> {
+        render::write_update_params::<S, Postgres, _, _, _>(
             &PostgresDialect,
             self.alias,
             &self.columns,
             &self.filters,
             &self.returning,
-            sink,
+            params,
         )
     }
 
     /// Collect bind parameters into a newly allocated vector.
     ///
     /// Use [`Self::write_params`] to inspect parameters without allocating a vector.
-    pub fn collect_params(&self) -> Vec<BindValue> {
+    pub fn collect_params(&self) -> Result<Vec<PostgresParam>, PostgresError> {
         let mut params = Vec::new();
-        self.write_params(&mut params)
-            .unwrap_or_else(|error| match error {});
-        params
+        self.write_params(&mut params)?;
+        Ok(params)
     }
 }
 
@@ -1986,106 +2121,117 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signed_widths_map_to_expected_param() {
+    fn primitives_encode_to_expected_param() {
+        assert!(matches!(encode_to_param(&7i8), Ok(PostgresParam::Int16(7))));
         assert!(matches!(
-            postgres_signed_int(7, IntWidth::I8),
+            encode_to_param(&7i16),
             Ok(PostgresParam::Int16(7))
         ));
         assert!(matches!(
-            postgres_signed_int(7, IntWidth::I16),
-            Ok(PostgresParam::Int16(7))
-        ));
-        assert!(matches!(
-            postgres_signed_int(7, IntWidth::I32),
+            encode_to_param(&7i32),
             Ok(PostgresParam::Int32(7))
         ));
         assert!(matches!(
-            postgres_signed_int(7, IntWidth::I64),
+            encode_to_param(&7i64),
             Ok(PostgresParam::Int64(7))
         ));
         assert!(matches!(
-            postgres_signed_int(7, IntWidth::I128),
+            encode_to_param(&7isize),
+            Ok(PostgresParam::Int64(7))
+        ));
+        assert!(matches!(
+            encode_to_param(&7i128),
+            Ok(PostgresParam::Numeric(PostgresNumericInteger {
+                negative: false,
+                magnitude: 7
+            }))
+        ));
+        assert!(matches!(encode_to_param(&7u8), Ok(PostgresParam::Int32(7))));
+        assert!(matches!(
+            encode_to_param(&7u16),
+            Ok(PostgresParam::Int32(7))
+        ));
+        assert!(matches!(
+            encode_to_param(&7u32),
+            Ok(PostgresParam::Int64(7))
+        ));
+        assert!(matches!(
+            encode_to_param(&7usize),
+            Ok(PostgresParam::Int64(7))
+        ));
+        assert!(matches!(
+            encode_to_param(&7u64),
             Ok(PostgresParam::Numeric(PostgresNumericInteger {
                 negative: false,
                 magnitude: 7
             }))
         ));
         assert!(matches!(
-            postgres_signed_int(7, IntWidth::Isize),
-            Ok(PostgresParam::Int64(7))
+            encode_to_param(&1.5f32),
+            Ok(PostgresParam::Float32(value)) if value == 1.5
+        ));
+        assert!(matches!(
+            encode_to_param(&1.5f64),
+            Ok(PostgresParam::Float64(value)) if value == 1.5
         ));
     }
 
     #[test]
-    fn signed_overflow_reports_unsupported_bind() {
-        let too_big_for_i16 = i64::from(i16::MAX) + 1;
+    fn text_bool_and_null_encode_through() {
         assert!(matches!(
-            postgres_signed_int(too_big_for_i16 as i128, IntWidth::I16),
-            Err(PostgresError::UnsupportedBind(_))
-        ));
-
-        let too_big_for_i32 = i64::from(i32::MAX) + 1;
-        assert!(matches!(
-            postgres_signed_int(too_big_for_i32 as i128, IntWidth::I32),
-            Err(PostgresError::UnsupportedBind(_))
-        ));
-
-        let too_big_for_i64 = i128::from(i64::MAX) + 1;
-        assert!(matches!(
-            postgres_signed_int(too_big_for_i64, IntWidth::I64),
-            Err(PostgresError::UnsupportedBind(_))
-        ));
-    }
-
-    #[test]
-    fn unsigned_widths_map_to_expected_param() {
-        assert!(matches!(
-            postgres_unsigned_int(7, UIntWidth::U8),
-            Ok(PostgresParam::Int32(7))
+            encode_to_param(&String::from("Ada")),
+            Ok(PostgresParam::Text(value)) if value == "Ada"
         ));
         assert!(matches!(
-            postgres_unsigned_int(7, UIntWidth::U16),
-            Ok(PostgresParam::Int32(7))
+            encode_to_param(&true),
+            Ok(PostgresParam::Bool(true))
         ));
         assert!(matches!(
-            postgres_unsigned_int(7, UIntWidth::U32),
-            Ok(PostgresParam::Int64(7))
+            encode_to_param(&Option::<i32>::None),
+            Ok(PostgresParam::Null(_))
         ));
         assert!(matches!(
-            postgres_unsigned_int(7, UIntWidth::U64),
-            Ok(PostgresParam::Numeric(PostgresNumericInteger {
-                negative: false,
-                magnitude: 7
-            }))
-        ));
-        assert!(matches!(
-            postgres_unsigned_int(7, UIntWidth::U128),
-            Ok(PostgresParam::Numeric(PostgresNumericInteger {
-                negative: false,
-                magnitude: 7
-            }))
-        ));
-        assert!(matches!(
-            postgres_unsigned_int(7, UIntWidth::Usize),
-            Ok(PostgresParam::Int64(7))
+            encode_to_param(&Some(5i32)),
+            Ok(PostgresParam::Int32(5))
         ));
     }
 
+    #[cfg(feature = "uuid")]
     #[test]
-    fn unsigned_overflow_reports_unsupported_bind() {
-        let too_big_for_i32 = u64::from(u32::MAX);
+    fn uuid_encodes_to_native_param() {
+        let id = uuid::Uuid::from_u128(0x1234_5678_1234_5678_1234_5678_1234_5678);
+        // Bare uuid::Uuid encodes to a native uuid param...
         assert!(matches!(
-            postgres_unsigned_int(u128::from(too_big_for_i32), UIntWidth::U16),
-            Err(PostgresError::UnsupportedBind(_))
+            encode_to_param(&id),
+            Ok(PostgresParam::Uuid(value)) if value == id
         ));
+        // ...and so does a transparent #[derive(ColumnType)] newtype over it.
+        #[derive(Clone, Debug, PartialEq, Eq, squealy::ColumnType)]
+        #[column_type(db_type = "uuid")]
+        struct UserId(uuid::Uuid);
 
+        assert_eq!(
+            <UserId as squealy::HasColumnType>::COLUMN_TYPE,
+            squealy::ColumnType::Uuid
+        );
         assert!(matches!(
-            postgres_unsigned_int(u128::from(u64::MAX), UIntWidth::U64),
-            Ok(PostgresParam::Numeric(PostgresNumericInteger {
-                negative: false,
-                magnitude
-            })) if magnitude == u128::from(u64::MAX)
+            encode_to_param(&UserId(id)),
+            Ok(PostgresParam::Uuid(value)) if value == id
         ));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn json_encodes_to_jsonb_param() {
+        let payload = serde_json::json!({ "ok": true, "n": 5 });
+        assert!(matches!(
+            encode_to_param(&Json(payload.clone())),
+            Ok(PostgresParam::Json(value)) if value == payload
+        ));
+        assert_eq!(
+            <Json<serde_json::Value> as squealy::HasColumnType>::COLUMN_TYPE,
+            squealy::ColumnType::Jsonb
+        );
     }
 
     #[test]
@@ -2119,31 +2265,5 @@ mod tests {
         bytes.put_u16(5_000);
 
         assert!(PostgresNumericInteger::from_sql(&Type::NUMERIC, &bytes).is_err());
-    }
-
-    #[test]
-    fn float_widths_preserve_precision() {
-        assert!(matches!(
-            postgres_float(1.5, FloatWidth::F32),
-            Ok(PostgresParam::Float32(value)) if value == 1.5
-        ));
-        assert!(matches!(
-            postgres_float(1.5, FloatWidth::F64),
-            Ok(PostgresParam::Float64(value)) if value == 1.5
-        ));
-    }
-
-    #[test]
-    fn params_pass_through_text_bool_and_null() {
-        let params = postgres_params(vec![
-            BindValue::text("Ada"),
-            BindValue::bool(true),
-            BindValue::Null,
-        ])
-        .expect("convert bind values");
-
-        assert!(matches!(&params[0], PostgresParam::Text(value) if value == "Ada"));
-        assert!(matches!(params[1], PostgresParam::Bool(true)));
-        assert!(matches!(params[2], PostgresParam::Null(_)));
     }
 }

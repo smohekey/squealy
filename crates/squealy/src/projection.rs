@@ -3,8 +3,7 @@ use std::marker::PhantomData;
 
 use crate::{
     AddExpr, ColumnNullableValue, ColumnRef, ColumnValue, Decode, DivideExpr, Expr, ExprAst,
-    ExprKind, IntoBindValue, MultiplyExpr, Nullable, ReturningProjection, SchemaTable, SourceAlias,
-    SubtractExpr,
+    ExprKind, MultiplyExpr, Nullable, ReturningProjection, SchemaTable, SourceAlias, SubtractExpr,
 };
 
 /// A projection shape that can produce scoped expression values for a SQL alias.
@@ -173,18 +172,6 @@ where
 pub trait Projectable: Clone {
     type Rebound<'scope>;
 
-    fn visit_projection<V>(&self, visitor: &mut V) -> Result<(), V::Error>
-    where
-        V: ProjectionVisitor;
-
-    fn visit_projection_with_prefix<V>(&self, prefix: &str, visitor: &mut V) -> Result<(), V::Error>
-    where
-        V: ProjectionVisitor,
-    {
-        _ = prefix;
-        self.visit_projection(visitor)
-    }
-
     fn re_alias<'scope>(&self, alias: SourceAlias) -> Self::Rebound<'scope>;
 
     fn re_alias_with_prefix<'scope>(
@@ -196,9 +183,29 @@ pub trait Projectable: Clone {
     }
 }
 
+/// Backend-parameterized projection rendering (mirror of [`RenderAst`]).
+#[doc(hidden)]
+pub trait RenderProjectable<B>: Projectable
+where
+    B: crate::Backend,
+{
+    fn visit_projection<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ProjectionVisitor<Backend = B>;
+
+    fn visit_projection_with_prefix<V>(&self, prefix: &str, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ProjectionVisitor<Backend = B>,
+    {
+        _ = prefix;
+        self.visit_projection(visitor)
+    }
+}
+
 #[doc(hidden)]
 pub trait ProjectionVisitor {
     type Error;
+    type Backend: crate::Backend;
 
     fn visit_expr<K, Ast>(
         &mut self,
@@ -207,7 +214,7 @@ pub trait ProjectionVisitor {
     ) -> Result<(), Self::Error>
     where
         K: ExprKind,
-        Ast: ExprAst;
+        Ast: crate::RenderAst<Self::Backend>;
 
     fn visit_column<K>(
         &mut self,
@@ -221,14 +228,19 @@ pub trait ProjectionVisitor {
 impl Projectable for () {
     type Rebound<'scope> = ();
 
+    fn re_alias<'scope>(&self, _alias: SourceAlias) -> Self::Rebound<'scope> {}
+}
+
+impl<B> RenderProjectable<B> for ()
+where
+    B: crate::Backend,
+{
     fn visit_projection<V>(&self, _visitor: &mut V) -> Result<(), V::Error>
     where
-        V: ProjectionVisitor,
+        V: ProjectionVisitor<Backend = B>,
     {
         Ok(())
     }
-
-    fn re_alias<'scope>(&self, _alias: SourceAlias) -> Self::Rebound<'scope> {}
 }
 
 squealy_macros::tuple_projection_shapes!(32);
@@ -239,20 +251,6 @@ where
     Ast: ExprAst,
 {
     type Rebound<'scope> = Expr<'scope, K>;
-
-    fn visit_projection<V>(&self, visitor: &mut V) -> Result<(), V::Error>
-    where
-        V: ProjectionVisitor,
-    {
-        visitor.visit_expr(self, Cow::Owned(self.project_alias().to_owned()))
-    }
-
-    fn visit_projection_with_prefix<V>(&self, prefix: &str, visitor: &mut V) -> Result<(), V::Error>
-    where
-        V: ProjectionVisitor,
-    {
-        visitor.visit_expr(self, Cow::Owned(prefix_alias(prefix, self.project_alias())))
-    }
 
     fn re_alias<'scope>(&self, alias: SourceAlias) -> Self::Rebound<'scope> {
         Expr::column(alias, self.project_alias().to_owned())
@@ -271,28 +269,32 @@ where
     }
 }
 
+impl<'expr, K, Ast, B> RenderProjectable<B> for Expr<'expr, K, Ast>
+where
+    K: ExprKind,
+    Ast: crate::RenderAst<B>,
+    B: crate::Backend,
+{
+    fn visit_projection<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ProjectionVisitor<Backend = B>,
+    {
+        visitor.visit_expr(self, Cow::Owned(self.project_alias().to_owned()))
+    }
+
+    fn visit_projection_with_prefix<V>(&self, prefix: &str, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ProjectionVisitor<Backend = B>,
+    {
+        visitor.visit_expr(self, Cow::Owned(prefix_alias(prefix, self.project_alias())))
+    }
+}
+
 impl<'expr, K> Projectable for ColumnRef<'expr, K>
 where
     K: ExprKind,
 {
     type Rebound<'scope> = Expr<'scope, K>;
-
-    fn visit_projection<V>(&self, visitor: &mut V) -> Result<(), V::Error>
-    where
-        V: ProjectionVisitor,
-    {
-        visitor.visit_column(*self, Cow::Borrowed(self.project_alias()))
-    }
-
-    fn visit_projection_with_prefix<V>(&self, prefix: &str, visitor: &mut V) -> Result<(), V::Error>
-    where
-        V: ProjectionVisitor,
-    {
-        visitor.visit_column(
-            *self,
-            Cow::Owned(prefix_alias(prefix, self.project_alias())),
-        )
-    }
 
     fn re_alias<'scope>(&self, alias: SourceAlias) -> Self::Rebound<'scope> {
         Expr::column(alias, self.project_alias())
@@ -311,29 +313,64 @@ where
     }
 }
 
-impl<T> Projectable for T
+impl<'expr, K, B> RenderProjectable<B> for ColumnRef<'expr, K>
 where
-    T: ExprKind + IntoBindValue + Clone,
+    K: ExprKind,
+    B: crate::Backend,
 {
-    type Rebound<'scope> = Expr<'scope, T>;
-
     fn visit_projection<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: ProjectionVisitor,
+        V: ProjectionVisitor<Backend = B>,
     {
-        Expr::<T, crate::LiteralExprAst<T>>::lit(self.clone()).visit_projection(visitor)
+        visitor.visit_column(*self, Cow::Borrowed(self.project_alias()))
     }
 
     fn visit_projection_with_prefix<V>(&self, prefix: &str, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: ProjectionVisitor,
+        V: ProjectionVisitor<Backend = B>,
     {
-        Expr::<T, crate::LiteralExprAst<T>>::lit(self.clone())
-            .visit_projection_with_prefix(prefix, visitor)
+        visitor.visit_column(
+            *self,
+            Cow::Owned(prefix_alias(prefix, self.project_alias())),
+        )
     }
+}
+
+impl<T> Projectable for T
+where
+    T: ExprKind<Value = T> + Clone,
+{
+    type Rebound<'scope> = Expr<'scope, T>;
 
     fn re_alias<'scope>(&self, alias: SourceAlias) -> Self::Rebound<'scope> {
         Expr::column(alias, "expr")
+    }
+}
+
+impl<T, B> RenderProjectable<B> for T
+where
+    T: ExprKind<Value = T> + Clone + crate::Encode<B>,
+    B: crate::Backend,
+{
+    fn visit_projection<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ProjectionVisitor<Backend = B>,
+    {
+        RenderProjectable::<B>::visit_projection(
+            &Expr::<T, crate::LiteralExprAst<T>>::lit(self.clone()),
+            visitor,
+        )
+    }
+
+    fn visit_projection_with_prefix<V>(&self, prefix: &str, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ProjectionVisitor<Backend = B>,
+    {
+        RenderProjectable::<B>::visit_projection_with_prefix(
+            &Expr::<T, crate::LiteralExprAst<T>>::lit(self.clone()),
+            prefix,
+            visitor,
+        )
     }
 }
 

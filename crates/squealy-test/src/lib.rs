@@ -10,8 +10,8 @@ mod query;
 mod sql;
 
 pub use query::{
-    EmptyRows, TestDelete, TestInsert, TestPreparedMutation, TestPreparedSelect, TestRowReader,
-    TestSelect, TestUpdate,
+    EmptyRows, TestDelete, TestInsert, TestParam, TestParamWriter, TestPreparedMutation,
+    TestPreparedSelect, TestRowReader, TestSelect, TestUpdate,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -29,6 +29,14 @@ impl Backend for TestBackend {
     type Error = TestError;
 
     type RowReader<'row> = TestRowReader<'row>;
+
+    type ParamWriter<'param> = query::TestParamWriter<'param>;
+
+    type Param = query::TestParam;
+
+    fn param_writer(params: &mut Vec<Self::Param>) -> Self::ParamWriter<'_> {
+        query::TestParamWriter::new(params)
+    }
 
     fn no_rows_error() -> Self::Error {
         TestError::NoRows

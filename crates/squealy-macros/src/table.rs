@@ -536,9 +536,28 @@ impl TableStruct {
             impl<'scope> ::squealy::Projectable for #exprs_ident <'scope> {
                 type Rebound<'next_scope> = #rebound_exprs_ident <'next_scope>;
 
+                fn re_alias<'next_scope>(&self, alias: ::squealy::SourceAlias) -> Self::Rebound<'next_scope> {
+                    #rebound_exprs_ident { #( #fields: ::squealy::Expr::column(alias, #field_literals), )* }
+                }
+
+                fn re_alias_with_prefix<'next_scope>(
+                    &self,
+                    alias: ::squealy::SourceAlias,
+                    prefix: &str,
+                ) -> Self::Rebound<'next_scope> {
+                    #rebound_exprs_ident {
+                        #( #fields: ::squealy::Expr::column(alias, ::std::format!("{prefix}_{}", #field_literals)), )*
+                    }
+                }
+            }
+
+            impl<'scope, RenderBackend> ::squealy::RenderProjectable<RenderBackend> for #exprs_ident <'scope>
+            where
+                RenderBackend: ::squealy::Backend,
+            {
                 fn visit_projection<V>(&self, visitor: &mut V) -> ::std::result::Result<(), V::Error>
                 where
-                    V: ::squealy::ProjectionVisitor,
+                    V: ::squealy::ProjectionVisitor<Backend = RenderBackend>,
                 {
                     #(
                         visitor.visit_column(self.#fields, ::std::borrow::Cow::Borrowed(#field_literals))?;
@@ -552,7 +571,7 @@ impl TableStruct {
                     visitor: &mut V,
                 ) -> ::std::result::Result<(), V::Error>
                 where
-                    V: ::squealy::ProjectionVisitor,
+                    V: ::squealy::ProjectionVisitor<Backend = RenderBackend>,
                 {
                     #(
                         visitor.visit_column(
@@ -561,20 +580,6 @@ impl TableStruct {
                         )?;
                     )*
                     Ok(())
-                }
-
-                fn re_alias<'next_scope>(&self, alias: ::squealy::SourceAlias) -> Self::Rebound<'next_scope> {
-                    #rebound_exprs_ident { #( #fields: ::squealy::Expr::column(alias, #field_literals), )* }
-                }
-
-                fn re_alias_with_prefix<'next_scope>(
-                    &self,
-                    alias: ::squealy::SourceAlias,
-                    prefix: &str,
-                ) -> Self::Rebound<'next_scope> {
-                    #rebound_exprs_ident {
-                        #( #fields: ::squealy::Expr::column(alias, ::std::format!("{prefix}_{}", #field_literals)), )*
-                    }
                 }
             }
 
@@ -585,33 +590,6 @@ impl TableStruct {
             impl<'scope> ::squealy::Projectable for #rebound_exprs_ident <'scope> {
                 type Rebound<'next_scope> = #rebound_exprs_ident <'next_scope>;
 
-                fn visit_projection<V>(&self, visitor: &mut V) -> ::std::result::Result<(), V::Error>
-                where
-                    V: ::squealy::ProjectionVisitor,
-                {
-                    #(
-                        visitor.visit_expr(&self.#fields, ::std::borrow::Cow::Borrowed(#field_literals))?;
-                    )*
-                    Ok(())
-                }
-
-                fn visit_projection_with_prefix<V>(
-                    &self,
-                    prefix: &str,
-                    visitor: &mut V,
-                ) -> ::std::result::Result<(), V::Error>
-                where
-                    V: ::squealy::ProjectionVisitor,
-                {
-                    #(
-                        visitor.visit_expr(
-                            &self.#fields,
-                            ::std::borrow::Cow::Owned(::std::format!("{prefix}_{}", #field_literals)),
-                        )?;
-                    )*
-                    Ok(())
-                }
-
                 fn re_alias<'next_scope>(&self, alias: ::squealy::SourceAlias) -> Self::Rebound<'next_scope> {
                     #rebound_exprs_ident { #( #fields: ::squealy::Expr::column(alias, #field_literals), )* }
                 }
@@ -627,65 +605,13 @@ impl TableStruct {
                 }
             }
 
-            impl<'scope> ::squealy::ReturningProjection<'scope> for #rebound_exprs_ident <'scope> {
-                type Shape = #row_shape_ident;
-            }
-
-            impl<'scope> ::squealy::Projectable for #nullable_exprs_ident <'scope> {
-                type Rebound<'next_scope> = #nullable_rebound_exprs_ident <'next_scope>;
-
+            impl<'scope, RenderBackend> ::squealy::RenderProjectable<RenderBackend> for #rebound_exprs_ident <'scope>
+            where
+                RenderBackend: ::squealy::Backend,
+            {
                 fn visit_projection<V>(&self, visitor: &mut V) -> ::std::result::Result<(), V::Error>
                 where
-                    V: ::squealy::ProjectionVisitor,
-                {
-                    #(
-                        visitor.visit_column(self.#fields, ::std::borrow::Cow::Borrowed(#field_literals))?;
-                    )*
-                    Ok(())
-                }
-
-                fn visit_projection_with_prefix<V>(
-                    &self,
-                    prefix: &str,
-                    visitor: &mut V,
-                ) -> ::std::result::Result<(), V::Error>
-                where
-                    V: ::squealy::ProjectionVisitor,
-                {
-                    #(
-                        visitor.visit_column(
-                            self.#fields,
-                            ::std::borrow::Cow::Owned(::std::format!("{prefix}_{}", #field_literals)),
-                        )?;
-                    )*
-                    Ok(())
-                }
-
-                fn re_alias<'next_scope>(&self, alias: ::squealy::SourceAlias) -> Self::Rebound<'next_scope> {
-                    #nullable_rebound_exprs_ident { #( #fields: ::squealy::Expr::column(alias, #field_literals), )* }
-                }
-
-                fn re_alias_with_prefix<'next_scope>(
-                    &self,
-                    alias: ::squealy::SourceAlias,
-                    prefix: &str,
-                ) -> Self::Rebound<'next_scope> {
-                    #nullable_rebound_exprs_ident {
-                        #( #fields: ::squealy::Expr::column(alias, ::std::format!("{prefix}_{}", #field_literals)), )*
-                    }
-                }
-            }
-
-            impl<'scope> ::squealy::ReturningProjection<'scope> for #nullable_exprs_ident <'scope> {
-                type Shape = ::squealy::Maybe<#ident <'static, ::squealy::ColumnExpr>>;
-            }
-
-            impl<'scope> ::squealy::Projectable for #nullable_rebound_exprs_ident <'scope> {
-                type Rebound<'next_scope> = #nullable_rebound_exprs_ident <'next_scope>;
-
-                fn visit_projection<V>(&self, visitor: &mut V) -> ::std::result::Result<(), V::Error>
-                where
-                    V: ::squealy::ProjectionVisitor,
+                    V: ::squealy::ProjectionVisitor<Backend = RenderBackend>,
                 {
                     #(
                         visitor.visit_expr(&self.#fields, ::std::borrow::Cow::Borrowed(#field_literals))?;
@@ -699,7 +625,7 @@ impl TableStruct {
                     visitor: &mut V,
                 ) -> ::std::result::Result<(), V::Error>
                 where
-                    V: ::squealy::ProjectionVisitor,
+                    V: ::squealy::ProjectionVisitor<Backend = RenderBackend>,
                 {
                     #(
                         visitor.visit_expr(
@@ -709,6 +635,14 @@ impl TableStruct {
                     )*
                     Ok(())
                 }
+            }
+
+            impl<'scope> ::squealy::ReturningProjection<'scope> for #rebound_exprs_ident <'scope> {
+                type Shape = #row_shape_ident;
+            }
+
+            impl<'scope> ::squealy::Projectable for #nullable_exprs_ident <'scope> {
+                type Rebound<'next_scope> = #nullable_rebound_exprs_ident <'next_scope>;
 
                 fn re_alias<'next_scope>(&self, alias: ::squealy::SourceAlias) -> Self::Rebound<'next_scope> {
                     #nullable_rebound_exprs_ident { #( #fields: ::squealy::Expr::column(alias, #field_literals), )* }
@@ -722,6 +656,92 @@ impl TableStruct {
                     #nullable_rebound_exprs_ident {
                         #( #fields: ::squealy::Expr::column(alias, ::std::format!("{prefix}_{}", #field_literals)), )*
                     }
+                }
+            }
+
+            impl<'scope, RenderBackend> ::squealy::RenderProjectable<RenderBackend> for #nullable_exprs_ident <'scope>
+            where
+                RenderBackend: ::squealy::Backend,
+            {
+                fn visit_projection<V>(&self, visitor: &mut V) -> ::std::result::Result<(), V::Error>
+                where
+                    V: ::squealy::ProjectionVisitor<Backend = RenderBackend>,
+                {
+                    #(
+                        visitor.visit_column(self.#fields, ::std::borrow::Cow::Borrowed(#field_literals))?;
+                    )*
+                    Ok(())
+                }
+
+                fn visit_projection_with_prefix<V>(
+                    &self,
+                    prefix: &str,
+                    visitor: &mut V,
+                ) -> ::std::result::Result<(), V::Error>
+                where
+                    V: ::squealy::ProjectionVisitor<Backend = RenderBackend>,
+                {
+                    #(
+                        visitor.visit_column(
+                            self.#fields,
+                            ::std::borrow::Cow::Owned(::std::format!("{prefix}_{}", #field_literals)),
+                        )?;
+                    )*
+                    Ok(())
+                }
+            }
+
+            impl<'scope> ::squealy::ReturningProjection<'scope> for #nullable_exprs_ident <'scope> {
+                type Shape = ::squealy::Maybe<#ident <'static, ::squealy::ColumnExpr>>;
+            }
+
+            impl<'scope> ::squealy::Projectable for #nullable_rebound_exprs_ident <'scope> {
+                type Rebound<'next_scope> = #nullable_rebound_exprs_ident <'next_scope>;
+
+                fn re_alias<'next_scope>(&self, alias: ::squealy::SourceAlias) -> Self::Rebound<'next_scope> {
+                    #nullable_rebound_exprs_ident { #( #fields: ::squealy::Expr::column(alias, #field_literals), )* }
+                }
+
+                fn re_alias_with_prefix<'next_scope>(
+                    &self,
+                    alias: ::squealy::SourceAlias,
+                    prefix: &str,
+                ) -> Self::Rebound<'next_scope> {
+                    #nullable_rebound_exprs_ident {
+                        #( #fields: ::squealy::Expr::column(alias, ::std::format!("{prefix}_{}", #field_literals)), )*
+                    }
+                }
+            }
+
+            impl<'scope, RenderBackend> ::squealy::RenderProjectable<RenderBackend> for #nullable_rebound_exprs_ident <'scope>
+            where
+                RenderBackend: ::squealy::Backend,
+            {
+                fn visit_projection<V>(&self, visitor: &mut V) -> ::std::result::Result<(), V::Error>
+                where
+                    V: ::squealy::ProjectionVisitor<Backend = RenderBackend>,
+                {
+                    #(
+                        visitor.visit_expr(&self.#fields, ::std::borrow::Cow::Borrowed(#field_literals))?;
+                    )*
+                    Ok(())
+                }
+
+                fn visit_projection_with_prefix<V>(
+                    &self,
+                    prefix: &str,
+                    visitor: &mut V,
+                ) -> ::std::result::Result<(), V::Error>
+                where
+                    V: ::squealy::ProjectionVisitor<Backend = RenderBackend>,
+                {
+                    #(
+                        visitor.visit_expr(
+                            &self.#fields,
+                            ::std::borrow::Cow::Owned(::std::format!("{prefix}_{}", #field_literals)),
+                        )?;
+                    )*
+                    Ok(())
                 }
             }
 

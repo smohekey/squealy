@@ -30,7 +30,10 @@ fn mysql_renders_select_in_its_dialect() {
         "must not use Postgres placeholders: {sql}"
     );
 
-    assert_eq!(query.collect_params(), vec![BindValue::text("Ada")]);
+    assert_eq!(
+        query.collect_params().unwrap(),
+        vec![mysql_async::Value::Bytes(b"Ada".to_vec())]
+    );
 }
 
 #[test]

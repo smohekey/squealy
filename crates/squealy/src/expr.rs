@@ -3,209 +3,6 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Add, BitAnd, BitOr, Div, Mul, Not, Sub};
 
-/// A SQL bind parameter value.
-#[derive(Clone, Debug)]
-pub struct BindValue {
-    kind: BindValueKind,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum BindValueKind {
-    Int { value: i128, width: IntWidth },
-    UInt { value: u128, width: UIntWidth },
-    Float { value: f64, width: FloatWidth },
-    Text(String),
-    Bool(bool),
-    Null,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IntWidth {
-    I8,
-    I16,
-    I32,
-    I64,
-    I128,
-    Isize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UIntWidth {
-    U8,
-    U16,
-    U32,
-    U64,
-    U128,
-    Usize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FloatWidth {
-    F32,
-    F64,
-}
-
-impl BindValue {
-    #[allow(non_snake_case)]
-    pub const fn Int(value: i128) -> Self {
-        Self::int128(value)
-    }
-
-    #[allow(non_snake_case)]
-    pub const fn UInt(value: u128) -> Self {
-        Self::uint128(value)
-    }
-
-    #[allow(non_snake_case)]
-    pub const fn Float(value: f64) -> Self {
-        Self::float64(value)
-    }
-
-    #[allow(non_snake_case)]
-    pub fn Text(value: String) -> Self {
-        Self::text(value)
-    }
-
-    #[allow(non_snake_case)]
-    pub const fn Bool(value: bool) -> Self {
-        Self::bool(value)
-    }
-
-    #[allow(non_upper_case_globals)]
-    pub const Null: Self = Self {
-        kind: BindValueKind::Null,
-    };
-
-    pub const fn int8(value: i8) -> Self {
-        Self::int(value as i128, IntWidth::I8)
-    }
-
-    pub const fn int16(value: i16) -> Self {
-        Self::int(value as i128, IntWidth::I16)
-    }
-
-    pub const fn int32(value: i32) -> Self {
-        Self::int(value as i128, IntWidth::I32)
-    }
-
-    pub const fn int64(value: i64) -> Self {
-        Self::int(value as i128, IntWidth::I64)
-    }
-
-    pub const fn int128(value: i128) -> Self {
-        Self::int(value, IntWidth::I128)
-    }
-
-    pub const fn isize(value: isize) -> Self {
-        Self::int(value as i128, IntWidth::Isize)
-    }
-
-    pub const fn uint8(value: u8) -> Self {
-        Self::uint(value as u128, UIntWidth::U8)
-    }
-
-    pub const fn uint16(value: u16) -> Self {
-        Self::uint(value as u128, UIntWidth::U16)
-    }
-
-    pub const fn uint32(value: u32) -> Self {
-        Self::uint(value as u128, UIntWidth::U32)
-    }
-
-    pub const fn uint64(value: u64) -> Self {
-        Self::uint(value as u128, UIntWidth::U64)
-    }
-
-    pub const fn uint128(value: u128) -> Self {
-        Self::uint(value, UIntWidth::U128)
-    }
-
-    pub const fn usize(value: usize) -> Self {
-        Self::uint(value as u128, UIntWidth::Usize)
-    }
-
-    pub const fn float32(value: f32) -> Self {
-        Self::float(value as f64, FloatWidth::F32)
-    }
-
-    pub const fn float64(value: f64) -> Self {
-        Self::float(value, FloatWidth::F64)
-    }
-
-    pub fn text(value: impl Into<String>) -> Self {
-        Self {
-            kind: BindValueKind::Text(value.into()),
-        }
-    }
-
-    pub const fn bool(value: bool) -> Self {
-        Self {
-            kind: BindValueKind::Bool(value),
-        }
-    }
-
-    pub const fn kind(&self) -> &BindValueKind {
-        &self.kind
-    }
-
-    pub fn into_kind(self) -> BindValueKind {
-        self.kind
-    }
-
-    const fn int(value: i128, width: IntWidth) -> Self {
-        Self {
-            kind: BindValueKind::Int { value, width },
-        }
-    }
-
-    const fn uint(value: u128, width: UIntWidth) -> Self {
-        Self {
-            kind: BindValueKind::UInt { value, width },
-        }
-    }
-
-    const fn float(value: f64, width: FloatWidth) -> Self {
-        Self {
-            kind: BindValueKind::Float { value, width },
-        }
-    }
-}
-
-impl PartialEq for BindValue {
-    fn eq(&self, other: &Self) -> bool {
-        match (&self.kind, &other.kind) {
-            (
-                BindValueKind::Int {
-                    value: left_value, ..
-                },
-                BindValueKind::Int {
-                    value: right_value, ..
-                },
-            ) => left_value == right_value,
-            (
-                BindValueKind::UInt {
-                    value: left_value, ..
-                },
-                BindValueKind::UInt {
-                    value: right_value, ..
-                },
-            ) => left_value == right_value,
-            (
-                BindValueKind::Float {
-                    value: left_value, ..
-                },
-                BindValueKind::Float {
-                    value: right_value, ..
-                },
-            ) => left_value == right_value,
-            (BindValueKind::Text(left), BindValueKind::Text(right)) => left == right,
-            (BindValueKind::Bool(left), BindValueKind::Bool(right)) => left == right,
-            (BindValueKind::Null, BindValueKind::Null) => true,
-            _ => false,
-        }
-    }
-}
-
 /// A structured SQL source alias used by generated query typestates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceAlias {
@@ -255,109 +52,6 @@ pub enum CompareOp {
 pub enum OrderDirection {
     Asc,
     Desc,
-}
-
-/// Converts Rust values into SQL bind parameter values.
-pub trait IntoBindValue {
-    fn into_bind_value(self) -> BindValue;
-}
-
-/// Converts Rust values, including `None`, into nullable SQL bind parameters.
-pub trait IntoNullableBindValue<T> {
-    fn into_nullable_bind_value(self) -> BindValue;
-}
-
-macro_rules! impl_bind_value {
-    ($($ty:ty => $constructor:ident),* $(,)?) => {
-        $(impl IntoBindValue for $ty {
-            fn into_bind_value(self) -> BindValue {
-                BindValue::$constructor(self)
-            }
-        })*
-    };
-}
-
-impl_bind_value! {
-    i8 => int8,
-    i16 => int16,
-    i32 => int32,
-    i64 => int64,
-    i128 => int128,
-    isize => isize,
-    u8 => uint8,
-    u16 => uint16,
-    u32 => uint32,
-    u64 => uint64,
-    u128 => uint128,
-    usize => usize,
-    f32 => float32,
-    f64 => float64,
-}
-
-impl IntoBindValue for String {
-    fn into_bind_value(self) -> BindValue {
-        BindValue::Text(self)
-    }
-}
-
-impl IntoBindValue for &str {
-    fn into_bind_value(self) -> BindValue {
-        BindValue::Text(self.to_owned())
-    }
-}
-
-impl IntoBindValue for &String {
-    fn into_bind_value(self) -> BindValue {
-        BindValue::Text(self.clone())
-    }
-}
-
-impl IntoBindValue for bool {
-    fn into_bind_value(self) -> BindValue {
-        BindValue::Bool(self)
-    }
-}
-
-impl<T> IntoNullableBindValue<T> for T
-where
-    T: IntoBindValue,
-{
-    fn into_nullable_bind_value(self) -> BindValue {
-        self.into_bind_value()
-    }
-}
-
-impl IntoNullableBindValue<String> for &str {
-    fn into_nullable_bind_value(self) -> BindValue {
-        self.into_bind_value()
-    }
-}
-
-impl IntoNullableBindValue<String> for &String {
-    fn into_nullable_bind_value(self) -> BindValue {
-        self.into_bind_value()
-    }
-}
-
-impl<T> IntoNullableBindValue<T> for Option<T>
-where
-    T: IntoBindValue,
-{
-    fn into_nullable_bind_value(self) -> BindValue {
-        self.map_or(BindValue::Null, IntoBindValue::into_bind_value)
-    }
-}
-
-impl IntoNullableBindValue<String> for Option<&str> {
-    fn into_nullable_bind_value(self) -> BindValue {
-        self.map_or(BindValue::Null, IntoBindValue::into_bind_value)
-    }
-}
-
-impl IntoNullableBindValue<String> for Option<&String> {
-    fn into_nullable_bind_value(self) -> BindValue {
-        self.map_or(BindValue::Null, IntoBindValue::into_bind_value)
-    }
 }
 
 /// Marker trait for Rust types that can participate in numeric SQL operations.
@@ -425,10 +119,22 @@ impl<T> SameValue<T> for T {}
 #[doc(hidden)]
 pub trait ExprAst: Clone {
     type Params: crate::HList;
+}
 
+/// Backend-parameterized rendering for an expression AST node.
+///
+/// Split out from [`ExprAst`] so the backend-agnostic `Params` bound (used by the query
+/// combinators) stays free of a backend, while literal nodes can carry a
+/// `where K::Value: Encode<B>` bound that is only checked at render/execution time — the
+/// mirror of how [`Decode<B>`](crate::Decode) is checked when a row is read.
+#[doc(hidden)]
+pub trait RenderAst<B>: ExprAst
+where
+    B: crate::Backend,
+{
     fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: ExprVisitor;
+        V: ExprVisitor<Backend = B>;
 }
 
 #[doc(hidden)]
@@ -441,8 +147,11 @@ pub struct ColumnExprAst<K> {
 
 #[doc(hidden)]
 #[derive(Debug, PartialEq)]
-pub struct LiteralExprAst<K> {
-    value: BindValue,
+pub struct LiteralExprAst<K>
+where
+    K: ExprKind,
+{
+    value: K::Value,
     _kind: PhantomData<K>,
 }
 
@@ -462,7 +171,11 @@ impl<K> Clone for ColumnExprAst<K> {
     }
 }
 
-impl<K> Clone for LiteralExprAst<K> {
+impl<K> Clone for LiteralExprAst<K>
+where
+    K: ExprKind,
+    K::Value: Clone,
+{
     fn clone(&self) -> Self {
         Self {
             value: self.value.clone(),
@@ -487,21 +200,37 @@ pub struct BinaryExprAst<Left, Right> {
 
 impl<K> ExprAst for ColumnExprAst<K> {
     type Params = crate::HNil;
+}
 
+impl<K, B> RenderAst<B> for ColumnExprAst<K>
+where
+    B: crate::Backend,
+{
     fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: ExprVisitor,
+        V: ExprVisitor<Backend = B>,
     {
         visitor.visit_column(self.alias, &self.column)
     }
 }
 
-impl<K> ExprAst for LiteralExprAst<K> {
+impl<K> ExprAst for LiteralExprAst<K>
+where
+    K: ExprKind,
+    K::Value: Clone,
+{
     type Params = crate::HNil;
+}
 
+impl<K, B> RenderAst<B> for LiteralExprAst<K>
+where
+    K: ExprKind,
+    K::Value: Clone + crate::Encode<B>,
+    B: crate::Backend,
+{
     fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: ExprVisitor,
+        V: ExprVisitor<Backend = B>,
     {
         visitor.visit_literal(&self.value)
     }
@@ -512,10 +241,16 @@ where
     K: ExprKind,
 {
     type Params = crate::HCons<K::Value, crate::HNil>;
+}
 
+impl<K, B> RenderAst<B> for ParamExprAst<K>
+where
+    K: ExprKind,
+    B: crate::Backend,
+{
     fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: ExprVisitor,
+        V: ExprVisitor<Backend = B>,
     {
         visitor.visit_param()
     }
@@ -528,10 +263,18 @@ where
     Left::Params: crate::HAppend<Right::Params>,
 {
     type Params = <Left::Params as crate::HAppend<Right::Params>>::Output;
+}
 
+impl<Left, Right, B> RenderAst<B> for BinaryExprAst<Left, Right>
+where
+    Left: RenderAst<B>,
+    Right: RenderAst<B>,
+    Left::Params: crate::HAppend<Right::Params>,
+    B: crate::Backend,
+{
     fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: ExprVisitor,
+        V: ExprVisitor<Backend = B>,
     {
         visitor.visit_binary(
             self.op,
@@ -545,9 +288,14 @@ where
 pub trait ExprVisitor {
     type Error;
 
+    /// The backend this visitor renders for. Literal encoding is resolved against it.
+    type Backend: crate::Backend;
+
     fn visit_column(&mut self, alias: SourceAlias, column: &str) -> Result<(), Self::Error>;
 
-    fn visit_literal(&mut self, value: &BindValue) -> Result<(), Self::Error>;
+    fn visit_literal<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: crate::Encode<Self::Backend>;
 
     fn visit_param(&mut self) -> Result<(), Self::Error>;
 
@@ -727,10 +475,17 @@ impl<P> PredicateKind for NotPredicate<P> {}
 #[doc(hidden)]
 pub trait PredicateAst: Clone {
     type Params: crate::HList;
+}
 
+/// Backend-parameterized rendering for a predicate AST node (mirror of [`RenderAst`]).
+#[doc(hidden)]
+pub trait RenderPredicateAst<B>: PredicateAst
+where
+    B: crate::Backend,
+{
     fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: PredicateAstVisitor;
+        V: PredicateAstVisitor<Backend = B>;
 }
 
 #[doc(hidden)]
@@ -768,10 +523,18 @@ where
     Left::Params: crate::HAppend<Right::Params>,
 {
     type Params = <Left::Params as crate::HAppend<Right::Params>>::Output;
+}
 
+impl<Left, Right, B> RenderPredicateAst<B> for ComparePredicateAst<Left, Right>
+where
+    Left: RenderAst<B>,
+    Right: RenderAst<B>,
+    Left::Params: crate::HAppend<Right::Params>,
+    B: crate::Backend,
+{
     fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: PredicateAstVisitor,
+        V: PredicateAstVisitor<Backend = B>,
     {
         visitor.visit_compare(
             self.op,
@@ -788,10 +551,18 @@ where
     Left::Params: crate::HAppend<Right::Params>,
 {
     type Params = <Left::Params as crate::HAppend<Right::Params>>::Output;
+}
 
+impl<Left, Right, B> RenderPredicateAst<B> for AndPredicateAst<Left, Right>
+where
+    Left: RenderPredicateAst<B>,
+    Right: RenderPredicateAst<B>,
+    Left::Params: crate::HAppend<Right::Params>,
+    B: crate::Backend,
+{
     fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: PredicateAstVisitor,
+        V: PredicateAstVisitor<Backend = B>,
     {
         visitor.visit_and(
             |visitor| self.left.visit(visitor),
@@ -807,10 +578,18 @@ where
     Left::Params: crate::HAppend<Right::Params>,
 {
     type Params = <Left::Params as crate::HAppend<Right::Params>>::Output;
+}
 
+impl<Left, Right, B> RenderPredicateAst<B> for OrPredicateAst<Left, Right>
+where
+    Left: RenderPredicateAst<B>,
+    Right: RenderPredicateAst<B>,
+    Left::Params: crate::HAppend<Right::Params>,
+    B: crate::Backend,
+{
     fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: PredicateAstVisitor,
+        V: PredicateAstVisitor<Backend = B>,
     {
         visitor.visit_or(
             |visitor| self.left.visit(visitor),
@@ -824,10 +603,16 @@ where
     Predicate: PredicateAst,
 {
     type Params = Predicate::Params;
+}
 
+impl<Predicate, B> RenderPredicateAst<B> for NotPredicateAst<Predicate>
+where
+    Predicate: RenderPredicateAst<B>,
+    B: crate::Backend,
+{
     fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: PredicateAstVisitor,
+        V: PredicateAstVisitor<Backend = B>,
     {
         visitor.visit_not(|visitor| self.predicate.visit(visitor))
     }
@@ -1039,21 +824,22 @@ where
 impl<'scope, K> Expr<'scope, K, LiteralExprAst<K>>
 where
     K: ExprKind,
+    K::Value: Clone,
 {
-    fn lit_bind(value: BindValue) -> Self {
+    /// Construct a SQL literal expression.
+    ///
+    /// The literal's value is carried in the AST and encoded as a bound parameter at
+    /// render time via [`Encode`](crate::Encode), so the literal can be any type the
+    /// target backend knows how to encode.
+    pub fn lit(value: impl Into<K::Value>) -> Self {
         Self {
             ast: LiteralExprAst {
-                value,
+                value: value.into(),
                 _kind: PhantomData,
             },
             project_alias: Cow::Borrowed("expr"),
             _phantom: PhantomData,
         }
-    }
-
-    /// Construct a SQL literal expression.
-    pub fn lit(value: impl IntoBindValue) -> Self {
-        Self::lit_bind(value.into_bind_value())
     }
 }
 
@@ -1088,6 +874,7 @@ where
     pub fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
         V: ExprVisitor,
+        Ast: RenderAst<V::Backend>,
     {
         self.ast.visit(visitor)
     }
@@ -1840,7 +1627,7 @@ where
 
 impl<'scope, T> IntoExpr<'scope> for T
 where
-    T: ExprKind + IntoBindValue,
+    T: ExprKind<Value = T> + Clone,
 {
     type Kind = T;
     type Ast = LiteralExprAst<T>;
@@ -1895,6 +1682,7 @@ where
     pub fn visit_expr<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
         V: ExprVisitor,
+        Ast: RenderAst<V::Backend>,
     {
         self.ast.visit(visitor)
     }
@@ -1963,6 +1751,7 @@ where
     pub fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
         V: PredicateAstVisitor,
+        Ast: RenderPredicateAst<V::Backend>,
     {
         self.ast.visit(visitor)
     }

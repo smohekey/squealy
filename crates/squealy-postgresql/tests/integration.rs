@@ -725,6 +725,79 @@ async fn postgres_runs_transaction_closures() {
     assert_eq!(users, vec!["Committed".to_owned()]);
 }
 
+#[cfg(feature = "uuid")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ColumnType)]
+#[column_type(db_type = "uuid")]
+struct IntegrationUuid(uuid::Uuid);
+
+#[cfg(feature = "uuid")]
+#[derive(Clone, Debug, PartialEq, Table)]
+struct IntegrationUuidRecord<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, IntegrationUuid>,
+    name: C::Type<'scope, String>,
+}
+
+#[cfg(feature = "uuid")]
+#[tokio::test]
+#[ignore]
+async fn postgres_round_trips_native_uuid() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS integration_uuid_records")
+        .await
+        .expect("drop old uuid table");
+
+    let ddl_backend = Postgres;
+    create_table::<IntegrationUuidRecord>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+    let id = IntegrationUuid(uuid::Uuid::from_u128(
+        0x0123_4567_89ab_cdef_0123_4567_89ab_cdef,
+    ));
+
+    let inserted = connection
+        .to::<IntegrationUuidRecord>()
+        .id(id)
+        .name("with-uuid")
+        .insert_returning(|record| record)
+        .fetch_one()
+        .await
+        .expect("insert uuid record");
+
+    assert_eq!(inserted.id, id);
+    assert_eq!(inserted.name, "with-uuid");
+
+    // The value round-trips through a real `uuid` column and filters correctly.
+    let ids = connection
+        .from::<IntegrationUuidRecord>()
+        .where_(|record| record.id.equals(id))
+        .select(|(record,)| record.id)
+        .collect()
+        .await
+        .expect("select uuid ids");
+
+    assert_eq!(ids, vec![id]);
+
+    // The custom `uuid` type also works as a prepared *runtime* parameter, not just an inline
+    // literal — supplying an `IntegrationUuid` to `param::<IntegrationUuid>()` encodes natively.
+    let uuid_param_select = connection
+        .from::<IntegrationUuidRecord>()
+        .where_(|record| record.id.equals(param::<IntegrationUuid>()))
+        .select(|(record,)| record.name);
+    let prepared = uuid_param_select
+        .prepare()
+        .await
+        .expect("prepare uuid-param select");
+    let names = prepared
+        .collect((id,))
+        .await
+        .expect("execute prepared uuid-param select");
+
+    assert_eq!(names, vec!["with-uuid".to_owned()]);
+}
+
 async fn create_table<S>(client: &tokio_postgres::Client, ddl_backend: &Postgres)
 where
     S: SchemaTable,
