@@ -322,6 +322,18 @@ impl TableStruct {
                     impl ::squealy::UpdateColumnKey for #expr_kind_ident {}
                 }
             });
+        // A nullable column's kind is `NullableExpr`, which gates the `is_null` / `is_not_null`
+        // predicate builders so they are only callable on columns that can actually be NULL.
+        let nullable_expr_impls = self
+            .fields
+            .iter()
+            .zip(expr_kind_idents.iter())
+            .filter(|(field, _)| field.nullable())
+            .map(|(_, expr_kind_ident)| {
+                quote::quote! {
+                    impl ::squealy::NullableExpr for #expr_kind_ident {}
+                }
+            });
 
         quote::quote! {
             #(#fk_type_assertions)*
@@ -361,6 +373,7 @@ impl TableStruct {
 
             #(#insert_column_key_impls)*
             #(#update_column_key_impls)*
+            #(#nullable_expr_impls)*
 
             #[doc(hidden)]
             #[derive(Clone, Copy, Debug, PartialEq, Eq)]

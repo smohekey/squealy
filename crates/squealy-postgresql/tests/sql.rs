@@ -1684,3 +1684,51 @@ fn postgres_defers_foreign_keys_until_all_tables_are_created() {
         "foreign key not deferred until after both tables were created: {sql}"
     );
 }
+
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Public)]
+struct Subscriber<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    #[column(nullable)]
+    nickname: C::Type<'scope, String>,
+}
+
+#[test]
+fn postgres_is_null_renders_is_null() {
+    let subscribers = Postgres
+        .from::<Subscriber>()
+        .where_(|subscriber| subscriber.nickname.is_null())
+        .select(|(subscriber,)| subscriber.id);
+
+    assert_eq!(
+        subscribers.to_sql(),
+        "SELECT q0_0.\"id\" AS \"id\" FROM \"public\".\"subscribers\" AS q0_0 WHERE (q0_0.\"nickname\" IS NULL)"
+    );
+    assert_eq!(
+        subscribers.collect_params().unwrap(),
+        Vec::<PostgresParam>::new()
+    );
+}
+
+#[test]
+fn postgres_is_not_null_composes_with_other_predicates() {
+    let subscribers = Postgres
+        .from::<Subscriber>()
+        .where_(|subscriber| {
+            subscriber
+                .nickname
+                .is_not_null()
+                .or(subscriber.id.equals(1))
+        })
+        .select(|(subscriber,)| subscriber.id);
+
+    assert_eq!(
+        subscribers.to_sql(),
+        "SELECT q0_0.\"id\" AS \"id\" FROM \"public\".\"subscribers\" AS q0_0 WHERE ((q0_0.\"nickname\" IS NOT NULL) OR (q0_0.\"id\" = $1))"
+    );
+    assert_eq!(
+        subscribers.collect_params().unwrap(),
+        vec![PostgresParam::Int32(1)]
+    );
+}

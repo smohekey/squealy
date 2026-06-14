@@ -330,6 +330,11 @@ pub trait PredicateAstVisitor: ExprVisitor {
     fn visit_not<P>(&mut self, predicate: P) -> Result<(), Self::Error>
     where
         P: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render a SQL `IS NULL` (or `IS NOT NULL` when `negated`) test of `operand`.
+    fn visit_is_null<O>(&mut self, negated: bool, operand: O) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>;
 }
 
 macro_rules! impl_value_expr_kind {
@@ -357,6 +362,16 @@ where
 {
     type Value = Option<K::Value>;
 }
+
+/// Marker for expression kinds that may be SQL `NULL`. It gates the `is_null` / `is_not_null`
+/// builders so they are only callable on nullable operands, making an `IS NULL` test of a column
+/// the type system knows is `NOT NULL` a compile error.
+///
+/// Implemented for [`Nullable<K>`] (outer-join projections and explicitly nullable expressions) and,
+/// by the `Table` derive, for the column kind of every `#[column(nullable)]` field.
+pub trait NullableExpr {}
+
+impl<K> NullableExpr for Nullable<K> {}
 
 /// Type-level identity for a prepared statement runtime parameter.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -472,6 +487,22 @@ pub enum NotPredicate<P> {
 
 impl<P> PredicateKind for NotPredicate<P> {}
 
+/// Type-level identity for a SQL `IS NULL` test of an expression of kind `K`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IsNullPredicate<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> PredicateKind for IsNullPredicate<K> {}
+
+/// Type-level identity for a SQL `IS NOT NULL` test of an expression of kind `K`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IsNotNullPredicate<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> PredicateKind for IsNotNullPredicate<K> {}
+
 #[doc(hidden)]
 pub trait PredicateAst: Clone {
     type Params: crate::HList;
@@ -514,6 +545,15 @@ pub struct OrPredicateAst<Left, Right> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct NotPredicateAst<Predicate> {
     predicate: Predicate,
+}
+
+/// Unary `IS NULL` / `IS NOT NULL` test of a single expression operand. `negated` selects
+/// `IS NOT NULL`; the operand's parameters flow straight through (a column contributes none).
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct NullCheckPredicateAst<Operand> {
+    operand: Operand,
+    negated: bool,
 }
 
 impl<Left, Right> PredicateAst for ComparePredicateAst<Left, Right>
@@ -615,6 +655,26 @@ where
         V: PredicateAstVisitor<Backend = B>,
     {
         visitor.visit_not(|visitor| self.predicate.visit(visitor))
+    }
+}
+
+impl<Operand> PredicateAst for NullCheckPredicateAst<Operand>
+where
+    Operand: ExprAst,
+{
+    type Params = Operand::Params;
+}
+
+impl<Operand, B> RenderPredicateAst<B> for NullCheckPredicateAst<Operand>
+where
+    Operand: RenderAst<B>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: PredicateAstVisitor<Backend = B>,
+    {
+        visitor.visit_is_null(self.negated, |visitor| self.operand.visit(visitor))
     }
 }
 
@@ -778,6 +838,26 @@ where
     /// Sort by this column in descending order.
     pub fn desc(self) -> Order<'scope, K, ColumnExprAst<K>> {
         self.into_expr().desc()
+    }
+}
+
+/// `IS NULL` / `IS NOT NULL` tests, available only on nullable columns (`K: NullableExpr`).
+impl<'scope, K> ColumnRef<'scope, K>
+where
+    K: ExprKind + NullableExpr,
+{
+    /// SQL `IS NULL`.
+    pub fn is_null(
+        self,
+    ) -> Predicate<'scope, IsNullPredicate<K>, NullCheckPredicateAst<ColumnExprAst<K>>> {
+        self.into_expr().is_null()
+    }
+
+    /// SQL `IS NOT NULL`.
+    pub fn is_not_null(
+        self,
+    ) -> Predicate<'scope, IsNotNullPredicate<K>, NullCheckPredicateAst<ColumnExprAst<K>>> {
+        self.into_expr().is_not_null()
     }
 }
 
@@ -994,6 +1074,33 @@ where
     /// Sort by this expression in descending order.
     pub fn desc(&self) -> Order<'scope, K, Ast> {
         Order::new(self.ast.clone(), OrderDirection::Desc)
+    }
+}
+
+/// `IS NULL` / `IS NOT NULL` tests are only available on nullable expressions (`K: NullableExpr`);
+/// calling them on a column the type system knows is `NOT NULL` is a compile error, since such a
+/// test would be a constant.
+impl<'scope, K, Ast> Expr<'scope, K, Ast>
+where
+    K: ExprKind + NullableExpr,
+    Ast: ExprAst,
+{
+    /// SQL `IS NULL`.
+    pub fn is_null(&self) -> Predicate<'scope, IsNullPredicate<K>, NullCheckPredicateAst<Ast>> {
+        Predicate::new(NullCheckPredicateAst {
+            operand: self.ast.clone(),
+            negated: false,
+        })
+    }
+
+    /// SQL `IS NOT NULL`.
+    pub fn is_not_null(
+        &self,
+    ) -> Predicate<'scope, IsNotNullPredicate<K>, NullCheckPredicateAst<Ast>> {
+        Predicate::new(NullCheckPredicateAst {
+            operand: self.ast.clone(),
+            negated: true,
+        })
     }
 }
 

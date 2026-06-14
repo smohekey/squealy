@@ -409,11 +409,12 @@ pub use dialect::Dialect;
 pub use expr::{
     AddExpr, AndPredicate, AnyPredicate, ArithmeticOp, BinaryExprAst, ColumnExprAst, ColumnRef,
     CompareOp, ComparePredicateAst, DivideExpr, EqualsPredicate, Expr, ExprAst, ExprKind,
-    ExprVisitor, GreaterThanOrEqualsPredicate, GreaterThanPredicate, IntoExpr,
-    LessThanOrEqualsPredicate, LessThanPredicate, LiteralExprAst, MultiplyExpr, NotEqualsPredicate,
-    NotPredicate, Nullable, OrPredicate, Order, OrderDirection, ParamExprAst, Predicate,
-    PredicateAst, PredicateAstVisitor, PredicateKind, RenderAst, RenderPredicateAst, RuntimeParam,
-    SameValue, SourceAlias, SqlDivide, SqlNumber, SubtractExpr, param,
+    ExprVisitor, GreaterThanOrEqualsPredicate, GreaterThanPredicate, IntoExpr, IsNotNullPredicate,
+    IsNullPredicate, LessThanOrEqualsPredicate, LessThanPredicate, LiteralExprAst, MultiplyExpr,
+    NotEqualsPredicate, NotPredicate, NullCheckPredicateAst, Nullable, NullableExpr, OrPredicate,
+    Order, OrderDirection, ParamExprAst, Predicate, PredicateAst, PredicateAstVisitor,
+    PredicateKind, RenderAst, RenderPredicateAst, RuntimeParam, SameValue, SourceAlias, SqlDivide,
+    SqlNumber, SubtractExpr, param,
 };
 pub use foreign_key::ForeignKey;
 pub use index::Index;
