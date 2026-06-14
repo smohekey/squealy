@@ -545,6 +545,9 @@ fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
         }
     };
 
+    // Single-column `#[column(unique)]` markers, then table-level `#[unique(columns = [..])]`
+    // composite constraints. The latter carry an optional explicit name and otherwise fall back to
+    // the same deterministic `uq_<table>_<columns>` convention.
     let uniques = columns
         .iter()
         .filter(|column| column.unique())
@@ -552,6 +555,19 @@ fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
             name: uq_name(&name, &[column.name()]),
             columns: vec![column.name().to_owned()],
         })
+        .chain(table.uniques().iter().map(|unique| {
+            Constraint {
+                name: unique
+                    .name
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| uq_name(&name, unique.columns)),
+                columns: unique
+                    .columns
+                    .iter()
+                    .map(|column| (*column).to_owned())
+                    .collect(),
+            }
+        }))
         .collect();
 
     let foreign_keys = columns
@@ -795,11 +811,36 @@ mod tests {
         id: C::Type<'scope, i64>,
     }
 
+    #[derive(Clone, Debug, PartialEq, Table)]
+    #[schema(Public)]
+    #[unique(columns = [organization_id, slug])]
+    struct Repository<'scope, C: ColumnMode = ColumnExpr> {
+        #[column(primary_key)]
+        id: C::Type<'scope, i64>,
+        organization_id: C::Type<'scope, i64>,
+        slug: C::Type<'scope, String>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Table)]
+    #[schema(Public)]
+    #[unique(name = "uq_widget_sku", columns = [tenant_id, sku])]
+    #[unique(columns = [tenant_id, label])]
+    struct Widget<'scope, C: ColumnMode = ColumnExpr> {
+        #[column(primary_key)]
+        id: C::Type<'scope, i64>,
+        #[column(unique)]
+        tenant_id: C::Type<'scope, i64>,
+        sku: C::Type<'scope, String>,
+        label: C::Type<'scope, String>,
+    }
+
     #[allow(dead_code)]
     #[derive(Schema)]
     struct CompositePublic {
         memberships: Membership<'static, ColumnName>,
         named_memberships: NamedMembership<'static, ColumnName>,
+        repositorys: Repository<'static, ColumnName>,
+        widgets: Widget<'static, ColumnName>,
     }
 
     #[allow(dead_code)]
@@ -833,6 +874,46 @@ mod tests {
                 name: "membership_pk".to_owned(),
                 columns: vec!["tenant_id".to_owned(), "id".to_owned()],
             })
+        );
+    }
+
+    #[test]
+    fn table_level_composite_unique_emits_constraint() {
+        let model = DatabaseModel::from_database::<CompositeApp>();
+        let repository = table(&model, "repositorys");
+
+        assert_eq!(
+            repository.uniques,
+            vec![Constraint {
+                name: "uq_repositorys_organization_id_slug".to_owned(),
+                columns: vec!["organization_id".to_owned(), "slug".to_owned()],
+            }]
+        );
+    }
+
+    #[test]
+    fn table_level_unique_combines_column_marker_name_override_and_multiples() {
+        let model = DatabaseModel::from_database::<CompositeApp>();
+        let widget = table(&model, "widgets");
+
+        // The single-column `#[column(unique)]` marker is hoisted first, then the two table-level
+        // `#[unique(...)]` declarations in source order; the first carries an explicit name.
+        assert_eq!(
+            widget.uniques,
+            vec![
+                Constraint {
+                    name: "uq_widgets_tenant_id".to_owned(),
+                    columns: vec!["tenant_id".to_owned()],
+                },
+                Constraint {
+                    name: "uq_widget_sku".to_owned(),
+                    columns: vec!["tenant_id".to_owned(), "sku".to_owned()],
+                },
+                Constraint {
+                    name: "uq_widgets_tenant_id_label".to_owned(),
+                    columns: vec!["tenant_id".to_owned(), "label".to_owned()],
+                },
+            ]
         );
     }
 
