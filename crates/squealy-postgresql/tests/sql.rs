@@ -1157,6 +1157,43 @@ fn postgres_renders_compound_primary_key() {
     );
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Catalog)]
+#[unique(columns = [organization_id, slug])]
+struct Repository<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, i32>,
+    organization_id: C::Type<'scope, i32>,
+    slug: C::Type<'scope, String>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct RepositoryCatalog {
+    repositorys: Repository<'static, ColumnName>,
+}
+
+#[allow(dead_code)]
+#[derive(Database)]
+struct RepositoryDb {
+    catalog: RepositoryCatalog,
+}
+
+#[test]
+fn postgres_renders_composite_unique_constraint() {
+    let model = DatabaseModel::from_database::<RepositoryDb>();
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CONSTRAINT \"uq_repositorys_organization_id_slug\" UNIQUE (\"organization_id\", \"slug\")"
+        ),
+        "expected composite UNIQUE constraint in: {sql}"
+    );
+}
+
 #[test]
 fn postgres_backend_writes_compound_primary_key_ddl() {
     // The query-side single-table `write_table` path must also honor a table-level primary key

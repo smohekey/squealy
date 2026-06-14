@@ -20,6 +20,7 @@ struct TableStruct {
     fields: Vec<Field>,
     indexes: Vec<IndexAttrs>,
     primary_key: Option<PrimaryKeyAttrs>,
+    uniques: Vec<UniqueAttrs>,
     schema: Option<proc_macro2::TokenStream>,
 }
 
@@ -40,10 +41,16 @@ struct PrimaryKeyAttrs {
     columns: Vec<Ident>,
 }
 
+struct UniqueAttrs {
+    name: Option<String>,
+    columns: Vec<Ident>,
+}
+
 #[derive(Default)]
 struct TableAttrs {
     indexes: Vec<IndexAttrs>,
     primary_key: Option<PrimaryKeyAttrs>,
+    uniques: Vec<UniqueAttrs>,
     schema: Option<proc_macro2::TokenStream>,
 }
 
@@ -283,6 +290,76 @@ impl TableStruct {
                 }
                 None => (quote::quote! {}, quote::quote! {}, quote::quote! {}),
             };
+        // Table-level `#[unique(columns = [..])]` constraints. Each one gets a static column-name
+        // list; the constraints themselves are gathered into a single static slice and surfaced
+        // through `uniques()` on both trait impls. Tables without any declaration fall through to
+        // the trait defaults (an empty slice).
+        let unique_column_statics = self
+            .uniques
+            .iter()
+            .enumerate()
+            .map(|(unique, attrs)| {
+                let columns_static =
+                    generated_ident(&ident, &format!("unique_{unique}"), "ColumnsStatic");
+                let columns = attrs
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        let column = column.to_string();
+                        let field = self
+                            .fields
+                            .iter()
+                            .find(|field| field.ident.to_string() == column)
+                            .expect("unique fields are validated before code generation");
+                        Literal::string(&field.column_name())
+                    })
+                    .collect::<Vec<_>>();
+                let columns_len = Literal::usize_unsuffixed(columns.len());
+                quote::quote! {
+                    static #columns_static: [&'static str; #columns_len] = [#( #columns, )*];
+                }
+            })
+            .collect::<Vec<_>>();
+        let unique_entries = self
+            .uniques
+            .iter()
+            .enumerate()
+            .map(|(unique, attrs)| {
+                let columns_static =
+                    generated_ident(&ident, &format!("unique_{unique}"), "ColumnsStatic");
+                let name = option_literal(attrs.name.as_deref());
+                quote::quote! {
+                    ::squealy::TableUnique {
+                        name: #name,
+                        columns: &#columns_static,
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        let uniques_static = generated_ident(&ident, "uniques", "Static");
+        let uniques_len = Literal::usize_unsuffixed(unique_entries.len());
+        let (uniques_static_def, table_uniques_method, schema_uniques_method) =
+            if self.uniques.is_empty() {
+                (quote::quote! {}, quote::quote! {}, quote::quote! {})
+            } else {
+                (
+                    quote::quote! {
+                        #( #unique_column_statics )*
+                        static #uniques_static: [::squealy::TableUnique; #uniques_len] =
+                            [#( #unique_entries, )*];
+                    },
+                    quote::quote! {
+                        fn uniques(&self) -> &'static [::squealy::TableUnique] {
+                            <Self as ::squealy::SchemaTable>::uniques()
+                        }
+                    },
+                    quote::quote! {
+                        fn uniques() -> &'static [::squealy::TableUnique] {
+                            &#uniques_static
+                        }
+                    },
+                )
+            };
         let schema = self
             .schema
             .clone()
@@ -397,6 +474,7 @@ impl TableStruct {
             static #columns_static: [&'static dyn ::squealy::Column; #columns_len] = [#( &#column_idents, )*];
             static #indexes_static: [&'static dyn ::squealy::Index; #indexes_len] = [#( &#index_idents, )*];
             #primary_key_static_def
+            #uniques_static_def
 
             impl<'scope, C: ::squealy::ColumnMode> ::squealy::Table for #ident <'scope, C> {
                 fn schema_name(&self) -> Option<&'static str> {
@@ -416,6 +494,7 @@ impl TableStruct {
                 }
 
                 #table_primary_key_method
+                #table_uniques_method
             }
 
             impl<'scope, C: ::squealy::ColumnMode> ::squealy::SchemaTable for #ident <'scope, C> {
@@ -442,6 +521,7 @@ impl TableStruct {
                 }
 
                 #schema_primary_key_method
+                #schema_uniques_method
 
                 fn column_names() -> Self::WithColumn<'static, ::squealy::ColumnName> {
                     #ident { #( #fields: #field_literals, )* }
@@ -1586,6 +1666,7 @@ fn table_struct(input: TokenStream) -> Result<TableStruct, MacroError> {
     let table_attrs = table_attributes(&tokens[..struct_index])?;
     validate_index_columns(&table_attrs.indexes, &fields)?;
     validate_primary_key(table_attrs.primary_key.as_ref(), &fields)?;
+    validate_unique_columns(&table_attrs.uniques, &fields)?;
     validate_field_attrs(&fields)?;
 
     Ok(TableStruct {
@@ -1594,6 +1675,7 @@ fn table_struct(input: TokenStream) -> Result<TableStruct, MacroError> {
         fields,
         indexes: table_attrs.indexes,
         primary_key: table_attrs.primary_key,
+        uniques: table_attrs.uniques,
         schema: table_attrs.schema,
     })
 }
@@ -1753,6 +1835,16 @@ fn apply_table_attribute(group: &Group, attrs: &mut TableAttrs) -> Result<(), St
                 meta.stream().into_iter().collect::<Vec<_>>(),
             )?);
         }
+        "unique" => {
+            let Some(TokenTree::Group(meta)) = tokens.next() else {
+                return Err(
+                    "table-level #[unique(...)] requires metadata inside parentheses".to_owned(),
+                );
+            };
+            attrs
+                .uniques
+                .push(parse_unique(meta.stream().into_iter().collect::<Vec<_>>())?);
+        }
         "schema" => {
             let Some(TokenTree::Group(schema)) = tokens.next() else {
                 return Err("table-level #[schema(...)] requires a schema type".to_owned());
@@ -1891,6 +1983,64 @@ fn parse_primary_key(tokens: Vec<TokenTree>) -> Result<PrimaryKeyAttrs, String> 
     Ok(attrs)
 }
 
+fn parse_unique(tokens: Vec<TokenTree>) -> Result<UniqueAttrs, String> {
+    let mut index = 0;
+    let mut attrs = UniqueAttrs {
+        name: None,
+        columns: Vec::new(),
+    };
+
+    while index < tokens.len() {
+        while matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == ',') {
+            index += 1;
+        }
+
+        let Some(TokenTree::Ident(name)) = tokens.get(index) else {
+            break;
+        };
+        let name = name.to_string();
+        index += 1;
+
+        match name.as_str() {
+            "name" => {
+                if !matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '=')
+                {
+                    return Err("unique option `name` requires a string value".to_owned());
+                }
+                index += 1;
+                attrs.name = Some(match tokens.get(index) {
+                    Some(TokenTree::Literal(literal)) => literal_string(literal),
+                    Some(token) => token.to_string(),
+                    None => return Err("unique option `name` is missing a value".to_owned()),
+                });
+                index += 1;
+            }
+            "columns" => {
+                if !matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '=')
+                {
+                    return Err("unique option `columns` requires a bracketed field list".to_owned());
+                }
+                index += 1;
+                let Some(TokenTree::Group(columns)) = tokens.get(index) else {
+                    return Err("unique option `columns` requires a bracketed field list".to_owned());
+                };
+                if columns.delimiter() != Delimiter::Bracket {
+                    return Err("unique option `columns` requires square brackets".to_owned());
+                }
+                attrs.columns = parse_index_columns(columns)?;
+                index += 1;
+            }
+            _ => return Err(format!("unsupported unique option `{name}`")),
+        }
+    }
+
+    if attrs.columns.is_empty() {
+        return Err("table-level #[unique(...)] requires at least one column".to_owned());
+    }
+
+    Ok(attrs)
+}
+
 fn parse_index_columns(group: &Group) -> Result<Vec<Ident>, String> {
     let mut columns = Vec::new();
     for token in group.stream() {
@@ -1948,6 +2098,19 @@ fn validate_index_columns(indexes: &[IndexAttrs], fields: &[Field]) -> Result<()
             let column = column.to_string();
             if !fields.iter().any(|field| field.ident.to_string() == column) {
                 return Err(format!("index references unknown field `{column}`"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_unique_columns(uniques: &[UniqueAttrs], fields: &[Field]) -> Result<(), String> {
+    for unique in uniques {
+        for column in &unique.columns {
+            let column = column.to_string();
+            if !fields.iter().any(|field| field.ident.to_string() == column) {
+                return Err(format!("unique constraint references unknown field `{column}`"));
             }
         }
     }
