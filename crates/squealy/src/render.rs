@@ -1296,6 +1296,19 @@ where
         predicate(self)?;
         self.writer.write_all(b")")
     }
+
+    fn visit_is_null<O>(&mut self, negated: bool, operand: O) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        self.writer.write_all(b"(")?;
+        operand(self)?;
+        if negated {
+            self.writer.write_all(b" IS NOT NULL)")
+        } else {
+            self.writer.write_all(b" IS NULL)")
+        }
+    }
 }
 
 fn render_arithmetic_op(op: ArithmeticOp) -> &'static str {

@@ -1,0 +1,16 @@
+error[E0599]: the method `is_null` exists for struct `ColumnRef<'_, AccountName>`, but its trait bounds were not satisfied
+  --> tests/compile_fail/is_null_requires_nullable_column.rs:15:40
+   |
+ 4 | #[derive(Clone, Debug, PartialEq, Table)]
+   |                                   ----- doesn't satisfy `AccountName: NullableExpr`
+...
+15 |         .where_(|account| account.name.is_null())
+   |                                        ^^^^^^^ method cannot be called on `ColumnRef<'_, AccountName>` due to unsatisfied trait bounds
+   |
+   = note: the following trait bounds were not satisfied:
+           `AccountName: NullableExpr`
+note: the trait `NullableExpr` must be implemented
+  --> src/expr.rs
+   |
+   | pub trait NullableExpr {}
+   | ^^^^^^^^^^^^^^^^^^^^^^
