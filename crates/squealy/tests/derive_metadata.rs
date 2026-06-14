@@ -515,7 +515,11 @@ fn assert_optional_i32_row(_: &impl HasSelectRow<Option<i32>>) {}
 
 fn assert_user_id_and_post_row(_: &impl HasSelectRow<(i32, __SquealyPostRowShape)>) {}
 
-fn assert_user_id_name_and_post_row(_: &impl HasSelectRow<(i32, String, __SquealyPostRowShape)>) {}
+// `name` is `#[column(nullable)]`, so projecting it in a tuple decodes as `Option<String>`.
+fn assert_user_id_name_and_post_row(
+    _: &impl HasSelectRow<(i32, Option<String>, __SquealyPostRowShape)>,
+) {
+}
 
 fn assert_user_id_post_id_title_row(_: &impl HasSelectRow<(i32, i32, String)>) {}
 
@@ -567,7 +571,8 @@ where
 
 fn assert_insert_i32_row(_: &impl HasInsertRow<i32>) {}
 
-fn assert_update_id_name_row(_: &impl HasUpdateRow<(i32, String)>) {}
+// `name` is `#[column(nullable)]`, so a `RETURNING` projection of it decodes as `Option<String>`.
+fn assert_update_id_name_row(_: &impl HasUpdateRow<(i32, Option<String>)>) {}
 
 fn assert_delete_user_row(_: &impl HasDeleteRow<__SquealyUserRowShape>) {}
 
@@ -1247,6 +1252,29 @@ fn select_can_project_three_part_tuple_shapes() {
         user_ids_names_and_posts.to_sql(),
         r#"SELECT q0_0.id AS t0_id, q0_0.name AS t1_name, q0_1.id AS t2_id, q0_1.user_id AS t2_user_id, q0_1.body AS t2_body FROM public.users AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id)"#
     );
+}
+
+#[test]
+fn select_projects_nullable_column_as_option() {
+    // Regression (git-bug a2b1909): a `#[column(nullable)]` column projected in a tuple decodes as
+    // `Option<T>` — matching how the whole-row decode already treats it — rather than bare `T`,
+    // which fails to decode a SQL NULL. `User::name` is nullable; `User::id` is not.
+    fn assert_id_and_optional_name(_: &impl HasSelectRow<(i32, Option<String>)>) {}
+    fn assert_optional_name(_: &impl HasSelectRow<Option<String>>) {}
+    fn assert_id(_: &impl HasSelectRow<i32>) {}
+
+    let id_and_name = TestConnection
+        .from::<User>()
+        .select(|(user,)| (user.id, user.name));
+    assert_id_and_optional_name(&id_and_name);
+
+    // A single nullable-column projection is `Option<T>` too.
+    let names = TestConnection.from::<User>().select(|(user,)| user.name);
+    assert_optional_name(&names);
+
+    // A non-null column still projects as its bare value type.
+    let ids = TestConnection.from::<User>().select(|(user,)| user.id);
+    assert_id(&ids);
 }
 
 #[test]
