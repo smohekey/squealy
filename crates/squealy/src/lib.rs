@@ -377,6 +377,7 @@ mod backend;
 mod column;
 mod connection;
 mod database;
+mod dialect;
 mod expr;
 mod foreign_key;
 mod index;
@@ -385,6 +386,10 @@ mod model;
 mod plan;
 mod projection;
 mod query;
+// The shared SQL query renderer. Public so backend crates can call its entry points, but hidden from
+// the documented API — it is an implementation detail backends drive via their `Dialect`.
+#[doc(hidden)]
+pub mod render;
 mod schema;
 mod table;
 
@@ -392,6 +397,7 @@ pub use backend::{
     Backend, ConstraintCapabilities, DdlExecutor, Decode, DecodeNullable, IndexCapabilities,
     RowReader, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect,
     SchemaMetadataStore, SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore,
+    SupportsReturning,
 };
 pub use column::{
     Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullableValue, ColumnType,
@@ -399,6 +405,7 @@ pub use column::{
 };
 pub use connection::{Connection, ConnectionWithTransaction, QueryBuilder};
 pub use database::Database;
+pub use dialect::Dialect;
 pub use expr::{
     AddExpr, AndPredicate, AnyPredicate, ArithmeticOp, BinaryExprAst, BindValue, BindValueKind,
     ColumnExprAst, ColumnRef, CompareOp, ComparePredicateAst, DivideExpr, EqualsPredicate, Expr,

@@ -79,6 +79,12 @@ pub trait Backend: Sized {
     fn write_table(&self, table: &(dyn Table + Sync), writer: &mut impl Write) -> io::Result<()>;
 }
 
+/// Marker for backends whose dialect supports a `RETURNING` clause on data-modifying statements
+/// (PostgreSQL). The `insert_returning`/`update_returning`/`delete_returning` builders require it, so
+/// a backend that does not implement it (such as MySQL, which has no `RETURNING`) rejects those
+/// queries at compile time rather than failing at runtime.
+pub trait SupportsReturning: Backend {}
+
 /// Backend schema-management capabilities that are supported for full DDL/introspection
 /// round-trips.
 ///
