@@ -350,6 +350,13 @@ impl_value_expr_kind!(u8, u16, u32, u64, u128, usize);
 impl_value_expr_kind!(f32, f64);
 impl_value_expr_kind!(String, bool);
 
+/// A `uuid::Uuid` value can be used as a literal predicate operand (`col.equals(id)`) or a
+/// write-builder setter (`.id(id)`), like the scalar value types above.
+#[cfg(feature = "uuid")]
+impl ExprKind for uuid::Uuid {
+    type Value = uuid::Uuid;
+}
+
 // Native timestamp values can be used as literal predicate operands and write-builder setters.
 #[cfg(feature = "systemtime")]
 impl_value_expr_kind!(std::time::SystemTime);

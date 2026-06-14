@@ -91,6 +91,13 @@ database DDL. For example, the PostgreSQL backend renders `i32` as `integer` and
 `varchar(64)`, `jsonb`, or a domain type. If a custom field type does not implement
 [`HasColumnType`] and does not provide `db_type`, the table derive fails to compile.
 
+Enabling the `uuid` feature maps a bare `uuid::Uuid` field to a `uuid` column (no `db_type`
+override needed) and lets a `Uuid` value be used directly in the query builder — as a predicate
+operand (`col.equals(id)`) and as a write-builder setter (`.id(id)`). It also covers nullable UUID
+columns (`#[column(nullable)]`) and left-joined UUID tables. Pair it with a backend that implements
+`Encode`/`Decode` for `uuid::Uuid` (the PostgreSQL backend's own `uuid` feature does, and turns on
+`squealy/uuid` for you).
+
 Timestamp columns are available behind feature flags: `systemtime` maps `std::time::SystemTime`
 to a `timestamptz` column with no extra dependency, while `time` and `chrono` map
 `time::OffsetDateTime` and `chrono::DateTime<Utc>` respectively. Each works in both non-null and
@@ -123,6 +130,16 @@ struct Event<'scope, C: ColumnMode = ColumnExpr> {
 `#[schema(Type)]` attaches a table to a schema namespace. `#[derive(Schema)]` lists the tables
 in that namespace, and `#[derive(Database)]` lists schemas for DDL/backends that want database
 metadata.
+
+Constraints spanning more than one column are declared as table-level attributes on the struct:
+
+- `#[primary_key(columns = [a, b])]` for a composite primary key,
+- `#[unique(columns = [a, b], name = "...")]` for a composite unique constraint (repeatable;
+  `name` is optional and defaults to `uq_<table>_<columns>`),
+- `#[index(columns = [a, b], unique, name = "...")]` for a multi-column index.
+
+The single-column forms `#[column(primary_key)]`, `#[column(unique)]`, and `#[column(index)]`
+remain available for one-column constraints.
 
 ### Stream rows from select queries
 

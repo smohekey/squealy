@@ -1649,6 +1649,7 @@ dependencies = [
  "squealy-test",
  "time",
  "trybuild",
+ "uuid",
 ]
 
 [[package]]

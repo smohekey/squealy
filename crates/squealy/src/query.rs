@@ -579,6 +579,11 @@ impl_nullable_assignment_value! {
     bool,
 }
 
+// Native `uuid` column support: a bare `uuid::Uuid` value can be assigned to a nullable UUID column
+// (`.col(id)`). `Some(id)` / `None` already route through the generic `Option<T>` impls below.
+#[cfg(feature = "uuid")]
+impl_nullable_assignment_value! { uuid::Uuid }
+
 // Native timestamp values can be assigned to a nullable timestamp column (`.col(ts)`); `Some`/`None`
 // route through the generic `Option<T>` impls below.
 #[cfg(feature = "systemtime")]

@@ -198,6 +198,20 @@ struct DerivedColumnTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
     labels: C::Type<'scope, VarcharArrayColumn>,
 }
 
+// A bare `uuid::Uuid` field maps to a `uuid` column without a `#[column(db_type = "uuid")]`
+// override (HasColumnType), and a `Uuid` value can be used in the query builder (ExprKind).
+#[cfg(feature = "uuid")]
+#[derive(Clone, Debug, PartialEq, Table)]
+struct UuidKeyed<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, uuid::Uuid>,
+    // A nullable bare-`uuid::Uuid` column exercises the `DecodeNullable` and
+    // `IntoNullableAssignmentValue` paths the table derive emits for nullable fields.
+    #[column(nullable)]
+    parent_id: C::Type<'scope, uuid::Uuid>,
+    slug: C::Type<'scope, String>,
+}
+
 // A bare `SystemTime` field maps to a `timestamptz` column (HasColumnType) and a `SystemTime` value
 // can be used in the query builder (ExprKind), including assigning to a nullable timestamp column.
 #[cfg(feature = "systemtime")]
@@ -331,6 +345,47 @@ fn derive_table_parses_db_type_into_structured_column_type() {
     );
     // Unrecognized db_type stays verbatim.
     assert_eq!(columns[5].column_type(), ColumnType::Raw("citext"));
+}
+
+#[cfg(feature = "uuid")]
+#[test]
+fn uuid_columns_map_and_build_queries() {
+    // HasColumnType: a bare `uuid::Uuid` field maps to a `uuid` column.
+    let columns = <UuidKeyed as SchemaTable>::columns();
+    assert_eq!(columns[0].column_type(), ColumnType::Uuid);
+    assert_eq!(<uuid::Uuid as HasColumnType>::COLUMN_TYPE, ColumnType::Uuid);
+
+    // ExprKind: a `Uuid` value works as a literal predicate operand and a write-builder setter.
+    // Building these forms is exactly what failed to compile before `ExprKind` existed; rendering
+    // them additionally needs a backend `Encode<uuid::Uuid>`, which the test backend omits.
+    let id = uuid::Uuid::from_u128(0x1234_5678_1234_5678_1234_5678_1234_5678);
+    let _select = TestConnection
+        .from::<UuidKeyed>()
+        .where_(|row| row.id.equals(id))
+        .select(|(row,)| row.slug);
+    let _insert = TestConnection
+        .to::<UuidKeyed>()
+        .id(id)
+        .slug("acme".to_owned())
+        .insert();
+    let _delete = TestConnection
+        .from::<UuidKeyed>()
+        .where_(|row| row.id.equals(id))
+        .delete();
+
+    // Nullable column: assigning a bare `Uuid` value exercises the new `IntoNullableAssignmentValue`
+    // / `IntoNullableInsertAssignmentValue` entry; `None` routes through the generic `Option<T>` impl.
+    let _insert_nullable = TestConnection
+        .to::<UuidKeyed>()
+        .id(id)
+        .parent_id(id)
+        .slug("acme".to_owned())
+        .insert();
+    let _update_null = TestConnection
+        .to::<UuidKeyed>()
+        .parent_id(None::<uuid::Uuid>)
+        .where_(|row| row.id.equals(id))
+        .update();
 }
 
 #[cfg(feature = "systemtime")]

@@ -61,6 +61,10 @@ impl SchemaStruct {
                         fn primary_key(&self) -> Option<::squealy::TablePrimaryKey> {
                             <#table_type as ::squealy::SchemaTable>::primary_key()
                         }
+
+                        fn uniques(&self) -> &'static [::squealy::TableUnique] {
+                            <#table_type as ::squealy::SchemaTable>::uniques()
+                        }
                     }
                 }
             })

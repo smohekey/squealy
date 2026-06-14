@@ -67,6 +67,12 @@ impl_decode_nullable_via_option! {
     bool,
 }
 
+// Native `uuid` column support: a `uuid::Uuid` field can appear in a nullable column or in a
+// left-joined row, both of which require `DecodeNullable`. Resolves only on backends that provide
+// `Decode<B> for Option<uuid::Uuid>` (the PostgreSQL backend does, behind its own `uuid` feature).
+#[cfg(feature = "uuid")]
+impl_decode_nullable_via_option! { uuid::Uuid }
+
 // Native timestamp columns are commonly nullable (`deleted_at`, `expires_at`), which makes the
 // table derive emit a `DecodeNullable` bound. Resolves only on backends that provide
 // `Decode<B> for Option<T>` for the type, behind the same feature.

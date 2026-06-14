@@ -87,6 +87,19 @@
 //! `varchar(64)`, `jsonb`, or a domain type. If a custom field type does not implement
 //! [`HasColumnType`] and does not provide `db_type`, the table derive fails to compile.
 //!
+//! Enabling the `uuid` feature maps a bare `uuid::Uuid` field to a `uuid` column (no `db_type`
+//! override needed) and lets a `Uuid` value be used directly in the query builder — as a predicate
+//! operand (`col.equals(id)`) and as a write-builder setter (`.id(id)`). It also covers nullable UUID
+//! columns (`#[column(nullable)]`) and left-joined UUID tables. Pair it with a backend that implements
+//! `Encode`/`Decode` for `uuid::Uuid` (the PostgreSQL backend's own `uuid` feature does, and turns on
+//! `squealy/uuid` for you).
+//!
+//! Timestamp columns are available behind feature flags: `systemtime` maps `std::time::SystemTime`
+//! to a `timestamptz` column with no extra dependency, while `time` and `chrono` map
+//! `time::OffsetDateTime` and `chrono::DateTime<Utc>` respectively. Each works in both non-null and
+//! nullable (`#[column(nullable)]`) columns and in the query builder, paired with a backend that
+//! enables the matching feature (the PostgreSQL backend turns on the core feature for you).
+//!
 //! For newtype wrappers, derive `ColumnType` on the wrapper. Single-field tuple structs and
 //! single-field named structs are transparent by default, so the wrapper uses the same database
 //! type, bind conversion, row decoding, and literal expression support as its inner value. Use
@@ -113,6 +126,16 @@
 //! `#[schema(Type)]` attaches a table to a schema namespace. `#[derive(Schema)]` lists the tables
 //! in that namespace, and `#[derive(Database)]` lists schemas for DDL/backends that want database
 //! metadata.
+//!
+//! Constraints spanning more than one column are declared as table-level attributes on the struct:
+//!
+//! - `#[primary_key(columns = [a, b])]` for a composite primary key,
+//! - `#[unique(columns = [a, b], name = "...")]` for a composite unique constraint (repeatable;
+//!   `name` is optional and defaults to `uq_<table>_<columns>`),
+//! - `#[index(columns = [a, b], unique, name = "...")]` for a multi-column index.
+//!
+//! The single-column forms `#[column(primary_key)]`, `#[column(unique)]`, and `#[column(index)]`
+//! remain available for one-column constraints.
 //!
 //! ## Stream rows from select queries
 //!
@@ -455,5 +478,6 @@ pub use query::{
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{ColumnType, Database, Schema, Table};
 pub use table::{
-    InsertableTable, SchemaTable, Table, TablePrimaryKey, UpdateableTable, WriteableTable,
+    InsertableTable, SchemaTable, Table, TablePrimaryKey, TableUnique, UpdateableTable,
+    WriteableTable,
 };

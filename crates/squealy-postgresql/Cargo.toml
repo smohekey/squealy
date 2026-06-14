@@ -15,8 +15,10 @@ default = []
 # default so query-only users carry none of it; the management engine and CLI enable it. Pulls tokio
 # for spawning the connection task in SchemaConnect, and tracing for reporting connection failures.
 schema = ["dep:tokio", "dep:tracing"]
-# Native `uuid` column support: Encode/Decode for uuid::Uuid against a real `uuid` column.
-uuid = ["dep:uuid", "tokio-postgres/with-uuid-1"]
+# Native `uuid` column support: Encode/Decode for uuid::Uuid against a real `uuid` column. Enables
+# the core `uuid` feature so a bare `uuid::Uuid` field maps to a `uuid` column and a `Uuid` value can
+# be used in the query builder.
+uuid = ["dep:uuid", "tokio-postgres/with-uuid-1", "squealy/uuid"]
 # serde-backed `Json<T>`: any T: Serialize/DeserializeOwned encodes to / decodes from a jsonb column.
 serde = ["dep:serde", "dep:serde_json", "tokio-postgres/with-serde_json-1"]
 # Native timestamp columns mapped to `timestamptz`. Each enables the matching core feature and the
