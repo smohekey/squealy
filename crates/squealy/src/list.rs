@@ -77,127 +77,69 @@ pub trait ToTuple {
     fn to_tuple(self) -> Self::Tuple;
 }
 
-/// Receives bind values while a query or prepared parameter list is traversed.
-pub trait BindSink {
-    type Error;
-
-    fn reserve_bind_values(&mut self, additional: usize) {
-        _ = additional;
-    }
-
-    fn push_bind_value(&mut self, value: crate::BindValue) -> Result<(), Self::Error>;
-}
-
 /// Runtime values supplied when executing a prepared statement.
-pub trait PreparedParamValues<Shape>
+///
+/// Parameterized by the backend `B` (mirroring how the row type is `Decode<B>`) so that
+/// each supplied value can be encoded via [`Encode<B>`](crate::Encode) directly into the
+/// backend's [`ParamWriter`](crate::ParamWriter), with no neutral intermediate.
+pub trait PreparedParamValues<Shape, B>
 where
     Shape: HList,
+    B: crate::Backend,
 {
-    fn write_bind_values<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
-    where
-        Sink: BindSink;
+    fn write_params(&self, writer: &mut B::ParamWriter<'_>) -> Result<(), B::Error>;
 
-    fn write_bind_value_at<Sink>(&self, index: usize, sink: &mut Sink) -> Result<bool, Sink::Error>
-    where
-        Sink: BindSink;
-
-    /// Collect prepared bind values into a newly allocated vector.
-    ///
-    /// Use [`Self::write_bind_values`] when the caller can consume values without
-    /// allocation.
-    fn collect_bind_values(&self) -> Vec<crate::BindValue> {
-        let mut values = Vec::with_capacity(Shape::LEN);
-        self.write_bind_values(&mut values)
-            .unwrap_or_else(|error| match error {});
-        values
-    }
+    fn write_param_at(
+        &self,
+        index: usize,
+        writer: &mut B::ParamWriter<'_>,
+    ) -> Result<bool, B::Error>;
 }
 
-/// Converts a value supplied to a prepared statement into a bind value for a
-/// specific runtime-parameter shape entry.
+/// Coerces a value supplied to a prepared statement into its runtime-parameter shape
+/// entry type, which the backend then encodes via [`Encode`](crate::Encode).
+///
+/// This carries the type-level check that a supplied value is compatible with the
+/// query's declared parameter type (e.g. `&str` for a `String` parameter), and performs
+/// any owning conversion that requires. The resulting value is encoded by the backend.
 pub trait IntoPreparedParam<T> {
-    fn into_prepared_param(self) -> crate::BindValue;
+    fn into_prepared_param(self) -> T;
 }
 
-macro_rules! impl_prepared_param {
-    ($($ty:ty),* $(,)?) => {
-        $(
-            impl IntoPreparedParam<$ty> for $ty {
-                fn into_prepared_param(self) -> crate::BindValue {
-                    crate::IntoBindValue::into_bind_value(self)
-                }
-            }
-        )*
-    };
-}
-
-impl_prepared_param! {
-    i8, i16, i32, i64, i128, isize,
-    u8, u16, u32, u64, u128, usize,
-    f32, f64,
-    bool,
-}
-
-impl IntoPreparedParam<String> for String {
-    fn into_prepared_param(self) -> crate::BindValue {
-        crate::IntoBindValue::into_bind_value(self)
+/// Reflexive identity: any value can be supplied for a parameter of its own type.
+///
+/// This is what keeps the open codec usable for prepared *runtime* parameters, not just inline
+/// literals: a custom type that implements [`Encode<B>`](crate::Encode) — for example a derived
+/// newtype over `uuid::Uuid`, or a backend's `Json<T>` wrapper — can be passed to `param::<T>()`
+/// with no extra impl. The convenience borrow conversions below (`&str` → `String`, etc.) cover the
+/// non-reflexive cases and do not overlap, since their `Self` and target types differ.
+impl<T> IntoPreparedParam<T> for T {
+    fn into_prepared_param(self) -> T {
+        self
     }
 }
 
 impl IntoPreparedParam<String> for &str {
-    fn into_prepared_param(self) -> crate::BindValue {
-        crate::IntoBindValue::into_bind_value(self)
+    fn into_prepared_param(self) -> String {
+        self.to_owned()
     }
 }
 
 impl IntoPreparedParam<String> for &String {
-    fn into_prepared_param(self) -> crate::BindValue {
-        crate::IntoBindValue::into_bind_value(self)
+    fn into_prepared_param(self) -> String {
+        self.clone()
     }
 }
 
-macro_rules! impl_nullable_prepared_param {
-    ($($ty:ty),* $(,)?) => {
-        $(
-            impl IntoPreparedParam<Option<$ty>> for Option<$ty> {
-                fn into_prepared_param(self) -> crate::BindValue {
-                    crate::IntoNullableBindValue::<$ty>::into_nullable_bind_value(self)
-                }
-            }
-        )*
-    };
-}
-
-impl_nullable_prepared_param! {
-    i8, i16, i32, i64, i128, isize,
-    u8, u16, u32, u64, u128, usize,
-    f32, f64,
-    bool,
-    String,
-}
-
 impl IntoPreparedParam<Option<String>> for Option<&str> {
-    fn into_prepared_param(self) -> crate::BindValue {
-        crate::IntoNullableBindValue::<String>::into_nullable_bind_value(self)
+    fn into_prepared_param(self) -> Option<String> {
+        self.map(str::to_owned)
     }
 }
 
 impl IntoPreparedParam<Option<String>> for Option<&String> {
-    fn into_prepared_param(self) -> crate::BindValue {
-        crate::IntoNullableBindValue::<String>::into_nullable_bind_value(self)
-    }
-}
-
-impl BindSink for Vec<crate::BindValue> {
-    type Error = std::convert::Infallible;
-
-    fn reserve_bind_values(&mut self, additional: usize) {
-        self.reserve(additional);
-    }
-
-    fn push_bind_value(&mut self, value: crate::BindValue) -> Result<(), Self::Error> {
-        self.push(value);
-        Ok(())
+    fn into_prepared_param(self) -> Option<String> {
+        self.cloned()
     }
 }
 
@@ -295,22 +237,19 @@ impl ToTuple for HNil {
     fn to_tuple(self) -> Self::Tuple {}
 }
 
-impl PreparedParamValues<HNil> for () {
-    fn write_bind_values<Sink>(&self, _sink: &mut Sink) -> Result<(), Sink::Error>
-    where
-        Sink: BindSink,
-    {
+impl<B> PreparedParamValues<HNil, B> for ()
+where
+    B: crate::Backend,
+{
+    fn write_params(&self, _writer: &mut B::ParamWriter<'_>) -> Result<(), B::Error> {
         Ok(())
     }
 
-    fn write_bind_value_at<Sink>(
+    fn write_param_at(
         &self,
         _index: usize,
-        _sink: &mut Sink,
-    ) -> Result<bool, Sink::Error>
-    where
-        Sink: BindSink,
-    {
+        _writer: &mut B::ParamWriter<'_>,
+    ) -> Result<bool, B::Error> {
         Ok(false)
     }
 }

@@ -469,32 +469,31 @@ fn prepared_param_value(arity: usize) -> proc_macro2::TokenStream {
     });
 
     quote::quote! {
-        impl<#(#types,)* #(#values),*> PreparedParamValues<#hlist_type> for (#(#values,)*)
+        impl<B, #(#types,)* #(#values),*> PreparedParamValues<#hlist_type, B> for (#(#values,)*)
         where
+            B: crate::Backend,
             #(#values: crate::IntoPreparedParam<#types> + Clone,)*
+            #(#types: crate::Encode<B>,)*
         {
-            fn write_bind_values<Sink>(&self, sink: &mut Sink) -> ::std::result::Result<(), Sink::Error>
-            where
-                Sink: crate::BindSink,
-            {
+            fn write_params(
+                &self,
+                writer: &mut <B as crate::Backend>::ParamWriter<'_>,
+            ) -> ::std::result::Result<(), <B as crate::Backend>::Error> {
                 #(
-                    sink.push_bind_value(self.#fields.clone().into_prepared_param())?;
+                    crate::ParamWriter::write(writer, &self.#fields.clone().into_prepared_param())?;
                 )*
                 Ok(())
             }
 
-            fn write_bind_value_at<Sink>(
+            fn write_param_at(
                 &self,
                 index: usize,
-                sink: &mut Sink,
-            ) -> ::std::result::Result<bool, Sink::Error>
-            where
-                Sink: crate::BindSink,
-            {
+                writer: &mut <B as crate::Backend>::ParamWriter<'_>,
+            ) -> ::std::result::Result<bool, <B as crate::Backend>::Error> {
                 match index {
                     #(
                         #fields => {
-                            sink.push_bind_value(self.#fields.clone().into_prepared_param())?;
+                            crate::ParamWriter::write(writer, &self.#fields.clone().into_prepared_param())?;
                             Ok(true)
                         }
                     )*
@@ -576,31 +575,6 @@ fn tuple_projection_shape(arity: usize) -> proc_macro2::TokenStream {
                 #(<#types as Projectable>::Rebound<'scope>,)*
             );
 
-            fn visit_projection<V>(&self, visitor: &mut V) -> Result<(), V::Error>
-            where
-                V: ProjectionVisitor,
-            {
-                #(
-                    self.#fields.visit_projection_with_prefix(#prefixes, visitor)?;
-                )*
-                Ok(())
-            }
-
-            fn visit_projection_with_prefix<V>(
-                &self,
-                prefix: &str,
-                visitor: &mut V,
-            ) -> Result<(), V::Error>
-            where
-                V: ProjectionVisitor,
-            {
-                #(
-                    self.#fields
-                        .visit_projection_with_prefix(&format!("{prefix}_{}", #prefixes), visitor)?;
-                )*
-                Ok(())
-            }
-
             fn re_alias<'scope>(&self, alias: SourceAlias) -> Self::Rebound<'scope> {
                 (
                     #(self.#fields.re_alias_with_prefix(alias, #prefixes),)*
@@ -618,6 +592,39 @@ fn tuple_projection_shape(arity: usize) -> proc_macro2::TokenStream {
                             .re_alias_with_prefix(alias, &format!("{prefix}_{}", #prefixes)),
                     )*
                 )
+            }
+        }
+
+        impl<RenderBackend, #(#types),*> RenderProjectable<RenderBackend> for (#(#types,)*)
+        where
+            RenderBackend: ::squealy::Backend,
+            #(
+                #types: RenderProjectable<RenderBackend>,
+            )*
+        {
+            fn visit_projection<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+            where
+                V: ProjectionVisitor<Backend = RenderBackend>,
+            {
+                #(
+                    self.#fields.visit_projection_with_prefix(#prefixes, visitor)?;
+                )*
+                Ok(())
+            }
+
+            fn visit_projection_with_prefix<V>(
+                &self,
+                prefix: &str,
+                visitor: &mut V,
+            ) -> Result<(), V::Error>
+            where
+                V: ProjectionVisitor<Backend = RenderBackend>,
+            {
+                #(
+                    self.#fields
+                        .visit_projection_with_prefix(&format!("{prefix}_{}", #prefixes), visitor)?;
+                )*
+                Ok(())
             }
         }
 

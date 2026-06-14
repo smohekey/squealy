@@ -93,7 +93,11 @@ where
         }
     }
 
-    fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError> {
+    fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError>
+    where
+        Base: RenderSelectAst<'conn, 'scope, Conn, Mysql>,
+        Projection: RenderProjectable<Mysql>,
+    {
         let sql = rendered_sql(|writer| {
             render::write_selected_into::<Conn, Base, Shape, Projection, _>(
                 &MysqlDialect,
@@ -101,23 +105,31 @@ where
                 writer,
             )
         });
-        let params = collect_mysql_params(0, |sink| {
-            render::write_selected_params::<Conn, Base, Shape, Projection, _>(
+        let params = collect_mysql_params(0, |params| {
+            render::write_selected_params::<Conn, Base, Shape, Projection>(
                 &MysqlDialect,
                 &self.selected,
-                sink,
+                params,
             )
         })?;
         Ok((sql, params))
     }
 
     /// Renders this query into a newly allocated SQL string.
-    pub fn to_sql(&self) -> String {
+    pub fn to_sql(&self) -> String
+    where
+        Base: RenderSelectAst<'conn, 'scope, Conn, Mysql>,
+        Projection: RenderProjectable<Mysql>,
+    {
         rendered_sql(|writer| self.write_sql(writer))
     }
 
     /// Streams SQL into caller-provided storage.
-    pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()>
+    where
+        Base: RenderSelectAst<'conn, 'scope, Conn, Mysql>,
+        Projection: RenderProjectable<Mysql>,
+    {
         render::write_selected_into::<Conn, Base, Shape, Projection, _>(
             &MysqlDialect,
             &self.selected,
@@ -126,15 +138,18 @@ where
     }
 
     /// Collects bind parameters into a newly allocated vector.
-    pub fn collect_params(&self) -> Vec<BindValue> {
+    pub fn collect_params(&self) -> Result<Vec<Value>, MysqlError>
+    where
+        Base: RenderSelectAst<'conn, 'scope, Conn, Mysql>,
+        Projection: RenderProjectable<Mysql>,
+    {
         let mut params = Vec::new();
-        render::write_selected_params::<Conn, Base, Shape, Projection, _>(
+        render::write_selected_params::<Conn, Base, Shape, Projection>(
             &MysqlDialect,
             &self.selected,
             &mut params,
-        )
-        .unwrap_or_else(|error| match error {});
-        params
+        )?;
+        Ok(params)
     }
 }
 
@@ -156,26 +171,44 @@ where
         }
     }
 
-    fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError> {
+    fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError>
+    where
+        Rows: RenderInsertRows<Mysql>,
+        Returning: RenderProjectable<Mysql>,
+    {
         let sql = rendered_sql(|writer| {
-            render::write_insert::<S, _, _>(&MysqlDialect, &self.columns, &self.returning, writer)
+            render::write_insert::<S, Mysql, _, _>(
+                &MysqlDialect,
+                &self.columns,
+                &self.returning,
+                writer,
+            )
         });
         let params =
-            collect_mysql_params(self.columns.first_row_len() * self.columns.len(), |sink| {
-                render::write_insert_params::<S, _, _, _>(
+            collect_mysql_params(self.columns.first_row_len() * self.columns.len(), |params| {
+                render::write_insert_params::<S, Mysql, _, _>(
                     &MysqlDialect,
                     &self.columns,
                     &self.returning,
-                    sink,
+                    params,
                 )
             })?;
         Ok((sql, params))
     }
 
     /// Renders this query into a newly allocated SQL string.
-    pub fn to_sql(&self) -> String {
+    pub fn to_sql(&self) -> String
+    where
+        Rows: RenderInsertRows<Mysql>,
+        Returning: RenderProjectable<Mysql>,
+    {
         rendered_sql(|writer| {
-            render::write_insert::<S, _, _>(&MysqlDialect, &self.columns, &self.returning, writer)
+            render::write_insert::<S, Mysql, _, _>(
+                &MysqlDialect,
+                &self.columns,
+                &self.returning,
+                writer,
+            )
         })
     }
 }
@@ -204,9 +237,13 @@ where
         }
     }
 
-    fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError> {
+    fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError>
+    where
+        Filters: RenderPredicateNodes<Mysql>,
+        Returning: RenderProjectable<Mysql>,
+    {
         let sql = rendered_sql(|writer| {
-            render::write_delete::<S, _, _>(
+            render::write_delete::<S, Mysql, _, _>(
                 &MysqlDialect,
                 self.alias,
                 &self.filters,
@@ -214,13 +251,13 @@ where
                 writer,
             )
         });
-        let params = collect_mysql_params(self.filters.len(), |sink| {
-            render::write_delete_params::<S, _, _, _>(
+        let params = collect_mysql_params(self.filters.len(), |params| {
+            render::write_delete_params::<S, Mysql, _, _>(
                 &MysqlDialect,
                 self.alias,
                 &self.filters,
                 &self.returning,
-                sink,
+                params,
             )
         })?;
         Ok((sql, params))
@@ -255,9 +292,14 @@ where
         }
     }
 
-    fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError> {
+    fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError>
+    where
+        Columns: RenderUpdateAssignments<Mysql>,
+        Filters: RenderPredicateNodes<Mysql>,
+        Returning: RenderProjectable<Mysql>,
+    {
         let sql = rendered_sql(|writer| {
-            render::write_update::<S, _, _, _>(
+            render::write_update::<S, Mysql, _, _, _>(
                 &MysqlDialect,
                 self.alias,
                 &self.columns,
@@ -266,14 +308,14 @@ where
                 writer,
             )
         });
-        let params = collect_mysql_params(self.columns.len() + self.filters.len(), |sink| {
-            render::write_update_params::<S, _, _, _, _>(
+        let params = collect_mysql_params(self.columns.len() + self.filters.len(), |params| {
+            render::write_update_params::<S, Mysql, _, _, _>(
                 &MysqlDialect,
                 self.alias,
                 &self.columns,
                 &self.filters,
                 &self.returning,
-                sink,
+                params,
             )
         })?;
         Ok((sql, params))
@@ -308,9 +350,9 @@ where
     Shape: ProjectionShape,
     Conn: MysqlExecutor + 'conn,
     Shape::Row: Decode<Mysql>,
-    Base: SelectAst<'conn, 'scope, Conn>,
+    Base: RenderSelectAst<'conn, 'scope, Conn, Mysql>,
     Base::Params: NoRuntimeParams,
-    Projection: Projectable,
+    Projection: RenderProjectable<Mysql>,
 {
     type RowStream<'query>
         = MysqlRows<'query, Self::Row, Conn>
@@ -352,9 +394,9 @@ where
     Shape: ProjectionShape,
     Conn: MysqlExecutor + 'conn,
     Shape::Row: Decode<Mysql>,
-    Rows: InsertRows,
+    Rows: RenderInsertRows<Mysql>,
     Rows::Params: NoRuntimeParams,
-    Returning: Projectable,
+    Returning: RenderProjectable<Mysql>,
 {
     type RowStream<'query>
         = MysqlRows<'query, Self::Row, Conn>
@@ -412,9 +454,9 @@ where
     Shape: ProjectionShape,
     Conn: MysqlExecutor + 'conn,
     Shape::Row: Decode<Mysql>,
-    Filters: PredicateNodes,
+    Filters: RenderPredicateNodes<Mysql>,
     Filters::Params: NoRuntimeParams,
-    Returning: Projectable,
+    Returning: RenderProjectable<Mysql>,
 {
     type RowStream<'query>
         = MysqlRows<'query, Self::Row, Conn>
@@ -476,11 +518,11 @@ where
     Shape: ProjectionShape,
     Conn: MysqlExecutor + 'conn,
     Shape::Row: Decode<Mysql>,
-    Columns: UpdateAssignments,
+    Columns: RenderUpdateAssignments<Mysql>,
     Columns::Params: NoRuntimeParams,
-    Filters: PredicateNodes,
+    Filters: RenderPredicateNodes<Mysql>,
     Filters::Params: NoRuntimeParams,
-    Returning: Projectable,
+    Returning: RenderProjectable<Mysql>,
 {
     type RowStream<'query>
         = MysqlRows<'query, Self::Row, Conn>

@@ -3,8 +3,8 @@
 use std::fmt;
 
 use squealy::{
-    Backend, BindValue, Connection, ConnectionWithTransaction, Decode, InsertableTable,
-    Projectable, ProjectionShape, QueryBuilder, SelectAst, Table, TableProjection, UpdateableTable,
+    Backend, Connection, ConnectionWithTransaction, Decode, InsertableTable, Projectable,
+    ProjectionShape, QueryBuilder, SelectAst, Table, TableProjection, UpdateableTable,
 };
 use tokio_postgres::Client;
 
@@ -13,9 +13,11 @@ mod introspect;
 mod query;
 mod sql;
 
+#[cfg(feature = "serde")]
+pub use query::Json;
 pub use query::{
-    EmptyRows, PostgresDelete, PostgresInsert, PostgresPreparedMutation, PostgresPreparedSelect,
-    PostgresRowReader, PostgresSelect, PostgresUpdate,
+    EmptyRows, PostgresDelete, PostgresInsert, PostgresParam, PostgresPreparedMutation,
+    PostgresPreparedSelect, PostgresRowReader, PostgresSelect, PostgresUpdate,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -59,8 +61,6 @@ impl fmt::Debug for PostgresConnection {
 pub enum PostgresError {
     #[error("query returned no rows")]
     NoRows,
-    #[error("unsupported bind value: {0:?}")]
-    UnsupportedBind(BindValue),
     #[error("database error: {0}")]
     Database(#[from] tokio_postgres::Error),
     #[error("decode error: {0}")]
@@ -73,6 +73,14 @@ impl Backend for Postgres {
     type Error = PostgresError;
 
     type RowReader<'row> = PostgresRowReader<'row>;
+
+    type ParamWriter<'param> = query::PostgresParamWriter<'param>;
+
+    type Param = query::PostgresParam;
+
+    fn param_writer(params: &mut Vec<Self::Param>) -> Self::ParamWriter<'_> {
+        query::PostgresParamWriter::new(params)
+    }
 
     fn no_rows_error() -> Self::Error {
         PostgresError::NoRows

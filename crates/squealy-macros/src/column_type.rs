@@ -45,10 +45,17 @@ impl ColumnTypeStruct {
                 type Value = Self;
             }
 
-            impl ::squealy::IntoBindValue for #ident {
-                fn into_bind_value(self) -> ::squealy::BindValue {
+            impl<Backend> ::squealy::Encode<Backend> for #ident
+            where
+                Backend: ::squealy::Backend,
+                #field_ty: ::squealy::Encode<Backend>,
+            {
+                fn encode(
+                    &self,
+                    out: &mut <Backend as ::squealy::Backend>::ParamWriter<'_>,
+                ) -> ::std::result::Result<(), <Backend as ::squealy::Backend>::Error> {
                     let #deconstruct = self;
-                    ::squealy::IntoBindValue::into_bind_value(value)
+                    ::squealy::Encode::encode(value, out)
                 }
             }
 
