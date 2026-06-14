@@ -1197,6 +1197,7 @@ pub(crate) mod ddl {
             }
         }
         if let Some(generated) = &column.generated {
+            reject_empty_generated_expression(&column.name, &generated.expression)?;
             writer.write_all(b" GENERATED ALWAYS AS (")?;
             writer.write_all(generated.expression.as_bytes())?;
             writer.write_all(b") STORED")?;
@@ -1348,6 +1349,22 @@ pub(crate) mod ddl {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "PostgreSQL constraint enforcement metadata is not supported by squealy yet",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Rejects a generated column with no expression instead of emitting invalid
+    /// `GENERATED ALWAYS AS ()`. The `#[column(generated)]` derive attribute marks a column as
+    /// generated but has no way to supply the expression, so such a model cannot be rendered.
+    fn reject_empty_generated_expression(column: &str, expression: &str) -> io::Result<()> {
+        if expression.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "generated column \"{column}\" has no expression; #[column(generated)] cannot \
+                     supply one, so it cannot be rendered to DDL"
+                ),
             ));
         }
         Ok(())
@@ -2369,6 +2386,47 @@ mod tests {
         for (ty, expected) in cases {
             assert_eq!(render_type(ty), expected);
         }
+    }
+
+    #[test]
+    fn postgres_rejects_generated_column_without_expression() {
+        use squealy::{
+            ColumnModel, DatabaseModel, GeneratedColumnModel, GeneratedStorage, SchemaModel,
+            TableModel,
+        };
+
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "people".to_owned(),
+                    comment: None,
+                    columns: vec![ColumnModel {
+                        name: "full_name".to_owned(),
+                        comment: None,
+                        ty: SqlType::String,
+                        collation: None,
+                        nullable: true,
+                        default: None,
+                        identity: None,
+                        generated: Some(GeneratedColumnModel {
+                            expression: String::new(),
+                            storage: GeneratedStorage::Stored,
+                        }),
+                    }],
+                    primary_key: None,
+                    foreign_keys: vec![],
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let mut out = Vec::new();
+        let error = ddl::write_database(&model, &mut out).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("full_name"), "{error}");
     }
 
     #[test]
