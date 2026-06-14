@@ -258,11 +258,11 @@ where
         self.push_source_separator()?;
         if first_source {
             self.writer.write_all(b"FROM ")?;
-            write_table_ref::<S>(self.writer)?;
+            write_table_ref::<S>(self.renderer.dialect, self.writer)?;
             write!(self.writer, " AS {alias}")?;
         } else {
             write!(self.writer, "{join} ")?;
-            write_table_ref::<S>(self.writer)?;
+            write_table_ref::<S>(self.renderer.dialect, self.writer)?;
             write!(self.writer, " AS {alias} ON ")?;
             write_predicate_value(&on, self.writer, &mut self.renderer)?;
         }
@@ -299,7 +299,7 @@ where
     {
         self.push_source_separator()?;
         self.writer.write_all(b"FROM ")?;
-        write_table_ref::<S>(self.writer)?;
+        write_table_ref::<S>(self.renderer.dialect, self.writer)?;
         write!(self.writer, " AS {alias}")
     }
 
@@ -386,7 +386,9 @@ where
         self.push_projection_separator()?;
         write_expr_value(expr, self.writer, &mut self.renderer)?;
         self.writer.write_all(b" AS ")?;
-        write_quoted_ident(&alias, self.writer)?;
+        self.renderer
+            .dialect
+            .write_quoted_ident(&alias, self.writer)?;
         Ok(())
     }
 
@@ -401,7 +403,9 @@ where
         self.push_projection_separator()?;
         write_column_value(column, self.writer, &mut self.renderer)?;
         self.writer.write_all(b" AS ")?;
-        write_quoted_ident(&alias, self.writer)
+        self.renderer
+            .dialect
+            .write_quoted_ident(&alias, self.writer)
     }
 }
 
@@ -1600,16 +1604,17 @@ fn write_qualified_name(
     write_quoted_ident(name, writer)
 }
 
-/// Writes a quoted, schema-qualified reference to a `TableProjection` source.
-fn write_table_ref<S>(writer: &mut impl Write) -> io::Result<()>
+/// Writes a quoted, schema-qualified reference to a `TableProjection` source, quoting through the
+/// active dialect (this is query rendering, unlike the DDL-side `write_qualified_name`).
+fn write_table_ref<S>(dialect: &dyn squealy::Dialect, writer: &mut impl Write) -> io::Result<()>
 where
     S: TableProjection,
 {
-    write_qualified_name(
-        <S as TableProjection>::schema_name(),
-        <S as TableProjection>::name(),
-        writer,
-    )
+    if let Some(schema) = <S as TableProjection>::schema_name() {
+        dialect.write_quoted_ident(schema, writer)?;
+        writer.write_all(b".")?;
+    }
+    dialect.write_quoted_ident(<S as TableProjection>::name(), writer)
 }
 
 /// Writes a quoted, schema-qualified reference to a `SchemaTable` model.
@@ -1861,7 +1866,7 @@ where
 {
     let mut renderer = Renderer::new(&PostgresDialect);
     writer.write_all(b"DELETE FROM ")?;
-    write_table_ref::<S>(writer)?;
+    write_table_ref::<S>(renderer.dialect, writer)?;
     write!(writer, " AS {alias}")?;
     write_filters(filters, writer, &mut renderer)?;
     write_returning(returning, writer, &mut renderer)?;
