@@ -1100,6 +1100,21 @@ fn postgres_renders_compound_primary_key() {
 }
 
 #[test]
+fn postgres_backend_writes_compound_primary_key_ddl() {
+    // The query-side single-table `write_table` path must also honor a table-level primary key
+    // (no column carries `primary_key()` in this case).
+    let mut sql = Vec::new();
+    let tables = <SeatCatalog as Schema>::tables().collect::<Vec<_>>();
+    Postgres.write_table(tables[0], &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "CREATE TABLE \"catalog\".\"seats\" (\"tenant_id\" integer NOT NULL, \"id\" integer NOT NULL, PRIMARY KEY (\"tenant_id\", \"id\"))"
+    );
+}
+
+#[test]
 fn postgres_renders_table_and_column_comments() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {

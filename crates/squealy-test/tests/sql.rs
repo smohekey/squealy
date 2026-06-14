@@ -311,3 +311,31 @@ fn test_backend_writes_table_ddl_with_autoincrement() {
         "CREATE TABLE public.users (id integer PRIMARY KEY AUTOINCREMENT NOT NULL, name text NOT NULL)"
     );
 }
+
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Public)]
+#[primary_key(columns = [tenant_id, id])]
+struct Seat<'scope, C: ColumnMode = ColumnExpr> {
+    tenant_id: C::Type<'scope, i32>,
+    id: C::Type<'scope, i32>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct SeatPublic {
+    seats: Seat<'static, ColumnName>,
+}
+
+#[test]
+fn test_backend_writes_compound_primary_key_ddl() {
+    // The query-side single-table `write_table` path must also honor a table-level primary key.
+    let mut sql = Vec::new();
+    let tables = <SeatPublic as Schema>::tables().collect::<Vec<_>>();
+    TestBackend.write_table(tables[0], &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "CREATE TABLE public.seats (tenant_id integer NOT NULL, id integer NOT NULL, PRIMARY KEY (tenant_id, id))"
+    );
+}
