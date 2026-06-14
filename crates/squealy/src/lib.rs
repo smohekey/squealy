@@ -114,6 +114,16 @@
 //! in that namespace, and `#[derive(Database)]` lists schemas for DDL/backends that want database
 //! metadata.
 //!
+//! Constraints spanning more than one column are declared as table-level attributes on the struct:
+//!
+//! - `#[primary_key(columns = [a, b])]` for a composite primary key,
+//! - `#[unique(columns = [a, b], name = "...")]` for a composite unique constraint (repeatable;
+//!   `name` is optional and defaults to `uq_<table>_<columns>`),
+//! - `#[index(columns = [a, b], unique, name = "...")]` for a multi-column index.
+//!
+//! The single-column forms `#[column(primary_key)]`, `#[column(unique)]`, and `#[column(index)]`
+//! remain available for one-column constraints.
+//!
 //! ## Stream rows from select queries
 //!
 //! Select queries start from a source table and finish with `select`:
