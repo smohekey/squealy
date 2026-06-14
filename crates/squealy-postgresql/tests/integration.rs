@@ -779,6 +779,23 @@ async fn postgres_round_trips_native_uuid() {
         .expect("select uuid ids");
 
     assert_eq!(ids, vec![id]);
+
+    // The custom `uuid` type also works as a prepared *runtime* parameter, not just an inline
+    // literal — supplying an `IntegrationUuid` to `param::<IntegrationUuid>()` encodes natively.
+    let uuid_param_select = connection
+        .from::<IntegrationUuidRecord>()
+        .where_(|record| record.id.equals(param::<IntegrationUuid>()))
+        .select(|(record,)| record.name);
+    let prepared = uuid_param_select
+        .prepare()
+        .await
+        .expect("prepare uuid-param select");
+    let names = prepared
+        .collect((id,))
+        .await
+        .expect("execute prepared uuid-param select");
+
+    assert_eq!(names, vec!["with-uuid".to_owned()]);
 }
 
 async fn create_table<S>(client: &tokio_postgres::Client, ddl_backend: &Postgres)

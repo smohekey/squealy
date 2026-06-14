@@ -724,6 +724,31 @@ fn postgres_runtime_prepared_assignment_params_render_without_captured_values() 
     );
 }
 
+/// A custom type that implements `Encode<Postgres>` (here a derived newtype over `uuid::Uuid`)
+/// must be usable as a prepared *runtime* parameter, not only as an inline literal. This exercises
+/// the exact bound the prepared-query builder requires — `(UserUuid,)` satisfying
+/// `PreparedParamValues<HCons<UserUuid, HNil>, Postgres>` — which relies on the reflexive
+/// `IntoPreparedParam<T> for T` impl plus the type's `Encode<Postgres>` impl.
+#[cfg(feature = "uuid")]
+#[test]
+fn postgres_custom_encode_type_is_usable_as_prepared_param() {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, ColumnType)]
+    #[column_type(db_type = "uuid")]
+    struct UserUuid(uuid::Uuid);
+
+    let id = uuid::Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0);
+    let values = (UserUuid(id),);
+
+    let mut params = Vec::new();
+    {
+        let mut writer = Postgres::param_writer(&mut params);
+        PreparedParamValues::<HCons<UserUuid, HNil>, Postgres>::write_params(&values, &mut writer)
+            .expect("encode custom-type prepared param");
+    }
+
+    assert_eq!(params, vec![PostgresParam::Uuid(id)]);
+}
+
 #[test]
 fn postgres_update_renders_explicit_defaults() {
     let update = Postgres

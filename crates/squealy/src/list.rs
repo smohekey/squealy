@@ -106,23 +106,17 @@ pub trait IntoPreparedParam<T> {
     fn into_prepared_param(self) -> T;
 }
 
-macro_rules! impl_prepared_param {
-    ($($ty:ty),* $(,)?) => {
-        $(
-            impl IntoPreparedParam<$ty> for $ty {
-                fn into_prepared_param(self) -> $ty {
-                    self
-                }
-            }
-        )*
-    };
-}
-
-impl_prepared_param! {
-    i8, i16, i32, i64, i128, isize,
-    u8, u16, u32, u64, u128, usize,
-    f32, f64,
-    bool, String,
+/// Reflexive identity: any value can be supplied for a parameter of its own type.
+///
+/// This is what keeps the open codec usable for prepared *runtime* parameters, not just inline
+/// literals: a custom type that implements [`Encode<B>`](crate::Encode) — for example a derived
+/// newtype over `uuid::Uuid`, or a backend's `Json<T>` wrapper — can be passed to `param::<T>()`
+/// with no extra impl. The convenience borrow conversions below (`&str` → `String`, etc.) cover the
+/// non-reflexive cases and do not overlap, since their `Self` and target types differ.
+impl<T> IntoPreparedParam<T> for T {
+    fn into_prepared_param(self) -> T {
+        self
+    }
 }
 
 impl IntoPreparedParam<String> for &str {
@@ -135,25 +129,6 @@ impl IntoPreparedParam<String> for &String {
     fn into_prepared_param(self) -> String {
         self.clone()
     }
-}
-
-macro_rules! impl_nullable_prepared_param {
-    ($($ty:ty),* $(,)?) => {
-        $(
-            impl IntoPreparedParam<Option<$ty>> for Option<$ty> {
-                fn into_prepared_param(self) -> Option<$ty> {
-                    self
-                }
-            }
-        )*
-    };
-}
-
-impl_nullable_prepared_param! {
-    i8, i16, i32, i64, i128, isize,
-    u8, u16, u32, u64, u128, usize,
-    f32, f64,
-    bool, String,
 }
 
 impl IntoPreparedParam<Option<String>> for Option<&str> {
