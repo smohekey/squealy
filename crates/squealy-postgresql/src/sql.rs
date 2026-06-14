@@ -1618,15 +1618,18 @@ where
 }
 
 /// Writes a quoted, schema-qualified reference to a `SchemaTable` model.
-fn write_schema_table_ref<S>(writer: &mut impl Write) -> io::Result<()>
+fn write_schema_table_ref<S>(
+    dialect: &dyn squealy::Dialect,
+    writer: &mut impl Write,
+) -> io::Result<()>
 where
     S: SchemaTable,
 {
-    write_qualified_name(
-        <S as SchemaTable>::schema_name(),
-        <S as SchemaTable>::name(),
-        writer,
-    )
+    if let Some(schema) = <S as SchemaTable>::schema_name() {
+        dialect.write_quoted_ident(schema, writer)?;
+        writer.write_all(b".")?;
+    }
+    dialect.write_quoted_ident(<S as SchemaTable>::name(), writer)
 }
 
 pub(crate) fn write_insert<S, Rows, Returning>(
@@ -1655,8 +1658,9 @@ where
     Writer: SqlWriter,
 {
     let mut renderer = Renderer::new(&PostgresDialect);
+    let dialect = renderer.dialect;
     writer.write_all(b"INSERT INTO ")?;
-    write_schema_table_ref::<S>(writer)?;
+    write_schema_table_ref::<S>(dialect, writer)?;
     if rows.len() == 1 && rows.first_row_len() == 0 {
         writer.write_all(b" DEFAULT VALUES")?;
     } else {
@@ -1667,7 +1671,7 @@ where
                 writer.write_all(b", ")?;
             }
             index += 1;
-            write_quoted_ident(column, writer)?;
+            dialect.write_quoted_ident(column, writer)?;
             Ok::<(), io::Error>(())
         })?;
         writer.write_all(b") VALUES ")?;
@@ -1794,7 +1798,7 @@ where
 {
     let mut renderer = Renderer::new(&PostgresDialect);
     writer.write_all(b"UPDATE ")?;
-    write_schema_table_ref::<S>(writer)?;
+    write_schema_table_ref::<S>(renderer.dialect, writer)?;
     write!(writer, " AS {alias} SET ")?;
     let mut assignments = WriteUpdateAssignments {
         writer,
@@ -1831,7 +1835,9 @@ where
             self.writer.write_all(b", ")?;
         }
         self.index += 1;
-        write_quoted_ident(column, self.writer)?;
+        self.renderer
+            .dialect
+            .write_quoted_ident(column, self.writer)?;
         self.writer.write_all(b" = ")?;
         write_assignment_value(value, self.writer, self.renderer)
     }
@@ -1943,7 +1949,9 @@ where
         self.write_prefix()?;
         write_expr_value_node(expr, self.writer, self.renderer, self.insert_returning)?;
         self.writer.write_all(b" AS ")?;
-        write_quoted_ident(&alias, self.writer)
+        self.renderer
+            .dialect
+            .write_quoted_ident(&alias, self.writer)
     }
 
     fn visit_column<K>(
@@ -1957,7 +1965,9 @@ where
         self.write_prefix()?;
         write_column_value_node(column, self.writer, self.renderer, self.insert_returning)?;
         self.writer.write_all(b" AS ")?;
-        write_quoted_ident(&alias, self.writer)
+        self.renderer
+            .dialect
+            .write_quoted_ident(&alias, self.writer)
     }
 }
 
