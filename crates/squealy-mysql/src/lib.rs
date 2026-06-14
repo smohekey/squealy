@@ -140,6 +140,27 @@ impl SchemaIntrospect for MysqlConnection {
     fn canonical_sql_type(&self, ty: &squealy::SqlType) -> squealy::SqlType {
         canonical_sql_type(ty)
     }
+
+    /// MySQL has only `AUTO_INCREMENT`: it renders any identity column that way and introspects it
+    /// back as [`IdentityMode::AutoIncrement`](squealy::IdentityMode::AutoIncrement). Map every mode
+    /// to that so a crate-declared `auto_increment` column (which enters the model as `ByDefault`)
+    /// does not churn as an ambiguous identity change against the live schema.
+    fn canonical_identity_mode(&self, _mode: &squealy::IdentityMode) -> squealy::IdentityMode {
+        squealy::IdentityMode::AutoIncrement
+    }
+
+    /// MySQL introspection reports a plain index's access method as `BTREE`; map an unset method to
+    /// that so a crate-declared index does not churn against the live schema.
+    fn default_index_method(&self) -> Option<squealy::IndexMethod> {
+        Some(squealy::IndexMethod::BTree)
+    }
+
+    /// MySQL ignores a declared primary-key constraint name and always reports it as `PRIMARY`; map
+    /// the desired name to that so a crate-declared `pk_<table>` does not churn against the live
+    /// schema.
+    fn canonical_primary_key_name(&self, _name: &str) -> String {
+        "PRIMARY".to_owned()
+    }
 }
 
 /// Maps a neutral [`SqlType`](squealy::SqlType) to the physical form the MySQL introspector reads

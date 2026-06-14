@@ -16,8 +16,8 @@ use squealy_model::{
     DatabasePlanStep, DdlExecutor, DiffPolicy, PlanApplyOptions, PlanFromDatabaseError,
     RefactorLog, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaMetadataStore,
     SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore, TableDiffChange,
-    TablePlanStep, apply_plan_with_options, check_create, check_diff_policy, classified_plan_steps,
-    diff_models, introspect, package_metadata, pending_refactors,
+    TablePlanStep, apply_plan_with_options, canonicalize_model, check_create, check_diff_policy,
+    classified_plan_steps, diff_models, introspect, package_metadata, pending_refactors,
     plan_from_database_with_refactors, plan_models_with_refactors, publish, read_package,
     read_refactor_log, refactor_from_kdl, render_create_sql, render_plan_sql,
     render_plan_with_options, repair_refactor_metadata, write_package,
@@ -513,15 +513,15 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         } => {
             let loaded = source.load_with_refactors()?;
             check_model_for_backend(&loaded.model, backend.backend)?;
-            let (actual, applied_ids, live_metadata, publish_history) =
-                live_status_inputs(backend.backend, &url, history).await?;
+            let (desired, actual, applied_ids, live_metadata, publish_history) =
+                live_status_inputs(backend.backend, &url, history, &loaded.model).await?;
             pending_refactors(&loaded.refactors, &applied_ids, &actual).map_err(|error| {
                 CliError::Message(format!("applied refactor metadata mismatch: {error}"))
             })?;
             let desired_metadata = package_metadata(&loaded.model, &loaded.refactors);
             if json {
                 print_status_json(
-                    &loaded.model,
+                    &desired,
                     &actual,
                     &loaded.refactors,
                     &applied_ids,
@@ -531,7 +531,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 )?;
             } else {
                 print_status(
-                    &loaded.model,
+                    &desired,
                     &actual,
                     &loaded.refactors,
                     &applied_ids,
@@ -547,7 +547,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             };
             check_status(
                 &checks,
-                &loaded.model,
+                &desired,
                 &actual,
                 &loaded.refactors,
                 &applied_ids,
@@ -713,12 +713,18 @@ fn check_model_for_backend(model: &DatabaseModel, backend: BackendKind) -> Resul
     }
 }
 
+/// Introspects the live database and returns the inputs the status command diffs. The returned
+/// desired model is canonicalized through the live backend (identically to [`plan_from_database`]),
+/// so `status` does not report spurious schema drift for backend-equivalent metadata immediately
+/// after a successful publish.
 async fn live_status_inputs(
     backend: BackendKind,
     url: &str,
     history: usize,
+    desired: &DatabaseModel,
 ) -> Result<
     (
+        DatabaseModel,
         DatabaseModel,
         Vec<String>,
         Vec<(String, String)>,
@@ -738,6 +744,7 @@ async fn live_status_inputs(
             let actual = introspect(&mut connection)
                 .await
                 .map_err(|error| CliError::Message(format!("introspect: {error}")))?;
+            let desired = canonicalize_model(&connection, desired);
             let applied_ids = connection
                 .applied_refactor_ids()
                 .await
@@ -750,7 +757,7 @@ async fn live_status_inputs(
                 .schema_publish_history(history)
                 .await
                 .map_err(|error| CliError::Message(format!("read publish history: {error}")))?;
-            Ok((actual, applied_ids, metadata, publish_history))
+            Ok((desired, actual, applied_ids, metadata, publish_history))
         }
         BackendKind::Mysql => {
             let mut connection = Mysql.connect(url).await.map_err(|error| {
@@ -762,6 +769,7 @@ async fn live_status_inputs(
             let actual = introspect(&mut connection)
                 .await
                 .map_err(|error| CliError::Message(format!("introspect: {error}")))?;
+            let desired = canonicalize_model(&connection, desired);
             let applied_ids = connection
                 .applied_refactor_ids()
                 .await
@@ -774,7 +782,7 @@ async fn live_status_inputs(
                 .schema_publish_history(history)
                 .await
                 .map_err(|error| CliError::Message(format!("read publish history: {error}")))?;
-            Ok((actual, applied_ids, metadata, publish_history))
+            Ok((desired, actual, applied_ids, metadata, publish_history))
         }
     }
 }
@@ -1212,15 +1220,24 @@ fn refactor_status_summary(
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
+    // Casts (`cast-column`) are idempotent rendering hints that are deliberately never recorded as
+    // applied refactors (`RefactorOperation::is_recorded` is false, and `repair_refactor_metadata`
+    // filters to recorded ops). Including them here would report every cast as pending forever, so a
+    // clean `status --check-refactors` would be impossible after a publish that used one.
     let package_ids = refactors
         .operations
         .iter()
+        .filter(|operation| operation.is_recorded())
         .map(|operation| operation.id())
         .collect::<BTreeSet<_>>();
     let mut applied = Vec::new();
     let mut pending = Vec::new();
 
-    for operation in &refactors.operations {
+    for operation in refactors
+        .operations
+        .iter()
+        .filter(|operation| operation.is_recorded())
+    {
         let id = operation.id();
         if applied_ids.contains(id) {
             applied.push(id.to_owned());
@@ -1870,6 +1887,42 @@ mod tests {
         BackendKind, ChangeRisk, ClassifiedDatabaseDiffChange, DatabaseDiffChange, DatabasePlan,
         DatabasePlanStep, policy_blocked_error, redact_secret, url_password, validate_url,
     };
+
+    #[test]
+    fn refactor_status_summary_excludes_cast_hints() {
+        use super::refactor_status_summary;
+        use squealy_model::{CastColumn, RefactorLog, RefactorOperation, RenameColumn};
+
+        let refactors = RefactorLog {
+            operations: vec![
+                RefactorOperation::RenameColumn(RenameColumn {
+                    id: "rename-1".to_owned(),
+                    schema: None,
+                    table: "users".to_owned(),
+                    from: "email".to_owned(),
+                    to: "email_address".to_owned(),
+                }),
+                RefactorOperation::CastColumn(CastColumn {
+                    id: "cast-1".to_owned(),
+                    schema: None,
+                    table: "orders".to_owned(),
+                    column: "total".to_owned(),
+                    using: "total::numeric".to_owned(),
+                }),
+            ],
+        };
+
+        // The rename was applied; the cast (never recorded as applied) must not surface as pending,
+        // so `status --check-refactors` can be clean after a publish that used the cast.
+        let summary = refactor_status_summary(&refactors, &["rename-1".to_owned()]);
+        assert_eq!(summary.applied, vec!["rename-1".to_owned()]);
+        assert!(summary.pending.is_empty(), "{:?}", summary.pending);
+        assert!(
+            summary.recorded_only.is_empty(),
+            "{:?}",
+            summary.recorded_only
+        );
+    }
 
     #[test]
     fn policy_blocked_error_lists_changes_and_force_flags() {
