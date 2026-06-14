@@ -91,6 +91,12 @@ database DDL. For example, the PostgreSQL backend renders `i32` as `integer` and
 `varchar(64)`, `jsonb`, or a domain type. If a custom field type does not implement
 [`HasColumnType`] and does not provide `db_type`, the table derive fails to compile.
 
+Timestamp columns are available behind feature flags: `systemtime` maps `std::time::SystemTime`
+to a `timestamptz` column with no extra dependency, while `time` and `chrono` map
+`time::OffsetDateTime` and `chrono::DateTime<Utc>` respectively. Each works in both non-null and
+nullable (`#[column(nullable)]`) columns and in the query builder, paired with a backend that
+enables the matching feature (the PostgreSQL backend turns on the core feature for you).
+
 For newtype wrappers, derive `ColumnType` on the wrapper. Single-field tuple structs and
 single-field named structs are transparent by default, so the wrapper uses the same database
 type, bind conversion, row decoding, and literal expression support as its inner value. Use

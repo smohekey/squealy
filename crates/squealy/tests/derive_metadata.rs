@@ -198,6 +198,18 @@ struct DerivedColumnTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
     labels: C::Type<'scope, VarcharArrayColumn>,
 }
 
+// A bare `SystemTime` field maps to a `timestamptz` column (HasColumnType) and a `SystemTime` value
+// can be used in the query builder (ExprKind), including assigning to a nullable timestamp column.
+#[cfg(feature = "systemtime")]
+#[derive(Clone, Debug, PartialEq, Table)]
+struct Timestamped<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, i32>,
+    created_at: C::Type<'scope, std::time::SystemTime>,
+    #[column(nullable)]
+    deleted_at: C::Type<'scope, std::time::SystemTime>,
+}
+
 #[allow(dead_code)]
 #[derive(Schema)]
 struct Public {
@@ -319,6 +331,38 @@ fn derive_table_parses_db_type_into_structured_column_type() {
     );
     // Unrecognized db_type stays verbatim.
     assert_eq!(columns[5].column_type(), ColumnType::Raw("citext"));
+}
+
+#[cfg(feature = "systemtime")]
+#[test]
+fn system_time_columns_map_and_build_queries() {
+    // HasColumnType: a bare `SystemTime` field maps to a `timestamptz` column.
+    let columns = <Timestamped as SchemaTable>::columns();
+    assert_eq!(columns[1].column_type(), ColumnType::Timestamp { tz: true });
+    assert_eq!(
+        <std::time::SystemTime as HasColumnType>::COLUMN_TYPE,
+        ColumnType::Timestamp { tz: true }
+    );
+
+    // ExprKind + nullable assignment: a `SystemTime` value works as a predicate operand and a
+    // (nullable) setter. Rendering additionally needs a backend `Encode<SystemTime>`, which the test
+    // backend omits, so this only builds the queries.
+    let now = std::time::SystemTime::now();
+    let _select = TestConnection
+        .from::<Timestamped>()
+        .where_(|row| row.created_at.equals(now))
+        .select(|(row,)| row.id);
+    let _insert = TestConnection
+        .to::<Timestamped>()
+        .id(1)
+        .created_at(now)
+        .deleted_at(now)
+        .insert();
+    let _clear = TestConnection
+        .to::<Timestamped>()
+        .deleted_at(None::<std::time::SystemTime>)
+        .where_(|row| row.id.equals(1))
+        .update();
 }
 
 #[test]

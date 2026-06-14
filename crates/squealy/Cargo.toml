@@ -10,9 +10,22 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+# Native timestamp column support. Each feature maps its Rust type to a `timestamptz` column
+# (`HasColumnType`), lets a value be used in the query builder (`ExprKind`), and covers nullable
+# columns (`DecodeNullable` / nullable assignment). The matching `Encode`/`Decode` lives in each
+# backend crate behind the same feature name.
+# `systemtime` needs no extra dependency: `std::time::SystemTime` maps to `timestamptz` natively.
+systemtime = []
+time = ["dep:time"]
+chrono = ["dep:chrono"]
+
 [dependencies]
 futures-core.workspace = true
 squealy-macros.workspace = true
+time = { version = "0.3", optional = true, default-features = false }
+chrono = { version = "0.4", optional = true, default-features = false }
 
 [dev-dependencies]
 squealy-test.workspace = true
