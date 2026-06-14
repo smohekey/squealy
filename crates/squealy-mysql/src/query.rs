@@ -4,11 +4,17 @@
 //! codec (decoding result columns into Rust values and encoding bound parameters into the driver's
 //! value type) and the [`Backend`] impl. The executable query objects build on top of it.
 
-use mysql_async::Value;
-use mysql_async::prelude::FromValue;
-use squealy::{Backend, BindValue, BindValueKind, Decode, FloatWidth, Table};
+use std::future::Future;
+use std::marker::PhantomData;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use crate::{Mysql, MysqlError};
+use futures_core::Stream;
+use mysql_async::Value;
+use mysql_async::prelude::{FromValue, Queryable};
+use squealy::{Backend, BindValue, BindValueKind, Decode, FloatWidth, RowsAffected, Table};
+
+use crate::{Mysql, MysqlConnection, MysqlError};
 
 /// Reads columns positionally out of a [`mysql_async::Row`] while a projected row is decoded.
 ///
@@ -142,6 +148,114 @@ impl Backend for Mysql {
         writer: &mut impl std::io::Write,
     ) -> std::io::Result<()> {
         crate::sql::write_table(table, writer)
+    }
+}
+
+/// Executes a rendered statement and yields its result rows, decoded.
+///
+/// A MySQL connection serves one statement at a time and `mysql_async`'s result borrows the
+/// connection, so rather than hold the `Mutex` guard across a lazy stream, the rows are collected up
+/// front (while the guard is held) and then decoded one at a time from the buffer. This also carries
+/// the affected-row count, so the same type backs both selects and mutations.
+pub struct MysqlRows<'query, Row> {
+    state: MysqlRowsState<'query>,
+    affected_rows: Option<u64>,
+    _row: PhantomData<Row>,
+}
+
+type BufferedRows = (Vec<mysql_async::Row>, u64);
+
+enum MysqlRowsState<'query> {
+    Pending(Pin<Box<dyn Future<Output = Result<BufferedRows, MysqlError>> + Send + 'query>>),
+    Rows(std::vec::IntoIter<mysql_async::Row>),
+    Done,
+}
+
+impl<'query, Row> MysqlRows<'query, Row> {
+    #[allow(dead_code)] // Driven by the executable query impls (next).
+    pub(crate) fn query(
+        connection: &'query MysqlConnection,
+        sql: String,
+        params: Vec<Value>,
+    ) -> Self {
+        Self {
+            state: MysqlRowsState::Pending(Box::pin(run_query(connection, sql, params))),
+            affected_rows: None,
+            _row: PhantomData,
+        }
+    }
+
+    #[allow(dead_code)] // Driven by the executable query impls (next).
+    pub(crate) fn error(error: MysqlError) -> Self {
+        Self {
+            state: MysqlRowsState::Pending(Box::pin(std::future::ready(Err(error)))),
+            affected_rows: None,
+            _row: PhantomData,
+        }
+    }
+}
+
+/// Locks the connection, runs `sql` with `params`, and buffers all result rows and the affected count.
+async fn run_query(
+    connection: &MysqlConnection,
+    sql: String,
+    params: Vec<Value>,
+) -> Result<BufferedRows, MysqlError> {
+    let mut guard = connection.lock().await;
+    let mut result = guard
+        .exec_iter(sql, mysql_async::Params::Positional(params))
+        .await
+        .map_err(MysqlError::Query)?;
+    let rows = result
+        .collect::<mysql_async::Row>()
+        .await
+        .map_err(MysqlError::Query)?;
+    let affected = result.affected_rows();
+    Ok((rows, affected))
+}
+
+impl<Row> Stream for MysqlRows<'_, Row>
+where
+    Row: Decode<Mysql>,
+{
+    type Item = Result<Row, MysqlError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            match &mut this.state {
+                MysqlRowsState::Pending(future) => match future.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok((rows, affected))) => {
+                        this.affected_rows = Some(affected);
+                        this.state = MysqlRowsState::Rows(rows.into_iter());
+                    }
+                    Poll::Ready(Err(error)) => {
+                        this.state = MysqlRowsState::Done;
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                },
+                MysqlRowsState::Rows(iter) => match iter.next() {
+                    Some(mut row) => {
+                        let mut reader = MysqlRowReader::new(&mut row);
+                        return Poll::Ready(Some(Row::decode(&mut reader)));
+                    }
+                    None => {
+                        this.state = MysqlRowsState::Done;
+                        return Poll::Ready(None);
+                    }
+                },
+                MysqlRowsState::Done => return Poll::Ready(None),
+            }
+        }
+    }
+}
+
+impl<Row> Unpin for MysqlRows<'_, Row> {}
+
+impl<Row> RowsAffected for MysqlRows<'_, Row> {
+    fn rows_affected(&self) -> Option<u64> {
+        self.affected_rows
     }
 }
 

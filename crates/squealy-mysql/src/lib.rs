@@ -70,6 +70,12 @@ impl MysqlConnection {
     fn conn_mut(&mut self) -> &mut mysql_async::Conn {
         self.conn.get_mut()
     }
+
+    /// Locks the connection for a query driven through the shared `&self` execution API. The guard is
+    /// held for the duration of one statement (a connection runs one at a time).
+    pub(crate) async fn lock(&self) -> tokio::sync::MutexGuard<'_, mysql_async::Conn> {
+        self.conn.lock().await
+    }
 }
 
 impl fmt::Debug for MysqlConnection {
