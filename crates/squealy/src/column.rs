@@ -146,6 +146,14 @@ impl_column_type! {
     bool => Bool,
 }
 
+/// A bare `uuid::Uuid` field maps to a `uuid` column, so no `#[column(db_type = "uuid")]`
+/// override is needed. The matching `Encode`/`Decode` lives in each backend crate behind its own
+/// `uuid` feature.
+#[cfg(feature = "uuid")]
+impl HasColumnType for uuid::Uuid {
+    const COLUMN_TYPE: ColumnType = ColumnType::Uuid;
+}
+
 /// Database schema metadata for a single column.
 pub trait Column: Sync {
     fn name(&self) -> &'static str;

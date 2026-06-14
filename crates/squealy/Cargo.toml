@@ -10,9 +10,19 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+# Native `uuid` column support: maps a bare `uuid::Uuid` field to a `uuid` column
+# (`HasColumnType`) and lets a `Uuid` value be used as a literal predicate operand or write-builder
+# setter (`ExprKind`). Also covers nullable UUID columns and left-joined UUID tables, which the table
+# derive gates on `DecodeNullable` / `IntoNullableAssignmentValue`. The matching `Encode`/`Decode`
+# lives in each backend crate behind its own `uuid` feature.
+uuid = ["dep:uuid"]
+
 [dependencies]
 futures-core.workspace = true
 squealy-macros.workspace = true
+uuid = { version = "1", optional = true }
 
 [dev-dependencies]
 squealy-test.workspace = true

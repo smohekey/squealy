@@ -401,7 +401,9 @@ where
 }
 
 /// Native `uuid` column support: `uuid::Uuid` encodes to and decodes from a real
-/// PostgreSQL `uuid` column. Pair with `#[column_type(db_type = "uuid")]` on a newtype.
+/// PostgreSQL `uuid` column. A bare `uuid::Uuid` field maps to a `uuid` column and can be used as a
+/// query-builder value directly (the core `uuid` feature supplies `HasColumnType` + `ExprKind`); a
+/// `#[derive(ColumnType)]` newtype over `Uuid` works too.
 #[cfg(feature = "uuid")]
 impl Encode<Postgres> for uuid::Uuid {
     fn encode(&self, out: &mut PostgresParamWriter<'_>) -> Result<(), PostgresError> {
@@ -2200,7 +2202,12 @@ mod tests {
     #[test]
     fn uuid_encodes_to_native_param() {
         let id = uuid::Uuid::from_u128(0x1234_5678_1234_5678_1234_5678_1234_5678);
-        // Bare uuid::Uuid encodes to a native uuid param...
+        // Bare uuid::Uuid maps to a `uuid` column without a db_type override...
+        assert_eq!(
+            <uuid::Uuid as squealy::HasColumnType>::COLUMN_TYPE,
+            squealy::ColumnType::Uuid
+        );
+        // ...encodes to a native uuid param...
         assert!(matches!(
             encode_to_param(&id),
             Ok(PostgresParam::Uuid(value)) if value == id
@@ -2218,6 +2225,12 @@ mod tests {
             encode_to_param(&UserId(id)),
             Ok(PostgresParam::Uuid(value)) if value == id
         ));
+
+        // A nullable `uuid::Uuid` column (or a left-joined UUID table) makes the table derive emit a
+        // `uuid::Uuid: DecodeNullable<Postgres>` bound. This compiles only when that impl exists, so
+        // it guards against the regression where bare-uuid metadata generated but failed on use.
+        fn _assert_uuid_decode_nullable<T: squealy::DecodeNullable<Postgres>>() {}
+        _assert_uuid_decode_nullable::<uuid::Uuid>();
     }
 
     #[cfg(feature = "serde")]
