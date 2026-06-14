@@ -4,6 +4,17 @@ use crate::{
     Column, ColumnMode, ColumnName, Index, Projectable, QueryBuilder, Schema, SourceAlias,
 };
 
+/// A table-level primary key declared with the `#[primary_key(columns = [..])]` attribute.
+///
+/// Unlike an [`Index`], a table has at most one primary key, so it is exposed as a small
+/// `Copy` value rather than a trait object. When `name` is `None` the model builder falls
+/// back to the deterministic `pk_<table>` convention.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TablePrimaryKey {
+    pub name: Option<&'static str>,
+    pub columns: &'static [&'static str],
+}
+
 /// Object-safe table metadata exposed through schema membership.
 pub trait Table {
     fn schema_name(&self) -> Option<&'static str>;
@@ -20,6 +31,13 @@ pub trait Table {
     fn columns(&self) -> &'static [&'static dyn Column];
 
     fn indexes(&self) -> &'static [&'static dyn Index];
+
+    /// Returns the table-level primary key declared on this model, if any. Tables that mark the
+    /// primary key with per-column `#[column(primary_key)]` return `None` here; that case is
+    /// hoisted into a constraint by the model builder instead.
+    fn primary_key(&self) -> Option<TablePrimaryKey> {
+        None
+    }
 }
 
 /// A typed table model that can also project expression columns.
@@ -67,6 +85,15 @@ pub trait SchemaTable: Table {
     fn indexes() -> &'static [&'static dyn Index]
     where
         Self: Sized;
+
+    /// Returns the table-level primary key declared on this model, if any. See
+    /// [`Table::primary_key`] for how per-column primary keys are handled instead.
+    fn primary_key() -> Option<TablePrimaryKey>
+    where
+        Self: Sized,
+    {
+        None
+    }
 
     /// Returns the database column names for this model.
     fn column_names() -> Self::WithColumn<'static, ColumnName>;

@@ -82,8 +82,13 @@ consistent with `#[derive(Schema)]`.
 Constraints are **hoisted to the table level as named lists** (not hung off columns as in the query
 traits). Columns keep only per-column facts; PK/unique/FK/check/index are table-level and named. This
 matches `ALTER … ADD CONSTRAINT`, how catalogs report constraints during introspection, and admits
-composite keys even though today's derive only emits single-column ones (the *shape* won't change
-when multi-column lands).
+composite keys.
+
+A single-column primary key is declared with the per-column `#[column(primary_key)]` marker. A
+composite primary key is declared with the table-level `#[primary_key(columns = [a, b])]` attribute,
+which fixes the key-column order and accepts an optional `name = "..."` override (defaulting to the
+deterministic `pk_<table>` convention). The two forms are mutually exclusive — declaring both on the
+same table is a compile error. Either way the model carries a single named `Constraint`.
 
 ```rust
 pub struct DatabaseModel { pub schemas: Vec<SchemaModel> }

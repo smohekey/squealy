@@ -518,6 +518,39 @@ fn column(name: &str) -> ColumnModel {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Shop)]
+#[primary_key(columns = [tenant_id, id])]
+struct Seat<'scope, C: ColumnMode = ColumnExpr> {
+    tenant_id: C::Type<'scope, i32>,
+    id: C::Type<'scope, i32>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct SeatShop {
+    seats: Seat<'static, ColumnName>,
+}
+
+#[allow(dead_code)]
+#[derive(Database)]
+struct SeatShopDb {
+    shop: SeatShop,
+}
+
+#[test]
+fn mysql_renders_compound_primary_key() {
+    let model = DatabaseModel::from_database::<SeatShopDb>();
+    let mut sql = Vec::new();
+    Mysql.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains("CONSTRAINT `pk_seats` PRIMARY KEY (`tenant_id`, `id`)"),
+        "expected compound PRIMARY KEY in: {sql}"
+    );
+}
+
 #[test]
 fn mysql_renders_create_from_scratch() {
     let model = DatabaseModel::from_database::<ShopDb>();
