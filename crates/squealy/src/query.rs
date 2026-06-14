@@ -584,6 +584,15 @@ impl_nullable_assignment_value! {
 #[cfg(feature = "uuid")]
 impl_nullable_assignment_value! { uuid::Uuid }
 
+// Native timestamp values can be assigned to a nullable timestamp column (`.col(ts)`); `Some`/`None`
+// route through the generic `Option<T>` impls below.
+#[cfg(feature = "systemtime")]
+impl_nullable_assignment_value! { std::time::SystemTime }
+#[cfg(feature = "time")]
+impl_nullable_assignment_value! { time::OffsetDateTime }
+#[cfg(feature = "chrono")]
+impl_nullable_assignment_value! { chrono::DateTime<chrono::Utc> }
+
 impl<K> IntoNullableAssignmentValue<K> for &str
 where
     K: ColumnKey<Value = String>,

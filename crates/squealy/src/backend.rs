@@ -73,6 +73,16 @@ impl_decode_nullable_via_option! {
 #[cfg(feature = "uuid")]
 impl_decode_nullable_via_option! { uuid::Uuid }
 
+// Native timestamp columns are commonly nullable (`deleted_at`, `expires_at`), which makes the
+// table derive emit a `DecodeNullable` bound. Resolves only on backends that provide
+// `Decode<B> for Option<T>` for the type, behind the same feature.
+#[cfg(feature = "systemtime")]
+impl_decode_nullable_via_option! { std::time::SystemTime }
+#[cfg(feature = "time")]
+impl_decode_nullable_via_option! { time::OffsetDateTime }
+#[cfg(feature = "chrono")]
+impl_decode_nullable_via_option! { chrono::DateTime<chrono::Utc> }
+
 /// Backend-specific parameter cursor used while encoding bind values.
 ///
 /// This is the encode-side mirror of [`RowReader`]: where a row reader pulls typed

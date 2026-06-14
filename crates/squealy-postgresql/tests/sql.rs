@@ -1157,6 +1157,52 @@ fn postgres_renders_compound_primary_key() {
     );
 }
 
+#[cfg(feature = "systemtime")]
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(AuditCatalog)]
+struct Audit<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, i32>,
+    created_at: C::Type<'scope, std::time::SystemTime>,
+    #[column(nullable)]
+    deleted_at: C::Type<'scope, std::time::SystemTime>,
+}
+
+#[cfg(feature = "systemtime")]
+#[allow(dead_code)]
+#[derive(Schema)]
+struct AuditCatalog {
+    audits: Audit<'static, ColumnName>,
+}
+
+#[cfg(feature = "systemtime")]
+#[allow(dead_code)]
+#[derive(Database)]
+struct AuditDb {
+    catalog: AuditCatalog,
+}
+
+#[cfg(feature = "systemtime")]
+#[test]
+fn postgres_renders_timestamp_columns_from_systemtime_fields() {
+    let model = DatabaseModel::from_database::<AuditDb>();
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // A bare `SystemTime` field maps to a timezone-aware timestamp column with no `db_type` override,
+    // nullable or not.
+    assert!(
+        sql.contains("\"created_at\" timestamp with time zone NOT NULL"),
+        "expected non-null timestamptz column in: {sql}"
+    );
+    // The nullable column renders the same type with no `NOT NULL`.
+    assert!(
+        sql.contains("\"deleted_at\" timestamp with time zone,"),
+        "expected nullable timestamptz column in: {sql}"
+    );
+}
+
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(Catalog)]
 #[unique(columns = [organization_id, slug])]

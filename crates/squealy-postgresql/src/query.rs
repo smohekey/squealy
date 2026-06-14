@@ -310,6 +310,12 @@ pub enum PostgresParam {
     Uuid(uuid::Uuid),
     #[cfg(feature = "serde")]
     Json(serde_json::Value),
+    #[cfg(feature = "systemtime")]
+    SystemTime(std::time::SystemTime),
+    #[cfg(feature = "time")]
+    TimeTimestamp(time::OffsetDateTime),
+    #[cfg(feature = "chrono")]
+    ChronoTimestamp(chrono::DateTime<chrono::Utc>),
 }
 
 /// Encodes a single value into one native [`PostgresParam`] via [`Encode`], asserting the
@@ -349,6 +355,12 @@ impl PostgresParam {
             Self::Uuid(value) => value,
             #[cfg(feature = "serde")]
             Self::Json(value) => value,
+            #[cfg(feature = "systemtime")]
+            Self::SystemTime(value) => value,
+            #[cfg(feature = "time")]
+            Self::TimeTimestamp(value) => value,
+            #[cfg(feature = "chrono")]
+            Self::ChronoTimestamp(value) => value,
         }
     }
 }
@@ -414,6 +426,54 @@ impl Encode<Postgres> for uuid::Uuid {
 
 #[cfg(feature = "uuid")]
 impl Decode<Postgres> for uuid::Uuid {
+    fn decode(row: &mut <Postgres as Backend>::RowReader<'_>) -> Result<Self, PostgresError> {
+        row.take_sql()
+    }
+}
+
+/// Native timestamp column support: each type encodes to and decodes from a real PostgreSQL
+/// `timestamptz` column via tokio-postgres's built-in (`SystemTime`) or feature-gated
+/// (`time` / `chrono`) `ToSql`/`FromSql` bridges.
+#[cfg(feature = "systemtime")]
+impl Encode<Postgres> for std::time::SystemTime {
+    fn encode(&self, out: &mut PostgresParamWriter<'_>) -> Result<(), PostgresError> {
+        out.push(PostgresParam::SystemTime(*self));
+        Ok(())
+    }
+}
+
+#[cfg(feature = "systemtime")]
+impl Decode<Postgres> for std::time::SystemTime {
+    fn decode(row: &mut <Postgres as Backend>::RowReader<'_>) -> Result<Self, PostgresError> {
+        row.take_sql()
+    }
+}
+
+#[cfg(feature = "time")]
+impl Encode<Postgres> for time::OffsetDateTime {
+    fn encode(&self, out: &mut PostgresParamWriter<'_>) -> Result<(), PostgresError> {
+        out.push(PostgresParam::TimeTimestamp(*self));
+        Ok(())
+    }
+}
+
+#[cfg(feature = "time")]
+impl Decode<Postgres> for time::OffsetDateTime {
+    fn decode(row: &mut <Postgres as Backend>::RowReader<'_>) -> Result<Self, PostgresError> {
+        row.take_sql()
+    }
+}
+
+#[cfg(feature = "chrono")]
+impl Encode<Postgres> for chrono::DateTime<chrono::Utc> {
+    fn encode(&self, out: &mut PostgresParamWriter<'_>) -> Result<(), PostgresError> {
+        out.push(PostgresParam::ChronoTimestamp(*self));
+        Ok(())
+    }
+}
+
+#[cfg(feature = "chrono")]
+impl Decode<Postgres> for chrono::DateTime<chrono::Utc> {
     fn decode(row: &mut <Postgres as Backend>::RowReader<'_>) -> Result<Self, PostgresError> {
         row.take_sql()
     }
@@ -2231,6 +2291,56 @@ mod tests {
         // it guards against the regression where bare-uuid metadata generated but failed on use.
         fn _assert_uuid_decode_nullable<T: squealy::DecodeNullable<Postgres>>() {}
         _assert_uuid_decode_nullable::<uuid::Uuid>();
+    }
+
+    #[cfg(feature = "systemtime")]
+    #[test]
+    fn system_time_encodes_to_native_timestamp_param() {
+        let ts = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        assert_eq!(
+            <std::time::SystemTime as squealy::HasColumnType>::COLUMN_TYPE,
+            squealy::ColumnType::Timestamp { tz: true }
+        );
+        assert!(matches!(
+            encode_to_param(&ts),
+            Ok(PostgresParam::SystemTime(value)) if value == ts
+        ));
+        // A nullable timestamp column (`deleted_at`, `expires_at`) makes the table derive emit a
+        // `DecodeNullable<Postgres>` bound; this compiles only when that impl exists.
+        fn _assert_decode_nullable<T: squealy::DecodeNullable<Postgres>>() {}
+        _assert_decode_nullable::<std::time::SystemTime>();
+    }
+
+    #[cfg(feature = "time")]
+    #[test]
+    fn time_offset_date_time_encodes_to_native_timestamp_param() {
+        let ts = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        assert_eq!(
+            <time::OffsetDateTime as squealy::HasColumnType>::COLUMN_TYPE,
+            squealy::ColumnType::Timestamp { tz: true }
+        );
+        assert!(matches!(
+            encode_to_param(&ts),
+            Ok(PostgresParam::TimeTimestamp(value)) if value == ts
+        ));
+        fn _assert_decode_nullable<T: squealy::DecodeNullable<Postgres>>() {}
+        _assert_decode_nullable::<time::OffsetDateTime>();
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn chrono_date_time_encodes_to_native_timestamp_param() {
+        let ts = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        assert_eq!(
+            <chrono::DateTime<chrono::Utc> as squealy::HasColumnType>::COLUMN_TYPE,
+            squealy::ColumnType::Timestamp { tz: true }
+        );
+        assert!(matches!(
+            encode_to_param(&ts),
+            Ok(PostgresParam::ChronoTimestamp(value)) if value == ts
+        ));
+        fn _assert_decode_nullable<T: squealy::DecodeNullable<Postgres>>() {}
+        _assert_decode_nullable::<chrono::DateTime<chrono::Utc>>();
     }
 
     #[cfg(feature = "serde")]
