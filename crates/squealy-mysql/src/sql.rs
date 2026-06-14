@@ -8,8 +8,9 @@
 use std::io::{self, Write};
 
 use squealy::{
-    CheckModel, ColumnModel, DatabaseModel, DatabasePlan, DatabasePlanStep, DefaultValue,
-    ForeignKeyModel, GeneratedStorage, IndexModel, SqlType, TableModel, TablePlanStep,
+    CheckModel, ColumnDefault, ColumnModel, DatabaseModel, DatabasePlan, DatabasePlanStep,
+    DefaultValue, ForeignKeyModel, GeneratedStorage, IndexModel, SqlType, Table, TableModel,
+    TablePlanStep,
 };
 
 /// Renders ordered create-from-scratch DDL for a whole model. Statements are `;`-terminated and
@@ -715,6 +716,78 @@ fn write_quoted_ident(value: &str, writer: &mut impl Write) -> io::Result<()> {
     write_delimited(value, '`', writer)
 }
 
+/// MySQL's [`Dialect`](squealy::Dialect): `?` placeholders, backtick-quoted identifiers, MySQL `CAST`
+/// target types, and float division (so `/` needs no float cast). The shared core renderer
+/// ([`squealy::render`]) drives MySQL query rendering through this.
+// Wired up by the MySQL query objects (the next step), which render through `squealy::render`.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MysqlDialect;
+
+impl squealy::Dialect for MysqlDialect {
+    fn write_placeholder(&self, _index: usize, writer: &mut dyn Write) -> io::Result<()> {
+        // MySQL placeholders are positional `?`, unnumbered.
+        writer.write_all(b"?")
+    }
+
+    fn write_quoted_ident(&self, ident: &str, mut writer: &mut dyn Write) -> io::Result<()> {
+        write_quoted_ident(ident, &mut writer)
+    }
+
+    fn write_cast_type(&self, ty: &SqlType, writer: &mut dyn Write) -> io::Result<()> {
+        // `CAST(expr AS <type>)` accepts a restricted vocabulary in MySQL, distinct from column types
+        // (e.g. `SIGNED`/`UNSIGNED`/`CHAR`, not `INT`/`VARCHAR`).
+        let name = match ty {
+            SqlType::Bool
+            | SqlType::I8
+            | SqlType::I16
+            | SqlType::I32
+            | SqlType::I64
+            | SqlType::I128
+            | SqlType::Isize => "SIGNED",
+            SqlType::U8
+            | SqlType::U16
+            | SqlType::U32
+            | SqlType::U64
+            | SqlType::U128
+            | SqlType::Usize => "UNSIGNED",
+            SqlType::F32 | SqlType::F64 | SqlType::Decimal { .. } => "DECIMAL",
+            SqlType::Date => "DATE",
+            SqlType::Time { .. } => "TIME",
+            SqlType::Timestamp { .. } => "DATETIME",
+            SqlType::Bytes => "BINARY",
+            _ => "CHAR",
+        };
+        writer.write_all(name.as_bytes())
+    }
+
+    fn integer_division_needs_float_cast(&self) -> bool {
+        // MySQL `/` is always floating-point division; `DIV` is the integer form.
+        false
+    }
+
+    fn write_limit_offset(
+        &self,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        writer: &mut dyn Write,
+    ) -> io::Result<()> {
+        // MySQL accepts OFFSET only as part of a LIMIT clause, so an offset-without-limit query needs
+        // a sentinel limit (the documented `18446744073709551615` "all rows" value).
+        match (limit, offset) {
+            (Some(limit), Some(offset)) => write!(writer, " LIMIT {limit} OFFSET {offset}"),
+            (Some(limit), None) => write!(writer, " LIMIT {limit}"),
+            (None, Some(offset)) => write!(writer, " LIMIT 18446744073709551615 OFFSET {offset}"),
+            (None, None) => Ok(()),
+        }
+    }
+
+    fn write_default_row_insert(&self, writer: &mut dyn Write) -> io::Result<()> {
+        // MySQL's empty-row insert form; `DEFAULT VALUES` is PostgreSQL-only.
+        writer.write_all(b" () VALUES ()")
+    }
+}
+
 fn write_quoted_text(value: &str, writer: &mut impl Write) -> io::Result<()> {
     write_delimited(value, '\'', writer)
 }
@@ -744,9 +817,178 @@ fn write_quoted_ident_list(columns: &[String], writer: &mut impl Write) -> io::R
     Ok(())
 }
 
+/// Renders a `CREATE TABLE` (plus any secondary indexes) for a query-builder [`Table`], used by the
+/// `to::<T>()` create path. This is the query-side counterpart to [`write_database`], which renders
+/// from the owned [`DatabaseModel`]; here the source is the derived `Table` trait.
+///
+/// Foreign keys are emitted as table-level `FOREIGN KEY` clauses rather than inline column
+/// `REFERENCES`, which MySQL parses but silently does not enforce.
+pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(b"CREATE TABLE ")?;
+    write_qualified_name(table.schema_name(), table.name(), writer)?;
+    writer.write_all(b" (")?;
+    for (index, column) in table.columns().iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        write_quoted_ident(column.name(), writer)?;
+        writer.write_all(b" ")?;
+        write_mysql_sql_type(&column.column_type().into(), writer)?;
+        if !column.nullable() {
+            writer.write_all(b" NOT NULL")?;
+        }
+        if column.auto_increment() {
+            writer.write_all(b" AUTO_INCREMENT")?;
+        }
+        if column.primary_key() {
+            writer.write_all(b" PRIMARY KEY")?;
+        }
+        if let Some(default) = column.default() {
+            writer.write_all(b" DEFAULT ")?;
+            write_column_default(default, writer)?;
+        }
+    }
+    for column in table.columns() {
+        if let Some(reference) = column.references() {
+            writer.write_all(b", FOREIGN KEY (")?;
+            write_quoted_ident(column.name(), writer)?;
+            writer.write_all(b") REFERENCES ")?;
+            write_qualified_name(reference.schema_name(), reference.table(), writer)?;
+            writer.write_all(b" (")?;
+            write_quoted_ident(reference.column(), writer)?;
+            writer.write_all(b")")?;
+            if let Some(on_delete) = reference.on_delete() {
+                write!(writer, " ON DELETE {on_delete}")?;
+            }
+            if let Some(on_update) = reference.on_update() {
+                write!(writer, " ON UPDATE {on_update}")?;
+            }
+        }
+    }
+    writer.write_all(b")")?;
+
+    for (position, index) in table.indexes().iter().enumerate() {
+        let unique = if index.unique() { "UNIQUE " } else { "" };
+        write!(writer, "\nCREATE {unique}INDEX ")?;
+        match index.name() {
+            Some(name) => write_quoted_ident(name, writer)?,
+            None => write_quoted_ident(&derived_index_name(table, *index, position), writer)?,
+        }
+        writer.write_all(b" ON ")?;
+        write_qualified_name(table.schema_name(), table.name(), writer)?;
+        writer.write_all(b" (")?;
+        write_quoted_idents(index.columns(), writer)?;
+        writer.write_all(b")")?;
+    }
+
+    Ok(())
+}
+
+/// Builds a deterministic, unique name for an index that did not supply one, so two unnamed indexes
+/// on a table do not collide.
+fn derived_index_name(
+    table: &(dyn Table + Sync),
+    index: &dyn squealy::Index,
+    position: usize,
+) -> String {
+    let mut name = format!("idx_{}", table.name());
+    for column in index.columns() {
+        name.push('_');
+        name.push_str(column);
+    }
+    if index.columns().is_empty() {
+        name.push_str(&format!("_{position}"));
+    }
+    name
+}
+
+fn write_quoted_idents(values: &[&'static str], writer: &mut impl Write) -> io::Result<()> {
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        write_quoted_ident(value, writer)?;
+    }
+    Ok(())
+}
+
+fn write_column_default(default: ColumnDefault, writer: &mut impl Write) -> io::Result<()> {
+    match default {
+        ColumnDefault::Null => writer.write_all(b"NULL"),
+        ColumnDefault::Int(value) => write!(writer, "{value}"),
+        ColumnDefault::UInt(value) => write!(writer, "{value}"),
+        ColumnDefault::Float(value) => write!(writer, "{value}"),
+        ColumnDefault::Text(value) => write_quoted_text(value, writer),
+        ColumnDefault::Bool(true) => writer.write_all(b"TRUE"),
+        ColumnDefault::Bool(false) => writer.write_all(b"FALSE"),
+        ColumnDefault::CurrentTimestamp => writer.write_all(b"CURRENT_TIMESTAMP"),
+        ColumnDefault::CurrentDate => writer.write_all(b"(CURRENT_DATE)"),
+        ColumnDefault::CurrentTime => writer.write_all(b"(CURRENT_TIME)"),
+        ColumnDefault::Raw(value) => writer.write_all(value.as_bytes()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use squealy::Dialect;
+
+    fn dialect_cast(ty: SqlType) -> String {
+        let mut out = Vec::new();
+        MysqlDialect.write_cast_type(&ty, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn mysql_dialect_renders_its_seams() {
+        let mut placeholder = Vec::new();
+        MysqlDialect.write_placeholder(3, &mut placeholder).unwrap();
+        assert_eq!(placeholder, b"?", "MySQL placeholders are positional `?`");
+
+        let mut ident = Vec::new();
+        MysqlDialect
+            .write_quoted_ident("user`s", &mut ident)
+            .unwrap();
+        assert_eq!(String::from_utf8(ident).unwrap(), "`user``s`");
+
+        // CAST target types differ from column types.
+        assert_eq!(dialect_cast(SqlType::I32), "SIGNED");
+        assert_eq!(dialect_cast(SqlType::U64), "UNSIGNED");
+        assert_eq!(dialect_cast(SqlType::F64), "DECIMAL");
+        assert_eq!(dialect_cast(SqlType::String), "CHAR");
+
+        assert!(
+            !MysqlDialect.integer_division_needs_float_cast(),
+            "MySQL `/` is already float division"
+        );
+    }
+
+    fn limit_offset(limit: Option<usize>, offset: Option<usize>) -> String {
+        let mut out = Vec::new();
+        MysqlDialect
+            .write_limit_offset(limit, offset, &mut out)
+            .unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn mysql_offset_without_limit_gets_a_sentinel_limit() {
+        // MySQL rejects a bare OFFSET, so an offset-only query needs a max LIMIT.
+        assert_eq!(
+            limit_offset(None, Some(5)),
+            " LIMIT 18446744073709551615 OFFSET 5"
+        );
+        assert_eq!(limit_offset(Some(10), Some(5)), " LIMIT 10 OFFSET 5");
+        assert_eq!(limit_offset(Some(10), None), " LIMIT 10");
+        assert_eq!(limit_offset(None, None), "");
+    }
+
+    #[test]
+    fn mysql_default_row_insert_uses_empty_values() {
+        let mut out = Vec::new();
+        MysqlDialect.write_default_row_insert(&mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), " () VALUES ()");
+    }
 
     fn render_type(ty: SqlType) -> String {
         let mut out = Vec::new();

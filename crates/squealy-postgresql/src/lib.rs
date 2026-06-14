@@ -87,6 +87,9 @@ impl Backend for Postgres {
     }
 }
 
+// PostgreSQL renders a `RETURNING` clause, so it can support the `*_returning` query builders.
+impl squealy::SupportsReturning for Postgres {}
+
 #[cfg(feature = "schema")]
 impl squealy::SchemaBackend for Postgres {
     fn capabilities(&self) -> squealy::SchemaCapabilities {

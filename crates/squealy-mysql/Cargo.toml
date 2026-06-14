@@ -1,6 +1,6 @@
 [package]
 name = "squealy-mysql"
-description = "MySQL schema-management backend for squealy"
+description = "MySQL backend for squealy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,9 +10,14 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+futures-core.workspace = true
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls"] }
 squealy.workspace = true
 thiserror.workspace = true
+# `tokio::sync::Mutex` holds the single `Conn` behind interior mutability: query execution borrows
+# `&self` (the core API) but `mysql_async` needs `&mut Conn`, so we lock across the await. Schema ops
+# already have `&mut self` and use `get_mut()` without locking.
+tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
 squealy-model.workspace = true

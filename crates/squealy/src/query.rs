@@ -9,7 +9,8 @@ use crate::{
     Backend, BindValue, ColumnExprAst, ColumnRef, Connection, Decode, Expr, ExprAst, ExprKind,
     ExprVisitor, HCons, HList, HNil, InsertableTable, IntoBindValue, IntoNullableBindValue, Maybe,
     NoRuntimeParams, Order, ParamExprAst, Predicate, PredicateKind, Projectable, ProjectionShape,
-    PushBack, QueryBuilder, RuntimeParam, SourceAlias, TableProjection, ToTuple, UpdateableTable,
+    PushBack, QueryBuilder, RuntimeParam, SourceAlias, SupportsReturning, TableProjection, ToTuple,
+    UpdateableTable,
 };
 
 type ErrorOf<Builder> = <<Builder as QueryBuilder>::Backend as Backend>::Error;
@@ -1703,6 +1704,7 @@ where
         Rows: NonEmptyInsertRows + 'conn,
         P: ReturningProjection<'static> + Projectable,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
+        Conn::Backend: SupportsReturning,
     {
         let table = <S as ProjectionShape>::exprs(SourceAlias::new(0, 0));
         let projection = projection(table);
@@ -1851,6 +1853,7 @@ where
     where
         P: ReturningProjection<'static> + Projectable,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
+        Conn::Backend: SupportsReturning,
     {
         let table = <S as ProjectionShape>::exprs(self.alias);
         let projection = projection(table);
@@ -3418,6 +3421,7 @@ where
         Self::Table: 'conn,
         P: ReturningProjection<'scope> + Projectable,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
+        Conn::Backend: SupportsReturning,
     {
         let (connection, depth, filters) = self.into_delete_parts();
         let alias = SourceAlias::new(depth, 0);

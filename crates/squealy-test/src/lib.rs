@@ -2,7 +2,8 @@
 
 use squealy::{
     Backend, Connection, ConnectionWithTransaction, Decode, InsertableTable, Projectable,
-    ProjectionShape, QueryBuilder, SelectAst, Table, TableProjection, UpdateableTable,
+    ProjectionShape, QueryBuilder, SelectAst, SupportsReturning, Table, TableProjection,
+    UpdateableTable,
 };
 
 mod query;
@@ -41,6 +42,9 @@ impl Backend for TestBackend {
         sql::write_table(table, writer)
     }
 }
+
+// The test backend renders a generic dialect and exercises the returning builders.
+impl SupportsReturning for TestBackend {}
 
 impl QueryBuilder for TestConnection {
     type Backend = TestBackend;

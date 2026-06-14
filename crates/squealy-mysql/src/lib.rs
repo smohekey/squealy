@@ -1,9 +1,10 @@
-//! MySQL schema-management backend for squealy.
+//! MySQL backend for squealy.
 //!
-//! This crate is deliberately **schema-only** (no query backend): it implements the DDL-management
-//! traits against the core `DatabaseModel`. Its purpose is partly to keep the crate boundaries
-//! honest — a second backend that renders a different dialect (backtick quoting, `AUTO_INCREMENT`,
-//! unsigned integers, `VARCHAR`-backed strings) without touching core or the model.
+//! Renders the MySQL dialect (backtick quoting, `AUTO_INCREMENT` identity, unsigned integers,
+//! `VARCHAR`-backed strings) for both schema management (DDL/introspection against the core
+//! `DatabaseModel`) and query execution. The query runtime lives in [`query`]; the single driver
+//! `Conn` is held behind a [`tokio::sync::Mutex`] so the `&self` execution API can obtain the
+//! `&mut Conn` that `mysql_async` requires.
 
 #![forbid(unsafe_code)]
 
@@ -17,7 +18,10 @@ use squealy::{
 };
 
 mod introspect;
+mod query;
 mod sql;
+
+pub use query::MysqlRowReader;
 
 /// The MySQL schema backend marker.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -44,14 +48,33 @@ impl SchemaBackend for Mysql {
     }
 }
 
-/// A live MySQL connection used for schema management.
+/// A live MySQL connection for schema management and query execution.
+///
+/// The driver `Conn` is held behind a [`tokio::sync::Mutex`] so query execution — which the core API
+/// drives through `&self` — can borrow the `&mut Conn` that `mysql_async` requires. Schema operations
+/// already take `&mut self` and reach the connection through [`get_mut`](tokio::sync::Mutex::get_mut)
+/// without locking. A single connection runs one statement at a time, so the lock is the honest model
+/// rather than a compromise.
 pub struct MysqlConnection {
-    conn: mysql_async::Conn,
+    conn: tokio::sync::Mutex<mysql_async::Conn>,
 }
 
 impl MysqlConnection {
     pub fn new(conn: mysql_async::Conn) -> Self {
-        Self { conn }
+        Self {
+            conn: tokio::sync::Mutex::new(conn),
+        }
+    }
+
+    /// Borrows the underlying connection for a schema operation that already holds `&mut self`.
+    fn conn_mut(&mut self) -> &mut mysql_async::Conn {
+        self.conn.get_mut()
+    }
+
+    /// Locks the connection for a query driven through the shared `&self` execution API. The guard is
+    /// held for the duration of one statement (a connection runs one at a time).
+    pub(crate) async fn lock(&self) -> tokio::sync::MutexGuard<'_, mysql_async::Conn> {
+        self.conn.lock().await
     }
 }
 
@@ -61,7 +84,7 @@ impl fmt::Debug for MysqlConnection {
     }
 }
 
-/// An error connecting to or executing DDL against MySQL.
+/// An error connecting to, executing DDL against, or querying MySQL.
 #[derive(Debug, thiserror::Error)]
 pub enum MysqlError {
     #[error("mysql connect error: {0}")]
@@ -70,6 +93,20 @@ pub enum MysqlError {
     Execute(#[source] mysql_async::Error),
     #[error("mysql introspection error: {0}")]
     Introspect(#[source] mysql_async::Error),
+    #[error("mysql query error: {0}")]
+    Query(#[source] mysql_async::Error),
+    #[error("query returned no rows")]
+    NoRows,
+    #[error("row is missing column {0}")]
+    MissingColumn(usize),
+    #[error("could not decode column {column}: {source}")]
+    Decode {
+        column: usize,
+        #[source]
+        source: mysql_async::FromValueError,
+    },
+    #[error("could not convert value to {0}")]
+    Conversion(&'static str),
     /// A statement in a multi-statement DDL batch failed. MySQL auto-commits DDL, so the
     /// `applied` statements before it are already committed and were not rolled back.
     #[error(
@@ -113,7 +150,7 @@ impl DdlExecutor for MysqlConnection {
         let statements = split_statements(sql);
         let total = statements.len();
         for (index, statement) in statements.into_iter().enumerate() {
-            self.conn
+            self.conn_mut()
                 .query_drop(statement)
                 .await
                 .map_err(|source| MysqlError::PartialDdl {
@@ -131,7 +168,7 @@ impl SchemaIntrospect for MysqlConnection {
     type Error = MysqlError;
 
     async fn introspect_database(&mut self) -> Result<DatabaseModel, MysqlError> {
-        introspect::database(&mut self.conn).await
+        introspect::database(self.conn_mut()).await
     }
 
     /// MySQL renders bare `String` as `VARCHAR(255)` (it has no key-usable unbounded `text`), which
@@ -178,7 +215,7 @@ impl SchemaRefactorStore for MysqlConnection {
 
     async fn applied_refactor_ids(&mut self) -> Result<Vec<String>, MysqlError> {
         let exists = self
-            .conn
+            .conn_mut()
             .query_first::<u8, _>(
                 "\
 SELECT 1
@@ -194,7 +231,7 @@ LIMIT 1",
             return Ok(Vec::new());
         }
 
-        self.conn
+        self.conn_mut()
             .query_map(
                 "SELECT `id` FROM `__squealy`.`refactors` ORDER BY `id`",
                 |id| id,
@@ -208,11 +245,11 @@ LIMIT 1",
             return Ok(());
         }
 
-        self.conn
+        self.conn_mut()
             .query_drop("CREATE SCHEMA IF NOT EXISTS `__squealy`")
             .await
             .map_err(MysqlError::Execute)?;
-        self.conn
+        self.conn_mut()
             .query_drop(
                 "\
 CREATE TABLE IF NOT EXISTS `__squealy`.`refactors` (
@@ -224,7 +261,7 @@ CREATE TABLE IF NOT EXISTS `__squealy`.`refactors` (
             .map_err(MysqlError::Execute)?;
 
         for id in ids {
-            self.conn
+            self.conn_mut()
                 .exec_drop(
                     "INSERT IGNORE INTO `__squealy`.`refactors` (`id`) VALUES (?)",
                     (id.as_str(),),
@@ -242,7 +279,7 @@ impl SchemaMetadataStore for MysqlConnection {
 
     async fn schema_metadata(&mut self) -> Result<Vec<(String, String)>, MysqlError> {
         let exists = self
-            .conn
+            .conn_mut()
             .query_first::<u8, _>(
                 "\
 SELECT 1
@@ -258,7 +295,7 @@ LIMIT 1",
             return Ok(Vec::new());
         }
 
-        self.conn
+        self.conn_mut()
             .query_map(
                 "SELECT `name`, `value` FROM `__squealy`.`metadata` ORDER BY `name`",
                 |(name, value)| (name, value),
@@ -275,11 +312,11 @@ LIMIT 1",
             return Ok(());
         }
 
-        self.conn
+        self.conn_mut()
             .query_drop("CREATE SCHEMA IF NOT EXISTS `__squealy`")
             .await
             .map_err(MysqlError::Execute)?;
-        self.conn
+        self.conn_mut()
             .query_drop(
                 "\
 CREATE TABLE IF NOT EXISTS `__squealy`.`metadata` (
@@ -292,7 +329,7 @@ CREATE TABLE IF NOT EXISTS `__squealy`.`metadata` (
             .map_err(MysqlError::Execute)?;
 
         for (name, value) in entries {
-            self.conn
+            self.conn_mut()
                 .exec_drop(
                     "\
 INSERT INTO `__squealy`.`metadata` (`name`, `value`)
@@ -316,7 +353,7 @@ impl SchemaPublishHistoryStore for MysqlConnection {
         limit: usize,
     ) -> Result<Vec<SchemaPublishRecord>, MysqlError> {
         let exists = self
-            .conn
+            .conn_mut()
             .query_first::<u8, _>(
                 "\
 SELECT 1
@@ -332,7 +369,7 @@ LIMIT 1",
             return Ok(Vec::new());
         }
 
-        self.conn
+        self.conn_mut()
             .exec_map(
                 "\
 SELECT `mode`,
@@ -360,11 +397,11 @@ LIMIT ?",
         package_hash: &str,
         package_format_version: &str,
     ) -> Result<(), MysqlError> {
-        self.conn
+        self.conn_mut()
             .query_drop("CREATE SCHEMA IF NOT EXISTS `__squealy`")
             .await
             .map_err(MysqlError::Execute)?;
-        self.conn
+        self.conn_mut()
             .query_drop(
                 "\
 CREATE TABLE IF NOT EXISTS `__squealy`.`publish_history` (
@@ -378,7 +415,7 @@ CREATE TABLE IF NOT EXISTS `__squealy`.`publish_history` (
             .await
             .map_err(MysqlError::Execute)?;
 
-        self.conn
+        self.conn_mut()
             .exec_drop(
                 "\
 INSERT INTO `__squealy`.`publish_history` (
