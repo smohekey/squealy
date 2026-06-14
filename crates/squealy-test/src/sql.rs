@@ -2,17 +2,21 @@ use std::borrow::Cow;
 use std::io::{self, Write};
 
 use squealy::{
-    ArithmeticOp, AssignmentNode, AssignmentValueVisitor, AssignmentVisitor, BindSink, BindValue,
-    Column, ColumnDefault, ColumnRef, ColumnType, CompareOp, Expr, ExprAst, ExprKind, ExprVisitor,
-    InsertAssignments, InsertRow, InsertRowVisitor, InsertRows, InsertableTable, Order,
-    OrderDirection, Predicate, PredicateAst, PredicateAstVisitor, PredicateKind, PredicateNodes,
-    PredicateVisitor, Projectable, ProjectionShape, ProjectionVisitor, QueryBuilder, SchemaTable,
-    SelectAst, SelectSink, Selected, SourceAlias, Table, TableProjection, UpdateAssignments,
-    UpdateableTable,
+    ArithmeticOp, AssignmentValueVisitor, AssignmentVisitor, Column, ColumnDefault, ColumnRef,
+    ColumnType, CompareOp, Encode, Expr, ExprKind, ExprVisitor, InsertRow, InsertRowVisitor,
+    InsertableTable, Order, OrderDirection, Predicate, PredicateAstVisitor, PredicateKind,
+    PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAssignment,
+    RenderAst, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst, RenderPredicateNodes,
+    RenderProjectable, RenderSelectAst, RenderUpdateAssignments, SchemaTable, SelectSink, Selected,
+    SourceAlias, Table, TableProjection, UpdateableTable,
 };
 
+use crate::query::{TestParam, TestParamWriter};
+
 trait SqlWriter: Write {
-    fn push_bind(&mut self, value: &BindValue);
+    fn push_bind<T>(&mut self, value: &T)
+    where
+        T: Encode<crate::TestBackend>;
 
     fn push_runtime_bind(&mut self);
 }
@@ -36,24 +40,30 @@ impl<Writer> SqlWriter for SqlOnly<'_, Writer>
 where
     Writer: Write,
 {
-    fn push_bind(&mut self, _value: &BindValue) {}
+    fn push_bind<T>(&mut self, _value: &T)
+    where
+        T: Encode<crate::TestBackend>,
+    {
+    }
 
     fn push_runtime_bind(&mut self) {}
 }
 
-struct ParamSinkWriter<'sink, Sink>
-where
-    Sink: BindSink,
-{
-    sink: &'sink mut Sink,
-    error: Option<Sink::Error>,
+/// Collects literal binds into a [`TestParam`] vector for inspection, discarding SQL text.
+struct ParamCollector<'params> {
+    params: &'params mut Vec<TestParam>,
+    error: Option<crate::TestError>,
 }
 
-impl<Sink> ParamSinkWriter<'_, Sink>
-where
-    Sink: BindSink,
-{
-    fn finish(self) -> Result<(), Sink::Error> {
+impl<'params> ParamCollector<'params> {
+    fn new(params: &'params mut Vec<TestParam>) -> Self {
+        Self {
+            params,
+            error: None,
+        }
+    }
+
+    fn finish(self) -> Result<(), crate::TestError> {
         match self.error {
             Some(error) => Err(error),
             None => Ok(()),
@@ -61,10 +71,7 @@ where
     }
 }
 
-impl<Sink> Write for ParamSinkWriter<'_, Sink>
-where
-    Sink: BindSink,
-{
+impl Write for ParamCollector<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         Ok(buf.len())
     }
@@ -74,13 +81,14 @@ where
     }
 }
 
-impl<Sink> SqlWriter for ParamSinkWriter<'_, Sink>
-where
-    Sink: BindSink,
-{
-    fn push_bind(&mut self, value: &BindValue) {
+impl SqlWriter for ParamCollector<'_> {
+    fn push_bind<T>(&mut self, value: &T)
+    where
+        T: Encode<crate::TestBackend>,
+    {
         if self.error.is_none() {
-            self.error = self.sink.push_bind_value(value.clone()).err();
+            let mut writer = TestParamWriter::new(self.params);
+            self.error = value.encode(&mut writer).err();
         }
     }
 
@@ -120,11 +128,12 @@ where
     Writer: SqlWriter,
 {
     type Error = io::Error;
+    type Backend = crate::TestBackend;
 
     fn push_projection<Shape, P>(&mut self, projection: P) -> io::Result<()>
     where
         Shape: ProjectionShape,
-        P: Projectable,
+        P: RenderProjectable<crate::TestBackend>,
     {
         _ = std::marker::PhantomData::<Shape>;
         projection.visit_projection(self)
@@ -146,7 +155,7 @@ where
     where
         S: TableProjection,
         P: PredicateKind,
-        Ast: PredicateAst,
+        Ast: RenderPredicateAst<crate::TestBackend>,
     {
         self.push_join::<S, P, Ast>(alias, on, "INNER JOIN")
     }
@@ -159,7 +168,7 @@ where
     where
         S: TableProjection,
         P: PredicateKind,
-        Ast: PredicateAst,
+        Ast: RenderPredicateAst<crate::TestBackend>,
     {
         self.push_join::<S, P, Ast>(alias, on, "LEFT JOIN")
     }
@@ -167,7 +176,7 @@ where
     fn push_filter<P, Ast>(&mut self, predicate: Predicate<'_, P, Ast>) -> io::Result<()>
     where
         P: PredicateKind,
-        Ast: PredicateAst,
+        Ast: RenderPredicateAst<crate::TestBackend>,
     {
         if self.filters == 0 {
             self.writer.write_all(b" WHERE ")?;
@@ -181,7 +190,7 @@ where
     fn push_order<K, Ast>(&mut self, order: Order<'_, K, Ast>) -> io::Result<()>
     where
         K: ExprKind,
-        Ast: ExprAst,
+        Ast: RenderAst<crate::TestBackend>,
     {
         if self.orders == 0 {
             self.writer.write_all(b" ORDER BY ")?;
@@ -208,6 +217,7 @@ where
     Writer: SqlWriter,
 {
     type Error = io::Error;
+    type Backend = crate::TestBackend;
 
     fn visit_expr<K, Ast>(
         &mut self,
@@ -216,7 +226,7 @@ where
     ) -> io::Result<()>
     where
         K: ExprKind,
-        Ast: ExprAst,
+        Ast: RenderAst<crate::TestBackend>,
     {
         self.push_projection_separator()?;
         write_expr_value(expr, self.writer)?;
@@ -245,9 +255,9 @@ pub(crate) fn write_selected_into<'conn, 'scope, Conn, Base, Shape, Projection, 
 ) -> io::Result<()>
 where
     Conn: QueryBuilder + 'conn,
-    Base: SelectAst<'conn, 'scope, Conn>,
+    Base: RenderSelectAst<'conn, 'scope, Conn, crate::TestBackend>,
     Shape: ProjectionShape,
-    Projection: Projectable,
+    Projection: RenderProjectable<crate::TestBackend>,
     Writer: Write,
 {
     let mut writer = SqlOnly(writer);
@@ -256,18 +266,17 @@ where
     sink.finish()
 }
 
-pub(crate) fn write_selected_params<'conn, 'scope, Conn, Base, Shape, Projection, Sink>(
+pub(crate) fn write_selected_params<'conn, 'scope, Conn, Base, Shape, Projection>(
     selected: &Selected<'scope, Base, Shape, Projection>,
-    sink: &mut Sink,
-) -> Result<(), Sink::Error>
+    params: &mut Vec<TestParam>,
+) -> Result<(), crate::TestError>
 where
     Conn: QueryBuilder + 'conn,
-    Base: SelectAst<'conn, 'scope, Conn>,
+    Base: RenderSelectAst<'conn, 'scope, Conn, crate::TestBackend>,
     Shape: ProjectionShape,
-    Projection: Projectable,
-    Sink: BindSink,
+    Projection: RenderProjectable<crate::TestBackend>,
 {
-    let mut writer = ParamSinkWriter { sink, error: None };
+    let mut writer = ParamCollector::new(params);
     let mut select_sink = TestSelectSink::new(&mut writer).unwrap();
     selected.lower_into::<Conn, _>(&mut select_sink).unwrap();
     select_sink.finish().unwrap();
@@ -303,7 +312,7 @@ where
     where
         S: TableProjection,
         P: PredicateKind,
-        Ast: PredicateAst,
+        Ast: RenderPredicateAst<crate::TestBackend>,
     {
         let first_source = self.sources == 0;
         self.push_source_separator()?;
@@ -480,8 +489,8 @@ pub(crate) fn write_insert<S, Rows, Returning>(
 ) -> io::Result<()>
 where
     S: InsertableTable,
-    Rows: InsertRows,
-    Returning: Projectable,
+    Rows: RenderInsertRows<crate::TestBackend>,
+    Returning: RenderProjectable<crate::TestBackend>,
 {
     let mut writer = SqlOnly(writer);
     write_insert_with_params::<S, _, _, _>(rows, returning, &mut writer)
@@ -494,8 +503,8 @@ fn write_insert_with_params<S, Rows, Returning, Writer>(
 ) -> io::Result<()>
 where
     S: InsertableTable,
-    Rows: InsertRows,
-    Returning: Projectable,
+    Rows: RenderInsertRows<crate::TestBackend>,
+    Returning: RenderProjectable<crate::TestBackend>,
     Writer: SqlWriter,
 {
     write!(
@@ -533,9 +542,11 @@ impl<Writer> InsertRowVisitor<io::Error> for WriteInsertRows<'_, Writer>
 where
     Writer: SqlWriter,
 {
+    type Backend = crate::TestBackend;
+
     fn visit_row<Columns>(&mut self, row: &InsertRow<Columns>) -> io::Result<()>
     where
-        Columns: InsertAssignments,
+        Columns: RenderInsertAssignments<crate::TestBackend>,
     {
         if row.columns().len() != self.expected_columns {
             return Err(io::Error::new(
@@ -569,6 +580,7 @@ where
     Writer: SqlWriter,
 {
     type Error = io::Error;
+    type Backend = crate::TestBackend;
 
     fn visit_assignment<Value>(
         &mut self,
@@ -576,7 +588,7 @@ where
         value: &Value,
     ) -> Result<(), Self::Error>
     where
-        Value: AssignmentNode,
+        Value: RenderAssignment<crate::TestBackend>,
     {
         if self.index > 0 {
             self.writer.write_all(b", ")?;
@@ -588,7 +600,7 @@ where
 
 fn write_insert_rows<Rows, Writer>(rows: &Rows, writer: &mut Writer) -> io::Result<()>
 where
-    Rows: InsertRows,
+    Rows: RenderInsertRows<crate::TestBackend>,
     Writer: SqlWriter,
 {
     let mut visitor = WriteInsertRows {
@@ -608,9 +620,9 @@ pub(crate) fn write_update<S, Columns, Filters, Returning>(
 ) -> io::Result<()>
 where
     S: UpdateableTable,
-    Columns: UpdateAssignments,
-    Filters: PredicateNodes,
-    Returning: Projectable,
+    Columns: RenderUpdateAssignments<crate::TestBackend>,
+    Filters: RenderPredicateNodes<crate::TestBackend>,
+    Returning: RenderProjectable<crate::TestBackend>,
 {
     let mut writer = SqlOnly(writer);
     write_update_with_params::<S, _, _, _, _>(alias, columns, filters, returning, &mut writer)
@@ -625,9 +637,9 @@ fn write_update_with_params<S, Columns, Filters, Returning, Writer>(
 ) -> io::Result<()>
 where
     S: UpdateableTable,
-    Columns: UpdateAssignments,
-    Filters: PredicateNodes,
-    Returning: Projectable,
+    Columns: RenderUpdateAssignments<crate::TestBackend>,
+    Filters: RenderPredicateNodes<crate::TestBackend>,
+    Returning: RenderProjectable<crate::TestBackend>,
     Writer: SqlWriter,
 {
     write!(
@@ -653,6 +665,7 @@ where
     Writer: SqlWriter,
 {
     type Error = io::Error;
+    type Backend = crate::TestBackend;
 
     fn visit_assignment<Value>(
         &mut self,
@@ -660,7 +673,7 @@ where
         value: &Value,
     ) -> Result<(), Self::Error>
     where
-        Value: AssignmentNode,
+        Value: RenderAssignment<crate::TestBackend>,
     {
         if self.index > 0 {
             self.writer.write_all(b", ")?;
@@ -679,8 +692,8 @@ pub(crate) fn write_delete<S, Filters, Returning>(
 ) -> io::Result<()>
 where
     S: TableProjection,
-    Filters: PredicateNodes,
-    Returning: Projectable,
+    Filters: RenderPredicateNodes<crate::TestBackend>,
+    Returning: RenderProjectable<crate::TestBackend>,
 {
     let mut writer = SqlOnly(writer);
     write_delete_with_params::<S, _, _, _>(alias, filters, returning, &mut writer)
@@ -694,8 +707,8 @@ fn write_delete_with_params<S, Filters, Returning, Writer>(
 ) -> io::Result<()>
 where
     S: TableProjection,
-    Filters: PredicateNodes,
-    Returning: Projectable,
+    Filters: RenderPredicateNodes<crate::TestBackend>,
+    Returning: RenderProjectable<crate::TestBackend>,
     Writer: SqlWriter,
 {
     write!(writer, "DELETE FROM {} AS {}", S::qualified_name(), alias)?;
@@ -704,7 +717,7 @@ where
     Ok(())
 }
 
-fn write_returning(returning: &impl Projectable, writer: &mut impl SqlWriter) -> io::Result<()> {
+fn write_returning(returning: &impl RenderProjectable<crate::TestBackend>, writer: &mut impl SqlWriter) -> io::Result<()> {
     returning.visit_projection(&mut WriteProjection {
         writer,
         index: 0,
@@ -738,6 +751,7 @@ where
     Writer: SqlWriter,
 {
     type Error = io::Error;
+    type Backend = crate::TestBackend;
 
     fn visit_expr<K, Ast>(
         &mut self,
@@ -746,7 +760,7 @@ where
     ) -> io::Result<()>
     where
         K: ExprKind,
-        Ast: ExprAst,
+        Ast: RenderAst<crate::TestBackend>,
     {
         self.write_projection_separator()?;
         write_expr_value(expr, self.writer)?;
@@ -767,7 +781,7 @@ where
     }
 }
 
-fn write_filters(filters: &impl PredicateNodes, writer: &mut impl SqlWriter) -> io::Result<()> {
+fn write_filters(filters: &impl RenderPredicateNodes<crate::TestBackend>, writer: &mut impl SqlWriter) -> io::Result<()> {
     if filters.is_empty() {
         return Ok(());
     }
@@ -787,11 +801,12 @@ where
     Writer: SqlWriter,
 {
     type Error = io::Error;
+    type Backend = crate::TestBackend;
 
     fn visit_predicate<Kind, Ast>(&mut self, predicate: &Predicate<'_, Kind, Ast>) -> io::Result<()>
     where
         Kind: PredicateKind,
-        Ast: PredicateAst,
+        Ast: RenderPredicateAst<crate::TestBackend>,
     {
         if self.index > 0 {
             self.writer.write_all(b" AND ")?;
@@ -804,16 +819,16 @@ where
 fn write_expr_value<K, Ast>(expr: &Expr<'_, K, Ast>, writer: &mut impl SqlWriter) -> io::Result<()>
 where
     K: ExprKind,
-    Ast: ExprAst,
+    Ast: RenderAst<crate::TestBackend>,
 {
-    expr.visit(&mut RenderAst { writer })
+    expr.visit(&mut RenderExpr { writer })
 }
 
 fn write_column_value<K>(column: ColumnRef<'_, K>, writer: &mut impl SqlWriter) -> io::Result<()>
 where
     K: ExprKind,
 {
-    column.visit(&mut RenderAst { writer })
+    column.visit(&mut RenderExpr { writer })
 }
 
 fn write_predicate_value<K, Ast>(
@@ -822,9 +837,9 @@ fn write_predicate_value<K, Ast>(
 ) -> io::Result<()>
 where
     K: PredicateKind,
-    Ast: PredicateAst,
+    Ast: RenderPredicateAst<crate::TestBackend>,
 {
-    predicate.visit(&mut RenderAst { writer })
+    predicate.visit(&mut RenderExpr { writer })
 }
 
 fn write_order_value<K, Ast>(
@@ -833,15 +848,15 @@ fn write_order_value<K, Ast>(
 ) -> io::Result<()>
 where
     K: ExprKind,
-    Ast: ExprAst,
+    Ast: RenderAst<crate::TestBackend>,
 {
-    order.visit_expr(&mut RenderAst { writer })?;
+    order.visit_expr(&mut RenderExpr { writer })?;
     write!(writer, " {}", render_order_direction(order.direction()))
 }
 
 fn write_assignment_value<Value>(value: &Value, writer: &mut impl SqlWriter) -> io::Result<()>
 where
-    Value: AssignmentNode,
+    Value: RenderAssignment<crate::TestBackend>,
 {
     value.visit_value(&mut RenderAssignmentValue { writer })
 }
@@ -855,8 +870,12 @@ where
     Writer: SqlWriter,
 {
     type Error = io::Error;
+    type Backend = crate::TestBackend;
 
-    fn visit_static(&mut self, value: &BindValue) -> Result<(), Self::Error> {
+    fn visit_static<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: Encode<crate::TestBackend>,
+    {
         self.writer.push_bind(value);
         self.writer.write_all(b"?")
     }
@@ -873,28 +892,32 @@ where
     fn visit_expr<K, Ast>(&mut self, expr: &Expr<'_, K, Ast>) -> Result<(), Self::Error>
     where
         K: ExprKind,
-        Ast: ExprAst,
+        Ast: RenderAst<crate::TestBackend>,
     {
         write_expr_value(expr, self.writer)
     }
 }
 
-struct RenderAst<'writer, Writer> {
+struct RenderExpr<'writer, Writer> {
     writer: &'writer mut Writer,
 }
 
-impl<Writer> ExprVisitor for RenderAst<'_, Writer>
+impl<Writer> ExprVisitor for RenderExpr<'_, Writer>
 where
     Writer: SqlWriter,
 {
     type Error = io::Error;
+    type Backend = crate::TestBackend;
 
     fn visit_column(&mut self, alias: SourceAlias, column: &str) -> Result<(), Self::Error> {
         write!(self.writer, "{alias}.{column}")
     }
 
-    fn visit_literal(&mut self, _value: &BindValue) -> Result<(), Self::Error> {
-        self.writer.push_bind(_value);
+    fn visit_literal<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: Encode<crate::TestBackend>,
+    {
+        self.writer.push_bind(value);
         self.writer.write_all(b"?")
     }
 
@@ -916,7 +939,7 @@ where
     }
 }
 
-impl<Writer> PredicateAstVisitor for RenderAst<'_, Writer>
+impl<Writer> PredicateAstVisitor for RenderExpr<'_, Writer>
 where
     Writer: SqlWriter,
 {
@@ -993,57 +1016,54 @@ fn render_order_direction(direction: OrderDirection) -> &'static str {
     }
 }
 
-pub(crate) fn write_insert_params<S, Rows, Returning, Sink>(
+pub(crate) fn write_insert_params<S, Rows, Returning>(
     rows: &Rows,
     returning: &Returning,
-    sink: &mut Sink,
-) -> Result<(), Sink::Error>
+    params: &mut Vec<TestParam>,
+) -> Result<(), crate::TestError>
 where
     S: InsertableTable,
-    Rows: InsertRows,
-    Returning: Projectable,
-    Sink: BindSink,
+    Rows: RenderInsertRows<crate::TestBackend>,
+    Returning: RenderProjectable<crate::TestBackend>,
 {
-    sink.reserve_bind_values(rows.param_count());
-    let mut writer = ParamSinkWriter { sink, error: None };
+    params.reserve(rows.param_count());
+    let mut writer = ParamCollector::new(params);
     write_insert_with_params::<S, _, _, _>(rows, returning, &mut writer).unwrap();
     writer.finish()
 }
 
-pub(crate) fn write_delete_params<S, Filters, Returning, Sink>(
+pub(crate) fn write_delete_params<S, Filters, Returning>(
     alias: SourceAlias,
     filters: &Filters,
     returning: &Returning,
-    sink: &mut Sink,
-) -> Result<(), Sink::Error>
+    params: &mut Vec<TestParam>,
+) -> Result<(), crate::TestError>
 where
     S: TableProjection,
-    Filters: PredicateNodes,
-    Returning: Projectable,
-    Sink: BindSink,
+    Filters: RenderPredicateNodes<crate::TestBackend>,
+    Returning: RenderProjectable<crate::TestBackend>,
 {
-    sink.reserve_bind_values(filters.len());
-    let mut writer = ParamSinkWriter { sink, error: None };
+    params.reserve(filters.len());
+    let mut writer = ParamCollector::new(params);
     write_delete_with_params::<S, _, _, _>(alias, filters, returning, &mut writer).unwrap();
     writer.finish()
 }
 
-pub(crate) fn write_update_params<S, Columns, Filters, Returning, Sink>(
+pub(crate) fn write_update_params<S, Columns, Filters, Returning>(
     alias: SourceAlias,
     columns: &Columns,
     filters: &Filters,
     returning: &Returning,
-    sink: &mut Sink,
-) -> Result<(), Sink::Error>
+    params: &mut Vec<TestParam>,
+) -> Result<(), crate::TestError>
 where
     S: UpdateableTable,
-    Columns: UpdateAssignments,
-    Filters: PredicateNodes,
-    Returning: Projectable,
-    Sink: BindSink,
+    Columns: RenderUpdateAssignments<crate::TestBackend>,
+    Filters: RenderPredicateNodes<crate::TestBackend>,
+    Returning: RenderProjectable<crate::TestBackend>,
 {
-    sink.reserve_bind_values(columns.param_count() + filters.len());
-    let mut writer = ParamSinkWriter { sink, error: None };
+    params.reserve(columns.param_count() + filters.len());
+    let mut writer = ParamCollector::new(params);
     write_update_with_params::<S, _, _, _, _>(alias, columns, filters, returning, &mut writer)
         .unwrap();
     writer.finish()

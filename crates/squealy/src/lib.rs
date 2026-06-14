@@ -394,10 +394,10 @@ mod schema;
 mod table;
 
 pub use backend::{
-    Backend, ConstraintCapabilities, DdlExecutor, Decode, DecodeNullable, IndexCapabilities,
-    RowReader, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect,
-    SchemaMetadataStore, SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore,
-    SupportsReturning,
+    Backend, ConstraintCapabilities, DdlExecutor, Decode, DecodeNullable, Encode,
+    IndexCapabilities, ParamWriter, RowReader, SchemaBackend, SchemaCapabilities, SchemaConnect,
+    SchemaIntrospect, SchemaMetadataStore, SchemaPublishHistoryStore, SchemaPublishRecord,
+    SchemaRefactorStore, SupportsReturning,
 };
 pub use column::{
     Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullableValue, ColumnType,
@@ -407,19 +407,18 @@ pub use connection::{Connection, ConnectionWithTransaction, QueryBuilder};
 pub use database::Database;
 pub use dialect::Dialect;
 pub use expr::{
-    AddExpr, AndPredicate, AnyPredicate, ArithmeticOp, BinaryExprAst, BindValue, BindValueKind,
-    ColumnExprAst, ColumnRef, CompareOp, ComparePredicateAst, DivideExpr, EqualsPredicate, Expr,
-    ExprAst, ExprKind, ExprVisitor, FloatWidth, GreaterThanOrEqualsPredicate, GreaterThanPredicate,
-    IntWidth, IntoBindValue, IntoExpr, IntoNullableBindValue, LessThanOrEqualsPredicate,
-    LessThanPredicate, LiteralExprAst, MultiplyExpr, NotEqualsPredicate, NotPredicate, Nullable,
-    OrPredicate, Order, OrderDirection, ParamExprAst, Predicate, PredicateAst, PredicateAstVisitor,
-    PredicateKind, RuntimeParam, SameValue, SourceAlias, SqlDivide, SqlNumber, SubtractExpr,
-    UIntWidth, param,
+    AddExpr, AndPredicate, AnyPredicate, ArithmeticOp, BinaryExprAst, ColumnExprAst, ColumnRef,
+    CompareOp, ComparePredicateAst, DivideExpr, EqualsPredicate, Expr, ExprAst, ExprKind,
+    ExprVisitor, GreaterThanOrEqualsPredicate, GreaterThanPredicate, IntoExpr,
+    LessThanOrEqualsPredicate, LessThanPredicate, LiteralExprAst, MultiplyExpr, NotEqualsPredicate,
+    NotPredicate, Nullable, OrPredicate, Order, OrderDirection, ParamExprAst, Predicate,
+    PredicateAst, PredicateAstVisitor, PredicateKind, RenderAst, RenderPredicateAst, RuntimeParam,
+    SameValue, SourceAlias, SqlDivide, SqlNumber, SubtractExpr, param,
 };
 pub use foreign_key::ForeignKey;
 pub use index::Index;
 pub use list::{
-    BindSink, FixedList, HAppend, HCons, HList, HNil, IntoPreparedParam, MapFixedList,
+    FixedList, HAppend, HCons, HList, HNil, IntoPreparedParam, MapFixedList,
     NoRuntimeParams, PreparedParamValues, PushBack, ToTuple, TupleAppend, TupleConcat,
 };
 pub use model::{
@@ -430,7 +429,9 @@ pub use model::{
     SchemaModel, SqlType, TableModel,
 };
 pub use plan::{DatabasePlan, DatabasePlanStep, TablePlanStep};
-pub use projection::{Maybe, Projectable, ProjectionShape, ProjectionVisitor, TableProjection};
+pub use projection::{
+    Maybe, Projectable, ProjectionShape, ProjectionVisitor, RenderProjectable, TableProjection,
+};
 pub use query::{
     AllRows, AssignmentNode, AssignmentValueNode, AssignmentValueVisitor, AssignmentVisitor,
     ColumnKey, DefaultAssignmentValue, DefaultValueNode, DeleteQuery, DeleteSourceAst,
@@ -443,7 +444,9 @@ pub use query::{
     LeftJoinTarget, Limited, MutationFiltered, MutationUnfiltered, NoSources, NonEmptyInsertRows,
     NonNullableColumn, NullableColumn, Offset, OrderBy, PredicateNodes, PredicateVisitor,
     PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery,
-    PreparedMutationQuery, PreparedSelectQuery, ReturningProjection, RootSource, RowsAffected,
+    PreparedMutationQuery, PreparedSelectQuery, RenderAssignment, RenderAssignmentValue,
+    RenderInsertAssignments, RenderInsertRows, RenderPredicateNodes, RenderSelectAst,
+    RenderSourceSpec, RenderUpdateAssignments, ReturningProjection, RootSource, RowsAffected,
     RuntimeAssignmentValue, SelectAst, SelectQuery, SelectSink, Selected, SourceQuery, SourceSpec,
     StaticAssignmentValue, ToColumns, UpdateAssignment, UpdateAssignmentNode, UpdateAssignments,
     UpdateColumnKey, UpdateColumnValues, UpdateQuery, Where, default,

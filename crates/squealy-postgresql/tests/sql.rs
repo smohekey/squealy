@@ -1,6 +1,6 @@
 use squealy::SchemaBackend;
 use squealy::*;
-use squealy_postgresql::Postgres;
+use squealy_postgresql::{Postgres, PostgresParam};
 
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(Public)]
@@ -643,10 +643,10 @@ fn postgres_select_uses_numbered_placeholders() {
     );
     let mut written = Vec::new();
     users.write_params(&mut written).unwrap();
-    assert_eq!(written, vec![BindValue::Int(2), BindValue::Int(1)]);
+    assert_eq!(written, vec![PostgresParam::Int32(2), PostgresParam::Int32(1)]);
     assert_eq!(
-        users.collect_params(),
-        vec![BindValue::Int(2), BindValue::Int(1)]
+        users.collect_params().unwrap(),
+        vec![PostgresParam::Int32(2), PostgresParam::Int32(1)]
     );
 }
 
@@ -658,7 +658,7 @@ fn postgres_division_renders_fractional_result() {
         users.to_sql(),
         "SELECT (CAST(q0_0.\"id\" AS double precision) / CAST($1 AS double precision)) AS \"expr\" FROM \"public\".\"users\" AS q0_0"
     );
-    assert_eq!(users.collect_params(), vec![BindValue::Int(2)]);
+    assert_eq!(users.collect_params().unwrap(), vec![PostgresParam::Int32(2)]);
 }
 
 #[test]
@@ -672,7 +672,7 @@ fn postgres_runtime_prepared_params_render_without_captured_values() {
         users.to_sql(),
         "SELECT q0_0.\"name\" AS \"name\" FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"name\" = $1)"
     );
-    assert_eq!(users.collect_params(), Vec::<BindValue>::new());
+    assert_eq!(users.collect_params().unwrap(), Vec::<PostgresParam>::new());
 }
 
 #[test]
@@ -704,9 +704,9 @@ fn postgres_runtime_prepared_assignment_params_render_without_captured_values() 
         update.to_sql(),
         "UPDATE \"public\".\"users\" AS q0_0 SET \"name\" = $1 WHERE (q0_0.\"id\" = $2) RETURNING q0_0.\"name\" AS \"name\""
     );
-    assert_eq!(insert.collect_params(), Vec::<BindValue>::new());
-    assert_eq!(insert_multiple.collect_params(), Vec::<BindValue>::new());
-    assert_eq!(update.collect_params(), Vec::<BindValue>::new());
+    assert_eq!(insert.collect_params().unwrap(), Vec::<PostgresParam>::new());
+    assert_eq!(insert_multiple.collect_params().unwrap(), Vec::<PostgresParam>::new());
+    assert_eq!(update.collect_params().unwrap(), Vec::<PostgresParam>::new());
 }
 
 #[test]
@@ -721,7 +721,7 @@ fn postgres_update_renders_explicit_defaults() {
         update.to_sql(),
         "UPDATE \"public\".\"users\" AS q0_0 SET \"name\" = DEFAULT WHERE (q0_0.\"id\" = $1) RETURNING q0_0.\"name\" AS \"name\""
     );
-    assert_eq!(update.collect_params(), vec![BindValue::Int(1)]);
+    assert_eq!(update.collect_params().unwrap(), vec![PostgresParam::Int32(1)]);
 }
 
 #[test]
@@ -737,8 +737,8 @@ fn postgres_explicit_update_columns_render_expression_assignments() {
         "UPDATE \"counters\" AS q0_0 SET \"count\" = (q0_0.\"count\" + $1) WHERE (q0_0.\"id\" = $2) RETURNING q0_0.\"count\" AS \"count\""
     );
     assert_eq!(
-        update.collect_params(),
-        vec![BindValue::Int(1), BindValue::Int(7)]
+        update.collect_params().unwrap(),
+        vec![PostgresParam::Int32(1), PostgresParam::Int32(7)]
     );
 }
 
@@ -757,8 +757,8 @@ fn postgres_source_first_select_renders_from_backend_selected_ast() {
         "SELECT q0_0.\"name\" AS \"name\" FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"id\" = $1) ORDER BY (q0_0.\"id\" + $2) DESC LIMIT 10 OFFSET 5"
     );
     assert_eq!(
-        users.collect_params(),
-        vec![BindValue::Int(1), BindValue::Int(2)]
+        users.collect_params().unwrap(),
+        vec![PostgresParam::Int32(1), PostgresParam::Int32(2)]
     );
 }
 
@@ -791,14 +791,14 @@ fn postgres_insert_update_and_delete_render_returning() {
         "DELETE FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"id\" = $1) RETURNING q0_0.\"id\" AS \"id\", q0_0.\"name\" AS \"name\""
     );
     assert_eq!(
-        insert.collect_params(),
-        vec![BindValue::Text("Ada".to_owned())]
+        insert.collect_params().unwrap(),
+        vec![PostgresParam::Text("Ada".to_owned())]
     );
     assert_eq!(
-        update.collect_params(),
-        vec![BindValue::Text("Ada".to_owned()), BindValue::Int(1)]
+        update.collect_params().unwrap(),
+        vec![PostgresParam::Text("Ada".to_owned()), PostgresParam::Int32(1)]
     );
-    assert_eq!(delete.collect_params(), vec![BindValue::Int(1)]);
+    assert_eq!(delete.collect_params().unwrap(), vec![PostgresParam::Int32(1)]);
 }
 
 #[test]
@@ -814,10 +814,10 @@ fn postgres_insert_renders_multiple_rows() {
         "INSERT INTO \"public\".\"users\" (\"name\") VALUES ($1), ($2) RETURNING \"id\" AS \"id\""
     );
     assert_eq!(
-        insert.collect_params(),
+        insert.collect_params().unwrap(),
         vec![
-            BindValue::Text("Ada".to_owned()),
-            BindValue::Text("Grace".to_owned())
+            PostgresParam::Text("Ada".to_owned()),
+            PostgresParam::Text("Grace".to_owned())
         ]
     );
 }
@@ -835,8 +835,8 @@ fn postgres_insert_renders_explicit_defaults() {
         "INSERT INTO \"public\".\"users\" (\"name\") VALUES (DEFAULT), ($1) RETURNING (\"id\" + $2) AS \"expr\""
     );
     assert_eq!(
-        insert.collect_params(),
-        vec![BindValue::Text("Grace".to_owned()), BindValue::Int(1)]
+        insert.collect_params().unwrap(),
+        vec![PostgresParam::Text("Grace".to_owned()), PostgresParam::Int32(1)]
     );
 }
 
@@ -850,7 +850,7 @@ fn postgres_insert_can_use_default_values() {
         insert.to_sql(),
         "INSERT INTO \"defaulted_records\" DEFAULT VALUES RETURNING \"id\" AS \"id\""
     );
-    assert_eq!(insert.collect_params(), Vec::<BindValue>::new());
+    assert_eq!(insert.collect_params().unwrap(), Vec::<PostgresParam>::new());
 }
 
 #[test]
@@ -874,15 +874,15 @@ fn postgres_mutation_returning_expressions_continue_placeholder_numbering() {
         "UPDATE \"public\".\"users\" AS q0_0 SET \"name\" = $1 WHERE (q0_0.\"id\" = $2) RETURNING (q0_0.\"id\" + $3) AS \"expr\""
     );
     assert_eq!(
-        insert.collect_params(),
-        vec![BindValue::Text("Ada".to_owned()), BindValue::Int(1)]
+        insert.collect_params().unwrap(),
+        vec![PostgresParam::Text("Ada".to_owned()), PostgresParam::Int32(1)]
     );
     assert_eq!(
-        update.collect_params(),
+        update.collect_params().unwrap(),
         vec![
-            BindValue::Text("Ada".to_owned()),
-            BindValue::Int(1),
-            BindValue::Int(2),
+            PostgresParam::Text("Ada".to_owned()),
+            PostgresParam::Int32(1),
+            PostgresParam::Int32(2),
         ]
     );
 }

@@ -1,5 +1,7 @@
 use squealy::*;
-use squealy_test::{TestBackend, TestConnection, TestDelete, TestInsert, TestSelect, TestUpdate};
+use squealy_test::{
+    TestBackend, TestConnection, TestDelete, TestInsert, TestParam, TestSelect, TestUpdate,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 enum LoweringEvent {
@@ -18,32 +20,14 @@ struct RecordingSelectSink {
     events: Vec<LoweringEvent>,
 }
 
-#[derive(Debug, PartialEq)]
-struct RecordingBindSink {
-    values: Vec<BindValue>,
-    reserved: usize,
-}
-
-impl BindSink for RecordingBindSink {
-    type Error = std::convert::Infallible;
-
-    fn reserve_bind_values(&mut self, additional: usize) {
-        self.reserved += additional;
-    }
-
-    fn push_bind_value(&mut self, value: BindValue) -> Result<(), Self::Error> {
-        self.values.push(value);
-        Ok(())
-    }
-}
-
 impl SelectSink for RecordingSelectSink {
     type Error = std::convert::Infallible;
+    type Backend = TestBackend;
 
     fn push_projection<Shape, P>(&mut self, projection: P) -> Result<(), Self::Error>
     where
         Shape: ProjectionShape,
-        P: Projectable,
+        P: RenderProjectable<TestBackend>,
     {
         _ = projection;
         _ = std::marker::PhantomData::<Shape>;
@@ -72,7 +56,7 @@ impl SelectSink for RecordingSelectSink {
     where
         S: TableProjection,
         P: PredicateKind,
-        Ast: PredicateAst,
+        Ast: RenderPredicateAst<TestBackend>,
     {
         self.events.push(LoweringEvent::InnerJoin {
             table: S::qualified_name().into_owned(),
@@ -89,7 +73,7 @@ impl SelectSink for RecordingSelectSink {
     where
         S: TableProjection,
         P: PredicateKind,
-        Ast: PredicateAst,
+        Ast: RenderPredicateAst<TestBackend>,
     {
         self.events.push(LoweringEvent::LeftJoin {
             table: S::qualified_name().into_owned(),
@@ -101,7 +85,7 @@ impl SelectSink for RecordingSelectSink {
     fn push_filter<P, Ast>(&mut self, _predicate: Predicate<'_, P, Ast>) -> Result<(), Self::Error>
     where
         P: PredicateKind,
-        Ast: PredicateAst,
+        Ast: RenderPredicateAst<TestBackend>,
     {
         self.events.push(LoweringEvent::Filter);
         Ok(())
@@ -110,7 +94,7 @@ impl SelectSink for RecordingSelectSink {
     fn push_order<K, Ast>(&mut self, _order: Order<'_, K, Ast>) -> Result<(), Self::Error>
     where
         K: ExprKind,
-        Ast: ExprAst,
+        Ast: RenderAst<TestBackend>,
     {
         self.events.push(LoweringEvent::Order);
         Ok(())
@@ -356,11 +340,11 @@ fn derive_column_type_maps_newtype_bind_values() {
         .insert_returning(|record| record.id);
 
     assert_eq!(
-        insert.collect_params(),
+        insert.collect_params().unwrap(),
         vec![
-            BindValue::Int(7),
-            BindValue::Text("{\"ok\":true}".to_owned()),
-            BindValue::Text("{a,b}".to_owned())
+            TestParam::Int(7),
+            TestParam::Text("{\"ok\":true}".to_owned()),
+            TestParam::Text("{a,b}".to_owned())
         ]
     );
 }
@@ -577,8 +561,8 @@ fn source_chain_selects_from_typed_root_and_join() {
         r#"SELECT q0_0.id AS t0_id, q0_1.id AS t1_id, q0_1.body AS t2_body FROM public.users AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id) WHERE (q0_0.name = ?)"#
     );
     assert_eq!(
-        posts.collect_params(),
-        vec![BindValue::Text("John".to_owned())]
+        posts.collect_params().unwrap(),
+        vec![TestParam::Text("John".to_owned())]
     );
 }
 
@@ -614,8 +598,8 @@ fn source_chain_can_filter_after_joining_sources() {
         r#"SELECT q0_0.id AS t0_id, q0_1.id AS t1_id, q0_1.body AS t2_body FROM public.users AS q0_0 INNER JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id) WHERE (q0_1.body = ?)"#
     );
     assert_eq!(
-        rows.collect_params(),
-        vec![BindValue::Text("Hello".to_owned())]
+        rows.collect_params().unwrap(),
+        vec![TestParam::Text("Hello".to_owned())]
     );
 }
 
@@ -782,14 +766,14 @@ fn insert_builder_can_use_default_values() {
         insert.to_sql(),
         r#"INSERT INTO defaulted_records DEFAULT VALUES RETURNING q0_0.id AS id"#
     );
-    assert_eq!(insert.collect_params(), Vec::<BindValue>::new());
+    assert_eq!(insert.collect_params().unwrap(), Vec::<TestParam>::new());
 }
 
 #[test]
 fn insert_query_builds_column_bindings() {
-    let columns = HNil.push_back(InsertAssignment::<UserName>::new(BindValue::Text(
-        "Ada".to_owned(),
-    )));
+    let columns = HNil.push_back(InsertAssignment::<UserName, StaticAssignmentValue<String>>::new(
+        StaticAssignmentValue::new("Ada".to_owned()),
+    ));
     let rows = HNil.push_back(InsertRow::new(columns));
     let insert = <<TestConnection as QueryBuilder>::Insert<'_, User, (), _, ()> as InsertQuery<
         '_,
@@ -803,15 +787,12 @@ fn insert_query_builds_column_bindings() {
         r#"INSERT INTO public.users (name) VALUES (?)"#
     );
     assert_eq!(
-        insert.collect_params(),
-        vec![BindValue::Text("Ada".to_owned())]
+        insert.collect_params().unwrap(),
+        vec![TestParam::Text("Ada".to_owned())]
     );
-    let mut sink = RecordingBindSink {
-        values: Vec::new(),
-        reserved: 0,
-    };
+    let mut sink: Vec<TestParam> = Vec::new();
     insert.write_params(&mut sink).unwrap();
-    assert_eq!(sink.reserved, 1);
+    assert_eq!(sink.len(), 1);
 }
 
 #[test]
@@ -834,8 +815,8 @@ fn insert_builder_can_return_projected_rows() {
         r#"INSERT INTO public.users (name) VALUES (?) RETURNING q0_0.id AS id"#
     );
     assert_eq!(
-        insert.collect_params(),
-        vec![BindValue::Text("Ada".to_owned())]
+        insert.collect_params().unwrap(),
+        vec![TestParam::Text("Ada".to_owned())]
     );
 }
 
@@ -853,19 +834,16 @@ fn insert_builder_can_insert_multiple_rows() {
         r#"INSERT INTO public.users (name) VALUES (?), (?) RETURNING q0_0.id AS id"#
     );
     assert_eq!(
-        insert.collect_params(),
+        insert.collect_params().unwrap(),
         vec![
-            BindValue::Text("Ada".to_owned()),
-            BindValue::Text("Grace".to_owned())
+            TestParam::Text("Ada".to_owned()),
+            TestParam::Text("Grace".to_owned())
         ]
     );
 
-    let mut sink = RecordingBindSink {
-        values: Vec::new(),
-        reserved: 0,
-    };
+    let mut sink: Vec<TestParam> = Vec::new();
     insert.write_params(&mut sink).unwrap();
-    assert_eq!(sink.reserved, 2);
+    assert_eq!(sink.len(), 2);
 }
 
 #[test]
@@ -879,7 +857,7 @@ fn insert_builder_accepts_null_for_nullable_columns() {
         insert.to_sql(),
         r#"INSERT INTO public.users (name) VALUES (?) RETURNING q0_0.id AS id"#
     );
-    assert_eq!(insert.collect_params(), vec![BindValue::Null]);
+    assert_eq!(insert.collect_params().unwrap(), vec![TestParam::Null]);
 }
 
 #[test]
@@ -895,8 +873,8 @@ fn explicit_insert_rows_accept_null_for_nullable_columns() {
         r#"INSERT INTO public.users (name) VALUES (?), (?) RETURNING q0_0.id AS id"#
     );
     assert_eq!(
-        insert.collect_params(),
-        vec![BindValue::Null, BindValue::Text("Ada".to_owned())]
+        insert.collect_params().unwrap(),
+        vec![TestParam::Null, TestParam::Text("Ada".to_owned())]
     );
 }
 
@@ -913,16 +891,13 @@ fn explicit_insert_rows_can_use_column_defaults() {
         r#"INSERT INTO public.users (name) VALUES (DEFAULT), (?) RETURNING q0_0.id AS id"#
     );
     assert_eq!(
-        insert.collect_params(),
-        vec![BindValue::Text("Ada".to_owned())]
+        insert.collect_params().unwrap(),
+        vec![TestParam::Text("Ada".to_owned())]
     );
 
-    let mut sink = RecordingBindSink {
-        values: Vec::new(),
-        reserved: 0,
-    };
+    let mut sink: Vec<TestParam> = Vec::new();
     insert.write_params(&mut sink).unwrap();
-    assert_eq!(sink.reserved, 1);
+    assert_eq!(sink.len(), 1);
 }
 
 #[test]
@@ -951,9 +926,9 @@ fn update_builder_skips_non_updateable_columns() {
 #[test]
 fn update_query_builds_column_bindings_and_filters() {
     let user = <User as ProjectionShape>::exprs(SourceAlias::new(0, 0));
-    let columns = HNil.push_back(UpdateAssignment::<UserName>::new(BindValue::Text(
-        "Ada".to_owned(),
-    )));
+    let columns = HNil.push_back(UpdateAssignment::<UserName, StaticAssignmentValue<String>>::new(
+        StaticAssignmentValue::new("Ada".to_owned()),
+    ));
     let filters = HNil.push_back(user.id.equals(1));
     let update =
         <<TestConnection as QueryBuilder>::Update<'_, User, (), _, _, ()> as UpdateQuery<
@@ -975,15 +950,12 @@ fn update_query_builds_column_bindings_and_filters() {
         r#"UPDATE public.users AS q0_0 SET name = ? WHERE (q0_0.id = ?)"#
     );
     assert_eq!(
-        update.collect_params(),
-        vec![BindValue::Text("Ada".to_owned()), BindValue::Int(1)]
+        update.collect_params().unwrap(),
+        vec![TestParam::Text("Ada".to_owned()), TestParam::Int(1)]
     );
-    let mut sink = RecordingBindSink {
-        values: Vec::new(),
-        reserved: 0,
-    };
+    let mut sink: Vec<TestParam> = Vec::new();
     update.write_params(&mut sink).unwrap();
-    assert_eq!(sink.reserved, 2);
+    assert_eq!(sink.len(), 2);
 }
 
 #[test]
@@ -1007,8 +979,8 @@ fn update_builder_can_return_projected_rows() {
         r#"UPDATE public.users AS q0_0 SET name = ? WHERE (q0_0.id = ?) RETURNING q0_0.id AS t0_id, q0_0.name AS t1_name"#
     );
     assert_eq!(
-        update.collect_params(),
-        vec![BindValue::Text("Ada".to_owned()), BindValue::Int(1)]
+        update.collect_params().unwrap(),
+        vec![TestParam::Text("Ada".to_owned()), TestParam::Int(1)]
     );
 }
 
@@ -1025,8 +997,8 @@ fn update_builder_accepts_null_for_nullable_columns() {
         r#"UPDATE public.users AS q0_0 SET name = ? WHERE (q0_0.id = ?) RETURNING q0_0.id AS id"#
     );
     assert_eq!(
-        update.collect_params(),
-        vec![BindValue::Null, BindValue::Int(1)]
+        update.collect_params().unwrap(),
+        vec![TestParam::Null, TestParam::Int(1)]
     );
 }
 
@@ -1042,14 +1014,11 @@ fn update_builder_can_use_column_defaults() {
         update.to_sql(),
         r#"UPDATE public.users AS q0_0 SET name = DEFAULT WHERE (q0_0.id = ?) RETURNING q0_0.id AS id"#
     );
-    assert_eq!(update.collect_params(), vec![BindValue::Int(1)]);
+    assert_eq!(update.collect_params().unwrap(), vec![TestParam::Int(1)]);
 
-    let mut sink = RecordingBindSink {
-        values: Vec::new(),
-        reserved: 0,
-    };
+    let mut sink: Vec<TestParam> = Vec::new();
     update.write_params(&mut sink).unwrap();
-    assert_eq!(sink.reserved, 1);
+    assert_eq!(sink.len(), 1);
 }
 
 #[test]
@@ -1065,16 +1034,13 @@ fn explicit_update_columns_can_reference_existing_values() {
         r#"UPDATE default_variants AS q0_0 SET count = (q0_0.count + ?) WHERE (q0_0.count = ?) RETURNING q0_0.count AS count"#
     );
     assert_eq!(
-        update.collect_params(),
-        vec![BindValue::Int(1), BindValue::Int(41)]
+        update.collect_params().unwrap(),
+        vec![TestParam::Int(1), TestParam::Int(41)]
     );
 
-    let mut sink = RecordingBindSink {
-        values: Vec::new(),
-        reserved: 0,
-    };
+    let mut sink: Vec<TestParam> = Vec::new();
     update.write_params(&mut sink).unwrap();
-    assert_eq!(sink.reserved, 2);
+    assert_eq!(sink.len(), 2);
 }
 
 #[test]
@@ -1109,15 +1075,12 @@ fn delete_query_builds_typed_table_filters() {
         r#"DELETE FROM public.users AS q0_0 WHERE (q0_0.id = ?) AND (q0_0.name = ?)"#
     );
     assert_eq!(
-        delete.collect_params(),
-        vec![BindValue::Int(1), BindValue::Text("Ada".to_owned())]
+        delete.collect_params().unwrap(),
+        vec![TestParam::Int(1), TestParam::Text("Ada".to_owned())]
     );
-    let mut sink = RecordingBindSink {
-        values: Vec::new(),
-        reserved: 0,
-    };
+    let mut sink: Vec<TestParam> = Vec::new();
     delete.write_params(&mut sink).unwrap();
-    assert_eq!(sink.reserved, 2);
+    assert_eq!(sink.len(), 2);
 }
 
 #[test]
@@ -1139,7 +1102,7 @@ fn delete_builder_can_return_projected_rows() {
         delete.to_sql(),
         r#"DELETE FROM public.users AS q0_0 WHERE (q0_0.id = ?) RETURNING q0_0.id AS id, q0_0.name AS name"#
     );
-    assert_eq!(delete.collect_params(), vec![BindValue::Int(1)]);
+    assert_eq!(delete.collect_params().unwrap(), vec![TestParam::Int(1)]);
 }
 
 #[test]
@@ -1196,8 +1159,8 @@ fn select_can_project_thirty_two_part_tuple_shapes() {
         r#"SELECT ? AS t0_expr, ? AS t1_expr, ? AS t2_expr, ? AS t3_expr, ? AS t4_expr, ? AS t5_expr, ? AS t6_expr, ? AS t7_expr, ? AS t8_expr, ? AS t9_expr, ? AS t10_expr, ? AS t11_expr, ? AS t12_expr, ? AS t13_expr, ? AS t14_expr, ? AS t15_expr, ? AS t16_expr, ? AS t17_expr, ? AS t18_expr, ? AS t19_expr, ? AS t20_expr, ? AS t21_expr, ? AS t22_expr, ? AS t23_expr, ? AS t24_expr, ? AS t25_expr, ? AS t26_expr, ? AS t27_expr, ? AS t28_expr, ? AS t29_expr, ? AS t30_expr, ? AS t31_expr"#
     );
     assert_eq!(
-        values.collect_params(),
-        (0..32).map(BindValue::Int).collect::<Vec<_>>()
+        values.collect_params().unwrap(),
+        (0i128..32).map(TestParam::Int).collect::<Vec<_>>()
     );
 }
 
@@ -1213,15 +1176,15 @@ fn select_can_project_arithmetic_expression_shapes() {
         adjusted_ids.to_sql(),
         r#"SELECT (q0_0.id + ?) AS expr FROM public.users AS q0_0"#
     );
-    assert_eq!(adjusted_ids.collect_params(), vec![BindValue::Int(1)]);
+    assert_eq!(adjusted_ids.collect_params().unwrap(), vec![TestParam::Int(1)]);
     assert_f64_row(&scaled_ids);
     assert_eq!(
         scaled_ids.to_sql(),
         r#"SELECT ((q0_0.id * ?) / ?) AS expr FROM public.users AS q0_0"#
     );
     assert_eq!(
-        scaled_ids.collect_params(),
-        vec![BindValue::Int(2), BindValue::Int(2)]
+        scaled_ids.collect_params().unwrap(),
+        vec![TestParam::Int(2), TestParam::Int(2)]
     );
 }
 
@@ -1231,7 +1194,7 @@ fn select_can_project_primitive_literal_shapes() {
 
     assert_i32_row(&values);
     assert_eq!(values.to_sql(), r#"SELECT ? AS expr"#);
-    assert_eq!(values.collect_params(), vec![BindValue::Int(1)]);
+    assert_eq!(values.collect_params().unwrap(), vec![TestParam::Int(1)]);
 }
 
 #[test]
@@ -1367,109 +1330,89 @@ fn select_accepts_primitive_literals_and_expression_operators() {
         r#"SELECT q0_0.id AS id, q0_0.name AS name FROM public.users AS q0_0 WHERE (((((q0_0.id + ?) - ?) > ?) AND (NOT (q0_0.id <> ?))) OR (q0_0.name = ?)) AND ((? + q0_0.id) < ?) AND (((q0_0.id * ?) / ?) > ?) AND (((? * q0_0.id) / ?) < ?)"#
     );
     assert_eq!(
-        users.collect_params(),
+        users.collect_params().unwrap(),
         vec![
-            BindValue::Int(1),
-            BindValue::Int(1),
-            BindValue::Int(0),
-            BindValue::Int(42),
-            BindValue::Text("Bob".to_owned()),
-            BindValue::Int(1),
-            BindValue::Int(100),
-            BindValue::Int(2),
-            BindValue::Int(2),
-            BindValue::Float(0.0),
-            BindValue::Int(2),
-            BindValue::Int(2),
-            BindValue::Float(100.0),
+            TestParam::Int(1),
+            TestParam::Int(1),
+            TestParam::Int(0),
+            TestParam::Int(42),
+            TestParam::Text("Bob".to_owned()),
+            TestParam::Int(1),
+            TestParam::Int(100),
+            TestParam::Int(2),
+            TestParam::Int(2),
+            TestParam::Float(0.0),
+            TestParam::Int(2),
+            TestParam::Int(2),
+            TestParam::Float(100.0),
         ]
     );
 }
 
 #[test]
-fn primitive_literals_preserve_bind_value_widths() {
-    assert_eq!(
-        1_i16.into_bind_value().kind(),
-        &BindValueKind::Int {
-            value: 1,
-            width: IntWidth::I16,
-        }
-    );
-    assert_eq!(
-        1_i32.into_bind_value().kind(),
-        &BindValueKind::Int {
-            value: 1,
-            width: IntWidth::I32,
-        }
-    );
-    assert_eq!(
-        1_i64.into_bind_value().kind(),
-        &BindValueKind::Int {
-            value: 1,
-            width: IntWidth::I64,
-        }
-    );
-    assert_eq!(
-        1.0_f32.into_bind_value().kind(),
-        &BindValueKind::Float {
-            value: 1.0,
-            width: FloatWidth::F32,
-        }
-    );
-}
-
-#[test]
-fn prepared_param_values_can_write_into_bind_sinks() {
+fn prepared_param_values_encode_through_param_writer() {
+    use squealy_test::TestParamWriter;
     type Params = HCons<String, HCons<i32, HNil>>;
 
     let params = ("Ada".to_owned(), 7_i32);
-    let mut sink = RecordingBindSink {
-        values: Vec::new(),
-        reserved: 0,
-    };
 
-    <(String, i32) as PreparedParamValues<Params>>::write_bind_values(&params, &mut sink).unwrap();
-    assert_eq!(
-        sink.values,
-        vec![BindValue::Text("Ada".to_owned()), BindValue::int32(7)]
-    );
-
-    let mut indexed = RecordingBindSink {
-        values: Vec::new(),
-        reserved: 0,
-    };
-    assert!(
-        <(String, i32) as PreparedParamValues<Params>>::write_bind_value_at(
+    let mut all = Vec::new();
+    {
+        let mut writer = TestParamWriter::new(&mut all);
+        <(String, i32) as PreparedParamValues<Params, TestBackend>>::write_params(
             &params,
-            1,
-            &mut indexed,
+            &mut writer,
         )
-        .unwrap()
-    );
-    assert_eq!(indexed.values, vec![BindValue::int32(7)]);
-    assert!(
-        !<(String, i32) as PreparedParamValues<Params>>::write_bind_value_at(
-            &params,
-            2,
-            &mut indexed,
-        )
-        .unwrap()
-    );
-
-    assert_eq!(
-        params.collect_bind_values(),
-        vec![BindValue::Text("Ada".to_owned()), BindValue::int32(7)]
-    );
-
-    let borrowed = ("Grace", 8_i32);
-    let mut borrowed_sink = RecordingBindSink {
-        values: Vec::new(),
-        reserved: 0,
-    };
-    <(&str, i32) as PreparedParamValues<Params>>::write_bind_values(&borrowed, &mut borrowed_sink)
         .unwrap();
+    }
     assert_eq!(
-        borrowed_sink.values,
-        vec![BindValue::Text("Grace".to_owned()), BindValue::int32(8)]
+        all,
+        vec![TestParam::Text("Ada".to_owned()), TestParam::Int(7)]
+    );
+
+    // write_param_at encodes a single positional parameter.
+    let mut at_one = Vec::new();
+    {
+        let mut writer = TestParamWriter::new(&mut at_one);
+        assert!(
+            <(String, i32) as PreparedParamValues<Params, TestBackend>>::write_param_at(
+                &params,
+                1,
+                &mut writer,
+            )
+            .unwrap()
+        );
+    }
+    assert_eq!(at_one, vec![TestParam::Int(7)]);
+
+    // An out-of-range index reports no parameter written.
+    let mut none = Vec::new();
+    {
+        let mut writer = TestParamWriter::new(&mut none);
+        assert!(
+            !<(String, i32) as PreparedParamValues<Params, TestBackend>>::write_param_at(
+                &params,
+                2,
+                &mut writer,
+            )
+            .unwrap()
+        );
+    }
+    assert!(none.is_empty());
+
+    // Borrowed values (&str) coerce to the String parameter type and encode through.
+    let borrowed = ("Grace", 8_i32);
+    let mut borrowed_params = Vec::new();
+    {
+        let mut writer = TestParamWriter::new(&mut borrowed_params);
+        <(&str, i32) as PreparedParamValues<Params, TestBackend>>::write_params(
+            &borrowed,
+            &mut writer,
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        borrowed_params,
+        vec![TestParam::Text("Grace".to_owned()), TestParam::Int(8)]
     );
 }

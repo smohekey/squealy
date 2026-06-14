@@ -1209,6 +1209,9 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "postgres-protocol",
+ "serde_core",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -1633,11 +1636,14 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures-core",
+ "serde",
+ "serde_json",
  "squealy",
  "thiserror",
  "tokio",
  "tokio-postgres",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

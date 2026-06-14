@@ -1,23 +1,30 @@
 //! Shared SQL query renderer.
 //!
 //! Renders SELECT/INSERT/UPDATE/DELETE from the typed query AST. The logic is identical across
-//! backends except for the dialect seams (placeholder, identifier quoting, cast type names), which
-//! are supplied by a [`Dialect`](crate::Dialect) threaded through the [`Renderer`]. Backends call the
-//! `write_*`/`render_*` entry points with their own dialect.
+//! backends except for two seams:
+//!
+//! * **Syntax** — placeholder style, identifier quoting, cast type names — supplied by a
+//!   [`Dialect`](crate::Dialect) threaded through the [`Renderer`].
+//! * **Value encoding** — each literal is encoded to the backend's native bound-parameter type
+//!   ([`Backend::Param`](crate::Backend::Param)) via [`Encode<B>`](crate::Encode) at render time,
+//!   the mirror of how [`Decode<B>`](crate::Decode) reads a value back. There is no neutral value
+//!   form: the renderer is generic over the backend `B` so a `uuid`/`jsonb`/extension literal binds
+//!   natively without passing through a closed enum.
 #![allow(clippy::result_unit_err)]
 
 use std::borrow::Cow;
 use std::io::{self, Write};
 
 use crate::{
-    ArithmeticOp, AssignmentNode, AssignmentValueVisitor, AssignmentVisitor, BindSink, BindValue,
-    ColumnRef, CompareOp, Dialect, Expr, ExprAst, ExprKind, ExprVisitor, InsertAssignments,
-    InsertRow, InsertRowVisitor, InsertRows, InsertableTable, Order, OrderDirection, Predicate,
-    PredicateAst, PredicateAstVisitor, PredicateKind, PredicateNodes, PredicateVisitor,
-    Projectable, ProjectionShape, ProjectionVisitor, QueryBuilder, SchemaTable, SelectAst,
-    SelectSink, Selected, SourceAlias, SqlType, TableProjection, UpdateAssignments,
-    UpdateableTable,
+    ArithmeticOp, AssignmentValueVisitor, AssignmentVisitor, Backend, ColumnRef, CompareOp, Dialect,
+    Encode, Expr, ExprKind, ExprVisitor, InsertRow, InsertRowVisitor, InsertableTable, Order,
+    OrderDirection, Predicate, PredicateAstVisitor, PredicateKind, PredicateVisitor, ProjectionShape,
+    ProjectionVisitor, QueryBuilder, RenderAssignment, RenderAst,
+    RenderInsertAssignments, RenderInsertRows, RenderPredicateAst, RenderPredicateNodes,
+    RenderProjectable, RenderSelectAst, RenderUpdateAssignments, SchemaTable, SelectSink, Selected,
+    SourceAlias, SqlType, TableProjection, UpdateableTable,
 };
+use std::marker::PhantomData;
 
 /// Threads the active [`Dialect`](crate::Dialect) and the running parameter counters through the
 /// renderer. The dialect is `&'static` (backend dialects are zero-sized unit values), so carrying it
@@ -51,30 +58,82 @@ impl Renderer {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct PreparedSql {
-    sql: String,
-    params: Vec<SqlParam>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum SqlParam {
-    Static(BindValue),
+/// A rendered placeholder slot: either a literal already encoded to the backend's native param, or a
+/// runtime-parameter slot resolved from user-supplied values at execution.
+pub enum SqlParam<B: Backend> {
+    Static(B::Param),
     Runtime(usize),
 }
 
-impl PreparedSql {
-    pub fn into_parts(self) -> (String, Vec<SqlParam>) {
-        (self.sql, self.params)
+impl<B: Backend> Clone for SqlParam<B>
+where
+    B::Param: Clone,
+{
+    fn clone(&self) -> Self {
+        match self {
+            SqlParam::Static(param) => SqlParam::Static(param.clone()),
+            SqlParam::Runtime(index) => SqlParam::Runtime(*index),
+        }
+    }
+}
+
+impl<B: Backend> std::fmt::Debug for SqlParam<B>
+where
+    B::Param: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SqlParam::Static(param) => f.debug_tuple("Static").field(param).finish(),
+            SqlParam::Runtime(index) => f.debug_tuple("Runtime").field(index).finish(),
+        }
+    }
+}
+
+impl<B: Backend> PartialEq for SqlParam<B>
+where
+    B::Param: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (SqlParam::Static(a), SqlParam::Static(b)) => a == b,
+            (SqlParam::Runtime(a), SqlParam::Runtime(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// A rendered statement: SQL text plus the ordered placeholder binds. Literal binds are already
+/// encoded to [`Backend::Param`]; runtime binds carry the user-parameter index to resolve at
+/// execution. An encode failure is captured and surfaced from [`into_parts`](Self::into_parts).
+pub struct PreparedSql<B: Backend> {
+    sql: String,
+    params: Vec<SqlParam<B>>,
+    error: Option<B::Error>,
+}
+
+impl<B: Backend> Default for PreparedSql<B> {
+    fn default() -> Self {
+        Self {
+            sql: String::new(),
+            params: Vec::new(),
+            error: None,
+        }
+    }
+}
+
+impl<B: Backend> PreparedSql<B> {
+    /// Consume the rendered statement, returning `(sql, params)` or the captured encode error.
+    pub fn into_parts(self) -> Result<(String, Vec<SqlParam<B>>), B::Error> {
+        match self.error {
+            Some(error) => Err(error),
+            None => Ok((self.sql, self.params)),
+        }
     }
 
     fn clear(&mut self) {
         self.sql.clear();
         self.params.clear();
-    }
-
-    fn push_param(&mut self, param: BindValue) {
-        self.params.push(SqlParam::Static(param));
+        self.error = None;
     }
 
     fn push_runtime_param(&mut self, index: usize) {
@@ -82,7 +141,7 @@ impl PreparedSql {
     }
 }
 
-impl Write for PreparedSql {
+impl<B: Backend> Write for PreparedSql<B> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let text = std::str::from_utf8(buf).map_err(|error| {
             io::Error::new(
@@ -99,15 +158,42 @@ impl Write for PreparedSql {
     }
 }
 
-trait SqlWriter: Write {
-    fn push_bind(&mut self, value: &BindValue);
+/// Encode a single literal into the backend's native param representation.
+fn encode_static<B, T>(value: &T) -> Result<Vec<B::Param>, B::Error>
+where
+    B: Backend,
+    T: Encode<B>,
+{
+    let mut params = Vec::new();
+    {
+        let mut writer = B::param_writer(&mut params);
+        value.encode(&mut writer)?;
+    }
+    Ok(params)
+}
+
+/// Encode-side render sink: produces SQL text and records each placeholder's bind, either a literal
+/// (encoded now via [`Encode`]) or a runtime-parameter slot resolved later.
+trait SqlWriter<B: Backend>: Write {
+    fn push_bind<T>(&mut self, value: &T)
+    where
+        T: Encode<B>;
 
     fn push_runtime_bind(&mut self, index: usize);
 }
 
-impl SqlWriter for PreparedSql {
-    fn push_bind(&mut self, value: &BindValue) {
-        self.push_param(value.clone());
+impl<B: Backend> SqlWriter<B> for PreparedSql<B> {
+    fn push_bind<T>(&mut self, value: &T)
+    where
+        T: Encode<B>,
+    {
+        if self.error.is_some() {
+            return;
+        }
+        match encode_static::<B, T>(value) {
+            Ok(encoded) => self.params.extend(encoded.into_iter().map(SqlParam::Static)),
+            Err(error) => self.error = Some(error),
+        }
     }
 
     fn push_runtime_bind(&mut self, index: usize) {
@@ -115,6 +201,7 @@ impl SqlWriter for PreparedSql {
     }
 }
 
+/// A render sink that emits SQL text only, discarding binds. Used by the to-SQL path.
 struct SqlOnly<'writer, Writer>(&'writer mut Writer);
 
 impl<Writer> Write for SqlOnly<'_, Writer>
@@ -130,28 +217,36 @@ where
     }
 }
 
-impl<Writer> SqlWriter for SqlOnly<'_, Writer>
+impl<B, Writer> SqlWriter<B> for SqlOnly<'_, Writer>
 where
+    B: Backend,
     Writer: Write,
 {
-    fn push_bind(&mut self, _value: &BindValue) {}
+    fn push_bind<T>(&mut self, _value: &T)
+    where
+        T: Encode<B>,
+    {
+    }
 
     fn push_runtime_bind(&mut self, _index: usize) {}
 }
 
-struct ParamSinkWriter<'sink, Sink>
-where
-    Sink: BindSink,
-{
-    sink: &'sink mut Sink,
-    error: Option<Sink::Error>,
+/// A render sink that collects literal binds directly into a native param vector, discarding SQL
+/// text. Used by the one-shot (non-prepared) execution path.
+struct ParamCollector<'params, B: Backend> {
+    params: &'params mut Vec<B::Param>,
+    error: Option<B::Error>,
 }
 
-impl<Sink> ParamSinkWriter<'_, Sink>
-where
-    Sink: BindSink,
-{
-    fn finish(self) -> Result<(), Sink::Error> {
+impl<'params, B: Backend> ParamCollector<'params, B> {
+    fn new(params: &'params mut Vec<B::Param>) -> Self {
+        Self {
+            params,
+            error: None,
+        }
+    }
+
+    fn finish(self) -> Result<(), B::Error> {
         match self.error {
             Some(error) => Err(error),
             None => Ok(()),
@@ -159,10 +254,7 @@ where
     }
 }
 
-impl<Sink> Write for ParamSinkWriter<'_, Sink>
-where
-    Sink: BindSink,
-{
+impl<B: Backend> Write for ParamCollector<'_, B> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         Ok(buf.len())
     }
@@ -172,20 +264,24 @@ where
     }
 }
 
-impl<Sink> SqlWriter for ParamSinkWriter<'_, Sink>
-where
-    Sink: BindSink,
-{
-    fn push_bind(&mut self, value: &BindValue) {
-        if self.error.is_none() {
-            self.error = self.sink.push_bind_value(value.clone()).err();
+impl<B: Backend> SqlWriter<B> for ParamCollector<'_, B> {
+    fn push_bind<T>(&mut self, value: &T)
+    where
+        T: Encode<B>,
+    {
+        if self.error.is_some() {
+            return;
+        }
+        match encode_static::<B, T>(value) {
+            Ok(encoded) => self.params.extend(encoded),
+            Err(error) => self.error = Some(error),
         }
     }
 
     fn push_runtime_bind(&mut self, _index: usize) {}
 }
 
-struct SelectRenderSink<'writer, Writer> {
+struct SelectRenderSink<'writer, B, Writer> {
     writer: &'writer mut Writer,
     renderer: Renderer,
     columns: usize,
@@ -194,11 +290,13 @@ struct SelectRenderSink<'writer, Writer> {
     orders: usize,
     limit: Option<usize>,
     offset: Option<usize>,
+    _backend: PhantomData<B>,
 }
 
-impl<'writer, Writer> SelectRenderSink<'writer, Writer>
+impl<'writer, B, Writer> SelectRenderSink<'writer, B, Writer>
 where
-    Writer: SqlWriter,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
     fn new(writer: &'writer mut Writer, dialect: &'static dyn Dialect) -> io::Result<Self> {
         writer.write_all(b"SELECT ")?;
@@ -211,6 +309,7 @@ where
             orders: 0,
             limit: None,
             offset: None,
+            _backend: PhantomData,
         })
     }
 
@@ -235,7 +334,7 @@ where
     where
         S: TableProjection,
         P: PredicateKind,
-        Ast: PredicateAst,
+        Ast: RenderPredicateAst<B>,
     {
         let first_source = self.sources == 0;
         self.push_source_separator()?;
@@ -261,16 +360,18 @@ where
     }
 }
 
-impl<Writer> SelectSink for SelectRenderSink<'_, Writer>
+impl<B, Writer> SelectSink for SelectRenderSink<'_, B, Writer>
 where
-    Writer: SqlWriter,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
     type Error = io::Error;
+    type Backend = B;
 
     fn push_projection<Shape, P>(&mut self, projection: P) -> io::Result<()>
     where
         Shape: ProjectionShape,
-        P: Projectable,
+        P: RenderProjectable<B>,
     {
         _ = std::marker::PhantomData::<Shape>;
         projection.visit_projection(self)
@@ -294,7 +395,7 @@ where
     where
         S: TableProjection,
         P: PredicateKind,
-        Ast: PredicateAst,
+        Ast: RenderPredicateAst<B>,
     {
         self.push_join::<S, P, Ast>(alias, on, "INNER JOIN")
     }
@@ -307,7 +408,7 @@ where
     where
         S: TableProjection,
         P: PredicateKind,
-        Ast: PredicateAst,
+        Ast: RenderPredicateAst<B>,
     {
         self.push_join::<S, P, Ast>(alias, on, "LEFT JOIN")
     }
@@ -315,7 +416,7 @@ where
     fn push_filter<P, Ast>(&mut self, predicate: Predicate<'_, P, Ast>) -> io::Result<()>
     where
         P: PredicateKind,
-        Ast: PredicateAst,
+        Ast: RenderPredicateAst<B>,
     {
         if self.filters == 0 {
             self.writer.write_all(b" WHERE ")?;
@@ -329,7 +430,7 @@ where
     fn push_order<K, Ast>(&mut self, order: Order<'_, K, Ast>) -> io::Result<()>
     where
         K: ExprKind,
-        Ast: ExprAst,
+        Ast: RenderAst<B>,
     {
         if self.orders == 0 {
             self.writer.write_all(b" ORDER BY ")?;
@@ -351,11 +452,13 @@ where
     }
 }
 
-impl<Writer> ProjectionVisitor for SelectRenderSink<'_, Writer>
+impl<B, Writer> ProjectionVisitor for SelectRenderSink<'_, B, Writer>
 where
-    Writer: SqlWriter,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
     type Error = io::Error;
+    type Backend = B;
 
     fn visit_expr<K, Ast>(
         &mut self,
@@ -364,7 +467,7 @@ where
     ) -> io::Result<()>
     where
         K: ExprKind,
-        Ast: ExprAst,
+        Ast: RenderAst<B>,
     {
         self.push_projection_separator()?;
         write_expr_value(expr, self.writer, &mut self.renderer)?;
@@ -395,15 +498,16 @@ where
 pub fn render_selected_prepared<'conn, 'scope, Conn, Base, Shape, Projection>(
     dialect: &'static dyn Dialect,
     selected: &Selected<'scope, Base, Shape, Projection>,
-    buffer: &mut PreparedSql,
+    buffer: &mut PreparedSql<Conn::Backend>,
 ) where
     Conn: QueryBuilder + 'conn,
-    Base: SelectAst<'conn, 'scope, Conn>,
+    Base: RenderSelectAst<'conn, 'scope, Conn, Conn::Backend>,
     Shape: ProjectionShape,
-    Projection: Projectable,
+    Projection: RenderProjectable<Conn::Backend>,
 {
     buffer.clear();
-    let mut sink = SelectRenderSink::new(buffer, dialect).unwrap();
+    let mut sink =
+        SelectRenderSink::<Conn::Backend, _>::new(buffer, dialect).unwrap();
     selected.lower_into::<Conn, _>(&mut sink).unwrap();
     sink.finish().unwrap();
 }
@@ -415,35 +519,37 @@ pub fn write_selected_into<'conn, 'scope, Conn, Base, Shape, Projection, Writer>
 ) -> io::Result<()>
 where
     Conn: QueryBuilder + 'conn,
-    Base: SelectAst<'conn, 'scope, Conn>,
+    Base: RenderSelectAst<'conn, 'scope, Conn, Conn::Backend>,
     Shape: ProjectionShape,
-    Projection: Projectable,
+    Projection: RenderProjectable<Conn::Backend>,
     Writer: Write,
 {
     let mut writer = SqlOnly(writer);
-    let mut sink = SelectRenderSink::new(&mut writer, dialect)?;
+    let mut sink =
+        SelectRenderSink::<Conn::Backend, _>::new(&mut writer, dialect)?;
     selected.lower_into::<Conn, _>(&mut sink)?;
     sink.finish()
 }
 
-pub fn write_selected_params<'conn, 'scope, Conn, Base, Shape, Projection, Sink>(
+pub fn write_selected_params<'conn, 'scope, Conn, Base, Shape, Projection>(
     dialect: &'static dyn Dialect,
     selected: &Selected<'scope, Base, Shape, Projection>,
-    sink: &mut Sink,
-) -> Result<(), Sink::Error>
+    params: &mut Vec<<Conn::Backend as Backend>::Param>,
+) -> Result<(), <Conn::Backend as Backend>::Error>
 where
     Conn: QueryBuilder + 'conn,
-    Base: SelectAst<'conn, 'scope, Conn>,
+    Base: RenderSelectAst<'conn, 'scope, Conn, Conn::Backend>,
     Shape: ProjectionShape,
-    Projection: Projectable,
-    Sink: BindSink,
+    Projection: RenderProjectable<Conn::Backend>,
 {
-    let mut writer = ParamSinkWriter { sink, error: None };
-    let mut select_sink = SelectRenderSink::new(&mut writer, dialect).unwrap();
+    let mut writer = ParamCollector::<Conn::Backend>::new(params);
+    let mut select_sink =
+        SelectRenderSink::<Conn::Backend, _>::new(&mut writer, dialect).unwrap();
     selected.lower_into::<Conn, _>(&mut select_sink).unwrap();
     select_sink.finish().unwrap();
     writer.finish()
 }
+
 fn write_table_ref<S>(dialect: &dyn Dialect, writer: &mut impl Write) -> io::Result<()>
 where
     S: TableProjection,
@@ -467,7 +573,7 @@ where
     dialect.write_quoted_ident(<S as SchemaTable>::name(), writer)
 }
 
-pub fn write_insert<S, Rows, Returning>(
+pub fn write_insert<S, B, Rows, Returning>(
     dialect: &'static dyn Dialect,
     rows: &Rows,
     returning: &Returning,
@@ -475,14 +581,15 @@ pub fn write_insert<S, Rows, Returning>(
 ) -> io::Result<()>
 where
     S: InsertableTable,
-    Rows: InsertRows,
-    Returning: Projectable,
+    B: Backend,
+    Rows: RenderInsertRows<B>,
+    Returning: RenderProjectable<B>,
 {
     let mut writer = SqlOnly(writer);
-    write_insert_with_params::<S, _, _, _>(dialect, rows, returning, &mut writer)
+    write_insert_with_params::<S, B, _, _, _>(dialect, rows, returning, &mut writer)
 }
 
-fn write_insert_with_params<S, Rows, Returning, Writer>(
+fn write_insert_with_params<S, B, Rows, Returning, Writer>(
     dialect: &'static dyn Dialect,
     rows: &Rows,
     returning: &Returning,
@@ -490,9 +597,10 @@ fn write_insert_with_params<S, Rows, Returning, Writer>(
 ) -> io::Result<()>
 where
     S: InsertableTable,
-    Rows: InsertRows,
-    Returning: Projectable,
-    Writer: SqlWriter,
+    B: Backend,
+    Rows: RenderInsertRows<B>,
+    Returning: RenderProjectable<B>,
+    Writer: SqlWriter<B>,
 {
     let mut renderer = Renderer::new(dialect);
     writer.write_all(b"INSERT INTO ")?;
@@ -511,26 +619,30 @@ where
             Ok::<(), io::Error>(())
         })?;
         writer.write_all(b") VALUES ")?;
-        write_insert_rows(rows, writer, &mut renderer)?;
+        write_insert_rows::<B, _, _>(rows, writer, &mut renderer)?;
     }
-    write_insert_returning(returning, writer, &mut renderer)?;
+    write_insert_returning::<B, _>(returning, writer, &mut renderer)?;
     Ok(())
 }
 
-struct WriteInsertRows<'writer, 'renderer, Writer> {
+struct WriteInsertRows<'writer, 'renderer, B, Writer> {
     writer: &'writer mut Writer,
     renderer: &'renderer mut Renderer,
     expected_columns: usize,
     row_index: usize,
+    _backend: PhantomData<B>,
 }
 
-impl<Writer> InsertRowVisitor<io::Error> for WriteInsertRows<'_, '_, Writer>
+impl<B, Writer> InsertRowVisitor<io::Error> for WriteInsertRows<'_, '_, B, Writer>
 where
-    Writer: SqlWriter,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
+    type Backend = B;
+
     fn visit_row<Columns>(&mut self, row: &InsertRow<Columns>) -> io::Result<()>
     where
-        Columns: InsertAssignments,
+        Columns: RenderInsertAssignments<B>,
     {
         if row.columns().len() != self.expected_columns {
             return Err(io::Error::new(
@@ -549,23 +661,27 @@ where
             writer: self.writer,
             renderer: self.renderer,
             index: 0,
+            _backend: PhantomData::<B>,
         };
         row.columns().try_visit(&mut assignments)?;
         self.writer.write_all(b")")
     }
 }
 
-struct WriteAssignmentValues<'writer, 'renderer, Writer> {
+struct WriteAssignmentValues<'writer, 'renderer, B, Writer> {
     writer: &'writer mut Writer,
     renderer: &'renderer mut Renderer,
     index: usize,
+    _backend: PhantomData<B>,
 }
 
-impl<Writer> AssignmentVisitor for WriteAssignmentValues<'_, '_, Writer>
+impl<B, Writer> AssignmentVisitor for WriteAssignmentValues<'_, '_, B, Writer>
 where
-    Writer: SqlWriter,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
     type Error = io::Error;
+    type Backend = B;
 
     fn visit_assignment<Value>(
         &mut self,
@@ -573,35 +689,37 @@ where
         value: &Value,
     ) -> Result<(), Self::Error>
     where
-        Value: AssignmentNode,
+        Value: RenderAssignment<B>,
     {
         if self.index > 0 {
             self.writer.write_all(b", ")?;
         }
         self.index += 1;
-        write_assignment_value(value, self.writer, self.renderer)
+        write_assignment_value::<B, _>(value, self.writer, self.renderer)
     }
 }
 
-fn write_insert_rows<Rows, Writer>(
+fn write_insert_rows<B, Rows, Writer>(
     rows: &Rows,
     writer: &mut Writer,
     renderer: &mut Renderer,
 ) -> io::Result<()>
 where
-    Rows: InsertRows,
-    Writer: SqlWriter,
+    B: Backend,
+    Rows: RenderInsertRows<B>,
+    Writer: SqlWriter<B>,
 {
     let mut visitor = WriteInsertRows {
         writer,
         renderer,
         expected_columns: rows.first_row_len(),
         row_index: 0,
+        _backend: PhantomData::<B>,
     };
     rows.try_for_each_row(&mut visitor)
 }
 
-pub fn write_update<S, Columns, Filters, Returning>(
+pub fn write_update<S, B, Columns, Filters, Returning>(
     dialect: &'static dyn Dialect,
     alias: SourceAlias,
     columns: &Columns,
@@ -611,12 +729,13 @@ pub fn write_update<S, Columns, Filters, Returning>(
 ) -> io::Result<()>
 where
     S: UpdateableTable,
-    Columns: UpdateAssignments,
-    Filters: PredicateNodes,
-    Returning: Projectable,
+    B: Backend,
+    Columns: RenderUpdateAssignments<B>,
+    Filters: RenderPredicateNodes<B>,
+    Returning: RenderProjectable<B>,
 {
     let mut writer = SqlOnly(writer);
-    write_update_with_params::<S, _, _, _, _>(
+    write_update_with_params::<S, B, _, _, _, _>(
         dialect,
         alias,
         columns,
@@ -626,7 +745,7 @@ where
     )
 }
 
-fn write_update_with_params<S, Columns, Filters, Returning, Writer>(
+fn write_update_with_params<S, B, Columns, Filters, Returning, Writer>(
     dialect: &'static dyn Dialect,
     alias: SourceAlias,
     columns: &Columns,
@@ -636,10 +755,11 @@ fn write_update_with_params<S, Columns, Filters, Returning, Writer>(
 ) -> io::Result<()>
 where
     S: UpdateableTable,
-    Columns: UpdateAssignments,
-    Filters: PredicateNodes,
-    Returning: Projectable,
-    Writer: SqlWriter,
+    B: Backend,
+    Columns: RenderUpdateAssignments<B>,
+    Filters: RenderPredicateNodes<B>,
+    Returning: RenderProjectable<B>,
+    Writer: SqlWriter<B>,
 {
     let mut renderer = Renderer::new(dialect);
     writer.write_all(b"UPDATE ")?;
@@ -649,24 +769,28 @@ where
         writer,
         renderer: &mut renderer,
         index: 0,
+        _backend: PhantomData::<B>,
     };
     columns.try_visit(&mut assignments)?;
-    write_filters(filters, writer, &mut renderer)?;
-    write_returning(returning, writer, &mut renderer)?;
+    write_filters::<B, _>(filters, writer, &mut renderer)?;
+    write_returning::<B, _>(returning, writer, &mut renderer)?;
     Ok(())
 }
 
-struct WriteUpdateAssignments<'writer, 'renderer, Writer> {
+struct WriteUpdateAssignments<'writer, 'renderer, B, Writer> {
     writer: &'writer mut Writer,
     renderer: &'renderer mut Renderer,
     index: usize,
+    _backend: PhantomData<B>,
 }
 
-impl<Writer> AssignmentVisitor for WriteUpdateAssignments<'_, '_, Writer>
+impl<B, Writer> AssignmentVisitor for WriteUpdateAssignments<'_, '_, B, Writer>
 where
-    Writer: SqlWriter,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
     type Error = io::Error;
+    type Backend = B;
 
     fn visit_assignment<Value>(
         &mut self,
@@ -674,7 +798,7 @@ where
         value: &Value,
     ) -> Result<(), Self::Error>
     where
-        Value: AssignmentNode,
+        Value: RenderAssignment<B>,
     {
         if self.index > 0 {
             self.writer.write_all(b", ")?;
@@ -684,11 +808,11 @@ where
             .dialect
             .write_quoted_ident(column, self.writer)?;
         self.writer.write_all(b" = ")?;
-        write_assignment_value(value, self.writer, self.renderer)
+        write_assignment_value::<B, _>(value, self.writer, self.renderer)
     }
 }
 
-pub fn write_delete<S, Filters, Returning>(
+pub fn write_delete<S, B, Filters, Returning>(
     dialect: &'static dyn Dialect,
     alias: SourceAlias,
     filters: &Filters,
@@ -697,14 +821,15 @@ pub fn write_delete<S, Filters, Returning>(
 ) -> io::Result<()>
 where
     S: TableProjection,
-    Filters: PredicateNodes,
-    Returning: Projectable,
+    B: Backend,
+    Filters: RenderPredicateNodes<B>,
+    Returning: RenderProjectable<B>,
 {
     let mut writer = SqlOnly(writer);
-    write_delete_with_params::<S, _, _, _>(dialect, alias, filters, returning, &mut writer)
+    write_delete_with_params::<S, B, _, _, _>(dialect, alias, filters, returning, &mut writer)
 }
 
-fn write_delete_with_params<S, Filters, Returning, Writer>(
+fn write_delete_with_params<S, B, Filters, Returning, Writer>(
     dialect: &'static dyn Dialect,
     alias: SourceAlias,
     filters: &Filters,
@@ -713,59 +838,75 @@ fn write_delete_with_params<S, Filters, Returning, Writer>(
 ) -> io::Result<()>
 where
     S: TableProjection,
-    Filters: PredicateNodes,
-    Returning: Projectable,
-    Writer: SqlWriter,
+    B: Backend,
+    Filters: RenderPredicateNodes<B>,
+    Returning: RenderProjectable<B>,
+    Writer: SqlWriter<B>,
 {
     let mut renderer = Renderer::new(dialect);
     writer.write_all(b"DELETE FROM ")?;
     write_table_ref::<S>(renderer.dialect, writer)?;
     write!(writer, " AS {alias}")?;
-    write_filters(filters, writer, &mut renderer)?;
-    write_returning(returning, writer, &mut renderer)?;
+    write_filters::<B, _>(filters, writer, &mut renderer)?;
+    write_returning::<B, _>(returning, writer, &mut renderer)?;
     Ok(())
 }
 
-fn write_returning(
-    returning: &impl Projectable,
-    writer: &mut impl SqlWriter,
+fn write_returning<B, Writer>(
+    returning: &impl RenderProjectable<B>,
+    writer: &mut Writer,
     renderer: &mut Renderer,
-) -> io::Result<()> {
-    write_projection(returning, writer, renderer, false)
+) -> io::Result<()>
+where
+    B: Backend,
+    Writer: SqlWriter<B>,
+{
+    write_projection::<B, _>(returning, writer, renderer, false)
 }
 
-fn write_insert_returning(
-    returning: &impl Projectable,
-    writer: &mut impl SqlWriter,
+fn write_insert_returning<B, Writer>(
+    returning: &impl RenderProjectable<B>,
+    writer: &mut Writer,
     renderer: &mut Renderer,
-) -> io::Result<()> {
-    write_projection(returning, writer, renderer, true)
+) -> io::Result<()>
+where
+    B: Backend,
+    Writer: SqlWriter<B>,
+{
+    write_projection::<B, _>(returning, writer, renderer, true)
 }
 
-fn write_projection(
-    projection: &impl Projectable,
-    writer: &mut impl SqlWriter,
+fn write_projection<B, Writer>(
+    projection: &impl RenderProjectable<B>,
+    writer: &mut Writer,
     renderer: &mut Renderer,
     insert_returning: bool,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    B: Backend,
+    Writer: SqlWriter<B>,
+{
     projection.visit_projection(&mut WriteProjection {
         writer,
         renderer,
         index: 0,
         insert_returning,
+        _backend: PhantomData::<B>,
     })
 }
 
-struct WriteProjection<'writer, 'renderer, Writer> {
+struct WriteProjection<'writer, 'renderer, B, Writer> {
     writer: &'writer mut Writer,
     renderer: &'renderer mut Renderer,
     index: usize,
     insert_returning: bool,
+    _backend: PhantomData<B>,
 }
 
-impl<Writer> WriteProjection<'_, '_, Writer>
+impl<B, Writer> WriteProjection<'_, '_, B, Writer>
 where
-    Writer: SqlWriter,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
     fn write_prefix(&mut self) -> io::Result<()> {
         if self.index == 0 {
@@ -778,11 +919,13 @@ where
     }
 }
 
-impl<Writer> ProjectionVisitor for WriteProjection<'_, '_, Writer>
+impl<B, Writer> ProjectionVisitor for WriteProjection<'_, '_, B, Writer>
 where
-    Writer: SqlWriter,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
     type Error = io::Error;
+    type Backend = B;
 
     fn visit_expr<K, Ast>(
         &mut self,
@@ -791,7 +934,7 @@ where
     ) -> io::Result<()>
     where
         K: ExprKind,
-        Ast: ExprAst,
+        Ast: RenderAst<B>,
     {
         self.write_prefix()?;
         write_expr_value_node(expr, self.writer, self.renderer, self.insert_returning)?;
@@ -818,11 +961,15 @@ where
     }
 }
 
-fn write_filters(
-    filters: &impl PredicateNodes,
-    writer: &mut impl SqlWriter,
+fn write_filters<B, Writer>(
+    filters: &impl RenderPredicateNodes<B>,
+    writer: &mut Writer,
     renderer: &mut Renderer,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    B: Backend,
+    Writer: SqlWriter<B>,
+{
     if filters.is_empty() {
         return Ok(());
     }
@@ -832,26 +979,30 @@ fn write_filters(
         writer,
         renderer,
         index: 0,
+        _backend: PhantomData::<B>,
     })?;
     Ok(())
 }
 
-struct WritePredicateFilters<'writer, 'renderer, Writer> {
+struct WritePredicateFilters<'writer, 'renderer, B, Writer> {
     writer: &'writer mut Writer,
     renderer: &'renderer mut Renderer,
     index: usize,
+    _backend: PhantomData<B>,
 }
 
-impl<Writer> PredicateVisitor for WritePredicateFilters<'_, '_, Writer>
+impl<B, Writer> PredicateVisitor for WritePredicateFilters<'_, '_, B, Writer>
 where
-    Writer: SqlWriter,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
     type Error = io::Error;
+    type Backend = B;
 
     fn visit_predicate<Kind, Ast>(&mut self, predicate: &Predicate<'_, Kind, Ast>) -> io::Result<()>
     where
         Kind: PredicateKind,
-        Ast: PredicateAst,
+        Ast: RenderPredicateAst<B>,
     {
         if self.index > 0 {
             self.writer.write_all(b" AND ")?;
@@ -861,106 +1012,131 @@ where
     }
 }
 
-fn write_expr_value<K, Ast>(
+fn write_expr_value<K, Ast, B, Writer>(
     expr: &Expr<'_, K, Ast>,
-    writer: &mut impl SqlWriter,
+    writer: &mut Writer,
     renderer: &mut Renderer,
 ) -> io::Result<()>
 where
     K: ExprKind,
-    Ast: ExprAst,
+    Ast: RenderAst<B>,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
     write_expr_value_node(expr, writer, renderer, false)
 }
 
-fn write_column_value<K>(
+fn write_column_value<K, B, Writer>(
     column: ColumnRef<'_, K>,
-    writer: &mut impl SqlWriter,
+    writer: &mut Writer,
     renderer: &mut Renderer,
 ) -> io::Result<()>
 where
     K: ExprKind,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
     write_column_value_node(column, writer, renderer, false)
 }
 
-fn write_expr_value_node<K, Ast>(
+fn write_expr_value_node<K, Ast, B, Writer>(
     expr: &Expr<'_, K, Ast>,
-    writer: &mut impl SqlWriter,
+    writer: &mut Writer,
     renderer: &mut Renderer,
     insert_returning: bool,
 ) -> io::Result<()>
 where
     K: ExprKind,
-    Ast: ExprAst,
+    Ast: RenderAst<B>,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
-    write_ast(writer, renderer, insert_returning, |visitor| {
+    write_ast::<B, _>(writer, renderer, insert_returning, |visitor| {
         expr.visit(visitor)
     })
 }
 
-fn write_column_value_node<K>(
+fn write_column_value_node<K, B, Writer>(
     column: ColumnRef<'_, K>,
-    writer: &mut impl SqlWriter,
+    writer: &mut Writer,
     renderer: &mut Renderer,
     insert_returning: bool,
 ) -> io::Result<()>
 where
     K: ExprKind,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
-    write_ast(writer, renderer, insert_returning, |visitor| {
+    write_ast::<B, _>(writer, renderer, insert_returning, |visitor| {
         column.visit(visitor)
     })
 }
 
-fn write_predicate_value<K, Ast>(
+fn write_predicate_value<K, Ast, B, Writer>(
     predicate: &Predicate<'_, K, Ast>,
-    writer: &mut impl SqlWriter,
+    writer: &mut Writer,
     renderer: &mut Renderer,
 ) -> io::Result<()>
 where
     K: PredicateKind,
-    Ast: PredicateAst,
+    Ast: RenderPredicateAst<B>,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
-    write_ast(writer, renderer, false, |visitor| predicate.visit(visitor))
+    write_ast::<B, _>(writer, renderer, false, |visitor| predicate.visit(visitor))
 }
 
-fn write_order_value<K, Ast>(
+fn write_order_value<K, Ast, B, Writer>(
     order: &Order<'_, K, Ast>,
-    writer: &mut impl SqlWriter,
+    writer: &mut Writer,
     renderer: &mut Renderer,
 ) -> io::Result<()>
 where
     K: ExprKind,
-    Ast: ExprAst,
+    Ast: RenderAst<B>,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
-    write_ast(writer, renderer, false, |visitor| order.visit_expr(visitor))?;
+    write_ast::<B, _>(writer, renderer, false, |visitor| {
+        order.visit_expr(visitor)
+    })?;
     write!(writer, " {}", render_order_direction(order.direction()))
 }
 
-fn write_assignment_value<Value>(
+fn write_assignment_value<B, Value>(
     value: &Value,
-    writer: &mut impl SqlWriter,
+    writer: &mut impl SqlWriter<B>,
     renderer: &mut Renderer,
 ) -> io::Result<()>
 where
-    Value: AssignmentNode,
+    B: Backend,
+    Value: RenderAssignment<B>,
 {
-    value.visit_value(&mut RenderAssignmentValue { writer, renderer })
+    value.visit_value(&mut RenderAssignmentValueVisitor {
+        writer,
+        renderer,
+        _backend: PhantomData::<B>,
+    })
 }
 
-struct RenderAssignmentValue<'writer, 'renderer, Writer> {
+struct RenderAssignmentValueVisitor<'writer, 'renderer, B, Writer> {
     writer: &'writer mut Writer,
     renderer: &'renderer mut Renderer,
+    _backend: PhantomData<B>,
 }
 
-impl<Writer> AssignmentValueVisitor for RenderAssignmentValue<'_, '_, Writer>
+impl<B, Writer> AssignmentValueVisitor for RenderAssignmentValueVisitor<'_, '_, B, Writer>
 where
-    Writer: SqlWriter,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
     type Error = io::Error;
+    type Backend = B;
 
-    fn visit_static(&mut self, value: &BindValue) -> Result<(), Self::Error> {
+    fn visit_static<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: Encode<B>,
+    {
         self.writer.push_bind(value);
         self.renderer.write_placeholder(self.writer)
     }
@@ -978,40 +1154,45 @@ where
     fn visit_expr<K, Ast>(&mut self, expr: &Expr<'_, K, Ast>) -> Result<(), Self::Error>
     where
         K: ExprKind,
-        Ast: ExprAst,
+        Ast: RenderAst<B>,
     {
         write_expr_value(expr, self.writer, self.renderer)
     }
 }
 
-fn write_ast<Writer>(
+fn write_ast<B, Writer>(
     writer: &mut Writer,
     renderer: &mut Renderer,
     insert_returning: bool,
-    render: impl FnOnce(&mut RenderAst<'_, '_, Writer>) -> io::Result<()>,
+    render: impl FnOnce(&mut RenderExpr<'_, '_, B, Writer>) -> io::Result<()>,
 ) -> io::Result<()>
 where
-    Writer: SqlWriter,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
-    let mut visitor = RenderAst {
+    let mut visitor = RenderExpr {
         writer,
         renderer,
         insert_returning,
+        _backend: PhantomData::<B>,
     };
     render(&mut visitor)
 }
 
-struct RenderAst<'writer, 'renderer, Writer> {
+struct RenderExpr<'writer, 'renderer, B, Writer> {
     writer: &'writer mut Writer,
     renderer: &'renderer mut Renderer,
     insert_returning: bool,
+    _backend: PhantomData<B>,
 }
 
-impl<Writer> ExprVisitor for RenderAst<'_, '_, Writer>
+impl<B, Writer> ExprVisitor for RenderExpr<'_, '_, B, Writer>
 where
-    Writer: SqlWriter,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
     type Error = io::Error;
+    type Backend = B;
 
     fn visit_column(&mut self, alias: SourceAlias, column: &str) -> Result<(), Self::Error> {
         if self.insert_returning {
@@ -1026,7 +1207,10 @@ where
         }
     }
 
-    fn visit_literal(&mut self, value: &BindValue) -> Result<(), Self::Error> {
+    fn visit_literal<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: Encode<B>,
+    {
         self.writer.push_bind(value);
         self.renderer.write_placeholder(self.writer)
     }
@@ -1066,9 +1250,10 @@ where
     }
 }
 
-impl<Writer> PredicateAstVisitor for RenderAst<'_, '_, Writer>
+impl<B, Writer> PredicateAstVisitor for RenderExpr<'_, '_, B, Writer>
 where
-    Writer: SqlWriter,
+    B: Backend,
+    Writer: SqlWriter<B>,
 {
     fn visit_compare<L, R>(&mut self, op: CompareOp, left: L, right: R) -> Result<(), Self::Error>
     where
@@ -1143,109 +1328,111 @@ fn render_order_direction(direction: OrderDirection) -> &'static str {
     }
 }
 
-pub fn render_insert_prepared<S, Rows, Returning>(
+pub fn render_insert_prepared<S, B, Rows, Returning>(
     dialect: &'static dyn Dialect,
     rows: &Rows,
     returning: &Returning,
-    buffer: &mut PreparedSql,
+    buffer: &mut PreparedSql<B>,
 ) where
     S: InsertableTable,
-    Rows: InsertRows,
-    Returning: Projectable,
+    B: Backend,
+    Rows: RenderInsertRows<B>,
+    Returning: RenderProjectable<B>,
 {
     buffer.clear();
-    write_insert_with_params::<S, _, _, _>(dialect, rows, returning, buffer).unwrap();
+    write_insert_with_params::<S, B, _, _, _>(dialect, rows, returning, buffer).unwrap();
 }
 
-pub fn write_insert_params<S, Rows, Returning, Sink>(
+pub fn write_insert_params<S, B, Rows, Returning>(
     dialect: &'static dyn Dialect,
     rows: &Rows,
     returning: &Returning,
-    sink: &mut Sink,
-) -> Result<(), Sink::Error>
+    params: &mut Vec<B::Param>,
+) -> Result<(), B::Error>
 where
     S: InsertableTable,
-    Rows: InsertRows,
-    Returning: Projectable,
-    Sink: BindSink,
+    B: Backend,
+    Rows: RenderInsertRows<B>,
+    Returning: RenderProjectable<B>,
 {
-    sink.reserve_bind_values(rows.param_count());
-    let mut writer = ParamSinkWriter { sink, error: None };
-    write_insert_with_params::<S, _, _, _>(dialect, rows, returning, &mut writer).unwrap();
+    let mut writer = ParamCollector::<B>::new(params);
+    write_insert_with_params::<S, B, _, _, _>(dialect, rows, returning, &mut writer).unwrap();
     writer.finish()
 }
 
-pub fn render_delete_prepared<S, Filters, Returning>(
+pub fn render_delete_prepared<S, B, Filters, Returning>(
     dialect: &'static dyn Dialect,
     alias: SourceAlias,
     filters: &Filters,
     returning: &Returning,
-    buffer: &mut PreparedSql,
+    buffer: &mut PreparedSql<B>,
 ) where
     S: TableProjection,
-    Filters: PredicateNodes,
-    Returning: Projectable,
+    B: Backend,
+    Filters: RenderPredicateNodes<B>,
+    Returning: RenderProjectable<B>,
 {
     buffer.clear();
-    write_delete_with_params::<S, _, _, _>(dialect, alias, filters, returning, buffer).unwrap();
+    write_delete_with_params::<S, B, _, _, _>(dialect, alias, filters, returning, buffer).unwrap();
 }
 
-pub fn write_delete_params<S, Filters, Returning, Sink>(
+pub fn write_delete_params<S, B, Filters, Returning>(
     dialect: &'static dyn Dialect,
     alias: SourceAlias,
     filters: &Filters,
     returning: &Returning,
-    sink: &mut Sink,
-) -> Result<(), Sink::Error>
+    params: &mut Vec<B::Param>,
+) -> Result<(), B::Error>
 where
     S: TableProjection,
-    Filters: PredicateNodes,
-    Returning: Projectable,
-    Sink: BindSink,
+    B: Backend,
+    Filters: RenderPredicateNodes<B>,
+    Returning: RenderProjectable<B>,
 {
-    sink.reserve_bind_values(filters.len());
-    let mut writer = ParamSinkWriter { sink, error: None };
-    write_delete_with_params::<S, _, _, _>(dialect, alias, filters, returning, &mut writer)
+    let mut writer = ParamCollector::<B>::new(params);
+    write_delete_with_params::<S, B, _, _, _>(dialect, alias, filters, returning, &mut writer)
         .unwrap();
     writer.finish()
 }
 
-pub fn render_update_prepared<S, Columns, Filters, Returning>(
+pub fn render_update_prepared<S, B, Columns, Filters, Returning>(
     dialect: &'static dyn Dialect,
     alias: SourceAlias,
     columns: &Columns,
     filters: &Filters,
     returning: &Returning,
-    buffer: &mut PreparedSql,
+    buffer: &mut PreparedSql<B>,
 ) where
     S: UpdateableTable,
-    Columns: UpdateAssignments,
-    Filters: PredicateNodes,
-    Returning: Projectable,
+    B: Backend,
+    Columns: RenderUpdateAssignments<B>,
+    Filters: RenderPredicateNodes<B>,
+    Returning: RenderProjectable<B>,
 {
     buffer.clear();
-    write_update_with_params::<S, _, _, _, _>(dialect, alias, columns, filters, returning, buffer)
-        .unwrap();
+    write_update_with_params::<S, B, _, _, _, _>(
+        dialect, alias, columns, filters, returning, buffer,
+    )
+    .unwrap();
 }
 
-pub fn write_update_params<S, Columns, Filters, Returning, Sink>(
+pub fn write_update_params<S, B, Columns, Filters, Returning>(
     dialect: &'static dyn Dialect,
     alias: SourceAlias,
     columns: &Columns,
     filters: &Filters,
     returning: &Returning,
-    sink: &mut Sink,
-) -> Result<(), Sink::Error>
+    params: &mut Vec<B::Param>,
+) -> Result<(), B::Error>
 where
     S: UpdateableTable,
-    Columns: UpdateAssignments,
-    Filters: PredicateNodes,
-    Returning: Projectable,
-    Sink: BindSink,
+    B: Backend,
+    Columns: RenderUpdateAssignments<B>,
+    Filters: RenderPredicateNodes<B>,
+    Returning: RenderProjectable<B>,
 {
-    sink.reserve_bind_values(columns.param_count() + filters.len());
-    let mut writer = ParamSinkWriter { sink, error: None };
-    write_update_with_params::<S, _, _, _, _>(
+    let mut writer = ParamCollector::<B>::new(params);
+    write_update_with_params::<S, B, _, _, _, _>(
         dialect,
         alias,
         columns,

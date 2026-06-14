@@ -67,11 +67,64 @@ impl_decode_nullable_via_option! {
     bool,
 }
 
+/// Backend-specific parameter cursor used while encoding bind values.
+///
+/// This is the encode-side mirror of [`RowReader`]: where a row reader pulls typed
+/// values *out* of a backend row, a param writer pushes typed values *into* a backend
+/// parameter list. Concrete writers may expose additional backend-private helpers (for
+/// example, appending a typed `NULL`) used by that backend's own [`Encode`] impls.
+pub trait ParamWriter: Sized {
+    type Backend: Backend;
+
+    fn write<T>(&mut self, value: &T) -> Result<(), <Self::Backend as Backend>::Error>
+    where
+        T: Encode<Self::Backend>;
+}
+
+/// Encode a Rust value into a backend parameter writer.
+///
+/// This is the mirror of [`Decode`]. Backends provide impls for the primitive types and
+/// for `Option<T>` (nullability), exactly as they do for decoding; custom and native
+/// types are added by implementing this trait for the backends that support them.
+pub trait Encode<B: Backend> {
+    fn encode(&self, out: &mut B::ParamWriter<'_>) -> Result<(), B::Error>;
+}
+
+impl<B> Encode<B> for ()
+where
+    B: Backend,
+{
+    fn encode(&self, _out: &mut B::ParamWriter<'_>) -> Result<(), B::Error> {
+        Ok(())
+    }
+}
+
+impl<B, T> Encode<B> for &T
+where
+    B: Backend,
+    T: Encode<B> + ?Sized,
+{
+    fn encode(&self, out: &mut B::ParamWriter<'_>) -> Result<(), B::Error> {
+        T::encode(self, out)
+    }
+}
+
 /// Backend-specific DDL generation.
 pub trait Backend: Sized {
     type Error;
 
     type RowReader<'row>: RowReader<Backend = Self>;
+
+    /// Encode-side mirror of [`RowReader`](Self::RowReader).
+    type ParamWriter<'param>: ParamWriter<Backend = Self>;
+
+    /// The backend's native bound-parameter representation (e.g. `PostgresParam`). A literal or
+    /// runtime value is encoded into one of these via [`Encode`] before being handed to the driver.
+    type Param;
+
+    /// Construct a [`ParamWriter`](Self::ParamWriter) that appends encoded parameters to `params`.
+    /// The shared renderer uses this to encode a single literal into [`Self::Param`].
+    fn param_writer(params: &mut Vec<Self::Param>) -> Self::ParamWriter<'_>;
 
     fn no_rows_error() -> Self::Error;
 

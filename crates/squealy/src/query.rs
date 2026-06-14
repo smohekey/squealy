@@ -6,8 +6,8 @@ use std::pin::pin;
 use futures_core::Stream;
 
 use crate::{
-    Backend, BindValue, ColumnExprAst, ColumnRef, Connection, Decode, Expr, ExprAst, ExprKind,
-    ExprVisitor, HCons, HList, HNil, InsertableTable, IntoBindValue, IntoNullableBindValue, Maybe,
+    Backend, ColumnExprAst, ColumnRef, Connection, Decode, Expr, ExprAst, ExprKind,
+    HCons, HList, HNil, InsertableTable, Maybe, RenderAst, RenderProjectable,
     NoRuntimeParams, Order, ParamExprAst, Predicate, PredicateKind, Projectable, ProjectionShape,
     PushBack, QueryBuilder, RuntimeParam, SourceAlias, SupportsReturning, TableProjection, ToTuple,
     UpdateableTable,
@@ -137,7 +137,7 @@ pub fn default() -> DefaultValueNode {
 /// A typed insert assignment for a single generated table column.
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq)]
-pub struct InsertAssignment<K, Value = StaticAssignmentValue>
+pub struct InsertAssignment<K, Value = DefaultAssignmentValue>
 where
     K: ColumnKey,
     Value: AssignmentValueNode,
@@ -162,7 +162,7 @@ where
 /// A typed update assignment for a single generated table column.
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq)]
-pub struct UpdateAssignment<K, Value = StaticAssignmentValue>
+pub struct UpdateAssignment<K, Value = DefaultAssignmentValue>
 where
     K: ColumnKey,
     Value: AssignmentValueNode,
@@ -186,8 +186,8 @@ where
 
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq)]
-pub struct StaticAssignmentValue {
-    value: BindValue,
+pub struct StaticAssignmentValue<T> {
+    value: T,
 }
 
 #[doc(hidden)]
@@ -229,18 +229,28 @@ where
 pub trait AssignmentValueNode: Clone {
     type Params: HList;
 
+    fn param_count(&self) -> usize;
+}
+
+/// Backend-parameterized rendering for an assignment value (mirror of [`RenderAst`]).
+#[doc(hidden)]
+pub trait RenderAssignmentValue<B>: AssignmentValueNode
+where
+    B: Backend,
+{
     fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: AssignmentValueVisitor;
-
-    fn param_count(&self) -> usize;
+        V: AssignmentValueVisitor<Backend = B>;
 }
 
 #[doc(hidden)]
 pub trait AssignmentValueVisitor {
     type Error;
+    type Backend: Backend;
 
-    fn visit_static(&mut self, value: &BindValue) -> Result<(), Self::Error>;
+    fn visit_static<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: crate::Encode<Self::Backend>;
 
     fn visit_default(&mut self) -> Result<(), Self::Error>;
 
@@ -249,18 +259,12 @@ pub trait AssignmentValueVisitor {
     fn visit_expr<K, Ast>(&mut self, expr: &Expr<'_, K, Ast>) -> Result<(), Self::Error>
     where
         K: ExprKind,
-        Ast: ExprAst;
+        Ast: RenderAst<Self::Backend>;
 }
 
-impl StaticAssignmentValue {
-    pub fn new(value: BindValue) -> Self {
+impl<T> StaticAssignmentValue<T> {
+    pub fn new(value: T) -> Self {
         Self { value }
-    }
-}
-
-impl std::convert::From<BindValue> for StaticAssignmentValue {
-    fn from(value: BindValue) -> Self {
-        Self::new(value)
     }
 }
 
@@ -303,33 +307,47 @@ where
 
 impl<K> Copy for RuntimeAssignmentValue<K> where K: ExprKind {}
 
-impl AssignmentValueNode for StaticAssignmentValue {
+impl<T> AssignmentValueNode for StaticAssignmentValue<T>
+where
+    T: Clone,
+{
     type Params = HNil;
-
-    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
-    where
-        V: AssignmentValueVisitor,
-    {
-        visitor.visit_static(&self.value)
-    }
 
     fn param_count(&self) -> usize {
         1
     }
 }
 
+impl<T, B> RenderAssignmentValue<B> for StaticAssignmentValue<T>
+where
+    T: Clone + crate::Encode<B>,
+    B: Backend,
+{
+    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentValueVisitor<Backend = B>,
+    {
+        visitor.visit_static(&self.value)
+    }
+}
+
 impl AssignmentValueNode for DefaultAssignmentValue {
     type Params = HNil;
 
-    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
-    where
-        V: AssignmentValueVisitor,
-    {
-        visitor.visit_default()
-    }
-
     fn param_count(&self) -> usize {
         0
+    }
+}
+
+impl<B> RenderAssignmentValue<B> for DefaultAssignmentValue
+where
+    B: Backend,
+{
+    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentValueVisitor<Backend = B>,
+    {
+        visitor.visit_default()
     }
 }
 
@@ -339,15 +357,21 @@ where
 {
     type Params = HCons<K::Value, HNil>;
 
-    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
-    where
-        V: AssignmentValueVisitor,
-    {
-        visitor.visit_runtime()
-    }
-
     fn param_count(&self) -> usize {
         1
+    }
+}
+
+impl<K, B> RenderAssignmentValue<B> for RuntimeAssignmentValue<K>
+where
+    K: ExprKind,
+    B: Backend,
+{
+    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentValueVisitor<Backend = B>,
+    {
+        visitor.visit_runtime()
     }
 }
 
@@ -358,62 +382,36 @@ where
 {
     type Params = Ast::Params;
 
-    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
-    where
-        V: AssignmentValueVisitor,
-    {
-        visitor.visit_expr(&self.expr)
-    }
-
     fn param_count(&self) -> usize {
         count_expr_params(&self.expr)
     }
 }
 
-struct ParamCountVisitor {
-    count: usize,
-}
-
-impl ExprVisitor for ParamCountVisitor {
-    type Error = std::convert::Infallible;
-
-    fn visit_column(&mut self, _alias: SourceAlias, _column: &str) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn visit_literal(&mut self, _value: &BindValue) -> Result<(), Self::Error> {
-        self.count += 1;
-        Ok(())
-    }
-
-    fn visit_param(&mut self) -> Result<(), Self::Error> {
-        self.count += 1;
-        Ok(())
-    }
-
-    fn visit_binary<L, R>(
-        &mut self,
-        _op: crate::ArithmeticOp,
-        left: L,
-        right: R,
-    ) -> Result<(), Self::Error>
+impl<'scope, K, Ast, B> RenderAssignmentValue<B> for ExprAssignmentValue<'scope, K, Ast>
+where
+    K: ExprKind,
+    Ast: RenderAst<B>,
+    B: Backend,
+{
+    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
-        R: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        V: AssignmentValueVisitor<Backend = B>,
     {
-        left(self)?;
-        right(self)
+        visitor.visit_expr(&self.expr)
     }
 }
 
-fn count_expr_params<K, Ast>(expr: &Expr<'_, K, Ast>) -> usize
+/// Number of runtime parameters an expression contributes.
+///
+/// Used only as a capacity hint for param-vector preallocation, so counting just the
+/// type-level runtime `Params` (literals are baked into the query, not user-supplied) is
+/// sufficient and avoids a runtime AST walk.
+fn count_expr_params<K, Ast>(_expr: &Expr<'_, K, Ast>) -> usize
 where
     K: ExprKind,
     Ast: ExprAst,
 {
-    let mut visitor = ParamCountVisitor { count: 0 };
-    expr.visit(&mut visitor).unwrap();
-    visitor.count
+    <Ast::Params as crate::HList>::LEN
 }
 
 #[doc(hidden)]
@@ -459,12 +457,34 @@ where
 impl<K, Value> IntoAssignmentValue<K> for Value
 where
     K: ColumnKey,
-    Value: IntoBindValue,
+    Value: ExprKind<Value = Value> + Clone,
 {
-    type Value = StaticAssignmentValue;
+    type Value = StaticAssignmentValue<Value>;
 
     fn into_assignment_value(self) -> Self::Value {
-        StaticAssignmentValue::new(self.into_bind_value())
+        StaticAssignmentValue::new(self)
+    }
+}
+
+impl<K> IntoAssignmentValue<K> for &str
+where
+    K: ColumnKey<Value = String>,
+{
+    type Value = StaticAssignmentValue<String>;
+
+    fn into_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(self.to_owned())
+    }
+}
+
+impl<K> IntoAssignmentValue<K> for &String
+where
+    K: ColumnKey<Value = String>,
+{
+    type Value = StaticAssignmentValue<String>;
+
+    fn into_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(self.clone())
     }
 }
 
@@ -482,12 +502,34 @@ where
 impl<K, Value> IntoInsertAssignmentValue<K> for Value
 where
     K: ColumnKey,
-    Value: IntoBindValue,
+    Value: ExprKind<Value = Value> + Clone,
 {
-    type Value = StaticAssignmentValue;
+    type Value = StaticAssignmentValue<Value>;
 
     fn into_insert_assignment_value(self) -> Self::Value {
-        StaticAssignmentValue::new(self.into_bind_value())
+        StaticAssignmentValue::new(self)
+    }
+}
+
+impl<K> IntoInsertAssignmentValue<K> for &str
+where
+    K: ColumnKey<Value = String>,
+{
+    type Value = StaticAssignmentValue<String>;
+
+    fn into_insert_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(self.to_owned())
+    }
+}
+
+impl<K> IntoInsertAssignmentValue<K> for &String
+where
+    K: ColumnKey<Value = String>,
+{
+    type Value = StaticAssignmentValue<String>;
+
+    fn into_insert_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(self.clone())
     }
 }
 
@@ -509,10 +551,10 @@ macro_rules! impl_nullable_assignment_value {
             where
                 K: ColumnKey<Value = $ty>,
             {
-                type Value = StaticAssignmentValue;
+                type Value = StaticAssignmentValue<$ty>;
 
                 fn into_nullable_assignment_value(self) -> Self::Value {
-                    StaticAssignmentValue::new(self.into_nullable_bind_value())
+                    StaticAssignmentValue::new(self)
                 }
             }
 
@@ -520,10 +562,10 @@ macro_rules! impl_nullable_assignment_value {
             where
                 K: ColumnKey<Value = $ty>,
             {
-                type Value = StaticAssignmentValue;
+                type Value = StaticAssignmentValue<$ty>;
 
                 fn into_nullable_insert_assignment_value(self) -> Self::Value {
-                    StaticAssignmentValue::new(self.into_nullable_bind_value())
+                    StaticAssignmentValue::new(self)
                 }
             }
         )*
@@ -542,12 +584,10 @@ impl<K> IntoNullableAssignmentValue<K> for &str
 where
     K: ColumnKey<Value = String>,
 {
-    type Value = StaticAssignmentValue;
+    type Value = StaticAssignmentValue<String>;
 
     fn into_nullable_assignment_value(self) -> Self::Value {
-        StaticAssignmentValue::new(
-            <&str as IntoNullableBindValue<String>>::into_nullable_bind_value(self),
-        )
+        StaticAssignmentValue::new(self.to_owned())
     }
 }
 
@@ -555,12 +595,10 @@ impl<K> IntoNullableInsertAssignmentValue<K> for &str
 where
     K: ColumnKey<Value = String>,
 {
-    type Value = StaticAssignmentValue;
+    type Value = StaticAssignmentValue<String>;
 
     fn into_nullable_insert_assignment_value(self) -> Self::Value {
-        StaticAssignmentValue::new(
-            <&str as IntoNullableBindValue<String>>::into_nullable_bind_value(self),
-        )
+        StaticAssignmentValue::new(self.to_owned())
     }
 }
 
@@ -568,12 +606,10 @@ impl<K> IntoNullableAssignmentValue<K> for &String
 where
     K: ColumnKey<Value = String>,
 {
-    type Value = StaticAssignmentValue;
+    type Value = StaticAssignmentValue<String>;
 
     fn into_nullable_assignment_value(self) -> Self::Value {
-        StaticAssignmentValue::new(
-            <&String as IntoNullableBindValue<String>>::into_nullable_bind_value(self),
-        )
+        StaticAssignmentValue::new(self.clone())
     }
 }
 
@@ -581,40 +617,34 @@ impl<K> IntoNullableInsertAssignmentValue<K> for &String
 where
     K: ColumnKey<Value = String>,
 {
-    type Value = StaticAssignmentValue;
+    type Value = StaticAssignmentValue<String>;
 
     fn into_nullable_insert_assignment_value(self) -> Self::Value {
-        StaticAssignmentValue::new(
-            <&String as IntoNullableBindValue<String>>::into_nullable_bind_value(self),
-        )
+        StaticAssignmentValue::new(self.clone())
     }
 }
 
 impl<K, T> IntoNullableAssignmentValue<K> for Option<T>
 where
     K: ColumnKey<Value = T>,
-    T: IntoBindValue,
+    T: Clone,
 {
-    type Value = StaticAssignmentValue;
+    type Value = StaticAssignmentValue<Option<T>>;
 
     fn into_nullable_assignment_value(self) -> Self::Value {
-        StaticAssignmentValue::new(
-            <Option<T> as IntoNullableBindValue<T>>::into_nullable_bind_value(self),
-        )
+        StaticAssignmentValue::new(self)
     }
 }
 
 impl<K, T> IntoNullableInsertAssignmentValue<K> for Option<T>
 where
     K: ColumnKey<Value = T>,
-    T: IntoBindValue,
+    T: Clone,
 {
-    type Value = StaticAssignmentValue;
+    type Value = StaticAssignmentValue<Option<T>>;
 
     fn into_nullable_insert_assignment_value(self) -> Self::Value {
-        StaticAssignmentValue::new(
-            <Option<T> as IntoNullableBindValue<T>>::into_nullable_bind_value(self),
-        )
+        StaticAssignmentValue::new(self)
     }
 }
 
@@ -719,11 +749,18 @@ pub trait AssignmentNode {
 
     fn column(&self) -> &'static str;
 
+    fn param_count(&self) -> usize;
+}
+
+/// Backend-parameterized rendering for an assignment (mirror of [`RenderAst`]).
+#[doc(hidden)]
+pub trait RenderAssignment<B>: AssignmentNode
+where
+    B: Backend,
+{
     fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: AssignmentValueVisitor;
-
-    fn param_count(&self) -> usize;
+        V: AssignmentValueVisitor<Backend = B>;
 }
 
 #[doc(hidden)]
@@ -740,15 +777,22 @@ where
         K::NAME
     }
 
-    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
-    where
-        V: AssignmentValueVisitor,
-    {
-        self.value.visit_value(visitor)
-    }
-
     fn param_count(&self) -> usize {
         self.value.param_count()
+    }
+}
+
+impl<K, Value, B> RenderAssignment<B> for InsertAssignment<K, Value>
+where
+    K: ColumnKey,
+    Value: RenderAssignmentValue<B>,
+    B: Backend,
+{
+    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentValueVisitor<Backend = B>,
+    {
+        self.value.visit_value(visitor)
     }
 }
 
@@ -773,15 +817,22 @@ where
         K::NAME
     }
 
-    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
-    where
-        V: AssignmentValueVisitor,
-    {
-        self.value.visit_value(visitor)
-    }
-
     fn param_count(&self) -> usize {
         self.value.param_count()
+    }
+}
+
+impl<K, Value, B> RenderAssignment<B> for UpdateAssignment<K, Value>
+where
+    K: ColumnKey,
+    Value: RenderAssignmentValue<B>,
+    B: Backend,
+{
+    fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentValueVisitor<Backend = B>,
+    {
+        self.value.visit_value(visitor)
     }
 }
 
@@ -795,6 +846,7 @@ where
 #[doc(hidden)]
 pub trait AssignmentVisitor {
     type Error;
+    type Backend: Backend;
 
     fn visit_assignment<Value>(
         &mut self,
@@ -802,7 +854,7 @@ pub trait AssignmentVisitor {
         value: &Value,
     ) -> Result<(), Self::Error>
     where
-        Value: AssignmentNode;
+        Value: RenderAssignment<Self::Backend>;
 }
 
 /// A typed insert row containing the assignments for one SQL `VALUES` group.
@@ -831,9 +883,11 @@ where
 /// Visitor used to traverse heterogeneously typed insert rows without allocation.
 #[doc(hidden)]
 pub trait InsertRowVisitor<E> {
+    type Backend: Backend;
+
     fn visit_row<Columns>(&mut self, row: &InsertRow<Columns>) -> Result<(), E>
     where
-        Columns: InsertAssignments;
+        Columns: RenderInsertAssignments<Self::Backend>;
 }
 
 /// Heterogeneous list of typed insert rows.
@@ -852,11 +906,18 @@ pub trait InsertRows {
     fn try_for_each_column<E>(&self, f: impl FnMut(&'static str) -> Result<(), E>)
     -> Result<(), E>;
 
+    fn param_count(&self) -> usize;
+}
+
+/// Backend-parameterized row traversal for insert rows (mirror of [`RenderAst`]).
+#[doc(hidden)]
+pub trait RenderInsertRows<B>: InsertRows
+where
+    B: Backend,
+{
     fn try_for_each_row<E, Visitor>(&self, visitor: &mut Visitor) -> Result<(), E>
     where
-        Visitor: InsertRowVisitor<E>;
-
-    fn param_count(&self) -> usize;
+        Visitor: InsertRowVisitor<E, Backend = B>;
 }
 
 #[doc(hidden)]
@@ -880,15 +941,20 @@ impl InsertRows for HNil {
         Ok(())
     }
 
-    fn try_for_each_row<E, Visitor>(&self, _visitor: &mut Visitor) -> Result<(), E>
-    where
-        Visitor: InsertRowVisitor<E>,
-    {
-        Ok(())
-    }
-
     fn param_count(&self) -> usize {
         0
+    }
+}
+
+impl<B> RenderInsertRows<B> for HNil
+where
+    B: Backend,
+{
+    fn try_for_each_row<E, Visitor>(&self, _visitor: &mut Visitor) -> Result<(), E>
+    where
+        Visitor: InsertRowVisitor<E, Backend = B>,
+    {
+        Ok(())
     }
 }
 
@@ -915,16 +981,24 @@ where
         self.head.columns().try_for_each_column(f)
     }
 
+    fn param_count(&self) -> usize {
+        self.head.columns().param_count() + self.tail.param_count()
+    }
+}
+
+impl<Columns, Tail, B> RenderInsertRows<B> for HCons<InsertRow<Columns>, Tail>
+where
+    Columns: RenderInsertAssignments<B>,
+    Tail: RenderInsertRows<B>,
+    Columns::Params: crate::HAppend<Tail::Params>,
+    B: Backend,
+{
     fn try_for_each_row<E, Visitor>(&self, visitor: &mut Visitor) -> Result<(), E>
     where
-        Visitor: InsertRowVisitor<E>,
+        Visitor: InsertRowVisitor<E, Backend = B>,
     {
         visitor.visit_row(&self.head)?;
         self.tail.try_for_each_row(visitor)
-    }
-
-    fn param_count(&self) -> usize {
-        self.head.columns().param_count() + self.tail.param_count()
     }
 }
 
@@ -998,11 +1072,18 @@ pub trait InsertAssignments {
     fn try_for_each_column<E>(&self, f: impl FnMut(&'static str) -> Result<(), E>)
     -> Result<(), E>;
 
+    fn param_count(&self) -> usize;
+}
+
+/// Backend-parameterized traversal for insert assignments (mirror of [`RenderAst`]).
+#[doc(hidden)]
+pub trait RenderInsertAssignments<B>: InsertAssignments
+where
+    B: Backend,
+{
     fn try_visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: AssignmentVisitor;
-
-    fn param_count(&self) -> usize;
+        V: AssignmentVisitor<Backend = B>;
 }
 
 impl InsertAssignments for HNil {
@@ -1019,15 +1100,20 @@ impl InsertAssignments for HNil {
         Ok(())
     }
 
-    fn try_visit<V>(&self, _visitor: &mut V) -> Result<(), V::Error>
-    where
-        V: AssignmentVisitor,
-    {
-        Ok(())
-    }
-
     fn param_count(&self) -> usize {
         0
+    }
+}
+
+impl<B> RenderInsertAssignments<B> for HNil
+where
+    B: Backend,
+{
+    fn try_visit<V>(&self, _visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentVisitor<Backend = B>,
+    {
+        Ok(())
     }
 }
 
@@ -1051,16 +1137,24 @@ where
         self.tail.try_for_each_column(f)
     }
 
+    fn param_count(&self) -> usize {
+        self.head.param_count() + self.tail.param_count()
+    }
+}
+
+impl<Head, Tail, B> RenderInsertAssignments<B> for HCons<Head, Tail>
+where
+    Head: InsertAssignmentNode + RenderAssignment<B>,
+    Tail: RenderInsertAssignments<B>,
+    Head::Params: crate::HAppend<Tail::Params>,
+    B: Backend,
+{
     fn try_visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: AssignmentVisitor,
+        V: AssignmentVisitor<Backend = B>,
     {
         visitor.visit_assignment(self.head.column(), &self.head)?;
         self.tail.try_visit(visitor)
-    }
-
-    fn param_count(&self) -> usize {
-        self.head.param_count() + self.tail.param_count()
     }
 }
 
@@ -1075,11 +1169,18 @@ pub trait UpdateAssignments {
         self.len() == 0
     }
 
+    fn param_count(&self) -> usize;
+}
+
+/// Backend-parameterized traversal for update assignments (mirror of [`RenderAst`]).
+#[doc(hidden)]
+pub trait RenderUpdateAssignments<B>: UpdateAssignments
+where
+    B: Backend,
+{
     fn try_visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: AssignmentVisitor;
-
-    fn param_count(&self) -> usize;
+        V: AssignmentVisitor<Backend = B>;
 }
 
 impl UpdateAssignments for HNil {
@@ -1089,15 +1190,20 @@ impl UpdateAssignments for HNil {
         0
     }
 
-    fn try_visit<V>(&self, _visitor: &mut V) -> Result<(), V::Error>
-    where
-        V: AssignmentVisitor,
-    {
-        Ok(())
-    }
-
     fn param_count(&self) -> usize {
         0
+    }
+}
+
+impl<B> RenderUpdateAssignments<B> for HNil
+where
+    B: Backend,
+{
+    fn try_visit<V>(&self, _visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: AssignmentVisitor<Backend = B>,
+    {
+        Ok(())
     }
 }
 
@@ -1113,16 +1219,24 @@ where
         1 + self.tail.len()
     }
 
+    fn param_count(&self) -> usize {
+        self.head.param_count() + self.tail.param_count()
+    }
+}
+
+impl<Head, Tail, B> RenderUpdateAssignments<B> for HCons<Head, Tail>
+where
+    Head: UpdateAssignmentNode + RenderAssignment<B>,
+    Tail: RenderUpdateAssignments<B>,
+    Head::Params: crate::HAppend<Tail::Params>,
+    B: Backend,
+{
     fn try_visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: AssignmentVisitor,
+        V: AssignmentVisitor<Backend = B>,
     {
         visitor.visit_assignment(self.head.column(), &self.head)?;
         self.tail.try_visit(visitor)
-    }
-
-    fn param_count(&self) -> usize {
-        self.head.param_count() + self.tail.param_count()
     }
 }
 
@@ -1136,15 +1250,23 @@ pub trait PredicateNodes {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
 
+/// Backend-parameterized rendering for a predicate-node list (mirror of [`RenderAst`]).
+#[doc(hidden)]
+pub trait RenderPredicateNodes<B>: PredicateNodes
+where
+    B: Backend,
+{
     fn try_visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: PredicateVisitor;
+        V: PredicateVisitor<Backend = B>;
 }
 
 #[doc(hidden)]
 pub trait PredicateVisitor {
     type Error;
+    type Backend: Backend;
 
     fn visit_predicate<Kind, Ast>(
         &mut self,
@@ -1152,7 +1274,7 @@ pub trait PredicateVisitor {
     ) -> Result<(), Self::Error>
     where
         Kind: PredicateKind,
-        Ast: crate::PredicateAst;
+        Ast: crate::RenderPredicateAst<Self::Backend>;
 }
 
 impl PredicateNodes for HNil {
@@ -1161,10 +1283,15 @@ impl PredicateNodes for HNil {
     fn len(&self) -> usize {
         0
     }
+}
 
+impl<B> RenderPredicateNodes<B> for HNil
+where
+    B: Backend,
+{
     fn try_visit<V>(&self, _visitor: &mut V) -> Result<(), V::Error>
     where
-        V: PredicateVisitor,
+        V: PredicateVisitor<Backend = B>,
     {
         Ok(())
     }
@@ -1182,10 +1309,20 @@ where
     fn len(&self) -> usize {
         1 + self.tail.len()
     }
+}
 
+impl<'scope, Kind, Ast, Tail, B> RenderPredicateNodes<B>
+    for HCons<Predicate<'scope, Kind, Ast>, Tail>
+where
+    Kind: PredicateKind,
+    Ast: crate::RenderPredicateAst<B>,
+    Tail: RenderPredicateNodes<B>,
+    Ast::Params: crate::HAppend<Tail::Params>,
+    B: Backend,
+{
     fn try_visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
-        V: PredicateVisitor,
+        V: PredicateVisitor<Backend = B>,
     {
         visitor.visit_predicate(&self.head)?;
         self.tail.try_visit(visitor)
@@ -1213,7 +1350,7 @@ pub trait PreparedSelectQuery<'conn> {
 
     fn fetch<'query, ParamValues>(&'query self, params: ParamValues) -> Self::RowStream<'query>
     where
-        ParamValues: crate::PreparedParamValues<Self::Params>;
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend>;
 
     fn collect<'query, ParamValues>(
         &'query self,
@@ -1221,7 +1358,7 @@ pub trait PreparedSelectQuery<'conn> {
     ) -> impl Future<Output = Result<Vec<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
     {
         let rows = self.fetch(params);
         collect_rows::<Self::Builder, Self::Row, _>(rows)
@@ -1233,7 +1370,7 @@ pub trait PreparedSelectQuery<'conn> {
     ) -> impl Future<Output = Result<Self::Row, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
     {
         let row = fetch_optional_row::<Self::Builder, Self::Row, _>(self.fetch(params));
         async move {
@@ -1248,7 +1385,7 @@ pub trait PreparedSelectQuery<'conn> {
     ) -> impl Future<Output = Result<Option<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
     {
         let rows = self.fetch(params);
         fetch_optional_row::<Self::Builder, Self::Row, _>(rows)
@@ -1277,11 +1414,11 @@ pub trait PreparedMutationQuery<'conn> {
     ) -> impl Future<Output = Result<u64, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params> + 'query;
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query;
 
     fn fetch<'query, ParamValues>(&'query self, params: ParamValues) -> Self::RowStream<'query>
     where
-        ParamValues: crate::PreparedParamValues<Self::Params>;
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend>;
 
     fn collect<'query, ParamValues>(
         &'query self,
@@ -1289,7 +1426,7 @@ pub trait PreparedMutationQuery<'conn> {
     ) -> impl Future<Output = Result<Vec<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
     {
         let rows = self.fetch(params);
         collect_rows::<Self::Builder, Self::Row, _>(rows)
@@ -1301,7 +1438,7 @@ pub trait PreparedMutationQuery<'conn> {
     ) -> impl Future<Output = RowsWithAffected<Self::Row, Self::Builder>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
     {
         let rows = self.fetch(params);
         collect_rows_with_affected::<Self::Builder, Self::Row, _>(rows)
@@ -1313,7 +1450,7 @@ pub trait PreparedMutationQuery<'conn> {
     ) -> impl Future<Output = Result<(Self::Row, u64), ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
     {
         let row =
             fetch_optional_row_with_affected::<Self::Builder, Self::Row, _>(self.fetch(params));
@@ -1331,7 +1468,7 @@ pub trait PreparedMutationQuery<'conn> {
     ) -> impl Future<Output = OptionalRowWithAffected<Self::Row, Self::Builder>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
     {
         let rows = self.fetch(params);
         fetch_optional_row_with_affected::<Self::Builder, Self::Row, _>(rows)
@@ -1343,7 +1480,7 @@ pub trait PreparedMutationQuery<'conn> {
     ) -> impl Future<Output = Result<Self::Row, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
     {
         let row = fetch_optional_row::<Self::Builder, Self::Row, _>(self.fetch(params));
         async move {
@@ -1358,7 +1495,7 @@ pub trait PreparedMutationQuery<'conn> {
     ) -> impl Future<Output = Result<Option<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
     {
         let rows = self.fetch(params);
         fetch_optional_row::<Self::Builder, Self::Row, _>(rows)
@@ -2274,7 +2411,7 @@ where
 
 impl<'scope, T> ReturningProjection<'scope> for T
 where
-    T: ExprKind + ProjectionShape + IntoBindValue + Clone,
+    T: ExprKind<Value = T> + ProjectionShape + Clone,
 {
     type Shape = T;
 }
@@ -2360,11 +2497,12 @@ where
 #[doc(hidden)]
 pub trait SelectSink {
     type Error;
+    type Backend: Backend;
 
     fn push_projection<Shape, P>(&mut self, projection: P) -> Result<(), Self::Error>
     where
         Shape: ProjectionShape,
-        P: Projectable;
+        P: RenderProjectable<Self::Backend>;
 
     fn push_table_source<S>(&mut self, alias: SourceAlias) -> Result<(), Self::Error>
     where
@@ -2378,7 +2516,7 @@ pub trait SelectSink {
     where
         S: TableProjection,
         P: PredicateKind,
-        PredicateAst: crate::PredicateAst;
+        PredicateAst: crate::RenderPredicateAst<Self::Backend>;
 
     fn push_left_join<S, P, PredicateAst>(
         &mut self,
@@ -2388,7 +2526,7 @@ pub trait SelectSink {
     where
         S: TableProjection,
         P: PredicateKind,
-        PredicateAst: crate::PredicateAst;
+        PredicateAst: crate::RenderPredicateAst<Self::Backend>;
 
     fn push_filter<P, PredicateAst>(
         &mut self,
@@ -2396,12 +2534,12 @@ pub trait SelectSink {
     ) -> Result<(), Self::Error>
     where
         P: PredicateKind,
-        PredicateAst: crate::PredicateAst;
+        PredicateAst: crate::RenderPredicateAst<Self::Backend>;
 
     fn push_order<K, Ast>(&mut self, order: Order<'_, K, Ast>) -> Result<(), Self::Error>
     where
         K: ExprKind,
-        Ast: ExprAst;
+        Ast: RenderAst<Self::Backend>;
 
     fn set_limit(&mut self, rows: usize) -> Result<(), Self::Error>;
 
@@ -2411,10 +2549,17 @@ pub trait SelectSink {
 #[doc(hidden)]
 pub trait SourceSpec {
     type Params: HList;
+}
 
+/// Backend-parameterized source rendering (mirror of [`RenderAst`]).
+#[doc(hidden)]
+pub trait RenderSourceSpec<B>: SourceSpec
+where
+    B: Backend,
+{
     fn push_source<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink;
+        Sink: SelectSink<Backend = B>;
 }
 
 impl<S> SourceSpec for RootSource<S>
@@ -2422,10 +2567,16 @@ where
     S: TableProjection,
 {
     type Params = HNil;
+}
 
+impl<S, B> RenderSourceSpec<B> for RootSource<S>
+where
+    S: TableProjection,
+    B: Backend,
+{
     fn push_source<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         sink.push_table_source::<S>(self.alias)
     }
@@ -2438,10 +2589,18 @@ where
     PredicateAst: crate::PredicateAst,
 {
     type Params = PredicateAst::Params;
+}
 
+impl<S, P, PredicateAst, B> RenderSourceSpec<B> for InnerJoinSource<'_, S, P, PredicateAst>
+where
+    S: TableProjection,
+    P: PredicateKind,
+    PredicateAst: crate::RenderPredicateAst<B>,
+    B: Backend,
+{
     fn push_source<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         sink.push_inner_join::<S, P, PredicateAst>(self.alias, self.on.clone())
     }
@@ -2454,10 +2613,18 @@ where
     PredicateAst: crate::PredicateAst,
 {
     type Params = PredicateAst::Params;
+}
 
+impl<S, P, PredicateAst, B> RenderSourceSpec<B> for LeftJoinSource<'_, S, P, PredicateAst>
+where
+    S: TableProjection,
+    P: PredicateKind,
+    PredicateAst: crate::RenderPredicateAst<B>,
+    B: Backend,
+{
     fn push_source<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         sink.push_left_join::<S, P, PredicateAst>(self.alias, self.on.clone())
     }
@@ -2568,8 +2735,9 @@ where
     pub fn lower_into<'conn, Conn, Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
         Conn: QueryBuilder + 'conn,
-        Base: SelectAst<'conn, 'scope, Conn>,
+        Base: RenderSelectAst<'conn, 'scope, Conn, Sink::Backend>,
         Sink: SelectSink,
+        Projection: RenderProjectable<Sink::Backend>,
     {
         sink.push_projection::<Shape, _>(self.projection.clone())?;
         self.base.lower_sources_into(sink)?;
@@ -2592,26 +2760,34 @@ where
     fn connection(&self) -> &'conn Conn;
 
     fn exprs(&self) -> Self::Exprs;
+}
 
+/// Backend-parameterized select lowering (mirror of [`RenderAst`]).
+#[doc(hidden)]
+pub trait RenderSelectAst<'conn, 'scope, Conn, B>: SelectAst<'conn, 'scope, Conn>
+where
+    Conn: QueryBuilder,
+    B: Backend,
+{
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink;
+        Sink: SelectSink<Backend = B>;
 
     fn lower_filters_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink;
+        Sink: SelectSink<Backend = B>;
 
     fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink;
+        Sink: SelectSink<Backend = B>;
 
     fn lower_bounds_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink;
+        Sink: SelectSink<Backend = B>;
 
     fn lower_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.lower_sources_into(sink)?;
         self.lower_filters_into(sink)?;
@@ -2638,31 +2814,37 @@ where
     fn exprs(&self) -> Self::Exprs {
         HNil
     }
+}
 
+impl<'conn, 'scope, Conn, B> RenderSelectAst<'conn, 'scope, Conn, B> for NoSources<'conn, Conn>
+where
+    Conn: QueryBuilder + 'conn,
+    B: Backend,
+{
     fn lower_sources_into<Sink>(&self, _sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         Ok(())
     }
 
     fn lower_filters_into<Sink>(&self, _sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         Ok(())
     }
 
     fn lower_orders_into<Sink>(&self, _sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         Ok(())
     }
 
     fn lower_bounds_into<Sink>(&self, _sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         Ok(())
     }
@@ -2747,31 +2929,40 @@ where
     fn exprs(&self) -> Self::Exprs {
         self.exprs.clone()
     }
+}
 
+impl<'conn, 'scope, Conn, Exprs, Source, B> RenderSelectAst<'conn, 'scope, Conn, B>
+    for From<'conn, 'scope, Conn, Exprs, Source>
+where
+    Conn: QueryBuilder + 'conn,
+    Exprs: HList + Clone + ToTuple,
+    Source: RenderSourceSpec<B>,
+    B: Backend,
+{
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.source.push_source(sink)
     }
 
     fn lower_filters_into<Sink>(&self, _sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         Ok(())
     }
 
     fn lower_orders_into<Sink>(&self, _sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         Ok(())
     }
 
     fn lower_bounds_into<Sink>(&self, _sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         Ok(())
     }
@@ -2873,17 +3064,28 @@ where
     fn exprs(&self) -> Self::Exprs {
         self.base.exprs()
     }
+}
 
+impl<'conn, 'scope, Conn, Base, P, PredicateAst, B> RenderSelectAst<'conn, 'scope, Conn, B>
+    for Where<'scope, Base, P, PredicateAst>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: RenderSelectAst<'conn, 'scope, Conn, B>,
+    P: PredicateKind,
+    PredicateAst: crate::RenderPredicateAst<B>,
+    Base::Params: crate::HAppend<PredicateAst::Params>,
+    B: Backend,
+{
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_sources_into(sink)
     }
 
     fn lower_filters_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_filters_into(sink)?;
         sink.push_filter(self.predicate.clone())
@@ -2891,14 +3093,14 @@ where
 
     fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_orders_into(sink)
     }
 
     fn lower_bounds_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_bounds_into(sink)
     }
@@ -2927,24 +3129,35 @@ where
     fn exprs(&self) -> Self::Exprs {
         self.base.exprs()
     }
+}
 
+impl<'conn, 'scope, Conn, Base, K, Ast, B> RenderSelectAst<'conn, 'scope, Conn, B>
+    for OrderBy<'scope, Base, K, Ast>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: RenderSelectAst<'conn, 'scope, Conn, B>,
+    K: ExprKind,
+    Ast: RenderAst<B>,
+    Base::Params: crate::HAppend<Ast::Params>,
+    B: Backend,
+{
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_sources_into(sink)
     }
 
     fn lower_filters_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_filters_into(sink)
     }
 
     fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_orders_into(sink)?;
         sink.push_order(self.order.clone())
@@ -2952,7 +3165,7 @@ where
 
     fn lower_bounds_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_bounds_into(sink)
     }
@@ -2977,31 +3190,38 @@ where
     fn exprs(&self) -> Self::Exprs {
         self.base.exprs()
     }
+}
 
+impl<'conn, 'scope, Conn, Base, B> RenderSelectAst<'conn, 'scope, Conn, B> for Limited<Base>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: RenderSelectAst<'conn, 'scope, Conn, B>,
+    B: Backend,
+{
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_sources_into(sink)
     }
 
     fn lower_filters_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_filters_into(sink)
     }
 
     fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_orders_into(sink)
     }
 
     fn lower_bounds_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_bounds_into(sink)?;
         sink.set_limit(self.rows)
@@ -3027,31 +3247,38 @@ where
     fn exprs(&self) -> Self::Exprs {
         self.base.exprs()
     }
+}
 
+impl<'conn, 'scope, Conn, Base, B> RenderSelectAst<'conn, 'scope, Conn, B> for Offset<Base>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: RenderSelectAst<'conn, 'scope, Conn, B>,
+    B: Backend,
+{
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_sources_into(sink)
     }
 
     fn lower_filters_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_filters_into(sink)
     }
 
     fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_orders_into(sink)
     }
 
     fn lower_bounds_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_bounds_into(sink)?;
         sink.set_offset(self.rows)
@@ -3083,10 +3310,23 @@ where
     fn exprs(&self) -> Self::Exprs {
         self.base.exprs().push_back(self.expr.clone())
     }
+}
 
+impl<'conn, 'scope, Conn, Base, Expr, Source, B> RenderSelectAst<'conn, 'scope, Conn, B>
+    for Join<Base, Expr, Source>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: RenderSelectAst<'conn, 'scope, Conn, B>,
+    Base::Exprs: PushBack<Expr>,
+    <Base::Exprs as PushBack<Expr>>::Output: Clone + ToTuple,
+    Expr: Clone,
+    Source: RenderSourceSpec<B>,
+    Base::Params: crate::HAppend<Source::Params>,
+    B: Backend,
+{
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_sources_into(sink)?;
         self.source.push_source(sink)
@@ -3094,21 +3334,21 @@ where
 
     fn lower_filters_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_filters_into(sink)
     }
 
     fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_orders_into(sink)
     }
 
     fn lower_bounds_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_bounds_into(sink)
     }
@@ -3139,10 +3379,23 @@ where
     fn exprs(&self) -> Self::Exprs {
         self.base.exprs().push_back(self.expr.clone())
     }
+}
 
+impl<'conn, 'scope, Conn, Base, Expr, Source, B> RenderSelectAst<'conn, 'scope, Conn, B>
+    for LeftJoin<Base, Expr, Source>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: RenderSelectAst<'conn, 'scope, Conn, B>,
+    Base::Exprs: PushBack<Expr>,
+    <Base::Exprs as PushBack<Expr>>::Output: Clone + ToTuple,
+    Expr: Clone,
+    Source: RenderSourceSpec<B>,
+    Base::Params: crate::HAppend<Source::Params>,
+    B: Backend,
+{
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_sources_into(sink)?;
         self.source.push_source(sink)
@@ -3150,21 +3403,21 @@ where
 
     fn lower_filters_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_filters_into(sink)
     }
 
     fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_orders_into(sink)
     }
 
     fn lower_bounds_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
-        Sink: SelectSink,
+        Sink: SelectSink<Backend = B>,
     {
         self.base.lower_bounds_into(sink)
     }

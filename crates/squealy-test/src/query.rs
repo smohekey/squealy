@@ -6,13 +6,14 @@ use std::task::{Context, Poll};
 use futures_core::Stream;
 
 use squealy::{
-    Backend, BindSink, BindValue, Decode, DeleteQuery, ExecutableDeleteQuery,
-    ExecutableInsertQuery, ExecutableSelectQuery, ExecutableUpdateQuery, HAppend, HList, HNil,
-    InsertQuery, InsertRows, InsertableTable, NoRuntimeParams, PredicateNodes,
-    PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery,
-    PreparedMutationQuery, PreparedParamValues, PreparedSelectQuery, Projectable, ProjectionShape,
-    QueryBuilder, RowsAffected, SelectAst, SelectQuery, Selected, SourceAlias, TableProjection,
-    UpdateQuery, UpdateableTable,
+    Backend, Decode, DeleteQuery, Encode, ExecutableDeleteQuery, ExecutableInsertQuery,
+    ExecutableSelectQuery, ExecutableUpdateQuery, HAppend, HList, HNil, InsertQuery, InsertRows,
+    InsertableTable, NoRuntimeParams, ParamWriter, PredicateNodes, PreparableDeleteQuery,
+    PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery, PreparedMutationQuery,
+    PreparedParamValues, PreparedSelectQuery, Projectable, ProjectionShape, QueryBuilder,
+    RenderInsertRows, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
+    RenderUpdateAssignments, RowsAffected, SelectAst, SelectQuery, Selected, SourceAlias,
+    TableProjection, UpdateQuery, UpdateableTable,
 };
 
 use crate::{TestBackend, TestConnection, TestError, sql};
@@ -55,6 +56,121 @@ impl squealy::RowReader for TestRowReader<'_> {
         T: Decode<TestBackend>,
     {
         T::decode(self)
+    }
+}
+
+/// Inspectable parameter captured by the test backend's [`TestParamWriter`].
+///
+/// This is the test backend's native param type (the mirror of `PostgresParam`). It is
+/// the value tests assert on, replacing the old neutral `BindValue`. Integer widths are
+/// canonicalized to `i128`/`u128` so equality ignores the source width, matching the old
+/// `BindValue` comparison semantics.
+#[derive(Clone, Debug)]
+pub enum TestParam {
+    Int(i128),
+    UInt(u128),
+    Float(f64),
+    Text(String),
+    Bool(bool),
+    Null,
+}
+
+impl PartialEq for TestParam {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Int(left), Self::Int(right)) => left == right,
+            (Self::UInt(left), Self::UInt(right)) => left == right,
+            (Self::Float(left), Self::Float(right)) => left == right,
+            (Self::Text(left), Self::Text(right)) => left == right,
+            (Self::Bool(left), Self::Bool(right)) => left == right,
+            (Self::Null, Self::Null) => true,
+            _ => false,
+        }
+    }
+}
+
+/// Encode-side mirror of [`TestRowReader`]: captures native [`TestParam`]s for inspection.
+pub struct TestParamWriter<'param> {
+    params: &'param mut Vec<TestParam>,
+}
+
+impl<'param> TestParamWriter<'param> {
+    pub fn new(params: &'param mut Vec<TestParam>) -> Self {
+        Self { params }
+    }
+
+    pub fn push(&mut self, param: TestParam) {
+        self.params.push(param);
+    }
+}
+
+impl ParamWriter for TestParamWriter<'_> {
+    type Backend = TestBackend;
+
+    fn write<T>(&mut self, value: &T) -> Result<(), TestError>
+    where
+        T: Encode<TestBackend>,
+    {
+        value.encode(self)
+    }
+}
+
+macro_rules! impl_test_encode {
+    ($($ty:ty => |$value:ident| $param:expr),* $(,)?) => {
+        $(impl Encode<TestBackend> for $ty {
+            fn encode(&self, out: &mut TestParamWriter<'_>) -> Result<(), TestError> {
+                let $value = self;
+                out.push($param);
+                Ok(())
+            }
+        })*
+    };
+}
+
+impl_test_encode! {
+    i8 => |v| TestParam::Int(i128::from(*v)),
+    i16 => |v| TestParam::Int(i128::from(*v)),
+    i32 => |v| TestParam::Int(i128::from(*v)),
+    i64 => |v| TestParam::Int(i128::from(*v)),
+    i128 => |v| TestParam::Int(*v),
+    isize => |v| TestParam::Int(*v as i128),
+    u8 => |v| TestParam::UInt(u128::from(*v)),
+    u16 => |v| TestParam::UInt(u128::from(*v)),
+    u32 => |v| TestParam::UInt(u128::from(*v)),
+    u64 => |v| TestParam::UInt(u128::from(*v)),
+    u128 => |v| TestParam::UInt(*v),
+    usize => |v| TestParam::UInt(*v as u128),
+    f32 => |v| TestParam::Float(f64::from(*v)),
+    f64 => |v| TestParam::Float(*v),
+    bool => |v| TestParam::Bool(*v),
+}
+
+impl Encode<TestBackend> for str {
+    fn encode(&self, out: &mut TestParamWriter<'_>) -> Result<(), TestError> {
+        out.push(TestParam::Text(self.to_owned()));
+        Ok(())
+    }
+}
+
+impl Encode<TestBackend> for String {
+    fn encode(&self, out: &mut TestParamWriter<'_>) -> Result<(), TestError> {
+        out.push(TestParam::Text(self.clone()));
+        Ok(())
+    }
+}
+
+impl<T> Encode<TestBackend> for Option<T>
+where
+    T: Encode<TestBackend>,
+{
+    fn encode(&self, out: &mut TestParamWriter<'_>) -> Result<(), TestError> {
+        match self {
+            Some(value) => value.encode(out),
+            None => {
+                out.push(TestParam::Null);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -383,7 +499,7 @@ where
 
     fn fetch<'query, ParamValues>(&'query self, _params: ParamValues) -> Self::RowStream<'query>
     where
-        ParamValues: PreparedParamValues<Self::Params>,
+        ParamValues: PreparedParamValues<Self::Params, TestBackend>,
     {
         self.connection.fetch_select()
     }
@@ -413,14 +529,14 @@ where
     + 'query
     where
         'conn: 'query,
-        ParamValues: PreparedParamValues<Self::Params> + 'query,
+        ParamValues: PreparedParamValues<Self::Params, TestBackend> + 'query,
     {
         self.connection.execute_insert()
     }
 
     fn fetch<'query, ParamValues>(&'query self, _params: ParamValues) -> Self::RowStream<'query>
     where
-        ParamValues: PreparedParamValues<Self::Params>,
+        ParamValues: PreparedParamValues<Self::Params, TestBackend>,
     {
         self.connection.fetch_insert()
     }
@@ -746,8 +862,8 @@ where
 impl<'conn, 'scope, Shape, Base, Projection> TestSelect<'conn, 'scope, Shape, Base, Projection>
 where
     Shape: ProjectionShape,
-    Base: SelectAst<'conn, 'scope, TestConnection>,
-    Projection: Projectable,
+    Base: RenderSelectAst<'conn, 'scope, TestConnection, TestBackend>,
+    Projection: RenderProjectable<TestBackend>,
 {
     /// Render this query into a newly allocated SQL string.
     ///
@@ -764,25 +880,26 @@ where
         )
     }
 
-    /// Write bind parameters into a caller-provided sink.
-    pub fn write_params<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    /// Write bind parameters into a caller-provided native param vector.
+    pub fn write_params(&self, params: &mut Vec<crate::TestParam>) -> Result<(), TestError>
     where
-        Sink: BindSink,
+        Base: RenderSelectAst<'conn, 'scope, TestConnection, TestBackend>,
+        Projection: RenderProjectable<TestBackend>,
     {
-        sql::write_selected_params::<TestConnection, Base, Shape, Projection, _>(
-            &self.selected,
-            sink,
-        )
+        sql::write_selected_params::<TestConnection, Base, Shape, Projection>(&self.selected, params)
     }
 
     /// Collect bind parameters into a newly allocated vector.
     ///
     /// Use [`Self::write_params`] to inspect parameters without allocating a vector.
-    pub fn collect_params(&self) -> Vec<BindValue> {
+    pub fn collect_params(&self) -> Result<Vec<crate::TestParam>, TestError>
+    where
+        Base: RenderSelectAst<'conn, 'scope, TestConnection, TestBackend>,
+        Projection: RenderProjectable<TestBackend>,
+    {
         let mut params = Vec::new();
-        self.write_params(&mut params)
-            .unwrap_or_else(|error| match error {});
-        params
+        self.write_params(&mut params)?;
+        Ok(params)
     }
 }
 
@@ -790,8 +907,8 @@ impl<S, Shape, Rows, Returning> TestInsert<'_, S, Shape, Rows, Returning>
 where
     S: InsertableTable,
     Shape: ProjectionShape,
-    Rows: InsertRows,
-    Returning: Projectable,
+    Rows: RenderInsertRows<TestBackend>,
+    Returning: RenderProjectable<TestBackend>,
 {
     /// Render this query into a newly allocated SQL string.
     ///
@@ -805,22 +922,26 @@ where
         sql::write_insert::<S, _, _>(&self.columns, &self.returning, writer)
     }
 
-    /// Write bind parameters into a caller-provided sink.
-    pub fn write_params<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    /// Write bind parameters into a caller-provided native param vector.
+    pub fn write_params(&self, params: &mut Vec<crate::TestParam>) -> Result<(), TestError>
     where
-        Sink: BindSink,
+        Rows: RenderInsertRows<TestBackend>,
+        Returning: RenderProjectable<TestBackend>,
     {
-        sql::write_insert_params::<S, _, _, _>(&self.columns, &self.returning, sink)
+        sql::write_insert_params::<S, _, _>(&self.columns, &self.returning, params)
     }
 
     /// Collect bind parameters into a newly allocated vector.
     ///
     /// Use [`Self::write_params`] to inspect parameters without allocating a vector.
-    pub fn collect_params(&self) -> Vec<BindValue> {
+    pub fn collect_params(&self) -> Result<Vec<crate::TestParam>, TestError>
+    where
+        Rows: RenderInsertRows<TestBackend>,
+        Returning: RenderProjectable<TestBackend>,
+    {
         let mut params = Vec::new();
-        self.write_params(&mut params)
-            .unwrap_or_else(|error| match error {});
-        params
+        self.write_params(&mut params)?;
+        Ok(params)
     }
 }
 
@@ -828,8 +949,8 @@ impl<S, Shape, Filters, Returning> TestDelete<'_, S, Shape, Filters, Returning>
 where
     S: TableProjection,
     Shape: ProjectionShape,
-    Filters: PredicateNodes,
-    Returning: Projectable,
+    Filters: RenderPredicateNodes<TestBackend>,
+    Returning: RenderProjectable<TestBackend>,
 {
     /// Render this query into a newly allocated SQL string.
     ///
@@ -843,22 +964,26 @@ where
         sql::write_delete::<S, _, _>(self.alias, &self.filters, &self.returning, writer)
     }
 
-    /// Write bind parameters into a caller-provided sink.
-    pub fn write_params<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    /// Write bind parameters into a caller-provided native param vector.
+    pub fn write_params(&self, params: &mut Vec<crate::TestParam>) -> Result<(), TestError>
     where
-        Sink: BindSink,
+        Filters: RenderPredicateNodes<TestBackend>,
+        Returning: RenderProjectable<TestBackend>,
     {
-        sql::write_delete_params::<S, _, _, _>(self.alias, &self.filters, &self.returning, sink)
+        sql::write_delete_params::<S, _, _>(self.alias, &self.filters, &self.returning, params)
     }
 
     /// Collect bind parameters into a newly allocated vector.
     ///
     /// Use [`Self::write_params`] to inspect parameters without allocating a vector.
-    pub fn collect_params(&self) -> Vec<BindValue> {
+    pub fn collect_params(&self) -> Result<Vec<crate::TestParam>, TestError>
+    where
+        Filters: RenderPredicateNodes<TestBackend>,
+        Returning: RenderProjectable<TestBackend>,
+    {
         let mut params = Vec::new();
-        self.write_params(&mut params)
-            .unwrap_or_else(|error| match error {});
-        params
+        self.write_params(&mut params)?;
+        Ok(params)
     }
 }
 
@@ -866,9 +991,9 @@ impl<S, Shape, Columns, Filters, Returning> TestUpdate<'_, S, Shape, Columns, Fi
 where
     S: UpdateableTable,
     Shape: ProjectionShape,
-    Columns: squealy::UpdateAssignments,
-    Filters: PredicateNodes,
-    Returning: Projectable,
+    Columns: RenderUpdateAssignments<TestBackend>,
+    Filters: RenderPredicateNodes<TestBackend>,
+    Returning: RenderProjectable<TestBackend>,
 {
     /// Render this query into a newly allocated SQL string.
     ///
@@ -888,27 +1013,33 @@ where
         )
     }
 
-    /// Write bind parameters into a caller-provided sink.
-    pub fn write_params<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    /// Write bind parameters into a caller-provided native param vector.
+    pub fn write_params(&self, params: &mut Vec<crate::TestParam>) -> Result<(), TestError>
     where
-        Sink: BindSink,
+        Columns: RenderUpdateAssignments<TestBackend>,
+        Filters: RenderPredicateNodes<TestBackend>,
+        Returning: RenderProjectable<TestBackend>,
     {
-        sql::write_update_params::<S, _, _, _, _>(
+        sql::write_update_params::<S, _, _, _>(
             self.alias,
             &self.columns,
             &self.filters,
             &self.returning,
-            sink,
+            params,
         )
     }
 
     /// Collect bind parameters into a newly allocated vector.
     ///
     /// Use [`Self::write_params`] to inspect parameters without allocating a vector.
-    pub fn collect_params(&self) -> Vec<BindValue> {
+    pub fn collect_params(&self) -> Result<Vec<crate::TestParam>, TestError>
+    where
+        Columns: RenderUpdateAssignments<TestBackend>,
+        Filters: RenderPredicateNodes<TestBackend>,
+        Returning: RenderProjectable<TestBackend>,
+    {
         let mut params = Vec::new();
-        self.write_params(&mut params)
-            .unwrap_or_else(|error| match error {});
-        params
+        self.write_params(&mut params)?;
+        Ok(params)
     }
 }
