@@ -717,7 +717,10 @@ where
     Ok(())
 }
 
-fn write_returning(returning: &impl RenderProjectable<crate::TestBackend>, writer: &mut impl SqlWriter) -> io::Result<()> {
+fn write_returning(
+    returning: &impl RenderProjectable<crate::TestBackend>,
+    writer: &mut impl SqlWriter,
+) -> io::Result<()> {
     returning.visit_projection(&mut WriteProjection {
         writer,
         index: 0,
@@ -781,7 +784,10 @@ where
     }
 }
 
-fn write_filters(filters: &impl RenderPredicateNodes<crate::TestBackend>, writer: &mut impl SqlWriter) -> io::Result<()> {
+fn write_filters(
+    filters: &impl RenderPredicateNodes<crate::TestBackend>,
+    writer: &mut impl SqlWriter,
+) -> io::Result<()> {
     if filters.is_empty() {
         return Ok(());
     }

@@ -87,10 +87,7 @@ where
     Shape: HList,
     B: crate::Backend,
 {
-    fn write_params(
-        &self,
-        writer: &mut B::ParamWriter<'_>,
-    ) -> Result<(), B::Error>;
+    fn write_params(&self, writer: &mut B::ParamWriter<'_>) -> Result<(), B::Error>;
 
     fn write_param_at(
         &self,

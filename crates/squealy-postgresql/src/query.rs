@@ -1271,15 +1271,17 @@ where
                 writer,
             )
         });
-        let params =
-            collect_postgres_params(self.columns.first_row_len() * self.columns.len(), |params| {
+        let params = collect_postgres_params(
+            self.columns.first_row_len() * self.columns.len(),
+            |params| {
                 render::write_insert_params::<S, Postgres, _, _>(
                     &PostgresDialect,
                     &self.columns,
                     &self.returning,
                     params,
                 )
-            })?;
+            },
+        )?;
         Ok((sql, params))
     }
 }
@@ -2121,10 +2123,22 @@ mod tests {
     #[test]
     fn primitives_encode_to_expected_param() {
         assert!(matches!(encode_to_param(&7i8), Ok(PostgresParam::Int16(7))));
-        assert!(matches!(encode_to_param(&7i16), Ok(PostgresParam::Int16(7))));
-        assert!(matches!(encode_to_param(&7i32), Ok(PostgresParam::Int32(7))));
-        assert!(matches!(encode_to_param(&7i64), Ok(PostgresParam::Int64(7))));
-        assert!(matches!(encode_to_param(&7isize), Ok(PostgresParam::Int64(7))));
+        assert!(matches!(
+            encode_to_param(&7i16),
+            Ok(PostgresParam::Int16(7))
+        ));
+        assert!(matches!(
+            encode_to_param(&7i32),
+            Ok(PostgresParam::Int32(7))
+        ));
+        assert!(matches!(
+            encode_to_param(&7i64),
+            Ok(PostgresParam::Int64(7))
+        ));
+        assert!(matches!(
+            encode_to_param(&7isize),
+            Ok(PostgresParam::Int64(7))
+        ));
         assert!(matches!(
             encode_to_param(&7i128),
             Ok(PostgresParam::Numeric(PostgresNumericInteger {
@@ -2133,9 +2147,18 @@ mod tests {
             }))
         ));
         assert!(matches!(encode_to_param(&7u8), Ok(PostgresParam::Int32(7))));
-        assert!(matches!(encode_to_param(&7u16), Ok(PostgresParam::Int32(7))));
-        assert!(matches!(encode_to_param(&7u32), Ok(PostgresParam::Int64(7))));
-        assert!(matches!(encode_to_param(&7usize), Ok(PostgresParam::Int64(7))));
+        assert!(matches!(
+            encode_to_param(&7u16),
+            Ok(PostgresParam::Int32(7))
+        ));
+        assert!(matches!(
+            encode_to_param(&7u32),
+            Ok(PostgresParam::Int64(7))
+        ));
+        assert!(matches!(
+            encode_to_param(&7usize),
+            Ok(PostgresParam::Int64(7))
+        ));
         assert!(matches!(
             encode_to_param(&7u64),
             Ok(PostgresParam::Numeric(PostgresNumericInteger {

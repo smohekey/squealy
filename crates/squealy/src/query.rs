@@ -6,11 +6,10 @@ use std::pin::pin;
 use futures_core::Stream;
 
 use crate::{
-    Backend, ColumnExprAst, ColumnRef, Connection, Decode, Expr, ExprAst, ExprKind,
-    HCons, HList, HNil, InsertableTable, Maybe, RenderAst, RenderProjectable,
-    NoRuntimeParams, Order, ParamExprAst, Predicate, PredicateKind, Projectable, ProjectionShape,
-    PushBack, QueryBuilder, RuntimeParam, SourceAlias, SupportsReturning, TableProjection, ToTuple,
-    UpdateableTable,
+    Backend, ColumnExprAst, ColumnRef, Connection, Decode, Expr, ExprAst, ExprKind, HCons, HList,
+    HNil, InsertableTable, Maybe, NoRuntimeParams, Order, ParamExprAst, Predicate, PredicateKind,
+    Projectable, ProjectionShape, PushBack, QueryBuilder, RenderAst, RenderProjectable,
+    RuntimeParam, SourceAlias, SupportsReturning, TableProjection, ToTuple, UpdateableTable,
 };
 
 type ErrorOf<Builder> = <<Builder as QueryBuilder>::Backend as Backend>::Error;
@@ -1350,7 +1349,8 @@ pub trait PreparedSelectQuery<'conn> {
 
     fn fetch<'query, ParamValues>(&'query self, params: ParamValues) -> Self::RowStream<'query>
     where
-        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend>;
+        ParamValues:
+            crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend>;
 
     fn collect<'query, ParamValues>(
         &'query self,
@@ -1358,7 +1358,8 @@ pub trait PreparedSelectQuery<'conn> {
     ) -> impl Future<Output = Result<Vec<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend>
+            + 'query,
     {
         let rows = self.fetch(params);
         collect_rows::<Self::Builder, Self::Row, _>(rows)
@@ -1370,7 +1371,8 @@ pub trait PreparedSelectQuery<'conn> {
     ) -> impl Future<Output = Result<Self::Row, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend>
+            + 'query,
     {
         let row = fetch_optional_row::<Self::Builder, Self::Row, _>(self.fetch(params));
         async move {
@@ -1385,7 +1387,8 @@ pub trait PreparedSelectQuery<'conn> {
     ) -> impl Future<Output = Result<Option<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend>
+            + 'query,
     {
         let rows = self.fetch(params);
         fetch_optional_row::<Self::Builder, Self::Row, _>(rows)
@@ -1414,11 +1417,13 @@ pub trait PreparedMutationQuery<'conn> {
     ) -> impl Future<Output = Result<u64, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query;
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend>
+            + 'query;
 
     fn fetch<'query, ParamValues>(&'query self, params: ParamValues) -> Self::RowStream<'query>
     where
-        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend>;
+        ParamValues:
+            crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend>;
 
     fn collect<'query, ParamValues>(
         &'query self,
@@ -1426,7 +1431,8 @@ pub trait PreparedMutationQuery<'conn> {
     ) -> impl Future<Output = Result<Vec<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend>
+            + 'query,
     {
         let rows = self.fetch(params);
         collect_rows::<Self::Builder, Self::Row, _>(rows)
@@ -1438,7 +1444,8 @@ pub trait PreparedMutationQuery<'conn> {
     ) -> impl Future<Output = RowsWithAffected<Self::Row, Self::Builder>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend>
+            + 'query,
     {
         let rows = self.fetch(params);
         collect_rows_with_affected::<Self::Builder, Self::Row, _>(rows)
@@ -1450,7 +1457,8 @@ pub trait PreparedMutationQuery<'conn> {
     ) -> impl Future<Output = Result<(Self::Row, u64), ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend>
+            + 'query,
     {
         let row =
             fetch_optional_row_with_affected::<Self::Builder, Self::Row, _>(self.fetch(params));
@@ -1468,7 +1476,8 @@ pub trait PreparedMutationQuery<'conn> {
     ) -> impl Future<Output = OptionalRowWithAffected<Self::Row, Self::Builder>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend>
+            + 'query,
     {
         let rows = self.fetch(params);
         fetch_optional_row_with_affected::<Self::Builder, Self::Row, _>(rows)
@@ -1480,7 +1489,8 @@ pub trait PreparedMutationQuery<'conn> {
     ) -> impl Future<Output = Result<Self::Row, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend>
+            + 'query,
     {
         let row = fetch_optional_row::<Self::Builder, Self::Row, _>(self.fetch(params));
         async move {
@@ -1495,7 +1505,8 @@ pub trait PreparedMutationQuery<'conn> {
     ) -> impl Future<Output = Result<Option<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
     where
         'conn: 'query,
-        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend> + 'query,
+        ParamValues: crate::PreparedParamValues<Self::Params, <Self::Builder as QueryBuilder>::Backend>
+            + 'query,
     {
         let rows = self.fetch(params);
         fetch_optional_row::<Self::Builder, Self::Row, _>(rows)

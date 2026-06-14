@@ -16,10 +16,10 @@ use std::borrow::Cow;
 use std::io::{self, Write};
 
 use crate::{
-    ArithmeticOp, AssignmentValueVisitor, AssignmentVisitor, Backend, ColumnRef, CompareOp, Dialect,
-    Encode, Expr, ExprKind, ExprVisitor, InsertRow, InsertRowVisitor, InsertableTable, Order,
-    OrderDirection, Predicate, PredicateAstVisitor, PredicateKind, PredicateVisitor, ProjectionShape,
-    ProjectionVisitor, QueryBuilder, RenderAssignment, RenderAst,
+    ArithmeticOp, AssignmentValueVisitor, AssignmentVisitor, Backend, ColumnRef, CompareOp,
+    Dialect, Encode, Expr, ExprKind, ExprVisitor, InsertRow, InsertRowVisitor, InsertableTable,
+    Order, OrderDirection, Predicate, PredicateAstVisitor, PredicateKind, PredicateVisitor,
+    ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAssignment, RenderAst,
     RenderInsertAssignments, RenderInsertRows, RenderPredicateAst, RenderPredicateNodes,
     RenderProjectable, RenderSelectAst, RenderUpdateAssignments, SchemaTable, SelectSink, Selected,
     SourceAlias, SqlType, TableProjection, UpdateableTable,
@@ -191,7 +191,9 @@ impl<B: Backend> SqlWriter<B> for PreparedSql<B> {
             return;
         }
         match encode_static::<B, T>(value) {
-            Ok(encoded) => self.params.extend(encoded.into_iter().map(SqlParam::Static)),
+            Ok(encoded) => self
+                .params
+                .extend(encoded.into_iter().map(SqlParam::Static)),
             Err(error) => self.error = Some(error),
         }
     }
@@ -506,8 +508,7 @@ pub fn render_selected_prepared<'conn, 'scope, Conn, Base, Shape, Projection>(
     Projection: RenderProjectable<Conn::Backend>,
 {
     buffer.clear();
-    let mut sink =
-        SelectRenderSink::<Conn::Backend, _>::new(buffer, dialect).unwrap();
+    let mut sink = SelectRenderSink::<Conn::Backend, _>::new(buffer, dialect).unwrap();
     selected.lower_into::<Conn, _>(&mut sink).unwrap();
     sink.finish().unwrap();
 }
@@ -525,8 +526,7 @@ where
     Writer: Write,
 {
     let mut writer = SqlOnly(writer);
-    let mut sink =
-        SelectRenderSink::<Conn::Backend, _>::new(&mut writer, dialect)?;
+    let mut sink = SelectRenderSink::<Conn::Backend, _>::new(&mut writer, dialect)?;
     selected.lower_into::<Conn, _>(&mut sink)?;
     sink.finish()
 }
@@ -543,8 +543,7 @@ where
     Projection: RenderProjectable<Conn::Backend>,
 {
     let mut writer = ParamCollector::<Conn::Backend>::new(params);
-    let mut select_sink =
-        SelectRenderSink::<Conn::Backend, _>::new(&mut writer, dialect).unwrap();
+    let mut select_sink = SelectRenderSink::<Conn::Backend, _>::new(&mut writer, dialect).unwrap();
     selected.lower_into::<Conn, _>(&mut select_sink).unwrap();
     select_sink.finish().unwrap();
     writer.finish()
@@ -1097,9 +1096,7 @@ where
     B: Backend,
     Writer: SqlWriter<B>,
 {
-    write_ast::<B, _>(writer, renderer, false, |visitor| {
-        order.visit_expr(visitor)
-    })?;
+    write_ast::<B, _>(writer, renderer, false, |visitor| order.visit_expr(visitor))?;
     write!(writer, " {}", render_order_direction(order.direction()))
 }
 

@@ -771,9 +771,11 @@ fn insert_builder_can_use_default_values() {
 
 #[test]
 fn insert_query_builds_column_bindings() {
-    let columns = HNil.push_back(InsertAssignment::<UserName, StaticAssignmentValue<String>>::new(
-        StaticAssignmentValue::new("Ada".to_owned()),
-    ));
+    let columns = HNil.push_back(
+        InsertAssignment::<UserName, StaticAssignmentValue<String>>::new(
+            StaticAssignmentValue::new("Ada".to_owned()),
+        ),
+    );
     let rows = HNil.push_back(InsertRow::new(columns));
     let insert = <<TestConnection as QueryBuilder>::Insert<'_, User, (), _, ()> as InsertQuery<
         '_,
@@ -926,9 +928,11 @@ fn update_builder_skips_non_updateable_columns() {
 #[test]
 fn update_query_builds_column_bindings_and_filters() {
     let user = <User as ProjectionShape>::exprs(SourceAlias::new(0, 0));
-    let columns = HNil.push_back(UpdateAssignment::<UserName, StaticAssignmentValue<String>>::new(
-        StaticAssignmentValue::new("Ada".to_owned()),
-    ));
+    let columns = HNil.push_back(
+        UpdateAssignment::<UserName, StaticAssignmentValue<String>>::new(
+            StaticAssignmentValue::new("Ada".to_owned()),
+        ),
+    );
     let filters = HNil.push_back(user.id.equals(1));
     let update =
         <<TestConnection as QueryBuilder>::Update<'_, User, (), _, _, ()> as UpdateQuery<
@@ -1176,7 +1180,10 @@ fn select_can_project_arithmetic_expression_shapes() {
         adjusted_ids.to_sql(),
         r#"SELECT (q0_0.id + ?) AS expr FROM public.users AS q0_0"#
     );
-    assert_eq!(adjusted_ids.collect_params().unwrap(), vec![TestParam::Int(1)]);
+    assert_eq!(
+        adjusted_ids.collect_params().unwrap(),
+        vec![TestParam::Int(1)]
+    );
     assert_f64_row(&scaled_ids);
     assert_eq!(
         scaled_ids.to_sql(),

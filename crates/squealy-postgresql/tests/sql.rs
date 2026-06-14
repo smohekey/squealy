@@ -643,7 +643,10 @@ fn postgres_select_uses_numbered_placeholders() {
     );
     let mut written = Vec::new();
     users.write_params(&mut written).unwrap();
-    assert_eq!(written, vec![PostgresParam::Int32(2), PostgresParam::Int32(1)]);
+    assert_eq!(
+        written,
+        vec![PostgresParam::Int32(2), PostgresParam::Int32(1)]
+    );
     assert_eq!(
         users.collect_params().unwrap(),
         vec![PostgresParam::Int32(2), PostgresParam::Int32(1)]
@@ -658,7 +661,10 @@ fn postgres_division_renders_fractional_result() {
         users.to_sql(),
         "SELECT (CAST(q0_0.\"id\" AS double precision) / CAST($1 AS double precision)) AS \"expr\" FROM \"public\".\"users\" AS q0_0"
     );
-    assert_eq!(users.collect_params().unwrap(), vec![PostgresParam::Int32(2)]);
+    assert_eq!(
+        users.collect_params().unwrap(),
+        vec![PostgresParam::Int32(2)]
+    );
 }
 
 #[test]
@@ -704,9 +710,18 @@ fn postgres_runtime_prepared_assignment_params_render_without_captured_values() 
         update.to_sql(),
         "UPDATE \"public\".\"users\" AS q0_0 SET \"name\" = $1 WHERE (q0_0.\"id\" = $2) RETURNING q0_0.\"name\" AS \"name\""
     );
-    assert_eq!(insert.collect_params().unwrap(), Vec::<PostgresParam>::new());
-    assert_eq!(insert_multiple.collect_params().unwrap(), Vec::<PostgresParam>::new());
-    assert_eq!(update.collect_params().unwrap(), Vec::<PostgresParam>::new());
+    assert_eq!(
+        insert.collect_params().unwrap(),
+        Vec::<PostgresParam>::new()
+    );
+    assert_eq!(
+        insert_multiple.collect_params().unwrap(),
+        Vec::<PostgresParam>::new()
+    );
+    assert_eq!(
+        update.collect_params().unwrap(),
+        Vec::<PostgresParam>::new()
+    );
 }
 
 #[test]
@@ -721,7 +736,10 @@ fn postgres_update_renders_explicit_defaults() {
         update.to_sql(),
         "UPDATE \"public\".\"users\" AS q0_0 SET \"name\" = DEFAULT WHERE (q0_0.\"id\" = $1) RETURNING q0_0.\"name\" AS \"name\""
     );
-    assert_eq!(update.collect_params().unwrap(), vec![PostgresParam::Int32(1)]);
+    assert_eq!(
+        update.collect_params().unwrap(),
+        vec![PostgresParam::Int32(1)]
+    );
 }
 
 #[test]
@@ -796,9 +814,15 @@ fn postgres_insert_update_and_delete_render_returning() {
     );
     assert_eq!(
         update.collect_params().unwrap(),
-        vec![PostgresParam::Text("Ada".to_owned()), PostgresParam::Int32(1)]
+        vec![
+            PostgresParam::Text("Ada".to_owned()),
+            PostgresParam::Int32(1)
+        ]
     );
-    assert_eq!(delete.collect_params().unwrap(), vec![PostgresParam::Int32(1)]);
+    assert_eq!(
+        delete.collect_params().unwrap(),
+        vec![PostgresParam::Int32(1)]
+    );
 }
 
 #[test]
@@ -836,7 +860,10 @@ fn postgres_insert_renders_explicit_defaults() {
     );
     assert_eq!(
         insert.collect_params().unwrap(),
-        vec![PostgresParam::Text("Grace".to_owned()), PostgresParam::Int32(1)]
+        vec![
+            PostgresParam::Text("Grace".to_owned()),
+            PostgresParam::Int32(1)
+        ]
     );
 }
 
@@ -850,7 +877,10 @@ fn postgres_insert_can_use_default_values() {
         insert.to_sql(),
         "INSERT INTO \"defaulted_records\" DEFAULT VALUES RETURNING \"id\" AS \"id\""
     );
-    assert_eq!(insert.collect_params().unwrap(), Vec::<PostgresParam>::new());
+    assert_eq!(
+        insert.collect_params().unwrap(),
+        Vec::<PostgresParam>::new()
+    );
 }
 
 #[test]
@@ -875,7 +905,10 @@ fn postgres_mutation_returning_expressions_continue_placeholder_numbering() {
     );
     assert_eq!(
         insert.collect_params().unwrap(),
-        vec![PostgresParam::Text("Ada".to_owned()), PostgresParam::Int32(1)]
+        vec![
+            PostgresParam::Text("Ada".to_owned()),
+            PostgresParam::Int32(1)
+        ]
     );
     assert_eq!(
         update.collect_params().unwrap(),

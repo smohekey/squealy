@@ -886,7 +886,10 @@ where
         Base: RenderSelectAst<'conn, 'scope, TestConnection, TestBackend>,
         Projection: RenderProjectable<TestBackend>,
     {
-        sql::write_selected_params::<TestConnection, Base, Shape, Projection>(&self.selected, params)
+        sql::write_selected_params::<TestConnection, Base, Shape, Projection>(
+            &self.selected,
+            params,
+        )
     }
 
     /// Collect bind parameters into a newly allocated vector.

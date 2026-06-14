@@ -13,12 +13,12 @@ mod introspect;
 mod query;
 mod sql;
 
+#[cfg(feature = "serde")]
+pub use query::Json;
 pub use query::{
     EmptyRows, PostgresDelete, PostgresInsert, PostgresParam, PostgresPreparedMutation,
     PostgresPreparedSelect, PostgresRowReader, PostgresSelect, PostgresUpdate,
 };
-#[cfg(feature = "serde")]
-pub use query::Json;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Postgres;

@@ -753,7 +753,9 @@ async fn postgres_round_trips_native_uuid() {
     create_table::<IntegrationUuidRecord>(&client, &ddl_backend).await;
 
     let connection = PostgresConnection::new(client);
-    let id = IntegrationUuid(uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef));
+    let id = IntegrationUuid(uuid::Uuid::from_u128(
+        0x0123_4567_89ab_cdef_0123_4567_89ab_cdef,
+    ));
 
     let inserted = connection
         .to::<IntegrationUuidRecord>()

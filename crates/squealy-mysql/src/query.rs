@@ -15,10 +15,10 @@ use mysql_async::prelude::{FromValue, Queryable};
 use squealy::{
     Backend, Connection, Decode, DeleteQuery, Encode, ExecutableDeleteQuery, ExecutableInsertQuery,
     ExecutableSelectQuery, ExecutableUpdateQuery, HNil, InsertQuery, InsertRows, InsertableTable,
-    NoRuntimeParams, ParamWriter, PredicateNodes, PreparedParamValues, Projectable, ProjectionShape,
-    QueryBuilder, RenderInsertRows, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
-    RenderUpdateAssignments, RowsAffected, SelectAst, SelectQuery, Selected, SourceAlias, Table,
-    TableProjection, UpdateAssignments, UpdateQuery, UpdateableTable, render,
+    NoRuntimeParams, ParamWriter, PredicateNodes, PreparedParamValues, Projectable,
+    ProjectionShape, QueryBuilder, RenderInsertRows, RenderPredicateNodes, RenderProjectable,
+    RenderSelectAst, RenderUpdateAssignments, RowsAffected, SelectAst, SelectQuery, Selected,
+    SourceAlias, Table, TableProjection, UpdateAssignments, UpdateQuery, UpdateableTable, render,
 };
 
 use crate::{Mysql, MysqlConnection, MysqlError};
@@ -157,7 +157,9 @@ where
         .next()
         .ok_or(MysqlError::Conversion("bind produced no parameter"))?;
     if params.next().is_some() {
-        return Err(MysqlError::Conversion("bind produced more than one parameter"));
+        return Err(MysqlError::Conversion(
+            "bind produced more than one parameter",
+        ));
     }
     Ok(param)
 }

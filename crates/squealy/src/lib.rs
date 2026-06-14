@@ -418,8 +418,8 @@ pub use expr::{
 pub use foreign_key::ForeignKey;
 pub use index::Index;
 pub use list::{
-    FixedList, HAppend, HCons, HList, HNil, IntoPreparedParam, MapFixedList,
-    NoRuntimeParams, PreparedParamValues, PushBack, ToTuple, TupleAppend, TupleConcat,
+    FixedList, HAppend, HCons, HList, HNil, IntoPreparedParam, MapFixedList, NoRuntimeParams,
+    PreparedParamValues, PushBack, ToTuple, TupleAppend, TupleConcat,
 };
 pub use model::{
     CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintEnforcement,
