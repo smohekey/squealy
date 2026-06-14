@@ -21,4 +21,13 @@ pub trait Dialect {
     /// Writes the type name for a `CAST(expr AS <type>)`. Dialects spell these differently — for
     /// example PostgreSQL's `double precision` versus MySQL's numeric cast types.
     fn write_cast_type(&self, ty: &SqlType, writer: &mut dyn Write) -> io::Result<()>;
+
+    /// Whether `/` performs integer division when both operands are integers, so the renderer must
+    /// cast operands to floating point to get the query builder's always-fractional division.
+    ///
+    /// PostgreSQL does integer division (so this is `true`); MySQL's `/` is already floating-point
+    /// division (`false`), and casting would change `DECIMAL` results.
+    fn integer_division_needs_float_cast(&self) -> bool {
+        true
+    }
 }

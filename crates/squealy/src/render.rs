@@ -1046,10 +1046,10 @@ where
         L: FnOnce(&mut Self) -> Result<(), Self::Error>,
         R: FnOnce(&mut Self) -> Result<(), Self::Error>,
     {
-        if op == ArithmeticOp::Divide {
-            // PostgreSQL integer `/` is integer division, so operands are cast to float to match the
-            // builder's division semantics. (MySQL's `/` is already float division — that divergence
-            // is why a shared renderer needs a dialect division hook, not just a cast-type name.)
+        if op == ArithmeticOp::Divide && self.renderer.dialect.integer_division_needs_float_cast() {
+            // Cast operands to float so integer `/` matches the builder's always-fractional division.
+            // Dialects where `/` is already float division (MySQL) skip this and fall through to a
+            // plain `/`.
             let dialect = self.renderer.dialect;
             self.writer.write_all(b"(CAST(")?;
             left(self)?;

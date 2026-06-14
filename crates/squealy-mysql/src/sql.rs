@@ -699,6 +699,57 @@ fn write_quoted_ident(value: &str, writer: &mut impl Write) -> io::Result<()> {
     write_delimited(value, '`', writer)
 }
 
+/// MySQL's [`Dialect`](squealy::Dialect): `?` placeholders, backtick-quoted identifiers, MySQL `CAST`
+/// target types, and float division (so `/` needs no float cast). The shared core renderer
+/// ([`squealy::render`]) drives MySQL query rendering through this.
+// Wired up by the MySQL query objects (the next step), which render through `squealy::render`.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MysqlDialect;
+
+impl squealy::Dialect for MysqlDialect {
+    fn write_placeholder(&self, _index: usize, writer: &mut dyn Write) -> io::Result<()> {
+        // MySQL placeholders are positional `?`, unnumbered.
+        writer.write_all(b"?")
+    }
+
+    fn write_quoted_ident(&self, ident: &str, mut writer: &mut dyn Write) -> io::Result<()> {
+        write_quoted_ident(ident, &mut writer)
+    }
+
+    fn write_cast_type(&self, ty: &SqlType, writer: &mut dyn Write) -> io::Result<()> {
+        // `CAST(expr AS <type>)` accepts a restricted vocabulary in MySQL, distinct from column types
+        // (e.g. `SIGNED`/`UNSIGNED`/`CHAR`, not `INT`/`VARCHAR`).
+        let name = match ty {
+            SqlType::Bool
+            | SqlType::I8
+            | SqlType::I16
+            | SqlType::I32
+            | SqlType::I64
+            | SqlType::I128
+            | SqlType::Isize => "SIGNED",
+            SqlType::U8
+            | SqlType::U16
+            | SqlType::U32
+            | SqlType::U64
+            | SqlType::U128
+            | SqlType::Usize => "UNSIGNED",
+            SqlType::F32 | SqlType::F64 | SqlType::Decimal { .. } => "DECIMAL",
+            SqlType::Date => "DATE",
+            SqlType::Time { .. } => "TIME",
+            SqlType::Timestamp { .. } => "DATETIME",
+            SqlType::Bytes => "BINARY",
+            _ => "CHAR",
+        };
+        writer.write_all(name.as_bytes())
+    }
+
+    fn integer_division_needs_float_cast(&self) -> bool {
+        // MySQL `/` is always floating-point division; `DIV` is the integer form.
+        false
+    }
+}
+
 fn write_quoted_text(value: &str, writer: &mut impl Write) -> io::Result<()> {
     write_delimited(value, '\'', writer)
 }
@@ -842,6 +893,37 @@ fn write_column_default(default: ColumnDefault, writer: &mut impl Write) -> io::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use squealy::Dialect;
+
+    fn dialect_cast(ty: SqlType) -> String {
+        let mut out = Vec::new();
+        MysqlDialect.write_cast_type(&ty, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn mysql_dialect_renders_its_seams() {
+        let mut placeholder = Vec::new();
+        MysqlDialect.write_placeholder(3, &mut placeholder).unwrap();
+        assert_eq!(placeholder, b"?", "MySQL placeholders are positional `?`");
+
+        let mut ident = Vec::new();
+        MysqlDialect
+            .write_quoted_ident("user`s", &mut ident)
+            .unwrap();
+        assert_eq!(String::from_utf8(ident).unwrap(), "`user``s`");
+
+        // CAST target types differ from column types.
+        assert_eq!(dialect_cast(SqlType::I32), "SIGNED");
+        assert_eq!(dialect_cast(SqlType::U64), "UNSIGNED");
+        assert_eq!(dialect_cast(SqlType::F64), "DECIMAL");
+        assert_eq!(dialect_cast(SqlType::String), "CHAR");
+
+        assert!(
+            !MysqlDialect.integer_division_needs_float_cast(),
+            "MySQL `/` is already float division"
+        );
+    }
 
     fn render_type(ty: SqlType) -> String {
         let mut out = Vec::new();
