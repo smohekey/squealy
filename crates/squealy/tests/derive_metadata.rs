@@ -205,6 +205,10 @@ struct DerivedColumnTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
 struct UuidKeyed<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key)]
     id: C::Type<'scope, uuid::Uuid>,
+    // A nullable bare-`uuid::Uuid` column exercises the `DecodeNullable` and
+    // `IntoNullableAssignmentValue` paths the table derive emits for nullable fields.
+    #[column(nullable)]
+    parent_id: C::Type<'scope, uuid::Uuid>,
     slug: C::Type<'scope, String>,
 }
 
@@ -356,6 +360,20 @@ fn uuid_columns_map_and_build_queries() {
         .from::<UuidKeyed>()
         .where_(|row| row.id.equals(id))
         .delete();
+
+    // Nullable column: assigning a bare `Uuid` value exercises the new `IntoNullableAssignmentValue`
+    // / `IntoNullableInsertAssignmentValue` entry; `None` routes through the generic `Option<T>` impl.
+    let _insert_nullable = TestConnection
+        .to::<UuidKeyed>()
+        .id(id)
+        .parent_id(id)
+        .slug("acme".to_owned())
+        .insert();
+    let _update_null = TestConnection
+        .to::<UuidKeyed>()
+        .parent_id(None::<uuid::Uuid>)
+        .where_(|row| row.id.equals(id))
+        .update();
 }
 
 #[test]

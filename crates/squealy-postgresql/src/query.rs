@@ -2225,6 +2225,12 @@ mod tests {
             encode_to_param(&UserId(id)),
             Ok(PostgresParam::Uuid(value)) if value == id
         ));
+
+        // A nullable `uuid::Uuid` column (or a left-joined UUID table) makes the table derive emit a
+        // `uuid::Uuid: DecodeNullable<Postgres>` bound. This compiles only when that impl exists, so
+        // it guards against the regression where bare-uuid metadata generated but failed on use.
+        fn _assert_uuid_decode_nullable<T: squealy::DecodeNullable<Postgres>>() {}
+        _assert_uuid_decode_nullable::<uuid::Uuid>();
     }
 
     #[cfg(feature = "serde")]
