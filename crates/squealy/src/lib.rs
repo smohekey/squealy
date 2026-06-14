@@ -386,6 +386,10 @@ mod model;
 mod plan;
 mod projection;
 mod query;
+// The shared SQL query renderer. Public so backend crates can call its entry points, but hidden from
+// the documented API — it is an implementation detail backends drive via their `Dialect`.
+#[doc(hidden)]
+pub mod render;
 mod schema;
 mod table;
 
