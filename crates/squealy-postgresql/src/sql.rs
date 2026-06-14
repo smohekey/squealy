@@ -459,6 +459,19 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
             }
         }
     }
+    // A table-level `#[primary_key(columns = [..])]` is not hung off any single column, so render it
+    // as a trailing constraint here (the per-column `primary_key` form above covers single columns).
+    if let Some(primary_key) = table.primary_key() {
+        writer.write_all(b", ")?;
+        if let Some(name) = primary_key.name {
+            writer.write_all(b"CONSTRAINT ")?;
+            write_quoted_ident(name, writer)?;
+            writer.write_all(b" ")?;
+        }
+        writer.write_all(b"PRIMARY KEY (")?;
+        write_quoted_idents(primary_key.columns, writer)?;
+        writer.write_all(b")")?;
+    }
     writer.write_all(b")")?;
 
     for (position, index) in table.indexes().iter().enumerate() {
