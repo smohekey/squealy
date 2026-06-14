@@ -198,6 +198,16 @@ struct DerivedColumnTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
     labels: C::Type<'scope, VarcharArrayColumn>,
 }
 
+// A bare `uuid::Uuid` field maps to a `uuid` column without a `#[column(db_type = "uuid")]`
+// override (HasColumnType), and a `Uuid` value can be used in the query builder (ExprKind).
+#[cfg(feature = "uuid")]
+#[derive(Clone, Debug, PartialEq, Table)]
+struct UuidKeyed<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, uuid::Uuid>,
+    slug: C::Type<'scope, String>,
+}
+
 #[allow(dead_code)]
 #[derive(Schema)]
 struct Public {
@@ -319,6 +329,33 @@ fn derive_table_parses_db_type_into_structured_column_type() {
     );
     // Unrecognized db_type stays verbatim.
     assert_eq!(columns[5].column_type(), ColumnType::Raw("citext"));
+}
+
+#[cfg(feature = "uuid")]
+#[test]
+fn uuid_columns_map_and_build_queries() {
+    // HasColumnType: a bare `uuid::Uuid` field maps to a `uuid` column.
+    let columns = <UuidKeyed as SchemaTable>::columns();
+    assert_eq!(columns[0].column_type(), ColumnType::Uuid);
+    assert_eq!(<uuid::Uuid as HasColumnType>::COLUMN_TYPE, ColumnType::Uuid);
+
+    // ExprKind: a `Uuid` value works as a literal predicate operand and a write-builder setter.
+    // Building these forms is exactly what failed to compile before `ExprKind` existed; rendering
+    // them additionally needs a backend `Encode<uuid::Uuid>`, which the test backend omits.
+    let id = uuid::Uuid::from_u128(0x1234_5678_1234_5678_1234_5678_1234_5678);
+    let _select = TestConnection
+        .from::<UuidKeyed>()
+        .where_(|row| row.id.equals(id))
+        .select(|(row,)| row.slug);
+    let _insert = TestConnection
+        .to::<UuidKeyed>()
+        .id(id)
+        .slug("acme".to_owned())
+        .insert();
+    let _delete = TestConnection
+        .from::<UuidKeyed>()
+        .where_(|row| row.id.equals(id))
+        .delete();
 }
 
 #[test]
