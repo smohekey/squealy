@@ -215,13 +215,9 @@ where
     }
 
     fn finish(self) -> io::Result<()> {
-        if let Some(limit) = self.limit {
-            write!(self.writer, " LIMIT {limit}")?;
-        }
-        if let Some(offset) = self.offset {
-            write!(self.writer, " OFFSET {offset}")?;
-        }
-        Ok(())
+        self.renderer
+            .dialect
+            .write_limit_offset(self.limit, self.offset, self.writer)
     }
 
     fn push_source_separator(&mut self) -> io::Result<()> {
@@ -502,7 +498,7 @@ where
     writer.write_all(b"INSERT INTO ")?;
     write_schema_table_ref::<S>(dialect, writer)?;
     if rows.len() == 1 && rows.first_row_len() == 0 {
-        writer.write_all(b" DEFAULT VALUES")?;
+        dialect.write_default_row_insert(writer)?;
     } else {
         writer.write_all(b" (")?;
         let mut index = 0;

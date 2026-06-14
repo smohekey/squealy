@@ -748,6 +748,27 @@ impl squealy::Dialect for MysqlDialect {
         // MySQL `/` is always floating-point division; `DIV` is the integer form.
         false
     }
+
+    fn write_limit_offset(
+        &self,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        writer: &mut dyn Write,
+    ) -> io::Result<()> {
+        // MySQL accepts OFFSET only as part of a LIMIT clause, so an offset-without-limit query needs
+        // a sentinel limit (the documented `18446744073709551615` "all rows" value).
+        match (limit, offset) {
+            (Some(limit), Some(offset)) => write!(writer, " LIMIT {limit} OFFSET {offset}"),
+            (Some(limit), None) => write!(writer, " LIMIT {limit}"),
+            (None, Some(offset)) => write!(writer, " LIMIT 18446744073709551615 OFFSET {offset}"),
+            (None, None) => Ok(()),
+        }
+    }
+
+    fn write_default_row_insert(&self, writer: &mut dyn Write) -> io::Result<()> {
+        // MySQL's empty-row insert form; `DEFAULT VALUES` is PostgreSQL-only.
+        writer.write_all(b" () VALUES ()")
+    }
 }
 
 fn write_quoted_text(value: &str, writer: &mut impl Write) -> io::Result<()> {
@@ -923,6 +944,33 @@ mod tests {
             !MysqlDialect.integer_division_needs_float_cast(),
             "MySQL `/` is already float division"
         );
+    }
+
+    fn limit_offset(limit: Option<usize>, offset: Option<usize>) -> String {
+        let mut out = Vec::new();
+        MysqlDialect
+            .write_limit_offset(limit, offset, &mut out)
+            .unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn mysql_offset_without_limit_gets_a_sentinel_limit() {
+        // MySQL rejects a bare OFFSET, so an offset-only query needs a max LIMIT.
+        assert_eq!(
+            limit_offset(None, Some(5)),
+            " LIMIT 18446744073709551615 OFFSET 5"
+        );
+        assert_eq!(limit_offset(Some(10), Some(5)), " LIMIT 10 OFFSET 5");
+        assert_eq!(limit_offset(Some(10), None), " LIMIT 10");
+        assert_eq!(limit_offset(None, None), "");
+    }
+
+    #[test]
+    fn mysql_default_row_insert_uses_empty_values() {
+        let mut out = Vec::new();
+        MysqlDialect.write_default_row_insert(&mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), " () VALUES ()");
     }
 
     fn render_type(ty: SqlType) -> String {

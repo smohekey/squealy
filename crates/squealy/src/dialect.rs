@@ -30,4 +30,28 @@ pub trait Dialect {
     fn integer_division_needs_float_cast(&self) -> bool {
         true
     }
+
+    /// Writes a `LIMIT`/`OFFSET` clause. The default is the standard form, with `OFFSET` emittable on
+    /// its own. MySQL accepts `OFFSET` only as part of `LIMIT`, so it overrides this to supply a
+    /// sentinel limit for the offset-without-limit case.
+    fn write_limit_offset(
+        &self,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        writer: &mut dyn Write,
+    ) -> io::Result<()> {
+        if let Some(limit) = limit {
+            write!(writer, " LIMIT {limit}")?;
+        }
+        if let Some(offset) = offset {
+            write!(writer, " OFFSET {offset}")?;
+        }
+        Ok(())
+    }
+
+    /// Writes the values clause for an `INSERT` of a single all-default/auto-increment row (no
+    /// explicit columns). PostgreSQL uses `DEFAULT VALUES`; MySQL uses `() VALUES ()`.
+    fn write_default_row_insert(&self, writer: &mut dyn Write) -> io::Result<()> {
+        writer.write_all(b" DEFAULT VALUES")
+    }
 }

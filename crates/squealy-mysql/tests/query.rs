@@ -34,6 +34,19 @@ fn mysql_renders_select_in_its_dialect() {
 }
 
 #[test]
+fn mysql_offset_without_limit_renders_a_sentinel_limit() {
+    let query = Mysql
+        .from::<Widget>()
+        .offset(5)
+        .select(|(widget,)| widget.id);
+    let sql = query.to_sql();
+    assert!(
+        sql.contains("LIMIT 18446744073709551615 OFFSET 5"),
+        "MySQL needs a LIMIT for a bare OFFSET: {sql}"
+    );
+}
+
+#[test]
 fn mysql_renders_division_without_a_float_cast() {
     // MySQL `/` is already float division, so the renderer skips the CAST wrapping Postgres needs.
     let query = Mysql.from::<Widget>().select(|(widget,)| widget.id / 2);
