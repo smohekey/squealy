@@ -555,16 +555,18 @@ fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
             name: uq_name(&name, &[column.name()]),
             columns: vec![column.name().to_owned()],
         })
-        .chain(table.uniques().iter().map(|unique| Constraint {
-            name: unique
-                .name
-                .map(str::to_owned)
-                .unwrap_or_else(|| uq_name(&name, unique.columns)),
-            columns: unique
-                .columns
-                .iter()
-                .map(|column| (*column).to_owned())
-                .collect(),
+        .chain(table.uniques().iter().map(|unique| {
+            Constraint {
+                name: unique
+                    .name
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| uq_name(&name, unique.columns)),
+                columns: unique
+                    .columns
+                    .iter()
+                    .map(|column| (*column).to_owned())
+                    .collect(),
+            }
         }))
         .collect();
 

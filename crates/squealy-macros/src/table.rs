@@ -2018,11 +2018,15 @@ fn parse_unique(tokens: Vec<TokenTree>) -> Result<UniqueAttrs, String> {
             "columns" => {
                 if !matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '=')
                 {
-                    return Err("unique option `columns` requires a bracketed field list".to_owned());
+                    return Err(
+                        "unique option `columns` requires a bracketed field list".to_owned()
+                    );
                 }
                 index += 1;
                 let Some(TokenTree::Group(columns)) = tokens.get(index) else {
-                    return Err("unique option `columns` requires a bracketed field list".to_owned());
+                    return Err(
+                        "unique option `columns` requires a bracketed field list".to_owned()
+                    );
                 };
                 if columns.delimiter() != Delimiter::Bracket {
                     return Err("unique option `columns` requires square brackets".to_owned());
@@ -2110,7 +2114,9 @@ fn validate_unique_columns(uniques: &[UniqueAttrs], fields: &[Field]) -> Result<
         for column in &unique.columns {
             let column = column.to_string();
             if !fields.iter().any(|field| field.ident.to_string() == column) {
-                return Err(format!("unique constraint references unknown field `{column}`"));
+                return Err(format!(
+                    "unique constraint references unknown field `{column}`"
+                ));
             }
         }
     }
