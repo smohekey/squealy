@@ -74,6 +74,19 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
         write_quoted_idents(primary_key.columns, writer)?;
         writer.write_all(b")")?;
     }
+    // Table-level `#[unique(columns = [..])]` constraints render as trailing constraints too, so the
+    // direct `write_table` path matches the model-based renderer and actually enforces uniqueness.
+    for unique in table.uniques() {
+        writer.write_all(b", ")?;
+        if let Some(name) = unique.name {
+            writer.write_all(b"CONSTRAINT ")?;
+            write_quoted_ident(name, writer)?;
+            writer.write_all(b" ")?;
+        }
+        writer.write_all(b"UNIQUE (")?;
+        write_quoted_idents(unique.columns, writer)?;
+        writer.write_all(b")")?;
+    }
     writer.write_all(b")")?;
 
     for (position, index) in table.indexes().iter().enumerate() {

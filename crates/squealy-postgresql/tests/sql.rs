@@ -1195,6 +1195,21 @@ fn postgres_renders_composite_unique_constraint() {
 }
 
 #[test]
+fn postgres_backend_writes_composite_unique_ddl() {
+    // The query-side single-table `write_table` path must also emit table-level `#[unique(..)]`
+    // constraints, otherwise duplicates are allowed even though `render_create` forbids them.
+    let mut sql = Vec::new();
+    let tables = <RepositoryCatalog as Schema>::tables().collect::<Vec<_>>();
+    Postgres.write_table(tables[0], &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains("UNIQUE (\"organization_id\", \"slug\")"),
+        "expected composite UNIQUE constraint in write_table output: {sql}"
+    );
+}
+
+#[test]
 fn postgres_backend_writes_compound_primary_key_ddl() {
     // The query-side single-table `write_table` path must also honor a table-level primary key
     // (no column carries `primary_key()` in this case).
