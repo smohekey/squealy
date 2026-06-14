@@ -12,7 +12,13 @@ use std::task::{Context, Poll};
 use futures_core::Stream;
 use mysql_async::Value;
 use mysql_async::prelude::{FromValue, Queryable};
-use squealy::{Backend, BindValue, BindValueKind, Decode, FloatWidth, RowsAffected, Table};
+use squealy::{
+    Backend, BindSink, BindValue, BindValueKind, Connection, Decode, DeleteQuery,
+    ExecutableDeleteQuery, ExecutableInsertQuery, ExecutableSelectQuery, ExecutableUpdateQuery,
+    FloatWidth, HNil, InsertQuery, InsertRows, InsertableTable, NoRuntimeParams, PredicateNodes,
+    Projectable, ProjectionShape, QueryBuilder, RowsAffected, SelectAst, SelectQuery, Selected,
+    SourceAlias, Table, TableProjection, UpdateAssignments, UpdateQuery, UpdateableTable, render,
+};
 
 use crate::{Mysql, MysqlConnection, MysqlError};
 
@@ -151,19 +157,77 @@ impl Backend for Mysql {
     }
 }
 
+type BufferedRows = (Vec<mysql_async::Row>, u64);
+
+/// Runs rendered SQL against a connection. Implemented for [`MysqlConnection`] (and, later,
+/// transactions) so the query objects can be generic over where they execute. Mirrors the role of
+/// PostgreSQL's executor trait; the `mysql_async` `&mut Conn` requirement is hidden behind the
+/// connection's `Mutex` (see [`MysqlConnection::lock`]).
+pub trait MysqlExecutor: Connection<Backend = Mysql> {
+    /// Runs `sql` with `params`, buffering all result rows and the affected-row count.
+    fn run_query<'query>(
+        &'query self,
+        sql: String,
+        params: Vec<Value>,
+    ) -> Pin<Box<dyn Future<Output = Result<BufferedRows, MysqlError>> + Send + 'query>>;
+
+    /// Runs `sql` with `params` for its effect only, returning the affected-row count.
+    fn run_execute<'query>(
+        &'query self,
+        sql: String,
+        params: Vec<Value>,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, MysqlError>> + Send + 'query>>;
+}
+
+impl MysqlExecutor for MysqlConnection {
+    fn run_query<'query>(
+        &'query self,
+        sql: String,
+        params: Vec<Value>,
+    ) -> Pin<Box<dyn Future<Output = Result<BufferedRows, MysqlError>> + Send + 'query>> {
+        Box::pin(async move {
+            let mut guard = self.lock().await;
+            let mut result = guard
+                .exec_iter(sql, mysql_async::Params::Positional(params))
+                .await
+                .map_err(MysqlError::Query)?;
+            let rows = result
+                .collect::<mysql_async::Row>()
+                .await
+                .map_err(MysqlError::Query)?;
+            let affected = result.affected_rows();
+            Ok((rows, affected))
+        })
+    }
+
+    fn run_execute<'query>(
+        &'query self,
+        sql: String,
+        params: Vec<Value>,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, MysqlError>> + Send + 'query>> {
+        Box::pin(async move {
+            let mut guard = self.lock().await;
+            guard
+                .exec_drop(sql, mysql_async::Params::Positional(params))
+                .await
+                .map_err(MysqlError::Query)?;
+            Ok(guard.affected_rows())
+        })
+    }
+}
+
 /// Executes a rendered statement and yields its result rows, decoded.
 ///
 /// A MySQL connection serves one statement at a time and `mysql_async`'s result borrows the
 /// connection, so rather than hold the `Mutex` guard across a lazy stream, the rows are collected up
 /// front (while the guard is held) and then decoded one at a time from the buffer. This also carries
 /// the affected-row count, so the same type backs both selects and mutations.
-pub struct MysqlRows<'query, Row> {
+pub struct MysqlRows<'query, Row, Conn = MysqlConnection> {
     state: MysqlRowsState<'query>,
     affected_rows: Option<u64>,
     _row: PhantomData<Row>,
+    _connection: PhantomData<fn() -> Conn>,
 }
-
-type BufferedRows = (Vec<mysql_async::Row>, u64);
 
 enum MysqlRowsState<'query> {
     Pending(Pin<Box<dyn Future<Output = Result<BufferedRows, MysqlError>> + Send + 'query>>),
@@ -171,50 +235,30 @@ enum MysqlRowsState<'query> {
     Done,
 }
 
-impl<'query, Row> MysqlRows<'query, Row> {
-    #[allow(dead_code)] // Driven by the executable query impls (next).
-    pub(crate) fn query(
-        connection: &'query MysqlConnection,
-        sql: String,
-        params: Vec<Value>,
-    ) -> Self {
+impl<'query, Row, Conn> MysqlRows<'query, Row, Conn>
+where
+    Conn: MysqlExecutor,
+{
+    fn query(connection: &'query Conn, sql: String, params: Vec<Value>) -> Self {
         Self {
-            state: MysqlRowsState::Pending(Box::pin(run_query(connection, sql, params))),
+            state: MysqlRowsState::Pending(connection.run_query(sql, params)),
             affected_rows: None,
             _row: PhantomData,
+            _connection: PhantomData,
         }
     }
 
-    #[allow(dead_code)] // Driven by the executable query impls (next).
-    pub(crate) fn error(error: MysqlError) -> Self {
+    fn error(error: MysqlError) -> Self {
         Self {
             state: MysqlRowsState::Pending(Box::pin(std::future::ready(Err(error)))),
             affected_rows: None,
             _row: PhantomData,
+            _connection: PhantomData,
         }
     }
 }
 
-/// Locks the connection, runs `sql` with `params`, and buffers all result rows and the affected count.
-async fn run_query(
-    connection: &MysqlConnection,
-    sql: String,
-    params: Vec<Value>,
-) -> Result<BufferedRows, MysqlError> {
-    let mut guard = connection.lock().await;
-    let mut result = guard
-        .exec_iter(sql, mysql_async::Params::Positional(params))
-        .await
-        .map_err(MysqlError::Query)?;
-    let rows = result
-        .collect::<mysql_async::Row>()
-        .await
-        .map_err(MysqlError::Query)?;
-    let affected = result.affected_rows();
-    Ok((rows, affected))
-}
-
-impl<Row> Stream for MysqlRows<'_, Row>
+impl<Row, Conn> Stream for MysqlRows<'_, Row, Conn>
 where
     Row: Decode<Mysql>,
 {
@@ -251,13 +295,63 @@ where
     }
 }
 
-impl<Row> Unpin for MysqlRows<'_, Row> {}
+impl<Row, Conn> Unpin for MysqlRows<'_, Row, Conn> {}
 
-impl<Row> RowsAffected for MysqlRows<'_, Row> {
+impl<Row, Conn> RowsAffected for MysqlRows<'_, Row, Conn> {
     fn rows_affected(&self) -> Option<u64> {
         self.affected_rows
     }
 }
+
+/// A [`BindSink`] that encodes bound values into the driver's [`Value`] type.
+struct MysqlBindSink {
+    params: Vec<Value>,
+}
+
+impl MysqlBindSink {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            params: Vec::with_capacity(capacity),
+        }
+    }
+}
+
+impl BindSink for MysqlBindSink {
+    type Error = MysqlError;
+
+    fn reserve_bind_values(&mut self, additional: usize) {
+        self.params.reserve(additional);
+    }
+
+    fn push_bind_value(&mut self, value: BindValue) -> Result<(), Self::Error> {
+        self.params.push(bind_value(value));
+        Ok(())
+    }
+}
+
+fn collect_mysql_params(
+    capacity: usize,
+    write: impl FnOnce(&mut MysqlBindSink) -> Result<(), MysqlError>,
+) -> Result<Vec<Value>, MysqlError> {
+    let mut sink = MysqlBindSink::with_capacity(capacity);
+    write(&mut sink)?;
+    Ok(sink.params)
+}
+
+/// Renders SQL into a freshly allocated string (the renderer only ever emits UTF-8).
+fn rendered_sql(write: impl FnOnce(&mut Vec<u8>) -> std::io::Result<()>) -> String {
+    let mut buffer = Vec::new();
+    write(&mut buffer).expect("render SQL");
+    String::from_utf8(buffer).expect("renderer emits UTF-8")
+}
+
+fn execute_error<'query>(
+    error: MysqlError,
+) -> Pin<Box<dyn Future<Output = Result<u64, MysqlError>> + Send + 'query>> {
+    Box::pin(std::future::ready(Err(error)))
+}
+
+include!("query_objects.rs");
 
 #[cfg(test)]
 mod tests {
