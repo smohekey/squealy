@@ -339,3 +339,40 @@ fn test_backend_writes_compound_primary_key_ddl() {
         "CREATE TABLE public.seats (tenant_id integer NOT NULL, id integer NOT NULL, PRIMARY KEY (tenant_id, id))"
     );
 }
+
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Public)]
+struct Account<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    #[column(nullable)]
+    nickname: C::Type<'scope, String>,
+}
+
+#[test]
+fn test_is_null_renders_is_null() {
+    let accounts = TestConnection
+        .from::<Account>()
+        .where_(|account| account.nickname.is_null())
+        .select(|(account,)| account.id);
+
+    assert_eq!(
+        accounts.to_sql(),
+        "SELECT q0_0.id AS id FROM public.accounts AS q0_0 WHERE (q0_0.nickname IS NULL)"
+    );
+    assert_eq!(accounts.collect_params().unwrap(), Vec::<TestParam>::new());
+}
+
+#[test]
+fn test_is_not_null_composes_with_other_predicates() {
+    let accounts = TestConnection
+        .from::<Account>()
+        .where_(|account| account.nickname.is_not_null().or(account.id.equals(1)))
+        .select(|(account,)| account.id);
+
+    assert_eq!(
+        accounts.to_sql(),
+        "SELECT q0_0.id AS id FROM public.accounts AS q0_0 WHERE ((q0_0.nickname IS NOT NULL) OR (q0_0.id = ?))"
+    );
+    assert_eq!(accounts.collect_params().unwrap(), vec![TestParam::Int(1)]);
+}
