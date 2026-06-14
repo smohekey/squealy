@@ -67,6 +67,12 @@ impl_decode_nullable_via_option! {
     bool,
 }
 
+// Native `uuid` column support: a `uuid::Uuid` field can appear in a nullable column or in a
+// left-joined row, both of which require `DecodeNullable`. Resolves only on backends that provide
+// `Decode<B> for Option<uuid::Uuid>` (the PostgreSQL backend does, behind its own `uuid` feature).
+#[cfg(feature = "uuid")]
+impl_decode_nullable_via_option! { uuid::Uuid }
+
 /// Backend-specific parameter cursor used while encoding bind values.
 ///
 /// This is the encode-side mirror of [`RowReader`]: where a row reader pulls typed

@@ -1577,6 +1577,7 @@ dependencies = [
  "squealy-macros",
  "squealy-test",
  "trybuild",
+ "uuid",
 ]
 
 [[package]]

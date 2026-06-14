@@ -91,6 +91,13 @@ database DDL. For example, the PostgreSQL backend renders `i32` as `integer` and
 `varchar(64)`, `jsonb`, or a domain type. If a custom field type does not implement
 [`HasColumnType`] and does not provide `db_type`, the table derive fails to compile.
 
+Enabling the `uuid` feature maps a bare `uuid::Uuid` field to a `uuid` column (no `db_type`
+override needed) and lets a `Uuid` value be used directly in the query builder — as a predicate
+operand (`col.equals(id)`) and as a write-builder setter (`.id(id)`). It also covers nullable UUID
+columns (`#[column(nullable)]`) and left-joined UUID tables. Pair it with a backend that implements
+`Encode`/`Decode` for `uuid::Uuid` (the PostgreSQL backend's own `uuid` feature does, and turns on
+`squealy/uuid` for you).
+
 For newtype wrappers, derive `ColumnType` on the wrapper. Single-field tuple structs and
 single-field named structs are transparent by default, so the wrapper uses the same database
 type, bind conversion, row decoding, and literal expression support as its inner value. Use
