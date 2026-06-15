@@ -1840,14 +1840,17 @@ where
         }
     }
 
-    pub fn insert(self) -> impl Future<Output = Result<u64, ErrorOf<Conn>>> + 'conn
+    pub fn insert(self) -> impl Future<Output = Result<u64, ErrorOf<Conn>>> + Send + 'conn
     where
         Conn: Connection + 'conn,
         S: 'conn,
         Rows: NonEmptyInsertRows + 'conn,
         Rows::Params: NoRuntimeParams,
+        // The returned future captures the built query object, so it must be `Send` for the future
+        // to be `Send` behind a generic `async fn -> impl Future + Send` trait method. This proves
+        // `Send` directly instead of leaking it through the (lifetime-specific) execution impl.
         <Conn as QueryBuilder>::Insert<'conn, S, (), Rows, ()>:
-            ExecutableInsertQuery<'conn, Rows, ()>,
+            ExecutableInsertQuery<'conn, Rows, ()> + Send,
     {
         let query = <<Conn as QueryBuilder>::Insert<'conn, S, (), Rows, ()> as InsertQuery<
             'conn,
@@ -1990,13 +1993,14 @@ where
     Columns: UpdateAssignments + 'conn,
     Filters: PredicateNodes + 'conn,
 {
-    pub fn update(self) -> impl Future<Output = Result<u64, ErrorOf<Conn>>> + 'conn
+    pub fn update(self) -> impl Future<Output = Result<u64, ErrorOf<Conn>>> + Send + 'conn
     where
         Conn: Connection + 'conn,
         Columns::Params: NoRuntimeParams,
         Filters::Params: NoRuntimeParams,
+        // See `insert`: the future captures the query object, so require it `Send`.
         <Conn as QueryBuilder>::Update<'conn, S, (), Columns, Filters, ()>:
-            ExecutableUpdateQuery<'conn, Columns, Filters, ()>,
+            ExecutableUpdateQuery<'conn, Columns, Filters, ()> + Send,
     {
         let query =
             <<Conn as QueryBuilder>::Update<'conn, S, (), Columns, Filters, ()> as UpdateQuery<
@@ -3668,7 +3672,7 @@ pub trait DeleteSourceQuery<'conn, 'scope, Conn>:
 where
     Conn: QueryBuilder + 'conn,
 {
-    fn delete(self) -> impl Future<Output = Result<u64, ErrorOf<Conn>>> + 'conn
+    fn delete(self) -> impl Future<Output = Result<u64, ErrorOf<Conn>>> + Send + 'conn
     where
         Conn: Connection + 'conn,
         'scope: 'conn,
@@ -3676,8 +3680,9 @@ where
         Self::Table: 'conn,
         Self::Filters: PredicateNodes,
         <Self::Filters as PredicateNodes>::Params: NoRuntimeParams,
+        // See `insert`: the future captures the query object, so require it `Send`.
         <Conn as QueryBuilder>::Delete<'conn, Self::Table, (), Self::Filters, ()>:
-            ExecutableDeleteQuery<'conn, Self::Filters, ()>,
+            ExecutableDeleteQuery<'conn, Self::Filters, ()> + Send,
     {
         let (connection, depth, filters) = self.into_delete_parts();
         let alias = SourceAlias::new(depth, 0);
