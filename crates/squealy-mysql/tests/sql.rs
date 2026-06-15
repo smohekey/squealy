@@ -582,6 +582,75 @@ fn mysql_backend_writes_composite_unique_ddl() {
     );
 }
 
+// A partial unique (`where = ...`) lowers to a partial index, which MySQL does not support.
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Shop)]
+#[unique(columns = [organization_id, slug], where = |row| row.deleted_at.is_null())]
+struct SoftRepository<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, i32>,
+    organization_id: C::Type<'scope, i32>,
+    slug: C::Type<'scope, String>,
+    #[column(nullable)]
+    deleted_at: C::Type<'scope, i64>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct SoftRepositoryShop {
+    soft_repositorys: SoftRepository<'static, ColumnName>,
+}
+
+#[allow(dead_code)]
+#[derive(Database)]
+struct SoftRepositoryDb {
+    shop: SoftRepositoryShop,
+}
+
+#[test]
+fn mysql_rejects_partial_unique_index_in_write_table() {
+    let mut sql = Vec::new();
+    let tables = <SoftRepositoryShop as Schema>::tables().collect::<Vec<_>>();
+    let error = Mysql.write_table(tables[0], &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mysql_rejects_partial_unique_index_in_render_create() {
+    let model = DatabaseModel::from_database::<SoftRepositoryDb>();
+    let mut sql = Vec::new();
+    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+// The single-column `#[column(unique, where = ...)]` form, carried on `Column::unique_predicate()`.
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Shop)]
+struct SoftAccount<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, i32>,
+    #[column(unique, where = |row| row.deleted_at.is_null())]
+    email: C::Type<'scope, String>,
+    #[column(nullable)]
+    deleted_at: C::Type<'scope, i64>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct SoftAccountShop {
+    soft_accounts: SoftAccount<'static, ColumnName>,
+}
+
+#[test]
+fn mysql_rejects_column_level_partial_unique_in_write_table() {
+    // The column form is not in `table.uniques()`, so the direct path must still reject it rather
+    // than silently emit a table without the intended uniqueness.
+    let mut sql = Vec::new();
+    let tables = <SoftAccountShop as Schema>::tables().collect::<Vec<_>>();
+    let error = Mysql.write_table(tables[0], &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
 #[test]
 fn mysql_renders_create_from_scratch() {
     let model = DatabaseModel::from_database::<ShopDb>();

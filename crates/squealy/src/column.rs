@@ -188,6 +188,16 @@ pub trait Column: Sync {
         false
     }
 
+    /// An optional partial-index predicate for a `#[column(unique, where = |row| ...)]` marker.
+    ///
+    /// Only meaningful when [`unique`](Self::unique) is `true`. When present, the model builder
+    /// emits a partial *unique index* (`CREATE UNIQUE INDEX ... WHERE <predicate>`) instead of a
+    /// plain `UNIQUE` constraint. See [`Index::predicate`](crate::Index::predicate) for why this
+    /// is a function rather than a `&'static str`.
+    fn unique_predicate(&self) -> Option<fn() -> String> {
+        None
+    }
+
     fn nullable(&self) -> bool {
         false
     }

@@ -547,27 +547,33 @@ fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
 
     // Single-column `#[column(unique)]` markers, then table-level `#[unique(columns = [..])]`
     // composite constraints. The latter carry an optional explicit name and otherwise fall back to
-    // the same deterministic `uq_<table>_<columns>` convention.
+    // the same deterministic `uq_<table>_<columns>` convention. A unique that carries a
+    // `where = ...` predicate is excluded here: Postgres cannot attach a `WHERE` to a table
+    // constraint, so it is lowered to a partial unique index below (sharing the `uq_` name).
     let uniques = columns
         .iter()
-        .filter(|column| column.unique())
+        .filter(|column| column.unique() && column.unique_predicate().is_none())
         .map(|column| Constraint {
             name: uq_name(&name, &[column.name()]),
             columns: vec![column.name().to_owned()],
         })
-        .chain(table.uniques().iter().map(|unique| {
-            Constraint {
-                name: unique
-                    .name
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| uq_name(&name, unique.columns)),
-                columns: unique
-                    .columns
-                    .iter()
-                    .map(|column| (*column).to_owned())
-                    .collect(),
-            }
-        }))
+        .chain(
+            table
+                .uniques()
+                .iter()
+                .filter(|unique| unique.predicate.is_none())
+                .map(|unique| Constraint {
+                    name: unique
+                        .name
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| uq_name(&name, unique.columns)),
+                    columns: unique
+                        .columns
+                        .iter()
+                        .map(|column| (*column).to_owned())
+                        .collect(),
+                }),
+        )
         .collect();
 
     let foreign_keys = columns
@@ -591,10 +597,42 @@ fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
         })
         .collect();
 
+    // Predicated uniques (single-column `#[column(unique, where = ...)]` and table-level
+    // `#[unique(columns = [..], where = ...)]`) become partial unique indexes, appended after the
+    // table's own `#[index(..)]` declarations.
+    let partial_unique_indexes = columns
+        .iter()
+        .filter_map(|column| {
+            column.unique_predicate().map(|predicate| {
+                partial_unique_index(
+                    uq_name(&name, &[column.name()]),
+                    vec![column.name().to_owned()],
+                    predicate,
+                )
+            })
+        })
+        .chain(table.uniques().iter().filter_map(|unique| {
+            unique.predicate.map(|predicate| {
+                partial_unique_index(
+                    unique
+                        .name
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| uq_name(&name, unique.columns)),
+                    unique
+                        .columns
+                        .iter()
+                        .map(|column| (*column).to_owned())
+                        .collect(),
+                    predicate,
+                )
+            })
+        }));
+
     let indexes = table
         .indexes()
         .iter()
         .map(|index| index_from_dyn(&name, *index))
+        .chain(partial_unique_indexes)
         .collect();
 
     TableModel {
@@ -662,7 +700,30 @@ fn index_from_dyn(table: &str, index: &dyn Index) -> IndexModel {
         nulls: Vec::new(),
         collations: Vec::new(),
         operator_classes: Vec::new(),
-        predicate: None,
+        predicate: index.predicate().map(|predicate| predicate()),
+    }
+}
+
+/// A partial unique index synthesized from a predicated `#[column(unique, where = ...)]` or
+/// `#[unique(columns = [..], where = ...)]` declaration. It keeps the `uq_<table>_<columns>`
+/// identity of the constraint it replaces, but renders as `CREATE UNIQUE INDEX ... WHERE ...`.
+fn partial_unique_index(
+    name: String,
+    columns: Vec<String>,
+    predicate: fn() -> String,
+) -> IndexModel {
+    IndexModel {
+        name,
+        columns,
+        expressions: Vec::new(),
+        include_columns: Vec::new(),
+        unique: true,
+        method: None,
+        directions: Vec::new(),
+        nulls: Vec::new(),
+        collations: Vec::new(),
+        operator_classes: Vec::new(),
+        predicate: Some(predicate()),
     }
 }
 

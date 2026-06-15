@@ -34,6 +34,9 @@ struct IndexAttrs {
     name: Option<String>,
     columns: Vec<Ident>,
     unique: bool,
+    /// Raw tokens of a `where = |row| ...` partial-index predicate, lowered to an ANSI SQL string
+    /// at model-build time. See [`crate`]'s `Table` derive docs for the supported expression subset.
+    predicate: Option<proc_macro2::TokenStream>,
 }
 
 struct PrimaryKeyAttrs {
@@ -44,6 +47,9 @@ struct PrimaryKeyAttrs {
 struct UniqueAttrs {
     name: Option<String>,
     columns: Vec<Ident>,
+    /// Raw tokens of a `where = |row| ...` predicate. When present, the constraint is lowered to a
+    /// partial unique index (`CREATE UNIQUE INDEX ... WHERE ...`) rather than a `UNIQUE` constraint.
+    predicate: Option<proc_macro2::TokenStream>,
 }
 
 #[derive(Default)]
@@ -69,6 +75,9 @@ struct FieldAttrs {
     db_type: Option<String>,
     check: Option<String>,
     references: Option<ForeignKeyAttrs>,
+    /// Raw tokens of a `#[column(unique, where = |row| ...)]` partial-unique predicate. Requires
+    /// `unique`; lowered to a partial unique index at model-build time.
+    predicate: Option<proc_macro2::TokenStream>,
 }
 
 enum DefaultAttrs {
@@ -239,11 +248,32 @@ impl TableStruct {
                 .enumerate()
                 .map(|(index, _)| generated_ident(&ident, &index.to_string(), "Index")),
         );
+        // Partial-predicate (`where = |row| ...`) helper functions, accumulated across the
+        // per-column unique markers, table-level `#[unique(...)]`, and table-level `#[index(...)]`
+        // declarations. Each pushes a `fn() -> String` definition and yields the
+        // `Option<fn() -> String>` reference spliced into the corresponding metadata accessor.
+        let mut predicate_fn_defs: Vec<proc_macro2::TokenStream> = Vec::new();
+        let field_unique_predicate_refs = self
+            .fields
+            .iter()
+            .map(|field| match field.attrs.predicate.as_ref() {
+                Some(closure) => predicate_fn_reference(
+                    &ident,
+                    &format!("{}_unique", field.ident),
+                    closure,
+                    &mut predicate_fn_defs,
+                ),
+                None => quote::quote! { ::std::option::Option::None },
+            })
+            .collect::<Vec<_>>();
         let column_defs = self
             .fields
             .iter()
             .zip(column_idents.iter())
-            .map(|(field, ident)| field.column_definition_tokens(ident))
+            .zip(field_unique_predicate_refs.iter())
+            .map(|((field, ident), unique_predicate)| {
+                field.column_definition_tokens(ident, unique_predicate)
+            })
             .collect::<Vec<_>>();
         let foreign_key_defs = self
             .fields
@@ -257,7 +287,20 @@ impl TableStruct {
             .collect::<Vec<_>>();
         let field_index_count = index_defs.len();
         index_defs.extend(self.indexes.iter().enumerate().map(|(index, attrs)| {
-            attrs.index_definition_tokens(&index_idents[field_index_count + index], &self.fields)
+            let predicate = match attrs.predicate.as_ref() {
+                Some(closure) => predicate_fn_reference(
+                    &ident,
+                    &format!("index_{index}"),
+                    closure,
+                    &mut predicate_fn_defs,
+                ),
+                None => quote::quote! { ::std::option::Option::None },
+            };
+            attrs.index_definition_tokens(
+                &index_idents[field_index_count + index],
+                &self.fields,
+                &predicate,
+            )
         }));
         let columns_static = generated_ident(&ident, "columns", "Static");
         let indexes_static = generated_ident(&ident, "indexes", "Static");
@@ -344,10 +387,20 @@ impl TableStruct {
                 let columns_static =
                     generated_ident(&ident, &format!("unique_{unique}"), "ColumnsStatic");
                 let name = option_literal(attrs.name.as_deref());
+                let predicate = match attrs.predicate.as_ref() {
+                    Some(closure) => predicate_fn_reference(
+                        &ident,
+                        &format!("unique_{unique}"),
+                        closure,
+                        &mut predicate_fn_defs,
+                    ),
+                    None => quote::quote! { ::std::option::Option::None },
+                };
                 quote::quote! {
                     ::squealy::TableUnique {
                         name: #name,
                         columns: &#columns_static,
+                        predicate: #predicate,
                     }
                 }
             })
@@ -433,6 +486,7 @@ impl TableStruct {
             #(#foreign_key_defs)*
             #(#column_defs)*
             #(#index_defs)*
+            #(#predicate_fn_defs)*
 
             #(
                 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1435,6 +1489,7 @@ impl IndexAttrs {
         &self,
         index_ident: &proc_macro2::Ident,
         fields: &[Field],
+        predicate: &proc_macro2::TokenStream,
     ) -> proc_macro2::TokenStream {
         let name = option_literal(self.name.as_deref());
         let columns = self
@@ -1465,6 +1520,10 @@ impl IndexAttrs {
 
                 fn unique(&self) -> bool {
                     #unique
+                }
+
+                fn predicate(&self) -> Option<fn() -> ::std::string::String> {
+                    #predicate
                 }
             }
         }
@@ -1546,6 +1605,7 @@ impl Field {
     fn column_definition_tokens(
         &self,
         column_ident: &proc_macro2::Ident,
+        unique_predicate: &proc_macro2::TokenStream,
     ) -> proc_macro2::TokenStream {
         let name = Literal::string(&self.column_name());
         let primary_key = bool_tokens(self.attrs.primary_key);
@@ -1574,6 +1634,7 @@ impl Field {
                 fn primary_key(&self) -> bool { #primary_key }
                 fn indexed(&self) -> bool { #indexed }
                 fn unique(&self) -> bool { #unique }
+                fn unique_predicate(&self) -> Option<fn() -> ::std::string::String> { #unique_predicate }
                 fn nullable(&self) -> bool { #nullable }
                 fn auto_increment(&self) -> bool { #auto_increment }
                 fn generated(&self) -> bool { #generated }
@@ -1905,6 +1966,7 @@ fn parse_index(tokens: Vec<TokenTree>) -> Result<IndexAttrs, String> {
         name: None,
         columns: Vec::new(),
         unique: false,
+        predicate: None,
     };
 
     while index < tokens.len() {
@@ -1920,6 +1982,16 @@ fn parse_index(tokens: Vec<TokenTree>) -> Result<IndexAttrs, String> {
 
         match name.as_str() {
             "unique" => attrs.unique = true,
+            "where" => {
+                if !matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '=')
+                {
+                    return Err(
+                        "index option `where` requires a `= |row| ...` predicate".to_owned()
+                    );
+                }
+                index += 1;
+                attrs.predicate = Some(collect_predicate_tokens(&tokens, &mut index, "index")?);
+            }
             "name" => {
                 if !matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '=')
                 {
@@ -2026,6 +2098,7 @@ fn parse_unique(tokens: Vec<TokenTree>) -> Result<UniqueAttrs, String> {
     let mut attrs = UniqueAttrs {
         name: None,
         columns: Vec::new(),
+        predicate: None,
     };
 
     while index < tokens.len() {
@@ -2052,6 +2125,16 @@ fn parse_unique(tokens: Vec<TokenTree>) -> Result<UniqueAttrs, String> {
                     None => return Err("unique option `name` is missing a value".to_owned()),
                 });
                 index += 1;
+            }
+            "where" => {
+                if !matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '=')
+                {
+                    return Err(
+                        "unique option `where` requires a `= |row| ...` predicate".to_owned()
+                    );
+                }
+                index += 1;
+                attrs.predicate = Some(collect_predicate_tokens(&tokens, &mut index, "unique")?);
             }
             "columns" => {
                 if !matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '=')
@@ -2095,6 +2178,73 @@ fn parse_index_columns(group: &Group) -> Result<Vec<Ident>, String> {
     Ok(columns)
 }
 
+/// Collects the raw tokens of a `where = <expr>` partial-index predicate from a table-level
+/// attribute, advancing `index` past them. The expression runs to the next top-level `,` (option
+/// separator); commas inside the predicate are nested in `(...)`/`[...]` groups, so a top-level
+/// comma always ends the option. Returns the tokens as a `proc_macro2` stream for `quote!`.
+fn collect_predicate_tokens(
+    tokens: &[TokenTree],
+    index: &mut usize,
+    context: &str,
+) -> Result<proc_macro2::TokenStream, String> {
+    let mut predicate = Vec::new();
+    while *index < tokens.len()
+        && !matches!(tokens.get(*index), Some(TokenTree::Punct(punct)) if punct.as_char() == ',')
+    {
+        predicate.push(tokens[*index].clone());
+        *index += 1;
+    }
+    if predicate.is_empty() {
+        return Err(format!(
+            "{context} option `where` requires a `= |row| ...` predicate"
+        ));
+    }
+    Ok(token_trees_to_stream(&predicate))
+}
+
+/// Re-tokenizes a slice of `proc_macro` token trees as a `proc_macro2` stream so it can be spliced
+/// into a `quote!` body (the predicate expression is emitted back out verbatim).
+fn token_trees_to_stream(tokens: &[TokenTree]) -> proc_macro2::TokenStream {
+    tokens.iter().cloned().collect::<TokenStream>().into()
+}
+
+/// Emits a `fn() -> String` that lowers a `where = |row| ...` predicate to an ANSI SQL string, and
+/// returns the `Option<fn() -> String>` expression that references it (for a `TableUnique`,
+/// `Column::unique_predicate`, or `Index::predicate`). The function definition is pushed onto
+/// `defs`; the predicate closure is applied to the table's column expressions and rendered by
+/// [`squealy::render_ddl_predicate`], which only accepts the literal-free subset (`IS NULL` /
+/// comparisons of columns), so an unsupported predicate fails to compile here.
+fn predicate_fn_reference(
+    table_ident: &proc_macro2::Ident,
+    tag: &str,
+    closure: &proc_macro2::TokenStream,
+    defs: &mut Vec<proc_macro2::TokenStream>,
+) -> proc_macro2::TokenStream {
+    let fn_ident = generated_ident(table_ident, tag, "Predicate");
+    defs.push(quote::quote! {
+        #[allow(non_snake_case)]
+        fn #fn_ident() -> ::std::string::String {
+            // Pass the user's `|row| ...` closure to a helper whose parameter type is fixed to the
+            // table's column-expression struct. This gives the closure an *expected* signature, so
+            // its `row` parameter is inferred (a bare immediately-applied closure cannot be — the
+            // field access in the body needs the type known up front).
+            fn build<__P>(
+                predicate: impl ::std::ops::FnOnce(
+                    <#table_ident<'static, ::squealy::ColumnExpr> as ::squealy::SchemaTable>::Exprs<'static>,
+                ) -> __P,
+            ) -> __P {
+                predicate(
+                    <#table_ident<'static, ::squealy::ColumnExpr> as ::squealy::SchemaTable>::column_exprs(
+                        ::squealy::SourceAlias::new(0, 0),
+                    ),
+                )
+            }
+            ::squealy::render_ddl_predicate(&build(#closure))
+        }
+    });
+    quote::quote! { ::std::option::Option::Some(#fn_ident as fn() -> ::std::string::String) }
+}
+
 /// Rejects column attribute combinations that are mutually contradictory and would
 /// otherwise only surface as a database error at DDL time.
 fn validate_field_attrs(fields: &[Field]) -> Result<(), MacroError> {
@@ -2127,6 +2277,12 @@ fn validate_field_attrs(fields: &[Field]) -> Result<(), MacroError> {
         if attrs.generated && attrs.auto_increment {
             return Err(at_field(format!(
                 "column `{name}` cannot be both `generated` and `auto_increment`"
+            )));
+        }
+        if attrs.predicate.is_some() && !attrs.unique {
+            return Err(at_field(format!(
+                "column `{name}` has a `where = ...` predicate but is not `unique`; a partial \
+                 predicate is only meaningful on a unique column"
             )));
         }
     }
@@ -2344,6 +2500,12 @@ fn parse_meta_item(
         }
         "db_type" => attrs.db_type = Some(required_literal(name, value_tokens)?),
         "check" => attrs.check = Some(required_literal(name, value_tokens)?),
+        "where" => {
+            if value_tokens.is_empty() {
+                return Err("column option `where` requires a `= |row| ...` predicate".to_owned());
+            }
+            attrs.predicate = Some(token_trees_to_stream(value_tokens));
+        }
         "column_name" | "name" => attrs.column_name = Some(required_literal(name, value_tokens)?),
         "references" => attrs.references = Some(parse_references(value_tokens)?),
         _ => return Err(format!("unsupported Table field attribute `{name}`")),

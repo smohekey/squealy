@@ -1284,6 +1284,227 @@ fn postgres_backend_writes_compound_primary_key_ddl() {
     );
 }
 
+// A soft-delete table: `slug` is unique only among live rows (`deleted_at IS NULL`), so a slug is
+// reusable once a row is soft-deleted. `external_id` carries a plain, unconditional unique.
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Catalog)]
+struct Organization<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, i32>,
+    #[column(unique, where = |row| row.deleted_at.is_null())]
+    slug: C::Type<'scope, String>,
+    #[column(unique)]
+    external_id: C::Type<'scope, i32>,
+    #[column(nullable)]
+    deleted_at: C::Type<'scope, i64>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct OrganizationCatalog {
+    organizations: Organization<'static, ColumnName>,
+}
+
+#[allow(dead_code)]
+#[derive(Database)]
+struct OrganizationDb {
+    catalog: OrganizationCatalog,
+}
+
+// Composite, table-level partial unique: `(organization_id, slug)` unique among live rows only.
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Catalog)]
+#[unique(columns = [organization_id, slug], where = |row| row.deleted_at.is_null())]
+struct Workspace<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, i32>,
+    organization_id: C::Type<'scope, i32>,
+    slug: C::Type<'scope, String>,
+    #[column(nullable)]
+    deleted_at: C::Type<'scope, i64>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct WorkspaceCatalog {
+    workspaces: Workspace<'static, ColumnName>,
+}
+
+#[allow(dead_code)]
+#[derive(Database)]
+struct WorkspaceDb {
+    catalog: WorkspaceCatalog,
+}
+
+#[test]
+fn postgres_renders_partial_unique_index_for_soft_delete() {
+    let model = DatabaseModel::from_database::<OrganizationDb>();
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // The predicated `#[column(unique, where = ...)]` becomes a partial UNIQUE INDEX, keeping the
+    // `uq_<table>_<column>` identity but rendering the `WHERE` from the typed predicate.
+    assert!(
+        sql.contains(
+            "CREATE UNIQUE INDEX \"uq_organizations_slug\" ON \"organization_catalog\".\"organizations\" (\"slug\") WHERE (\"deleted_at\" IS NULL)"
+        ),
+        "expected partial unique index in: {sql}"
+    );
+    // A plain `#[column(unique)]` still renders as an unconditional constraint.
+    assert!(
+        sql.contains("UNIQUE (\"external_id\")"),
+        "expected plain unique constraint in: {sql}"
+    );
+    // The predicated column must NOT also produce an unconditional UNIQUE over `slug`.
+    assert!(
+        !sql.contains("UNIQUE (\"slug\")"),
+        "slug must not carry an unconditional unique constraint: {sql}"
+    );
+}
+
+#[test]
+fn postgres_renders_composite_partial_unique_index() {
+    let model = DatabaseModel::from_database::<WorkspaceDb>();
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE UNIQUE INDEX \"uq_workspaces_organization_id_slug\" ON \"workspace_catalog\".\"workspaces\" (\"organization_id\", \"slug\") WHERE (\"deleted_at\" IS NULL)"
+        ),
+        "expected composite partial unique index in: {sql}"
+    );
+    assert!(
+        !sql.contains("UNIQUE (\"organization_id\", \"slug\")"),
+        "composite predicated unique must not render as a table constraint: {sql}"
+    );
+}
+
+#[test]
+fn postgres_write_table_emits_partial_unique_index() {
+    // The query-side `write_table` path must honor the predicate too: emit a partial unique index
+    // rather than silently dropping or over-constraining with an unconditional `UNIQUE`.
+    let mut sql = Vec::new();
+    let tables = <WorkspaceCatalog as Schema>::tables().collect::<Vec<_>>();
+    Postgres.write_table(tables[0], &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains("CREATE UNIQUE INDEX \"uq_workspaces_organization_id_slug\"")
+            && sql.contains("WHERE (\"deleted_at\" IS NULL)"),
+        "expected partial unique index in write_table output: {sql}"
+    );
+    assert!(
+        !sql.contains("UNIQUE (\"organization_id\", \"slug\")"),
+        "predicated unique must not render as an inline constraint: {sql}"
+    );
+}
+
+#[test]
+fn postgres_write_table_emits_column_level_partial_unique_index() {
+    // The column form `#[column(unique, where = ...)]` lives on `Column::unique_predicate()`, not
+    // `table.uniques()`; the direct `write_table` path must still emit its partial index so
+    // soft-delete uniqueness is enforced in the query-side create flow.
+    let mut sql = Vec::new();
+    let tables = <OrganizationCatalog as Schema>::tables().collect::<Vec<_>>();
+    Postgres.write_table(tables[0], &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE UNIQUE INDEX \"uq_organizations_slug\" ON \"catalog\".\"organizations\" (\"slug\") WHERE (\"deleted_at\" IS NULL)"
+        ),
+        "expected column-level partial unique index in write_table output: {sql}"
+    );
+    // The plain `#[column(unique)]` external_id is unaffected; slug carries no inline UNIQUE.
+    assert!(
+        !sql.contains("UNIQUE (\"slug\")"),
+        "slug must not render as an inline unique: {sql}"
+    );
+}
+
+// A predicate combining a NULL check with a scalar value-literal comparison: `email` is unique
+// among live, active rows only.
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Catalog)]
+struct Roster<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, i32>,
+    #[column(unique, where = |row| row.deleted_at.is_null().and(row.status.equals(1)))]
+    email: C::Type<'scope, String>,
+    status: C::Type<'scope, i32>,
+    #[column(nullable)]
+    deleted_at: C::Type<'scope, i64>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct RosterCatalog {
+    rosters: Roster<'static, ColumnName>,
+}
+
+#[allow(dead_code)]
+#[derive(Database)]
+struct RosterDb {
+    catalog: RosterCatalog,
+}
+
+// A predicate comparing a column to a string literal that contains a single quote, to exercise
+// SQL string-literal escaping in the DDL predicate renderer.
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Catalog)]
+struct Region<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, i32>,
+    #[column(unique, where = |row| row.label.equals("o'brien"))]
+    code: C::Type<'scope, String>,
+    label: C::Type<'scope, String>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct RegionCatalog {
+    regions: Region<'static, ColumnName>,
+}
+
+#[allow(dead_code)]
+#[derive(Database)]
+struct RegionDb {
+    catalog: RegionCatalog,
+}
+
+#[test]
+fn postgres_renders_partial_unique_index_with_literal_predicate() {
+    let model = DatabaseModel::from_database::<RosterDb>();
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // A scalar value literal renders inline (no bind placeholder), alongside the NULL check.
+    assert!(
+        sql.contains(
+            "CREATE UNIQUE INDEX \"uq_rosters_email\" ON \"roster_catalog\".\"rosters\" (\"email\") WHERE ((\"deleted_at\" IS NULL) AND (\"status\" = 1))"
+        ),
+        "expected partial unique index with inline literal in: {sql}"
+    );
+}
+
+#[test]
+fn postgres_escapes_string_literal_in_partial_index_predicate() {
+    let model = DatabaseModel::from_database::<RegionDb>();
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // The embedded single quote is doubled, matching backend text-literal quoting.
+    assert!(
+        sql.contains("WHERE (\"label\" = 'o''brien')"),
+        "expected escaped string literal in predicate: {sql}"
+    );
+}
+
 #[test]
 fn postgres_renders_table_and_column_comments() {
     let model = DatabaseModel {
