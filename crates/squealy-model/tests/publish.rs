@@ -84,6 +84,44 @@ struct IndexDemoDb {
     index_demo: IndexDemo,
 }
 
+// A soft-delete table exercising partial unique indexes: a column-level `IS NULL` predicate and a
+// table-level predicate combining a boolean and a small-integer literal. PostgreSQL introspects the
+// predicate via `pg_get_expr` (unquoted identifiers, lowercase booleans), while the crate renders it
+// quoted with `TRUE`; without `canonical_index_predicate` this churns as a never-settling
+// `AlterIndex`.
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(SoftDemo)]
+#[unique(columns = [tenant_id, code], where = |row| row.active.equals(true).and(row.status.equals(1)))]
+struct SoftWidget<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    tenant_id: C::Type<'scope, i32>,
+    code: C::Type<'scope, i32>,
+    // The column-level predicate references `position`, a col_name (`C`) keyword that PostgreSQL
+    // deparses quoted (`"position"`), so the canonicalizer must keep it quoted — with only
+    // reserved/type keywords it would wrongly unquote and churn.
+    #[column(unique, where = |row| row.deleted_at.is_null().and(row.position.is_null()))]
+    slug: C::Type<'scope, String>,
+    status: C::Type<'scope, i32>,
+    active: C::Type<'scope, bool>,
+    #[column(name = "position", nullable)]
+    position: C::Type<'scope, i32>,
+    #[column(nullable)]
+    deleted_at: C::Type<'scope, i64>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct SoftDemo {
+    soft_widgets: SoftWidget<'static, ColumnName>,
+}
+
+#[allow(dead_code)]
+#[derive(Database)]
+struct SoftDemoDb {
+    soft_demo: SoftDemo,
+}
+
 fn database_url() -> String {
     std::env::var("SQUEALY_POSTGRES_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:55432/squealy_test".to_owned())
@@ -162,6 +200,36 @@ async fn replan_after_publish_is_empty() {
     assert!(
         plan.steps.is_empty(),
         "expected empty plan after publish, got: {:?}",
+        plan.steps
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn replan_after_publish_partial_unique_index_is_empty() {
+    let (mut connection, _guard) = connect().await;
+    let model = DatabaseModel::from_database::<SoftDemoDb>();
+
+    squealy_model::publish(&model, &Postgres, &mut connection)
+        .await
+        .expect("publish create-from-scratch");
+
+    // Re-planning the same crate model against the freshly published schema must converge to an
+    // empty plan. The crate renders the partial-index predicates as `("deleted_at" IS NULL)` and
+    // `(("active" = TRUE) AND ("status" = 1))`, while PostgreSQL introspects them via `pg_get_expr`
+    // as `(deleted_at IS NULL)` / `((active = true) AND (status = 1))`; without
+    // `canonical_index_predicate` aligning the desired model, this churns as a never-settling
+    // `AlterIndex`.
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan against published schema");
+    assert!(
+        plan.steps.is_empty(),
+        "expected empty plan after publishing partial unique indexes, got: {:?}",
         plan.steps
     );
 }

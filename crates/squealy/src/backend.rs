@@ -320,6 +320,23 @@ pub trait SchemaIntrospect {
     fn default_index_method(&self) -> Option<IndexMethod> {
         None
     }
+
+    /// Canonicalizes a partial-index predicate to the form this backend's introspection reports.
+    ///
+    /// A crate-declared `where = ...` predicate enters the desired model as the renderer's form
+    /// (quoted identifiers, `TRUE`/`FALSE`, e.g. `("deleted_at" IS NULL)`), while a backend reads it
+    /// back through its own expression deparser — PostgreSQL's `pg_get_expr` yields
+    /// `(deleted_at IS NULL)` (unquoted lowercase identifiers, lowercase booleans). A desired model
+    /// is canonicalized through this before diffing, so a partial index does not produce a
+    /// never-settling `AlterIndex` after publish. The default is the identity, which suits backends
+    /// that have no partial indexes (e.g. MySQL).
+    ///
+    /// Note: backends deparse value literals with type casts that depend on the literal's value and
+    /// the column type (e.g. `'x'::text`, `(1.5)::double precision`), which this offline transform
+    /// does not reproduce, so a predicate comparing a column to a value literal may still churn.
+    fn canonical_index_predicate(&self, predicate: &str) -> String {
+        predicate.to_owned()
+    }
 }
 
 /// Reads backend metadata about explicit schema refactors already recorded against a database.
