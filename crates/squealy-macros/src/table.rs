@@ -636,9 +636,13 @@ impl TableStruct {
                 }
             }
 
-            impl ::squealy::InsertableTable for #ident <'static, ::squealy::ColumnExpr> {}
+            // Generic over the expr `'scope` (not pinned to `'static`) so that, behind a generic
+            // `async fn -> impl Future + Send` trait, the inferred table lifetime satisfies these
+            // markers "for any lifetime" — mirroring `TableProjection`, which is why selects/deletes
+            // already work there. Insertability does not depend on the scope lifetime.
+            impl<'scope> ::squealy::InsertableTable for #ident <'scope, ::squealy::ColumnExpr> {}
 
-            impl ::squealy::UpdateableTable for #ident <'static, ::squealy::ColumnExpr> {}
+            impl<'scope> ::squealy::UpdateableTable for #ident <'scope, ::squealy::ColumnExpr> {}
 
             #write_table_impl
 
@@ -1135,7 +1139,7 @@ impl TableStruct {
                         self,
                     ) -> impl ::std::future::Future<
                         Output = ::std::result::Result<u64, <<Conn as ::squealy::QueryBuilder>::Backend as ::squealy::Backend>::Error>,
-                    > + 'conn
+                    > + ::std::marker::Send + 'conn
                     where
                         Conn: ::squealy::Connection,
                         UpdateColumns: ::squealy::UpdateAssignments,
@@ -1149,7 +1153,9 @@ impl TableStruct {
                             UpdateColumns,
                             Filters,
                             (),
-                        >: ::squealy::ExecutableUpdateQuery<'conn, UpdateColumns, Filters, ()>,
+                        >: ::squealy::ExecutableUpdateQuery<'conn, UpdateColumns, Filters, ()>
+                            // The future captures this query object, so require it `Send` (see `insert`).
+                            + ::std::marker::Send,
                     {
                         let query = <<Conn as ::squealy::QueryBuilder>::Update<
                             'conn,
@@ -1331,7 +1337,7 @@ impl TableStruct {
                     self,
                 ) -> impl ::std::future::Future<
                     Output = ::std::result::Result<u64, <<Conn as ::squealy::QueryBuilder>::Backend as ::squealy::Backend>::Error>,
-                > + 'conn
+                > + ::std::marker::Send + 'conn
                 where
                     Conn: ::squealy::Connection,
                     ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>: ::squealy::InsertRows,
@@ -1342,7 +1348,10 @@ impl TableStruct {
                         (),
                         ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>,
                         (),
-                    >: ::squealy::ExecutableInsertQuery<'conn, ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>, ()>,
+                    >: ::squealy::ExecutableInsertQuery<'conn, ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>, ()>
+                        // The returned future captures this query object, so it must be `Send` for the
+                        // future to be `Send` behind a generic `async fn -> impl Future + Send` trait.
+                        + ::std::marker::Send,
                 {
                     let insert_rows = ::squealy::HCons {
                         head: ::squealy::InsertRow::new(self.insert_columns),
@@ -1398,7 +1407,7 @@ impl TableStruct {
         };
 
         let table_impl = quote::quote! {
-            impl ::squealy::WriteableTable for #table_ident <'static, ::squealy::ColumnExpr> {
+            impl<'scope> ::squealy::WriteableTable for #table_ident <'scope, ::squealy::ColumnExpr> {
                 type WriteBuilder<'conn, Conn> = #builder_ident <'conn, Conn>
                 where
                     Conn: ::squealy::QueryBuilder + 'conn;
