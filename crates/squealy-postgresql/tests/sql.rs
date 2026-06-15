@@ -10,6 +10,20 @@ struct User<'scope, C: ColumnMode = ColumnExpr> {
     name: C::Type<'scope, String>,
 }
 
+// Regression (PR #23 review): projecting a nullable column yields `Option<T>`, which requires
+// `Option<T>: Decode<Postgres>`. A `#[derive(ColumnType)]` newtype carries `Decode`/`DecodeNullable`
+// but not `FromSqlOwned`, so `Option<Newtype>: Decode<Postgres>` only holds once the backend decodes
+// `Option<T>` through `T: Decode` (via the row reader's NULL peek) rather than `T: FromSqlOwned`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ColumnType)]
+struct ProbeId(i32);
+
+#[test]
+fn option_newtype_column_decodes() {
+    fn assert_decode<T: squealy::Decode<Postgres>>() {}
+    assert_decode::<Option<ProbeId>>();
+    assert_decode::<Option<i32>>();
+}
+
 #[derive(Clone, Debug, PartialEq, Table)]
 struct DefaultedRecord<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key, auto_increment)]

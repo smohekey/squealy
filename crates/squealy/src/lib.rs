@@ -205,6 +205,10 @@
 //! # }
 //! ```
 //!
+//! Projecting a `#[column(nullable)]` column yields `Option<T>`, so a SQL `NULL` decodes instead of
+//! erroring — the same way selecting the whole row decodes nullable fields. Non-null columns project
+//! as their bare value type.
+//!
 //! ## Write data with type-checked mutations
 //!
 //! Mutations use explicit direction words: `to` for insert and update destinations, `from` for

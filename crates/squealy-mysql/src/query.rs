@@ -52,6 +52,27 @@ impl<'row> MysqlRowReader<'row> {
         self.index += 1;
         Ok(value)
     }
+
+    /// Decode a possibly-`NULL` value by peeking the current column without consuming it: a SQL
+    /// `NULL` yields `None` (and skips the column), otherwise the inner [`Decode`] reads it. Decoding
+    /// through `Decode for T` (rather than `Option<T>: FromValue`) lets nullable `ColumnType` newtype
+    /// columns project, since those carry `Decode` but not `FromValue`.
+    fn take_nullable<T>(&mut self) -> Result<Option<T>, MysqlError>
+    where
+        T: Decode<Mysql>,
+    {
+        let column = self.index;
+        // Peek the current column, releasing the borrow before `T::decode` takes `&mut self`.
+        match self.row.as_ref(column) {
+            None => return Err(MysqlError::MissingColumn(column)),
+            Some(Value::NULL) => {
+                self.index += 1;
+                return Ok(None);
+            }
+            Some(_) => {}
+        }
+        T::decode(self).map(Some)
+    }
 }
 
 impl squealy::RowReader for MysqlRowReader<'_> {
@@ -105,11 +126,10 @@ impl_mysql_decode_from_u64!(usize, u128);
 
 impl<T> Decode<Mysql> for Option<T>
 where
-    T: FromValue,
+    T: Decode<Mysql>,
 {
     fn decode(row: &mut <Mysql as Backend>::RowReader<'_>) -> Result<Self, MysqlError> {
-        // `FromValue for Option<T>` maps SQL `NULL` to `None`.
-        row.take()
+        row.take_nullable()
     }
 }
 
