@@ -117,8 +117,8 @@ impl SelectSink for RecordingSelectSink {
 struct User<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key, auto_increment, index)]
     id: C::Type<'scope, i32>,
-    #[column(index, nullable, default = value("anonymous"))]
-    name: C::Type<'scope, String>,
+    #[column(index, default = value("anonymous"))]
+    name: C::Type<'scope, Option<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
@@ -162,6 +162,9 @@ struct DefaultVariant<'scope, C: ColumnMode = ColumnExpr> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct JsonPayload;
+// A bare `db_type` column value type (no `HasColumnType`) must still declare its nullability for the
+// type-level machinery. `#[derive(ColumnType)]` does this automatically; a bare type uses the macro.
+squealy::impl_non_null_column!(JsonPayload);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ColumnType)]
 pub struct RecordId(i32);
@@ -205,8 +208,7 @@ struct DerivedColumnTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
 struct NewtypeNullable<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key)]
     id: C::Type<'scope, RecordId>,
-    #[column(nullable)]
-    parent_id: C::Type<'scope, RecordId>,
+    parent_id: C::Type<'scope, Option<RecordId>>,
 }
 
 // A bare `uuid::Uuid` field maps to a `uuid` column without a `#[column(db_type = "uuid")]`
@@ -216,10 +218,8 @@ struct NewtypeNullable<'scope, C: ColumnMode = ColumnExpr> {
 struct UuidKeyed<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key)]
     id: C::Type<'scope, uuid::Uuid>,
-    // A nullable bare-`uuid::Uuid` column exercises the `DecodeNullable` and
-    // `IntoNullableAssignmentValue` paths the table derive emits for nullable fields.
-    #[column(nullable)]
-    parent_id: C::Type<'scope, uuid::Uuid>,
+    // A nullable bare-`uuid::Uuid` column exercises the nullable decode/projection paths.
+    parent_id: C::Type<'scope, Option<uuid::Uuid>>,
     slug: C::Type<'scope, String>,
 }
 
@@ -231,8 +231,7 @@ struct Timestamped<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key)]
     id: C::Type<'scope, i32>,
     created_at: C::Type<'scope, std::time::SystemTime>,
-    #[column(nullable)]
-    deleted_at: C::Type<'scope, std::time::SystemTime>,
+    deleted_at: C::Type<'scope, Option<std::time::SystemTime>>,
 }
 
 #[allow(dead_code)]

@@ -56,6 +56,25 @@ pub enum NullableColumn {}
 
 impl InsertColumnNullability for NullableColumn {}
 
+/// Implemented only by [`NullableColumn`]; lets the derive gate `is_null` / `is_not_null` on a
+/// column's `ColumnNullability::Nullability` where a type-level bound is workable.
+#[doc(hidden)]
+pub trait IsNullable {}
+
+impl IsNullable for NullableColumn {}
+
+/// Type-level gate for whether a column's insert-typestate slot may be left unset at `.insert()`.
+/// The `Table` derive generates, per insertable column, `impl<N> InsertReady<N>` for its "set" marker
+/// (always ready) and `impl InsertReady<NullableColumn>` for its "missing" marker (a nullable column
+/// may be omitted). There is deliberately no `InsertReady<NonNullableColumn>` for a missing marker,
+/// so omitting a required (non-null, no-default) column makes `.insert()` unavailable. `N` is the
+/// column's `ColumnNullability::Nullability`.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "this column must be set before `.insert()` (it is not nullable and has no default)"
+)]
+pub trait InsertReady<N> {}
+
 #[doc(hidden)]
 pub trait IntoInsertColumnValue<K, Value>
 where

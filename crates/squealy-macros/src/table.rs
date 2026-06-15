@@ -60,7 +60,6 @@ struct FieldAttrs {
     primary_key: bool,
     index: bool,
     unique: bool,
-    nullable: Option<bool>,
     auto_increment: bool,
     generated: bool,
     insert: Option<bool>,
@@ -131,30 +130,35 @@ impl TableStruct {
                 )
             })
             .collect::<Vec<_>>();
+        // The *declared* field value type `D` (e.g. `Option<SystemTime>` or `SystemTime`). Nullability
+        // is resolved from it at the type level via `ColumnNullability`.
         let field_value_tys = self
             .fields
             .iter()
             .map(|field| field.value_ty.clone())
             .collect::<Vec<_>>();
-        // The type a single-column projection decodes to. A `#[column(nullable)]` column projects as
-        // `Option<T>` (so a NULL decodes instead of erroring), matching how the whole-row decode
-        // already treats nullable fields; non-null columns project as the bare value type. Predicate
-        // operands still use the bare `ExprKind::Value` (`T`), so this does not affect `where_`.
-        let projection_row_value_tys = self
+        // The inner (non-null) value type `<D as ColumnNullability>::Inner`. Used for the column's
+        // `ExprKind::Value` (so predicate operands stay `T`), FK type assertions, and the nullable
+        // (left-join) row decode.
+        let field_inner_tys = self
             .fields
             .iter()
             .map(|field| {
-                let value_ty = field.value_ty.clone();
-                if field.nullable() {
-                    quote::quote! { ::std::option::Option<#value_ty> }
-                } else {
-                    quote::quote! { #value_ty }
-                }
+                let d = field.value_ty.clone();
+                quote::quote! { <#d as ::squealy::ColumnNullability>::Inner }
+            })
+            .collect::<Vec<_>>();
+        // The column's type-level nullability marker (`NonNullableColumn` / `NullableColumn`).
+        let field_nullability_tys = self
+            .fields
+            .iter()
+            .map(|field| {
+                let d = field.value_ty.clone();
+                quote::quote! { <#d as ::squealy::ColumnNullability>::Nullability }
             })
             .collect::<Vec<_>>();
         // For each `references(Table::column)` foreign key, assert at compile time that the local
-        // column's value type matches the referenced column's — so a mismatched FK fails to compile
-        // rather than producing DDL the database rejects.
+        // column's inner value type matches the referenced column's.
         let fk_type_assertions = self
             .fields
             .iter()
@@ -166,7 +170,7 @@ impl TableStruct {
                     &format!("{}{}", table, to_pascal(&column.to_string())),
                     Span::call_site(),
                 );
-                let local_value_ty = field.value_ty.clone();
+                let d = field.value_ty.clone();
                 Some(quote::quote! {
                     const _: fn() = || {
                         fn assert_foreign_key_column_type<A, B>()
@@ -175,47 +179,11 @@ impl TableStruct {
                         {
                         }
                         assert_foreign_key_column_type::<
-                            #local_value_ty,
+                            <#d as ::squealy::ColumnNullability>::Inner,
                             <#referenced_marker as ::squealy::ExprKind>::Value,
                         >();
                     };
                 })
-            })
-            .collect::<Vec<_>>();
-        let row_field_value_tys = self
-            .fields
-            .iter()
-            .map(|field| {
-                let field_ty = field.value_ty.clone();
-                if field.nullable() {
-                    quote::quote! { ::std::option::Option<#field_ty> }
-                } else {
-                    field_ty
-                }
-            })
-            .collect::<Vec<_>>();
-        let row_field_decode_bounds = self
-            .fields
-            .iter()
-            .map(|field| {
-                let field_ty = field.value_ty.clone();
-                if field.nullable() {
-                    quote::quote! { #field_ty: ::squealy::DecodeNullable<Backend> }
-                } else {
-                    quote::quote! { #field_ty: ::squealy::Decode<Backend> }
-                }
-            })
-            .collect::<Vec<_>>();
-        let row_field_decode_values = self
-            .fields
-            .iter()
-            .map(|field| {
-                let field_ty = field.value_ty.clone();
-                if field.nullable() {
-                    quote::quote! { <#field_ty as ::squealy::DecodeNullable<Backend>>::decode_nullable(row)? }
-                } else {
-                    quote::quote! { ::squealy::RowReader::read::<#field_ty>(row)? }
-                }
             })
             .collect::<Vec<_>>();
         let field_indexes = self
@@ -384,17 +352,6 @@ impl TableStruct {
         let visibility = &self.visibility;
         let write_builder_defs = write_builder.definitions;
         let write_table_impl = write_builder.table_impl;
-        let field_nullability = self
-            .fields
-            .iter()
-            .map(|field| {
-                if field.nullable() {
-                    quote::quote! { ::squealy::NullableColumn }
-                } else {
-                    quote::quote! { ::squealy::NonNullableColumn }
-                }
-            })
-            .collect::<Vec<_>>();
         let insert_column_key_impls = self
             .fields
             .iter()
@@ -439,12 +396,13 @@ impl TableStruct {
                 #visibility enum #expr_kind_idents {}
 
                 impl ::squealy::ExprKind for #expr_kind_idents {
-                    type Value = #field_value_tys;
+                    // Predicate operands use the inner (non-null) value type.
+                    type Value = #field_inner_tys;
                 }
 
                 impl ::squealy::ColumnKey for #expr_kind_idents {
                     type Table = #ident <'static, ::squealy::ColumnExpr>;
-                    type Nullability = #field_nullability;
+                    type Nullability = #field_nullability_tys;
 
                     const NAME: &'static str = #field_literals;
                 }
@@ -452,7 +410,9 @@ impl TableStruct {
                 impl ::squealy::ProjectionShape for #expr_kind_idents {
                     type Exprs<'scope> = ::squealy::ColumnRef<'scope, #expr_kind_idents>;
                     type ReboundExprs<'scope> = ::squealy::Expr<'scope, #expr_kind_idents>;
-                    type Row = #projection_row_value_tys;
+                    // A single-column projection decodes as the declared type `D` (`Option<T>` when
+                    // nullable; `Option<T>: Decode` handles a SQL NULL).
+                    type Row = #field_value_tys;
 
                     fn exprs<'scope>(alias: ::squealy::SourceAlias) -> Self::Exprs<'scope> {
                         ::squealy::ColumnRef::column(alias, #field_literals)
@@ -483,7 +443,7 @@ impl TableStruct {
             #[doc(hidden)]
             #[derive(Clone, Debug, PartialEq)]
             #visibility struct #row_shape_ident {
-                #( pub #fields: #row_field_value_tys, )*
+                #( pub #fields: #field_value_tys, )*
             }
 
             #[doc(hidden)]
@@ -607,30 +567,33 @@ impl TableStruct {
             impl<Backend> ::squealy::Decode<Backend> for #row_shape_ident
             where
                 Backend: ::squealy::Backend,
-                #(#row_field_decode_bounds,)*
+                #(#field_value_tys: ::squealy::Decode<Backend>,)*
             {
                 fn decode(
                     row: &mut <Backend as ::squealy::Backend>::RowReader<'_>,
                 ) -> ::std::result::Result<Self, <Backend as ::squealy::Backend>::Error> {
                     Ok(#row_shape_ident {
                         #(
-                            #fields: #row_field_decode_values,
+                            #fields: ::squealy::RowReader::read::<#field_value_tys>(row)?,
                         )*
                     })
                 }
             }
 
+            // A LEFT JOIN makes every column nullable, so each field decodes as `Option<Inner>` via
+            // the inner value type's `DecodeNullable` — a single `Option` layer whether the column was
+            // already nullable (`D = Option<T>`, inner `T`) or not (`D = T`).
             impl<Backend> ::squealy::Decode<Backend> for #ident <'static, ::squealy::ColumnNullableValue>
             where
                 Backend: ::squealy::Backend,
-                #(#field_value_tys: ::squealy::DecodeNullable<Backend>,)*
+                #(#field_inner_tys: ::squealy::DecodeNullable<Backend>,)*
             {
                 fn decode(
                     row: &mut <Backend as ::squealy::Backend>::RowReader<'_>,
                 ) -> ::std::result::Result<Self, <Backend as ::squealy::Backend>::Error> {
                     Ok(#ident {
                         #(
-                            #fields: <#field_value_tys as ::squealy::DecodeNullable<Backend>>::decode_nullable(row)?,
+                            #fields: <#field_inner_tys as ::squealy::DecodeNullable<Backend>>::decode_nullable(row)?,
                         )*
                     })
                 }
@@ -934,22 +897,32 @@ impl TableStruct {
             .collect::<Vec<_>>();
         let insert_initial_states = insert_missing_idents.iter().collect::<Vec<_>>();
         let update_initial_states = update_missing_idents.iter().collect::<Vec<_>>();
-        let insert_execute_states = fields
+        // `.insert()` is generic over every column's insert-state slot; required-ness is enforced
+        // type-level by an `InsertReady<Nullability>` bound per insertable, non-default column. A
+        // column with a `default` is always omittable (no bound). `InsertReady` is satisfied by a
+        // `Set` slot (any nullability) or a `Missing` slot only when the column is nullable.
+        let insert_ready_bounds = fields
             .iter()
             .zip(insert_state_idents.iter())
-            .zip(insert_set_idents.iter())
-            .map(|(((_, field), state), set)| {
-                if field.required_insert() {
-                    quote::quote! { #set }
-                } else {
-                    quote::quote! { #state }
+            .filter(|((_, field), _)| field.insertable() && field.attrs.default.is_none())
+            .map(|((_, field), state)| {
+                let d = field.value_ty.clone();
+                quote::quote! {
+                    #state: ::squealy::InsertReady<<#d as ::squealy::ColumnNullability>::Nullability>,
                 }
             })
             .collect::<Vec<_>>();
-        let insert_execute_state_params = fields
+        let insert_ready_impls = fields
             .iter()
-            .zip(insert_state_idents.iter())
-            .filter_map(|((_, field), state)| (!field.required_insert()).then_some(state))
+            .zip(insert_set_idents.iter())
+            .zip(insert_missing_idents.iter())
+            .filter(|(((_, field), _), _)| field.insertable())
+            .map(|(((_, _), set), missing)| {
+                quote::quote! {
+                    impl<N> ::squealy::InsertReady<N> for #set {}
+                    impl ::squealy::InsertReady<::squealy::NullableColumn> for #missing {}
+                }
+            })
             .collect::<Vec<_>>();
         let insert_state_tuple = if insert_state_idents.is_empty() {
             quote::quote! { () }
@@ -1222,6 +1195,10 @@ impl TableStruct {
                 #visibility struct #insert_set_idents;
             )*
 
+            // Type-level insert-required-ness: a `Set` slot is ready for any nullability; a `Missing`
+            // slot is ready only for a nullable column.
+            #(#insert_ready_impls)*
+
             #(
                 #[doc(hidden)]
                 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1327,11 +1304,12 @@ impl TableStruct {
 
             #(#setters)*
 
-            impl<'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, #(#insert_execute_state_params,)* #(#update_state_idents),*> #builder_ident <'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, #(#insert_execute_states,)* #(#update_state_idents),*>
+            impl<'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, #(#insert_state_idents,)* #(#update_state_idents),*> #builder_ident <'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, #(#insert_state_idents,)* #(#update_state_idents),*>
             where
                 Conn: ::squealy::QueryBuilder + 'conn,
                 InsertColumns: ::squealy::InsertAssignments + 'conn,
                 <InsertColumns as ::squealy::InsertAssignments>::Params: ::squealy::HAppend<::squealy::HNil>,
+                #(#insert_ready_bounds)*
             {
                 pub fn insert(
                     self,
@@ -1485,18 +1463,17 @@ impl Field {
             .unwrap_or(!self.attrs.generated && !self.attrs.auto_increment)
     }
 
-    fn required_insert(&self) -> bool {
-        self.insertable() && !self.nullable() && self.attrs.default.is_none()
-    }
-
     fn updateable(&self) -> bool {
         self.attrs
             .update
             .unwrap_or(!self.attrs.generated && !self.attrs.auto_increment)
     }
 
+    /// Macro-time nullability, by a literal `Option<…>` token check. Used only for the setter
+    /// value-dispatch and the `is_null` gate; storage/decode/DDL nullability and insert-required-ness
+    /// are resolved at the type level via `ColumnNullability` / `InsertReady` (alias-transparent).
     fn nullable(&self) -> bool {
-        self.attrs.nullable.unwrap_or(false)
+        strip_option(&self.value_ty).is_some()
     }
 
     fn default_tokens(&self) -> proc_macro2::TokenStream {
@@ -1551,7 +1528,6 @@ impl Field {
         let primary_key = bool_tokens(self.attrs.primary_key);
         let indexed = bool_tokens(self.attrs.index);
         let unique = bool_tokens(self.attrs.unique);
-        let nullable = bool_tokens(self.attrs.nullable.unwrap_or(false));
         let auto_increment = bool_tokens(self.attrs.auto_increment);
         let generated = bool_tokens(self.attrs.generated);
         let insertable = bool_tokens(self.insertable());
@@ -1574,7 +1550,7 @@ impl Field {
                 fn primary_key(&self) -> bool { #primary_key }
                 fn indexed(&self) -> bool { #indexed }
                 fn unique(&self) -> bool { #unique }
-                fn nullable(&self) -> bool { #nullable }
+                fn nullable(&self) -> bool { <#value_ty as ::squealy::ColumnNullability>::NULLABLE }
                 fn auto_increment(&self) -> bool { #auto_increment }
                 fn generated(&self) -> bool { #generated }
                 fn insertable(&self) -> bool { #insertable }
@@ -1745,9 +1721,9 @@ fn validate_primary_key(
         else {
             return Err(format!("primary key references unknown field `{column}`"));
         };
-        if field.attrs.nullable == Some(true) {
+        if field.nullable() {
             return Err(format!(
-                "primary key column `{column}` cannot be `nullable`"
+                "primary key column `{column}` cannot be `Option<_>` (nullable)"
             ));
         }
     }
@@ -2101,17 +2077,17 @@ fn validate_field_attrs(fields: &[Field]) -> Result<(), MacroError> {
     for field in fields {
         let attrs = &field.attrs;
         let name = field.ident.to_string();
-        let nullable = attrs.nullable == Some(true);
+        let nullable = field.nullable();
         let at_field = |message: String| MacroError::spanned(message, field.ident.span().into());
 
         if attrs.primary_key && nullable {
             return Err(at_field(format!(
-                "column `{name}` cannot be both `primary_key` and `nullable`"
+                "column `{name}` cannot be both `primary_key` and `Option<_>` (nullable)"
             )));
         }
         if attrs.auto_increment && nullable {
             return Err(at_field(format!(
-                "column `{name}` cannot be both `auto_increment` and `nullable`"
+                "column `{name}` cannot be both `auto_increment` and `Option<_>` (nullable)"
             )));
         }
         if attrs.auto_increment && attrs.default.is_some() {
@@ -2228,6 +2204,43 @@ fn named_fields(group: &Group) -> Result<Vec<Field>, String> {
     }
 }
 
+/// If a declared column value type is a literal `Option<Inner>` (bare or via a `std`/`core` path),
+/// returns its inner tokens. Token-based, so a type *alias* to `Option<…>` is not recognized — used
+/// only for the `is_null` gate and setter value-dispatch (storage/decode/DDL nullability is fully
+/// type-level via `ColumnNullability`).
+fn strip_option(value_ty: &proc_macro2::TokenStream) -> Option<proc_macro2::TokenStream> {
+    let tokens: Vec<proc_macro2::TokenTree> = value_ty.clone().into_iter().collect();
+    let open = tokens.iter().position(
+        |token| matches!(token, proc_macro2::TokenTree::Punct(p) if p.as_char() == '<'),
+    )?;
+    let path: String = tokens[..open]
+        .iter()
+        .map(|token| token.to_string())
+        .collect::<String>()
+        .replace(char::is_whitespace, "");
+    let is_option = matches!(
+        path.as_str(),
+        "Option"
+            | "::Option"
+            | "std::option::Option"
+            | "::std::option::Option"
+            | "core::option::Option"
+            | "::core::option::Option"
+    );
+    if !is_option {
+        return None;
+    }
+    let close = tokens.len().checked_sub(1)?;
+    if !matches!(&tokens[close], proc_macro2::TokenTree::Punct(p) if p.as_char() == '>') {
+        return None;
+    }
+    let inner: proc_macro2::TokenStream = tokens[open + 1..close].iter().cloned().collect();
+    if inner.is_empty() {
+        return None;
+    }
+    Some(inner)
+}
+
 fn column_type_value(type_tokens: &[TokenTree]) -> Result<proc_macro2::TokenStream, String> {
     let mut angle_depth = 0usize;
     let mut seen_first_argument = false;
@@ -2332,8 +2345,12 @@ fn parse_meta_item(
         "primary_key" => attrs.primary_key = true,
         "index" => attrs.index = true,
         "unique" => attrs.unique = true,
-        "nullable" => attrs.nullable = Some(true),
-        "not_null" => attrs.nullable = Some(false),
+        "nullable" | "not_null" => {
+            return Err(format!(
+                "`#[column({name})]` was removed: declare nullability in the column type instead \
+                 (`C::Type<'scope, Option<T>>` for a nullable column, `C::Type<'scope, T>` otherwise)"
+            ));
+        }
         "auto_increment" => attrs.auto_increment = true,
         "generated" => attrs.generated = true,
         "insert" => attrs.insert = Some(required_bool(name, value_tokens)?),

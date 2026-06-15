@@ -45,8 +45,7 @@ struct IntegrationDefaulted<'scope, C: ColumnMode = ColumnExpr> {
 struct IntegrationNullable<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
-    #[column(nullable)]
-    note: C::Type<'scope, String>,
+    note: C::Type<'scope, Option<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
@@ -89,8 +88,7 @@ pub struct IntegrationRecordId(i32);
 struct IntegrationNewtype<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key)]
     id: C::Type<'scope, IntegrationRecordId>,
-    #[column(nullable)]
-    parent_id: C::Type<'scope, IntegrationRecordId>,
+    parent_id: C::Type<'scope, Option<IntegrationRecordId>>,
     name: C::Type<'scope, String>,
 }
 

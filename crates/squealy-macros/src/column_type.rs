@@ -41,6 +41,9 @@ impl ColumnTypeStruct {
                 const COLUMN_TYPE: ::squealy::ColumnType = #column_type;
             }
 
+            // A `ColumnType` newtype is a non-null column value type; `Option<#ident>` is nullable.
+            ::squealy::impl_non_null_column!(#ident);
+
             impl ::squealy::ExprKind for #ident {
                 type Value = Self;
             }

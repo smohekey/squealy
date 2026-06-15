@@ -70,10 +70,14 @@
 //! `PostTitle`, and so on. Those marker types are useful when declaring runtime parameters with
 //! [`param`].
 //!
+//! Nullability is declared in the column type: a `C::Type<'scope, Option<T>>` field is a nullable
+//! column with value type `T` (mapping to a `NULL`-able DDL column and decoding as `Option<T>`),
+//! while `C::Type<'scope, T>` is `NOT NULL`. There is no `#[column(nullable)]` attribute. The
+//! `Option<…>` must be written literally in the field type (a type alias to `Option` is not seen).
+//!
 //! Common column attributes include:
 //!
 //! - `primary_key`, `auto_increment`, `index`, and `unique`
-//! - `nullable`
 //! - `generated`, `insert = false`, and `update = false`
 //! - `default = value(...)`, `default = current_timestamp`, `default = current_date`,
 //!   `default = current_time`, and `default_raw = "..."`
@@ -85,19 +89,21 @@
 //! database DDL. For example, the PostgreSQL backend renders `i32` as `integer` and `String` as
 //! `text`. Use `db_type` only when you need an explicit backend-specific escape hatch such as
 //! `varchar(64)`, `jsonb`, or a domain type. If a custom field type does not implement
-//! [`HasColumnType`] and does not provide `db_type`, the table derive fails to compile.
+//! [`HasColumnType`] and does not provide `db_type`, the table derive fails to compile. A `db_type`
+//! column whose value type is a bare type (not a `#[derive(ColumnType)]` newtype) must still declare
+//! its nullability via `squealy::impl_non_null_column!(MyType);`.
 //!
 //! Enabling the `uuid` feature maps a bare `uuid::Uuid` field to a `uuid` column (no `db_type`
 //! override needed) and lets a `Uuid` value be used directly in the query builder — as a predicate
 //! operand (`col.equals(id)`) and as a write-builder setter (`.id(id)`). It also covers nullable UUID
-//! columns (`#[column(nullable)]`) and left-joined UUID tables. Pair it with a backend that implements
+//! columns (`Option<uuid::Uuid>`) and left-joined UUID tables. Pair it with a backend that implements
 //! `Encode`/`Decode` for `uuid::Uuid` (the PostgreSQL backend's own `uuid` feature does, and turns on
 //! `squealy/uuid` for you).
 //!
 //! Timestamp columns are available behind feature flags: `systemtime` maps `std::time::SystemTime`
 //! to a `timestamptz` column with no extra dependency, while `time` and `chrono` map
 //! `time::OffsetDateTime` and `chrono::DateTime<Utc>` respectively. Each works in both non-null and
-//! nullable (`#[column(nullable)]`) columns and in the query builder, paired with a backend that
+//! nullable (`Option<…>`) columns and in the query builder, paired with a backend that
 //! enables the matching feature (the PostgreSQL backend turns on the core feature for you).
 //!
 //! For newtype wrappers, derive `ColumnType` on the wrapper. Single-field tuple structs and
@@ -205,7 +211,7 @@
 //! # }
 //! ```
 //!
-//! Projecting a `#[column(nullable)]` column yields `Option<T>`, so a SQL `NULL` decodes instead of
+//! Projecting an `Option<T>` (nullable) column yields `Option<T>`, so a SQL `NULL` decodes instead of
 //! erroring — the same way selecting the whole row decodes nullable fields. Non-null columns project
 //! as their bare value type.
 //!
@@ -427,8 +433,8 @@ pub use backend::{
     SchemaRefactorStore, SupportsReturning,
 };
 pub use column::{
-    Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullableValue, ColumnType,
-    ColumnValue, HasColumnType,
+    Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullability,
+    ColumnNullableValue, ColumnType, ColumnValue, HasColumnType,
 };
 pub use connection::{Connection, ConnectionWithTransaction, QueryBuilder};
 pub use database::Database;
@@ -466,18 +472,19 @@ pub use query::{
     DeleteSourceQuery, ExecutableDeleteQuery, ExecutableInsertQuery, ExecutableSelectQuery,
     ExecutableUpdateQuery, ExplicitUpdateBuilder, ExprAssignmentValue, From, InnerJoinSource,
     InsertAssignment, InsertAssignmentNode, InsertAssignments, InsertColumnKey,
-    InsertColumnNullability, InsertColumnValues, InsertQuery, InsertRow, InsertRowVisitor,
-    InsertRows, InsertRowsBuilder, IntoAssignmentValue, IntoInsertColumnValue,
-    IntoNullableAssignmentValue, IntoUpdateColumnValue, Join, JoinTarget, LeftJoin, LeftJoinSource,
-    LeftJoinTarget, Limited, MutationFiltered, MutationUnfiltered, NoSources, NonEmptyInsertRows,
-    NonNullableColumn, NullableColumn, Offset, OrderBy, PredicateNodes, PredicateVisitor,
-    PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery,
-    PreparedMutationQuery, PreparedSelectQuery, RenderAssignment, RenderAssignmentValue,
-    RenderInsertAssignments, RenderInsertRows, RenderPredicateNodes, RenderSelectAst,
-    RenderSourceSpec, RenderUpdateAssignments, ReturningProjection, RootSource, RowsAffected,
-    RuntimeAssignmentValue, SelectAst, SelectQuery, SelectSink, Selected, SourceQuery, SourceSpec,
-    StaticAssignmentValue, ToColumns, UpdateAssignment, UpdateAssignmentNode, UpdateAssignments,
-    UpdateColumnKey, UpdateColumnValues, UpdateQuery, Where, default,
+    InsertColumnNullability, InsertColumnValues, InsertQuery, InsertReady, InsertRow,
+    InsertRowVisitor, InsertRows, InsertRowsBuilder, IntoAssignmentValue, IntoInsertColumnValue,
+    IntoNullableAssignmentValue, IntoUpdateColumnValue, IsNullable, Join, JoinTarget, LeftJoin,
+    LeftJoinSource, LeftJoinTarget, Limited, MutationFiltered, MutationUnfiltered, NoSources,
+    NonEmptyInsertRows, NonNullableColumn, NullableColumn, Offset, OrderBy, PredicateNodes,
+    PredicateVisitor, PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery,
+    PreparableUpdateQuery, PreparedMutationQuery, PreparedSelectQuery, RenderAssignment,
+    RenderAssignmentValue, RenderInsertAssignments, RenderInsertRows, RenderPredicateNodes,
+    RenderSelectAst, RenderSourceSpec, RenderUpdateAssignments, ReturningProjection, RootSource,
+    RowsAffected, RuntimeAssignmentValue, SelectAst, SelectQuery, SelectSink, Selected,
+    SourceQuery, SourceSpec, StaticAssignmentValue, ToColumns, UpdateAssignment,
+    UpdateAssignmentNode, UpdateAssignments, UpdateColumnKey, UpdateColumnValues, UpdateQuery,
+    Where, default,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{ColumnType, Database, Schema, Table};
