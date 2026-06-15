@@ -97,10 +97,15 @@ struct SoftWidget<'scope, C: ColumnMode = ColumnExpr> {
     id: C::Type<'scope, i32>,
     tenant_id: C::Type<'scope, i32>,
     code: C::Type<'scope, i32>,
-    #[column(unique, where = |row| row.deleted_at.is_null())]
+    // The column-level predicate references `position`, a col_name (`C`) keyword that PostgreSQL
+    // deparses quoted (`"position"`), so the canonicalizer must keep it quoted — with only
+    // reserved/type keywords it would wrongly unquote and churn.
+    #[column(unique, where = |row| row.deleted_at.is_null().and(row.position.is_null()))]
     slug: C::Type<'scope, String>,
     status: C::Type<'scope, i32>,
     active: C::Type<'scope, bool>,
+    #[column(name = "position", nullable)]
+    position: C::Type<'scope, i32>,
     #[column(nullable)]
     deleted_at: C::Type<'scope, i64>,
 }

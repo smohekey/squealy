@@ -6,25 +6,34 @@
 //! fully parenthesized. PostgreSQL's deparse agrees on operators, `IS NULL`/`IS NOT NULL`, and
 //! parenthesization, and differs only in two surface details:
 //!
-//!   * it leaves an identifier unquoted when it is a "safe" lowercase identifier that is not a
-//!     reserved (or type/function-name) keyword, whereas squealy always quotes; and
+//!   * it leaves an identifier unquoted when it is a "safe" lowercase identifier that PostgreSQL's
+//!     `quote_identifier` would not quote (not a keyword, or only an `unreserved` keyword), whereas
+//!     squealy always quotes; and
 //!   * it lowercases boolean literals (`true` / `false`).
 //!
 //! This transform applies exactly those two changes and copies everything else verbatim, so a
 //! literal-free predicate (`("deleted_at" IS NULL)` → `(deleted_at IS NULL)`), a column-to-column
 //! comparison, a boolean comparison, and a small integer comparison all round-trip cleanly.
 //!
-//! It deliberately does **not** synthesize the value-literal type casts PostgreSQL adds during
-//! parse (`'x'::text`, `(1.5)::double precision`, `'5000000000'::bigint`) — those depend on the
-//! literal value and the column type, which an offline string transform cannot reproduce — so a
-//! predicate comparing a column to a value literal can still churn. That is tracked separately.
+//! It deliberately does **not** reproduce the structural normalizations PostgreSQL applies when it
+//! understands the expression, so two kinds of predicate can still churn (both tracked separately,
+//! for a semantic / round-trip-to-pg approach):
+//!
+//!   * value-literal type casts synthesized during parse (`'x'::text`, `(1.5)::double precision`,
+//!     `'5000000000'::bigint`), which depend on the literal value and column type; and
+//!   * flattening of associative chains of three or more operands — PostgreSQL deparses
+//!     `((a AND b) AND c)` as `(a AND b AND c)`, while the renderer nests left-associatively.
+//!
+//! Single comparisons / null checks and two-operand `AND`/`OR` chains match structurally, so the
+//! common soft-delete predicate (`("deleted_at" IS NULL)`) and its small combinations are covered.
 
-/// Reserved (`R`) and type/function-name (`T`) keywords. PostgreSQL's `quote_identifier` quotes an
-/// identifier matching one of these even when it is otherwise lowercase-safe; `col_name` (`C`) and
-/// `unreserved` (`U`) keywords are deparsed unquoted, so they are not listed. Sourced from
-/// `SELECT word FROM pg_get_keywords() WHERE catcode IN ('R','T')` on PostgreSQL 17. Kept sorted for
-/// binary search (asserted by a unit test).
-static RESERVED_KEYWORDS: &[&str] = &[
+/// Keywords PostgreSQL's `quote_identifier` quotes when used as an identifier: every keyword whose
+/// category is not `unreserved` (`U`) — i.e. reserved (`R`), type/function-name (`T`), and col_name
+/// (`C`). An identifier equal to one of these is quoted in deparse output even when it is otherwise
+/// lowercase-safe (e.g. `between`, a col_name keyword, deparses as `"between"`), so it must stay
+/// quoted here. Sourced from `SELECT word FROM pg_get_keywords() WHERE catcode <> 'U'` on
+/// PostgreSQL 17. Kept sorted for binary search (asserted by a unit test).
+static QUOTED_KEYWORDS: &[&str] = &[
     "all",
     "analyse",
     "analyze",
@@ -35,11 +44,18 @@ static RESERVED_KEYWORDS: &[&str] = &[
     "asc",
     "asymmetric",
     "authorization",
+    "between",
+    "bigint",
     "binary",
+    "bit",
+    "boolean",
     "both",
     "case",
     "cast",
+    "char",
+    "character",
     "check",
+    "coalesce",
     "collate",
     "collation",
     "column",
@@ -54,6 +70,8 @@ static RESERVED_KEYWORDS: &[&str] = &[
     "current_time",
     "current_timestamp",
     "current_user",
+    "dec",
+    "decimal",
     "default",
     "deferrable",
     "desc",
@@ -62,75 +80,129 @@ static RESERVED_KEYWORDS: &[&str] = &[
     "else",
     "end",
     "except",
+    "exists",
+    "extract",
     "false",
     "fetch",
+    "float",
     "for",
     "foreign",
     "freeze",
     "from",
     "full",
     "grant",
+    "greatest",
     "group",
+    "grouping",
     "having",
     "ilike",
     "in",
     "initially",
     "inner",
+    "inout",
+    "int",
+    "integer",
     "intersect",
+    "interval",
     "into",
     "is",
     "isnull",
     "join",
+    "json",
+    "json_array",
+    "json_arrayagg",
+    "json_exists",
+    "json_object",
+    "json_objectagg",
+    "json_query",
+    "json_scalar",
+    "json_serialize",
+    "json_table",
+    "json_value",
     "lateral",
     "leading",
+    "least",
     "left",
     "like",
     "limit",
     "localtime",
     "localtimestamp",
+    "merge_action",
+    "national",
     "natural",
+    "nchar",
+    "none",
+    "normalize",
     "not",
     "notnull",
     "null",
+    "nullif",
+    "numeric",
     "offset",
     "on",
     "only",
     "or",
     "order",
+    "out",
     "outer",
     "overlaps",
+    "overlay",
     "placing",
+    "position",
+    "precision",
     "primary",
+    "real",
     "references",
     "returning",
     "right",
+    "row",
     "select",
     "session_user",
+    "setof",
     "similar",
+    "smallint",
     "some",
+    "substring",
     "symmetric",
     "system_user",
     "table",
     "tablesample",
     "then",
+    "time",
+    "timestamp",
     "to",
     "trailing",
+    "treat",
+    "trim",
     "true",
     "union",
     "unique",
     "user",
     "using",
+    "values",
+    "varchar",
     "variadic",
     "verbose",
     "when",
     "where",
     "window",
     "with",
+    "xmlattributes",
+    "xmlconcat",
+    "xmlelement",
+    "xmlexists",
+    "xmlforest",
+    "xmlnamespaces",
+    "xmlparse",
+    "xmlpi",
+    "xmlroot",
+    "xmlserialize",
+    "xmltable",
 ];
 
 /// True when PostgreSQL would deparse `ident` without quotes: a non-empty identifier matching
-/// `[a-z_][a-z0-9_]*` that is not a reserved/type-function keyword. Anything with uppercase or
-/// special characters, or any reserved keyword, stays quoted.
+/// `[a-z_][a-z0-9_]*` that is not a keyword PostgreSQL quotes (see [`QUOTED_KEYWORDS`]). Anything
+/// with uppercase or special characters stays quoted too.
 fn deparses_unquoted(ident: &str) -> bool {
     let mut chars = ident.chars();
     let Some(first) = chars.next() else {
@@ -142,7 +214,7 @@ fn deparses_unquoted(ident: &str) -> bool {
     if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
         return false;
     }
-    RESERVED_KEYWORDS.binary_search(&ident).is_err()
+    QUOTED_KEYWORDS.binary_search(&ident).is_err()
 }
 
 /// Rewrites a squealy-rendered partial-index predicate into PostgreSQL's `pg_get_expr` form. See the
@@ -223,8 +295,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reserved_keywords_are_sorted_for_binary_search() {
-        assert!(RESERVED_KEYWORDS.is_sorted());
+    fn quoted_keywords_are_sorted_for_binary_search() {
+        assert!(QUOTED_KEYWORDS.is_sorted());
     }
 
     #[test]
@@ -240,15 +312,33 @@ mod tests {
     }
 
     #[test]
-    fn keeps_reserved_and_mixed_case_identifiers_quoted() {
-        // `order` is a reserved keyword; `MixedCol` is not lowercase-safe.
+    fn keeps_quoted_keywords_and_mixed_case_identifiers_quoted() {
+        // `order` is a reserved keyword and `between` a col_name keyword: PostgreSQL quotes both
+        // categories in deparse output. `MixedCol` is not lowercase-safe.
         assert_eq!(
             canonical_index_predicate("(\"order\" IS NULL)"),
             "(\"order\" IS NULL)"
         );
         assert_eq!(
+            canonical_index_predicate("(\"between\" IS NULL)"),
+            "(\"between\" IS NULL)"
+        );
+        assert_eq!(
             canonical_index_predicate("(\"MixedCol\" IS NULL)"),
             "(\"MixedCol\" IS NULL)"
+        );
+    }
+
+    #[test]
+    fn unquotes_unreserved_keyword_identifiers() {
+        // `name` and `value` are unreserved keywords, which PostgreSQL deparses unquoted.
+        assert_eq!(
+            canonical_index_predicate("(\"name\" IS NULL)"),
+            "(name IS NULL)"
+        );
+        assert_eq!(
+            canonical_index_predicate("(\"value\" IS NULL)"),
+            "(value IS NULL)"
         );
     }
 
