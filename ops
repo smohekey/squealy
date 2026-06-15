@@ -1,1 +1,1 @@
-{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":2,"timestamp":1781507392,"nonce":"IssuGQip1cfBiGU4X5waOvzSGAY=","title":"Support partial / filtered unique indexes (UNIQUE ... WHERE) for soft-delete","was":"There's no way to declare a **partial / filtered unique index** — a `UNIQUE`"}]}
+{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":4,"timestamp":1781518374,"nonce":"nJx/Aj7Kwc7di24Jwf6td465Qhw=","status":2}]}
