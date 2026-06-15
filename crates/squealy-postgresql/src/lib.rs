@@ -9,6 +9,8 @@ use squealy::{
 use tokio_postgres::Client;
 
 #[cfg(feature = "schema")]
+mod canonical;
+#[cfg(feature = "schema")]
 mod introspect;
 mod query;
 mod sql;
@@ -246,6 +248,15 @@ impl squealy::SchemaIntrospect for PostgresConnection {
     /// method to that so a crate-declared index does not churn against the live schema.
     fn default_index_method(&self) -> Option<squealy::IndexMethod> {
         Some(squealy::IndexMethod::BTree)
+    }
+
+    /// PostgreSQL introspects a partial-index predicate via `pg_get_expr`, which deparses to
+    /// unquoted lowercase identifiers and lowercase booleans (e.g. `(deleted_at IS NULL)`). A
+    /// crate-rendered predicate quotes identifiers and uppercases booleans, so it is normalized to
+    /// that form here to keep publish/status idempotent. See [`canonical`] for scope and the
+    /// value-literal-cast limitation.
+    fn canonical_index_predicate(&self, predicate: &str) -> String {
+        canonical::canonical_index_predicate(predicate)
     }
 }
 
