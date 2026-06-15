@@ -201,8 +201,10 @@ static QUOTED_KEYWORDS: &[&str] = &[
 ];
 
 /// True when PostgreSQL would deparse `ident` without quotes: a non-empty identifier matching
-/// `[a-z_][a-z0-9_]*` that is not a keyword PostgreSQL quotes (see [`QUOTED_KEYWORDS`]). Anything
-/// with uppercase or special characters stays quoted too.
+/// `[a-z_][a-z0-9_]*` that is not a keyword PostgreSQL quotes (see [`QUOTED_KEYWORDS`]).
+/// `quote_identifier` treats only `[a-z0-9_]` as safe, so an identifier containing `$`, uppercase,
+/// or non-ASCII characters is quoted in deparse output (verified on pg 17, e.g. `foo$bar` deparses
+/// as `"foo$bar"`) and is therefore kept quoted here.
 fn deparses_unquoted(ident: &str) -> bool {
     let mut chars = ident.chars();
     let Some(first) = chars.next() else {
@@ -217,30 +219,81 @@ fn deparses_unquoted(ident: &str) -> bool {
     QUOTED_KEYWORDS.binary_search(&ident).is_err()
 }
 
+/// If `bytes[start]` (a `$`) begins a dollar-quoted string `$tag$...$tag$` (the tag follows the
+/// unquoted-identifier rules and may be empty), returns the index just past the closing tag;
+/// otherwise `None`. Such literals only appear in package- or programmatically-authored predicates
+/// (the renderer never emits them) and are copied verbatim so their bodies are never read as
+/// identifiers.
+fn dollar_quoted_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut tag_end = start + 1;
+    if matches!(bytes.get(tag_end), Some(c) if c.is_ascii_alphabetic() || *c == b'_') {
+        tag_end += 1;
+        while matches!(bytes.get(tag_end), Some(c) if c.is_ascii_alphanumeric() || *c == b'_') {
+            tag_end += 1;
+        }
+    }
+    if bytes.get(tag_end) != Some(&b'$') {
+        return None;
+    }
+    let tag = &bytes[start..=tag_end];
+    let mut i = tag_end + 1;
+    while i + tag.len() <= bytes.len() {
+        if &bytes[i..i + tag.len()] == tag {
+            return Some(i + tag.len());
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Returns the index just past the closing `'` of the string literal whose opening quote is at
+/// `quote`. A doubled `''` is an embedded quote in both modes; `escape_aware` (an `E'...'` escape
+/// string) additionally treats `\x` as a two-character escape, so `\'` does not end the string.
+fn quoted_string_end(bytes: &[u8], quote: usize, escape_aware: bool) -> usize {
+    let mut i = quote + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if escape_aware => i = (i + 2).min(bytes.len()),
+            b'\'' if bytes.get(i + 1) == Some(&b'\'') => i += 2,
+            b'\'' => return i + 1,
+            _ => i += 1,
+        }
+    }
+    i
+}
+
 /// Rewrites a squealy-rendered partial-index predicate into PostgreSQL's `pg_get_expr` form. See the
-/// module docs for the scope and the known value-literal-cast limitation.
+/// module docs for the scope and known limitations. String literals — standard `'...'`, escape
+/// `E'...'`, and dollar-quoted `$tag$...$tag$` — are copied verbatim, so a body that happens to
+/// contain a `"…"` span or a boolean-looking word is never rewritten.
 pub(crate) fn canonical_index_predicate(predicate: &str) -> String {
     let bytes = predicate.as_bytes();
     let mut out = String::with_capacity(predicate.len());
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            // String literal: copy verbatim through the closing quote, honoring `''` escapes.
+            // Standard string literal: verbatim through the closing quote (`''` escape).
             b'\'' => {
-                let start = i;
-                i += 1;
-                while i < bytes.len() {
-                    if bytes[i] == b'\'' {
-                        if bytes.get(i + 1) == Some(&b'\'') {
-                            i += 2;
-                            continue;
-                        }
-                        i += 1;
-                        break;
-                    }
+                let end = quoted_string_end(bytes, i, false);
+                out.push_str(&predicate[i..end]);
+                i = end;
+            }
+            // Escape string `E'...'` / `e'...'`: verbatim (also honors `\` escapes). A bare `E`/`e`
+            // not introducing a string falls through to the keyword/identifier handling below.
+            b'E' | b'e' if bytes.get(i + 1) == Some(&b'\'') => {
+                let end = quoted_string_end(bytes, i + 1, true);
+                out.push_str(&predicate[i..end]);
+                i = end;
+            }
+            // Dollar-quoted string literal: verbatim, or a lone `$` if it does not open one.
+            b'$' => {
+                if let Some(end) = dollar_quoted_end(bytes, i) {
+                    out.push_str(&predicate[i..end]);
+                    i = end;
+                } else {
+                    out.push('$');
                     i += 1;
                 }
-                out.push_str(&predicate[start..i]);
             }
             // Quoted identifier: unquote when PostgreSQL would, else re-emit the span verbatim.
             b'"' => {
@@ -365,6 +418,45 @@ mod tests {
         assert_eq!(
             canonical_index_predicate("(\"label\" = 'o''brien')"),
             "(label = 'o''brien')"
+        );
+    }
+
+    #[test]
+    fn keeps_dollar_and_non_safe_char_identifiers_quoted() {
+        // PostgreSQL's `quote_identifier` only treats `[a-z0-9_]` as safe, so `$` stays quoted —
+        // matching pg's deparse `("foo$bar" IS NULL)`. Unquoting it would itself cause churn.
+        assert_eq!(
+            canonical_index_predicate("(\"foo$bar\" IS NULL)"),
+            "(\"foo$bar\" IS NULL)"
+        );
+    }
+
+    #[test]
+    fn does_not_rewrite_inside_dollar_quoted_strings() {
+        // A `"…"` span inside a dollar-quoted string is part of the string value, not an identifier;
+        // unquoting it would change which rows the index covers.
+        assert_eq!(
+            canonical_index_predicate("(\"label\" = $$\"active\"$$)"),
+            "(label = $$\"active\"$$)"
+        );
+        // Tagged dollar-quote with an inner `TRUE` word and a nested `$$`.
+        assert_eq!(
+            canonical_index_predicate("(\"label\" = $tag$ TRUE \"x\" $tag$)"),
+            "(label = $tag$ TRUE \"x\" $tag$)"
+        );
+    }
+
+    #[test]
+    fn does_not_rewrite_inside_escape_strings() {
+        // `E'...'` honors backslash escapes, so `\'` does not end the string; the `"z"` span and the
+        // `FALSE` word inside must be copied verbatim.
+        assert_eq!(
+            canonical_index_predicate("(\"a\" = E'x\\'\"z\" FALSE')"),
+            "(a = E'x\\'\"z\" FALSE')"
+        );
+        assert_eq!(
+            canonical_index_predicate("(\"a\" = E'it''s')"),
+            "(a = E'it''s')"
         );
     }
 
