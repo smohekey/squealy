@@ -1985,7 +1985,9 @@ fn parse_index(tokens: Vec<TokenTree>) -> Result<IndexAttrs, String> {
             "where" => {
                 if !matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '=')
                 {
-                    return Err("index option `where` requires a `= |row| ...` predicate".to_owned());
+                    return Err(
+                        "index option `where` requires a `= |row| ...` predicate".to_owned()
+                    );
                 }
                 index += 1;
                 attrs.predicate = Some(collect_predicate_tokens(&tokens, &mut index, "index")?);
@@ -2203,11 +2205,7 @@ fn collect_predicate_tokens(
 /// Re-tokenizes a slice of `proc_macro` token trees as a `proc_macro2` stream so it can be spliced
 /// into a `quote!` body (the predicate expression is emitted back out verbatim).
 fn token_trees_to_stream(tokens: &[TokenTree]) -> proc_macro2::TokenStream {
-    tokens
-        .iter()
-        .cloned()
-        .collect::<TokenStream>()
-        .into()
+    tokens.iter().cloned().collect::<TokenStream>().into()
 }
 
 /// Emits a `fn() -> String` that lowers a `where = |row| ...` predicate to an ANSI SQL string, and
@@ -2504,9 +2502,7 @@ fn parse_meta_item(
         "check" => attrs.check = Some(required_literal(name, value_tokens)?),
         "where" => {
             if value_tokens.is_empty() {
-                return Err(
-                    "column option `where` requires a `= |row| ...` predicate".to_owned()
-                );
+                return Err("column option `where` requires a `= |row| ...` predicate".to_owned());
             }
             attrs.predicate = Some(token_trees_to_stream(value_tokens));
         }

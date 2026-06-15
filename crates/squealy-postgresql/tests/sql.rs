@@ -1402,6 +1402,86 @@ fn postgres_write_table_emits_partial_unique_index() {
     );
 }
 
+// A predicate combining a NULL check with a scalar value-literal comparison: `email` is unique
+// among live, active rows only.
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Catalog)]
+struct Roster<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, i32>,
+    #[column(unique, where = |row| row.deleted_at.is_null().and(row.status.equals(1)))]
+    email: C::Type<'scope, String>,
+    status: C::Type<'scope, i32>,
+    #[column(nullable)]
+    deleted_at: C::Type<'scope, i64>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct RosterCatalog {
+    rosters: Roster<'static, ColumnName>,
+}
+
+#[allow(dead_code)]
+#[derive(Database)]
+struct RosterDb {
+    catalog: RosterCatalog,
+}
+
+// A predicate comparing a column to a string literal that contains a single quote, to exercise
+// SQL string-literal escaping in the DDL predicate renderer.
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Catalog)]
+struct Region<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, i32>,
+    #[column(unique, where = |row| row.label.equals("o'brien"))]
+    code: C::Type<'scope, String>,
+    label: C::Type<'scope, String>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct RegionCatalog {
+    regions: Region<'static, ColumnName>,
+}
+
+#[allow(dead_code)]
+#[derive(Database)]
+struct RegionDb {
+    catalog: RegionCatalog,
+}
+
+#[test]
+fn postgres_renders_partial_unique_index_with_literal_predicate() {
+    let model = DatabaseModel::from_database::<RosterDb>();
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // A scalar value literal renders inline (no bind placeholder), alongside the NULL check.
+    assert!(
+        sql.contains(
+            "CREATE UNIQUE INDEX \"uq_rosters_email\" ON \"roster_catalog\".\"rosters\" (\"email\") WHERE ((\"deleted_at\" IS NULL) AND (\"status\" = 1))"
+        ),
+        "expected partial unique index with inline literal in: {sql}"
+    );
+}
+
+#[test]
+fn postgres_escapes_string_literal_in_partial_index_predicate() {
+    let model = DatabaseModel::from_database::<RegionDb>();
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // The embedded single quote is doubled, matching backend text-literal quoting.
+    assert!(
+        sql.contains("WHERE (\"label\" = 'o''brien')"),
+        "expected escaped string literal in predicate: {sql}"
+    );
+}
+
 #[test]
 fn postgres_renders_table_and_column_comments() {
     let model = DatabaseModel {

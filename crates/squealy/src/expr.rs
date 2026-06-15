@@ -697,21 +697,69 @@ where
 /// partial-index predicate (`CREATE UNIQUE INDEX ... WHERE <predicate>`).
 ///
 /// Unlike [`RenderAst`], this path is **backend-independent** and carries no bind parameters:
-/// columns render as bare, double-quoted identifiers with no source alias, and there is no
-/// literal encoding. It is implemented only for the literal-free node shapes, so a predicate
-/// that references a value literal does not satisfy the bound and fails to compile — exactly the
-/// subset (`IS NULL` / `IS NOT NULL`, column-to-column comparisons, and their boolean
-/// combinations) a partial unique index for soft-delete needs.
+/// columns render as bare, double-quoted identifiers with no source alias, and a value literal
+/// renders *inline* (no `$n` placeholder) via [`DdlSqlLiteral`]. It is implemented for columns and
+/// for literals of the scalar value types; operands whose SQL form is backend-specific (a runtime
+/// bind param, an arithmetic sub-expression, or a literal of a temporal/uuid type) do not satisfy
+/// the bound and fail to compile.
 #[doc(hidden)]
 pub trait DdlExprAst {
     fn render_ddl(&self, out: &mut String);
 }
 
 /// Renders a predicate node to a self-contained ANSI SQL string for a DDL partial-index
-/// predicate. See [`DdlExprAst`] for the backend-independent, literal-free contract.
+/// predicate. See [`DdlExprAst`] for the backend-independent contract.
 #[doc(hidden)]
 pub trait DdlPredicateAst {
     fn render_ddl(&self, out: &mut String);
+}
+
+/// A Rust value that renders as an inline ANSI SQL literal inside a DDL partial-index predicate
+/// (e.g. `... WHERE "status" = 0`). Implemented for the scalar value types; types whose SQL
+/// literal form is backend-specific or ambiguous (timestamps, `uuid`) are intentionally omitted, so
+/// comparing such a column to a literal in a partial-index predicate is a compile error rather than
+/// producing dialect-dependent or malformed SQL.
+#[doc(hidden)]
+pub trait DdlSqlLiteral {
+    fn render_sql_literal(&self, out: &mut String);
+}
+
+macro_rules! impl_ddl_sql_literal_display {
+    ($($ty:ty),* $(,)?) => {
+        $(impl DdlSqlLiteral for $ty {
+            fn render_sql_literal(&self, out: &mut String) {
+                use ::std::fmt::Write as _;
+                // Integer/float `Display` is already a valid SQL numeric literal.
+                let _ = write!(out, "{self}");
+            }
+        })*
+    };
+}
+
+impl_ddl_sql_literal_display!(i8, i16, i32, i64, i128, isize);
+impl_ddl_sql_literal_display!(u8, u16, u32, u64, u128, usize);
+impl_ddl_sql_literal_display!(f32, f64);
+
+impl DdlSqlLiteral for bool {
+    fn render_sql_literal(&self, out: &mut String) {
+        out.push_str(if *self { "TRUE" } else { "FALSE" });
+    }
+}
+
+impl DdlSqlLiteral for String {
+    fn render_sql_literal(&self, out: &mut String) {
+        // Standard SQL single-quoted string with embedded quotes doubled, matching the backend
+        // text-literal quoting. Values originate from compile-time predicates, so this is
+        // correctness (a slug like `o'brien`), not injection defense.
+        out.push('\'');
+        for ch in self.chars() {
+            if ch == '\'' {
+                out.push('\'');
+            }
+            out.push(ch);
+        }
+        out.push('\'');
+    }
 }
 
 impl<K> DdlExprAst for ColumnExprAst<K> {
@@ -724,6 +772,16 @@ impl<K> DdlExprAst for ColumnExprAst<K> {
             out.push(ch);
         }
         out.push('"');
+    }
+}
+
+impl<K> DdlExprAst for LiteralExprAst<K>
+where
+    K: ExprKind,
+    K::Value: DdlSqlLiteral,
+{
+    fn render_ddl(&self, out: &mut String) {
+        self.value.render_sql_literal(out);
     }
 }
 

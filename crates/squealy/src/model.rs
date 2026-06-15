@@ -707,7 +707,11 @@ fn index_from_dyn(table: &str, index: &dyn Index) -> IndexModel {
 /// A partial unique index synthesized from a predicated `#[column(unique, where = ...)]` or
 /// `#[unique(columns = [..], where = ...)]` declaration. It keeps the `uq_<table>_<columns>`
 /// identity of the constraint it replaces, but renders as `CREATE UNIQUE INDEX ... WHERE ...`.
-fn partial_unique_index(name: String, columns: Vec<String>, predicate: fn() -> String) -> IndexModel {
+fn partial_unique_index(
+    name: String,
+    columns: Vec<String>,
+    predicate: fn() -> String,
+) -> IndexModel {
     IndexModel {
         name,
         columns,
