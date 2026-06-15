@@ -76,7 +76,12 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
     }
     // Table-level `#[unique(columns = [..])]` constraints render as trailing constraints too, so the
     // direct `write_table` path matches the model-based renderer and actually enforces uniqueness.
+    // A unique carrying a `where = ...` predicate is *not* a table constraint (Postgres cannot put a
+    // `WHERE` on one); it is emitted as a partial unique index after the table instead.
     for unique in table.uniques() {
+        if unique.predicate.is_some() {
+            continue;
+        }
         writer.write_all(b", ")?;
         if let Some(name) = unique.name {
             writer.write_all(b"CONSTRAINT ")?;
@@ -101,9 +106,44 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
         writer.write_all(b" (")?;
         write_quoted_idents(index.columns(), writer)?;
         writer.write_all(b")")?;
+        if let Some(predicate) = index.predicate() {
+            writer.write_all(b" WHERE ")?;
+            writer.write_all(predicate().as_bytes())?;
+        }
+    }
+
+    // Predicated `#[unique(columns = [..], where = ...)]` constraints, emitted as partial unique
+    // indexes so the `WHERE` is honored. The `uq_<table>_<columns>` name matches the model path.
+    for unique in table.uniques() {
+        let Some(predicate) = unique.predicate else {
+            continue;
+        };
+        writer.write_all(b"\nCREATE UNIQUE INDEX ")?;
+        match unique.name {
+            Some(name) => write_quoted_ident(name, writer)?,
+            None => write_quoted_ident(&derived_unique_name(table, unique.columns), writer)?,
+        }
+        writer.write_all(b" ON ")?;
+        write_qualified_name(table.schema_name(), table.name(), writer)?;
+        writer.write_all(b" (")?;
+        write_quoted_idents(unique.columns, writer)?;
+        writer.write_all(b") WHERE ")?;
+        writer.write_all(predicate().as_bytes())?;
     }
 
     Ok(())
+}
+
+/// Builds the `uq_<table>_<columns>` name a partial unique index falls back to when the
+/// `#[unique(..)]` declaration did not supply an explicit name. Mirrors the model builder's
+/// `uq_name` convention so the two DDL paths agree.
+fn derived_unique_name(table: &(dyn Table + Sync), columns: &[&str]) -> String {
+    let mut name = format!("uq_{}", table.name());
+    for column in columns {
+        name.push('_');
+        name.push_str(column);
+    }
+    name
 }
 
 /// Builds a deterministic, unique index name for an index that did not supply one.

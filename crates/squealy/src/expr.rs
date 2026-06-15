@@ -693,6 +693,125 @@ where
     }
 }
 
+/// Renders an expression operand to a self-contained ANSI SQL fragment for use inside a DDL
+/// partial-index predicate (`CREATE UNIQUE INDEX ... WHERE <predicate>`).
+///
+/// Unlike [`RenderAst`], this path is **backend-independent** and carries no bind parameters:
+/// columns render as bare, double-quoted identifiers with no source alias, and there is no
+/// literal encoding. It is implemented only for the literal-free node shapes, so a predicate
+/// that references a value literal does not satisfy the bound and fails to compile — exactly the
+/// subset (`IS NULL` / `IS NOT NULL`, column-to-column comparisons, and their boolean
+/// combinations) a partial unique index for soft-delete needs.
+#[doc(hidden)]
+pub trait DdlExprAst {
+    fn render_ddl(&self, out: &mut String);
+}
+
+/// Renders a predicate node to a self-contained ANSI SQL string for a DDL partial-index
+/// predicate. See [`DdlExprAst`] for the backend-independent, literal-free contract.
+#[doc(hidden)]
+pub trait DdlPredicateAst {
+    fn render_ddl(&self, out: &mut String);
+}
+
+impl<K> DdlExprAst for ColumnExprAst<K> {
+    fn render_ddl(&self, out: &mut String) {
+        out.push('"');
+        for ch in self.column.chars() {
+            if ch == '"' {
+                out.push('"');
+            }
+            out.push(ch);
+        }
+        out.push('"');
+    }
+}
+
+impl<Operand> DdlPredicateAst for NullCheckPredicateAst<Operand>
+where
+    Operand: DdlExprAst,
+{
+    fn render_ddl(&self, out: &mut String) {
+        out.push('(');
+        self.operand.render_ddl(out);
+        out.push_str(if self.negated {
+            " IS NOT NULL)"
+        } else {
+            " IS NULL)"
+        });
+    }
+}
+
+impl<Left, Right> DdlPredicateAst for ComparePredicateAst<Left, Right>
+where
+    Left: DdlExprAst,
+    Right: DdlExprAst,
+{
+    fn render_ddl(&self, out: &mut String) {
+        out.push('(');
+        self.left.render_ddl(out);
+        out.push(' ');
+        out.push_str(crate::render::render_compare_op(self.op));
+        out.push(' ');
+        self.right.render_ddl(out);
+        out.push(')');
+    }
+}
+
+impl<Left, Right> DdlPredicateAst for AndPredicateAst<Left, Right>
+where
+    Left: DdlPredicateAst,
+    Right: DdlPredicateAst,
+{
+    fn render_ddl(&self, out: &mut String) {
+        out.push('(');
+        self.left.render_ddl(out);
+        out.push_str(" AND ");
+        self.right.render_ddl(out);
+        out.push(')');
+    }
+}
+
+impl<Left, Right> DdlPredicateAst for OrPredicateAst<Left, Right>
+where
+    Left: DdlPredicateAst,
+    Right: DdlPredicateAst,
+{
+    fn render_ddl(&self, out: &mut String) {
+        out.push('(');
+        self.left.render_ddl(out);
+        out.push_str(" OR ");
+        self.right.render_ddl(out);
+        out.push(')');
+    }
+}
+
+impl<Predicate> DdlPredicateAst for NotPredicateAst<Predicate>
+where
+    Predicate: DdlPredicateAst,
+{
+    fn render_ddl(&self, out: &mut String) {
+        out.push_str("(NOT ");
+        self.predicate.render_ddl(out);
+        out.push(')');
+    }
+}
+
+/// Render a typed, literal-free [`Predicate`] to a self-contained ANSI SQL string suitable for a
+/// DDL partial-index `WHERE` clause. Used by the `Table` derive to lower a `where = |row| ...`
+/// attribute on a unique column/constraint or index into [`IndexModel::predicate`].
+///
+/// [`IndexModel::predicate`]: crate::model::IndexModel::predicate
+pub fn render_ddl_predicate<K, Ast>(predicate: &Predicate<'_, K, Ast>) -> String
+where
+    K: PredicateKind,
+    Ast: PredicateAst + DdlPredicateAst,
+{
+    let mut out = String::new();
+    predicate.ast.render_ddl(&mut out);
+    out
+}
+
 /// A typed SQL scalar expression scoped to a query builder invocation.
 #[derive(Debug, PartialEq)]
 pub struct Expr<'scope, K, Ast = ColumnExprAst<K>>

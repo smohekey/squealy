@@ -137,6 +137,34 @@
 //! The single-column forms `#[column(primary_key)]`, `#[column(unique)]`, and `#[column(index)]`
 //! remain available for one-column constraints.
 //!
+//! ### Partial (filtered) unique indexes
+//!
+//! A `where = |row| ...` clause turns a unique into a *partial unique index*
+//! (`CREATE UNIQUE INDEX ... WHERE <predicate>`) — the standard soft-delete idiom, where a slug or
+//! email is unique only among live rows and reusable once a row is soft-deleted:
+//!
+//! ```rust
+//! # use squealy::*;
+//! #[derive(Table)]
+//! struct Organization<'scope, C: ColumnMode = ColumnExpr> {
+//!     #[column(primary_key)]
+//!     id: C::Type<'scope, i32>,
+//!     #[column(unique, where = |row| row.deleted_at.is_null())]
+//!     slug: C::Type<'scope, String>,
+//!     #[column(nullable)]
+//!     deleted_at: C::Type<'scope, i64>,
+//! }
+//! ```
+//!
+//! The same `where = ...` is accepted on the table-level `#[unique(columns = [..], where = ...)]`
+//! (composite partial uniques) and `#[index(columns = [..], where = ...)]`. The predicate is a
+//! typed expression over the table's columns — the same builders used in `where_` (`.is_null()`,
+//! `.is_not_null()`, column-to-column comparisons, `.and()` / `.or()` / `.not_()`) — so a typo in a
+//! column name is a compile error, not bad SQL. It currently supports the **literal-free** subset
+//! (no value operands such as `col.equals("x")`); that is exactly what soft-delete needs, and a
+//! predicate that references a literal fails to compile. Partial indexes are PostgreSQL-only; MySQL
+//! rejects them.
+//!
 //! ## Stream rows from select queries
 //!
 //! Select queries start from a source table and finish with `select`:
@@ -435,13 +463,13 @@ pub use database::Database;
 pub use dialect::Dialect;
 pub use expr::{
     AddExpr, AndPredicate, AnyPredicate, ArithmeticOp, BinaryExprAst, ColumnExprAst, ColumnRef,
-    CompareOp, ComparePredicateAst, DivideExpr, EqualsPredicate, Expr, ExprAst, ExprKind,
-    ExprVisitor, GreaterThanOrEqualsPredicate, GreaterThanPredicate, IntoExpr, IsNotNullPredicate,
-    IsNullPredicate, LessThanOrEqualsPredicate, LessThanPredicate, LiteralExprAst, MultiplyExpr,
-    NotEqualsPredicate, NotPredicate, NullCheckPredicateAst, Nullable, NullableExpr, OrPredicate,
-    Order, OrderDirection, ParamExprAst, Predicate, PredicateAst, PredicateAstVisitor,
-    PredicateKind, RenderAst, RenderPredicateAst, RuntimeParam, SameValue, SourceAlias, SqlDivide,
-    SqlNumber, SubtractExpr, param,
+    CompareOp, ComparePredicateAst, DdlExprAst, DdlPredicateAst, DivideExpr, EqualsPredicate, Expr,
+    ExprAst, ExprKind, ExprVisitor, GreaterThanOrEqualsPredicate, GreaterThanPredicate, IntoExpr,
+    IsNotNullPredicate, IsNullPredicate, LessThanOrEqualsPredicate, LessThanPredicate,
+    LiteralExprAst, MultiplyExpr, NotEqualsPredicate, NotPredicate, NullCheckPredicateAst, Nullable,
+    NullableExpr, OrPredicate, Order, OrderDirection, ParamExprAst, Predicate, PredicateAst,
+    PredicateAstVisitor, PredicateKind, RenderAst, RenderPredicateAst, RuntimeParam, SameValue,
+    SourceAlias, SqlDivide, SqlNumber, SubtractExpr, param, render_ddl_predicate,
 };
 pub use foreign_key::ForeignKey;
 pub use index::Index;
