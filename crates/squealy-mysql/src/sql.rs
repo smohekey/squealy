@@ -865,6 +865,17 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
             }
         }
     }
+    // A single-column `#[column(unique, where = ...)]` is a partial unique index, carried on
+    // `Column::unique_predicate()` (not in `table.uniques()`). MySQL has no partial indexes, so it
+    // is rejected here rather than silently dropped, mirroring the table-level case below.
+    for column in table.columns() {
+        if column.unique_predicate().is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "MySQL does not support partial (filtered) unique indexes",
+            ));
+        }
+    }
     // Table-level `#[unique(columns = [..])]` constraints render as trailing constraints too, so the
     // direct `write_table` path matches the model-based renderer and actually enforces uniqueness.
     // MySQL has no partial indexes, so a `where = ...` predicate is rejected rather than silently

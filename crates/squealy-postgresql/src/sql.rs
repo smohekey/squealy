@@ -112,8 +112,24 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
         }
     }
 
-    // Predicated `#[unique(columns = [..], where = ...)]` constraints, emitted as partial unique
-    // indexes so the `WHERE` is honored. The `uq_<table>_<columns>` name matches the model path.
+    // Predicated uniques, emitted as partial unique indexes so the `WHERE` is honored: first the
+    // single-column `#[column(unique, where = ...)]` form (carried on `Column::unique_predicate`,
+    // not in `table.uniques()`), then the table-level `#[unique(columns = [..], where = ...)]` form.
+    // Both use the `uq_<table>_<columns>` name that matches the model path.
+    for column in table.columns() {
+        let Some(predicate) = column.unique_predicate() else {
+            continue;
+        };
+        let name = derived_unique_name(table, &[column.name()]);
+        writer.write_all(b"\nCREATE UNIQUE INDEX ")?;
+        write_quoted_ident(&name, writer)?;
+        writer.write_all(b" ON ")?;
+        write_qualified_name(table.schema_name(), table.name(), writer)?;
+        writer.write_all(b" (")?;
+        write_quoted_ident(column.name(), writer)?;
+        writer.write_all(b") WHERE ")?;
+        writer.write_all(predicate().as_bytes())?;
+    }
     for unique in table.uniques() {
         let Some(predicate) = unique.predicate else {
             continue;

@@ -1402,6 +1402,29 @@ fn postgres_write_table_emits_partial_unique_index() {
     );
 }
 
+#[test]
+fn postgres_write_table_emits_column_level_partial_unique_index() {
+    // The column form `#[column(unique, where = ...)]` lives on `Column::unique_predicate()`, not
+    // `table.uniques()`; the direct `write_table` path must still emit its partial index so
+    // soft-delete uniqueness is enforced in the query-side create flow.
+    let mut sql = Vec::new();
+    let tables = <OrganizationCatalog as Schema>::tables().collect::<Vec<_>>();
+    Postgres.write_table(tables[0], &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE UNIQUE INDEX \"uq_organizations_slug\" ON \"catalog\".\"organizations\" (\"slug\") WHERE (\"deleted_at\" IS NULL)"
+        ),
+        "expected column-level partial unique index in write_table output: {sql}"
+    );
+    // The plain `#[column(unique)]` external_id is unaffected; slug carries no inline UNIQUE.
+    assert!(
+        !sql.contains("UNIQUE (\"slug\")"),
+        "slug must not render as an inline unique: {sql}"
+    );
+}
+
 // A predicate combining a NULL check with a scalar value-literal comparison: `email` is unique
 // among live, active rows only.
 #[derive(Clone, Debug, PartialEq, Table)]
