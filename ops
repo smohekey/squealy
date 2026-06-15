@@ -1,1 +1,1 @@
-{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":2,"timestamp":1781456764,"nonce":"0lD3x92g/0iwT8DDLC348wZV7Fw=","title":"Query builder can't be used in async fn -\u003e impl Future + Send (execution-query traits not lifetime-general; rust#100013)","was":"squealy's query builder cannot be used inside an `async fn` that returns"}]}
+{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":4,"timestamp":1781498956,"nonce":"UWp+2teAZept4yac3j3FuuFbyMc=","status":2}]}
