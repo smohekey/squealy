@@ -2189,9 +2189,21 @@ fn named_fields(group: &Group) -> Result<Vec<Field>, String> {
             index += 1;
         }
 
+        let value_ty = column_type_value(&type_tokens)?;
+        // Reject `Option<Option<_>>` here with a stable message (the trait-level rejection via
+        // `ColumnNullability` produces a rustc-version-sensitive error).
+        if let Some(inner) = strip_option(&value_ty)
+            && strip_option(&inner).is_some()
+        {
+            return Err(
+                "a column type may not be `Option<Option<_>>` (a column is at most nullable once)"
+                    .to_owned(),
+            );
+        }
+
         fields.push(Field {
             ident,
-            value_ty: column_type_value(&type_tokens)?,
+            value_ty,
             attrs: std::mem::take(&mut pending_attrs),
         });
         index += 1;
