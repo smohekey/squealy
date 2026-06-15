@@ -136,6 +136,22 @@ impl TableStruct {
             .iter()
             .map(|field| field.value_ty.clone())
             .collect::<Vec<_>>();
+        // The type a single-column projection decodes to. A `#[column(nullable)]` column projects as
+        // `Option<T>` (so a NULL decodes instead of erroring), matching how the whole-row decode
+        // already treats nullable fields; non-null columns project as the bare value type. Predicate
+        // operands still use the bare `ExprKind::Value` (`T`), so this does not affect `where_`.
+        let projection_row_value_tys = self
+            .fields
+            .iter()
+            .map(|field| {
+                let value_ty = field.value_ty.clone();
+                if field.nullable() {
+                    quote::quote! { ::std::option::Option<#value_ty> }
+                } else {
+                    quote::quote! { #value_ty }
+                }
+            })
+            .collect::<Vec<_>>();
         // For each `references(Table::column)` foreign key, assert at compile time that the local
         // column's value type matches the referenced column's — so a mismatched FK fails to compile
         // rather than producing DDL the database rejects.
@@ -436,7 +452,7 @@ impl TableStruct {
                 impl ::squealy::ProjectionShape for #expr_kind_idents {
                     type Exprs<'scope> = ::squealy::ColumnRef<'scope, #expr_kind_idents>;
                     type ReboundExprs<'scope> = ::squealy::Expr<'scope, #expr_kind_idents>;
-                    type Row = #field_value_tys;
+                    type Row = #projection_row_value_tys;
 
                     fn exprs<'scope>(alias: ::squealy::SourceAlias) -> Self::Exprs<'scope> {
                         ::squealy::ColumnRef::column(alias, #field_literals)
