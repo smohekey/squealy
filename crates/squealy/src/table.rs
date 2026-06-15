@@ -21,10 +21,20 @@ pub struct TablePrimaryKey {
 /// slice. The single-column `#[column(unique)]` form is handled separately by the model builder;
 /// this type carries only the composite / table-level declarations. When `name` is `None` the
 /// model builder falls back to the deterministic `uq_<table>_<columns>` convention.
+///
+/// A `predicate` is present when the constraint is declared with a `where = |row| ...` filter.
+/// Such a unique is lowered to a *partial unique index* rather than a table `UNIQUE` constraint
+/// (Postgres cannot attach a `WHERE` to a table constraint); the function lowers the typed
+/// predicate to an ANSI SQL string when the model is built.
+// `PartialEq`/`Eq` compare the predicate by function-pointer identity, which is not meaningful on
+// its own; nothing relies on `TableUnique` equality (the model builder reads the fields), so the
+// derive is kept only for parity with the other metadata structs and the lint is silenced.
+#[allow(unpredictable_function_pointer_comparisons)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TableUnique {
     pub name: Option<&'static str>,
     pub columns: &'static [&'static str],
+    pub predicate: Option<fn() -> String>,
 }
 
 /// Object-safe table metadata exposed through schema membership.

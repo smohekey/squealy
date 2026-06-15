@@ -1320,7 +1320,7 @@ fn render_arithmetic_op(op: ArithmeticOp) -> &'static str {
     }
 }
 
-fn render_compare_op(op: CompareOp) -> &'static str {
+pub(crate) fn render_compare_op(op: CompareOp) -> &'static str {
     match op {
         CompareOp::Equals => "=",
         CompareOp::NotEquals => "<>",

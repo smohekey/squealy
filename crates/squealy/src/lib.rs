@@ -137,6 +137,36 @@
 //! The single-column forms `#[column(primary_key)]`, `#[column(unique)]`, and `#[column(index)]`
 //! remain available for one-column constraints.
 //!
+//! ### Partial (filtered) unique indexes
+//!
+//! A `where = |row| ...` clause turns a unique into a *partial unique index*
+//! (`CREATE UNIQUE INDEX ... WHERE <predicate>`) — the standard soft-delete idiom, where a slug or
+//! email is unique only among live rows and reusable once a row is soft-deleted:
+//!
+//! ```rust
+//! # use squealy::*;
+//! #[derive(Table)]
+//! struct Organization<'scope, C: ColumnMode = ColumnExpr> {
+//!     #[column(primary_key)]
+//!     id: C::Type<'scope, i32>,
+//!     #[column(unique, where = |row| row.deleted_at.is_null())]
+//!     slug: C::Type<'scope, String>,
+//!     #[column(nullable)]
+//!     deleted_at: C::Type<'scope, i64>,
+//! }
+//! ```
+//!
+//! The same `where = ...` is accepted on the table-level `#[unique(columns = [..], where = ...)]`
+//! (composite partial uniques) and `#[index(columns = [..], where = ...)]`. The predicate is a
+//! typed expression over the table's columns — the same builders used in `where_` (`.is_null()`,
+//! `.is_not_null()`, comparisons, `.and()` / `.or()` / `.not_()`) — so a typo in a column name is a
+//! compile error, not bad SQL. Operands may be other columns or scalar value literals
+//! (`col.equals(0)`, `col.equals("active")`, `col.greater_than(10)`); literals of the integer,
+//! float, `bool`, and `String` value types render inline. Operands whose SQL form is
+//! backend-specific — a timestamp/`uuid` literal, a runtime bind param, or an arithmetic
+//! sub-expression — are not supported and fail to compile. Partial indexes are PostgreSQL-only;
+//! MySQL rejects them.
+//!
 //! ## Stream rows from select queries
 //!
 //! Select queries start from a source table and finish with `select`:
@@ -435,13 +465,14 @@ pub use database::Database;
 pub use dialect::Dialect;
 pub use expr::{
     AddExpr, AndPredicate, AnyPredicate, ArithmeticOp, BinaryExprAst, ColumnExprAst, ColumnRef,
-    CompareOp, ComparePredicateAst, DivideExpr, EqualsPredicate, Expr, ExprAst, ExprKind,
-    ExprVisitor, GreaterThanOrEqualsPredicate, GreaterThanPredicate, IntoExpr, IsNotNullPredicate,
-    IsNullPredicate, LessThanOrEqualsPredicate, LessThanPredicate, LiteralExprAst, MultiplyExpr,
-    NotEqualsPredicate, NotPredicate, NullCheckPredicateAst, Nullable, NullableExpr, OrPredicate,
-    Order, OrderDirection, ParamExprAst, Predicate, PredicateAst, PredicateAstVisitor,
-    PredicateKind, RenderAst, RenderPredicateAst, RuntimeParam, SameValue, SourceAlias, SqlDivide,
-    SqlNumber, SubtractExpr, param,
+    CompareOp, ComparePredicateAst, DdlExprAst, DdlPredicateAst, DdlSqlLiteral, DivideExpr,
+    EqualsPredicate, Expr, ExprAst, ExprKind, ExprVisitor, GreaterThanOrEqualsPredicate,
+    GreaterThanPredicate, IntoExpr, IsNotNullPredicate, IsNullPredicate, LessThanOrEqualsPredicate,
+    LessThanPredicate, LiteralExprAst, MultiplyExpr, NotEqualsPredicate, NotPredicate,
+    NullCheckPredicateAst, Nullable, NullableExpr, OrPredicate, Order, OrderDirection,
+    ParamExprAst, Predicate, PredicateAst, PredicateAstVisitor, PredicateKind, RenderAst,
+    RenderPredicateAst, RuntimeParam, SameValue, SourceAlias, SqlDivide, SqlNumber, SubtractExpr,
+    param, render_ddl_predicate,
 };
 pub use foreign_key::ForeignKey;
 pub use index::Index;
