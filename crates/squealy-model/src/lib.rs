@@ -236,11 +236,13 @@ where
 /// Returns a copy of `model` aligned with the form `connection`'s introspection produces, so a
 /// desired model does not churn against a live schema. Column types go through
 /// [`SchemaIntrospect::canonical_sql_type`], identity modes through
-/// [`SchemaIntrospect::canonical_identity_mode`], and an index declared without an explicit method /
+/// [`SchemaIntrospect::canonical_identity_mode`], an index declared without an explicit method /
 /// directions has them filled to the backend default (see
-/// [`SchemaIntrospect::default_index_method`], empty directions becoming all-ASC). This is the same
-/// canonicalization [`plan_from_database`] applies, exposed so callers that diff a desired model
-/// against a live schema directly (e.g. `status --check-schema`) align it identically.
+/// [`SchemaIntrospect::default_index_method`], empty directions becoming all-ASC), and a partial
+/// index's predicate goes through [`SchemaIntrospect::canonical_index_predicate`] to match the
+/// backend's expression deparse form. This is the same canonicalization [`plan_from_database`]
+/// applies, exposed so callers that diff a desired model against a live schema directly (e.g.
+/// `status --check-schema`) align it identically.
 pub fn canonicalize_model<C: SchemaIntrospect>(
     connection: &C,
     model: &DatabaseModel,
@@ -260,6 +262,9 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
             }
             for index in &mut table.indexes {
                 canonicalize_index(index, &default_method);
+                if let Some(predicate) = &index.predicate {
+                    index.predicate = Some(connection.canonical_index_predicate(predicate));
+                }
             }
         }
     }
