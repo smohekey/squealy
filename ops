@@ -1,1 +1,1 @@
-{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":2,"timestamp":1781457176,"nonce":"0pqGn6Dv9Ty0+vaW2jXNc80P6p0=","title":"Tuple projection of a nullable column decodes as T, not Option\u003cT\u003e (NULL fails)","was":"Projecting a **single nullable column** as part of a tuple projection decodes it as"}]}
+{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":4,"timestamp":1781498956,"nonce":"77KbNd3ssYGlxQ5V/99C0Ppoa10=","status":2}]}
