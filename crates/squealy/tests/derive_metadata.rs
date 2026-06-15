@@ -198,6 +198,17 @@ struct DerivedColumnTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
     labels: C::Type<'scope, VarcharArrayColumn>,
 }
 
+// A nullable `#[derive(ColumnType)]` newtype column: projecting it must yield `Option<Newtype>`,
+// which decodes via `Option<Newtype>: Decode<Backend>`. Newtypes carry `Decode`/`DecodeNullable`
+// but not the backends' raw conversion trait, so this exercises the NULL-peek decode path.
+#[derive(Clone, Debug, PartialEq, Table)]
+struct NewtypeNullable<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, RecordId>,
+    #[column(nullable)]
+    parent_id: C::Type<'scope, RecordId>,
+}
+
 // A bare `uuid::Uuid` field maps to a `uuid` column without a `#[column(db_type = "uuid")]`
 // override (HasColumnType), and a `Uuid` value can be used in the query builder (ExprKind).
 #[cfg(feature = "uuid")]
@@ -1275,6 +1286,13 @@ fn select_projects_nullable_column_as_option() {
     // A non-null column still projects as its bare value type.
     let ids = TestConnection.from::<User>().select(|(user,)| user.id);
     assert_id(&ids);
+
+    // A nullable `#[derive(ColumnType)]` newtype column projects as `Option<Newtype>` too.
+    fn assert_optional_record_id(_: &impl HasSelectRow<Option<RecordId>>) {}
+    let parents = TestConnection
+        .from::<NewtypeNullable>()
+        .select(|(r,)| r.parent_id);
+    assert_optional_record_id(&parents);
 }
 
 #[test]

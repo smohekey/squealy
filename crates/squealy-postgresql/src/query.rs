@@ -74,6 +74,45 @@ impl<'row> PostgresRowReader<'row> {
         self.index += 1;
         Ok(value)
     }
+
+    /// Decode a possibly-`NULL` value by peeking the current column without consuming it: a SQL
+    /// `NULL` yields `None` (and skips the column), otherwise the inner [`Decode`] reads it. Decoding
+    /// through `Decode for T` (rather than `Option<T>: FromSqlOwned`) lets nullable `ColumnType`
+    /// newtype columns project, since those carry `Decode` but not `FromSqlOwned`.
+    fn take_nullable<T>(&mut self) -> Result<Option<T>, PostgresError>
+    where
+        T: Decode<Postgres>,
+    {
+        // `NullProbe` accepts any column type, so this peek works regardless of `T`. `try_get` does
+        // not advance our cursor, so a present value is then read by `T::decode` at the same index.
+        let probe: Option<NullProbe> = self
+            .row
+            .try_get(self.index)
+            .map_err(PostgresError::Decode)?;
+        if probe.is_none() {
+            self.index += 1;
+            Ok(None)
+        } else {
+            T::decode(self).map(Some)
+        }
+    }
+}
+
+/// A `FromSql` adapter used only to test the current column for SQL `NULL`: it accepts any column
+/// type and discards the bytes, so `Option<NullProbe>` reports presence without decoding a value.
+struct NullProbe;
+
+impl tokio_postgres::types::FromSql<'_> for NullProbe {
+    fn from_sql(
+        _ty: &tokio_postgres::types::Type,
+        _raw: &[u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(NullProbe)
+    }
+
+    fn accepts(_ty: &tokio_postgres::types::Type) -> bool {
+        true
+    }
 }
 
 impl squealy::RowReader for PostgresRowReader<'_> {
@@ -131,10 +170,10 @@ impl_postgres_decode_from_numeric!(i128, u64, u128);
 
 impl<T> Decode<Postgres> for Option<T>
 where
-    T: FromSqlOwned,
+    T: Decode<Postgres>,
 {
     fn decode(row: &mut <Postgres as Backend>::RowReader<'_>) -> Result<Self, PostgresError> {
-        row.take_sql()
+        row.take_nullable()
     }
 }
 
