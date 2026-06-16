@@ -744,6 +744,8 @@ async fn live_status_inputs(
             let actual = introspect(&mut connection)
                 .await
                 .map_err(|error| CliError::Message(format!("introspect: {error}")))?;
+            // Canonicalize both sides so equivalent predicate / CHECK expressions compare equal.
+            let actual = canonicalize_model(&connection, &actual);
             let desired = canonicalize_model(&connection, desired);
             let applied_ids = connection
                 .applied_refactor_ids()
@@ -769,6 +771,8 @@ async fn live_status_inputs(
             let actual = introspect(&mut connection)
                 .await
                 .map_err(|error| CliError::Message(format!("introspect: {error}")))?;
+            // Canonicalize both sides so equivalent predicate / CHECK expressions compare equal.
+            let actual = canonicalize_model(&connection, &actual);
             let desired = canonicalize_model(&connection, desired);
             let applied_ids = connection
                 .applied_refactor_ids()

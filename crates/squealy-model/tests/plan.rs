@@ -1,11 +1,11 @@
 use squealy_model::{
-    AppliedRefactorError, CastColumn, ChangeRisk, ColumnModel, DatabaseModel, DatabasePlanStep,
-    DdlExecutor, DiffPolicy, IndexModel, PlanApplyOptions, RefactorLog, RefactorOperation,
-    RenameColumn, RenameTable, SchemaIntrospect, SchemaModel, SchemaRefactorStore, SqlType,
-    TableModel, TablePlanStep, apply_plan, apply_plan_with_options, classified_plan_steps,
-    pending_refactors, plan_from_database, plan_from_database_with_refactors, plan_models,
-    plan_models_with_refactors, render_plan_sql, render_plan_with_options,
-    repair_refactor_metadata,
+    AppliedRefactorError, CastColumn, ChangeRisk, CheckModel, ColumnModel, DatabaseModel,
+    DatabasePlanStep, DdlExecutor, DiffPolicy, IndexModel, PlanApplyOptions, RefactorLog,
+    RefactorOperation, RenameColumn, RenameTable, SchemaIntrospect, SchemaModel,
+    SchemaRefactorStore, SqlType, TableModel, TablePlanStep, apply_plan, apply_plan_with_options,
+    classified_plan_steps, pending_refactors, plan_from_database,
+    plan_from_database_with_refactors, plan_models, plan_models_with_refactors, render_plan_sql,
+    render_plan_with_options, repair_refactor_metadata,
 };
 use squealy_postgresql::Postgres;
 
@@ -667,6 +667,20 @@ impl SchemaIntrospect for TestConnection {
             other => other.clone(),
         }
     }
+
+    // Stand-in for the backend's real expression normalizer: strips whitespace and parentheses and
+    // lowercases, enough to map an "authored" and a "deparsed" form of the same expression together.
+    fn canonical_index_predicate(&self, predicate: &str) -> String {
+        predicate
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '(' && *c != ')')
+            .collect::<String>()
+            .to_ascii_lowercase()
+    }
+
+    fn canonical_check_expression(&self, expression: &str) -> String {
+        self.canonical_index_predicate(expression)
+    }
 }
 
 #[tokio::test]
@@ -702,6 +716,62 @@ async fn plan_from_database_canonicalizes_backend_equivalent_types() {
     assert!(
         plan.is_empty(),
         "String/Text are equivalent on this backend; expected no changes, got {:?}",
+        plan.steps
+    );
+}
+
+#[tokio::test]
+async fn plan_from_database_canonicalizes_predicates_and_checks_on_both_sides() {
+    // The live schema deparses an index predicate and a CHECK expression one way; the desired model
+    // authored them another. `canonicalize_model` must run on BOTH sides for them to converge — if
+    // only the desired side were canonicalized, the introspected form would still differ and churn.
+    let model = |predicate: &str, check: &str| {
+        model_with_tables(
+            "public",
+            vec![{
+                let mut t = table("t");
+                t.columns = vec![
+                    column("status", SqlType::I32),
+                    column("score", SqlType::I32),
+                ];
+                t.indexes = vec![IndexModel {
+                    name: "uq_t_status".to_owned(),
+                    columns: vec!["status".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: true,
+                    method: None,
+                    directions: Vec::new(),
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    predicate: Some(predicate.to_owned()),
+                }];
+                t.checks = vec![CheckModel {
+                    name: "ck_t_score".to_owned(),
+                    expression: check.to_owned(),
+                    validation: None,
+                    enforcement: None,
+                }];
+                t
+            }],
+        )
+    };
+    let live = model("(status = 1)", "(score > 0)");
+    let desired = model("STATUS = 1", "score>0");
+    let mut connection = TestConnection {
+        model: live,
+        applied_refactor_ids: Vec::new(),
+        executed: Vec::new(),
+    };
+
+    let plan = plan_from_database(&desired, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan");
+
+    assert!(
+        plan.is_empty(),
+        "predicate/CHECK differ only in surface form; expected no changes, got {:?}",
         plan.steps
     );
 }
