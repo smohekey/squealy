@@ -321,8 +321,8 @@ enum Tok {
 }
 
 const KEYWORDS: &[&str] = &[
-    "and", "any", "array", "between", "false", "ilike", "in", "is", "like", "not", "null", "or",
-    "true",
+    "all", "and", "any", "array", "between", "false", "ilike", "in", "is", "like", "not", "null",
+    "or", "true",
 ];
 
 fn normalize(input: &str) -> Option<String> {
@@ -421,6 +421,16 @@ fn tokenize(input: &str) -> Option<Vec<Tok>> {
             b'!' if bytes.get(i + 1) == Some(&b'=') => {
                 tokens.push(Tok::Sym("<>"));
                 i += 2;
+            }
+            // `!~~` / `!~~*` are PostgreSQL's deparse of `NOT LIKE` / `NOT ILIKE`.
+            b'!' if bytes.get(i + 1) == Some(&b'~') && bytes.get(i + 2) == Some(&b'~') => {
+                if bytes.get(i + 3) == Some(&b'*') {
+                    tokens.push(Tok::Sym("!~~*"));
+                    i += 4;
+                } else {
+                    tokens.push(Tok::Sym("!~~"));
+                    i += 3;
+                }
             }
             b'~' => {
                 if bytes.get(i + 1) == Some(&b'~') {
@@ -610,11 +620,32 @@ impl<'a> Parser<'a> {
                 false,
             ));
         }
+        // `!~~` / `!~~*` are PostgreSQL's deparse of `NOT LIKE` / `NOT ILIKE`.
+        if self.eat_sym("!~~") {
+            return Some(Node::Like(
+                Box::new(left),
+                Box::new(self.parse_additive()?),
+                false,
+                true,
+            ));
+        }
+        if self.eat_sym("!~~*") {
+            return Some(Node::Like(
+                Box::new(left),
+                Box::new(self.parse_additive()?),
+                true,
+                true,
+            ));
+        }
         for op in ["=", "<>", "<=", ">=", "<", ">"] {
             if self.eat_sym(op) {
-                // `x = ANY (ARRAY[..])` is PostgreSQL's deparse of `x IN (..)`.
+                // `x = ANY (ARRAY[..])` / `x <> ALL (ARRAY[..])` are PostgreSQL's deparse of
+                // `x IN (..)` / `x NOT IN (..)`.
                 if op == "=" && matches!(self.peek(), Some(Tok::Kw("any"))) {
-                    return self.parse_any_array(left);
+                    return self.parse_array_membership(left, "any");
+                }
+                if op == "<>" && matches!(self.peek(), Some(Tok::Kw("all"))) {
+                    return self.parse_array_membership(left, "all");
                 }
                 return Some(Node::Compare(
                     op,
@@ -642,8 +673,13 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_any_array(&mut self, left: Node) -> Option<Node> {
-        if !self.eat_kw("any") || !self.eat_sym("(") || !self.eat_kw("array") || !self.eat_sym("[")
+    /// Parses `<quantifier> (ARRAY[..])` after the comparison operator. `any` (from `= ANY`) is
+    /// `IN`; `all` (from `<> ALL`) is `NOT IN`.
+    fn parse_array_membership(&mut self, left: Node, quantifier: &'static str) -> Option<Node> {
+        if !self.eat_kw(quantifier)
+            || !self.eat_sym("(")
+            || !self.eat_kw("array")
+            || !self.eat_sym("[")
         {
             return None;
         }
@@ -651,7 +687,12 @@ impl<'a> Parser<'a> {
         if !self.eat_sym("]") || !self.eat_sym(")") {
             return None;
         }
-        Some(Node::In(Box::new(left), items))
+        let node = Node::In(Box::new(left), items);
+        Some(if quantifier == "all" {
+            Node::Not(Box::new(node))
+        } else {
+            node
+        })
     }
 
     fn parse_between(&mut self, left: Node, negated: bool) -> Option<Node> {
@@ -660,14 +701,18 @@ impl<'a> Parser<'a> {
             return None;
         }
         let high = self.parse_additive()?;
-        // Match pg's deparse: `BETWEEN a AND b` -> `(x >= a) AND (x <= b)`.
-        let ge = Node::Compare(">=", Box::new(left.clone()), Box::new(low));
-        let le = Node::Compare("<=", Box::new(left), Box::new(high));
-        let node = Node::And(vec![ge, le]);
+        // Match pg's deparse: `BETWEEN a AND b` -> `(x >= a) AND (x <= b)`, and the negation
+        // `NOT BETWEEN a AND b` -> `(x < a) OR (x > b)` (pg expands it, rather than negating).
         Some(if negated {
-            Node::Not(Box::new(node))
+            Node::Or(vec![
+                Node::Compare("<", Box::new(left.clone()), Box::new(low)),
+                Node::Compare(">", Box::new(left), Box::new(high)),
+            ])
         } else {
-            node
+            Node::And(vec![
+                Node::Compare(">=", Box::new(left.clone()), Box::new(low)),
+                Node::Compare("<=", Box::new(left), Box::new(high)),
+            ])
         })
     }
 
@@ -1090,6 +1135,15 @@ mod tests {
         same("qty BETWEEN 0 AND 100", "((qty >= 0) AND (qty <= 100))");
         same("label LIKE 'a%'", "(label ~~ 'a%'::text)");
         same("name ILIKE 'b%'", "(name ~~* 'b%'::text)");
+    }
+
+    #[test]
+    fn negated_operator_rewrites() {
+        // PostgreSQL deparses the negations with different operators than a leading `NOT`.
+        same("status NOT IN (1, 2)", "(status <> ALL (ARRAY[1, 2]))");
+        same("label NOT LIKE 'a%'", "(label !~~ 'a%'::text)");
+        same("name NOT ILIKE 'b%'", "(name !~~* 'b%'::text)");
+        same("qty NOT BETWEEN 0 AND 100", "((qty < 0) OR (qty > 100))");
     }
 
     #[test]

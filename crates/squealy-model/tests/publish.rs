@@ -106,6 +106,8 @@ struct SoftWidget<'scope, C: ColumnMode = ColumnExpr> {
     #[column(check = "status IN (0, 1, 2)")]
     status: C::Type<'scope, i32>,
     active: C::Type<'scope, bool>,
+    // A negated CHECK, which PostgreSQL deparses with the `!~~` operator (`NOT LIKE`).
+    #[column(check = "name NOT LIKE 'tmp%'")]
     name: C::Type<'scope, String>,
     #[column(name = "position", nullable)]
     position: C::Type<'scope, i32>,
