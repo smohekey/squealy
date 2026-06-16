@@ -321,21 +321,24 @@ pub trait SchemaIntrospect {
         None
     }
 
-    /// Canonicalizes a partial-index predicate to the form this backend's introspection reports.
-    ///
-    /// A crate-declared `where = ...` predicate enters the desired model as the renderer's form
-    /// (quoted identifiers, `TRUE`/`FALSE`, e.g. `("deleted_at" IS NULL)`), while a backend reads it
-    /// back through its own expression deparser — PostgreSQL's `pg_get_expr` yields
-    /// `(deleted_at IS NULL)` (unquoted lowercase identifiers, lowercase booleans). A desired model
-    /// is canonicalized through this before diffing, so a partial index does not produce a
-    /// never-settling `AlterIndex` after publish. The default is the identity, which suits backends
-    /// that have no partial indexes (e.g. MySQL).
-    ///
-    /// Note: backends deparse value literals with type casts that depend on the literal's value and
-    /// the column type (e.g. `'x'::text`, `(1.5)::double precision`), which this offline transform
-    /// does not reproduce, so a predicate comparing a column to a value literal may still churn.
+    /// Canonicalizes a partial-index predicate into a stable form, so a predicate written one way
+    /// (the renderer's `("deleted_at" IS NULL)`) and read back another (PostgreSQL's `pg_get_expr`
+    /// deparse `(deleted_at IS NULL)`, with synthesized literal casts and operator rewrites) compare
+    /// equal. This is applied to **both** the desired and the introspected model before diffing (see
+    /// [`canonicalize_model`](crate::model) callers), so a partial index does not produce a
+    /// never-settling `AlterIndex` after publish. The returned string is internal — it need not match
+    /// the backend's deparse, only be identical for equivalent predicates. The default is the
+    /// identity, which suits backends that have no partial indexes (e.g. MySQL).
     fn canonical_index_predicate(&self, predicate: &str) -> String {
         predicate.to_owned()
+    }
+
+    /// Canonicalizes a `CHECK` constraint expression into a stable form, the constraint analogue of
+    /// [`canonical_index_predicate`]. A user-authored `check = "status = 1"` and the backend's
+    /// deparse (`pg_get_constraintdef` → `(status = 1)`) compare equal once both the desired and the
+    /// introspected model are canonicalized through this before diffing. The default is the identity.
+    fn canonical_check_expression(&self, expression: &str) -> String {
+        expression.to_owned()
     }
 }
 

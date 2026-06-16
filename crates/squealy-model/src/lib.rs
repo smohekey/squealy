@@ -205,6 +205,9 @@ where
     let actual = introspect(connection)
         .await
         .map_err(PlanFromDatabaseError::Introspect)?;
+    // Canonicalize both sides so equivalent partial-index predicates / CHECK expressions written one
+    // way and deparsed another compare equal (and so the desired model aligns with introspection).
+    let actual = canonicalize_model(connection, &actual);
     let desired = canonicalize_model(connection, desired);
     plan_models(&desired, &actual, policy).map_err(PlanFromDatabaseError::Policy)
 }
@@ -228,21 +231,26 @@ where
         .map_err(PlanFromDatabaseError::ReadAppliedRefactors)?;
     let pending_refactors = pending_refactors(refactors, &applied_ids, &actual)
         .map_err(PlanFromDatabaseError::AppliedRefactor)?;
+    // Canonicalize both sides for the diff (after refactor matching, which reads the raw schema).
+    let actual = canonicalize_model(connection, &actual);
     let desired = canonicalize_model(connection, desired);
     plan_models_with_refactors(&desired, &actual, &pending_refactors, policy)
         .map_err(PlanFromDatabaseError::Policy)
 }
 
-/// Returns a copy of `model` aligned with the form `connection`'s introspection produces, so a
-/// desired model does not churn against a live schema. Column types go through
-/// [`SchemaIntrospect::canonical_sql_type`], identity modes through
-/// [`SchemaIntrospect::canonical_identity_mode`], an index declared without an explicit method /
-/// directions has them filled to the backend default (see
-/// [`SchemaIntrospect::default_index_method`], empty directions becoming all-ASC), and a partial
-/// index's predicate goes through [`SchemaIntrospect::canonical_index_predicate`] to match the
-/// backend's expression deparse form. This is the same canonicalization [`plan_from_database`]
-/// applies, exposed so callers that diff a desired model against a live schema directly (e.g.
-/// `status --check-schema`) align it identically.
+/// Returns a copy of `model` in a canonical form for diffing, so a model does not churn against a
+/// live schema. Column types go through [`SchemaIntrospect::canonical_sql_type`], identity modes
+/// through [`SchemaIntrospect::canonical_identity_mode`], an index declared without an explicit
+/// method / directions has them filled to the backend default (see
+/// [`SchemaIntrospect::default_index_method`], empty directions becoming all-ASC), partial-index
+/// predicates go through [`SchemaIntrospect::canonical_index_predicate`] and CHECK expressions
+/// through [`SchemaIntrospect::canonical_check_expression`].
+///
+/// The type/identity/method steps align a *desired* model with the form introspection produces; the
+/// predicate/CHECK steps put an expression into a backend-neutral canonical form. [`plan_from_database`]
+/// applies this to **both** the desired and the introspected model before diffing, so equivalent
+/// expressions written one way and deparsed another compare equal. It is exposed so callers that
+/// diff against a live schema directly (e.g. `status --check-schema`) can align both sides the same.
 pub fn canonicalize_model<C: SchemaIntrospect>(
     connection: &C,
     model: &DatabaseModel,
@@ -265,6 +273,9 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 if let Some(predicate) = &index.predicate {
                     index.predicate = Some(connection.canonical_index_predicate(predicate));
                 }
+            }
+            for check in &mut table.checks {
+                check.expression = connection.canonical_check_expression(&check.expression);
             }
         }
     }
