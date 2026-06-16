@@ -250,13 +250,16 @@ impl squealy::SchemaIntrospect for PostgresConnection {
         Some(squealy::IndexMethod::BTree)
     }
 
-    /// PostgreSQL introspects a partial-index predicate via `pg_get_expr`, which deparses to
-    /// unquoted lowercase identifiers and lowercase booleans (e.g. `(deleted_at IS NULL)`). A
-    /// crate-rendered predicate quotes identifiers and uppercases booleans, so it is normalized to
-    /// that form here to keep publish/status idempotent. See [`canonical`] for scope and the
-    /// value-literal-cast limitation.
+    /// Normalizes a partial-index predicate by parsing it and re-serializing a canonical AST, so the
+    /// crate-rendered form and PostgreSQL's `pg_get_expr` deparse compare equal. See [`canonical`].
     fn canonical_index_predicate(&self, predicate: &str) -> String {
         canonical::canonical_index_predicate(predicate)
+    }
+
+    /// Normalizes a `CHECK` expression with the same parser, so an authored expression and
+    /// PostgreSQL's `pg_get_constraintdef` deparse compare equal. See [`canonical`].
+    fn canonical_check_expression(&self, expression: &str) -> String {
+        canonical::canonical_check_expression(expression)
     }
 }
 
