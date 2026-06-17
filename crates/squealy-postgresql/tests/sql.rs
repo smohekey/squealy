@@ -668,6 +668,83 @@ fn postgres_select_uses_numbered_placeholders() {
 }
 
 #[test]
+fn postgres_like_renders_with_numbered_placeholder() {
+    let users = Postgres
+        .from::<User>()
+        .where_(|user| user.name.like("A%"))
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        users.to_sql(),
+        "SELECT q0_0.\"id\" AS \"id\" FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"name\" LIKE $1)"
+    );
+    assert_eq!(
+        users.collect_params().unwrap(),
+        vec![PostgresParam::Text("A%".to_owned())]
+    );
+}
+
+#[test]
+fn postgres_ilike_renders_native_ilike_operator() {
+    let users = Postgres
+        .from::<User>()
+        .where_(|user| user.name.ilike("a%"))
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        users.to_sql(),
+        "SELECT q0_0.\"id\" AS \"id\" FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"name\" ILIKE $1)"
+    );
+
+    let not_ilike = Postgres
+        .from::<User>()
+        .where_(|user| user.name.not_ilike("a%"))
+        .select(|(user,)| user.id);
+    assert_eq!(
+        not_ilike.to_sql(),
+        "SELECT q0_0.\"id\" AS \"id\" FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"name\" NOT ILIKE $1)"
+    );
+}
+
+#[test]
+fn postgres_in_renders_numbered_placeholder_list() {
+    let users = Postgres
+        .from::<User>()
+        .where_(|user| user.id.in_([1, 2, 3]))
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        users.to_sql(),
+        "SELECT q0_0.\"id\" AS \"id\" FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"id\" IN ($1, $2, $3))"
+    );
+    assert_eq!(
+        users.collect_params().unwrap(),
+        vec![
+            PostgresParam::Int32(1),
+            PostgresParam::Int32(2),
+            PostgresParam::Int32(3)
+        ]
+    );
+}
+
+#[test]
+fn postgres_between_renders_numbered_placeholders() {
+    let users = Postgres
+        .from::<User>()
+        .where_(|user| user.id.between(1, 10))
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        users.to_sql(),
+        "SELECT q0_0.\"id\" AS \"id\" FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"id\" BETWEEN $1 AND $2)"
+    );
+    assert_eq!(
+        users.collect_params().unwrap(),
+        vec![PostgresParam::Int32(1), PostgresParam::Int32(10)]
+    );
+}
+
+#[test]
 fn postgres_division_renders_fractional_result() {
     let users = Postgres.from::<User>().select(|(user,)| user.id / 2);
 

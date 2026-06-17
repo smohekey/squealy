@@ -57,3 +57,33 @@ fn mysql_renders_division_without_a_float_cast() {
     assert!(!sql.contains("CAST"), "MySQL division needs no cast: {sql}");
     assert!(sql.contains('/'), "{sql}");
 }
+
+#[test]
+fn mysql_ilike_falls_back_to_plain_like() {
+    // MySQL has no `ILIKE`; its default collations make `LIKE` case-insensitive, so the dialect
+    // default maps `ilike` to a plain `LIKE`.
+    let query = Mysql
+        .from::<Widget>()
+        .where_(|widget| widget.name.ilike("a%"))
+        .select(|(widget,)| widget.id);
+    let sql = query.to_sql();
+    assert!(sql.contains("LIKE ?"), "expected a plain LIKE: {sql}");
+    assert!(!sql.contains("ILIKE"), "MySQL has no ILIKE: {sql}");
+}
+
+#[test]
+fn mysql_in_and_between_render() {
+    let in_query = Mysql
+        .from::<Widget>()
+        .where_(|widget| widget.id.in_([1, 2, 3]))
+        .select(|(widget,)| widget.id);
+    let sql = in_query.to_sql();
+    assert!(sql.contains("IN (?, ?, ?)"), "{sql}");
+
+    let between_query = Mysql
+        .from::<Widget>()
+        .where_(|widget| widget.id.between(1, 10))
+        .select(|(widget,)| widget.id);
+    let sql = between_query.to_sql();
+    assert!(sql.contains("BETWEEN ? AND ?"), "{sql}");
+}
