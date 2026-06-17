@@ -459,21 +459,22 @@ fn test_not_in_renders_negated_membership_list() {
 }
 
 #[test]
-fn test_empty_in_collapses_to_false_constant() {
+fn test_empty_in_is_always_false_and_renders_operand() {
     let users = TestConnection
         .from::<User>()
         .where_(|user| user.id.in_(Vec::<i32>::new()))
         .select(|(user,)| user.id);
 
+    // The operand is still rendered (so its params stay aligned), guarded by a constant false.
     assert_eq!(
         users.to_sql(),
-        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (1 = 0)"
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.id IS NOT NULL AND 1 = 0)"
     );
     assert_eq!(users.collect_params().unwrap(), Vec::<TestParam>::new());
 }
 
 #[test]
-fn test_empty_not_in_collapses_to_true_constant() {
+fn test_empty_not_in_is_always_true_and_renders_operand() {
     let users = TestConnection
         .from::<User>()
         .where_(|user| user.id.not_in(Vec::<i32>::new()))
@@ -481,7 +482,7 @@ fn test_empty_not_in_collapses_to_true_constant() {
 
     assert_eq!(
         users.to_sql(),
-        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (1 = 1)"
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.id IS NOT NULL OR 1 = 1)"
     );
 }
 

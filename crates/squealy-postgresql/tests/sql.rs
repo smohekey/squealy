@@ -728,6 +728,27 @@ fn postgres_in_renders_numbered_placeholder_list() {
 }
 
 #[test]
+fn postgres_empty_not_in_with_param_operand_keeps_placeholder_order() {
+    // Regression (PR #30 review): an empty IN/NOT IN must still render its operand so the
+    // operand's runtime parameter is consumed in order. The NOT IN operand is the first runtime
+    // param and the equals is the second, so the equals must bind $2 — not $1.
+    let users = Postgres
+        .from::<User>()
+        .where_(|user| {
+            param::<UserId>()
+                .not_in(Vec::<i32>::new())
+                .and(user.id.equals(param::<UserId>()))
+        })
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        users.to_sql(),
+        "SELECT q0_0.\"id\" AS \"id\" FROM \"public\".\"users\" AS q0_0 \
+         WHERE (($1 IS NOT NULL OR 1 = 1) AND (q0_0.\"id\" = $2))"
+    );
+}
+
+#[test]
 fn postgres_between_renders_numbered_placeholders() {
     let users = Postgres
         .from::<User>()

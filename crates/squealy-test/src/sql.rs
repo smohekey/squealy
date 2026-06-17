@@ -1036,9 +1036,15 @@ where
         T: Encode<crate::TestBackend>,
     {
         if values.is_empty() {
-            return self
-                .writer
-                .write_all(if negated { b"(1 = 1)" } else { b"(1 = 0)" });
+            // Render the operand once so its runtime params stay aligned; see the shared renderer.
+            self.writer.write_all(b"(")?;
+            operand(self)?;
+            let tail: &[u8] = if negated {
+                b" IS NOT NULL OR 1 = 1)"
+            } else {
+                b" IS NOT NULL AND 1 = 0)"
+            };
+            return self.writer.write_all(tail);
         }
         self.writer.write_all(b"(")?;
         operand(self)?;

@@ -1335,11 +1335,19 @@ where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>,
         T: Encode<B>,
     {
-        // SQL has no `IN ()` form, so an empty list collapses to a constant truth value.
+        // SQL has no `IN ()` form. For an empty list, render the operand once — so any runtime
+        // parameters it carries are still emitted in order and stay aligned with later
+        // placeholders — guarded by a constant that fixes the truth value: an empty `IN` is always
+        // false, an empty `NOT IN` always true.
         if values.is_empty() {
-            return self
-                .writer
-                .write_all(if negated { b"(1 = 1)" } else { b"(1 = 0)" });
+            self.writer.write_all(b"(")?;
+            operand(self)?;
+            let tail: &[u8] = if negated {
+                b" IS NOT NULL OR 1 = 1)"
+            } else {
+                b" IS NOT NULL AND 1 = 0)"
+            };
+            return self.writer.write_all(tail);
         }
         self.writer.write_all(b"(")?;
         operand(self)?;
