@@ -21,6 +21,21 @@ impl squealy::Dialect for PostgresDialect {
     fn write_cast_type(&self, ty: &SqlType, mut writer: &mut dyn Write) -> io::Result<()> {
         write_pg_sql_type(ty, &mut writer)
     }
+
+    fn write_like_operator(
+        &self,
+        case_insensitive: bool,
+        negated: bool,
+        writer: &mut dyn Write,
+    ) -> io::Result<()> {
+        // PostgreSQL has a native case-insensitive `ILIKE`.
+        writer.write_all(match (case_insensitive, negated) {
+            (false, false) => b" LIKE " as &[u8],
+            (false, true) => b" NOT LIKE ",
+            (true, false) => b" ILIKE ",
+            (true, true) => b" NOT ILIKE ",
+        })
+    }
 }
 
 pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -> io::Result<()> {

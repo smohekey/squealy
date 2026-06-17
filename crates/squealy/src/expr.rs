@@ -78,6 +78,14 @@ impl_sql_number!(i8, i16, i32, i64, i128, isize);
 impl_sql_number!(u8, u16, u32, u64, u128, usize);
 impl_sql_number!(f32, f64);
 
+/// Marker trait for Rust value types that can participate in SQL pattern matching (`LIKE` /
+/// `ILIKE`). Only string-valued expressions expose the `like` family, so a pattern match against a
+/// numeric column is a compile error. Implemented for `String` (the value type of a text column);
+/// nullable text columns (value type `Option<String>`) are intentionally excluded for now.
+pub trait SqlText {}
+
+impl SqlText for String {}
+
 /// Computes the Rust value type produced by SQL division.
 ///
 /// Division may produce fractional values even when both operands are integers,
@@ -335,6 +343,51 @@ pub trait PredicateAstVisitor: ExprVisitor {
     fn visit_is_null<O>(&mut self, negated: bool, operand: O) -> Result<(), Self::Error>
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render a SQL `LIKE` pattern match. `case_insensitive` selects `ILIKE` on dialects that
+    /// support it (and a case-insensitive fallback elsewhere); `negated` selects `NOT LIKE`.
+    fn visit_like<O, P>(
+        &mut self,
+        case_insensitive: bool,
+        negated: bool,
+        operand: O,
+        pattern: P,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        P: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render a SQL `IN` (or `NOT IN` when `negated`) test of `operand` against a literal value
+    /// list. An empty list is rendered as a constant `FALSE` (or `TRUE` when negated) since SQL has
+    /// no `IN ()` form.
+    fn visit_in<O, T>(
+        &mut self,
+        negated: bool,
+        operand: O,
+        values: &[T],
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        T: crate::Encode<Self::Backend>;
+
+    /// Render a SQL `BETWEEN lo AND hi` (or `NOT BETWEEN` when `negated`) range test.
+    fn visit_between<O, Lo, Hi>(
+        &mut self,
+        negated: bool,
+        operand: O,
+        lo: Lo,
+        hi: Hi,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Lo: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Hi: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render a boolean-valued expression used directly as a predicate (`negated` wraps it in
+    /// `NOT`).
+    fn visit_bool_test<O>(&mut self, negated: bool, operand: O) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>;
 }
 
 macro_rules! impl_value_expr_kind {
@@ -492,7 +545,32 @@ predicate_kind!(
     GreaterThanOrEqualsPredicate,
     AndPredicate,
     OrPredicate,
+    LikePredicate,
 );
+
+/// Type-level identity for a SQL `IN (...)` list membership test of an expression of kind `K`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InPredicate<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> PredicateKind for InPredicate<K> {}
+
+/// Type-level identity for a SQL `BETWEEN` range test of an operand of kind `K`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BetweenPredicate<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> PredicateKind for BetweenPredicate<K> {}
+
+/// Type-level identity for a boolean-valued expression of kind `K` used directly as a predicate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BoolTestPredicate<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> PredicateKind for BoolTestPredicate<K> {}
 
 /// Type-level identity for SQL predicate negation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -690,6 +768,159 @@ where
         V: PredicateAstVisitor<Backend = B>,
     {
         visitor.visit_is_null(self.negated, |visitor| self.operand.visit(visitor))
+    }
+}
+
+/// `LIKE` / `ILIKE` pattern match between two expression operands. `case_insensitive` selects
+/// `ILIKE`; `negated` selects the `NOT` form. The operands' parameters concatenate left-to-right,
+/// like a comparison.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LikePredicateAst<Left, Right> {
+    left: Left,
+    right: Right,
+    case_insensitive: bool,
+    negated: bool,
+}
+
+impl<Left, Right> PredicateAst for LikePredicateAst<Left, Right>
+where
+    Left: ExprAst,
+    Right: ExprAst,
+    Left::Params: crate::HAppend<Right::Params>,
+{
+    type Params = <Left::Params as crate::HAppend<Right::Params>>::Output;
+}
+
+impl<Left, Right, B> RenderPredicateAst<B> for LikePredicateAst<Left, Right>
+where
+    Left: RenderAst<B>,
+    Right: RenderAst<B>,
+    Left::Params: crate::HAppend<Right::Params>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: PredicateAstVisitor<Backend = B>,
+    {
+        visitor.visit_like(
+            self.case_insensitive,
+            self.negated,
+            |visitor| self.left.visit(visitor),
+            |visitor| self.right.visit(visitor),
+        )
+    }
+}
+
+/// `IN (...)` / `NOT IN (...)` membership test of an operand against an inline list of value
+/// literals. The values are captured in the AST and encoded as binds at render time, so they
+/// contribute no runtime parameters — only the operand's parameters flow through.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InPredicateAst<Operand, V> {
+    operand: Operand,
+    values: Vec<V>,
+    negated: bool,
+}
+
+impl<Operand, V> PredicateAst for InPredicateAst<Operand, V>
+where
+    Operand: ExprAst,
+    V: Clone,
+{
+    type Params = Operand::Params;
+}
+
+impl<Operand, V, B> RenderPredicateAst<B> for InPredicateAst<Operand, V>
+where
+    Operand: RenderAst<B>,
+    V: Clone + crate::Encode<B>,
+    B: crate::Backend,
+{
+    fn visit<Vi>(&self, visitor: &mut Vi) -> Result<(), Vi::Error>
+    where
+        Vi: PredicateAstVisitor<Backend = B>,
+    {
+        visitor.visit_in(
+            self.negated,
+            |visitor| self.operand.visit(visitor),
+            &self.values,
+        )
+    }
+}
+
+/// `BETWEEN lo AND hi` / `NOT BETWEEN` range test. The operand's, `lo`'s, and `hi`'s parameters
+/// concatenate left-to-right.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BetweenPredicateAst<Operand, Lo, Hi> {
+    operand: Operand,
+    lo: Lo,
+    hi: Hi,
+    negated: bool,
+}
+
+impl<Operand, Lo, Hi> PredicateAst for BetweenPredicateAst<Operand, Lo, Hi>
+where
+    Operand: ExprAst,
+    Lo: ExprAst,
+    Hi: ExprAst,
+    Operand::Params: crate::HAppend<Lo::Params>,
+    <Operand::Params as crate::HAppend<Lo::Params>>::Output: crate::HAppend<Hi::Params>,
+{
+    type Params = <<Operand::Params as crate::HAppend<Lo::Params>>::Output as crate::HAppend<
+        Hi::Params,
+    >>::Output;
+}
+
+impl<Operand, Lo, Hi, B> RenderPredicateAst<B> for BetweenPredicateAst<Operand, Lo, Hi>
+where
+    Operand: RenderAst<B>,
+    Lo: RenderAst<B>,
+    Hi: RenderAst<B>,
+    Operand::Params: crate::HAppend<Lo::Params>,
+    <Operand::Params as crate::HAppend<Lo::Params>>::Output: crate::HAppend<Hi::Params>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: PredicateAstVisitor<Backend = B>,
+    {
+        visitor.visit_between(
+            self.negated,
+            |visitor| self.operand.visit(visitor),
+            |visitor| self.lo.visit(visitor),
+            |visitor| self.hi.visit(visitor),
+        )
+    }
+}
+
+/// A boolean-valued expression used directly as a predicate (`negated` wraps it in `NOT`). The
+/// operand's parameters flow straight through.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoolTestPredicateAst<Operand> {
+    operand: Operand,
+    negated: bool,
+}
+
+impl<Operand> PredicateAst for BoolTestPredicateAst<Operand>
+where
+    Operand: ExprAst,
+{
+    type Params = Operand::Params;
+}
+
+impl<Operand, B> RenderPredicateAst<B> for BoolTestPredicateAst<Operand>
+where
+    Operand: RenderAst<B>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: PredicateAstVisitor<Backend = B>,
+    {
+        visitor.visit_bool_test(self.negated, |visitor| self.operand.visit(visitor))
     }
 }
 
@@ -903,6 +1134,16 @@ impl<'scope, K> Copy for ColumnRef<'scope, K> {}
 pub type ColumnComparison<'scope, Cmp, K, RhsAst> =
     Predicate<'scope, Cmp, ComparePredicateAst<ColumnExprAst<K>, RhsAst>>;
 
+/// The predicate produced by a [`ColumnRef`] `like`/`ilike` helper: a pattern match between this
+/// column's expression and the pattern's AST.
+pub type ColumnLike<'scope, K, RhsKind, RhsAst> =
+    Predicate<'scope, LikePredicate<K, RhsKind>, LikePredicateAst<ColumnExprAst<K>, RhsAst>>;
+
+/// The predicate produced by a [`ColumnRef`] `between` helper: a range test of this column's
+/// expression against the `lo`/`hi` ASTs.
+pub type ColumnBetween<'scope, K, LoAst, HiAst> =
+    Predicate<'scope, BetweenPredicate<K>, BetweenPredicateAst<ColumnExprAst<K>, LoAst, HiAst>>;
+
 impl<'scope, K> ColumnRef<'scope, K>
 where
     K: ExprKind,
@@ -1022,6 +1263,110 @@ where
         self.into_expr().greater_than_or_equals(other)
     }
 
+    /// SQL `LIKE` pattern match (text columns only).
+    pub fn like<'other, R>(self, pattern: R) -> ColumnLike<'scope, K, R::Kind, R::Ast>
+    where
+        K::Value: SqlText,
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
+        <ColumnExprAst<K> as ExprAst>::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
+    {
+        self.into_expr().like(pattern)
+    }
+
+    /// SQL `NOT LIKE` pattern match (text columns only).
+    pub fn not_like<'other, R>(self, pattern: R) -> ColumnLike<'scope, K, R::Kind, R::Ast>
+    where
+        K::Value: SqlText,
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
+        <ColumnExprAst<K> as ExprAst>::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
+    {
+        self.into_expr().not_like(pattern)
+    }
+
+    /// SQL case-insensitive `ILIKE` pattern match (text columns only).
+    pub fn ilike<'other, R>(self, pattern: R) -> ColumnLike<'scope, K, R::Kind, R::Ast>
+    where
+        K::Value: SqlText,
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
+        <ColumnExprAst<K> as ExprAst>::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
+    {
+        self.into_expr().ilike(pattern)
+    }
+
+    /// SQL case-insensitive `NOT ILIKE` pattern match (text columns only).
+    pub fn not_ilike<'other, R>(self, pattern: R) -> ColumnLike<'scope, K, R::Kind, R::Ast>
+    where
+        K::Value: SqlText,
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
+        <ColumnExprAst<K> as ExprAst>::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
+    {
+        self.into_expr().not_ilike(pattern)
+    }
+
+    /// SQL `IN (...)` membership against an inline value list.
+    pub fn in_<I>(
+        self,
+        values: I,
+    ) -> Predicate<'scope, InPredicate<K>, InPredicateAst<ColumnExprAst<K>, K::Value>>
+    where
+        I: IntoIterator,
+        I::Item: Into<K::Value>,
+        K::Value: Clone,
+    {
+        self.into_expr().in_(values)
+    }
+
+    /// SQL `NOT IN (...)` membership against an inline value list.
+    pub fn not_in<I>(
+        self,
+        values: I,
+    ) -> Predicate<'scope, InPredicate<K>, InPredicateAst<ColumnExprAst<K>, K::Value>>
+    where
+        I: IntoIterator,
+        I::Item: Into<K::Value>,
+        K::Value: Clone,
+    {
+        self.into_expr().not_in(values)
+    }
+
+    /// SQL `BETWEEN lo AND hi` (inclusive).
+    pub fn between<'other, Lo, Hi>(
+        self,
+        lo: Lo,
+        hi: Hi,
+    ) -> ColumnBetween<'scope, K, Lo::Ast, Hi::Ast>
+    where
+        Lo: IntoExpr<'other>,
+        Hi: IntoExpr<'other>,
+        Lo::Kind: ExprKind<Value = K::Value>,
+        Hi::Kind: ExprKind<Value = K::Value>,
+        // `ColumnExprAst` carries no params (`HNil`), so the operand-append collapses and only the
+        // `lo`/`hi` params need to concatenate.
+        <Lo::Ast as ExprAst>::Params: crate::HAppend<<Hi::Ast as ExprAst>::Params>,
+    {
+        self.into_expr().between(lo, hi)
+    }
+
+    /// SQL `NOT BETWEEN lo AND hi`.
+    pub fn not_between<'other, Lo, Hi>(
+        self,
+        lo: Lo,
+        hi: Hi,
+    ) -> ColumnBetween<'scope, K, Lo::Ast, Hi::Ast>
+    where
+        Lo: IntoExpr<'other>,
+        Hi: IntoExpr<'other>,
+        Lo::Kind: ExprKind<Value = K::Value>,
+        Hi::Kind: ExprKind<Value = K::Value>,
+        <Lo::Ast as ExprAst>::Params: crate::HAppend<<Hi::Ast as ExprAst>::Params>,
+    {
+        self.into_expr().not_between(lo, hi)
+    }
+
     /// Sort by this column in ascending order.
     pub fn asc(self) -> Order<'scope, K, ColumnExprAst<K>> {
         self.into_expr().asc()
@@ -1050,6 +1395,26 @@ where
         self,
     ) -> Predicate<'scope, IsNotNullPredicate<K>, NullCheckPredicateAst<ColumnExprAst<K>>> {
         self.into_expr().is_not_null()
+    }
+}
+
+/// Boolean columns can be used directly as a predicate (`K::Value = bool`).
+impl<'scope, K> ColumnRef<'scope, K>
+where
+    K: ExprKind<Value = bool>,
+{
+    /// Use this boolean column as a predicate (matches rows where it is true).
+    pub fn is_true(
+        self,
+    ) -> Predicate<'scope, BoolTestPredicate<K>, BoolTestPredicateAst<ColumnExprAst<K>>> {
+        self.into_expr().is_true()
+    }
+
+    /// Use the negation of this boolean column as a predicate (matches rows where it is false).
+    pub fn is_false(
+        self,
+    ) -> Predicate<'scope, BoolTestPredicate<K>, BoolTestPredicateAst<ColumnExprAst<K>>> {
+        self.into_expr().is_false()
     }
 }
 
@@ -1258,6 +1623,185 @@ where
         })
     }
 
+    /// SQL `LIKE` pattern match. Available only on text expressions; the pattern is any text
+    /// operand (a `&str`/`String` literal, a runtime param, or another text column).
+    pub fn like<'other, R>(
+        &self,
+        pattern: R,
+    ) -> Predicate<'scope, LikePredicate<K, R::Kind>, LikePredicateAst<Ast, R::Ast>>
+    where
+        K::Value: SqlText,
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
+        Ast::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
+    {
+        self.like_impl(pattern, false, false)
+    }
+
+    /// SQL `NOT LIKE` pattern match.
+    pub fn not_like<'other, R>(
+        &self,
+        pattern: R,
+    ) -> Predicate<'scope, LikePredicate<K, R::Kind>, LikePredicateAst<Ast, R::Ast>>
+    where
+        K::Value: SqlText,
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
+        Ast::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
+    {
+        self.like_impl(pattern, false, true)
+    }
+
+    /// SQL case-insensitive `ILIKE` pattern match (case-insensitive `LIKE` on dialects without
+    /// `ILIKE`).
+    pub fn ilike<'other, R>(
+        &self,
+        pattern: R,
+    ) -> Predicate<'scope, LikePredicate<K, R::Kind>, LikePredicateAst<Ast, R::Ast>>
+    where
+        K::Value: SqlText,
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
+        Ast::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
+    {
+        self.like_impl(pattern, true, false)
+    }
+
+    /// SQL case-insensitive `NOT ILIKE` pattern match.
+    pub fn not_ilike<'other, R>(
+        &self,
+        pattern: R,
+    ) -> Predicate<'scope, LikePredicate<K, R::Kind>, LikePredicateAst<Ast, R::Ast>>
+    where
+        K::Value: SqlText,
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind<Value = K::Value>,
+        Ast::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
+    {
+        self.like_impl(pattern, true, true)
+    }
+
+    fn like_impl<'other, R>(
+        &self,
+        pattern: R,
+        case_insensitive: bool,
+        negated: bool,
+    ) -> Predicate<'scope, LikePredicate<K, R::Kind>, LikePredicateAst<Ast, R::Ast>>
+    where
+        R: IntoExpr<'other>,
+        R::Kind: ExprKind,
+        Ast::Params: crate::HAppend<<R::Ast as ExprAst>::Params>,
+    {
+        Predicate::new(LikePredicateAst {
+            left: self.ast.clone(),
+            right: pattern.into_expr().ast,
+            case_insensitive,
+            negated,
+        })
+    }
+
+    /// SQL `IN (...)` membership against an inline list of values of this expression's value type.
+    /// An empty list matches no rows.
+    pub fn in_<I>(
+        &self,
+        values: I,
+    ) -> Predicate<'scope, InPredicate<K>, InPredicateAst<Ast, K::Value>>
+    where
+        I: IntoIterator,
+        I::Item: Into<K::Value>,
+        K::Value: Clone,
+    {
+        self.in_impl(values, false)
+    }
+
+    /// SQL `NOT IN (...)` membership. An empty list matches every row.
+    pub fn not_in<I>(
+        &self,
+        values: I,
+    ) -> Predicate<'scope, InPredicate<K>, InPredicateAst<Ast, K::Value>>
+    where
+        I: IntoIterator,
+        I::Item: Into<K::Value>,
+        K::Value: Clone,
+    {
+        self.in_impl(values, true)
+    }
+
+    fn in_impl<I>(
+        &self,
+        values: I,
+        negated: bool,
+    ) -> Predicate<'scope, InPredicate<K>, InPredicateAst<Ast, K::Value>>
+    where
+        I: IntoIterator,
+        I::Item: Into<K::Value>,
+        K::Value: Clone,
+    {
+        Predicate::new(InPredicateAst {
+            operand: self.ast.clone(),
+            values: values.into_iter().map(Into::into).collect(),
+            negated,
+        })
+    }
+
+    /// SQL `BETWEEN lo AND hi` (inclusive). `lo` and `hi` are any operands of this expression's
+    /// value type.
+    pub fn between<'other, Lo, Hi>(
+        &self,
+        lo: Lo,
+        hi: Hi,
+    ) -> Predicate<'scope, BetweenPredicate<K>, BetweenPredicateAst<Ast, Lo::Ast, Hi::Ast>>
+    where
+        Lo: IntoExpr<'other>,
+        Hi: IntoExpr<'other>,
+        Lo::Kind: ExprKind<Value = K::Value>,
+        Hi::Kind: ExprKind<Value = K::Value>,
+        Ast::Params: crate::HAppend<<Lo::Ast as ExprAst>::Params>,
+        <Ast::Params as crate::HAppend<<Lo::Ast as ExprAst>::Params>>::Output:
+            crate::HAppend<<Hi::Ast as ExprAst>::Params>,
+    {
+        self.between_impl(lo, hi, false)
+    }
+
+    /// SQL `NOT BETWEEN lo AND hi`.
+    pub fn not_between<'other, Lo, Hi>(
+        &self,
+        lo: Lo,
+        hi: Hi,
+    ) -> Predicate<'scope, BetweenPredicate<K>, BetweenPredicateAst<Ast, Lo::Ast, Hi::Ast>>
+    where
+        Lo: IntoExpr<'other>,
+        Hi: IntoExpr<'other>,
+        Lo::Kind: ExprKind<Value = K::Value>,
+        Hi::Kind: ExprKind<Value = K::Value>,
+        Ast::Params: crate::HAppend<<Lo::Ast as ExprAst>::Params>,
+        <Ast::Params as crate::HAppend<<Lo::Ast as ExprAst>::Params>>::Output:
+            crate::HAppend<<Hi::Ast as ExprAst>::Params>,
+    {
+        self.between_impl(lo, hi, true)
+    }
+
+    fn between_impl<'other, Lo, Hi>(
+        &self,
+        lo: Lo,
+        hi: Hi,
+        negated: bool,
+    ) -> Predicate<'scope, BetweenPredicate<K>, BetweenPredicateAst<Ast, Lo::Ast, Hi::Ast>>
+    where
+        Lo: IntoExpr<'other>,
+        Hi: IntoExpr<'other>,
+        Ast::Params: crate::HAppend<<Lo::Ast as ExprAst>::Params>,
+        <Ast::Params as crate::HAppend<<Lo::Ast as ExprAst>::Params>>::Output:
+            crate::HAppend<<Hi::Ast as ExprAst>::Params>,
+    {
+        Predicate::new(BetweenPredicateAst {
+            operand: self.ast.clone(),
+            lo: lo.into_expr().ast,
+            hi: hi.into_expr().ast,
+            negated,
+        })
+    }
+
     /// Sort by this expression in ascending order.
     pub fn asc(&self) -> Order<'scope, K, Ast> {
         Order::new(self.ast.clone(), OrderDirection::Asc)
@@ -1290,6 +1834,30 @@ where
         &self,
     ) -> Predicate<'scope, IsNotNullPredicate<K>, NullCheckPredicateAst<Ast>> {
         Predicate::new(NullCheckPredicateAst {
+            operand: self.ast.clone(),
+            negated: true,
+        })
+    }
+}
+
+/// Using a boolean-valued expression directly as a predicate. Available only on non-null `bool`
+/// expressions, so a bool column can go straight into `where_` without an explicit `.equals(true)`.
+impl<'scope, K, Ast> Expr<'scope, K, Ast>
+where
+    K: ExprKind<Value = bool>,
+    Ast: ExprAst,
+{
+    /// Use this boolean expression as a predicate (matches rows where it is true).
+    pub fn is_true(&self) -> Predicate<'scope, BoolTestPredicate<K>, BoolTestPredicateAst<Ast>> {
+        Predicate::new(BoolTestPredicateAst {
+            operand: self.ast.clone(),
+            negated: false,
+        })
+    }
+
+    /// Use the negation of this boolean expression as a predicate (matches rows where it is false).
+    pub fn is_false(&self) -> Predicate<'scope, BoolTestPredicate<K>, BoolTestPredicateAst<Ast>> {
+        Predicate::new(BoolTestPredicateAst {
             operand: self.ast.clone(),
             negated: true,
         })
