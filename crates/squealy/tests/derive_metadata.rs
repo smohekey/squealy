@@ -117,8 +117,8 @@ impl SelectSink for RecordingSelectSink {
 struct User<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key, auto_increment, index)]
     id: C::Type<'scope, i32>,
-    #[column(index, nullable, default = value("anonymous"))]
-    name: C::Type<'scope, String>,
+    #[column(index, default = value("anonymous"))]
+    name: C::Type<'scope, Option<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
@@ -163,6 +163,10 @@ struct DefaultVariant<'scope, C: ColumnMode = ColumnExpr> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct JsonPayload;
 
+// A bare `db_type` column value type (no `#[derive(ColumnType)]`) must declare its non-null
+// nullability explicitly.
+squealy::impl_non_null_column!(JsonPayload);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ColumnType)]
 pub struct RecordId(i32);
 
@@ -205,8 +209,7 @@ struct DerivedColumnTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
 struct NewtypeNullable<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key)]
     id: C::Type<'scope, RecordId>,
-    #[column(nullable)]
-    parent_id: C::Type<'scope, RecordId>,
+    parent_id: C::Type<'scope, Option<RecordId>>,
 }
 
 // A bare `uuid::Uuid` field maps to a `uuid` column without a `#[column(db_type = "uuid")]`
@@ -218,8 +221,7 @@ struct UuidKeyed<'scope, C: ColumnMode = ColumnExpr> {
     id: C::Type<'scope, uuid::Uuid>,
     // A nullable bare-`uuid::Uuid` column exercises the `DecodeNullable` and
     // `IntoNullableAssignmentValue` paths the table derive emits for nullable fields.
-    #[column(nullable)]
-    parent_id: C::Type<'scope, uuid::Uuid>,
+    parent_id: C::Type<'scope, Option<uuid::Uuid>>,
     slug: C::Type<'scope, String>,
 }
 
@@ -231,8 +233,7 @@ struct Timestamped<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key)]
     id: C::Type<'scope, i32>,
     created_at: C::Type<'scope, std::time::SystemTime>,
-    #[column(nullable)]
-    deleted_at: C::Type<'scope, std::time::SystemTime>,
+    deleted_at: C::Type<'scope, Option<std::time::SystemTime>>,
 }
 
 #[allow(dead_code)]
@@ -526,7 +527,7 @@ fn assert_optional_i32_row(_: &impl HasSelectRow<Option<i32>>) {}
 
 fn assert_user_id_and_post_row(_: &impl HasSelectRow<(i32, __SquealyPostRowShape)>) {}
 
-// `name` is `#[column(nullable)]`, so projecting it in a tuple decodes as `Option<String>`.
+// `name` is an `Option<T>` (nullable), so projecting it in a tuple decodes as `Option<String>`.
 fn assert_user_id_name_and_post_row(
     _: &impl HasSelectRow<(i32, Option<String>, __SquealyPostRowShape)>,
 ) {
@@ -582,7 +583,7 @@ where
 
 fn assert_insert_i32_row(_: &impl HasInsertRow<i32>) {}
 
-// `name` is `#[column(nullable)]`, so a `RETURNING` projection of it decodes as `Option<String>`.
+// `name` is an `Option<T>` (nullable), so a `RETURNING` projection of it decodes as `Option<String>`.
 fn assert_update_id_name_row(_: &impl HasUpdateRow<(i32, Option<String>)>) {}
 
 fn assert_delete_user_row(_: &impl HasDeleteRow<__SquealyUserRowShape>) {}
@@ -1267,7 +1268,7 @@ fn select_can_project_three_part_tuple_shapes() {
 
 #[test]
 fn select_projects_nullable_column_as_option() {
-    // Regression (git-bug a2b1909): a `#[column(nullable)]` column projected in a tuple decodes as
+    // Regression (git-bug a2b1909): a an `Option<T>` (nullable) column projected in a tuple decodes as
     // `Option<T>` — matching how the whole-row decode already treats it — rather than bare `T`,
     // which fails to decode a SQL NULL. `User::name` is nullable; `User::id` is not.
     fn assert_id_and_optional_name(_: &impl HasSelectRow<(i32, Option<String>)>) {}
