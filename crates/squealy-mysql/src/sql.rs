@@ -738,12 +738,14 @@ impl squealy::Dialect for MysqlDialect {
         // `CAST(expr AS <type>)` accepts a restricted vocabulary in MySQL, distinct from column types
         // (e.g. `SIGNED`/`UNSIGNED`/`CHAR`, not `INT`/`VARCHAR`).
         let name = match ty {
+            // `i128` exceeds MySQL's 64-bit `SIGNED`, so cast to a full-precision decimal (e.g. a
+            // widened `SUM(BIGINT UNSIGNED)`) rather than overflowing `SIGNED`.
+            SqlType::I128 => "DECIMAL(65, 0)",
             SqlType::Bool
             | SqlType::I8
             | SqlType::I16
             | SqlType::I32
             | SqlType::I64
-            | SqlType::I128
             | SqlType::Isize => "SIGNED",
             SqlType::U8
             | SqlType::U16

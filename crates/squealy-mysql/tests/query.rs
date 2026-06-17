@@ -10,6 +10,13 @@ struct Widget<'scope, C: ColumnMode = ColumnExpr> {
     name: C::Type<'scope, String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+struct Counter<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    hits: C::Type<'scope, u64>,
+}
+
 #[test]
 fn mysql_renders_select_in_its_dialect() {
     let query = Mysql
@@ -113,4 +120,19 @@ fn mysql_sum_and_avg_cast_in_its_dialect() {
         count.to_sql()
     );
     assert!(!count.to_sql().contains("CAST"), "{}", count.to_sql());
+}
+
+#[test]
+fn mysql_unsigned_sum_casts_to_full_precision_decimal() {
+    // A `u64` SUM widens to `i128` (can exceed `i64::MAX`); on MySQL that must cast to a
+    // full-precision DECIMAL, not `SIGNED`, to avoid overflow.
+    let sum = Mysql
+        .from::<Counter>()
+        .select(|(counter,)| counter.hits.sum());
+    assert!(
+        sum.to_sql()
+            .contains("CAST(SUM(q0_0.`hits`) AS DECIMAL(65, 0))"),
+        "{}",
+        sum.to_sql()
+    );
 }

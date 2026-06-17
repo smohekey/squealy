@@ -24,6 +24,19 @@ fn option_newtype_column_decodes() {
     assert_decode::<Option<i32>>();
 }
 
+/// `#[derive(ColumnType)]` emits `AggregateScalar`, so `MIN`/`MAX` still work on a newtype column
+/// (and decode back to the newtype) — including its nullable / left-joined form, which flattens to
+/// a single `Option<ProbeId>` rather than `Option<Option<ProbeId>>`.
+#[test]
+fn newtype_min_max_result_types() {
+    let min: <squealy::MinExpr<ProbeId> as squealy::ExprKind>::Value = Some(ProbeId(0));
+    let _: Option<ProbeId> = min;
+
+    let nullable_max: <squealy::MaxExpr<squealy::Nullable<ProbeId>> as squealy::ExprKind>::Value =
+        Some(ProbeId(0));
+    let _: Option<ProbeId> = nullable_max;
+}
+
 #[derive(Clone, Debug, PartialEq, Table)]
 struct DefaultedRecord<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key, auto_increment)]

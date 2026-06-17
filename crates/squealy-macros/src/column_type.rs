@@ -48,6 +48,12 @@ impl ColumnTypeStruct {
                 type Value = Self;
             }
 
+            // A newtype is its own aggregate scalar, so `MIN`/`MAX` over a column of this type (or a
+            // nullable / left-joined one) decode back to the newtype.
+            impl ::squealy::AggregateScalar for #ident {
+                type Scalar = Self;
+            }
+
             impl<Backend> ::squealy::Encode<Backend> for #ident
             where
                 Backend: ::squealy::Backend,

@@ -649,3 +649,18 @@ fn test_aggregate_result_types() {
     let max: <MaxExpr<String> as ExprKind>::Value = Some(String::new());
     let _: Option<String> = max;
 }
+
+/// Compile-time checks that aggregates over a nullable operand kind (`Nullable<K>`, as produced by
+/// a `left_join`) unwrap the nullability: `SUM` still widens to `Option<i64>`, and `MIN` stays a
+/// single `Option<i32>` rather than nesting a second `Option`.
+#[test]
+fn test_aggregate_nullable_operand_types_unwrap() {
+    let sum: <SumExpr<Nullable<i32>> as ExprKind>::Value = Some(0i64);
+    let _: Option<i64> = sum;
+
+    let avg: <AvgExpr<Nullable<i32>> as ExprKind>::Value = Some(0.0f64);
+    let _: Option<f64> = avg;
+
+    let min: <MinExpr<Nullable<i32>> as ExprKind>::Value = Some(0i32);
+    let _: Option<i32> = min;
+}

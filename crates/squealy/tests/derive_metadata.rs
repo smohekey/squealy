@@ -525,6 +525,10 @@ fn assert_f64_row(_: &impl HasSelectRow<f64>) {}
 
 fn assert_optional_i32_row(_: &impl HasSelectRow<Option<i32>>) {}
 
+fn assert_optional_i64_row(_: &impl HasSelectRow<Option<i64>>) {}
+
+fn assert_optional_string_row(_: &impl HasSelectRow<Option<String>>) {}
+
 fn assert_user_id_and_post_row(_: &impl HasSelectRow<(i32, __SquealyPostRowShape)>) {}
 
 // `name` is an `Option<T>` (nullable), so projecting it in a tuple decodes as `Option<String>`.
@@ -1445,6 +1449,37 @@ fn left_join_projects_nullable_column_shapes() {
         post_ids.to_sql(),
         r#"SELECT q0_1.id AS id FROM public.users AS q0_0 LEFT JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id)"#
     );
+}
+
+#[test]
+fn aggregates_over_left_joined_columns_unwrap_nullability() {
+    // PR #31 review (P2): aggregating a left-joined column (kind `Nullable<K>`, value `Option<T>`)
+    // works and the result type matches the non-null operand — SQL aggregates ignore NULLs. SUM
+    // widens to `Option<i64>`, and MIN stays a single `Option<i32>` (not `Option<Option<i32>>`).
+    let post_sum = TestConnection
+        .from::<User>()
+        .left_join::<Post>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .select(|(_user, post)| post.id.sum());
+    assert_optional_i64_row(&post_sum);
+    assert_eq!(
+        post_sum.to_sql(),
+        r#"SELECT SUM(q0_1.id) AS expr FROM public.users AS q0_0 LEFT JOIN public.posts AS q0_1 ON (q0_1.user_id = q0_0.id)"#
+    );
+
+    let post_min = TestConnection
+        .from::<User>()
+        .left_join::<Post>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .select(|(_user, post)| post.id.min());
+    assert_optional_i32_row(&post_min);
+
+    let body_max = TestConnection
+        .from::<User>()
+        .left_join::<Post>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .select(|(_user, post)| post.body.max());
+    assert_optional_string_row(&body_max);
 }
 
 #[test]

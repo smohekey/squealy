@@ -160,6 +160,49 @@ impl_sql_sum!(
     f64 => f64 : crate::SqlType::F64,
 );
 
+/// The non-null scalar an aggregate operates on, looking through any number of `Option` layers.
+///
+/// SQL aggregates (`SUM`/`AVG`/`MIN`/`MAX`) ignore `NULL` inputs, so an aggregate over a nullable
+/// operand — a `#[column]` typed `Option<T>`, or any column reached through a `LEFT JOIN`
+/// (`Nullable<K>`, value `Option<T>`) — produces the same result type as the non-null `T`. This
+/// trait maps the operand's value type to that scalar: `T` → `T`, and `Option<T>` → `T`'s scalar
+/// (recursively, so a left-joined nullable column's `Option<Option<T>>` still resolves to `T`).
+///
+/// It is implemented for the built-in scalar value types and, by `#[derive(ColumnType)]`, for
+/// newtype wrappers, plus the blanket `Option` impl below.
+pub trait AggregateScalar {
+    /// The underlying non-null scalar value type.
+    type Scalar;
+}
+
+impl<T> AggregateScalar for Option<T>
+where
+    T: AggregateScalar,
+{
+    type Scalar = T::Scalar;
+}
+
+macro_rules! impl_aggregate_scalar {
+    ($($ty:ty),* $(,)?) => {
+        $(impl AggregateScalar for $ty {
+            type Scalar = $ty;
+        })*
+    };
+}
+
+impl_aggregate_scalar!(i8, i16, i32, i64, i128, isize);
+impl_aggregate_scalar!(u8, u16, u32, u64, u128, usize);
+impl_aggregate_scalar!(f32, f64, String, bool);
+
+#[cfg(feature = "uuid")]
+impl_aggregate_scalar!(uuid::Uuid);
+#[cfg(feature = "systemtime")]
+impl_aggregate_scalar!(std::time::SystemTime);
+#[cfg(feature = "time")]
+impl_aggregate_scalar!(time::OffsetDateTime);
+#[cfg(feature = "chrono")]
+impl_aggregate_scalar!(chrono::DateTime<chrono::Utc>);
+
 /// Type-level identity for a SQL expression.
 pub trait ExprKind {
     type Value;
@@ -636,9 +679,10 @@ pub enum SumExpr<K> {
 impl<K> ExprKind for SumExpr<K>
 where
     K: ExprKind,
-    K::Value: SqlSum,
+    K::Value: AggregateScalar,
+    <K::Value as AggregateScalar>::Scalar: SqlSum,
 {
-    type Value = Option<<K::Value as SqlSum>::Output>;
+    type Value = Option<<<K::Value as AggregateScalar>::Scalar as SqlSum>::Output>;
 }
 
 /// Type-level identity for SQL `AVG(expr)`. An average is `NULL` over an empty input and always
@@ -651,7 +695,8 @@ pub enum AvgExpr<K> {
 impl<K> ExprKind for AvgExpr<K>
 where
     K: ExprKind,
-    K::Value: SqlNumber,
+    K::Value: AggregateScalar,
+    <K::Value as AggregateScalar>::Scalar: SqlNumber,
 {
     type Value = Option<f64>;
 }
@@ -666,8 +711,9 @@ pub enum MinExpr<K> {
 impl<K> ExprKind for MinExpr<K>
 where
     K: ExprKind,
+    K::Value: AggregateScalar,
 {
-    type Value = Option<K::Value>;
+    type Value = Option<<K::Value as AggregateScalar>::Scalar>;
 }
 
 /// Type-level identity for SQL `MAX(expr)`. `MAX` is `NULL` over an empty input, so the value type
@@ -680,8 +726,9 @@ pub enum MaxExpr<K> {
 impl<K> ExprKind for MaxExpr<K>
 where
     K: ExprKind,
+    K::Value: AggregateScalar,
 {
-    type Value = Option<K::Value>;
+    type Value = Option<<K::Value as AggregateScalar>::Scalar>;
 }
 
 /// Type-level identity for a SQL predicate.
@@ -1542,10 +1589,12 @@ where
         self.into_expr().count()
     }
 
-    /// SQL `SUM(column)` (numeric columns; integer sums widen to `i64`).
+    /// SQL `SUM(column)` (numeric columns; integer sums widen to `i64`). Also accepts nullable /
+    /// left-joined numeric columns.
     pub fn sum(self) -> Expr<'scope, SumExpr<K>, AggregateExprAst<ColumnExprAst<K>>>
     where
-        K::Value: SqlSum,
+        K::Value: AggregateScalar,
+        <K::Value as AggregateScalar>::Scalar: SqlSum,
     {
         self.into_expr().sum()
     }
@@ -1553,18 +1602,25 @@ where
     /// SQL `AVG(column)` (numeric columns), producing `Option<f64>`.
     pub fn avg(self) -> Expr<'scope, AvgExpr<K>, AggregateExprAst<ColumnExprAst<K>>>
     where
-        K::Value: SqlNumber,
+        K::Value: AggregateScalar,
+        <K::Value as AggregateScalar>::Scalar: SqlNumber,
     {
         self.into_expr().avg()
     }
 
     /// SQL `MIN(column)`.
-    pub fn min(self) -> Expr<'scope, MinExpr<K>, AggregateExprAst<ColumnExprAst<K>>> {
+    pub fn min(self) -> Expr<'scope, MinExpr<K>, AggregateExprAst<ColumnExprAst<K>>>
+    where
+        K::Value: AggregateScalar,
+    {
         self.into_expr().min()
     }
 
     /// SQL `MAX(column)`.
-    pub fn max(self) -> Expr<'scope, MaxExpr<K>, AggregateExprAst<ColumnExprAst<K>>> {
+    pub fn max(self) -> Expr<'scope, MaxExpr<K>, AggregateExprAst<ColumnExprAst<K>>>
+    where
+        K::Value: AggregateScalar,
+    {
         self.into_expr().max()
     }
 
@@ -2011,12 +2067,17 @@ where
 
     /// SQL `SUM(expr)` — `NULL` over an empty input, so the result is `Option<…>`; integer sums
     /// widen to `i64` (see [`SqlSum`]). The call is cast to that type so the database's own result
-    /// type (which can be `numeric`) decodes correctly.
+    /// type (which can be `numeric`) decodes correctly. Works on nullable / left-joined operands,
+    /// which aggregate over the same scalar as their non-null counterpart (see [`AggregateScalar`]).
     pub fn sum(&self) -> Expr<'scope, SumExpr<K>, AggregateExprAst<Ast>>
     where
-        K::Value: SqlSum,
+        K::Value: AggregateScalar,
+        <K::Value as AggregateScalar>::Scalar: SqlSum,
     {
-        self.aggregate(AggregateFunc::Sum, Some(<K::Value as SqlSum>::SUM_CAST))
+        self.aggregate(
+            AggregateFunc::Sum,
+            Some(<<K::Value as AggregateScalar>::Scalar as SqlSum>::SUM_CAST),
+        )
     }
 
     /// SQL `AVG(expr)` — `NULL` over an empty input and always fractional, so the result is
@@ -2024,18 +2085,26 @@ where
     /// inputs.
     pub fn avg(&self) -> Expr<'scope, AvgExpr<K>, AggregateExprAst<Ast>>
     where
-        K::Value: SqlNumber,
+        K::Value: AggregateScalar,
+        <K::Value as AggregateScalar>::Scalar: SqlNumber,
     {
         self.aggregate(AggregateFunc::Avg, Some(crate::SqlType::F64))
     }
 
-    /// SQL `MIN(expr)` — `NULL` over an empty input, so the result is `Option<…>`.
-    pub fn min(&self) -> Expr<'scope, MinExpr<K>, AggregateExprAst<Ast>> {
+    /// SQL `MIN(expr)` — `NULL` over an empty input, so the result is `Option<…>` of the operand's
+    /// scalar (a nullable operand does not nest a second `Option`).
+    pub fn min(&self) -> Expr<'scope, MinExpr<K>, AggregateExprAst<Ast>>
+    where
+        K::Value: AggregateScalar,
+    {
         self.aggregate(AggregateFunc::Min, None)
     }
 
     /// SQL `MAX(expr)` — `NULL` over an empty input, so the result is `Option<…>`.
-    pub fn max(&self) -> Expr<'scope, MaxExpr<K>, AggregateExprAst<Ast>> {
+    pub fn max(&self) -> Expr<'scope, MaxExpr<K>, AggregateExprAst<Ast>>
+    where
+        K::Value: AggregateScalar,
+    {
         self.aggregate(AggregateFunc::Max, None)
     }
 
