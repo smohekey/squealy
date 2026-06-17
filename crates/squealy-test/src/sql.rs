@@ -1006,6 +1006,97 @@ where
             self.writer.write_all(b" IS NULL)")
         }
     }
+
+    fn visit_like<O, P>(
+        &mut self,
+        case_insensitive: bool,
+        negated: bool,
+        operand: O,
+        pattern: P,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        P: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        self.writer.write_all(b"(")?;
+        operand(self)?;
+        self.writer.write_all(match (case_insensitive, negated) {
+            (false, false) => b" LIKE " as &[u8],
+            (false, true) => b" NOT LIKE ",
+            (true, false) => b" ILIKE ",
+            (true, true) => b" NOT ILIKE ",
+        })?;
+        pattern(self)?;
+        self.writer.write_all(b")")
+    }
+
+    fn visit_in<O, T>(&mut self, negated: bool, operand: O, values: &[T]) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        T: Encode<crate::TestBackend>,
+    {
+        if values.is_empty() {
+            // Render the operand once so its runtime params stay aligned; see the shared renderer.
+            self.writer.write_all(b"(")?;
+            operand(self)?;
+            let tail: &[u8] = if negated {
+                b" IS NOT NULL OR 1 = 1)"
+            } else {
+                b" IS NOT NULL AND 1 = 0)"
+            };
+            return self.writer.write_all(tail);
+        }
+        self.writer.write_all(b"(")?;
+        operand(self)?;
+        self.writer
+            .write_all(if negated { b" NOT IN (" } else { b" IN (" })?;
+        for (index, value) in values.iter().enumerate() {
+            if index > 0 {
+                self.writer.write_all(b", ")?;
+            }
+            self.writer.push_bind(value);
+            self.writer.write_all(b"?")?;
+        }
+        self.writer.write_all(b"))")
+    }
+
+    fn visit_between<O, Lo, Hi>(
+        &mut self,
+        negated: bool,
+        operand: O,
+        lo: Lo,
+        hi: Hi,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Lo: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Hi: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        self.writer.write_all(b"(")?;
+        operand(self)?;
+        self.writer.write_all(if negated {
+            b" NOT BETWEEN "
+        } else {
+            b" BETWEEN "
+        })?;
+        lo(self)?;
+        self.writer.write_all(b" AND ")?;
+        hi(self)?;
+        self.writer.write_all(b")")
+    }
+
+    fn visit_bool_test<O>(&mut self, negated: bool, operand: O) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        if negated {
+            self.writer.write_all(b"(NOT ")?;
+        } else {
+            self.writer.write_all(b"(")?;
+        }
+        operand(self)?;
+        self.writer.write_all(b")")
+    }
 }
 
 fn render_arithmetic_op(op: ArithmeticOp) -> &'static str {

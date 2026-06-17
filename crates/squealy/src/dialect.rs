@@ -54,4 +54,20 @@ pub trait Dialect {
     fn write_default_row_insert(&self, writer: &mut dyn Write) -> io::Result<()> {
         writer.write_all(b" DEFAULT VALUES")
     }
+
+    /// Writes the `LIKE` operator (with surrounding spaces) for a pattern match, selecting the
+    /// `NOT` form when `negated`.
+    ///
+    /// The default ignores `case_insensitive` and always emits `LIKE`, which is correct for MySQL
+    /// where the default (case-insensitive) collations make `LIKE` case-insensitive already.
+    /// PostgreSQL overrides this to emit `ILIKE` for case-insensitive matches.
+    fn write_like_operator(
+        &self,
+        case_insensitive: bool,
+        negated: bool,
+        writer: &mut dyn Write,
+    ) -> io::Result<()> {
+        let _ = case_insensitive;
+        writer.write_all(if negated { b" NOT LIKE " } else { b" LIKE " })
+    }
 }

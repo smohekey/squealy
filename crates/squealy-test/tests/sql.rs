@@ -375,3 +375,199 @@ fn test_is_not_null_composes_with_other_predicates() {
     );
     assert_eq!(accounts.collect_params().unwrap(), vec![TestParam::Int(1)]);
 }
+
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Public)]
+struct Widget<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    name: C::Type<'scope, String>,
+    active: C::Type<'scope, bool>,
+}
+
+#[test]
+fn test_like_renders_pattern_match() {
+    let users = TestConnection
+        .from::<User>()
+        .where_(|user| user.name.like("A%"))
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        users.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.name LIKE ?)"
+    );
+    assert_eq!(
+        users.collect_params().unwrap(),
+        vec![TestParam::Text("A%".to_owned())]
+    );
+}
+
+#[test]
+fn test_not_like_renders_negated_pattern_match() {
+    let users = TestConnection
+        .from::<User>()
+        .where_(|user| user.name.not_like("A%"))
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        users.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.name NOT LIKE ?)"
+    );
+}
+
+#[test]
+fn test_ilike_renders_case_insensitive_pattern_match() {
+    let users = TestConnection
+        .from::<User>()
+        .where_(|user| user.name.ilike("a%"))
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        users.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.name ILIKE ?)"
+    );
+}
+
+#[test]
+fn test_in_renders_membership_list() {
+    let users = TestConnection
+        .from::<User>()
+        .where_(|user| user.id.in_([1, 2, 3]))
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        users.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.id IN (?, ?, ?))"
+    );
+    assert_eq!(
+        users.collect_params().unwrap(),
+        vec![TestParam::Int(1), TestParam::Int(2), TestParam::Int(3)]
+    );
+}
+
+#[test]
+fn test_not_in_renders_negated_membership_list() {
+    let users = TestConnection
+        .from::<User>()
+        .where_(|user| user.id.not_in([1, 2]))
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        users.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.id NOT IN (?, ?))"
+    );
+}
+
+#[test]
+fn test_empty_in_is_always_false_and_renders_operand() {
+    let users = TestConnection
+        .from::<User>()
+        .where_(|user| user.id.in_(Vec::<i32>::new()))
+        .select(|(user,)| user.id);
+
+    // The operand is still rendered (so its params stay aligned), guarded by a constant false.
+    assert_eq!(
+        users.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.id IS NOT NULL AND 1 = 0)"
+    );
+    assert_eq!(users.collect_params().unwrap(), Vec::<TestParam>::new());
+}
+
+#[test]
+fn test_empty_not_in_is_always_true_and_renders_operand() {
+    let users = TestConnection
+        .from::<User>()
+        .where_(|user| user.id.not_in(Vec::<i32>::new()))
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        users.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.id IS NOT NULL OR 1 = 1)"
+    );
+}
+
+#[test]
+fn test_between_renders_inclusive_range() {
+    let users = TestConnection
+        .from::<User>()
+        .where_(|user| user.id.between(1, 10))
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        users.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.id BETWEEN ? AND ?)"
+    );
+    assert_eq!(
+        users.collect_params().unwrap(),
+        vec![TestParam::Int(1), TestParam::Int(10)]
+    );
+}
+
+#[test]
+fn test_not_between_renders_negated_range() {
+    let users = TestConnection
+        .from::<User>()
+        .where_(|user| user.id.not_between(1, 10))
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        users.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.id NOT BETWEEN ? AND ?)"
+    );
+}
+
+#[test]
+fn test_bool_column_used_directly_as_predicate() {
+    let widgets = TestConnection
+        .from::<Widget>()
+        .where_(|widget| widget.active.is_true())
+        .select(|(widget,)| widget.id);
+
+    assert_eq!(
+        widgets.to_sql(),
+        "SELECT q0_0.id AS id FROM public.widgets AS q0_0 WHERE (q0_0.active)"
+    );
+    assert_eq!(widgets.collect_params().unwrap(), Vec::<TestParam>::new());
+}
+
+#[test]
+fn test_bool_column_is_false_negates() {
+    let widgets = TestConnection
+        .from::<Widget>()
+        .where_(|widget| widget.active.is_false())
+        .select(|(widget,)| widget.id);
+
+    assert_eq!(
+        widgets.to_sql(),
+        "SELECT q0_0.id AS id FROM public.widgets AS q0_0 WHERE (NOT q0_0.active)"
+    );
+}
+
+#[test]
+fn test_like_composes_with_in_and_between() {
+    let users = TestConnection
+        .from::<User>()
+        .where_(|user| {
+            user.name
+                .like("A%")
+                .and(user.id.in_([1, 2]))
+                .and(user.id.between(1, 100))
+        })
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        users.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 \
+         WHERE (((q0_0.name LIKE ?) AND (q0_0.id IN (?, ?))) AND (q0_0.id BETWEEN ? AND ?))"
+    );
+    assert_eq!(
+        users.collect_params().unwrap(),
+        vec![
+            TestParam::Text("A%".to_owned()),
+            TestParam::Int(1),
+            TestParam::Int(2),
+            TestParam::Int(1),
+            TestParam::Int(100),
+        ]
+    );
+}
