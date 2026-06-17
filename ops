@@ -1,1 +1,1 @@
-{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":2,"timestamp":1781471959,"nonce":"M3+MVUGL0k2yH6vnC0/Jrv01V+k=","title":"Consider declaring column nullability as Option\u003cT\u003e in the type instead of #[column(nullable)]","was":"Currently a nullable column is declared with a `#[column(nullable)]` attribute on a field whose"}]}
+{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":4,"timestamp":1781666213,"nonce":"C0TMybcCSandYxMGupjPMCtp4Hs=","status":2}]}
