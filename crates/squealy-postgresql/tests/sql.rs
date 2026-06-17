@@ -766,6 +766,30 @@ fn postgres_between_renders_numbered_placeholders() {
 }
 
 #[test]
+fn postgres_count_and_sum_render_as_aggregates() {
+    let q = Postgres
+        .from::<User>()
+        .select(|(user,)| (user.id.count(), user.id.sum()));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT COUNT(q0_0.\"id\") AS \"t0_expr\", SUM(q0_0.\"id\") AS \"t1_expr\" \
+         FROM \"public\".\"users\" AS q0_0"
+    );
+}
+
+#[test]
+fn postgres_avg_min_max_render_as_aggregates() {
+    let q = Postgres
+        .from::<User>()
+        .select(|(user,)| (user.id.avg(), user.id.min(), user.name.max()));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT AVG(q0_0.\"id\") AS \"t0_expr\", MIN(q0_0.\"id\") AS \"t1_expr\", \
+         MAX(q0_0.\"name\") AS \"t2_expr\" FROM \"public\".\"users\" AS q0_0"
+    );
+}
+
+#[test]
 fn postgres_division_renders_fractional_result() {
     let users = Postgres.from::<User>().select(|(user,)| user.id / 2);
 

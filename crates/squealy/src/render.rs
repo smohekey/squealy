@@ -16,11 +16,11 @@ use std::borrow::Cow;
 use std::io::{self, Write};
 
 use crate::{
-    ArithmeticOp, AssignmentValueVisitor, AssignmentVisitor, Backend, ColumnRef, CompareOp,
-    Dialect, Encode, Expr, ExprKind, ExprVisitor, InsertRow, InsertRowVisitor, InsertableTable,
-    Order, OrderDirection, Predicate, PredicateAstVisitor, PredicateKind, PredicateVisitor,
-    ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAssignment, RenderAst,
-    RenderInsertAssignments, RenderInsertRows, RenderPredicateAst, RenderPredicateNodes,
+    AggregateFunc, ArithmeticOp, AssignmentValueVisitor, AssignmentVisitor, Backend, ColumnRef,
+    CompareOp, Dialect, Encode, Expr, ExprKind, ExprVisitor, InsertRow, InsertRowVisitor,
+    InsertableTable, Order, OrderDirection, Predicate, PredicateAstVisitor, PredicateKind,
+    PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAssignment,
+    RenderAst, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst, RenderPredicateNodes,
     RenderProjectable, RenderSelectAst, RenderUpdateAssignments, SchemaTable, SelectSink, Selected,
     SourceAlias, SqlType, TableProjection, UpdateableTable,
 };
@@ -1245,6 +1245,15 @@ where
         right(self)?;
         self.writer.write_all(b")")
     }
+
+    fn visit_aggregate<O>(&mut self, func: AggregateFunc, operand: O) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        write!(self.writer, "{}(", render_aggregate_func(func))?;
+        operand(self)?;
+        self.writer.write_all(b")")
+    }
 }
 
 impl<B, Writer> PredicateAstVisitor for RenderExpr<'_, '_, B, Writer>
@@ -1410,6 +1419,16 @@ fn render_arithmetic_op(op: ArithmeticOp) -> &'static str {
         ArithmeticOp::Subtract => "-",
         ArithmeticOp::Multiply => "*",
         ArithmeticOp::Divide => "/",
+    }
+}
+
+fn render_aggregate_func(func: AggregateFunc) -> &'static str {
+    match func {
+        AggregateFunc::Count => "COUNT",
+        AggregateFunc::Sum => "SUM",
+        AggregateFunc::Avg => "AVG",
+        AggregateFunc::Min => "MIN",
+        AggregateFunc::Max => "MAX",
     }
 }
 

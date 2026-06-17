@@ -48,6 +48,16 @@ pub enum CompareOp {
     GreaterThanOrEquals,
 }
 
+/// A SQL aggregate function applied to a single expression operand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AggregateFunc {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OrderDirection {
     Asc,
@@ -106,6 +116,29 @@ macro_rules! impl_sql_divide {
 impl_sql_divide!(i8, i16, i32, i64, i128, isize);
 impl_sql_divide!(u8, u16, u32, u64, u128, usize);
 impl_sql_divide!(f32, f64);
+
+/// Computes the Rust value type produced by SQL `SUM`.
+///
+/// A `SUM` over an integer column widens to avoid overflow (PostgreSQL returns `bigint` for
+/// `SUM(int)` and `numeric` for `SUM(bigint)`), so Squealy models every fixed-width integer `SUM`
+/// as `i64`. Floating-point sums stay floating point.
+pub trait SqlSum: SqlNumber {
+    type Output: SqlNumber;
+}
+
+macro_rules! impl_sql_sum {
+    ($($ty:ty => $output:ty),* $(,)?) => {
+        $(impl SqlSum for $ty {
+            type Output = $output;
+        })*
+    };
+}
+
+impl_sql_sum!(
+    i8 => i64, i16 => i64, i32 => i64, i64 => i64, i128 => i128, isize => i64,
+    u8 => i64, u16 => i64, u32 => i64, u64 => i64, u128 => i128, usize => i64,
+    f32 => f64, f64 => f64,
+);
 
 /// Type-level identity for a SQL expression.
 pub trait ExprKind {
@@ -292,6 +325,35 @@ where
     }
 }
 
+/// A SQL aggregate function call (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`) over a single operand. The
+/// operand's parameters flow straight through.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AggregateExprAst<Operand> {
+    func: AggregateFunc,
+    operand: Operand,
+}
+
+impl<Operand> ExprAst for AggregateExprAst<Operand>
+where
+    Operand: ExprAst,
+{
+    type Params = Operand::Params;
+}
+
+impl<Operand, B> RenderAst<B> for AggregateExprAst<Operand>
+where
+    Operand: RenderAst<B>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_aggregate(self.func, |visitor| self.operand.visit(visitor))
+    }
+}
+
 #[doc(hidden)]
 pub trait ExprVisitor {
     type Error;
@@ -316,6 +378,11 @@ pub trait ExprVisitor {
     where
         L: FnOnce(&mut Self) -> Result<(), Self::Error>,
         R: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render a SQL aggregate function call (`func(operand)`).
+    fn visit_aggregate<O>(&mut self, func: AggregateFunc, operand: O) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>;
 }
 
 #[doc(hidden)]
@@ -512,6 +579,78 @@ where
     L::Value: SqlDivide,
 {
     type Value = <L::Value as SqlDivide>::Output;
+}
+
+/// Type-level identity for SQL `COUNT(expr)`. `COUNT` never returns `NULL` (it is `0` for an empty
+/// input), so its value type is a non-null `i64`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CountExpr<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> ExprKind for CountExpr<K>
+where
+    K: ExprKind,
+{
+    type Value = i64;
+}
+
+/// Type-level identity for SQL `SUM(expr)`. A sum is `NULL` over an empty input, so the value type
+/// is nullable; the operand type is widened per [`SqlSum`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SumExpr<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> ExprKind for SumExpr<K>
+where
+    K: ExprKind,
+    K::Value: SqlSum,
+{
+    type Value = Option<<K::Value as SqlSum>::Output>;
+}
+
+/// Type-level identity for SQL `AVG(expr)`. An average is `NULL` over an empty input and always
+/// fractional, so the value type is `Option<f64>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AvgExpr<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> ExprKind for AvgExpr<K>
+where
+    K: ExprKind,
+    K::Value: SqlNumber,
+{
+    type Value = Option<f64>;
+}
+
+/// Type-level identity for SQL `MIN(expr)`. `MIN` is `NULL` over an empty input, so the value type
+/// is nullable in the operand's own type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MinExpr<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> ExprKind for MinExpr<K>
+where
+    K: ExprKind,
+{
+    type Value = Option<K::Value>;
+}
+
+/// Type-level identity for SQL `MAX(expr)`. `MAX` is `NULL` over an empty input, so the value type
+/// is nullable in the operand's own type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MaxExpr<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> ExprKind for MaxExpr<K>
+where
+    K: ExprKind,
+{
+    type Value = Option<K::Value>;
 }
 
 /// Type-level identity for a SQL predicate.
@@ -1367,6 +1506,37 @@ where
         self.into_expr().not_between(lo, hi)
     }
 
+    /// SQL `COUNT(column)`.
+    pub fn count(self) -> Expr<'scope, CountExpr<K>, AggregateExprAst<ColumnExprAst<K>>> {
+        self.into_expr().count()
+    }
+
+    /// SQL `SUM(column)` (numeric columns; integer sums widen to `i64`).
+    pub fn sum(self) -> Expr<'scope, SumExpr<K>, AggregateExprAst<ColumnExprAst<K>>>
+    where
+        K::Value: SqlSum,
+    {
+        self.into_expr().sum()
+    }
+
+    /// SQL `AVG(column)` (numeric columns), producing `Option<f64>`.
+    pub fn avg(self) -> Expr<'scope, AvgExpr<K>, AggregateExprAst<ColumnExprAst<K>>>
+    where
+        K::Value: SqlNumber,
+    {
+        self.into_expr().avg()
+    }
+
+    /// SQL `MIN(column)`.
+    pub fn min(self) -> Expr<'scope, MinExpr<K>, AggregateExprAst<ColumnExprAst<K>>> {
+        self.into_expr().min()
+    }
+
+    /// SQL `MAX(column)`.
+    pub fn max(self) -> Expr<'scope, MaxExpr<K>, AggregateExprAst<ColumnExprAst<K>>> {
+        self.into_expr().max()
+    }
+
     /// Sort by this column in ascending order.
     pub fn asc(self) -> Order<'scope, K, ColumnExprAst<K>> {
         self.into_expr().asc()
@@ -1800,6 +1970,54 @@ where
             hi: hi.into_expr().ast,
             negated,
         })
+    }
+
+    /// SQL `COUNT(expr)` — counts non-null values of this expression (never `NULL`; `0` for an
+    /// empty input), producing an `i64`.
+    pub fn count(&self) -> Expr<'scope, CountExpr<K>, AggregateExprAst<Ast>> {
+        self.aggregate(AggregateFunc::Count)
+    }
+
+    /// SQL `SUM(expr)` — `NULL` over an empty input, so the result is `Option<…>`; integer sums
+    /// widen to `i64` (see [`SqlSum`]).
+    pub fn sum(&self) -> Expr<'scope, SumExpr<K>, AggregateExprAst<Ast>>
+    where
+        K::Value: SqlSum,
+    {
+        self.aggregate(AggregateFunc::Sum)
+    }
+
+    /// SQL `AVG(expr)` — `NULL` over an empty input and always fractional, so the result is
+    /// `Option<f64>`.
+    pub fn avg(&self) -> Expr<'scope, AvgExpr<K>, AggregateExprAst<Ast>>
+    where
+        K::Value: SqlNumber,
+    {
+        self.aggregate(AggregateFunc::Avg)
+    }
+
+    /// SQL `MIN(expr)` — `NULL` over an empty input, so the result is `Option<…>`.
+    pub fn min(&self) -> Expr<'scope, MinExpr<K>, AggregateExprAst<Ast>> {
+        self.aggregate(AggregateFunc::Min)
+    }
+
+    /// SQL `MAX(expr)` — `NULL` over an empty input, so the result is `Option<…>`.
+    pub fn max(&self) -> Expr<'scope, MaxExpr<K>, AggregateExprAst<Ast>> {
+        self.aggregate(AggregateFunc::Max)
+    }
+
+    fn aggregate<ResultKind>(
+        &self,
+        func: AggregateFunc,
+    ) -> Expr<'scope, ResultKind, AggregateExprAst<Ast>> {
+        Expr {
+            ast: AggregateExprAst {
+                func,
+                operand: self.ast.clone(),
+            },
+            project_alias: Cow::Borrowed("expr"),
+            _phantom: PhantomData,
+        }
     }
 
     /// Sort by this expression in ascending order.

@@ -469,17 +469,18 @@ pub use connection::{Connection, ConnectionWithTransaction, QueryBuilder};
 pub use database::Database;
 pub use dialect::Dialect;
 pub use expr::{
-    AddExpr, AndPredicate, AnyPredicate, ArithmeticOp, BetweenPredicate, BetweenPredicateAst,
-    BinaryExprAst, BoolTestPredicate, BoolTestPredicateAst, ColumnBetween, ColumnComparison,
-    ColumnExprAst, ColumnLike, ColumnRef, CompareOp, ComparePredicateAst, DdlExprAst,
-    DdlPredicateAst, DdlSqlLiteral, DivideExpr, EqualsPredicate, Expr, ExprAst, ExprKind,
-    ExprVisitor, GreaterThanOrEqualsPredicate, GreaterThanPredicate, InPredicate, InPredicateAst,
-    IntoExpr, IsNotNullPredicate, IsNullPredicate, LessThanOrEqualsPredicate, LessThanPredicate,
-    LikePredicate, LikePredicateAst, LiteralExprAst, MultiplyExpr, NotEqualsPredicate,
-    NotPredicate, NullCheckPredicateAst, Nullable, NullableExpr, OrPredicate, Order,
-    OrderDirection, ParamExprAst, Predicate, PredicateAst, PredicateAstVisitor, PredicateKind,
-    RenderAst, RenderPredicateAst, RuntimeParam, SameValue, SourceAlias, SqlDivide, SqlNumber,
-    SqlText, SubtractExpr, param, render_ddl_predicate,
+    AddExpr, AggregateExprAst, AggregateFunc, AndPredicate, AnyPredicate, ArithmeticOp, AvgExpr,
+    BetweenPredicate, BetweenPredicateAst, BinaryExprAst, BoolTestPredicate, BoolTestPredicateAst,
+    ColumnBetween, ColumnComparison, ColumnExprAst, ColumnLike, ColumnRef, CompareOp,
+    ComparePredicateAst, CountExpr, DdlExprAst, DdlPredicateAst, DdlSqlLiteral, DivideExpr,
+    EqualsPredicate, Expr, ExprAst, ExprKind, ExprVisitor, GreaterThanOrEqualsPredicate,
+    GreaterThanPredicate, InPredicate, InPredicateAst, IntoExpr, IsNotNullPredicate,
+    IsNullPredicate, LessThanOrEqualsPredicate, LessThanPredicate, LikePredicate, LikePredicateAst,
+    LiteralExprAst, MaxExpr, MinExpr, MultiplyExpr, NotEqualsPredicate, NotPredicate,
+    NullCheckPredicateAst, Nullable, NullableExpr, OrPredicate, Order, OrderDirection,
+    ParamExprAst, Predicate, PredicateAst, PredicateAstVisitor, PredicateKind, RenderAst,
+    RenderPredicateAst, RuntimeParam, SameValue, SourceAlias, SqlDivide, SqlNumber, SqlSum,
+    SqlText, SubtractExpr, SumExpr, param, render_ddl_predicate,
 };
 pub use foreign_key::ForeignKey;
 pub use index::Index;

@@ -571,3 +571,81 @@ fn test_like_composes_with_in_and_between() {
         ]
     );
 }
+
+#[test]
+fn test_count_renders_aggregate() {
+    let q = TestConnection
+        .from::<User>()
+        .select(|(user,)| user.id.count());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT COUNT(q0_0.id) AS expr FROM public.users AS q0_0"
+    );
+}
+
+#[test]
+fn test_sum_avg_min_max_render_aggregates() {
+    let sum = TestConnection
+        .from::<User>()
+        .select(|(user,)| user.id.sum());
+    assert_eq!(
+        sum.to_sql(),
+        "SELECT SUM(q0_0.id) AS expr FROM public.users AS q0_0"
+    );
+
+    let avg = TestConnection
+        .from::<User>()
+        .select(|(user,)| user.id.avg());
+    assert_eq!(
+        avg.to_sql(),
+        "SELECT AVG(q0_0.id) AS expr FROM public.users AS q0_0"
+    );
+
+    let min = TestConnection
+        .from::<User>()
+        .select(|(user,)| user.id.min());
+    assert_eq!(
+        min.to_sql(),
+        "SELECT MIN(q0_0.id) AS expr FROM public.users AS q0_0"
+    );
+
+    let max = TestConnection
+        .from::<User>()
+        .select(|(user,)| user.id.max());
+    assert_eq!(
+        max.to_sql(),
+        "SELECT MAX(q0_0.id) AS expr FROM public.users AS q0_0"
+    );
+}
+
+#[test]
+fn test_aggregates_compose_in_a_tuple_with_filter() {
+    let q = TestConnection
+        .from::<User>()
+        .where_(|user| user.id.greater_than(0))
+        .select(|(user,)| (user.id.count(), user.id.sum()));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT COUNT(q0_0.id) AS t0_expr, SUM(q0_0.id) AS t1_expr FROM public.users AS q0_0 WHERE (q0_0.id > ?)"
+    );
+}
+
+/// Compile-time checks that the aggregate result types are nullable (except `COUNT`) and that
+/// integer `SUM` widens to `i64`.
+#[test]
+fn test_aggregate_result_types() {
+    let count: <CountExpr<i32> as ExprKind>::Value = 0i64;
+    let _: i64 = count;
+
+    let sum: <SumExpr<i32> as ExprKind>::Value = Some(0i64);
+    let _: Option<i64> = sum;
+
+    let avg: <AvgExpr<i32> as ExprKind>::Value = Some(0.0f64);
+    let _: Option<f64> = avg;
+
+    let min: <MinExpr<i32> as ExprKind>::Value = Some(0i32);
+    let _: Option<i32> = min;
+
+    let max: <MaxExpr<String> as ExprKind>::Value = Some(String::new());
+    let _: Option<String> = max;
+}
