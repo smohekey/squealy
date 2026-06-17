@@ -1,8 +1,13 @@
 use crate::{Expr, ForeignKey};
 
-/// Controls how table fields are represented.
+/// Controls how table fields are represented. The field value type `U` is always a column value
+/// type (it implements [`ColumnNullability`]), which lets the nullable-value mode peel a declared
+/// `Option<T>` down to its inner `T` before re-wrapping, so a LEFT JOIN of an already-nullable column
+/// yields a single `Option<T>` rather than `Option<Option<T>>`.
 pub trait ColumnMode {
-    type Type<'scope, U>;
+    type Type<'scope, U>
+    where
+        U: ColumnNullability;
 }
 
 /// Table fields are typed SQL expressions.
@@ -10,7 +15,10 @@ pub trait ColumnMode {
 pub enum ColumnExpr {}
 
 impl ColumnMode for ColumnExpr {
-    type Type<'scope, U> = Expr<'scope, U>;
+    type Type<'scope, U>
+        = Expr<'scope, U>
+    where
+        U: ColumnNullability;
 }
 
 /// Table fields are database column names.
@@ -18,23 +26,34 @@ impl ColumnMode for ColumnExpr {
 pub enum ColumnName {}
 
 impl ColumnMode for ColumnName {
-    type Type<'scope, U> = &'static str;
+    type Type<'scope, U>
+        = &'static str
+    where
+        U: ColumnNullability;
 }
 
-/// Table fields are plain Rust values.
+/// Table fields are plain Rust values: the declared type `U` (`Option<T>` for a nullable column).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColumnValue {}
 
 impl ColumnMode for ColumnValue {
-    type Type<'scope, U> = U;
+    type Type<'scope, U>
+        = U
+    where
+        U: ColumnNullability;
 }
 
-/// Table fields are nullable Rust values.
+/// Table fields are nullable Rust values (a LEFT JOIN makes every column nullable). Peels the
+/// declared type to its inner `T` first, so an already-nullable `Option<T>` column stays a single
+/// `Option<T>` here rather than `Option<Option<T>>`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColumnNullableValue {}
 
 impl ColumnMode for ColumnNullableValue {
-    type Type<'scope, U> = Option<U>;
+    type Type<'scope, U>
+        = Option<<U as ColumnNullability>::Inner>
+    where
+        U: ColumnNullability;
 }
 
 /// A backend-agnostic column default.
@@ -117,14 +136,64 @@ pub trait HasColumnType {
     const COLUMN_TYPE: ColumnType;
 }
 
+/// Resolves a column field's *declared* value type into its inner (non-null) value type and its
+/// nullability, at the type level — so the `Table` derive never inspects `Option<…>` tokens and a
+/// type alias to `Option<…>` resolves correctly. Implemented explicitly per value type (no blanket
+/// over `T`, mirroring [`HasColumnType`]) plus once for `Option<T>`; the `Option<T>` impl requires a
+/// non-null inner, so `Option<Option<T>>` does not resolve.
+pub trait ColumnNullability {
+    type Inner;
+    type Nullability;
+    const NULLABLE: bool;
+}
+
+/// Emits the non-null [`ColumnNullability`] impl for a value type. Re-exported for the `ColumnType`
+/// derive and backend column types (e.g. `Json`), and for `db_type` column value types.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! impl_non_null_column {
+    ($ty:ty) => {
+        impl $crate::ColumnNullability for $ty {
+            type Inner = $ty;
+            type Nullability = $crate::NonNullableColumn;
+            const NULLABLE: bool = false;
+        }
+    };
+}
+
 macro_rules! impl_column_type {
     ($($ty:ty => $kind:ident),* $(,)?) => {
         $(
             impl HasColumnType for $ty {
                 const COLUMN_TYPE: ColumnType = ColumnType::$kind;
             }
+
+            impl ColumnNullability for $ty {
+                type Inner = $ty;
+                type Nullability = crate::NonNullableColumn;
+                const NULLABLE: bool = false;
+            }
         )*
     };
+}
+
+/// `Option<T>` is the in-type spelling of a nullable column: its `COLUMN_TYPE` is the inner type's,
+/// and it is nullable with inner `T`. The `ColumnNullability` bound requires a non-null inner, so
+/// `Option<Option<T>>` does not resolve.
+impl<T> HasColumnType for Option<T>
+where
+    T: HasColumnType,
+{
+    const COLUMN_TYPE: ColumnType = T::COLUMN_TYPE;
+}
+
+impl<T> ColumnNullability for Option<T>
+where
+    T: ColumnNullability<Nullability = crate::NonNullableColumn>,
+{
+    type Inner = T;
+    type Nullability = crate::NullableColumn;
+    const NULLABLE: bool = true;
 }
 
 impl_column_type! {
@@ -153,6 +222,8 @@ impl_column_type! {
 impl HasColumnType for uuid::Uuid {
     const COLUMN_TYPE: ColumnType = ColumnType::Uuid;
 }
+#[cfg(feature = "uuid")]
+crate::impl_non_null_column!(uuid::Uuid);
 
 /// Native timestamp columns. Each maps to a timezone-aware `timestamptz` column, so no
 /// `#[column(db_type = "...")]` override is needed. The matching `Encode`/`Decode` lives in each
@@ -161,16 +232,22 @@ impl HasColumnType for uuid::Uuid {
 impl HasColumnType for std::time::SystemTime {
     const COLUMN_TYPE: ColumnType = ColumnType::Timestamp { tz: true };
 }
+#[cfg(feature = "systemtime")]
+crate::impl_non_null_column!(std::time::SystemTime);
 
 #[cfg(feature = "time")]
 impl HasColumnType for time::OffsetDateTime {
     const COLUMN_TYPE: ColumnType = ColumnType::Timestamp { tz: true };
 }
+#[cfg(feature = "time")]
+crate::impl_non_null_column!(time::OffsetDateTime);
 
 #[cfg(feature = "chrono")]
 impl HasColumnType for chrono::DateTime<chrono::Utc> {
     const COLUMN_TYPE: ColumnType = ColumnType::Timestamp { tz: true };
 }
+#[cfg(feature = "chrono")]
+crate::impl_non_null_column!(chrono::DateTime<chrono::Utc>);
 
 /// Database schema metadata for a single column.
 pub trait Column: Sync {

@@ -591,8 +591,7 @@ struct SoftRepository<'scope, C: ColumnMode = ColumnExpr> {
     id: C::Type<'scope, i32>,
     organization_id: C::Type<'scope, i32>,
     slug: C::Type<'scope, String>,
-    #[column(nullable)]
-    deleted_at: C::Type<'scope, i64>,
+    deleted_at: C::Type<'scope, Option<i64>>,
 }
 
 #[allow(dead_code)]
@@ -631,8 +630,7 @@ struct SoftAccount<'scope, C: ColumnMode = ColumnExpr> {
     id: C::Type<'scope, i32>,
     #[column(unique, where = |row| row.deleted_at.is_null())]
     email: C::Type<'scope, String>,
-    #[column(nullable)]
-    deleted_at: C::Type<'scope, i64>,
+    deleted_at: C::Type<'scope, Option<i64>>,
 }
 
 #[allow(dead_code)]
