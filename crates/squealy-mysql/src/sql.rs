@@ -753,7 +753,10 @@ impl squealy::Dialect for MysqlDialect {
             | SqlType::U64
             | SqlType::U128
             | SqlType::Usize => "UNSIGNED",
-            SqlType::F32 | SqlType::F64 | SqlType::Decimal { .. } => "DECIMAL",
+            // `CAST(x AS DECIMAL)` with no scale is `DECIMAL(10, 0)` and truncates the fraction, so
+            // float results (e.g. `AVG`) cast to `DOUBLE` to stay fractional.
+            SqlType::F32 | SqlType::F64 => "DOUBLE",
+            SqlType::Decimal { .. } => "DECIMAL",
             SqlType::Date => "DATE",
             SqlType::Time { .. } => "TIME",
             SqlType::Timestamp { .. } => "DATETIME",
@@ -994,7 +997,9 @@ mod tests {
         // CAST target types differ from column types.
         assert_eq!(dialect_cast(SqlType::I32), "SIGNED");
         assert_eq!(dialect_cast(SqlType::U64), "UNSIGNED");
-        assert_eq!(dialect_cast(SqlType::F64), "DECIMAL");
+        // Floats cast to `DOUBLE` (fractional), and 128-bit ints to a full-precision decimal.
+        assert_eq!(dialect_cast(SqlType::F64), "DOUBLE");
+        assert_eq!(dialect_cast(SqlType::I128), "DECIMAL(65, 0)");
         assert_eq!(dialect_cast(SqlType::String), "CHAR");
 
         assert!(

@@ -108,7 +108,7 @@ fn mysql_sum_and_avg_cast_in_its_dialect() {
 
     let avg = Mysql.from::<Widget>().select(|(widget,)| widget.id.avg());
     assert!(
-        avg.to_sql().contains("CAST(AVG(q0_0.`id`) AS DECIMAL)"),
+        avg.to_sql().contains("CAST(AVG(q0_0.`id`) AS DOUBLE)"),
         "{}",
         avg.to_sql()
     );
