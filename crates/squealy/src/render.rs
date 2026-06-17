@@ -1246,13 +1246,33 @@ where
         self.writer.write_all(b")")
     }
 
-    fn visit_aggregate<O>(&mut self, func: AggregateFunc, operand: O) -> Result<(), Self::Error>
+    fn visit_aggregate<O>(
+        &mut self,
+        func: AggregateFunc,
+        cast: Option<&SqlType>,
+        operand: O,
+    ) -> Result<(), Self::Error>
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>,
     {
-        write!(self.writer, "{}(", render_aggregate_func(func))?;
-        operand(self)?;
-        self.writer.write_all(b")")
+        // Some aggregates (`SUM`/`AVG`) have a database result type that differs from the Rust type
+        // Squealy advertises (e.g. PostgreSQL `avg(int)` is `numeric`); a cast pins the wire type.
+        match cast {
+            Some(ty) => {
+                write!(self.writer, "CAST({}(", render_aggregate_func(func))?;
+                operand(self)?;
+                self.writer.write_all(b") AS ")?;
+                self.renderer
+                    .dialect
+                    .write_cast_type(ty, &mut *self.writer)?;
+                self.writer.write_all(b")")
+            }
+            None => {
+                write!(self.writer, "{}(", render_aggregate_func(func))?;
+                operand(self)?;
+                self.writer.write_all(b")")
+            }
+        }
     }
 }
 

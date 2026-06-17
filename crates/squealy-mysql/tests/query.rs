@@ -87,3 +87,30 @@ fn mysql_in_and_between_render() {
     let sql = between_query.to_sql();
     assert!(sql.contains("BETWEEN ? AND ?"), "{sql}");
 }
+
+#[test]
+fn mysql_sum_and_avg_cast_in_its_dialect() {
+    // The aggregate cast uses MySQL's restricted CAST vocabulary: `SIGNED` for the widened integer
+    // `SUM`, `DECIMAL` for `AVG`. `COUNT` needs no cast.
+    let sum = Mysql.from::<Widget>().select(|(widget,)| widget.id.sum());
+    assert!(
+        sum.to_sql().contains("CAST(SUM(q0_0.`id`) AS SIGNED)"),
+        "{}",
+        sum.to_sql()
+    );
+
+    let avg = Mysql.from::<Widget>().select(|(widget,)| widget.id.avg());
+    assert!(
+        avg.to_sql().contains("CAST(AVG(q0_0.`id`) AS DECIMAL)"),
+        "{}",
+        avg.to_sql()
+    );
+
+    let count = Mysql.from::<Widget>().select(|(widget,)| widget.id.count());
+    assert!(
+        count.to_sql().contains("COUNT(q0_0.`id`)"),
+        "{}",
+        count.to_sql()
+    );
+    assert!(!count.to_sql().contains("CAST"), "{}", count.to_sql());
+}

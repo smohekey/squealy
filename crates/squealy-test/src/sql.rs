@@ -8,7 +8,7 @@ use squealy::{
     PredicateKind, PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder,
     RenderAssignment, RenderAst, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst,
     RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderUpdateAssignments, SchemaTable,
-    SelectSink, Selected, SourceAlias, Table, TableProjection, UpdateableTable,
+    SelectSink, Selected, SourceAlias, SqlType, Table, TableProjection, UpdateableTable,
 };
 
 use crate::query::{TestParam, TestParamWriter};
@@ -944,10 +944,17 @@ where
         self.writer.write_all(b")")
     }
 
-    fn visit_aggregate<O>(&mut self, func: AggregateFunc, operand: O) -> Result<(), Self::Error>
+    fn visit_aggregate<O>(
+        &mut self,
+        func: AggregateFunc,
+        _cast: Option<&SqlType>,
+        operand: O,
+    ) -> Result<(), Self::Error>
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>,
     {
+        // The in-memory test backend renders the bare aggregate (no dialect casts), matching how it
+        // skips the integer-division cast the real backends emit.
         write!(self.writer, "{}(", render_aggregate_func(func))?;
         operand(self)?;
         self.writer.write_all(b")")

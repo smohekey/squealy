@@ -770,9 +770,10 @@ fn postgres_count_and_sum_render_as_aggregates() {
     let q = Postgres
         .from::<User>()
         .select(|(user,)| (user.id.count(), user.id.sum()));
+    // `SUM` is cast to `bigint` so the widened `i64` decodes (PostgreSQL `sum(bigint)` is `numeric`).
     assert_eq!(
         q.to_sql(),
-        "SELECT COUNT(q0_0.\"id\") AS \"t0_expr\", SUM(q0_0.\"id\") AS \"t1_expr\" \
+        "SELECT COUNT(q0_0.\"id\") AS \"t0_expr\", CAST(SUM(q0_0.\"id\") AS bigint) AS \"t1_expr\" \
          FROM \"public\".\"users\" AS q0_0"
     );
 }
@@ -782,10 +783,13 @@ fn postgres_avg_min_max_render_as_aggregates() {
     let q = Postgres
         .from::<User>()
         .select(|(user,)| (user.id.avg(), user.id.min(), user.name.max()));
+    // `AVG` is cast to `double precision` so the advertised `f64` decodes (PostgreSQL `avg(int)` is
+    // `numeric`); `MIN`/`MAX` keep the operand type and need no cast.
     assert_eq!(
         q.to_sql(),
-        "SELECT AVG(q0_0.\"id\") AS \"t0_expr\", MIN(q0_0.\"id\") AS \"t1_expr\", \
-         MAX(q0_0.\"name\") AS \"t2_expr\" FROM \"public\".\"users\" AS q0_0"
+        "SELECT CAST(AVG(q0_0.\"id\") AS double precision) AS \"t0_expr\", \
+         MIN(q0_0.\"id\") AS \"t1_expr\", MAX(q0_0.\"name\") AS \"t2_expr\" \
+         FROM \"public\".\"users\" AS q0_0"
     );
 }
 

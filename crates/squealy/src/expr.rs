@@ -117,27 +117,47 @@ impl_sql_divide!(i8, i16, i32, i64, i128, isize);
 impl_sql_divide!(u8, u16, u32, u64, u128, usize);
 impl_sql_divide!(f32, f64);
 
-/// Computes the Rust value type produced by SQL `SUM`.
+/// Computes the Rust value type produced by SQL `SUM`, and the SQL type the rendered `SUM(...)` is
+/// cast to so the database returns that exact type.
 ///
 /// A `SUM` over an integer column widens to avoid overflow (PostgreSQL returns `bigint` for
 /// `SUM(int)` and `numeric` for `SUM(bigint)`), so Squealy models every fixed-width integer `SUM`
-/// as `i64`. Floating-point sums stay floating point.
+/// as `i64`. Because the database's own result type varies by operand width (e.g. `sum(bigint)` is
+/// `numeric`, `sum(real)` is `real`), the rendered aggregate is cast to [`SUM_CAST`](Self::SUM_CAST)
+/// so the wire type always matches [`Output`](Self::Output).
 pub trait SqlSum: SqlNumber {
     type Output: SqlNumber;
+
+    /// The SQL type the rendered `SUM(operand)` is cast to so it decodes as [`Output`](Self::Output).
+    const SUM_CAST: crate::SqlType;
 }
 
 macro_rules! impl_sql_sum {
-    ($($ty:ty => $output:ty),* $(,)?) => {
+    ($($ty:ty => $output:ty : $cast:expr),* $(,)?) => {
         $(impl SqlSum for $ty {
             type Output = $output;
+            const SUM_CAST: crate::SqlType = $cast;
         })*
     };
 }
 
 impl_sql_sum!(
-    i8 => i64, i16 => i64, i32 => i64, i64 => i64, i128 => i128, isize => i64,
-    u8 => i64, u16 => i64, u32 => i64, u64 => i64, u128 => i128, usize => i64,
-    f32 => f64, f64 => f64,
+    i8 => i64 : crate::SqlType::I64,
+    i16 => i64 : crate::SqlType::I64,
+    i32 => i64 : crate::SqlType::I64,
+    i64 => i64 : crate::SqlType::I64,
+    i128 => i128 : crate::SqlType::I128,
+    isize => i64 : crate::SqlType::I64,
+    u8 => i64 : crate::SqlType::I64,
+    u16 => i64 : crate::SqlType::I64,
+    u32 => i64 : crate::SqlType::I64,
+    // A single `u64` can exceed `i64::MAX`, so widen to `i128` (cast to `numeric`) rather than
+    // overflowing a `bigint` cast.
+    u64 => i128 : crate::SqlType::I128,
+    u128 => i128 : crate::SqlType::I128,
+    usize => i64 : crate::SqlType::I64,
+    f32 => f64 : crate::SqlType::F64,
+    f64 => f64 : crate::SqlType::F64,
 );
 
 /// Type-level identity for a SQL expression.
@@ -326,11 +346,14 @@ where
 }
 
 /// A SQL aggregate function call (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`) over a single operand. The
-/// operand's parameters flow straight through.
+/// operand's parameters flow straight through. When `cast` is set the rendered call is wrapped in a
+/// `CAST(... AS <type>)` so the database's result type matches the advertised Rust value type (e.g.
+/// `SUM`/`AVG` whose native type would otherwise be `numeric`).
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct AggregateExprAst<Operand> {
     func: AggregateFunc,
+    cast: Option<crate::SqlType>,
     operand: Operand,
 }
 
@@ -350,7 +373,9 @@ where
     where
         V: ExprVisitor<Backend = B>,
     {
-        visitor.visit_aggregate(self.func, |visitor| self.operand.visit(visitor))
+        visitor.visit_aggregate(self.func, self.cast.as_ref(), |visitor| {
+            self.operand.visit(visitor)
+        })
     }
 }
 
@@ -379,8 +404,14 @@ pub trait ExprVisitor {
         L: FnOnce(&mut Self) -> Result<(), Self::Error>,
         R: FnOnce(&mut Self) -> Result<(), Self::Error>;
 
-    /// Render a SQL aggregate function call (`func(operand)`).
-    fn visit_aggregate<O>(&mut self, func: AggregateFunc, operand: O) -> Result<(), Self::Error>
+    /// Render a SQL aggregate function call (`func(operand)`), optionally wrapped in a
+    /// `CAST(... AS cast)` so the result type matches the advertised Rust type.
+    fn visit_aggregate<O>(
+        &mut self,
+        func: AggregateFunc,
+        cast: Option<&crate::SqlType>,
+        operand: O,
+    ) -> Result<(), Self::Error>
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>;
 }
@@ -1975,44 +2006,48 @@ where
     /// SQL `COUNT(expr)` — counts non-null values of this expression (never `NULL`; `0` for an
     /// empty input), producing an `i64`.
     pub fn count(&self) -> Expr<'scope, CountExpr<K>, AggregateExprAst<Ast>> {
-        self.aggregate(AggregateFunc::Count)
+        self.aggregate(AggregateFunc::Count, None)
     }
 
     /// SQL `SUM(expr)` — `NULL` over an empty input, so the result is `Option<…>`; integer sums
-    /// widen to `i64` (see [`SqlSum`]).
+    /// widen to `i64` (see [`SqlSum`]). The call is cast to that type so the database's own result
+    /// type (which can be `numeric`) decodes correctly.
     pub fn sum(&self) -> Expr<'scope, SumExpr<K>, AggregateExprAst<Ast>>
     where
         K::Value: SqlSum,
     {
-        self.aggregate(AggregateFunc::Sum)
+        self.aggregate(AggregateFunc::Sum, Some(<K::Value as SqlSum>::SUM_CAST))
     }
 
     /// SQL `AVG(expr)` — `NULL` over an empty input and always fractional, so the result is
-    /// `Option<f64>`.
+    /// `Option<f64>`. Cast to `double precision` since the database returns `numeric` for integer
+    /// inputs.
     pub fn avg(&self) -> Expr<'scope, AvgExpr<K>, AggregateExprAst<Ast>>
     where
         K::Value: SqlNumber,
     {
-        self.aggregate(AggregateFunc::Avg)
+        self.aggregate(AggregateFunc::Avg, Some(crate::SqlType::F64))
     }
 
     /// SQL `MIN(expr)` — `NULL` over an empty input, so the result is `Option<…>`.
     pub fn min(&self) -> Expr<'scope, MinExpr<K>, AggregateExprAst<Ast>> {
-        self.aggregate(AggregateFunc::Min)
+        self.aggregate(AggregateFunc::Min, None)
     }
 
     /// SQL `MAX(expr)` — `NULL` over an empty input, so the result is `Option<…>`.
     pub fn max(&self) -> Expr<'scope, MaxExpr<K>, AggregateExprAst<Ast>> {
-        self.aggregate(AggregateFunc::Max)
+        self.aggregate(AggregateFunc::Max, None)
     }
 
     fn aggregate<ResultKind>(
         &self,
         func: AggregateFunc,
+        cast: Option<crate::SqlType>,
     ) -> Expr<'scope, ResultKind, AggregateExprAst<Ast>> {
         Expr {
             ast: AggregateExprAst {
                 func,
+                cast,
                 operand: self.ast.clone(),
             },
             project_alias: Cow::Borrowed("expr"),
