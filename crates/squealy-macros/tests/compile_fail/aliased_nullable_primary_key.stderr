@@ -1,0 +1,12 @@
+error[E0271]: type mismatch resolving `<Option<i32> as ColumnNullability>::Nullability == NonNullableColumn`
+  --> tests/compile_fail/aliased_nullable_primary_key.rs:11:25
+   |
+11 |     id: C::Type<'scope, MaybeId>,
+   |                         ^^^^^^^ expected `NonNullableColumn`, found `NullableColumn`
+   |
+note: required by a bound in `assert_non_null_column`
+  --> tests/compile_fail/aliased_nullable_primary_key.rs:8:10
+   |
+ 8 | #[derive(Table)]
+   |          ^^^^^ required by this bound in `assert_non_null_column`
+   = note: this error originates in the derive macro `Table` (in Nightly builds, run with -Z macro-backtrace for more info)

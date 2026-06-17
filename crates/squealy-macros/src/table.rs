@@ -195,6 +195,28 @@ impl TableStruct {
                 })
             })
             .collect::<Vec<_>>();
+        // A primary-key or auto-increment column must be non-null. The macro-time `nullable()` check
+        // catches a literal `Option<T>` with a friendly message, but a type *alias* to `Option<…>`
+        // is token-invisible; this type-level assertion rejects it too, so the generated
+        // `Column::nullable()` can never disagree with the declared key.
+        let non_null_assertions = self
+            .fields
+            .iter()
+            .filter(|field| field.attrs.primary_key || field.attrs.auto_increment)
+            .map(|field| {
+                let d = field.value_ty.clone();
+                quote::quote! {
+                    const _: fn() = || {
+                        fn assert_non_null_column<T>()
+                        where
+                            T: ::squealy::ColumnNullability<Nullability = ::squealy::NonNullableColumn>,
+                        {
+                        }
+                        assert_non_null_column::<#d>();
+                    };
+                }
+            })
+            .collect::<Vec<_>>();
         let field_indexes = self
             .fields
             .iter()
@@ -440,6 +462,7 @@ impl TableStruct {
 
         quote::quote! {
             #(#fk_type_assertions)*
+            #(#non_null_assertions)*
             #(#foreign_key_defs)*
             #(#column_defs)*
             #(#index_defs)*
