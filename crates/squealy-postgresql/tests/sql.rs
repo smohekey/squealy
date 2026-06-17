@@ -993,8 +993,7 @@ struct Member<'scope, C: ColumnMode = ColumnExpr> {
     // `order` is a reserved word; it must be quoted to produce valid DDL.
     order: C::Type<'scope, i32>,
 
-    #[column(nullable)]
-    select: C::Type<'scope, i32>,
+    select: C::Type<'scope, Option<i32>>,
 
     #[column(default = value("anonymous"))]
     email: C::Type<'scope, String>,
@@ -1178,8 +1177,7 @@ struct Audit<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key)]
     id: C::Type<'scope, i32>,
     created_at: C::Type<'scope, std::time::SystemTime>,
-    #[column(nullable)]
-    deleted_at: C::Type<'scope, std::time::SystemTime>,
+    deleted_at: C::Type<'scope, Option<std::time::SystemTime>>,
 }
 
 #[cfg(feature = "systemtime")]
@@ -1295,8 +1293,7 @@ struct Organization<'scope, C: ColumnMode = ColumnExpr> {
     slug: C::Type<'scope, String>,
     #[column(unique)]
     external_id: C::Type<'scope, i32>,
-    #[column(nullable)]
-    deleted_at: C::Type<'scope, i64>,
+    deleted_at: C::Type<'scope, Option<i64>>,
 }
 
 #[allow(dead_code)]
@@ -1320,8 +1317,7 @@ struct Workspace<'scope, C: ColumnMode = ColumnExpr> {
     id: C::Type<'scope, i32>,
     organization_id: C::Type<'scope, i32>,
     slug: C::Type<'scope, String>,
-    #[column(nullable)]
-    deleted_at: C::Type<'scope, i64>,
+    deleted_at: C::Type<'scope, Option<i64>>,
 }
 
 #[allow(dead_code)]
@@ -1435,8 +1431,7 @@ struct Roster<'scope, C: ColumnMode = ColumnExpr> {
     #[column(unique, where = |row| row.deleted_at.is_null().and(row.status.equals(1)))]
     email: C::Type<'scope, String>,
     status: C::Type<'scope, i32>,
-    #[column(nullable)]
-    deleted_at: C::Type<'scope, i64>,
+    deleted_at: C::Type<'scope, Option<i64>>,
 }
 
 #[allow(dead_code)]
@@ -2023,8 +2018,7 @@ fn postgres_defers_foreign_keys_until_all_tables_are_created() {
 struct Subscriber<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
-    #[column(nullable)]
-    nickname: C::Type<'scope, String>,
+    nickname: C::Type<'scope, Option<String>>,
 }
 
 #[test]

@@ -345,8 +345,7 @@ fn test_backend_writes_compound_primary_key_ddl() {
 struct Account<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
-    #[column(nullable)]
-    nickname: C::Type<'scope, String>,
+    nickname: C::Type<'scope, Option<String>>,
 }
 
 #[test]

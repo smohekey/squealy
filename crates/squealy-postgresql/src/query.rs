@@ -420,6 +420,14 @@ impl<T> squealy::HasColumnType for Json<T> {
     const COLUMN_TYPE: squealy::ColumnType = squealy::ColumnType::Jsonb;
 }
 
+// `Json<T>` is a non-null column value type; `Option<Json<T>>` is the nullable form.
+#[cfg(feature = "serde")]
+impl<T> squealy::ColumnNullability for Json<T> {
+    type Inner = Self;
+    type Nullability = squealy::NonNullableColumn;
+    const NULLABLE: bool = false;
+}
+
 #[cfg(feature = "serde")]
 impl<T> squealy::ExprKind for Json<T> {
     type Value = Self;
