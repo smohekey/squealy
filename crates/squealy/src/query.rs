@@ -756,7 +756,8 @@ impl<'scope, K, ExprK, Ast> IntoNullableAssignmentValue<K> for Expr<'scope, Expr
 where
     K: ColumnKey,
     ExprK: ExprKind<Value = K::Value>,
-    Ast: ExprAst,
+    // As with the non-null case, aggregates are invalid in an `UPDATE ... SET` value.
+    Ast: ExprAst + crate::NonAggregateAst,
 {
     type Value = ExprAssignmentValue<'scope, ExprK, Ast>;
 
