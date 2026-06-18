@@ -1,0 +1,25 @@
+error[E0277]: the trait bound `(ColumnRef<'_, ItemId>, Expr<'_, CountExpr<ItemId>, squealy::AggregateExprAst<squealy::ColumnExprAst<ItemId>>>): squealy::ProjectionClass` is not satisfied
+  --> tests/compile_fail/mixed_aggregate_scalar_select_rejected.rs:15:10
+   |
+15 |         .select(|(item,)| (item.id, item.id.count()));
+   |          ^^^^^^ unsatisfied trait bound
+   |
+   = help: the trait `squealy::ProjectionClass` is not implemented for `(ColumnRef<'_, ItemId>, Expr<'_, CountExpr<ItemId>, squealy::AggregateExprAst<squealy::ColumnExprAst<ItemId>>>)`
+   = help: the following other types implement trait `squealy::ProjectionClass`:
+             ()
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+             (T0, T1, T2, T3, T4)
+             (T0, T1, T2, T3, T4, T5)
+             (T0, T1, T2, T3, T4, T5, T6)
+             (T0, T1, T2, T3, T4, T5, T6, T7)
+           and $N others
+note: required by a bound in `squealy::SourceQuery::select`
+  --> src/query.rs
+   |
+   |     fn select<P>(
+   |        ------ required by a bound in this associated function
+...
+   |         P: ReturningProjection<'scope> + Projectable + crate::ProjectionClass,
+   |                                                        ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `SourceQuery::select`

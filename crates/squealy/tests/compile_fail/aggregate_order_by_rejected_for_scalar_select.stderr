@@ -1,0 +1,5 @@
+error[E0271]: type mismatch resolving `<ColumnRef<'_, UserId> as ProjectionClass>::Class == AggregateProjection`
+  --> tests/compile_fail/aggregate_order_by_rejected_for_scalar_select.rs:16:10
+   |
+16 |         .select(|(user,)| user.id);
+   |          ^^^^^^ expected `AggregateProjection`, found `ScalarProjection`

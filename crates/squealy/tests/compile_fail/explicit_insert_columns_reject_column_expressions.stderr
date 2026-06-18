@@ -7,13 +7,13 @@ error[E0277]: the trait bound `Expr<'_, AddExpr<CounterCount, {integer}>, squeal
    = help: the trait `ExprKind` is not implemented for `Expr<'_, AddExpr<CounterCount, {integer}>, squealy::BinaryExprAst<squealy::ColumnExprAst<CounterCount>, squealy::LiteralExprAst<{integer}>>>`
    = help: the following other types implement trait `ExprKind`:
              AddExpr<L, R>
+             AvgExpr<K>
+             CountExpr<K>
              CounterCount
              CounterId
              DivideExpr<L, R>
-             MultiplyExpr<L, R>
-             Nullable<K>
-             RuntimeParam<K>
-             SubtractExpr<L, R>
+             MaxExpr<K>
+             MinExpr<K>
            and $N others
    = note: required for `Expr<'_, AddExpr<CounterCount, {integer}>, squealy::BinaryExprAst<squealy::ColumnExprAst<CounterCount>, squealy::LiteralExprAst<{integer}>>>` to implement `squealy::query::IntoInsertAssignmentValue<CounterCount>`
    = note: required for `squealy::NonNullableColumn` to implement `squealy::IntoInsertColumnValue<CounterCount, Expr<'_, AddExpr<CounterCount, {integer}>, squealy::BinaryExprAst<squealy::ColumnExprAst<CounterCount>, squealy::LiteralExprAst<{integer}>>>>`

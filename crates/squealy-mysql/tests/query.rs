@@ -10,6 +10,13 @@ struct Widget<'scope, C: ColumnMode = ColumnExpr> {
     name: C::Type<'scope, String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+struct Counter<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    hits: C::Type<'scope, u64>,
+}
+
 #[test]
 fn mysql_renders_select_in_its_dialect() {
     let query = Mysql
@@ -86,4 +93,46 @@ fn mysql_in_and_between_render() {
         .select(|(widget,)| widget.id);
     let sql = between_query.to_sql();
     assert!(sql.contains("BETWEEN ? AND ?"), "{sql}");
+}
+
+#[test]
+fn mysql_sum_and_avg_cast_in_its_dialect() {
+    // The aggregate cast uses MySQL's restricted CAST vocabulary: `SIGNED` for the widened integer
+    // `SUM`, `DECIMAL` for `AVG`. `COUNT` needs no cast.
+    let sum = Mysql.from::<Widget>().select(|(widget,)| widget.id.sum());
+    assert!(
+        sum.to_sql().contains("CAST(SUM(q0_0.`id`) AS SIGNED)"),
+        "{}",
+        sum.to_sql()
+    );
+
+    let avg = Mysql.from::<Widget>().select(|(widget,)| widget.id.avg());
+    assert!(
+        avg.to_sql().contains("CAST(AVG(q0_0.`id`) AS DOUBLE)"),
+        "{}",
+        avg.to_sql()
+    );
+
+    let count = Mysql.from::<Widget>().select(|(widget,)| widget.id.count());
+    assert!(
+        count.to_sql().contains("COUNT(q0_0.`id`)"),
+        "{}",
+        count.to_sql()
+    );
+    assert!(!count.to_sql().contains("CAST"), "{}", count.to_sql());
+}
+
+#[test]
+fn mysql_unsigned_sum_casts_to_full_precision_decimal() {
+    // A `u64` SUM widens to `i128` (can exceed `i64::MAX`); on MySQL that must cast to a
+    // full-precision DECIMAL, not `SIGNED`, to avoid overflow.
+    let sum = Mysql
+        .from::<Counter>()
+        .select(|(counter,)| counter.hits.sum());
+    assert!(
+        sum.to_sql()
+            .contains("CAST(SUM(q0_0.`hits`) AS DECIMAL(65, 0))"),
+        "{}",
+        sum.to_sql()
+    );
 }

@@ -729,7 +729,9 @@ impl<'scope, K, ExprK, Ast> IntoAssignmentValue<K> for Expr<'scope, ExprK, Ast>
 where
     K: ColumnKey,
     ExprK: ExprKind<Value = K::Value>,
-    Ast: ExprAst,
+    // Aggregates are invalid in an `UPDATE ... SET` value (`SET x = COUNT(...)`), so the assignment
+    // expression must be aggregate-free.
+    Ast: ExprAst + crate::NonAggregateAst,
 {
     type Value = ExprAssignmentValue<'scope, ExprK, Ast>;
 
@@ -754,7 +756,8 @@ impl<'scope, K, ExprK, Ast> IntoNullableAssignmentValue<K> for Expr<'scope, Expr
 where
     K: ColumnKey,
     ExprK: ExprKind<Value = K::Value>,
-    Ast: ExprAst,
+    // As with the non-null case, aggregates are invalid in an `UPDATE ... SET` value.
+    Ast: ExprAst + crate::NonAggregateAst,
 {
     type Value = ExprAssignmentValue<'scope, ExprK, Ast>;
 
@@ -1886,7 +1889,10 @@ where
     where
         S: ProjectionShape + 'conn,
         Rows: NonEmptyInsertRows + 'conn,
-        P: ReturningProjection<'static> + Projectable,
+        // Aggregates are never valid in `RETURNING`, so require an aggregate-free projection.
+        P: ReturningProjection<'static>
+            + Projectable
+            + crate::ProjectionClass<Class = crate::ScalarProjection>,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
         Conn::Backend: SupportsReturning,
     {
@@ -1977,7 +1983,7 @@ where
     >
     where
         P: PredicateKind,
-        PredicateAst: crate::PredicateAst,
+        PredicateAst: crate::PredicateAst + crate::NonAggregatePredicate,
         Filters: PushBack<Predicate<'static, P, PredicateAst>>,
         <Filters as PushBack<Predicate<'static, P, PredicateAst>>>::Output: PredicateNodes,
     {
@@ -2036,7 +2042,10 @@ where
         projection: impl FnOnce(<S as ProjectionShape>::Exprs<'static>) -> P,
     ) -> Conn::Update<'conn, S, <P as ReturningProjection<'static>>::Shape, Columns, Filters, P>
     where
-        P: ReturningProjection<'static> + Projectable,
+        // Aggregates are never valid in `RETURNING`, so require an aggregate-free projection.
+        P: ReturningProjection<'static>
+            + Projectable
+            + crate::ProjectionClass<Class = crate::ScalarProjection>,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
         Conn::Backend: SupportsReturning,
     {
@@ -2803,6 +2812,11 @@ where
     type Exprs: HList + Clone + ToTuple;
     type Params: HList;
 
+    /// Which kinds of `ORDER BY` terms this chain has (see [`OrderNone`](crate::OrderNone) /
+    /// [`OrderScalar`](crate::OrderScalar) / [`OrderAggregate`](crate::OrderAggregate) /
+    /// [`OrderMixed`](crate::OrderMixed)). `select` requires the ordering match the projection class.
+    type OrderClass;
+
     fn depth(&self) -> usize;
 
     fn connection(&self) -> &'conn Conn;
@@ -2850,6 +2864,7 @@ where
 {
     type Exprs = HNil;
     type Params = HNil;
+    type OrderClass = crate::OrderNone;
 
     fn depth(&self) -> usize {
         self.depth
@@ -2940,7 +2955,7 @@ where
     ) -> Where<'scope, Self, P, PredicateAst>
     where
         P: PredicateKind,
-        PredicateAst: crate::PredicateAst,
+        PredicateAst: crate::PredicateAst + crate::NonAggregatePredicate,
         <S as ProjectionShape>::Exprs<'scope>: Clone,
     {
         let predicate = predicate(self.exprs.head.clone());
@@ -2965,6 +2980,7 @@ where
 {
     type Exprs = Exprs;
     type Params = Source::Params;
+    type OrderClass = crate::OrderNone;
 
     fn depth(&self) -> usize {
         self.depth
@@ -3100,6 +3116,7 @@ where
 {
     type Exprs = Base::Exprs;
     type Params = <Base::Params as crate::HAppend<PredicateAst::Params>>::Output;
+    type OrderClass = Base::OrderClass;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3160,11 +3177,15 @@ where
     Conn: QueryBuilder + 'conn,
     Base: SelectAst<'conn, 'scope, Conn>,
     K: ExprKind,
-    Ast: ExprAst,
+    Ast: ExprAst + crate::AstProjectionClass,
     Base::Params: crate::HAppend<Ast::Params>,
+    Base::OrderClass: crate::ExtendOrderClass<<Ast as crate::AstProjectionClass>::Class>,
 {
     type Exprs = Base::Exprs;
     type Params = <Base::Params as crate::HAppend<Ast::Params>>::Output;
+    type OrderClass = <Base::OrderClass as crate::ExtendOrderClass<
+        <Ast as crate::AstProjectionClass>::Class,
+    >>::Output;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3185,8 +3206,9 @@ where
     Conn: QueryBuilder + 'conn,
     Base: RenderSelectAst<'conn, 'scope, Conn, B>,
     K: ExprKind,
-    Ast: RenderAst<B>,
+    Ast: RenderAst<B> + crate::AstProjectionClass,
     Base::Params: crate::HAppend<Ast::Params>,
+    Base::OrderClass: crate::ExtendOrderClass<<Ast as crate::AstProjectionClass>::Class>,
     B: Backend,
 {
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3226,6 +3248,7 @@ where
 {
     type Exprs = Base::Exprs;
     type Params = Base::Params;
+    type OrderClass = Base::OrderClass;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3283,6 +3306,7 @@ where
 {
     type Exprs = Base::Exprs;
     type Params = Base::Params;
+    type OrderClass = Base::OrderClass;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3346,6 +3370,7 @@ where
 {
     type Exprs = <Base::Exprs as PushBack<Expr>>::Output;
     type Params = <Base::Params as crate::HAppend<Source::Params>>::Output;
+    type OrderClass = Base::OrderClass;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3415,6 +3440,7 @@ where
 {
     type Exprs = <Base::Exprs as PushBack<Expr>>::Output;
     type Params = <Base::Params as crate::HAppend<Source::Params>>::Output;
+    type OrderClass = Base::OrderClass;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3481,7 +3507,7 @@ where
     ) -> Where<'scope, Self, P, PredicateAst>
     where
         P: PredicateKind,
-        PredicateAst: crate::PredicateAst,
+        PredicateAst: crate::PredicateAst + crate::NonAggregatePredicate,
     {
         let predicate = predicate(self.exprs().to_tuple());
         Where {
@@ -3535,7 +3561,13 @@ where
         projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
     ) -> Conn::Select<'conn, 'scope, Self, <P as ReturningProjection<'scope>>::Shape, P>
     where
-        P: ReturningProjection<'scope> + Projectable,
+        // `ProjectionClass` rejects a SELECT list that mixes scalar columns and aggregates (it has
+        // no impl for a mixed tuple), since that is invalid without `GROUP BY`. An all-scalar or
+        // all-aggregate list is fine.
+        P: ReturningProjection<'scope> + Projectable + crate::ProjectionClass,
+        // ...and an aggregate-only projection cannot be ordered by a scalar (ungrouped) column.
+        <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass:
+            crate::OrderCompatibleWith<<P as crate::ProjectionClass>::Class>,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
         <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
     {
@@ -3581,7 +3613,7 @@ where
         Conn: QueryBuilder + 'conn,
         Base: SelectAst<'conn, 'scope, Conn>,
         P: PredicateKind,
-        PredicateAst: crate::PredicateAst,
+        PredicateAst: crate::PredicateAst + crate::NonAggregatePredicate,
         <S as ProjectionShape>::Exprs<'scope>: Clone,
     {
         let alias = SourceAlias::new(self.base.depth(), Base::Exprs::LEN);
@@ -3615,7 +3647,7 @@ where
         Conn: QueryBuilder + 'conn,
         Base: SelectAst<'conn, 'scope, Conn>,
         P: PredicateKind,
-        PredicateAst: crate::PredicateAst,
+        PredicateAst: crate::PredicateAst + crate::NonAggregatePredicate,
     {
         let alias = SourceAlias::new(self.base.depth(), Base::Exprs::LEN);
         let joined = S::exprs(alias);
@@ -3721,7 +3753,10 @@ where
     ) -> Conn::Delete<'conn, Self::Table, <P as ReturningProjection<'scope>>::Shape, Self::Filters, P>
     where
         Self::Table: 'conn,
-        P: ReturningProjection<'scope> + Projectable,
+        // Aggregates are never valid in `RETURNING`, so require an aggregate-free projection.
+        P: ReturningProjection<'scope>
+            + Projectable
+            + crate::ProjectionClass<Class = crate::ScalarProjection>,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
         Conn::Backend: SupportsReturning,
     {

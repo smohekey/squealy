@@ -1,0 +1,23 @@
+error[E0277]: the trait bound `squealy::AggregateExprAst<squealy::ColumnExprAst<ItemId>>: NonAggregateAst` is not satisfied
+  --> tests/compile_fail/aggregate_rejected_in_where.rs:16:10
+   |
+16 |         .where_(|item| item.id.count().greater_than(0i64))
+   |          ^^^^^^ the trait `NonAggregateAst` is not implemented for `squealy::AggregateExprAst<squealy::ColumnExprAst<ItemId>>`
+   |
+help: the trait `NonAggregatePredicate` is implemented for `squealy::ComparePredicateAst<Left, Right>`
+  --> src/expr.rs
+   |
+   | / impl<Left, Right> NonAggregatePredicate for ComparePredicateAst<Left, Right>
+   | | where
+   | |     Left: NonAggregateAst,
+   | |     Right: NonAggregateAst,
+   | |___________________________^
+   = note: required for `squealy::ComparePredicateAst<squealy::AggregateExprAst<squealy::ColumnExprAst<ItemId>>, squealy::LiteralExprAst<i64>>` to implement `NonAggregatePredicate`
+note: required by a bound in `squealy::From::<'conn, 'scope, Conn, HCons<<S as ProjectionShape>::Exprs<'scope>, HNil>, squealy::RootSource<S>>::where_`
+  --> src/query.rs
+   |
+   |     pub fn where_<P, PredicateAst>(
+   |            ------ required by a bound in this associated function
+...
+   |         PredicateAst: crate::PredicateAst + crate::NonAggregatePredicate,
+   |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `From::<'conn, 'scope, Conn, HCons<<S as ProjectionShape>::Exprs<'scope>, HNil>, RootSource<S>>::where_`

@@ -738,20 +738,20 @@ impl squealy::Dialect for MysqlDialect {
         // `CAST(expr AS <type>)` accepts a restricted vocabulary in MySQL, distinct from column types
         // (e.g. `SIGNED`/`UNSIGNED`/`CHAR`, not `INT`/`VARCHAR`).
         let name = match ty {
+            // 128-bit ints exceed MySQL's 64-bit `SIGNED`/`UNSIGNED`, so cast to a full-precision
+            // decimal (e.g. a widened `SUM(BIGINT UNSIGNED)`) rather than overflowing.
+            SqlType::I128 | SqlType::U128 => "DECIMAL(65, 0)",
             SqlType::Bool
             | SqlType::I8
             | SqlType::I16
             | SqlType::I32
             | SqlType::I64
-            | SqlType::I128
             | SqlType::Isize => "SIGNED",
-            SqlType::U8
-            | SqlType::U16
-            | SqlType::U32
-            | SqlType::U64
-            | SqlType::U128
-            | SqlType::Usize => "UNSIGNED",
-            SqlType::F32 | SqlType::F64 | SqlType::Decimal { .. } => "DECIMAL",
+            SqlType::U8 | SqlType::U16 | SqlType::U32 | SqlType::U64 | SqlType::Usize => "UNSIGNED",
+            // `CAST(x AS DECIMAL)` with no scale is `DECIMAL(10, 0)` and truncates the fraction, so
+            // float results (e.g. `AVG`) cast to `DOUBLE` to stay fractional.
+            SqlType::F32 | SqlType::F64 => "DOUBLE",
+            SqlType::Decimal { .. } => "DECIMAL",
             SqlType::Date => "DATE",
             SqlType::Time { .. } => "TIME",
             SqlType::Timestamp { .. } => "DATETIME",
@@ -992,7 +992,10 @@ mod tests {
         // CAST target types differ from column types.
         assert_eq!(dialect_cast(SqlType::I32), "SIGNED");
         assert_eq!(dialect_cast(SqlType::U64), "UNSIGNED");
-        assert_eq!(dialect_cast(SqlType::F64), "DECIMAL");
+        // Floats cast to `DOUBLE` (fractional), and 128-bit ints to a full-precision decimal.
+        assert_eq!(dialect_cast(SqlType::F64), "DOUBLE");
+        assert_eq!(dialect_cast(SqlType::I128), "DECIMAL(65, 0)");
+        assert_eq!(dialect_cast(SqlType::U128), "DECIMAL(65, 0)");
         assert_eq!(dialect_cast(SqlType::String), "CHAR");
 
         assert!(

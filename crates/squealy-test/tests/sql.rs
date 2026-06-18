@@ -571,3 +571,151 @@ fn test_like_composes_with_in_and_between() {
         ]
     );
 }
+
+#[test]
+fn test_count_renders_aggregate() {
+    let q = TestConnection
+        .from::<User>()
+        .select(|(user,)| user.id.count());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT COUNT(q0_0.id) AS expr FROM public.users AS q0_0"
+    );
+}
+
+#[test]
+fn test_aggregate_select_can_order_by_aggregate() {
+    // An aggregate-only projection may order by an aggregate (the order class matches the
+    // projection class) — only scalar ordering of an aggregate select is rejected.
+    let q = TestConnection
+        .from::<User>()
+        .order_by(|(user,)| user.id.count().desc())
+        .select(|(user,)| user.id.count());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT COUNT(q0_0.id) AS expr FROM public.users AS q0_0 ORDER BY COUNT(q0_0.id) DESC"
+    );
+}
+
+#[test]
+fn test_sum_avg_min_max_render_aggregates() {
+    let sum = TestConnection
+        .from::<User>()
+        .select(|(user,)| user.id.sum());
+    assert_eq!(
+        sum.to_sql(),
+        "SELECT SUM(q0_0.id) AS expr FROM public.users AS q0_0"
+    );
+
+    let avg = TestConnection
+        .from::<User>()
+        .select(|(user,)| user.id.avg());
+    assert_eq!(
+        avg.to_sql(),
+        "SELECT AVG(q0_0.id) AS expr FROM public.users AS q0_0"
+    );
+
+    let min = TestConnection
+        .from::<User>()
+        .select(|(user,)| user.id.min());
+    assert_eq!(
+        min.to_sql(),
+        "SELECT MIN(q0_0.id) AS expr FROM public.users AS q0_0"
+    );
+
+    let max = TestConnection
+        .from::<User>()
+        .select(|(user,)| user.id.max());
+    assert_eq!(
+        max.to_sql(),
+        "SELECT MAX(q0_0.id) AS expr FROM public.users AS q0_0"
+    );
+}
+
+#[test]
+fn test_aggregates_compose_in_a_tuple_with_filter() {
+    let q = TestConnection
+        .from::<User>()
+        .where_(|user| user.id.greater_than(0))
+        .select(|(user,)| (user.id.count(), user.id.sum()));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT COUNT(q0_0.id) AS t0_expr, SUM(q0_0.id) AS t1_expr FROM public.users AS q0_0 WHERE (q0_0.id > ?)"
+    );
+}
+
+/// Compile-time checks that the aggregate result types are nullable (except `COUNT`) and that
+/// integer `SUM` widens to `i64`.
+#[test]
+fn test_aggregate_result_types() {
+    let count: <CountExpr<i32> as ExprKind>::Value = 0i64;
+    let _: i64 = count;
+
+    // ≤32-bit operands sum to `i64`; 64-bit and wider widen to `i128` to match PostgreSQL's
+    // `numeric` result and avoid a narrowing `bigint` cast.
+    let sum: <SumExpr<i32> as ExprKind>::Value = Some(0i64);
+    let _: Option<i64> = sum;
+
+    let wide_sum: <SumExpr<i64> as ExprKind>::Value = Some(0i128);
+    let _: Option<i128> = wide_sum;
+
+    // `u128` keeps an unsigned sum: a single value can exceed `i128::MAX`.
+    let unsigned_sum: <SumExpr<u128> as ExprKind>::Value = Some(0u128);
+    let _: Option<u128> = unsigned_sum;
+
+    let avg: <AvgExpr<i32> as ExprKind>::Value = Some(0.0f64);
+    let _: Option<f64> = avg;
+
+    let min: <MinExpr<i32> as ExprKind>::Value = Some(0i32);
+    let _: Option<i32> = min;
+
+    let max: <MaxExpr<String> as ExprKind>::Value = Some(String::new());
+    let _: Option<String> = max;
+}
+
+/// Exhaustive compile-time check of the `SUM` widening for every numeric operand type. ≤32-bit
+/// integers sum to `i64`; 64-bit-and-wider signed/`bigint`-stored operands to `i128`; `u128` stays
+/// unsigned (a single value can exceed `i128::MAX`); floats to `f64`. Each is also asserted to be
+/// decodable on PostgreSQL by [`sum_result_types_decode_on_postgres`] there.
+#[test]
+fn test_sum_widening_for_every_numeric_operand() {
+    fn sum_is<K, Expected>()
+    where
+        K: ExprKind,
+        SumExpr<K>: ExprKind<Value = Option<Expected>>,
+    {
+    }
+
+    sum_is::<i8, i64>();
+    sum_is::<i16, i64>();
+    sum_is::<i32, i64>();
+    sum_is::<u8, i64>();
+    sum_is::<u16, i64>();
+
+    sum_is::<i64, i128>();
+    sum_is::<isize, i128>();
+    sum_is::<u32, i128>();
+    sum_is::<u64, i128>();
+    sum_is::<usize, i128>();
+    sum_is::<i128, i128>();
+
+    sum_is::<u128, u128>();
+
+    sum_is::<f32, f64>();
+    sum_is::<f64, f64>();
+}
+
+/// Compile-time checks that aggregates over a nullable operand kind (`Nullable<K>`, as produced by
+/// a `left_join`) unwrap the nullability: `SUM` still widens to `Option<i64>`, and `MIN` stays a
+/// single `Option<i32>` rather than nesting a second `Option`.
+#[test]
+fn test_aggregate_nullable_operand_types_unwrap() {
+    let sum: <SumExpr<Nullable<i32>> as ExprKind>::Value = Some(0i64);
+    let _: Option<i64> = sum;
+
+    let avg: <AvgExpr<Nullable<i32>> as ExprKind>::Value = Some(0.0f64);
+    let _: Option<f64> = avg;
+
+    let min: <MinExpr<Nullable<i32>> as ExprKind>::Value = Some(0i32);
+    let _: Option<i32> = min;
+}
