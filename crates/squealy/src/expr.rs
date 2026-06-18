@@ -120,11 +120,15 @@ impl_sql_divide!(f32, f64);
 /// Computes the Rust value type produced by SQL `SUM`, and the SQL type the rendered `SUM(...)` is
 /// cast to so the database returns that exact type.
 ///
-/// A `SUM` over an integer column widens to avoid overflow (PostgreSQL returns `bigint` for
-/// `SUM(int)` and `numeric` for `SUM(bigint)`), so Squealy models every fixed-width integer `SUM`
-/// as `i64`. Because the database's own result type varies by operand width (e.g. `sum(bigint)` is
-/// `numeric`, `sum(real)` is `real`), the rendered aggregate is cast to [`SUM_CAST`](Self::SUM_CAST)
-/// so the wire type always matches [`Output`](Self::Output).
+/// A `SUM` widens to avoid overflow, mirroring the database's own result type: PostgreSQL returns
+/// `bigint` for `SUM` over `smallint`/`integer` columns but `numeric` for `SUM` over `bigint` and
+/// `numeric` columns. So operands Squealy stores in ≤ 32-bit columns sum to `i64`, while 64-bit and
+/// wider integer operands sum to `i128` (a `bigint` cast would narrow PostgreSQL's `numeric` result
+/// and error on a total above `i64::MAX`). The rendered aggregate is cast to
+/// [`SUM_CAST`](Self::SUM_CAST) so the wire type always matches [`Output`](Self::Output).
+///
+/// (Squealy stores `u32` as `bigint`, so a `u32` sum is `numeric`/`i128` like the other 64-bit
+/// operands, even though the operand itself fits in 32 bits.)
 pub trait SqlSum: SqlNumber {
     type Output: SqlNumber;
 
@@ -142,20 +146,21 @@ macro_rules! impl_sql_sum {
 }
 
 impl_sql_sum!(
+    // `smallint`/`integer`-backed operands: PostgreSQL `SUM` is `bigint`.
     i8 => i64 : crate::SqlType::I64,
     i16 => i64 : crate::SqlType::I64,
     i32 => i64 : crate::SqlType::I64,
-    i64 => i64 : crate::SqlType::I64,
-    i128 => i128 : crate::SqlType::I128,
-    isize => i64 : crate::SqlType::I64,
     u8 => i64 : crate::SqlType::I64,
     u16 => i64 : crate::SqlType::I64,
-    u32 => i64 : crate::SqlType::I64,
-    // A single `u64` can exceed `i64::MAX`, so widen to `i128` (cast to `numeric`) rather than
-    // overflowing a `bigint` cast.
+    // `bigint`/`numeric`-backed operands (or values that already exceed 64 bits): PostgreSQL `SUM`
+    // is `numeric`, so widen to `i128` rather than narrowing back to a 64-bit `bigint` cast.
+    i64 => i128 : crate::SqlType::I128,
+    i128 => i128 : crate::SqlType::I128,
+    isize => i128 : crate::SqlType::I128,
+    u32 => i128 : crate::SqlType::I128,
     u64 => i128 : crate::SqlType::I128,
     u128 => i128 : crate::SqlType::I128,
-    usize => i64 : crate::SqlType::I64,
+    usize => i128 : crate::SqlType::I128,
     f32 => f64 : crate::SqlType::F64,
     f64 => f64 : crate::SqlType::F64,
 );
@@ -168,8 +173,10 @@ impl_sql_sum!(
 /// trait maps the operand's value type to that scalar: `T` → `T`, and `Option<T>` → `T`'s scalar
 /// (recursively, so a left-joined nullable column's `Option<Option<T>>` still resolves to `T`).
 ///
-/// It is implemented for the built-in scalar value types and, by `#[derive(ColumnType)]`, for
-/// newtype wrappers, plus the blanket `Option` impl below.
+/// It is implemented for the orderable built-in scalar value types and, by `#[derive(ColumnType)]`,
+/// for newtype wrappers, plus the blanket `Option` impl below. `bool` is intentionally excluded:
+/// it gates `MIN`/`MAX`, and PostgreSQL has no `min`/`max` aggregate for boolean values, so a
+/// `bool` column's `.min()`/`.max()` is a compile error rather than a runtime failure.
 pub trait AggregateScalar {
     /// The underlying non-null scalar value type.
     type Scalar;
@@ -192,7 +199,7 @@ macro_rules! impl_aggregate_scalar {
 
 impl_aggregate_scalar!(i8, i16, i32, i64, i128, isize);
 impl_aggregate_scalar!(u8, u16, u32, u64, u128, usize);
-impl_aggregate_scalar!(f32, f64, String, bool);
+impl_aggregate_scalar!(f32, f64, String);
 
 #[cfg(feature = "uuid")]
 impl_aggregate_scalar!(uuid::Uuid);
@@ -1589,8 +1596,8 @@ where
         self.into_expr().count()
     }
 
-    /// SQL `SUM(column)` (numeric columns; integer sums widen to `i64`). Also accepts nullable /
-    /// left-joined numeric columns.
+    /// SQL `SUM(column)` (numeric columns; integer sums widen per [`SqlSum`] — to `i64` for
+    /// ≤32-bit operands, `i128` for 64-bit and wider). Also accepts nullable / left-joined columns.
     pub fn sum(self) -> Expr<'scope, SumExpr<K>, AggregateExprAst<ColumnExprAst<K>>>
     where
         K::Value: AggregateScalar,
@@ -2066,9 +2073,10 @@ where
     }
 
     /// SQL `SUM(expr)` — `NULL` over an empty input, so the result is `Option<…>`; integer sums
-    /// widen to `i64` (see [`SqlSum`]). The call is cast to that type so the database's own result
-    /// type (which can be `numeric`) decodes correctly. Works on nullable / left-joined operands,
-    /// which aggregate over the same scalar as their non-null counterpart (see [`AggregateScalar`]).
+    /// widen per [`SqlSum`] (`i64` for ≤32-bit operands, `i128` for 64-bit and wider). The call is
+    /// cast to that type so the database's own result (which can be `numeric`) decodes correctly.
+    /// Works on nullable / left-joined operands, which aggregate over the same scalar as their
+    /// non-null counterpart (see [`AggregateScalar`]).
     pub fn sum(&self) -> Expr<'scope, SumExpr<K>, AggregateExprAst<Ast>>
     where
         K::Value: AggregateScalar,

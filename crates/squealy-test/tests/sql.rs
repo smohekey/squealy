@@ -637,8 +637,13 @@ fn test_aggregate_result_types() {
     let count: <CountExpr<i32> as ExprKind>::Value = 0i64;
     let _: i64 = count;
 
+    // ≤32-bit operands sum to `i64`; 64-bit and wider widen to `i128` to match PostgreSQL's
+    // `numeric` result and avoid a narrowing `bigint` cast.
     let sum: <SumExpr<i32> as ExprKind>::Value = Some(0i64);
     let _: Option<i64> = sum;
+
+    let wide_sum: <SumExpr<i64> as ExprKind>::Value = Some(0i128);
+    let _: Option<i128> = wide_sum;
 
     let avg: <AvgExpr<i32> as ExprKind>::Value = Some(0.0f64);
     let _: Option<f64> = avg;
