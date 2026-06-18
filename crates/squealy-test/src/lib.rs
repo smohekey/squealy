@@ -120,4 +120,78 @@ impl ConnectionWithTransaction for TestConnection {
         let mut transaction = TestConnection;
         f(&mut transaction).await
     }
+
+    async fn transaction_scoped<'conn, T, F>(
+        &'conn mut self,
+        f: F,
+    ) -> Result<T, <Self::Backend as Backend>::Error>
+    where
+        T: 'conn,
+        F: for<'tx> FnOnce(
+                &'tx mut Self::Transaction<'conn>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<T, <Self::Backend as Backend>::Error>>
+                        + Send
+                        + 'tx,
+                >,
+            > + 'conn,
+    {
+        let mut transaction = TestConnection;
+        f(&mut transaction).await
+    }
+}
+
+#[cfg(test)]
+mod transaction_scoped_tests {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    use super::{TestConnection, TestError};
+    use crate::{Backend, ConnectionWithTransaction};
+
+    /// Compile-time guard: the future returned by `transaction_scoped` is `Send` even when the
+    /// connection is known only generically (`C: ConnectionWithTransaction`) — the backend-agnostic
+    /// multithreaded `-> impl Future + Send` service workflow. Mirrors the `async_trait_send`
+    /// regression test, but for the transaction entry point. Never executed; it only needs to
+    /// type-check.
+    #[allow(dead_code)]
+    fn outer_future_is_send_for_generic_backend<C>(conn: &mut C)
+    where
+        C: ConnectionWithTransaction,
+        <C::Backend as Backend>::Error: Send,
+    {
+        fn assert_send<T: Send>(_: T) {}
+        assert_send(conn.transaction_scoped(move |_tx| {
+            Box::pin(async move { Ok::<(), <C::Backend as Backend>::Error>(()) })
+        }));
+    }
+
+    /// Minimal executor (no tokio dep): the test futures never suspend, so busy-polling
+    /// to completion is enough.
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        loop {
+            if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+                return value;
+            }
+        }
+    }
+
+    /// Proves a closure that *owns* captured data (moved into the future) satisfies
+    /// `transaction_scoped`'s HRTB bound — the case an `async` closure (`transaction`)
+    /// cannot express. Only `tx` is borrowed; the data is owned, so the future is valid for
+    /// any transaction lifetime.
+    #[test]
+    fn admits_captured_data() {
+        let rows: Vec<i32> = (1..=4).collect();
+        let mut conn = TestConnection;
+        let sum = block_on(conn.transaction_scoped(move |_tx| {
+            Box::pin(async move { Ok::<i32, TestError>(rows.iter().sum()) })
+        }))
+        .expect("transaction");
+        assert_eq!(sum, 10);
+    }
 }
