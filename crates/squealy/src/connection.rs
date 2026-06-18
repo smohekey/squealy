@@ -98,6 +98,14 @@ pub trait ConnectionWithTransaction: Connection {
     where
         Self: 'conn;
 
+    /// Run a closure inside a backend-managed transaction.
+    ///
+    /// The returned future is **not** guaranteed `Send`: the closure's `AsyncFnOnce` call future
+    /// would have to be bound `Send`, which on stable Rust requires the unnameable, unstable
+    /// `AsyncFnOnce::CallOnceFuture` associated type. If you need a `Send` transaction future for a
+    /// multithreaded `-> impl Future + Send` context (especially a backend-generic one), use
+    /// [`transaction_scoped`](Self::transaction_scoped) — its explicit boxed `dyn Future + Send`
+    /// makes the future's `Send`-ness expressible on stable.
     fn transaction<'conn, T, F>(
         &'conn mut self,
         f: F,
@@ -107,5 +115,39 @@ pub trait ConnectionWithTransaction: Connection {
         F: for<'tx> AsyncFnOnce(
                 &'tx mut Self::Transaction<'conn>,
             ) -> Result<T, <Self::Backend as Backend>::Error>
+            + 'conn;
+
+    /// Like [`transaction`](Self::transaction), but the closure returns a **boxed** future,
+    /// so it can carry per-call data into the transaction.
+    ///
+    /// An `async` closure that captures data cannot satisfy the higher-ranked `AsyncFnOnce`
+    /// bound of [`transaction`](Self::transaction) — a Rust async-closure limitation. A plain
+    /// `FnOnce` returning `Pin<Box<dyn Future + 'tx>>` boxes the per-call future instead. The
+    /// data must be **moved into** the future (owned) so that only `tx` is borrowed for `'tx`
+    /// — borrowing outer data would re-introduce the higher-ranked conflict. The boxed future
+    /// is required to be `Send` and the returned future is itself `Send`, so this stays usable
+    /// from a multithreaded `-> impl Future + Send` service — including a *backend-generic* one
+    /// (`C: ConnectionWithTransaction`), not just a concrete connection (see the
+    /// `async_trait_send` regression test and `outer_future_is_send_for_generic_backend`).
+    /// Callers write:
+    ///
+    /// ```ignore
+    /// conn.transaction_scoped(move |tx| Box::pin(async move {
+    ///     // `rows` moved in (owned); `tx` borrowed
+    ///     for row in rows { tx.to::<T>()./* … */.insert().await?; }
+    ///     Ok(())
+    /// })).await
+    /// ```
+    fn transaction_scoped<'conn, T, F>(
+        &'conn mut self,
+        f: F,
+    ) -> impl Future<Output = Result<T, <Self::Backend as Backend>::Error>> + Send + 'conn
+    where
+        T: Send + 'conn,
+        F: for<'tx> FnOnce(
+                &'tx mut Self::Transaction<'conn>,
+            ) -> std::pin::Pin<
+                Box<dyn Future<Output = Result<T, <Self::Backend as Backend>::Error>> + Send + 'tx>,
+            > + Send
             + 'conn;
 }
