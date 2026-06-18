@@ -740,6 +740,21 @@ impl TableStruct {
                 type Shape = #row_shape_ident;
             }
 
+            // A whole-table projection is all columns, i.e. all scalar — so it is a valid SELECT
+            // list (alone or alongside other scalar projections) and a valid RETURNING projection.
+            impl<'scope> ::squealy::ProjectionClass for #exprs_ident <'scope> {
+                type Class = ::squealy::ScalarProjection;
+            }
+            impl<'scope> ::squealy::ProjectionClass for #rebound_exprs_ident <'scope> {
+                type Class = ::squealy::ScalarProjection;
+            }
+            impl<'scope> ::squealy::ProjectionClass for #nullable_exprs_ident <'scope> {
+                type Class = ::squealy::ScalarProjection;
+            }
+            impl<'scope> ::squealy::ProjectionClass for #nullable_rebound_exprs_ident <'scope> {
+                type Class = ::squealy::ScalarProjection;
+            }
+
             impl<'scope> ::squealy::Projectable for #rebound_exprs_ident <'scope> {
                 type Rebound<'next_scope> = #rebound_exprs_ident <'next_scope>;
 
@@ -1233,7 +1248,7 @@ impl TableStruct {
                         ) -> P,
                     ) -> <Conn as ::squealy::QueryBuilder>::Update<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape, UpdateColumns, Filters, P>
                     where
-                        P: ::squealy::ReturningProjection<'static> + ::squealy::Projectable,
+                        P: ::squealy::ReturningProjection<'static> + ::squealy::Projectable + ::squealy::ProjectionClass<Class = ::squealy::ScalarProjection>,
                         <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<<Conn as ::squealy::QueryBuilder>::Backend>,
                     {
                         let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
@@ -1435,7 +1450,7 @@ impl TableStruct {
                     ) -> P,
                 ) -> <Conn as ::squealy::QueryBuilder>::Insert<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape, ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>, P>
                 where
-                    P: ::squealy::ReturningProjection<'static> + ::squealy::Projectable,
+                    P: ::squealy::ReturningProjection<'static> + ::squealy::Projectable + ::squealy::ProjectionClass<Class = ::squealy::ScalarProjection>,
                     <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<<Conn as ::squealy::QueryBuilder>::Backend>,
                 {
                     let insert_rows = ::squealy::HCons {

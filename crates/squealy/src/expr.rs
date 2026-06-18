@@ -193,9 +193,23 @@ where
     type Scalar = T::Scalar;
 }
 
+/// Opts a value type into SQL `MIN`/`MAX` by implementing [`AggregateScalar`] (its own scalar).
+///
+/// The built-in numeric/string/date-time value types are covered already. Use this to enable
+/// `MIN`/`MAX` on a `#[derive(ColumnType)]` newtype — which is **not** automatic, so a newtype over
+/// a type PostgreSQL has no `min`/`max` aggregate for (`bool`, `uuid`, JSON, bytes, …) is excluded
+/// by default. Only opt in newtypes whose column type the database can actually order:
+///
+/// ```
+/// # use squealy::*;
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, ColumnType)]
+/// struct UserId(i32);
+/// squealy::impl_aggregate_scalar!(UserId);
+/// ```
+#[macro_export]
 macro_rules! impl_aggregate_scalar {
     ($($ty:ty),* $(,)?) => {
-        $(impl AggregateScalar for $ty {
+        $(impl $crate::AggregateScalar for $ty {
             type Scalar = $ty;
         })*
     };
@@ -450,6 +464,70 @@ where
     Left: NonAggregateAst,
     Right: NonAggregateAst,
 {
+}
+
+/// Classification of a projection element as a plain scalar value (see [`ProjectionClass`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalarProjection {}
+
+/// Classification of a projection element as a SQL aggregate (`COUNT`/`SUM`/…, see
+/// [`ProjectionClass`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AggregateProjection {}
+
+/// Classifies a projection element (or a tuple of them) as scalar or aggregate, so the query
+/// builder can keep SQL valid without `GROUP BY`:
+///
+/// - `select` requires a *homogeneous* projection — every element the same class — so a list that
+///   mixes a bare column with an aggregate (`(user.id, user.id.count())`, which PostgreSQL/MySQL
+///   reject without `GROUP BY`) has no impl and fails to compile. An all-scalar or all-aggregate
+///   list is fine.
+/// - `RETURNING` and update assignments require [`ScalarProjection`], since aggregates are never
+///   valid there.
+///
+/// A tuple is classified only when all its elements agree; a mixed tuple has no impl. Aggregates
+/// can only appear as a top-level element (their `Option<…>` value type makes them un-combinable
+/// with arithmetic, and comparisons yield predicates), so classifying by the top-level AST is
+/// sufficient.
+#[doc(hidden)]
+pub trait ProjectionClass {
+    type Class;
+}
+
+/// Helper that classifies an [`Expr`] by its top-level AST node.
+#[doc(hidden)]
+pub trait AstProjectionClass {
+    type Class;
+}
+
+impl<Operand> AstProjectionClass for AggregateExprAst<Operand> {
+    type Class = AggregateProjection;
+}
+impl<K> AstProjectionClass for ColumnExprAst<K> {
+    type Class = ScalarProjection;
+}
+impl<K> AstProjectionClass for LiteralExprAst<K>
+where
+    K: ExprKind,
+{
+    type Class = ScalarProjection;
+}
+impl<K> AstProjectionClass for ParamExprAst<K> {
+    type Class = ScalarProjection;
+}
+impl<Left, Right> AstProjectionClass for BinaryExprAst<Left, Right> {
+    type Class = ScalarProjection;
+}
+
+impl<'scope, K, Ast> ProjectionClass for Expr<'scope, K, Ast>
+where
+    Ast: ExprAst + AstProjectionClass,
+{
+    type Class = <Ast as AstProjectionClass>::Class;
+}
+
+impl<'scope, K> ProjectionClass for ColumnRef<'scope, K> {
+    type Class = ScalarProjection;
 }
 
 /// Marker for predicate ASTs whose expression operands are all aggregate-free (see

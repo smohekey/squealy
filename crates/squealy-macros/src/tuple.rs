@@ -523,6 +523,10 @@ fn tuple_projection_shape(arity: usize) -> proc_macro2::TokenStream {
     let returning_shape_tuple = quote::quote! {
         (#(<#types as ReturningProjection<'scope>>::Shape,)*)
     };
+    // The projection's aggregate class is the first element's; every element must agree, so a
+    // tuple mixing a scalar column and an aggregate has no `ProjectionClass` impl.
+    let first_type = &types[0];
+    let rest_types = &types[1..];
     quote::quote! {
         impl<#(#types),*> ProjectionShape for (#(#types,)*)
         where
@@ -637,6 +641,18 @@ fn tuple_projection_shape(arity: usize) -> proc_macro2::TokenStream {
             type Shape = (
                 #(<#types as ReturningProjection<'scope>>::Shape,)*
             );
+        }
+
+        impl<#(#types),*> ::squealy::ProjectionClass for (#(#types,)*)
+        where
+            #first_type: ::squealy::ProjectionClass,
+            #(
+                #rest_types: ::squealy::ProjectionClass<
+                    Class = <#first_type as ::squealy::ProjectionClass>::Class,
+                >,
+            )*
+        {
+            type Class = <#first_type as ::squealy::ProjectionClass>::Class;
         }
 
         impl<Backend, #(#types),*> Decode<Backend> for (#(#types,)*)

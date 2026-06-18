@@ -48,17 +48,12 @@ impl ColumnTypeStruct {
                 type Value = Self;
             }
 
-            // A newtype is its own aggregate scalar, so `MIN`/`MAX` over a column of this type (or a
-            // nullable / left-joined one) decode back to the newtype.
-            //
-            // This is unconditional: gating it on `#field_ty: AggregateScalar` would be a concrete
-            // (non-generic) bound that the compiler rejects eagerly for a `bool`/`uuid`-backed
-            // newtype — breaking the newtype's own compilation, not just `MIN`/`MAX` — and the
-            // generic blanket alternative collides with the primitive impls under coherence. Raw
-            // `bool`/`uuid` columns are still excluded; a newtype wrapping one is a known narrow gap.
-            impl ::squealy::AggregateScalar for #ident {
-                type Scalar = Self;
-            }
+            // `AggregateScalar` (which enables `MIN`/`MAX`) is intentionally NOT derived: the
+            // wrapped type may be one PostgreSQL has no `min`/`max` aggregate for (`bool`, `uuid`,
+            // JSON, bytes, raw `db_type`s), and a concrete `where #field_ty: AggregateScalar` bound
+            // is rejected eagerly by the compiler (breaking the newtype itself), while a generic
+            // blanket collides with the primitive impls under coherence. So it is opt-in: a newtype
+            // over an orderable type enables `MIN`/`MAX` with `squealy::impl_aggregate_scalar!(Ty);`.
 
             impl<Backend> ::squealy::Encode<Backend> for #ident
             where

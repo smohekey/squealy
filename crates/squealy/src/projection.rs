@@ -3,8 +3,8 @@ use std::marker::PhantomData;
 
 use crate::{
     AddExpr, AvgExpr, ColumnNullableValue, ColumnRef, ColumnValue, CountExpr, Decode, DivideExpr,
-    Expr, ExprAst, ExprKind, MaxExpr, MinExpr, MultiplyExpr, Nullable, ReturningProjection,
-    SchemaTable, SourceAlias, SubtractExpr, SumExpr,
+    Expr, ExprAst, ExprKind, MaxExpr, MinExpr, MultiplyExpr, Nullable, ProjectionClass,
+    ReturningProjection, ScalarProjection, SchemaTable, SourceAlias, SubtractExpr, SumExpr,
 };
 
 /// A projection shape that can produce scoped expression values for a SQL alias.
@@ -254,6 +254,18 @@ impl Projectable for () {
     type Rebound<'scope> = ();
 
     fn re_alias<'scope>(&self, _alias: SourceAlias) -> Self::Rebound<'scope> {}
+}
+
+impl ProjectionClass for () {
+    type Class = ScalarProjection;
+}
+
+// A bare value literal projects as a scalar. (Mirrors the `Projectable for T` blanket below.)
+impl<T> ProjectionClass for T
+where
+    T: ExprKind<Value = T>,
+{
+    type Class = ScalarProjection;
 }
 
 impl<B> RenderProjectable<B> for ()

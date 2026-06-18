@@ -17,6 +17,10 @@ struct User<'scope, C: ColumnMode = ColumnExpr> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ColumnType)]
 struct ProbeId(i32);
 
+// `MIN`/`MAX` support for a newtype is opt-in (it is not derived). `ProbeId` wraps an orderable
+// integer, so enable it.
+squealy::impl_aggregate_scalar!(ProbeId);
+
 #[test]
 fn option_newtype_column_decodes() {
     fn assert_decode<T: squealy::Decode<Postgres>>() {}
@@ -37,9 +41,9 @@ fn sum_and_avg_result_types_decode() {
     assert_decode::<Option<f64>>();
 }
 
-/// `#[derive(ColumnType)]` emits `AggregateScalar`, so `MIN`/`MAX` still work on a newtype column
-/// (and decode back to the newtype) — including its nullable / left-joined form, which flattens to
-/// a single `Option<ProbeId>` rather than `Option<Option<ProbeId>>`.
+/// A newtype that opts in via `impl_aggregate_scalar!` supports `MIN`/`MAX` and decodes back to the
+/// newtype — including its nullable / left-joined form, which flattens to a single `Option<ProbeId>`
+/// rather than `Option<Option<ProbeId>>`.
 #[test]
 fn newtype_min_max_result_types() {
     let min: <squealy::MinExpr<ProbeId> as squealy::ExprKind>::Value = Some(ProbeId(0));

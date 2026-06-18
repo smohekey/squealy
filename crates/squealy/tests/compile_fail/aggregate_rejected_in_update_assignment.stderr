@@ -1,0 +1,27 @@
+error[E0277]: the trait bound `Expr<'_, CountExpr<CounterTotal>, squealy::AggregateExprAst<squealy::ColumnExprAst<CounterTotal>>>: squealy::IntoAssignmentValue<CounterTotal>` is not satisfied
+  --> tests/compile_fail/aggregate_rejected_in_update_assignment.rs:18:10
+   |
+18 |         .set(|counter| (counter.total.count(),));
+   |          ^^^ unsatisfied trait bound
+   |
+   = help: the trait `squealy::IntoAssignmentValue<CounterTotal>` is not implemented for `Expr<'_, CountExpr<CounterTotal>, squealy::AggregateExprAst<squealy::ColumnExprAst<CounterTotal>>>`
+help: the trait `squealy::IntoAssignmentValue<K>` is implemented for `Expr<'_, ExprK, Ast>`
+  --> src/query.rs
+   |
+   | / impl<'scope, K, ExprK, Ast> IntoAssignmentValue<K> for Expr<'scope, ExprK, Ast>
+   | | where
+   | |     K: ColumnKey,
+   | |     ExprK: ExprKind<Value = K::Value>,
+...  |
+   | |     Ast: ExprAst + crate::NonAggregateAst,
+   | |__________________________________________^
+   = note: required for `squealy::NonNullableColumn` to implement `squealy::IntoUpdateColumnValue<CounterTotal, Expr<'_, CountExpr<CounterTotal>, squealy::AggregateExprAst<squealy::ColumnExprAst<CounterTotal>>>>`
+   = note: required for `(CounterTotal,)` to implement `squealy::UpdateColumnValues<Counter<'_>, (Expr<'_, CountExpr<CounterTotal>, squealy::AggregateExprAst<squealy::ColumnExprAst<CounterTotal>>>,)>`
+note: required by a bound in `ToColumns::<'conn, Conn, S, Columns, Rows>::set`
+  --> src/query.rs
+   |
+   |     pub fn set<Values>(
+   |            --- required by a bound in this associated function
+...
+   |         Columns: UpdateColumnValues<S, Values>,
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `ToColumns::<'conn, Conn, S, Columns, Rows>::set`

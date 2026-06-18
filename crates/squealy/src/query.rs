@@ -729,7 +729,9 @@ impl<'scope, K, ExprK, Ast> IntoAssignmentValue<K> for Expr<'scope, ExprK, Ast>
 where
     K: ColumnKey,
     ExprK: ExprKind<Value = K::Value>,
-    Ast: ExprAst,
+    // Aggregates are invalid in an `UPDATE ... SET` value (`SET x = COUNT(...)`), so the assignment
+    // expression must be aggregate-free.
+    Ast: ExprAst + crate::NonAggregateAst,
 {
     type Value = ExprAssignmentValue<'scope, ExprK, Ast>;
 
@@ -1886,7 +1888,10 @@ where
     where
         S: ProjectionShape + 'conn,
         Rows: NonEmptyInsertRows + 'conn,
-        P: ReturningProjection<'static> + Projectable,
+        // Aggregates are never valid in `RETURNING`, so require an aggregate-free projection.
+        P: ReturningProjection<'static>
+            + Projectable
+            + crate::ProjectionClass<Class = crate::ScalarProjection>,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
         Conn::Backend: SupportsReturning,
     {
@@ -2036,7 +2041,10 @@ where
         projection: impl FnOnce(<S as ProjectionShape>::Exprs<'static>) -> P,
     ) -> Conn::Update<'conn, S, <P as ReturningProjection<'static>>::Shape, Columns, Filters, P>
     where
-        P: ReturningProjection<'static> + Projectable,
+        // Aggregates are never valid in `RETURNING`, so require an aggregate-free projection.
+        P: ReturningProjection<'static>
+            + Projectable
+            + crate::ProjectionClass<Class = crate::ScalarProjection>,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
         Conn::Backend: SupportsReturning,
     {
@@ -3535,7 +3543,10 @@ where
         projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
     ) -> Conn::Select<'conn, 'scope, Self, <P as ReturningProjection<'scope>>::Shape, P>
     where
-        P: ReturningProjection<'scope> + Projectable,
+        // `ProjectionClass` rejects a SELECT list that mixes scalar columns and aggregates (it has
+        // no impl for a mixed tuple), since that is invalid without `GROUP BY`. An all-scalar or
+        // all-aggregate list is fine.
+        P: ReturningProjection<'scope> + Projectable + crate::ProjectionClass,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
         <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
     {
@@ -3721,7 +3732,10 @@ where
     ) -> Conn::Delete<'conn, Self::Table, <P as ReturningProjection<'scope>>::Shape, Self::Filters, P>
     where
         Self::Table: 'conn,
-        P: ReturningProjection<'scope> + Projectable,
+        // Aggregates are never valid in `RETURNING`, so require an aggregate-free projection.
+        P: ReturningProjection<'scope>
+            + Projectable
+            + crate::ProjectionClass<Class = crate::ScalarProjection>,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
         Conn::Backend: SupportsReturning,
     {
