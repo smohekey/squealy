@@ -719,3 +719,53 @@ fn test_aggregate_nullable_operand_types_unwrap() {
     let min: <MinExpr<Nullable<i32>> as ExprKind>::Value = Some(0i32);
     let _: Option<i32> = min;
 }
+
+#[test]
+fn test_group_by_allows_mixed_projection() {
+    // A grouped query may select a grouping key alongside an aggregate (rejected without GROUP BY).
+    let q = TestConnection
+        .from::<User>()
+        .group_by(|(user,)| user.name)
+        .select(|(user,)| (user.name, user.id.count()));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.name AS t0_name, COUNT(q0_0.id) AS t1_expr \
+         FROM public.users AS q0_0 GROUP BY q0_0.name"
+    );
+}
+
+#[test]
+fn test_group_by_having_full_clause_order() {
+    // WHERE -> GROUP BY (multiple keys) -> HAVING (aggregate) -> ORDER BY, with params in order.
+    let q = TestConnection
+        .from::<User>()
+        .where_(|user| user.id.greater_than(0))
+        .group_by(|(user,)| user.id)
+        .group_by(|(user,)| user.name)
+        .having(|(user,)| user.id.count().greater_than(1i64))
+        .order_by(|(user,)| user.name.asc())
+        .select(|(user,)| (user.id, user.name, user.id.count()));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS t0_id, q0_0.name AS t1_name, COUNT(q0_0.id) AS t2_expr \
+         FROM public.users AS q0_0 WHERE (q0_0.id > ?) GROUP BY q0_0.id, q0_0.name \
+         HAVING (COUNT(q0_0.id) > ?) ORDER BY q0_0.name ASC"
+    );
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![TestParam::Int(0), TestParam::Int(1)]
+    );
+}
+
+#[test]
+fn test_having_without_group_by_on_whole_table_aggregate() {
+    // `HAVING` is valid without `GROUP BY` over a whole-table aggregate, and may use aggregates.
+    let q = TestConnection
+        .from::<User>()
+        .having(|(user,)| user.id.count().greater_than(0i64))
+        .select(|(user,)| user.id.count());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT COUNT(q0_0.id) AS expr FROM public.users AS q0_0 HAVING (COUNT(q0_0.id) > ?)"
+    );
+}

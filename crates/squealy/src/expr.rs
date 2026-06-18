@@ -665,6 +665,35 @@ impl OrderCompatibleWith<ScalarProjection> for OrderScalar {}
 impl OrderCompatibleWith<AggregateProjection> for OrderNone {}
 impl OrderCompatibleWith<AggregateProjection> for OrderAggregate {}
 
+// === GROUP BY state ===
+
+/// Grouping state of a select chain (carried as [`SelectAst::Grouped`](crate::SelectAst::Grouped)):
+/// the chain has no `GROUP BY`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ungrouped {}
+/// Grouping state of a select chain: the chain has a `GROUP BY`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Grouped {}
+
+/// Validates a `SELECT`'s projection and ordering for a chain's [grouping state](Ungrouped).
+///
+/// An [`Ungrouped`] query must be *homogeneous* — every projected element the same class
+/// ([`ProjectionClass`]) — and its ordering must match ([`OrderCompatibleWith`]), since without
+/// `GROUP BY` a list cannot mix a bare column with an aggregate. A [`Grouped`] query lifts those
+/// restrictions: a grouped list may mix grouping keys and aggregates, and may order by either; the
+/// database validates that the non-aggregate terms are grouping keys.
+#[doc(hidden)]
+pub trait ValidSelect<Projection, OrderClass> {}
+
+impl<Projection, OrderClass> ValidSelect<Projection, OrderClass> for Grouped {}
+
+impl<Projection, OrderClass> ValidSelect<Projection, OrderClass> for Ungrouped
+where
+    Projection: ProjectionClass,
+    OrderClass: OrderCompatibleWith<<Projection as ProjectionClass>::Class>,
+{
+}
+
 /// Marker for predicate ASTs whose expression operands are all aggregate-free (see
 /// [`NonAggregateAst`]). `where_` requires it, keeping aggregates out of `WHERE` clauses.
 pub trait NonAggregatePredicate {}
