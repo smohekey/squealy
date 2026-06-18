@@ -186,7 +186,7 @@ mod transaction_scoped_tests {
     /// any transaction lifetime.
     #[test]
     fn admits_captured_data() {
-        let rows = vec![1, 2, 3, 4];
+        let rows: Vec<i32> = (1..=4).collect();
         let mut conn = TestConnection;
         let sum = block_on(conn.transaction_scoped(move |_tx| {
             Box::pin(async move { Ok::<i32, TestError>(rows.iter().sum()) })
