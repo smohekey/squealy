@@ -2139,8 +2139,12 @@ where
     }
 
     /// SQL `COUNT(expr)` — counts non-null values of this expression (never `NULL`; `0` for an
-    /// empty input), producing an `i64`.
-    pub fn count(&self) -> Expr<'scope, CountExpr<K>, AggregateExprAst<Ast>> {
+    /// empty input), producing an `i64`. The operand must be aggregate-free (`Ast: NonAggregateAst`)
+    /// so an aggregate cannot be nested inside another (`SUM(COUNT(...))` is invalid SQL).
+    pub fn count(&self) -> Expr<'scope, CountExpr<K>, AggregateExprAst<Ast>>
+    where
+        Ast: NonAggregateAst,
+    {
         self.aggregate(AggregateFunc::Count, None)
     }
 
@@ -2151,6 +2155,7 @@ where
     /// non-null counterpart (see [`AggregateScalar`]).
     pub fn sum(&self) -> Expr<'scope, SumExpr<K>, AggregateExprAst<Ast>>
     where
+        Ast: NonAggregateAst,
         K::Value: AggregateScalar,
         <K::Value as AggregateScalar>::Scalar: SqlSum,
     {
@@ -2165,6 +2170,7 @@ where
     /// inputs.
     pub fn avg(&self) -> Expr<'scope, AvgExpr<K>, AggregateExprAst<Ast>>
     where
+        Ast: NonAggregateAst,
         K::Value: AggregateScalar,
         <K::Value as AggregateScalar>::Scalar: SqlNumber,
     {
@@ -2175,6 +2181,7 @@ where
     /// scalar (a nullable operand does not nest a second `Option`).
     pub fn min(&self) -> Expr<'scope, MinExpr<K>, AggregateExprAst<Ast>>
     where
+        Ast: NonAggregateAst,
         K::Value: AggregateScalar,
     {
         self.aggregate(AggregateFunc::Min, None)
@@ -2183,6 +2190,7 @@ where
     /// SQL `MAX(expr)` — `NULL` over an empty input, so the result is `Option<…>`.
     pub fn max(&self) -> Expr<'scope, MaxExpr<K>, AggregateExprAst<Ast>>
     where
+        Ast: NonAggregateAst,
         K::Value: AggregateScalar,
     {
         self.aggregate(AggregateFunc::Max, None)
