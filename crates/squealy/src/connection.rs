@@ -108,4 +108,32 @@ pub trait ConnectionWithTransaction: Connection {
                 &'tx mut Self::Transaction<'conn>,
             ) -> Result<T, <Self::Backend as Backend>::Error>
             + 'conn;
+
+    /// Like [`transaction`](Self::transaction), but the closure returns a **boxed** future,
+    /// so it can carry per-call data into the transaction.
+    ///
+    /// An `async` closure that captures data cannot satisfy the higher-ranked `AsyncFnOnce`
+    /// bound of [`transaction`](Self::transaction) — a Rust async-closure limitation. A plain
+    /// `FnOnce` returning `Pin<Box<dyn Future + 'tx>>` boxes the per-call future instead. The
+    /// data must be **moved into** the future (owned) so that only `tx` is borrowed for `'tx`
+    /// — borrowing outer data would re-introduce the higher-ranked conflict. Callers write:
+    ///
+    /// ```ignore
+    /// conn.transaction_scoped(move |tx| Box::pin(async move {
+    ///     // `rows` moved in (owned); `tx` borrowed
+    ///     for row in rows { tx.to::<T>()./* … */.insert().await?; }
+    ///     Ok(())
+    /// })).await
+    /// ```
+    fn transaction_scoped<'conn, T, F>(
+        &'conn mut self,
+        f: F,
+    ) -> impl Future<Output = Result<T, <Self::Backend as Backend>::Error>> + 'conn
+    where
+        T: 'conn,
+        F: for<'tx> FnOnce(
+                &'tx mut Self::Transaction<'conn>,
+            ) -> std::pin::Pin<
+                Box<dyn Future<Output = Result<T, <Self::Backend as Backend>::Error>> + 'tx>,
+            > + 'conn;
 }

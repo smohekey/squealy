@@ -650,6 +650,48 @@ impl ConnectionWithTransaction for PostgresConnection {
             }
         }
     }
+
+    async fn transaction_scoped<'conn, T, F>(
+        &'conn mut self,
+        f: F,
+    ) -> Result<T, <Self::Backend as Backend>::Error>
+    where
+        T: 'conn,
+        F: for<'tx> FnOnce(
+                &'tx mut Self::Transaction<'conn>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<T, <Self::Backend as Backend>::Error>>
+                        + 'tx,
+                >,
+            > + 'conn,
+    {
+        let transaction = self
+            .client_mut()
+            .transaction()
+            .await
+            .map_err(PostgresError::Database)?;
+        let mut transaction: Self::Transaction<'conn> = PostgresTransaction { transaction };
+
+        match f(&mut transaction).await {
+            Ok(value) => {
+                transaction
+                    .transaction
+                    .commit()
+                    .await
+                    .map_err(PostgresError::Database)?;
+                Ok(value)
+            }
+            Err(error) => {
+                transaction
+                    .transaction
+                    .rollback()
+                    .await
+                    .map_err(PostgresError::Database)?;
+                Err(error)
+            }
+        }
+    }
 }
 
 #[cfg(all(test, feature = "schema"))]

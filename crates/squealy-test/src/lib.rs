@@ -120,4 +120,60 @@ impl ConnectionWithTransaction for TestConnection {
         let mut transaction = TestConnection;
         f(&mut transaction).await
     }
+
+    async fn transaction_scoped<'conn, T, F>(
+        &'conn mut self,
+        f: F,
+    ) -> Result<T, <Self::Backend as Backend>::Error>
+    where
+        T: 'conn,
+        F: for<'tx> FnOnce(
+                &'tx mut Self::Transaction<'conn>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<T, <Self::Backend as Backend>::Error>>
+                        + 'tx,
+                >,
+            > + 'conn,
+    {
+        let mut transaction = TestConnection;
+        f(&mut transaction).await
+    }
+}
+
+#[cfg(test)]
+mod transaction_scoped_tests {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    use super::{TestConnection, TestError};
+    use crate::ConnectionWithTransaction;
+
+    /// Minimal executor (no tokio dep): the test futures never suspend, so busy-polling
+    /// to completion is enough.
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        loop {
+            if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+                return value;
+            }
+        }
+    }
+
+    /// Proves a closure that *owns* captured data (moved into the future) satisfies
+    /// `transaction_scoped`'s HRTB bound — the case an `async` closure (`transaction`)
+    /// cannot express. Only `tx` is borrowed; the data is owned, so the future is valid for
+    /// any transaction lifetime.
+    #[test]
+    fn admits_captured_data() {
+        let rows = vec![1, 2, 3, 4];
+        let mut conn = TestConnection;
+        let sum = block_on(conn.transaction_scoped(move |_tx| {
+            Box::pin(async move { Ok::<i32, TestError>(rows.iter().sum()) })
+        }))
+        .expect("transaction");
+        assert_eq!(sum, 10);
+    }
 }
