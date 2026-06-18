@@ -147,9 +147,7 @@ pub trait ConnectionWithTransaction: Connection {
         F: for<'tx> FnOnce(
                 &'tx mut Self::Transaction<'conn>,
             ) -> std::pin::Pin<
-                Box<
-                    dyn Future<Output = Result<T, <Self::Backend as Backend>::Error>> + Send + 'tx,
-                >,
+                Box<dyn Future<Output = Result<T, <Self::Backend as Backend>::Error>> + Send + 'tx>,
             > + Send
             + 'conn;
 }
