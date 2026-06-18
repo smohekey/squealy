@@ -662,6 +662,7 @@ impl ConnectionWithTransaction for PostgresConnection {
             ) -> std::pin::Pin<
                 Box<
                     dyn std::future::Future<Output = Result<T, <Self::Backend as Backend>::Error>>
+                        + Send
                         + 'tx,
                 >,
             > + 'conn,

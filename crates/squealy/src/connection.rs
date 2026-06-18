@@ -116,7 +116,10 @@ pub trait ConnectionWithTransaction: Connection {
     /// bound of [`transaction`](Self::transaction) — a Rust async-closure limitation. A plain
     /// `FnOnce` returning `Pin<Box<dyn Future + 'tx>>` boxes the per-call future instead. The
     /// data must be **moved into** the future (owned) so that only `tx` is borrowed for `'tx`
-    /// — borrowing outer data would re-introduce the higher-ranked conflict. Callers write:
+    /// — borrowing outer data would re-introduce the higher-ranked conflict. The boxed future
+    /// is required to be `Send` so the surrounding transaction future stays `Send`, keeping this
+    /// usable from a multithreaded `-> impl Future + Send` service (see the `async_trait_send`
+    /// regression test). Callers write:
     ///
     /// ```ignore
     /// conn.transaction_scoped(move |tx| Box::pin(async move {
@@ -134,6 +137,8 @@ pub trait ConnectionWithTransaction: Connection {
         F: for<'tx> FnOnce(
                 &'tx mut Self::Transaction<'conn>,
             ) -> std::pin::Pin<
-                Box<dyn Future<Output = Result<T, <Self::Backend as Backend>::Error>> + 'tx>,
+                Box<
+                    dyn Future<Output = Result<T, <Self::Backend as Backend>::Error>> + Send + 'tx,
+                >,
             > + 'conn;
 }
