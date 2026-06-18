@@ -117,9 +117,11 @@ pub trait ConnectionWithTransaction: Connection {
     /// `FnOnce` returning `Pin<Box<dyn Future + 'tx>>` boxes the per-call future instead. The
     /// data must be **moved into** the future (owned) so that only `tx` is borrowed for `'tx`
     /// — borrowing outer data would re-introduce the higher-ranked conflict. The boxed future
-    /// is required to be `Send` so the surrounding transaction future stays `Send`, keeping this
-    /// usable from a multithreaded `-> impl Future + Send` service (see the `async_trait_send`
-    /// regression test). Callers write:
+    /// is required to be `Send` and the returned future is itself `Send`, so this stays usable
+    /// from a multithreaded `-> impl Future + Send` service — including a *backend-generic* one
+    /// (`C: ConnectionWithTransaction`), not just a concrete connection (see the
+    /// `async_trait_send` regression test and `outer_future_is_send_for_generic_backend`).
+    /// Callers write:
     ///
     /// ```ignore
     /// conn.transaction_scoped(move |tx| Box::pin(async move {
@@ -131,14 +133,15 @@ pub trait ConnectionWithTransaction: Connection {
     fn transaction_scoped<'conn, T, F>(
         &'conn mut self,
         f: F,
-    ) -> impl Future<Output = Result<T, <Self::Backend as Backend>::Error>> + 'conn
+    ) -> impl Future<Output = Result<T, <Self::Backend as Backend>::Error>> + Send + 'conn
     where
-        T: 'conn,
+        T: Send + 'conn,
         F: for<'tx> FnOnce(
                 &'tx mut Self::Transaction<'conn>,
             ) -> std::pin::Pin<
                 Box<
                     dyn Future<Output = Result<T, <Self::Backend as Backend>::Error>> + Send + 'tx,
                 >,
-            > + 'conn;
+            > + Send
+            + 'conn;
 }

@@ -148,7 +148,24 @@ mod transaction_scoped_tests {
     use std::task::{Context, Poll, Waker};
 
     use super::{TestConnection, TestError};
-    use crate::ConnectionWithTransaction;
+    use crate::{Backend, ConnectionWithTransaction};
+
+    /// Compile-time guard: the future returned by `transaction_scoped` is `Send` even when the
+    /// connection is known only generically (`C: ConnectionWithTransaction`) — the backend-agnostic
+    /// multithreaded `-> impl Future + Send` service workflow. Mirrors the `async_trait_send`
+    /// regression test, but for the transaction entry point. Never executed; it only needs to
+    /// type-check.
+    #[allow(dead_code)]
+    fn outer_future_is_send_for_generic_backend<C>(conn: &mut C)
+    where
+        C: ConnectionWithTransaction,
+        <C::Backend as Backend>::Error: Send,
+    {
+        fn assert_send<T: Send>(_: T) {}
+        assert_send(conn.transaction_scoped(move |_tx| {
+            Box::pin(async move { Ok::<(), <C::Backend as Backend>::Error>(()) })
+        }));
+    }
 
     /// Minimal executor (no tokio dep): the test futures never suspend, so busy-polling
     /// to completion is enough.
