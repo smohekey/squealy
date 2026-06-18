@@ -48,6 +48,16 @@ pub enum CompareOp {
     GreaterThanOrEquals,
 }
 
+/// A SQL aggregate function applied to a single expression operand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AggregateFunc {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OrderDirection {
     Asc,
@@ -106,6 +116,116 @@ macro_rules! impl_sql_divide {
 impl_sql_divide!(i8, i16, i32, i64, i128, isize);
 impl_sql_divide!(u8, u16, u32, u64, u128, usize);
 impl_sql_divide!(f32, f64);
+
+/// Computes the Rust value type produced by SQL `SUM`, and the SQL type the rendered `SUM(...)` is
+/// cast to so the database returns that exact type.
+///
+/// A `SUM` widens to avoid overflow, mirroring the database's own result type: PostgreSQL returns
+/// `bigint` for `SUM` over `smallint`/`integer` columns but `numeric` for `SUM` over `bigint` and
+/// `numeric` columns. So operands Squealy stores in ≤ 32-bit columns sum to `i64`, while 64-bit and
+/// wider integer operands sum to `i128` (a `bigint` cast would narrow PostgreSQL's `numeric` result
+/// and error on a total above `i64::MAX`). The rendered aggregate is cast to
+/// [`SUM_CAST`](Self::SUM_CAST) so the wire type always matches [`Output`](Self::Output).
+///
+/// (Squealy stores `u32` as `bigint`, so a `u32` sum is `numeric`/`i128` like the other 64-bit
+/// operands, even though the operand itself fits in 32 bits.)
+pub trait SqlSum: SqlNumber {
+    type Output: SqlNumber;
+
+    /// The SQL type the rendered `SUM(operand)` is cast to so it decodes as [`Output`](Self::Output).
+    const SUM_CAST: crate::SqlType;
+}
+
+macro_rules! impl_sql_sum {
+    ($($ty:ty => $output:ty : $cast:expr),* $(,)?) => {
+        $(impl SqlSum for $ty {
+            type Output = $output;
+            const SUM_CAST: crate::SqlType = $cast;
+        })*
+    };
+}
+
+impl_sql_sum!(
+    // `smallint`/`integer`-backed operands: PostgreSQL `SUM` is `bigint`.
+    i8 => i64 : crate::SqlType::I64,
+    i16 => i64 : crate::SqlType::I64,
+    i32 => i64 : crate::SqlType::I64,
+    u8 => i64 : crate::SqlType::I64,
+    u16 => i64 : crate::SqlType::I64,
+    // `bigint`/`numeric`-backed operands (or values that already exceed 64 bits): PostgreSQL `SUM`
+    // is `numeric`, so widen to `i128` rather than narrowing back to a 64-bit `bigint` cast.
+    i64 => i128 : crate::SqlType::I128,
+    i128 => i128 : crate::SqlType::I128,
+    isize => i128 : crate::SqlType::I128,
+    u32 => i128 : crate::SqlType::I128,
+    u64 => i128 : crate::SqlType::I128,
+    // A single `u128` can exceed `i128::MAX`, so keep the sum unsigned (decoded from `numeric`)
+    // rather than narrowing valid values into `i128`.
+    u128 => u128 : crate::SqlType::U128,
+    usize => i128 : crate::SqlType::I128,
+    f32 => f64 : crate::SqlType::F64,
+    f64 => f64 : crate::SqlType::F64,
+);
+
+/// The non-null scalar an aggregate operates on, looking through any number of `Option` layers.
+///
+/// SQL aggregates (`SUM`/`AVG`/`MIN`/`MAX`) ignore `NULL` inputs, so an aggregate over a nullable
+/// operand — a `#[column]` typed `Option<T>`, or any column reached through a `LEFT JOIN`
+/// (`Nullable<K>`, value `Option<T>`) — produces the same result type as the non-null `T`. This
+/// trait maps the operand's value type to that scalar: `T` → `T`, and `Option<T>` → `T`'s scalar
+/// (recursively, so a left-joined nullable column's `Option<Option<T>>` still resolves to `T`).
+///
+/// It is implemented for the built-in scalar value types PostgreSQL actually provides `MIN`/`MAX`
+/// aggregates for and, by `#[derive(ColumnType)]`, for newtype wrappers, plus the blanket `Option`
+/// impl below. `bool` and `uuid::Uuid` are intentionally excluded: PostgreSQL has no `min`/`max`
+/// aggregate for them (only for numbers, strings, and date/time types), so `.min()`/`.max()` on
+/// such a column is a compile error rather than a runtime `function min(uuid) does not exist`. They
+/// remain orderable for `ORDER BY`, which is a separate capability.
+pub trait AggregateScalar {
+    /// The underlying non-null scalar value type.
+    type Scalar;
+}
+
+impl<T> AggregateScalar for Option<T>
+where
+    T: AggregateScalar,
+{
+    type Scalar = T::Scalar;
+}
+
+/// Opts a value type into SQL `MIN`/`MAX` by implementing [`AggregateScalar`] (its own scalar).
+///
+/// The built-in numeric/string/date-time value types are covered already. Use this to enable
+/// `MIN`/`MAX` on a `#[derive(ColumnType)]` newtype — which is **not** automatic, so a newtype over
+/// a type PostgreSQL has no `min`/`max` aggregate for (`bool`, `uuid`, JSON, bytes, …) is excluded
+/// by default. Only opt in newtypes whose column type the database can actually order:
+///
+/// ```
+/// # use squealy::*;
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, ColumnType)]
+/// struct UserId(i32);
+/// squealy::impl_aggregate_scalar!(UserId);
+/// ```
+#[macro_export]
+macro_rules! impl_aggregate_scalar {
+    ($($ty:ty),* $(,)?) => {
+        $(impl $crate::AggregateScalar for $ty {
+            type Scalar = $ty;
+        })*
+    };
+}
+
+impl_aggregate_scalar!(i8, i16, i32, i64, i128, isize);
+impl_aggregate_scalar!(u8, u16, u32, u64, u128, usize);
+impl_aggregate_scalar!(f32, f64, String);
+
+// Date/time types have PostgreSQL `min`/`max` aggregates; `uuid` does not, so it is excluded.
+#[cfg(feature = "systemtime")]
+impl_aggregate_scalar!(std::time::SystemTime);
+#[cfg(feature = "time")]
+impl_aggregate_scalar!(time::OffsetDateTime);
+#[cfg(feature = "chrono")]
+impl_aggregate_scalar!(chrono::DateTime<chrono::Utc>);
 
 /// Type-level identity for a SQL expression.
 pub trait ExprKind {
@@ -292,6 +412,308 @@ where
     }
 }
 
+/// A SQL aggregate function call (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`) over a single operand. The
+/// operand's parameters flow straight through. When `cast` is set the rendered call is wrapped in a
+/// `CAST(... AS <type>)` so the database's result type matches the advertised Rust value type (e.g.
+/// `SUM`/`AVG` whose native type would otherwise be `numeric`).
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AggregateExprAst<Operand> {
+    func: AggregateFunc,
+    cast: Option<crate::SqlType>,
+    operand: Operand,
+}
+
+impl<Operand> ExprAst for AggregateExprAst<Operand>
+where
+    Operand: ExprAst,
+{
+    type Params = Operand::Params;
+}
+
+impl<Operand, B> RenderAst<B> for AggregateExprAst<Operand>
+where
+    Operand: RenderAst<B>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_aggregate(self.func, self.cast.as_ref(), |visitor| {
+            self.operand.visit(visitor)
+        })
+    }
+}
+
+/// Marker for expression ASTs that are *not* a SQL aggregate function call (`COUNT`/`SUM`/…) and do
+/// not contain one. It is implemented for every expression AST node except [`AggregateExprAst`]
+/// (recursively for [`BinaryExprAst`]), so an aggregate cannot satisfy it.
+///
+/// Predicate ASTs built from aggregate-free operands are [`NonAggregatePredicate`], which `where_`
+/// requires — so an aggregate cannot flow into a `WHERE` clause (PostgreSQL/MySQL reject aggregates
+/// there; they belong in the select list, or `HAVING` once it is supported). Comparing an aggregate
+/// is still possible; the resulting predicate just cannot be used as a `where_` filter.
+pub trait NonAggregateAst {}
+
+impl<K> NonAggregateAst for ColumnExprAst<K> {}
+impl<K> NonAggregateAst for LiteralExprAst<K> where K: ExprKind {}
+impl<K> NonAggregateAst for ParamExprAst<K> {}
+impl<Left, Right> NonAggregateAst for BinaryExprAst<Left, Right>
+where
+    Left: NonAggregateAst,
+    Right: NonAggregateAst,
+{
+}
+
+/// Classification of a projection element as a plain scalar value (see [`ProjectionClass`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalarProjection {}
+
+/// Classification of a projection element as a SQL aggregate (`COUNT`/`SUM`/…, see
+/// [`ProjectionClass`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AggregateProjection {}
+
+/// Classifies a projection element (or a tuple of them) as scalar or aggregate so the query builder
+/// can keep SQL valid without `GROUP BY`:
+///
+/// - `select` requires a *homogeneous* projection — every element the same class — so a list mixing
+///   a bare column with an aggregate (`(user.id, user.id.count())`) has no impl and fails.
+/// - `RETURNING` and update assignments require [`ScalarProjection`].
+///
+/// Classification is structural over expression [terms](ConstantTerm) (constant/param, bare column,
+/// aggregate). An aggregate combined with a bare column (`COUNT(id) + id`, ungrouped) has no valid
+/// [`CombineTerm`] and so is rejected everywhere.
+#[doc(hidden)]
+pub trait ProjectionClass {
+    type Class;
+}
+
+/// A term of an expression for aggregate-validity: a constant/param.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstantTerm {}
+/// A term of an expression for aggregate-validity: a bare (ungrouped) column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColumnTerm {}
+/// A term of an expression for aggregate-validity: a SQL aggregate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AggregateTerm {}
+
+/// Classifies an expression AST into a [term](ConstantTerm): constant, column, or aggregate.
+#[doc(hidden)]
+pub trait AstProjectionClass {
+    type Class;
+}
+
+impl<Operand> AstProjectionClass for AggregateExprAst<Operand> {
+    type Class = AggregateTerm;
+}
+impl<K> AstProjectionClass for ColumnExprAst<K> {
+    type Class = ColumnTerm;
+}
+impl<K> AstProjectionClass for LiteralExprAst<K>
+where
+    K: ExprKind,
+{
+    type Class = ConstantTerm;
+}
+impl<K> AstProjectionClass for ParamExprAst<K> {
+    type Class = ConstantTerm;
+}
+// A binary expression's term is its operands combined; `CombineTerm` has no impl for an aggregate
+// mixed with a bare column (`COUNT(id) + id`), so such an expression is rejected from projections.
+impl<Left, Right> AstProjectionClass for BinaryExprAst<Left, Right>
+where
+    Left: AstProjectionClass,
+    Right: AstProjectionClass,
+    <Left as AstProjectionClass>::Class: CombineTerm<<Right as AstProjectionClass>::Class>,
+{
+    type Class = <<Left as AstProjectionClass>::Class as CombineTerm<
+        <Right as AstProjectionClass>::Class,
+    >>::Output;
+}
+
+/// Combines two expression [terms](ConstantTerm): a constant is absorbed by either side; two
+/// columns stay a column; an aggregate with a constant stays aggregate. An aggregate combined with
+/// a bare column is ungrouped and invalid, so it has no impl.
+#[doc(hidden)]
+pub trait CombineTerm<Rhs> {
+    type Output;
+}
+impl CombineTerm<ConstantTerm> for ConstantTerm {
+    type Output = ConstantTerm;
+}
+impl CombineTerm<ColumnTerm> for ConstantTerm {
+    type Output = ColumnTerm;
+}
+impl CombineTerm<AggregateTerm> for ConstantTerm {
+    type Output = AggregateTerm;
+}
+impl CombineTerm<ConstantTerm> for ColumnTerm {
+    type Output = ColumnTerm;
+}
+impl CombineTerm<ColumnTerm> for ColumnTerm {
+    type Output = ColumnTerm;
+}
+impl CombineTerm<ConstantTerm> for AggregateTerm {
+    type Output = AggregateTerm;
+}
+impl CombineTerm<AggregateTerm> for AggregateTerm {
+    type Output = AggregateTerm;
+}
+// No `CombineTerm` between `ColumnTerm` and `AggregateTerm`: a bare column outside an aggregate is
+// invalid without `GROUP BY`.
+
+/// Maps an expression [term](ConstantTerm) to its projection class: constants and columns are
+/// [`ScalarProjection`], aggregates are [`AggregateProjection`].
+#[doc(hidden)]
+pub trait TermProjectionClass {
+    type Class;
+}
+impl TermProjectionClass for ConstantTerm {
+    type Class = ScalarProjection;
+}
+impl TermProjectionClass for ColumnTerm {
+    type Class = ScalarProjection;
+}
+impl TermProjectionClass for AggregateTerm {
+    type Class = AggregateProjection;
+}
+
+impl<'scope, K, Ast> ProjectionClass for Expr<'scope, K, Ast>
+where
+    Ast: ExprAst + AstProjectionClass,
+    <Ast as AstProjectionClass>::Class: TermProjectionClass,
+{
+    type Class = <<Ast as AstProjectionClass>::Class as TermProjectionClass>::Class;
+}
+
+impl<'scope, K> ProjectionClass for ColumnRef<'scope, K> {
+    type Class = ScalarProjection;
+}
+
+// === ORDER BY classification ===
+
+/// Order-class of a select chain (carried as [`SelectAst::OrderClass`](crate::SelectAst::OrderClass)):
+/// which kinds of `ORDER BY` terms it has. `select` requires the ordering match the projection — an
+/// aggregate-only query may order only by aggregates, a scalar query only by scalar columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderNone {}
+/// Order-class: orders by at least one scalar (ungrouped) column and no aggregate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderScalar {}
+/// Order-class: orders by at least one aggregate and no scalar column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderAggregate {}
+/// Order-class: orders by both a scalar column and an aggregate — never valid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderMixed {}
+
+/// Extends an order-class with one more `ORDER BY` term of the given [term](ConstantTerm) class.
+#[doc(hidden)]
+pub trait ExtendOrderClass<TermClass> {
+    type Output;
+}
+// A constant order term (e.g. a bound param) constrains nothing.
+impl ExtendOrderClass<ConstantTerm> for OrderNone {
+    type Output = OrderNone;
+}
+impl ExtendOrderClass<ConstantTerm> for OrderScalar {
+    type Output = OrderScalar;
+}
+impl ExtendOrderClass<ConstantTerm> for OrderAggregate {
+    type Output = OrderAggregate;
+}
+impl ExtendOrderClass<ConstantTerm> for OrderMixed {
+    type Output = OrderMixed;
+}
+// A column order term introduces a scalar dependency.
+impl ExtendOrderClass<ColumnTerm> for OrderNone {
+    type Output = OrderScalar;
+}
+impl ExtendOrderClass<ColumnTerm> for OrderScalar {
+    type Output = OrderScalar;
+}
+impl ExtendOrderClass<ColumnTerm> for OrderAggregate {
+    type Output = OrderMixed;
+}
+impl ExtendOrderClass<ColumnTerm> for OrderMixed {
+    type Output = OrderMixed;
+}
+// An aggregate order term.
+impl ExtendOrderClass<AggregateTerm> for OrderNone {
+    type Output = OrderAggregate;
+}
+impl ExtendOrderClass<AggregateTerm> for OrderScalar {
+    type Output = OrderMixed;
+}
+impl ExtendOrderClass<AggregateTerm> for OrderAggregate {
+    type Output = OrderAggregate;
+}
+impl ExtendOrderClass<AggregateTerm> for OrderMixed {
+    type Output = OrderMixed;
+}
+
+/// Witness that a select chain's order-class is valid for a projection of the given class: a scalar
+/// projection may order only by scalar columns, an aggregate projection only by aggregates; either
+/// may have no ordering. A mixed ordering is never valid.
+#[doc(hidden)]
+pub trait OrderCompatibleWith<ProjectionClass> {}
+impl OrderCompatibleWith<ScalarProjection> for OrderNone {}
+impl OrderCompatibleWith<ScalarProjection> for OrderScalar {}
+impl OrderCompatibleWith<AggregateProjection> for OrderNone {}
+impl OrderCompatibleWith<AggregateProjection> for OrderAggregate {}
+
+/// Marker for predicate ASTs whose expression operands are all aggregate-free (see
+/// [`NonAggregateAst`]). `where_` requires it, keeping aggregates out of `WHERE` clauses.
+pub trait NonAggregatePredicate {}
+
+impl<Left, Right> NonAggregatePredicate for ComparePredicateAst<Left, Right>
+where
+    Left: NonAggregateAst,
+    Right: NonAggregateAst,
+{
+}
+
+impl<Left, Right> NonAggregatePredicate for LikePredicateAst<Left, Right>
+where
+    Left: NonAggregateAst,
+    Right: NonAggregateAst,
+{
+}
+
+impl<Operand, V> NonAggregatePredicate for InPredicateAst<Operand, V> where Operand: NonAggregateAst {}
+
+impl<Operand, Lo, Hi> NonAggregatePredicate for BetweenPredicateAst<Operand, Lo, Hi>
+where
+    Operand: NonAggregateAst,
+    Lo: NonAggregateAst,
+    Hi: NonAggregateAst,
+{
+}
+
+impl<Operand> NonAggregatePredicate for NullCheckPredicateAst<Operand> where Operand: NonAggregateAst
+{}
+
+impl<Operand> NonAggregatePredicate for BoolTestPredicateAst<Operand> where Operand: NonAggregateAst {}
+
+impl<Left, Right> NonAggregatePredicate for AndPredicateAst<Left, Right>
+where
+    Left: NonAggregatePredicate,
+    Right: NonAggregatePredicate,
+{
+}
+
+impl<Left, Right> NonAggregatePredicate for OrPredicateAst<Left, Right>
+where
+    Left: NonAggregatePredicate,
+    Right: NonAggregatePredicate,
+{
+}
+
+impl<P> NonAggregatePredicate for NotPredicateAst<P> where P: NonAggregatePredicate {}
+
 #[doc(hidden)]
 pub trait ExprVisitor {
     type Error;
@@ -316,6 +738,17 @@ pub trait ExprVisitor {
     where
         L: FnOnce(&mut Self) -> Result<(), Self::Error>,
         R: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render a SQL aggregate function call (`func(operand)`), optionally wrapped in a
+    /// `CAST(... AS cast)` so the result type matches the advertised Rust type.
+    fn visit_aggregate<O>(
+        &mut self,
+        func: AggregateFunc,
+        cast: Option<&crate::SqlType>,
+        operand: O,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>;
 }
 
 #[doc(hidden)]
@@ -512,6 +945,82 @@ where
     L::Value: SqlDivide,
 {
     type Value = <L::Value as SqlDivide>::Output;
+}
+
+/// Type-level identity for SQL `COUNT(expr)`. `COUNT` never returns `NULL` (it is `0` for an empty
+/// input), so its value type is a non-null `i64`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CountExpr<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> ExprKind for CountExpr<K>
+where
+    K: ExprKind,
+{
+    type Value = i64;
+}
+
+/// Type-level identity for SQL `SUM(expr)`. A sum is `NULL` over an empty input, so the value type
+/// is nullable; the operand type is widened per [`SqlSum`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SumExpr<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> ExprKind for SumExpr<K>
+where
+    K: ExprKind,
+    K::Value: AggregateScalar,
+    <K::Value as AggregateScalar>::Scalar: SqlSum,
+{
+    type Value = Option<<<K::Value as AggregateScalar>::Scalar as SqlSum>::Output>;
+}
+
+/// Type-level identity for SQL `AVG(expr)`. An average is `NULL` over an empty input and always
+/// fractional, so the value type is `Option<f64>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AvgExpr<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> ExprKind for AvgExpr<K>
+where
+    K: ExprKind,
+    K::Value: AggregateScalar,
+    <K::Value as AggregateScalar>::Scalar: SqlNumber,
+{
+    type Value = Option<f64>;
+}
+
+/// Type-level identity for SQL `MIN(expr)`. `MIN` is `NULL` over an empty input, so the value type
+/// is nullable in the operand's own type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MinExpr<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> ExprKind for MinExpr<K>
+where
+    K: ExprKind,
+    K::Value: AggregateScalar,
+{
+    type Value = Option<<K::Value as AggregateScalar>::Scalar>;
+}
+
+/// Type-level identity for SQL `MAX(expr)`. `MAX` is `NULL` over an empty input, so the value type
+/// is nullable in the operand's own type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MaxExpr<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> ExprKind for MaxExpr<K>
+where
+    K: ExprKind,
+    K::Value: AggregateScalar,
+{
+    type Value = Option<<K::Value as AggregateScalar>::Scalar>;
 }
 
 /// Type-level identity for a SQL predicate.
@@ -1367,6 +1876,46 @@ where
         self.into_expr().not_between(lo, hi)
     }
 
+    /// SQL `COUNT(column)`.
+    pub fn count(self) -> Expr<'scope, CountExpr<K>, AggregateExprAst<ColumnExprAst<K>>> {
+        self.into_expr().count()
+    }
+
+    /// SQL `SUM(column)` (numeric columns; integer sums widen per [`SqlSum`] — to `i64` for
+    /// ≤32-bit operands, `i128` for 64-bit and wider). Also accepts nullable / left-joined columns.
+    pub fn sum(self) -> Expr<'scope, SumExpr<K>, AggregateExprAst<ColumnExprAst<K>>>
+    where
+        K::Value: AggregateScalar,
+        <K::Value as AggregateScalar>::Scalar: SqlSum,
+    {
+        self.into_expr().sum()
+    }
+
+    /// SQL `AVG(column)` (numeric columns), producing `Option<f64>`.
+    pub fn avg(self) -> Expr<'scope, AvgExpr<K>, AggregateExprAst<ColumnExprAst<K>>>
+    where
+        K::Value: AggregateScalar,
+        <K::Value as AggregateScalar>::Scalar: SqlNumber,
+    {
+        self.into_expr().avg()
+    }
+
+    /// SQL `MIN(column)`.
+    pub fn min(self) -> Expr<'scope, MinExpr<K>, AggregateExprAst<ColumnExprAst<K>>>
+    where
+        K::Value: AggregateScalar,
+    {
+        self.into_expr().min()
+    }
+
+    /// SQL `MAX(column)`.
+    pub fn max(self) -> Expr<'scope, MaxExpr<K>, AggregateExprAst<ColumnExprAst<K>>>
+    where
+        K::Value: AggregateScalar,
+    {
+        self.into_expr().max()
+    }
+
     /// Sort by this column in ascending order.
     pub fn asc(self) -> Order<'scope, K, ColumnExprAst<K>> {
         self.into_expr().asc()
@@ -1800,6 +2349,80 @@ where
             hi: hi.into_expr().ast,
             negated,
         })
+    }
+
+    /// SQL `COUNT(expr)` — counts non-null values of this expression (never `NULL`; `0` for an
+    /// empty input), producing an `i64`. The operand must be aggregate-free (`Ast: NonAggregateAst`)
+    /// so an aggregate cannot be nested inside another (`SUM(COUNT(...))` is invalid SQL).
+    pub fn count(&self) -> Expr<'scope, CountExpr<K>, AggregateExprAst<Ast>>
+    where
+        Ast: NonAggregateAst,
+    {
+        self.aggregate(AggregateFunc::Count, None)
+    }
+
+    /// SQL `SUM(expr)` — `NULL` over an empty input, so the result is `Option<…>`; integer sums
+    /// widen per [`SqlSum`] (`i64` for ≤32-bit operands, `i128` for 64-bit and wider). The call is
+    /// cast to that type so the database's own result (which can be `numeric`) decodes correctly.
+    /// Works on nullable / left-joined operands, which aggregate over the same scalar as their
+    /// non-null counterpart (see [`AggregateScalar`]).
+    pub fn sum(&self) -> Expr<'scope, SumExpr<K>, AggregateExprAst<Ast>>
+    where
+        Ast: NonAggregateAst,
+        K::Value: AggregateScalar,
+        <K::Value as AggregateScalar>::Scalar: SqlSum,
+    {
+        self.aggregate(
+            AggregateFunc::Sum,
+            Some(<<K::Value as AggregateScalar>::Scalar as SqlSum>::SUM_CAST),
+        )
+    }
+
+    /// SQL `AVG(expr)` — `NULL` over an empty input and always fractional, so the result is
+    /// `Option<f64>`. Cast to `double precision` since the database returns `numeric` for integer
+    /// inputs.
+    pub fn avg(&self) -> Expr<'scope, AvgExpr<K>, AggregateExprAst<Ast>>
+    where
+        Ast: NonAggregateAst,
+        K::Value: AggregateScalar,
+        <K::Value as AggregateScalar>::Scalar: SqlNumber,
+    {
+        self.aggregate(AggregateFunc::Avg, Some(crate::SqlType::F64))
+    }
+
+    /// SQL `MIN(expr)` — `NULL` over an empty input, so the result is `Option<…>` of the operand's
+    /// scalar (a nullable operand does not nest a second `Option`).
+    pub fn min(&self) -> Expr<'scope, MinExpr<K>, AggregateExprAst<Ast>>
+    where
+        Ast: NonAggregateAst,
+        K::Value: AggregateScalar,
+    {
+        self.aggregate(AggregateFunc::Min, None)
+    }
+
+    /// SQL `MAX(expr)` — `NULL` over an empty input, so the result is `Option<…>`.
+    pub fn max(&self) -> Expr<'scope, MaxExpr<K>, AggregateExprAst<Ast>>
+    where
+        Ast: NonAggregateAst,
+        K::Value: AggregateScalar,
+    {
+        self.aggregate(AggregateFunc::Max, None)
+    }
+
+    fn aggregate<ResultKind>(
+        &self,
+        func: AggregateFunc,
+        cast: Option<crate::SqlType>,
+    ) -> Expr<'scope, ResultKind, AggregateExprAst<Ast>> {
+        Expr {
+            ast: AggregateExprAst {
+                func,
+                cast,
+                operand: self.ast.clone(),
+            },
+            project_alias: Cow::Borrowed("expr"),
+            _phantom: PhantomData,
+        }
     }
 
     /// Sort by this expression in ascending order.

@@ -6,13 +6,13 @@ error[E0277]: the trait bound `Option<std::string::String>: squealy::query::Into
    |
    = help: the following other types implement trait `ExprKind`:
              AddExpr<L, R>
+             AvgExpr<K>
+             CountExpr<K>
              DivideExpr<L, R>
+             MaxExpr<K>
+             MinExpr<K>
              MultiplyExpr<L, R>
              Nullable<K>
-             RequiredRecordId
-             RequiredRecordTitle
-             RuntimeParam<K>
-             SubtractExpr<L, R>
            and $N others
    = note: required for `Option<std::string::String>` to implement `squealy::query::IntoInsertAssignmentValue<RequiredRecordTitle>`
    = note: required for `squealy::NonNullableColumn` to implement `squealy::IntoInsertColumnValue<RequiredRecordTitle, Option<std::string::String>>`

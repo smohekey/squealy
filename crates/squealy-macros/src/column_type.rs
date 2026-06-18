@@ -48,6 +48,13 @@ impl ColumnTypeStruct {
                 type Value = Self;
             }
 
+            // `AggregateScalar` (which enables `MIN`/`MAX`) is intentionally NOT derived: the
+            // wrapped type may be one PostgreSQL has no `min`/`max` aggregate for (`bool`, `uuid`,
+            // JSON, bytes, raw `db_type`s), and a concrete `where #field_ty: AggregateScalar` bound
+            // is rejected eagerly by the compiler (breaking the newtype itself), while a generic
+            // blanket collides with the primitive impls under coherence. So it is opt-in: a newtype
+            // over an orderable type enables `MIN`/`MAX` with `squealy::impl_aggregate_scalar!(Ty);`.
+
             impl<Backend> ::squealy::Encode<Backend> for #ident
             where
                 Backend: ::squealy::Backend,

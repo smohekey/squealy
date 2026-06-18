@@ -17,11 +17,41 @@ struct User<'scope, C: ColumnMode = ColumnExpr> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ColumnType)]
 struct ProbeId(i32);
 
+// `MIN`/`MAX` support for a newtype is opt-in (it is not derived). `ProbeId` wraps an orderable
+// integer, so enable it.
+squealy::impl_aggregate_scalar!(ProbeId);
+
 #[test]
 fn option_newtype_column_decodes() {
     fn assert_decode<T: squealy::Decode<Postgres>>() {}
     assert_decode::<Option<ProbeId>>();
     assert_decode::<Option<i32>>();
+}
+
+/// Every `SUM`/`AVG` output type (and its nullable wrapper, since aggregates are `NULL` over an
+/// empty input) must decode on PostgreSQL — otherwise a query that compiles would fail at row
+/// decode. `SUM` widens to `i64`/`i128`/`u128` and `AVG` to `f64`; `i128`/`u128` decode from
+/// `numeric`, `i64`/`f64` directly.
+#[test]
+fn sum_and_avg_result_types_decode() {
+    fn assert_decode<T: squealy::Decode<Postgres>>() {}
+    assert_decode::<Option<i64>>();
+    assert_decode::<Option<i128>>();
+    assert_decode::<Option<u128>>();
+    assert_decode::<Option<f64>>();
+}
+
+/// A newtype that opts in via `impl_aggregate_scalar!` supports `MIN`/`MAX` and decodes back to the
+/// newtype — including its nullable / left-joined form, which flattens to a single `Option<ProbeId>`
+/// rather than `Option<Option<ProbeId>>`.
+#[test]
+fn newtype_min_max_result_types() {
+    let min: <squealy::MinExpr<ProbeId> as squealy::ExprKind>::Value = Some(ProbeId(0));
+    let _: Option<ProbeId> = min;
+
+    let nullable_max: <squealy::MaxExpr<squealy::Nullable<ProbeId>> as squealy::ExprKind>::Value =
+        Some(ProbeId(0));
+    let _: Option<ProbeId> = nullable_max;
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
@@ -762,6 +792,34 @@ fn postgres_between_renders_numbered_placeholders() {
     assert_eq!(
         users.collect_params().unwrap(),
         vec![PostgresParam::Int32(1), PostgresParam::Int32(10)]
+    );
+}
+
+#[test]
+fn postgres_count_and_sum_render_as_aggregates() {
+    let q = Postgres
+        .from::<User>()
+        .select(|(user,)| (user.id.count(), user.id.sum()));
+    // `SUM` is cast to `bigint` so the widened `i64` decodes (PostgreSQL `sum(bigint)` is `numeric`).
+    assert_eq!(
+        q.to_sql(),
+        "SELECT COUNT(q0_0.\"id\") AS \"t0_expr\", CAST(SUM(q0_0.\"id\") AS bigint) AS \"t1_expr\" \
+         FROM \"public\".\"users\" AS q0_0"
+    );
+}
+
+#[test]
+fn postgres_avg_min_max_render_as_aggregates() {
+    let q = Postgres
+        .from::<User>()
+        .select(|(user,)| (user.id.avg(), user.id.min(), user.name.max()));
+    // `AVG` is cast to `double precision` so the advertised `f64` decodes (PostgreSQL `avg(int)` is
+    // `numeric`); `MIN`/`MAX` keep the operand type and need no cast.
+    assert_eq!(
+        q.to_sql(),
+        "SELECT CAST(AVG(q0_0.\"id\") AS double precision) AS \"t0_expr\", \
+         MIN(q0_0.\"id\") AS \"t1_expr\", MAX(q0_0.\"name\") AS \"t2_expr\" \
+         FROM \"public\".\"users\" AS q0_0"
     );
 }
 

@@ -2,13 +2,13 @@ use std::borrow::Cow;
 use std::io::{self, Write};
 
 use squealy::{
-    ArithmeticOp, AssignmentValueVisitor, AssignmentVisitor, Column, ColumnDefault, ColumnRef,
-    ColumnType, CompareOp, Encode, Expr, ExprKind, ExprVisitor, InsertRow, InsertRowVisitor,
-    InsertableTable, Order, OrderDirection, Predicate, PredicateAstVisitor, PredicateKind,
-    PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAssignment,
-    RenderAst, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst, RenderPredicateNodes,
-    RenderProjectable, RenderSelectAst, RenderUpdateAssignments, SchemaTable, SelectSink, Selected,
-    SourceAlias, Table, TableProjection, UpdateableTable,
+    AggregateFunc, ArithmeticOp, AssignmentValueVisitor, AssignmentVisitor, Column, ColumnDefault,
+    ColumnRef, ColumnType, CompareOp, Encode, Expr, ExprKind, ExprVisitor, InsertRow,
+    InsertRowVisitor, InsertableTable, Order, OrderDirection, Predicate, PredicateAstVisitor,
+    PredicateKind, PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder,
+    RenderAssignment, RenderAst, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst,
+    RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderUpdateAssignments, SchemaTable,
+    SelectSink, Selected, SourceAlias, SqlType, Table, TableProjection, UpdateableTable,
 };
 
 use crate::query::{TestParam, TestParamWriter};
@@ -943,6 +943,22 @@ where
         right(self)?;
         self.writer.write_all(b")")
     }
+
+    fn visit_aggregate<O>(
+        &mut self,
+        func: AggregateFunc,
+        _cast: Option<&SqlType>,
+        operand: O,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        // The in-memory test backend renders the bare aggregate (no dialect casts), matching how it
+        // skips the integer-division cast the real backends emit.
+        write!(self.writer, "{}(", render_aggregate_func(func))?;
+        operand(self)?;
+        self.writer.write_all(b")")
+    }
 }
 
 impl<Writer> PredicateAstVisitor for RenderExpr<'_, Writer>
@@ -1105,6 +1121,16 @@ fn render_arithmetic_op(op: ArithmeticOp) -> &'static str {
         ArithmeticOp::Subtract => "-",
         ArithmeticOp::Multiply => "*",
         ArithmeticOp::Divide => "/",
+    }
+}
+
+fn render_aggregate_func(func: AggregateFunc) -> &'static str {
+    match func {
+        AggregateFunc::Count => "COUNT",
+        AggregateFunc::Sum => "SUM",
+        AggregateFunc::Avg => "AVG",
+        AggregateFunc::Min => "MIN",
+        AggregateFunc::Max => "MAX",
     }
 }
 

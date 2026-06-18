@@ -2,8 +2,9 @@ use std::borrow::Cow;
 use std::marker::PhantomData;
 
 use crate::{
-    AddExpr, ColumnNullableValue, ColumnRef, ColumnValue, Decode, DivideExpr, Expr, ExprAst,
-    ExprKind, MultiplyExpr, Nullable, ReturningProjection, SchemaTable, SourceAlias, SubtractExpr,
+    AddExpr, AvgExpr, ColumnNullableValue, ColumnRef, ColumnValue, CountExpr, Decode, DivideExpr,
+    Expr, ExprAst, ExprKind, MaxExpr, MinExpr, MultiplyExpr, Nullable, ProjectionClass,
+    ReturningProjection, ScalarProjection, SchemaTable, SourceAlias, SubtractExpr, SumExpr,
 };
 
 /// A projection shape that can produce scoped expression values for a SQL alias.
@@ -73,6 +74,30 @@ macro_rules! impl_binary_projection_shape {
 }
 
 impl_binary_projection_shape!(AddExpr, SubtractExpr, MultiplyExpr, DivideExpr);
+
+macro_rules! impl_aggregate_projection_shape {
+    ($($ty:ident),* $(,)?) => {
+        $(impl<K> ProjectionShape for $ty<K>
+        where
+            $ty<K>: ExprKind,
+            <$ty<K> as ExprKind>::Value: Send,
+        {
+            type Exprs<'scope> = Expr<'scope, $ty<K>>;
+            type ReboundExprs<'scope> = Expr<'scope, $ty<K>>;
+            type Row = <$ty<K> as ExprKind>::Value;
+
+            fn exprs<'scope>(alias: SourceAlias) -> Self::Exprs<'scope> {
+                Expr::column(alias, "expr")
+            }
+
+            fn rebound_exprs<'scope>(alias: SourceAlias) -> Self::ReboundExprs<'scope> {
+                Expr::column(alias, "expr")
+            }
+        })*
+    };
+}
+
+impl_aggregate_projection_shape!(CountExpr, SumExpr, AvgExpr, MinExpr, MaxExpr);
 
 impl<K> ProjectionShape for Nullable<K>
 where
@@ -229,6 +254,18 @@ impl Projectable for () {
     type Rebound<'scope> = ();
 
     fn re_alias<'scope>(&self, _alias: SourceAlias) -> Self::Rebound<'scope> {}
+}
+
+impl ProjectionClass for () {
+    type Class = ScalarProjection;
+}
+
+// A bare value literal projects as a scalar. (Mirrors the `Projectable for T` blanket below.)
+impl<T> ProjectionClass for T
+where
+    T: ExprKind<Value = T>,
+{
+    type Class = ScalarProjection;
 }
 
 impl<B> RenderProjectable<B> for ()

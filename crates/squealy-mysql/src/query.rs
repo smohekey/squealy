@@ -118,11 +118,15 @@ macro_rules! impl_mysql_decode_from_u64 {
     };
 }
 
-// `mysql_async` implements `FromValue` for these natively.
-impl_mysql_decode_direct!(i8, i16, i32, i64, u8, u16, u32, u64, f32, f64, bool, String);
-// Widths MySQL stores as 64-bit but the model carries as wider/pointer-sized types.
-impl_mysql_decode_from_i64!(isize, i128);
-impl_mysql_decode_from_u64!(usize, u128);
+// `mysql_async` implements `FromValue` for these natively. `i128`/`u128` parse from MySQL's
+// `DECIMAL`/text representation too, so a widened `SUM` (cast to `DECIMAL(65, 0)`) that exceeds 64
+// bits still decodes — unlike routing through `i64`/`u64`, which would truncate or fail conversion.
+impl_mysql_decode_direct!(
+    i8, i16, i32, i64, i128, u8, u16, u32, u64, u128, f32, f64, bool, String
+);
+// Pointer-sized widths MySQL has no native column type for; the model carries them as 64-bit.
+impl_mysql_decode_from_i64!(isize);
+impl_mysql_decode_from_u64!(usize);
 
 impl<T> Decode<Mysql> for Option<T>
 where
@@ -505,6 +509,24 @@ mod tests {
         assert_eq!(
             encode_to_value(&big).unwrap(),
             Value::Bytes(big.to_string().into_bytes())
+        );
+    }
+
+    #[test]
+    fn decodes_out_of_range_128_bit_from_a_decimal_string() {
+        use mysql_async::prelude::FromValue;
+        // A widened `SUM(BIGINT UNSIGNED)` above 64 bits comes back as a `DECIMAL` (text); `i128` /
+        // `u128` must parse it rather than truncating through `i64` / `u64`.
+        let big = i128::from(i64::MAX) + 1;
+        assert_eq!(
+            i128::from_value(Value::Bytes(big.to_string().into_bytes())),
+            big
+        );
+
+        let big_u = u128::from(u64::MAX) + 1;
+        assert_eq!(
+            u128::from_value(Value::Bytes(big_u.to_string().into_bytes())),
+            big_u
         );
     }
 

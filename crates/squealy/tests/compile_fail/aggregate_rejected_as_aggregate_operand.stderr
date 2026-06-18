@@ -1,0 +1,14 @@
+error[E0277]: the trait bound `squealy::AggregateExprAst<squealy::ColumnExprAst<ItemId>>: NonAggregateAst` is not satisfied
+  --> tests/compile_fail/aggregate_rejected_as_aggregate_operand.rs:16:41
+   |
+16 |         .select(|(item,)| item.id.sum().sum());
+   |                                         ^^^ the trait `NonAggregateAst` is not implemented for `squealy::AggregateExprAst<squealy::ColumnExprAst<ItemId>>`
+   |
+note: required by a bound in `Expr::<'scope, K, Ast>::sum`
+  --> src/expr.rs
+   |
+   |     pub fn sum(&self) -> Expr<'scope, SumExpr<K>, AggregateExprAst<Ast>>
+   |            --- required by a bound in this associated function
+   |     where
+   |         Ast: NonAggregateAst,
+   |              ^^^^^^^^^^^^^^^ required by this bound in `Expr::<'scope, K, Ast>::sum`
