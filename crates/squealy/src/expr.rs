@@ -159,7 +159,9 @@ impl_sql_sum!(
     isize => i128 : crate::SqlType::I128,
     u32 => i128 : crate::SqlType::I128,
     u64 => i128 : crate::SqlType::I128,
-    u128 => i128 : crate::SqlType::I128,
+    // A single `u128` can exceed `i128::MAX`, so keep the sum unsigned (decoded from `numeric`)
+    // rather than narrowing valid values into `i128`.
+    u128 => u128 : crate::SqlType::U128,
     usize => i128 : crate::SqlType::I128,
     f32 => f64 : crate::SqlType::F64,
     f64 => f64 : crate::SqlType::F64,

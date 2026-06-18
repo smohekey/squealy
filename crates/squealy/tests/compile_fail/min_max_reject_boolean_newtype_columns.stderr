@@ -1,0 +1,73 @@
+error[E0277]: the trait bound `bool: AggregateScalar` is not satisfied
+ --> tests/compile_fail/min_max_reject_boolean_newtype_columns.rs:7:45
+  |
+7 | #[derive(Clone, Copy, Debug, PartialEq, Eq, ColumnType)]
+  |                                             ^^^^^^^^^^ the trait `AggregateScalar` is not implemented for `bool`
+  |
+  = help: the following other types implement trait `AggregateScalar`:
+            Flag
+            Option<T>
+            f32
+            f64
+            i128
+            i16
+            i32
+            i64
+          and $N others
+  = note: this error originates in the derive macro `ColumnType` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `bool: AggregateScalar` is not satisfied
+  --> tests/compile_fail/min_max_reject_boolean_newtype_columns.rs:20:41
+   |
+20 |         .select(|(toggle,)| toggle.flag.max());
+   |                                         ^^^ the trait `AggregateScalar` is not implemented for `bool`
+   |
+   = help: the following other types implement trait `AggregateScalar`:
+             Flag
+             Option<T>
+             f32
+             f64
+             i128
+             i16
+             i32
+             i64
+           and $N others
+note: required for `Flag` to implement `AggregateScalar`
+  --> tests/compile_fail/min_max_reject_boolean_newtype_columns.rs:7:45
+   |
+ 7 | #[derive(Clone, Copy, Debug, PartialEq, Eq, ColumnType)]
+   |                                             ^^^^^^^^^^ type parameter would need to implement `AggregateScalar`
+   = help: consider manually implementing `AggregateScalar` to avoid undesired bounds
+note: required by a bound in `ColumnRef::<'scope, K>::max`
+  --> src/expr.rs
+   |
+   |     pub fn max(self) -> Expr<'scope, MaxExpr<K>, AggregateExprAst<ColumnExprAst<K>>>
+   |            --- required by a bound in this associated function
+   |     where
+   |         K::Value: AggregateScalar,
+   |                   ^^^^^^^^^^^^^^^ required by this bound in `ColumnRef::<'scope, K>::max`
+   = note: this error originates in the derive macro `ColumnType` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `Expr<'_, MaxExpr<ToggleFlag>, squealy::AggregateExprAst<squealy::ColumnExprAst<ToggleFlag>>>: squealy::ReturningProjection<'_>` is not satisfied
+  --> tests/compile_fail/min_max_reject_boolean_newtype_columns.rs:20:10
+   |
+20 |         .select(|(toggle,)| toggle.flag.max());
+   |          ^^^^^^ unsatisfied trait bound
+   |
+   = help: the trait `squealy::ReturningProjection<'_>` is not implemented for `Expr<'_, MaxExpr<ToggleFlag>, squealy::AggregateExprAst<squealy::ColumnExprAst<ToggleFlag>>>`
+help: the trait `squealy::ReturningProjection<'_>` is implemented for `Expr<'_, K, Ast>`
+  --> src/query.rs
+   |
+   | / impl<'scope, K, Ast> ReturningProjection<'scope> for Expr<'scope, K, Ast>
+   | | where
+   | |     K: ExprKind + ProjectionShape,
+   | |     Ast: crate::ExprAst,
+   | |________________________^
+note: required by a bound in `squealy::SourceQuery::select`
+  --> src/query.rs
+   |
+   |     fn select<P>(
+   |        ------ required by a bound in this associated function
+...
+   |         P: ReturningProjection<'scope> + Projectable,
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `SourceQuery::select`

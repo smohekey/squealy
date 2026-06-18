@@ -49,8 +49,13 @@ impl ColumnTypeStruct {
             }
 
             // A newtype is its own aggregate scalar, so `MIN`/`MAX` over a column of this type (or a
-            // nullable / left-joined one) decode back to the newtype.
-            impl ::squealy::AggregateScalar for #ident {
+            // nullable / left-joined one) decode back to the newtype — but only when the wrapped
+            // type is itself an aggregate scalar, so a boolean-backed newtype is excluded from
+            // `MIN`/`MAX` just like a primitive `bool` column.
+            impl ::squealy::AggregateScalar for #ident
+            where
+                #field_ty: ::squealy::AggregateScalar,
+            {
                 type Scalar = Self;
             }
 

@@ -645,6 +645,10 @@ fn test_aggregate_result_types() {
     let wide_sum: <SumExpr<i64> as ExprKind>::Value = Some(0i128);
     let _: Option<i128> = wide_sum;
 
+    // `u128` keeps an unsigned sum: a single value can exceed `i128::MAX`.
+    let unsigned_sum: <SumExpr<u128> as ExprKind>::Value = Some(0u128);
+    let _: Option<u128> = unsigned_sum;
+
     let avg: <AvgExpr<i32> as ExprKind>::Value = Some(0.0f64);
     let _: Option<f64> = avg;
 
