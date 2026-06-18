@@ -659,6 +659,38 @@ fn test_aggregate_result_types() {
     let _: Option<String> = max;
 }
 
+/// Exhaustive compile-time check of the `SUM` widening for every numeric operand type. ≤32-bit
+/// integers sum to `i64`; 64-bit-and-wider signed/`bigint`-stored operands to `i128`; `u128` stays
+/// unsigned (a single value can exceed `i128::MAX`); floats to `f64`. Each is also asserted to be
+/// decodable on PostgreSQL by [`sum_result_types_decode_on_postgres`] there.
+#[test]
+fn test_sum_widening_for_every_numeric_operand() {
+    fn sum_is<K, Expected>()
+    where
+        K: ExprKind,
+        SumExpr<K>: ExprKind<Value = Option<Expected>>,
+    {
+    }
+
+    sum_is::<i8, i64>();
+    sum_is::<i16, i64>();
+    sum_is::<i32, i64>();
+    sum_is::<u8, i64>();
+    sum_is::<u16, i64>();
+
+    sum_is::<i64, i128>();
+    sum_is::<isize, i128>();
+    sum_is::<u32, i128>();
+    sum_is::<u64, i128>();
+    sum_is::<usize, i128>();
+    sum_is::<i128, i128>();
+
+    sum_is::<u128, u128>();
+
+    sum_is::<f32, f64>();
+    sum_is::<f64, f64>();
+}
+
 /// Compile-time checks that aggregates over a nullable operand kind (`Nullable<K>`, as produced by
 /// a `left_join`) unwrap the nullability: `SUM` still widens to `Option<i64>`, and `MIN` stays a
 /// single `Option<i32>` rather than nesting a second `Option`.

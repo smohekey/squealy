@@ -24,6 +24,19 @@ fn option_newtype_column_decodes() {
     assert_decode::<Option<i32>>();
 }
 
+/// Every `SUM`/`AVG` output type (and its nullable wrapper, since aggregates are `NULL` over an
+/// empty input) must decode on PostgreSQL — otherwise a query that compiles would fail at row
+/// decode. `SUM` widens to `i64`/`i128`/`u128` and `AVG` to `f64`; `i128`/`u128` decode from
+/// `numeric`, `i64`/`f64` directly.
+#[test]
+fn sum_and_avg_result_types_decode() {
+    fn assert_decode<T: squealy::Decode<Postgres>>() {}
+    assert_decode::<Option<i64>>();
+    assert_decode::<Option<i128>>();
+    assert_decode::<Option<u128>>();
+    assert_decode::<Option<f64>>();
+}
+
 /// `#[derive(ColumnType)]` emits `AggregateScalar`, so `MIN`/`MAX` still work on a newtype column
 /// (and decode back to the newtype) — including its nullable / left-joined form, which flattens to
 /// a single `Option<ProbeId>` rather than `Option<Option<ProbeId>>`.
