@@ -1977,7 +1977,7 @@ where
     >
     where
         P: PredicateKind,
-        PredicateAst: crate::PredicateAst,
+        PredicateAst: crate::PredicateAst + crate::NonAggregatePredicate,
         Filters: PushBack<Predicate<'static, P, PredicateAst>>,
         <Filters as PushBack<Predicate<'static, P, PredicateAst>>>::Output: PredicateNodes,
     {
@@ -2940,7 +2940,7 @@ where
     ) -> Where<'scope, Self, P, PredicateAst>
     where
         P: PredicateKind,
-        PredicateAst: crate::PredicateAst,
+        PredicateAst: crate::PredicateAst + crate::NonAggregatePredicate,
         <S as ProjectionShape>::Exprs<'scope>: Clone,
     {
         let predicate = predicate(self.exprs.head.clone());
@@ -3481,7 +3481,7 @@ where
     ) -> Where<'scope, Self, P, PredicateAst>
     where
         P: PredicateKind,
-        PredicateAst: crate::PredicateAst,
+        PredicateAst: crate::PredicateAst + crate::NonAggregatePredicate,
     {
         let predicate = predicate(self.exprs().to_tuple());
         Where {
@@ -3581,7 +3581,7 @@ where
         Conn: QueryBuilder + 'conn,
         Base: SelectAst<'conn, 'scope, Conn>,
         P: PredicateKind,
-        PredicateAst: crate::PredicateAst,
+        PredicateAst: crate::PredicateAst + crate::NonAggregatePredicate,
         <S as ProjectionShape>::Exprs<'scope>: Clone,
     {
         let alias = SourceAlias::new(self.base.depth(), Base::Exprs::LEN);
@@ -3615,7 +3615,7 @@ where
         Conn: QueryBuilder + 'conn,
         Base: SelectAst<'conn, 'scope, Conn>,
         P: PredicateKind,
-        PredicateAst: crate::PredicateAst,
+        PredicateAst: crate::PredicateAst + crate::NonAggregatePredicate,
     {
         let alias = SourceAlias::new(self.base.depth(), Base::Exprs::LEN);
         let joined = S::exprs(alias);

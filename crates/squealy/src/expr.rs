@@ -175,10 +175,12 @@ impl_sql_sum!(
 /// trait maps the operand's value type to that scalar: `T` → `T`, and `Option<T>` → `T`'s scalar
 /// (recursively, so a left-joined nullable column's `Option<Option<T>>` still resolves to `T`).
 ///
-/// It is implemented for the orderable built-in scalar value types and, by `#[derive(ColumnType)]`,
-/// for newtype wrappers, plus the blanket `Option` impl below. `bool` is intentionally excluded:
-/// it gates `MIN`/`MAX`, and PostgreSQL has no `min`/`max` aggregate for boolean values, so a
-/// `bool` column's `.min()`/`.max()` is a compile error rather than a runtime failure.
+/// It is implemented for the built-in scalar value types PostgreSQL actually provides `MIN`/`MAX`
+/// aggregates for and, by `#[derive(ColumnType)]`, for newtype wrappers, plus the blanket `Option`
+/// impl below. `bool` and `uuid::Uuid` are intentionally excluded: PostgreSQL has no `min`/`max`
+/// aggregate for them (only for numbers, strings, and date/time types), so `.min()`/`.max()` on
+/// such a column is a compile error rather than a runtime `function min(uuid) does not exist`. They
+/// remain orderable for `ORDER BY`, which is a separate capability.
 pub trait AggregateScalar {
     /// The underlying non-null scalar value type.
     type Scalar;
@@ -203,8 +205,7 @@ impl_aggregate_scalar!(i8, i16, i32, i64, i128, isize);
 impl_aggregate_scalar!(u8, u16, u32, u64, u128, usize);
 impl_aggregate_scalar!(f32, f64, String);
 
-#[cfg(feature = "uuid")]
-impl_aggregate_scalar!(uuid::Uuid);
+// Date/time types have PostgreSQL `min`/`max` aggregates; `uuid` does not, so it is excluded.
 #[cfg(feature = "systemtime")]
 impl_aggregate_scalar!(std::time::SystemTime);
 #[cfg(feature = "time")]
@@ -430,6 +431,75 @@ where
         })
     }
 }
+
+/// Marker for expression ASTs that are *not* a SQL aggregate function call (`COUNT`/`SUM`/…) and do
+/// not contain one. It is implemented for every expression AST node except [`AggregateExprAst`]
+/// (recursively for [`BinaryExprAst`]), so an aggregate cannot satisfy it.
+///
+/// Predicate ASTs built from aggregate-free operands are [`NonAggregatePredicate`], which `where_`
+/// requires — so an aggregate cannot flow into a `WHERE` clause (PostgreSQL/MySQL reject aggregates
+/// there; they belong in the select list, or `HAVING` once it is supported). Comparing an aggregate
+/// is still possible; the resulting predicate just cannot be used as a `where_` filter.
+pub trait NonAggregateAst {}
+
+impl<K> NonAggregateAst for ColumnExprAst<K> {}
+impl<K> NonAggregateAst for LiteralExprAst<K> where K: ExprKind {}
+impl<K> NonAggregateAst for ParamExprAst<K> {}
+impl<Left, Right> NonAggregateAst for BinaryExprAst<Left, Right>
+where
+    Left: NonAggregateAst,
+    Right: NonAggregateAst,
+{
+}
+
+/// Marker for predicate ASTs whose expression operands are all aggregate-free (see
+/// [`NonAggregateAst`]). `where_` requires it, keeping aggregates out of `WHERE` clauses.
+pub trait NonAggregatePredicate {}
+
+impl<Left, Right> NonAggregatePredicate for ComparePredicateAst<Left, Right>
+where
+    Left: NonAggregateAst,
+    Right: NonAggregateAst,
+{
+}
+
+impl<Left, Right> NonAggregatePredicate for LikePredicateAst<Left, Right>
+where
+    Left: NonAggregateAst,
+    Right: NonAggregateAst,
+{
+}
+
+impl<Operand, V> NonAggregatePredicate for InPredicateAst<Operand, V> where Operand: NonAggregateAst {}
+
+impl<Operand, Lo, Hi> NonAggregatePredicate for BetweenPredicateAst<Operand, Lo, Hi>
+where
+    Operand: NonAggregateAst,
+    Lo: NonAggregateAst,
+    Hi: NonAggregateAst,
+{
+}
+
+impl<Operand> NonAggregatePredicate for NullCheckPredicateAst<Operand> where Operand: NonAggregateAst
+{}
+
+impl<Operand> NonAggregatePredicate for BoolTestPredicateAst<Operand> where Operand: NonAggregateAst {}
+
+impl<Left, Right> NonAggregatePredicate for AndPredicateAst<Left, Right>
+where
+    Left: NonAggregatePredicate,
+    Right: NonAggregatePredicate,
+{
+}
+
+impl<Left, Right> NonAggregatePredicate for OrPredicateAst<Left, Right>
+where
+    Left: NonAggregatePredicate,
+    Right: NonAggregatePredicate,
+{
+}
+
+impl<P> NonAggregatePredicate for NotPredicateAst<P> where P: NonAggregatePredicate {}
 
 #[doc(hidden)]
 pub trait ExprVisitor {

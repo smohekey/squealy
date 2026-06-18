@@ -477,10 +477,11 @@ pub use expr::{
     GreaterThanOrEqualsPredicate, GreaterThanPredicate, InPredicate, InPredicateAst, IntoExpr,
     IsNotNullPredicate, IsNullPredicate, LessThanOrEqualsPredicate, LessThanPredicate,
     LikePredicate, LikePredicateAst, LiteralExprAst, MaxExpr, MinExpr, MultiplyExpr,
-    NotEqualsPredicate, NotPredicate, NullCheckPredicateAst, Nullable, NullableExpr, OrPredicate,
-    Order, OrderDirection, ParamExprAst, Predicate, PredicateAst, PredicateAstVisitor,
-    PredicateKind, RenderAst, RenderPredicateAst, RuntimeParam, SameValue, SourceAlias, SqlDivide,
-    SqlNumber, SqlSum, SqlText, SubtractExpr, SumExpr, param, render_ddl_predicate,
+    NonAggregateAst, NonAggregatePredicate, NotEqualsPredicate, NotPredicate,
+    NullCheckPredicateAst, Nullable, NullableExpr, OrPredicate, Order, OrderDirection,
+    ParamExprAst, Predicate, PredicateAst, PredicateAstVisitor, PredicateKind, RenderAst,
+    RenderPredicateAst, RuntimeParam, SameValue, SourceAlias, SqlDivide, SqlNumber, SqlSum,
+    SqlText, SubtractExpr, SumExpr, param, render_ddl_predicate,
 };
 pub use foreign_key::ForeignKey;
 pub use index::Index;
