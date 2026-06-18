@@ -515,9 +515,78 @@ where
 impl<K> AstProjectionClass for ParamExprAst<K> {
     type Class = ScalarProjection;
 }
-impl<Left, Right> AstProjectionClass for BinaryExprAst<Left, Right> {
-    type Class = ScalarProjection;
+// `COUNT` is non-null `i64`, so `count() + 1` is buildable arithmetic over an aggregate. A binary
+// expression is therefore aggregate if *either* operand is, so it cannot masquerade as scalar.
+impl<Left, Right> AstProjectionClass for BinaryExprAst<Left, Right>
+where
+    Left: AstProjectionClass,
+    Right: AstProjectionClass,
+    <Left as AstProjectionClass>::Class:
+        CombineProjectionClass<<Right as AstProjectionClass>::Class>,
+{
+    type Class = <<Left as AstProjectionClass>::Class as CombineProjectionClass<
+        <Right as AstProjectionClass>::Class,
+    >>::Output;
 }
+
+/// Combines two projection classes: the result is [`AggregateProjection`] if either side is (so an
+/// expression containing an aggregate anywhere is classified aggregate), else [`ScalarProjection`].
+#[doc(hidden)]
+pub trait CombineProjectionClass<Rhs> {
+    type Output;
+}
+impl CombineProjectionClass<ScalarProjection> for ScalarProjection {
+    type Output = ScalarProjection;
+}
+impl CombineProjectionClass<AggregateProjection> for ScalarProjection {
+    type Output = AggregateProjection;
+}
+impl CombineProjectionClass<ScalarProjection> for AggregateProjection {
+    type Output = AggregateProjection;
+}
+impl CombineProjectionClass<AggregateProjection> for AggregateProjection {
+    type Output = AggregateProjection;
+}
+
+/// Order-class of a select chain: whether it orders by any scalar (ungrouped) expression. Carried
+/// as `SelectAst::OrderClass` so `select` can reject ordering an aggregate-only query by a base
+/// column (`SELECT COUNT(*) ... ORDER BY name`, which PostgreSQL rejects without `GROUP BY`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderScalarFree {}
+
+/// Order-class for a select chain that orders by at least one scalar (ungrouped) expression.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderContainsScalar {}
+
+/// Extends an order-class with one more `ORDER BY` term of the given [`AstProjectionClass`]: a
+/// scalar order term makes the chain [`OrderContainsScalar`]; an aggregate order term is harmless.
+#[doc(hidden)]
+pub trait ExtendOrderClass<AstClass> {
+    type Output;
+}
+impl ExtendOrderClass<ScalarProjection> for OrderScalarFree {
+    type Output = OrderContainsScalar;
+}
+impl ExtendOrderClass<AggregateProjection> for OrderScalarFree {
+    type Output = OrderScalarFree;
+}
+impl ExtendOrderClass<ScalarProjection> for OrderContainsScalar {
+    type Output = OrderContainsScalar;
+}
+impl ExtendOrderClass<AggregateProjection> for OrderContainsScalar {
+    type Output = OrderContainsScalar;
+}
+
+/// Witness that a select chain's [`OrderClass`](crate::SelectAst::OrderClass) is valid for a
+/// projection of the given class. A scalar projection accepts any ordering; an aggregate-only
+/// projection accepts only aggregate-free ordering (`OrderScalarFree`), since ordering a
+/// non-grouped aggregate query by a base column is invalid SQL.
+#[doc(hidden)]
+pub trait OrderCompatibleWith<ProjectionClass> {}
+impl OrderCompatibleWith<ScalarProjection> for OrderScalarFree {}
+impl OrderCompatibleWith<ScalarProjection> for OrderContainsScalar {}
+impl OrderCompatibleWith<AggregateProjection> for OrderScalarFree {}
+// Intentionally no `OrderCompatibleWith<AggregateProjection> for OrderContainsScalar`.
 
 impl<'scope, K, Ast> ProjectionClass for Expr<'scope, K, Ast>
 where

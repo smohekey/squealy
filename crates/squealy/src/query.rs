@@ -2811,6 +2811,11 @@ where
     type Exprs: HList + Clone + ToTuple;
     type Params: HList;
 
+    /// Whether this chain orders by any scalar (ungrouped) expression — see
+    /// [`OrderScalarFree`](crate::OrderScalarFree) / [`OrderContainsScalar`](crate::OrderContainsScalar).
+    /// `select` uses it to reject ordering an aggregate-only projection by a base column.
+    type OrderClass;
+
     fn depth(&self) -> usize;
 
     fn connection(&self) -> &'conn Conn;
@@ -2858,6 +2863,7 @@ where
 {
     type Exprs = HNil;
     type Params = HNil;
+    type OrderClass = crate::OrderScalarFree;
 
     fn depth(&self) -> usize {
         self.depth
@@ -2973,6 +2979,7 @@ where
 {
     type Exprs = Exprs;
     type Params = Source::Params;
+    type OrderClass = crate::OrderScalarFree;
 
     fn depth(&self) -> usize {
         self.depth
@@ -3108,6 +3115,7 @@ where
 {
     type Exprs = Base::Exprs;
     type Params = <Base::Params as crate::HAppend<PredicateAst::Params>>::Output;
+    type OrderClass = Base::OrderClass;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3168,11 +3176,15 @@ where
     Conn: QueryBuilder + 'conn,
     Base: SelectAst<'conn, 'scope, Conn>,
     K: ExprKind,
-    Ast: ExprAst,
+    Ast: ExprAst + crate::AstProjectionClass,
     Base::Params: crate::HAppend<Ast::Params>,
+    Base::OrderClass: crate::ExtendOrderClass<<Ast as crate::AstProjectionClass>::Class>,
 {
     type Exprs = Base::Exprs;
     type Params = <Base::Params as crate::HAppend<Ast::Params>>::Output;
+    type OrderClass = <Base::OrderClass as crate::ExtendOrderClass<
+        <Ast as crate::AstProjectionClass>::Class,
+    >>::Output;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3193,8 +3205,9 @@ where
     Conn: QueryBuilder + 'conn,
     Base: RenderSelectAst<'conn, 'scope, Conn, B>,
     K: ExprKind,
-    Ast: RenderAst<B>,
+    Ast: RenderAst<B> + crate::AstProjectionClass,
     Base::Params: crate::HAppend<Ast::Params>,
+    Base::OrderClass: crate::ExtendOrderClass<<Ast as crate::AstProjectionClass>::Class>,
     B: Backend,
 {
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3234,6 +3247,7 @@ where
 {
     type Exprs = Base::Exprs;
     type Params = Base::Params;
+    type OrderClass = Base::OrderClass;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3291,6 +3305,7 @@ where
 {
     type Exprs = Base::Exprs;
     type Params = Base::Params;
+    type OrderClass = Base::OrderClass;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3354,6 +3369,7 @@ where
 {
     type Exprs = <Base::Exprs as PushBack<Expr>>::Output;
     type Params = <Base::Params as crate::HAppend<Source::Params>>::Output;
+    type OrderClass = Base::OrderClass;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3423,6 +3439,7 @@ where
 {
     type Exprs = <Base::Exprs as PushBack<Expr>>::Output;
     type Params = <Base::Params as crate::HAppend<Source::Params>>::Output;
+    type OrderClass = Base::OrderClass;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3547,6 +3564,9 @@ where
         // no impl for a mixed tuple), since that is invalid without `GROUP BY`. An all-scalar or
         // all-aggregate list is fine.
         P: ReturningProjection<'scope> + Projectable + crate::ProjectionClass,
+        // ...and an aggregate-only projection cannot be ordered by a scalar (ungrouped) column.
+        <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass:
+            crate::OrderCompatibleWith<<P as crate::ProjectionClass>::Class>,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
         <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
     {

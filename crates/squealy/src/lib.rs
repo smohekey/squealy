@@ -483,7 +483,10 @@ pub use expr::{
     RenderPredicateAst, RuntimeParam, SameValue, ScalarProjection, SourceAlias, SqlDivide,
     SqlNumber, SqlSum, SqlText, SubtractExpr, SumExpr, param, render_ddl_predicate,
 };
-pub use expr::{AggregateProjection, AstProjectionClass, ProjectionClass};
+pub use expr::{
+    AggregateProjection, AstProjectionClass, CombineProjectionClass, ExtendOrderClass,
+    OrderCompatibleWith, OrderContainsScalar, OrderScalarFree, ProjectionClass,
+};
 pub use foreign_key::ForeignKey;
 pub use index::Index;
 pub use list::{

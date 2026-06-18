@@ -1364,7 +1364,9 @@ impl TableStruct {
                     Filters: ::squealy::PushBack<::squealy::Predicate<'static, P, PredicateAst>>,
                     <Filters as ::squealy::PushBack<::squealy::Predicate<'static, P, PredicateAst>>>::Output: ::squealy::PredicateNodes,
                     P: ::squealy::PredicateKind,
-                    PredicateAst: ::squealy::PredicateAst,
+                    // Aggregates are invalid in a `WHERE` clause (they belong in HAVING), so the
+                    // predicate must be aggregate-free.
+                    PredicateAst: ::squealy::PredicateAst + ::squealy::NonAggregatePredicate,
                 {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                     let predicate = predicate(&table);
