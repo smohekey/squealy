@@ -3138,6 +3138,146 @@ where
     predicate: Predicate<'scope, P, PredicateAst>,
 }
 
+/// Applies one or more `GROUP BY` keys onto a select chain, producing the nested [`GroupBy`]
+/// node(s). Implemented for a single key (a column or expression) and for tuples of keys, so
+/// [`SourceQuery::group_by`] accepts `group_by(|(u,)| u.id)` or `group_by(|(u,)| (u.id, u.name))`.
+/// Each tuple arity delegates to the tail tuple, so the keys nest left-to-right and their params
+/// thread through the existing single-key [`GroupBy`] node.
+#[doc(hidden)]
+pub trait GroupByKeys<'scope, Base> {
+    type Output;
+
+    fn apply(self, base: Base) -> Self::Output;
+}
+
+// No keys: a no-op, and the recursion base case for the tuple impls below.
+impl<'scope, Base> GroupByKeys<'scope, Base> for () {
+    type Output = Base;
+
+    fn apply(self, base: Base) -> Self::Output {
+        base
+    }
+}
+
+impl<'scope, Base, K, Ast> GroupByKeys<'scope, Base> for Expr<'scope, K, Ast>
+where
+    K: ExprKind,
+    Ast: ExprAst,
+{
+    type Output = GroupBy<'scope, Base, K, Ast>;
+
+    fn apply(self, base: Base) -> Self::Output {
+        GroupBy { base, key: self }
+    }
+}
+
+impl<'scope, Base, K> GroupByKeys<'scope, Base> for ColumnRef<'scope, K>
+where
+    K: ExprKind,
+{
+    type Output = GroupBy<'scope, Base, K, ColumnExprAst<K>>;
+
+    fn apply(self, base: Base) -> Self::Output {
+        GroupBy {
+            base,
+            key: self.into_expr(),
+        }
+    }
+}
+
+macro_rules! impl_group_by_keys_tuple {
+    () => {};
+    ($head:ident $(, $tail:ident)*) => {
+        impl<'scope, Base, $head, $($tail,)*> GroupByKeys<'scope, Base> for ($head, $($tail,)*)
+        where
+            $head: GroupByKeys<'scope, Base>,
+            ($($tail,)*): GroupByKeys<'scope, <$head as GroupByKeys<'scope, Base>>::Output>,
+        {
+            type Output = <($($tail,)*) as GroupByKeys<
+                'scope,
+                <$head as GroupByKeys<'scope, Base>>::Output,
+            >>::Output;
+
+            #[allow(non_snake_case)]
+            fn apply(self, base: Base) -> Self::Output {
+                let ($head, $($tail,)*) = self;
+                GroupByKeys::apply(($($tail,)*), GroupByKeys::apply($head, base))
+            }
+        }
+
+        impl_group_by_keys_tuple!($($tail),*);
+    };
+}
+
+impl_group_by_keys_tuple!(
+    A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15
+);
+
+/// Applies one or more `HAVING` predicates onto a select chain, producing the nested [`Having`]
+/// node(s). Implemented for a single predicate and for tuples of predicates, so
+/// [`SourceQuery::having`] accepts `having(|(u,)| p)` or `having(|(u,)| (p1, p2))` (the predicates
+/// are `AND`-joined). Mirrors [`GroupByKeys`]: each tuple arity delegates to the tail tuple, so the
+/// predicates nest left-to-right and their params thread through the existing single-predicate
+/// [`Having`] node.
+#[doc(hidden)]
+pub trait HavingPredicates<'scope, Base> {
+    type Output;
+
+    fn apply(self, base: Base) -> Self::Output;
+}
+
+// No predicates: a no-op, and the recursion base case for the tuple impls below.
+impl<'scope, Base> HavingPredicates<'scope, Base> for () {
+    type Output = Base;
+
+    fn apply(self, base: Base) -> Self::Output {
+        base
+    }
+}
+
+impl<'scope, Base, P, Ast> HavingPredicates<'scope, Base> for Predicate<'scope, P, Ast>
+where
+    P: PredicateKind,
+    Ast: crate::PredicateAst,
+{
+    type Output = Having<'scope, Base, P, Ast>;
+
+    fn apply(self, base: Base) -> Self::Output {
+        Having {
+            base,
+            predicate: self,
+        }
+    }
+}
+
+macro_rules! impl_having_predicates_tuple {
+    () => {};
+    ($head:ident $(, $tail:ident)*) => {
+        impl<'scope, Base, $head, $($tail,)*> HavingPredicates<'scope, Base> for ($head, $($tail,)*)
+        where
+            $head: HavingPredicates<'scope, Base>,
+            ($($tail,)*): HavingPredicates<'scope, <$head as HavingPredicates<'scope, Base>>::Output>,
+        {
+            type Output = <($($tail,)*) as HavingPredicates<
+                'scope,
+                <$head as HavingPredicates<'scope, Base>>::Output,
+            >>::Output;
+
+            #[allow(non_snake_case)]
+            fn apply(self, base: Base) -> Self::Output {
+                let ($head, $($tail,)*) = self;
+                HavingPredicates::apply(($($tail,)*), HavingPredicates::apply($head, base))
+            }
+        }
+
+        impl_having_predicates_tuple!($($tail),*);
+    };
+}
+
+impl_having_predicates_tuple!(
+    A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15
+);
+
 #[doc(hidden)]
 pub struct Limited<Base> {
     base: Base,
@@ -3861,35 +4001,32 @@ where
         OrderBy { base: self, order }
     }
 
-    /// Add a `GROUP BY` key (a column or expression). Chain `group_by` for multiple keys
-    /// (`GROUP BY a, b`). A grouped query may select grouping keys alongside aggregates (the
-    /// database validates that non-aggregate projected/ordered columns are grouping keys).
-    fn group_by<Key>(
+    /// Add one or more `GROUP BY` keys. The closure may return a single key (a column or
+    /// expression) or a tuple of keys (`group_by(|(u,)| (u.id, u.name))` -> `GROUP BY id, name`);
+    /// chaining `group_by` also accumulates keys. A grouped query may select grouping keys
+    /// alongside aggregates (the database validates that non-aggregate projected/ordered columns
+    /// are grouping keys).
+    fn group_by<Keys>(
         self,
-        key: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> Key,
-    ) -> GroupBy<'scope, Self, Key::Kind, Key::Ast>
+        keys: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> Keys,
+    ) -> Keys::Output
     where
-        Key: crate::IntoExpr<'scope>,
+        Keys: GroupByKeys<'scope, Self>,
     {
-        let key = key(self.exprs().to_tuple()).into_expr();
-        GroupBy { base: self, key }
+        keys(self.exprs().to_tuple()).apply(self)
     }
 
-    /// Add a `HAVING` predicate (chain for multiple, joined with `AND`). Unlike `where_`, `HAVING`
-    /// may reference aggregates.
-    fn having<P, PredicateAst>(
+    /// Add one or more `HAVING` predicates. The closure may return a single predicate or a tuple of
+    /// predicates (`having(|(u,)| (p1, p2))` -> `HAVING p1 AND p2`); chaining `having` also
+    /// accumulates predicates. Unlike `where_`, `HAVING` may reference aggregates.
+    fn having<Preds>(
         self,
-        predicate: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> Predicate<'scope, P, PredicateAst>,
-    ) -> Having<'scope, Self, P, PredicateAst>
+        predicates: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> Preds,
+    ) -> Preds::Output
     where
-        P: PredicateKind,
-        PredicateAst: crate::PredicateAst,
+        Preds: HavingPredicates<'scope, Self>,
     {
-        let predicate = predicate(self.exprs().to_tuple());
-        Having {
-            base: self,
-            predicate,
-        }
+        predicates(self.exprs().to_tuple()).apply(self)
     }
 
     fn limit(self, rows: usize) -> Limited<Self> {

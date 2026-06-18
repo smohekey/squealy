@@ -769,3 +769,48 @@ fn test_having_without_group_by_on_whole_table_aggregate() {
         "SELECT COUNT(q0_0.id) AS expr FROM public.users AS q0_0 HAVING (COUNT(q0_0.id) > ?)"
     );
 }
+
+#[test]
+fn test_group_by_tuple_matches_chained_keys() {
+    // A tuple of keys in one call renders identically to chaining `group_by`.
+    let tuple = TestConnection
+        .from::<User>()
+        .group_by(|(user,)| (user.id, user.name))
+        .select(|(user,)| (user.id, user.name, user.id.count()));
+    let chained = TestConnection
+        .from::<User>()
+        .group_by(|(user,)| user.id)
+        .group_by(|(user,)| user.name)
+        .select(|(user,)| (user.id, user.name, user.id.count()));
+    assert_eq!(
+        tuple.to_sql(),
+        "SELECT q0_0.id AS t0_id, q0_0.name AS t1_name, COUNT(q0_0.id) AS t2_expr \
+         FROM public.users AS q0_0 GROUP BY q0_0.id, q0_0.name"
+    );
+    assert_eq!(tuple.to_sql(), chained.to_sql());
+}
+
+#[test]
+fn test_having_tuple_predicates_are_anded() {
+    // A tuple of HAVING predicates is AND-joined, identically to chaining `having`.
+    let q = TestConnection
+        .from::<User>()
+        .group_by(|(user,)| user.name)
+        .having(|(user,)| {
+            (
+                user.id.count().greater_than(1i64),
+                user.id.count().less_than(10i64),
+            )
+        })
+        .select(|(user,)| (user.name, user.id.count()));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.name AS t0_name, COUNT(q0_0.id) AS t1_expr \
+         FROM public.users AS q0_0 GROUP BY q0_0.name \
+         HAVING (COUNT(q0_0.id) > ?) AND (COUNT(q0_0.id) < ?)"
+    );
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![TestParam::Int(1), TestParam::Int(10)]
+    );
+}
