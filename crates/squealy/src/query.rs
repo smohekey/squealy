@@ -2811,9 +2811,9 @@ where
     type Exprs: HList + Clone + ToTuple;
     type Params: HList;
 
-    /// Whether this chain orders by any scalar (ungrouped) expression — see
-    /// [`OrderScalarFree`](crate::OrderScalarFree) / [`OrderContainsScalar`](crate::OrderContainsScalar).
-    /// `select` uses it to reject ordering an aggregate-only projection by a base column.
+    /// Which kinds of `ORDER BY` terms this chain has (see [`OrderNone`](crate::OrderNone) /
+    /// [`OrderScalar`](crate::OrderScalar) / [`OrderAggregate`](crate::OrderAggregate) /
+    /// [`OrderMixed`](crate::OrderMixed)). `select` requires the ordering match the projection class.
     type OrderClass;
 
     fn depth(&self) -> usize;
@@ -2863,7 +2863,7 @@ where
 {
     type Exprs = HNil;
     type Params = HNil;
-    type OrderClass = crate::OrderScalarFree;
+    type OrderClass = crate::OrderNone;
 
     fn depth(&self) -> usize {
         self.depth
@@ -2979,7 +2979,7 @@ where
 {
     type Exprs = Exprs;
     type Params = Source::Params;
-    type OrderClass = crate::OrderScalarFree;
+    type OrderClass = crate::OrderNone;
 
     fn depth(&self) -> usize {
         self.depth

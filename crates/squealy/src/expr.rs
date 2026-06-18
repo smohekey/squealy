@@ -475,129 +475,195 @@ pub enum ScalarProjection {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AggregateProjection {}
 
-/// Classifies a projection element (or a tuple of them) as scalar or aggregate, so the query
-/// builder can keep SQL valid without `GROUP BY`:
+/// Classifies a projection element (or a tuple of them) as scalar or aggregate so the query builder
+/// can keep SQL valid without `GROUP BY`:
 ///
-/// - `select` requires a *homogeneous* projection — every element the same class — so a list that
-///   mixes a bare column with an aggregate (`(user.id, user.id.count())`, which PostgreSQL/MySQL
-///   reject without `GROUP BY`) has no impl and fails to compile. An all-scalar or all-aggregate
-///   list is fine.
-/// - `RETURNING` and update assignments require [`ScalarProjection`], since aggregates are never
-///   valid there.
+/// - `select` requires a *homogeneous* projection — every element the same class — so a list mixing
+///   a bare column with an aggregate (`(user.id, user.id.count())`) has no impl and fails.
+/// - `RETURNING` and update assignments require [`ScalarProjection`].
 ///
-/// A tuple is classified only when all its elements agree; a mixed tuple has no impl. Aggregates
-/// can only appear as a top-level element (their `Option<…>` value type makes them un-combinable
-/// with arithmetic, and comparisons yield predicates), so classifying by the top-level AST is
-/// sufficient.
+/// Classification is structural over expression [terms](ConstantTerm) (constant/param, bare column,
+/// aggregate). An aggregate combined with a bare column (`COUNT(id) + id`, ungrouped) has no valid
+/// [`CombineTerm`] and so is rejected everywhere.
 #[doc(hidden)]
 pub trait ProjectionClass {
     type Class;
 }
 
-/// Helper that classifies an [`Expr`] by its top-level AST node.
+/// A term of an expression for aggregate-validity: a constant/param.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstantTerm {}
+/// A term of an expression for aggregate-validity: a bare (ungrouped) column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColumnTerm {}
+/// A term of an expression for aggregate-validity: a SQL aggregate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AggregateTerm {}
+
+/// Classifies an expression AST into a [term](ConstantTerm): constant, column, or aggregate.
 #[doc(hidden)]
 pub trait AstProjectionClass {
     type Class;
 }
 
 impl<Operand> AstProjectionClass for AggregateExprAst<Operand> {
-    type Class = AggregateProjection;
+    type Class = AggregateTerm;
 }
 impl<K> AstProjectionClass for ColumnExprAst<K> {
-    type Class = ScalarProjection;
+    type Class = ColumnTerm;
 }
 impl<K> AstProjectionClass for LiteralExprAst<K>
 where
     K: ExprKind,
 {
-    type Class = ScalarProjection;
+    type Class = ConstantTerm;
 }
 impl<K> AstProjectionClass for ParamExprAst<K> {
-    type Class = ScalarProjection;
+    type Class = ConstantTerm;
 }
-// `COUNT` is non-null `i64`, so `count() + 1` is buildable arithmetic over an aggregate. A binary
-// expression is therefore aggregate if *either* operand is, so it cannot masquerade as scalar.
+// A binary expression's term is its operands combined; `CombineTerm` has no impl for an aggregate
+// mixed with a bare column (`COUNT(id) + id`), so such an expression is rejected from projections.
 impl<Left, Right> AstProjectionClass for BinaryExprAst<Left, Right>
 where
     Left: AstProjectionClass,
     Right: AstProjectionClass,
-    <Left as AstProjectionClass>::Class:
-        CombineProjectionClass<<Right as AstProjectionClass>::Class>,
+    <Left as AstProjectionClass>::Class: CombineTerm<<Right as AstProjectionClass>::Class>,
 {
-    type Class = <<Left as AstProjectionClass>::Class as CombineProjectionClass<
+    type Class = <<Left as AstProjectionClass>::Class as CombineTerm<
         <Right as AstProjectionClass>::Class,
     >>::Output;
 }
 
-/// Combines two projection classes: the result is [`AggregateProjection`] if either side is (so an
-/// expression containing an aggregate anywhere is classified aggregate), else [`ScalarProjection`].
+/// Combines two expression [terms](ConstantTerm): a constant is absorbed by either side; two
+/// columns stay a column; an aggregate with a constant stays aggregate. An aggregate combined with
+/// a bare column is ungrouped and invalid, so it has no impl.
 #[doc(hidden)]
-pub trait CombineProjectionClass<Rhs> {
+pub trait CombineTerm<Rhs> {
     type Output;
 }
-impl CombineProjectionClass<ScalarProjection> for ScalarProjection {
-    type Output = ScalarProjection;
+impl CombineTerm<ConstantTerm> for ConstantTerm {
+    type Output = ConstantTerm;
 }
-impl CombineProjectionClass<AggregateProjection> for ScalarProjection {
-    type Output = AggregateProjection;
+impl CombineTerm<ColumnTerm> for ConstantTerm {
+    type Output = ColumnTerm;
 }
-impl CombineProjectionClass<ScalarProjection> for AggregateProjection {
-    type Output = AggregateProjection;
+impl CombineTerm<AggregateTerm> for ConstantTerm {
+    type Output = AggregateTerm;
 }
-impl CombineProjectionClass<AggregateProjection> for AggregateProjection {
-    type Output = AggregateProjection;
+impl CombineTerm<ConstantTerm> for ColumnTerm {
+    type Output = ColumnTerm;
 }
+impl CombineTerm<ColumnTerm> for ColumnTerm {
+    type Output = ColumnTerm;
+}
+impl CombineTerm<ConstantTerm> for AggregateTerm {
+    type Output = AggregateTerm;
+}
+impl CombineTerm<AggregateTerm> for AggregateTerm {
+    type Output = AggregateTerm;
+}
+// No `CombineTerm` between `ColumnTerm` and `AggregateTerm`: a bare column outside an aggregate is
+// invalid without `GROUP BY`.
 
-/// Order-class of a select chain: whether it orders by any scalar (ungrouped) expression. Carried
-/// as `SelectAst::OrderClass` so `select` can reject ordering an aggregate-only query by a base
-/// column (`SELECT COUNT(*) ... ORDER BY name`, which PostgreSQL rejects without `GROUP BY`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OrderScalarFree {}
-
-/// Order-class for a select chain that orders by at least one scalar (ungrouped) expression.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OrderContainsScalar {}
-
-/// Extends an order-class with one more `ORDER BY` term of the given [`AstProjectionClass`]: a
-/// scalar order term makes the chain [`OrderContainsScalar`]; an aggregate order term is harmless.
+/// Maps an expression [term](ConstantTerm) to its projection class: constants and columns are
+/// [`ScalarProjection`], aggregates are [`AggregateProjection`].
 #[doc(hidden)]
-pub trait ExtendOrderClass<AstClass> {
-    type Output;
+pub trait TermProjectionClass {
+    type Class;
 }
-impl ExtendOrderClass<ScalarProjection> for OrderScalarFree {
-    type Output = OrderContainsScalar;
+impl TermProjectionClass for ConstantTerm {
+    type Class = ScalarProjection;
 }
-impl ExtendOrderClass<AggregateProjection> for OrderScalarFree {
-    type Output = OrderScalarFree;
+impl TermProjectionClass for ColumnTerm {
+    type Class = ScalarProjection;
 }
-impl ExtendOrderClass<ScalarProjection> for OrderContainsScalar {
-    type Output = OrderContainsScalar;
+impl TermProjectionClass for AggregateTerm {
+    type Class = AggregateProjection;
 }
-impl ExtendOrderClass<AggregateProjection> for OrderContainsScalar {
-    type Output = OrderContainsScalar;
-}
-
-/// Witness that a select chain's [`OrderClass`](crate::SelectAst::OrderClass) is valid for a
-/// projection of the given class. A scalar projection accepts any ordering; an aggregate-only
-/// projection accepts only aggregate-free ordering (`OrderScalarFree`), since ordering a
-/// non-grouped aggregate query by a base column is invalid SQL.
-#[doc(hidden)]
-pub trait OrderCompatibleWith<ProjectionClass> {}
-impl OrderCompatibleWith<ScalarProjection> for OrderScalarFree {}
-impl OrderCompatibleWith<ScalarProjection> for OrderContainsScalar {}
-impl OrderCompatibleWith<AggregateProjection> for OrderScalarFree {}
-// Intentionally no `OrderCompatibleWith<AggregateProjection> for OrderContainsScalar`.
 
 impl<'scope, K, Ast> ProjectionClass for Expr<'scope, K, Ast>
 where
     Ast: ExprAst + AstProjectionClass,
+    <Ast as AstProjectionClass>::Class: TermProjectionClass,
 {
-    type Class = <Ast as AstProjectionClass>::Class;
+    type Class = <<Ast as AstProjectionClass>::Class as TermProjectionClass>::Class;
 }
 
 impl<'scope, K> ProjectionClass for ColumnRef<'scope, K> {
     type Class = ScalarProjection;
 }
+
+// === ORDER BY classification ===
+
+/// Order-class of a select chain (carried as [`SelectAst::OrderClass`](crate::SelectAst::OrderClass)):
+/// which kinds of `ORDER BY` terms it has. `select` requires the ordering match the projection — an
+/// aggregate-only query may order only by aggregates, a scalar query only by scalar columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderNone {}
+/// Order-class: orders by at least one scalar (ungrouped) column and no aggregate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderScalar {}
+/// Order-class: orders by at least one aggregate and no scalar column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderAggregate {}
+/// Order-class: orders by both a scalar column and an aggregate — never valid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderMixed {}
+
+/// Extends an order-class with one more `ORDER BY` term of the given [term](ConstantTerm) class.
+#[doc(hidden)]
+pub trait ExtendOrderClass<TermClass> {
+    type Output;
+}
+// A constant order term (e.g. a bound param) constrains nothing.
+impl ExtendOrderClass<ConstantTerm> for OrderNone {
+    type Output = OrderNone;
+}
+impl ExtendOrderClass<ConstantTerm> for OrderScalar {
+    type Output = OrderScalar;
+}
+impl ExtendOrderClass<ConstantTerm> for OrderAggregate {
+    type Output = OrderAggregate;
+}
+impl ExtendOrderClass<ConstantTerm> for OrderMixed {
+    type Output = OrderMixed;
+}
+// A column order term introduces a scalar dependency.
+impl ExtendOrderClass<ColumnTerm> for OrderNone {
+    type Output = OrderScalar;
+}
+impl ExtendOrderClass<ColumnTerm> for OrderScalar {
+    type Output = OrderScalar;
+}
+impl ExtendOrderClass<ColumnTerm> for OrderAggregate {
+    type Output = OrderMixed;
+}
+impl ExtendOrderClass<ColumnTerm> for OrderMixed {
+    type Output = OrderMixed;
+}
+// An aggregate order term.
+impl ExtendOrderClass<AggregateTerm> for OrderNone {
+    type Output = OrderAggregate;
+}
+impl ExtendOrderClass<AggregateTerm> for OrderScalar {
+    type Output = OrderMixed;
+}
+impl ExtendOrderClass<AggregateTerm> for OrderAggregate {
+    type Output = OrderAggregate;
+}
+impl ExtendOrderClass<AggregateTerm> for OrderMixed {
+    type Output = OrderMixed;
+}
+
+/// Witness that a select chain's order-class is valid for a projection of the given class: a scalar
+/// projection may order only by scalar columns, an aggregate projection only by aggregates; either
+/// may have no ordering. A mixed ordering is never valid.
+#[doc(hidden)]
+pub trait OrderCompatibleWith<ProjectionClass> {}
+impl OrderCompatibleWith<ScalarProjection> for OrderNone {}
+impl OrderCompatibleWith<ScalarProjection> for OrderScalar {}
+impl OrderCompatibleWith<AggregateProjection> for OrderNone {}
+impl OrderCompatibleWith<AggregateProjection> for OrderAggregate {}
 
 /// Marker for predicate ASTs whose expression operands are all aggregate-free (see
 /// [`NonAggregateAst`]). `where_` requires it, keeping aggregates out of `WHERE` clauses.

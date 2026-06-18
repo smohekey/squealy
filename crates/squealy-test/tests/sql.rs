@@ -584,6 +584,20 @@ fn test_count_renders_aggregate() {
 }
 
 #[test]
+fn test_aggregate_select_can_order_by_aggregate() {
+    // An aggregate-only projection may order by an aggregate (the order class matches the
+    // projection class) — only scalar ordering of an aggregate select is rejected.
+    let q = TestConnection
+        .from::<User>()
+        .order_by(|(user,)| user.id.count().desc())
+        .select(|(user,)| user.id.count());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT COUNT(q0_0.id) AS expr FROM public.users AS q0_0 ORDER BY COUNT(q0_0.id) DESC"
+    );
+}
+
+#[test]
 fn test_sum_avg_min_max_render_aggregates() {
     let sum = TestConnection
         .from::<User>()

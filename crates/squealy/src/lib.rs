@@ -484,8 +484,9 @@ pub use expr::{
     SqlNumber, SqlSum, SqlText, SubtractExpr, SumExpr, param, render_ddl_predicate,
 };
 pub use expr::{
-    AggregateProjection, AstProjectionClass, CombineProjectionClass, ExtendOrderClass,
-    OrderCompatibleWith, OrderContainsScalar, OrderScalarFree, ProjectionClass,
+    AggregateProjection, AggregateTerm, AstProjectionClass, ColumnTerm, CombineTerm, ConstantTerm,
+    ExtendOrderClass, OrderAggregate, OrderCompatibleWith, OrderMixed, OrderNone, OrderScalar,
+    ProjectionClass, TermProjectionClass,
 };
 pub use foreign_key::ForeignKey;
 pub use index::Index;
