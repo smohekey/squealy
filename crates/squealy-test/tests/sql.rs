@@ -791,6 +791,26 @@ fn test_group_by_tuple_matches_chained_keys() {
 }
 
 #[test]
+fn test_order_by_tuple_matches_chained_terms() {
+    // A tuple of orderings in one call renders identically to chaining `order_by`.
+    let tuple = TestConnection
+        .from::<User>()
+        .order_by(|(user,)| (user.id.asc(), user.name.desc()))
+        .select(|(user,)| (user.id, user.name));
+    let chained = TestConnection
+        .from::<User>()
+        .order_by(|(user,)| user.id.asc())
+        .order_by(|(user,)| user.name.desc())
+        .select(|(user,)| (user.id, user.name));
+    assert_eq!(
+        tuple.to_sql(),
+        "SELECT q0_0.id AS t0_id, q0_0.name AS t1_name \
+         FROM public.users AS q0_0 ORDER BY q0_0.id ASC, q0_0.name DESC"
+    );
+    assert_eq!(tuple.to_sql(), chained.to_sql());
+}
+
+#[test]
 fn test_having_tuple_predicates_are_anded() {
     // A tuple of HAVING predicates is AND-joined, identically to chaining `having`.
     let q = TestConnection

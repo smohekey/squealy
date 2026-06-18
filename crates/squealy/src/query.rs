@@ -3278,6 +3278,68 @@ impl_having_predicates_tuple!(
     A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15
 );
 
+/// Applies one or more `ORDER BY` terms onto a select chain, producing the nested [`OrderBy`]
+/// node(s). Implemented for a single ordering and for tuples of orderings, so
+/// [`SourceQuery::order_by`] accepts `order_by(|(u,)| u.id.asc())` or
+/// `order_by(|(u,)| (u.id.asc(), u.name.desc()))`. Mirrors [`GroupByKeys`]: each tuple arity
+/// delegates to the tail tuple, so the terms nest left-to-right and their params and order-class
+/// typestate thread through the existing single-term [`OrderBy`] node.
+#[doc(hidden)]
+pub trait OrderByTerms<'scope, Base> {
+    type Output;
+
+    fn apply(self, base: Base) -> Self::Output;
+}
+
+// No terms: a no-op, and the recursion base case for the tuple impls below.
+impl<'scope, Base> OrderByTerms<'scope, Base> for () {
+    type Output = Base;
+
+    fn apply(self, base: Base) -> Self::Output {
+        base
+    }
+}
+
+impl<'scope, Base, K, Ast> OrderByTerms<'scope, Base> for Order<'scope, K, Ast>
+where
+    K: ExprKind,
+    Ast: ExprAst,
+{
+    type Output = OrderBy<'scope, Base, K, Ast>;
+
+    fn apply(self, base: Base) -> Self::Output {
+        OrderBy { base, order: self }
+    }
+}
+
+macro_rules! impl_order_by_terms_tuple {
+    () => {};
+    ($head:ident $(, $tail:ident)*) => {
+        impl<'scope, Base, $head, $($tail,)*> OrderByTerms<'scope, Base> for ($head, $($tail,)*)
+        where
+            $head: OrderByTerms<'scope, Base>,
+            ($($tail,)*): OrderByTerms<'scope, <$head as OrderByTerms<'scope, Base>>::Output>,
+        {
+            type Output = <($($tail,)*) as OrderByTerms<
+                'scope,
+                <$head as OrderByTerms<'scope, Base>>::Output,
+            >>::Output;
+
+            #[allow(non_snake_case)]
+            fn apply(self, base: Base) -> Self::Output {
+                let ($head, $($tail,)*) = self;
+                OrderByTerms::apply(($($tail,)*), OrderByTerms::apply($head, base))
+            }
+        }
+
+        impl_order_by_terms_tuple!($($tail),*);
+    };
+}
+
+impl_order_by_terms_tuple!(
+    A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15
+);
+
 #[doc(hidden)]
 pub struct Limited<Base> {
     base: Base,
@@ -3989,16 +4051,17 @@ where
         }
     }
 
-    fn order_by<K, Ast>(
+    /// Add one or more `ORDER BY` terms. The closure may return a single ordering or a tuple of
+    /// them (`order_by(|(u,)| (u.id.asc(), u.name.desc()))` -> `ORDER BY id ASC, name DESC`);
+    /// chaining `order_by` also accumulates terms.
+    fn order_by<Orders>(
         self,
-        order: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> Order<'scope, K, Ast>,
-    ) -> OrderBy<'scope, Self, K, Ast>
+        orders: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> Orders,
+    ) -> Orders::Output
     where
-        K: ExprKind,
-        Ast: ExprAst,
+        Orders: OrderByTerms<'scope, Self>,
     {
-        let order = order(self.exprs().to_tuple());
-        OrderBy { base: self, order }
+        orders(self.exprs().to_tuple()).apply(self)
     }
 
     /// Add one or more `GROUP BY` keys. The closure may return a single key (a column or
