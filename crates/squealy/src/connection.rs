@@ -98,6 +98,14 @@ pub trait ConnectionWithTransaction: Connection {
     where
         Self: 'conn;
 
+    /// Run a closure inside a backend-managed transaction.
+    ///
+    /// The returned future is **not** guaranteed `Send`: the closure's `AsyncFnOnce` call future
+    /// would have to be bound `Send`, which on stable Rust requires the unnameable, unstable
+    /// `AsyncFnOnce::CallOnceFuture` associated type. If you need a `Send` transaction future for a
+    /// multithreaded `-> impl Future + Send` context (especially a backend-generic one), use
+    /// [`transaction_scoped`](Self::transaction_scoped) — its explicit boxed `dyn Future + Send`
+    /// makes the future's `Send`-ness expressible on stable.
     fn transaction<'conn, T, F>(
         &'conn mut self,
         f: F,
