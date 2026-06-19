@@ -791,6 +791,31 @@ fn test_group_by_tuple_matches_chained_keys() {
 }
 
 #[test]
+fn test_runtime_params_use_render_order_regardless_of_build_order() {
+    // Regression: runtime `param` placeholders are numbered as they render (WHERE before ORDER BY),
+    // so the `Params` shape callers bind against must be render-ordered (the WHERE param, then the
+    // ORDER BY param) no matter what order `where_`/`order_by` were called in. Both build orders must
+    // therefore share the exact same `Params` shape — pinned here at the type level.
+    fn assert_filter_then_order_shape<'conn, 'scope, Q>(_query: &Q)
+    where
+        Q: SelectAst<'conn, 'scope, TestConnection, Params = HCons<String, HCons<i32, HNil>>>,
+    {
+    }
+
+    let canonical = TestConnection
+        .from::<User>()
+        .where_(|user| user.name.equals(param::<UserName>()))
+        .order_by(|(user,)| (user.id + param::<UserId>()).asc());
+    let reversed = TestConnection
+        .from::<User>()
+        .order_by(|(user,)| (user.id + param::<UserId>()).asc())
+        .where_(|(user,)| user.name.equals(param::<UserName>()));
+
+    assert_filter_then_order_shape(&canonical);
+    assert_filter_then_order_shape(&reversed);
+}
+
+#[test]
 fn test_order_by_tuple_matches_chained_terms() {
     // A tuple of orderings in one call renders identically to chaining `order_by`.
     let tuple = TestConnection

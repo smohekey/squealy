@@ -2819,13 +2819,58 @@ where
     }
 }
 
+/// Combines a select chain's per-clause runtime params into render order
+/// (`sources ++ filters ++ groups ++ havings ++ orders`), so a chain's [`Params`](SelectAst::Params)
+/// shape matches how placeholders are numbered at render time regardless of the order the builder
+/// methods were called in. Runtime (`param`) placeholders are numbered as they render, while the
+/// `Params` shape is what callers bind against; keeping the two aligned is what makes out-of-order
+/// clause building (e.g. `order_by(..).where_(..)`) bind correctly.
+#[doc(hidden)]
+pub trait RenderOrderedParams {
+    type Params: HList;
+}
+
+impl<Sources, Filters, Groups, Havings, Orders> RenderOrderedParams
+    for (Sources, Filters, Groups, Havings, Orders)
+where
+    Sources: HList + crate::HAppend<Filters>,
+    Filters: HList,
+    Groups: HList,
+    Havings: HList,
+    Orders: HList,
+    <Sources as crate::HAppend<Filters>>::Output: crate::HAppend<Groups>,
+    <<Sources as crate::HAppend<Filters>>::Output as crate::HAppend<Groups>>::Output:
+        crate::HAppend<Havings>,
+    <<<Sources as crate::HAppend<Filters>>::Output as crate::HAppend<Groups>>::Output as crate::HAppend<
+        Havings,
+    >>::Output: crate::HAppend<Orders>,
+{
+    type Params = <<<<Sources as crate::HAppend<Filters>>::Output as crate::HAppend<Groups>>::Output
+        as crate::HAppend<Havings>>::Output as crate::HAppend<Orders>>::Output;
+}
+
 #[doc(hidden)]
 pub trait SelectAst<'conn, 'scope, Conn>
 where
     Conn: QueryBuilder,
 {
     type Exprs: HList + Clone + ToTuple;
+
+    /// The chain's runtime-parameter shape, in render order. Assembled from the per-clause buckets
+    /// below via [`RenderOrderedParams`] so it stays aligned with placeholder numbering even when
+    /// clauses are added out of SQL order.
     type Params: HList;
+
+    /// Runtime params contributed by `FROM`/`JOIN` sources (the first clauses to render).
+    type SourceParams: HList;
+    /// Runtime params contributed by `WHERE`.
+    type FilterParams: HList;
+    /// Runtime params contributed by `GROUP BY`.
+    type GroupParams: HList;
+    /// Runtime params contributed by `HAVING`.
+    type HavingParams: HList;
+    /// Runtime params contributed by `ORDER BY`.
+    type OrderParams: HList;
 
     /// Which kinds of `ORDER BY` terms this chain has (see [`OrderNone`](crate::OrderNone) /
     /// [`OrderScalar`](crate::OrderScalar) / [`OrderAggregate`](crate::OrderAggregate) /
@@ -2895,6 +2940,11 @@ where
 {
     type Exprs = HNil;
     type Params = HNil;
+    type SourceParams = HNil;
+    type FilterParams = HNil;
+    type GroupParams = HNil;
+    type HavingParams = HNil;
+    type OrderParams = HNil;
     type OrderClass = crate::OrderNone;
     type Grouped = crate::Ungrouped;
 
@@ -3026,6 +3076,11 @@ where
 {
     type Exprs = Exprs;
     type Params = Source::Params;
+    type SourceParams = Source::Params;
+    type FilterParams = HNil;
+    type GroupParams = HNil;
+    type HavingParams = HNil;
+    type OrderParams = HNil;
     type OrderClass = crate::OrderNone;
     type Grouped = crate::Ungrouped;
 
@@ -3395,10 +3450,28 @@ where
     Base: SelectAst<'conn, 'scope, Conn>,
     P: PredicateKind,
     PredicateAst: crate::PredicateAst,
-    Base::Params: crate::HAppend<PredicateAst::Params>,
+    Base::FilterParams: crate::HAppend<PredicateAst::Params>,
+    (
+        Base::SourceParams,
+        <Base::FilterParams as crate::HAppend<PredicateAst::Params>>::Output,
+        Base::GroupParams,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
 {
     type Exprs = Base::Exprs;
-    type Params = <Base::Params as crate::HAppend<PredicateAst::Params>>::Output;
+    type Params = <(
+        Self::SourceParams,
+        Self::FilterParams,
+        Self::GroupParams,
+        Self::HavingParams,
+        Self::OrderParams,
+    ) as RenderOrderedParams>::Params;
+    type SourceParams = Base::SourceParams;
+    type FilterParams = <Base::FilterParams as crate::HAppend<PredicateAst::Params>>::Output;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
     type Grouped = Base::Grouped;
 
@@ -3422,7 +3495,14 @@ where
     Base: RenderSelectAst<'conn, 'scope, Conn, B>,
     P: PredicateKind,
     PredicateAst: crate::RenderPredicateAst<B>,
-    Base::Params: crate::HAppend<PredicateAst::Params>,
+    Base::FilterParams: crate::HAppend<PredicateAst::Params>,
+    (
+        Base::SourceParams,
+        <Base::FilterParams as crate::HAppend<PredicateAst::Params>>::Output,
+        Base::GroupParams,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
     B: Backend,
 {
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3476,11 +3556,29 @@ where
     Base: SelectAst<'conn, 'scope, Conn>,
     K: ExprKind,
     Ast: ExprAst + crate::AstProjectionClass,
-    Base::Params: crate::HAppend<Ast::Params>,
+    Base::OrderParams: crate::HAppend<Ast::Params>,
     Base::OrderClass: crate::ExtendOrderClass<<Ast as crate::AstProjectionClass>::Class>,
+    (
+        Base::SourceParams,
+        Base::FilterParams,
+        Base::GroupParams,
+        Base::HavingParams,
+        <Base::OrderParams as crate::HAppend<Ast::Params>>::Output,
+    ): RenderOrderedParams,
 {
     type Exprs = Base::Exprs;
-    type Params = <Base::Params as crate::HAppend<Ast::Params>>::Output;
+    type Params = <(
+        Self::SourceParams,
+        Self::FilterParams,
+        Self::GroupParams,
+        Self::HavingParams,
+        Self::OrderParams,
+    ) as RenderOrderedParams>::Params;
+    type SourceParams = Base::SourceParams;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = <Base::OrderParams as crate::HAppend<Ast::Params>>::Output;
     type OrderClass = <Base::OrderClass as crate::ExtendOrderClass<
         <Ast as crate::AstProjectionClass>::Class,
     >>::Output;
@@ -3506,8 +3604,15 @@ where
     Base: RenderSelectAst<'conn, 'scope, Conn, B>,
     K: ExprKind,
     Ast: RenderAst<B> + crate::AstProjectionClass,
-    Base::Params: crate::HAppend<Ast::Params>,
+    Base::OrderParams: crate::HAppend<Ast::Params>,
     Base::OrderClass: crate::ExtendOrderClass<<Ast as crate::AstProjectionClass>::Class>,
+    (
+        Base::SourceParams,
+        Base::FilterParams,
+        Base::GroupParams,
+        Base::HavingParams,
+        <Base::OrderParams as crate::HAppend<Ast::Params>>::Output,
+    ): RenderOrderedParams,
     B: Backend,
 {
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3561,10 +3666,28 @@ where
     Base: SelectAst<'conn, 'scope, Conn>,
     K: ExprKind,
     Ast: ExprAst,
-    Base::Params: crate::HAppend<Ast::Params>,
+    Base::GroupParams: crate::HAppend<Ast::Params>,
+    (
+        Base::SourceParams,
+        Base::FilterParams,
+        <Base::GroupParams as crate::HAppend<Ast::Params>>::Output,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
 {
     type Exprs = Base::Exprs;
-    type Params = <Base::Params as crate::HAppend<Ast::Params>>::Output;
+    type Params = <(
+        Self::SourceParams,
+        Self::FilterParams,
+        Self::GroupParams,
+        Self::HavingParams,
+        Self::OrderParams,
+    ) as RenderOrderedParams>::Params;
+    type SourceParams = Base::SourceParams;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = <Base::GroupParams as crate::HAppend<Ast::Params>>::Output;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
     type Grouped = crate::Grouped;
 
@@ -3588,7 +3711,14 @@ where
     Base: RenderSelectAst<'conn, 'scope, Conn, B>,
     K: ExprKind,
     Ast: RenderAst<B>,
-    Base::Params: crate::HAppend<Ast::Params>,
+    Base::GroupParams: crate::HAppend<Ast::Params>,
+    (
+        Base::SourceParams,
+        Base::FilterParams,
+        <Base::GroupParams as crate::HAppend<Ast::Params>>::Output,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
     B: Backend,
 {
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3642,10 +3772,28 @@ where
     Base: SelectAst<'conn, 'scope, Conn>,
     P: PredicateKind,
     PredicateAst: crate::PredicateAst,
-    Base::Params: crate::HAppend<PredicateAst::Params>,
+    Base::HavingParams: crate::HAppend<PredicateAst::Params>,
+    (
+        Base::SourceParams,
+        Base::FilterParams,
+        Base::GroupParams,
+        <Base::HavingParams as crate::HAppend<PredicateAst::Params>>::Output,
+        Base::OrderParams,
+    ): RenderOrderedParams,
 {
     type Exprs = Base::Exprs;
-    type Params = <Base::Params as crate::HAppend<PredicateAst::Params>>::Output;
+    type Params = <(
+        Self::SourceParams,
+        Self::FilterParams,
+        Self::GroupParams,
+        Self::HavingParams,
+        Self::OrderParams,
+    ) as RenderOrderedParams>::Params;
+    type SourceParams = Base::SourceParams;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = <Base::HavingParams as crate::HAppend<PredicateAst::Params>>::Output;
+    type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
     type Grouped = Base::Grouped;
 
@@ -3669,7 +3817,14 @@ where
     Base: RenderSelectAst<'conn, 'scope, Conn, B>,
     P: PredicateKind,
     PredicateAst: crate::RenderPredicateAst<B>,
-    Base::Params: crate::HAppend<PredicateAst::Params>,
+    Base::HavingParams: crate::HAppend<PredicateAst::Params>,
+    (
+        Base::SourceParams,
+        Base::FilterParams,
+        Base::GroupParams,
+        <Base::HavingParams as crate::HAppend<PredicateAst::Params>>::Output,
+        Base::OrderParams,
+    ): RenderOrderedParams,
     B: Backend,
 {
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3723,6 +3878,11 @@ where
 {
     type Exprs = Base::Exprs;
     type Params = Base::Params;
+    type SourceParams = Base::SourceParams;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
     type Grouped = Base::Grouped;
 
@@ -3796,6 +3956,11 @@ where
 {
     type Exprs = Base::Exprs;
     type Params = Base::Params;
+    type SourceParams = Base::SourceParams;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
     type Grouped = Base::Grouped;
 
@@ -3871,10 +4036,28 @@ where
     <Base::Exprs as PushBack<Expr>>::Output: Clone + ToTuple,
     Expr: Clone,
     Source: SourceSpec,
-    Base::Params: crate::HAppend<Source::Params>,
+    Base::SourceParams: crate::HAppend<Source::Params>,
+    (
+        <Base::SourceParams as crate::HAppend<Source::Params>>::Output,
+        Base::FilterParams,
+        Base::GroupParams,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
 {
     type Exprs = <Base::Exprs as PushBack<Expr>>::Output;
-    type Params = <Base::Params as crate::HAppend<Source::Params>>::Output;
+    type Params = <(
+        Self::SourceParams,
+        Self::FilterParams,
+        Self::GroupParams,
+        Self::HavingParams,
+        Self::OrderParams,
+    ) as RenderOrderedParams>::Params;
+    type SourceParams = <Base::SourceParams as crate::HAppend<Source::Params>>::Output;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
     type Grouped = Base::Grouped;
 
@@ -3900,7 +4083,14 @@ where
     <Base::Exprs as PushBack<Expr>>::Output: Clone + ToTuple,
     Expr: Clone,
     Source: RenderSourceSpec<B>,
-    Base::Params: crate::HAppend<Source::Params>,
+    Base::SourceParams: crate::HAppend<Source::Params>,
+    (
+        <Base::SourceParams as crate::HAppend<Source::Params>>::Output,
+        Base::FilterParams,
+        Base::GroupParams,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
     B: Backend,
 {
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3956,10 +4146,28 @@ where
     <Base::Exprs as PushBack<Expr>>::Output: Clone + ToTuple,
     Expr: Clone,
     Source: SourceSpec,
-    Base::Params: crate::HAppend<Source::Params>,
+    Base::SourceParams: crate::HAppend<Source::Params>,
+    (
+        <Base::SourceParams as crate::HAppend<Source::Params>>::Output,
+        Base::FilterParams,
+        Base::GroupParams,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
 {
     type Exprs = <Base::Exprs as PushBack<Expr>>::Output;
-    type Params = <Base::Params as crate::HAppend<Source::Params>>::Output;
+    type Params = <(
+        Self::SourceParams,
+        Self::FilterParams,
+        Self::GroupParams,
+        Self::HavingParams,
+        Self::OrderParams,
+    ) as RenderOrderedParams>::Params;
+    type SourceParams = <Base::SourceParams as crate::HAppend<Source::Params>>::Output;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
     type Grouped = Base::Grouped;
 
@@ -3985,7 +4193,14 @@ where
     <Base::Exprs as PushBack<Expr>>::Output: Clone + ToTuple,
     Expr: Clone,
     Source: RenderSourceSpec<B>,
-    Base::Params: crate::HAppend<Source::Params>,
+    Base::SourceParams: crate::HAppend<Source::Params>,
+    (
+        <Base::SourceParams as crate::HAppend<Source::Params>>::Output,
+        Base::FilterParams,
+        Base::GroupParams,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
     B: Backend,
 {
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
