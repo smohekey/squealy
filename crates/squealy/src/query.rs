@@ -3217,7 +3217,8 @@ impl<'scope, Base> GroupByKeys<'scope, Base> for () {
 impl<'scope, Base, K, Ast> GroupByKeys<'scope, Base> for Expr<'scope, K, Ast>
 where
     K: ExprKind,
-    Ast: ExprAst,
+    // A grouping item may not contain an aggregate (`GROUP BY COUNT(..)` is rejected by the database).
+    Ast: ExprAst + crate::NonAggregateAst,
 {
     type Output = GroupBy<'scope, Base, K, Ast>;
 
