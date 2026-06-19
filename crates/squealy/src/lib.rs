@@ -488,7 +488,7 @@ pub use expr::{
     ColumnFree, ColumnTerm, CombineColumns, CombineTerm, ConstantTerm, ExprColumns,
     ExtendOrderClass, Grouped, HasBareColumn, HavingTransition, OrderAggregate,
     OrderCompatibleWith, OrderMixed, OrderNone, OrderScalar, PredicateColumns, ProjectionClass,
-    TermProjectionClass, Ungrouped, ValidSelect,
+    ProjectionColumns, TermProjectionClass, Ungrouped, ValidSelect,
 };
 pub use foreign_key::ForeignKey;
 pub use index::Index;

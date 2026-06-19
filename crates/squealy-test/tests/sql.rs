@@ -795,6 +795,21 @@ fn test_having_before_group_by_is_order_independent() {
 }
 
 #[test]
+fn test_whole_table_having_allows_constant_projection() {
+    // A whole-table-aggregate query (HAVING, no GROUP BY) may project constants alongside
+    // aggregates — they do not depend on an ungrouped row. Only bare columns are rejected there.
+    let q = TestConnection
+        .from::<User>()
+        .having(|(user,)| user.id.count().greater_than(0i64))
+        .select(|(user,)| (1, user.id.count()));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT ? AS t0_expr, COUNT(q0_0.id) AS t1_expr \
+         FROM public.users AS q0_0 HAVING (COUNT(q0_0.id) > ?)"
+    );
+}
+
+#[test]
 fn test_having_without_group_by_on_whole_table_aggregate() {
     // `HAVING` is valid without `GROUP BY` over a whole-table aggregate, and may use aggregates.
     let q = TestConnection

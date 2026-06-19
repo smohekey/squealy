@@ -652,6 +652,27 @@ impl<'scope, K> ProjectionClass for ColumnRef<'scope, K> {
     type Class = ScalarProjection;
 }
 
+/// Classifies a whole projection as [`ColumnFree`] or [`HasBareColumn`], independent of the
+/// homogeneity that [`ProjectionClass`] requires. A whole-table aggregate (a `HAVING` with no
+/// `GROUP BY`, the [`Aggregated`] state) requires a column-free projection: aggregates and constants
+/// are fine (they do not depend on an ungrouped row), bare columns are not. Tuples implement it only
+/// when every element is column-free.
+#[doc(hidden)]
+pub trait ProjectionColumns {
+    type Columns;
+}
+
+impl<'scope, K, Ast> ProjectionColumns for Expr<'scope, K, Ast>
+where
+    Ast: ExprAst + ExprColumns,
+{
+    type Columns = <Ast as ExprColumns>::Columns;
+}
+
+impl<'scope, K> ProjectionColumns for ColumnRef<'scope, K> {
+    type Columns = HasBareColumn;
+}
+
 // === ORDER BY classification ===
 
 /// Order-class of a select chain (carried as [`SelectAst::OrderClass`](crate::SelectAst::OrderClass)):
@@ -770,7 +791,10 @@ where
 
 impl<Projection, OrderClass> ValidSelect<Projection, OrderClass> for Aggregated
 where
-    Projection: ProjectionClass<Class = AggregateProjection>,
+    // Column-free projection (aggregates and constants), not necessarily *all* aggregate — a
+    // constant like `SELECT 1` is valid in a whole-table aggregate. Ordering must still be
+    // aggregate-only (no bare-column `ORDER BY`).
+    Projection: ProjectionColumns<Columns = ColumnFree>,
     OrderClass: OrderCompatibleWith<AggregateProjection>,
 {
 }

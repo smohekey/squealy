@@ -18,7 +18,8 @@ help: the following other types implement trait `squealy::ValidSelect<Projection
 ...
    | / impl<Projection, OrderClass> ValidSelect<Projection, OrderClass> for Aggregated
    | | where
-   | |     Projection: ProjectionClass<Class = AggregateProjection>,
+...  |
+   | |     Projection: ProjectionColumns<Columns = ColumnFree>,
    | |     OrderClass: OrderCompatibleWith<AggregateProjection>,
    | |_________________________________________________________^ `Aggregated`
 note: the method call chain might not have had the expected associated types
