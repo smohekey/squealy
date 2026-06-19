@@ -655,6 +655,16 @@ fn tuple_projection_shape(arity: usize) -> proc_macro2::TokenStream {
             type Class = <#first_type as ::squealy::ProjectionClass>::Class;
         }
 
+        // A tuple projection is column-free only when every element is (used to validate a
+        // whole-table-aggregate `HAVING`; a bare column in any element leaves the tuple without an
+        // impl, so `select` is rejected in that state).
+        impl<#(#types),*> ::squealy::ProjectionColumns for (#(#types,)*)
+        where
+            #(#types: ::squealy::ProjectionColumns<Columns = ::squealy::ColumnFree>,)*
+        {
+            type Columns = ::squealy::ColumnFree;
+        }
+
         impl<Backend, #(#types),*> Decode<Backend> for (#(#types,)*)
         where
             Backend: ::squealy::Backend,

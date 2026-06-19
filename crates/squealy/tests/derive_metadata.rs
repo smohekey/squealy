@@ -10,6 +10,8 @@ enum LoweringEvent {
     InnerJoin { table: String, alias: SourceAlias },
     LeftJoin { table: String, alias: SourceAlias },
     Filter,
+    Group,
+    Having,
     Order,
     Limit(usize),
     Offset(usize),
@@ -88,6 +90,24 @@ impl SelectSink for RecordingSelectSink {
         Ast: RenderPredicateAst<TestBackend>,
     {
         self.events.push(LoweringEvent::Filter);
+        Ok(())
+    }
+
+    fn push_group<K, Ast>(&mut self, _key: &Expr<'_, K, Ast>) -> Result<(), Self::Error>
+    where
+        K: ExprKind,
+        Ast: RenderAst<TestBackend>,
+    {
+        self.events.push(LoweringEvent::Group);
+        Ok(())
+    }
+
+    fn push_having<P, Ast>(&mut self, _predicate: Predicate<'_, P, Ast>) -> Result<(), Self::Error>
+    where
+        P: PredicateKind,
+        Ast: RenderPredicateAst<TestBackend>,
+    {
+        self.events.push(LoweringEvent::Having);
         Ok(())
     }
 

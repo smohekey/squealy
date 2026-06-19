@@ -1,0 +1,47 @@
+error[E0277]: the trait bound `AggregateNeedsGroupBy: squealy::ValidSelect<_, OrderNone>` is not satisfied
+  --> tests/compile_fail/bare_column_having_predicate_rejected_without_group_by.rs:17:10
+   |
+17 |         .select(|(user,)| user.id.count());
+   |          ^^^^^^ the trait `squealy::ValidSelect<_, OrderNone>` is not implemented for `AggregateNeedsGroupBy`
+   |
+help: the following other types implement trait `squealy::ValidSelect<Projection, OrderClass>`
+  --> src/expr.rs
+   |
+   |   impl<Projection, OrderClass> ValidSelect<Projection, OrderClass> for Grouped {}
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Grouped`
+   |
+   | / impl<Projection, OrderClass> ValidSelect<Projection, OrderClass> for Ungrouped
+   | | where
+   | |     Projection: ProjectionClass,
+   | |     OrderClass: OrderCompatibleWith<<Projection as ProjectionClass>::Class>,
+   | |____________________________________________________________________________^ `Ungrouped`
+...
+   | / impl<Projection, OrderClass> ValidSelect<Projection, OrderClass> for Aggregated
+   | | where
+...  |
+   | |     Projection: ProjectionColumns<Columns = ColumnFree>,
+   | |     OrderClass: OrderCompatibleWith<AggregateProjection>,
+   | |_________________________________________________________^ `Aggregated`
+note: the method call chain might not have had the expected associated types
+  --> tests/compile_fail/bare_column_having_predicate_rejected_without_group_by.rs:15:10
+   |
+14 |     let _query = TestConnection
+   |                  -------------- this expression has type `TestConnection`
+15 |         .from::<User>()
+   |          ^^^^^^^^^^^^^^
+   |          |
+   |          `SelectAst::Grouped` is `Ungrouped` here
+   |          `SelectAst::OrderClass` is `OrderNone` here
+16 |         .having(|(user,)| user.id.greater_than(0))
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |          |
+   |          `SelectAst::Grouped` changed to `AggregateNeedsGroupBy` here
+   |          `SelectAst::OrderClass` remains `OrderNone` here
+note: required by a bound in `squealy::SourceQuery::select`
+  --> src/query.rs
+   |
+   |     fn select<P>(
+   |        ------ required by a bound in this associated function
+...
+   |             crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `SourceQuery::select`

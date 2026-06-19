@@ -466,6 +466,65 @@ where
 {
 }
 
+/// Whether an expression references a *bare* (ungrouped) column: the dual axis to
+/// [`NonAggregateAst`], used to validate `HAVING`. A bare column is only valid in a `HAVING` once a
+/// `GROUP BY` is present; otherwise the query is a whole-table aggregate and the column belongs to
+/// no group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColumnFree {}
+/// See [`ColumnFree`]: the expression contains at least one bare (ungrouped) column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HasBareColumn {}
+
+/// Combines two column classes ([`ColumnFree`] / [`HasBareColumn`]); `HasBareColumn` dominates.
+#[doc(hidden)]
+pub trait CombineColumns<Rhs> {
+    type Output;
+}
+impl CombineColumns<ColumnFree> for ColumnFree {
+    type Output = ColumnFree;
+}
+impl CombineColumns<HasBareColumn> for ColumnFree {
+    type Output = HasBareColumn;
+}
+impl CombineColumns<ColumnFree> for HasBareColumn {
+    type Output = HasBareColumn;
+}
+impl CombineColumns<HasBareColumn> for HasBareColumn {
+    type Output = HasBareColumn;
+}
+
+/// Classifies an expression AST as [`ColumnFree`] or [`HasBareColumn`]. A column is bare unless it
+/// sits inside an aggregate (`AggregateExprAst`), which collapses its operand to a single value.
+#[doc(hidden)]
+pub trait ExprColumns {
+    type Columns;
+}
+impl<K> ExprColumns for ColumnExprAst<K> {
+    type Columns = HasBareColumn;
+}
+impl<Operand> ExprColumns for AggregateExprAst<Operand> {
+    type Columns = ColumnFree;
+}
+impl<K> ExprColumns for LiteralExprAst<K>
+where
+    K: ExprKind,
+{
+    type Columns = ColumnFree;
+}
+impl<K> ExprColumns for ParamExprAst<K> {
+    type Columns = ColumnFree;
+}
+impl<Left, Right> ExprColumns for BinaryExprAst<Left, Right>
+where
+    Left: ExprColumns,
+    Right: ExprColumns,
+    <Left as ExprColumns>::Columns: CombineColumns<<Right as ExprColumns>::Columns>,
+{
+    type Columns =
+        <<Left as ExprColumns>::Columns as CombineColumns<<Right as ExprColumns>::Columns>>::Output;
+}
+
 /// Classification of a projection element as a plain scalar value (see [`ProjectionClass`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScalarProjection {}
@@ -593,6 +652,27 @@ impl<'scope, K> ProjectionClass for ColumnRef<'scope, K> {
     type Class = ScalarProjection;
 }
 
+/// Classifies a whole projection as [`ColumnFree`] or [`HasBareColumn`], independent of the
+/// homogeneity that [`ProjectionClass`] requires. A whole-table aggregate (a `HAVING` with no
+/// `GROUP BY`, the [`Aggregated`] state) requires a column-free projection: aggregates and constants
+/// are fine (they do not depend on an ungrouped row), bare columns are not. Tuples implement it only
+/// when every element is column-free.
+#[doc(hidden)]
+pub trait ProjectionColumns {
+    type Columns;
+}
+
+impl<'scope, K, Ast> ProjectionColumns for Expr<'scope, K, Ast>
+where
+    Ast: ExprAst + ExprColumns,
+{
+    type Columns = <Ast as ExprColumns>::Columns;
+}
+
+impl<'scope, K> ProjectionColumns for ColumnRef<'scope, K> {
+    type Columns = HasBareColumn;
+}
+
 // === ORDER BY classification ===
 
 /// Order-class of a select chain (carried as [`SelectAst::OrderClass`](crate::SelectAst::OrderClass)):
@@ -665,6 +745,95 @@ impl OrderCompatibleWith<ScalarProjection> for OrderScalar {}
 impl OrderCompatibleWith<AggregateProjection> for OrderNone {}
 impl OrderCompatibleWith<AggregateProjection> for OrderAggregate {}
 
+// === GROUP BY state ===
+
+/// Grouping state of a select chain (carried as [`SelectAst::Grouped`](crate::SelectAst::Grouped)):
+/// the chain has no `GROUP BY`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ungrouped {}
+/// Grouping state of a select chain: the chain has a `GROUP BY`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Grouped {}
+/// Grouping state of a select chain: the chain has a `HAVING` but no `GROUP BY`, so SQL evaluates it
+/// as a single (whole-table) group, and every `HAVING` predicate so far was column-free. The
+/// projection and ordering must then be aggregate-only — a bare column is invalid without
+/// `GROUP BY`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Aggregated {}
+/// Grouping state of a select chain: a whole-table-aggregate `HAVING` (no `GROUP BY`) referenced a
+/// bare column. That is only valid once a `GROUP BY` makes the column a grouping key, so this state
+/// has no [`ValidSelect`] impl — `select` is rejected until a `group_by` rescues it to [`Grouped`]
+/// (this keeps the check independent of whether `having` or `group_by` was called first).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AggregateNeedsGroupBy {}
+
+/// Validates a `SELECT`'s projection and ordering for a chain's [grouping state](Ungrouped).
+///
+/// An [`Ungrouped`] query must be *homogeneous* — every projected element the same class
+/// ([`ProjectionClass`]) — and its ordering must match ([`OrderCompatibleWith`]), since without
+/// `GROUP BY` a list cannot mix a bare column with an aggregate. An [`Aggregated`] query (a `HAVING`
+/// with no `GROUP BY`) is stricter still: the projection must be aggregate-*only*, since a bare
+/// column has no group to belong to. [`AggregateNeedsGroupBy`] has no impl at all — it requires a
+/// `GROUP BY` first. A [`Grouped`] query lifts those restrictions: a grouped list may mix grouping
+/// keys and aggregates, and may order by either; the database validates that the non-aggregate terms
+/// are grouping keys.
+#[doc(hidden)]
+pub trait ValidSelect<Projection, OrderClass> {}
+
+impl<Projection, OrderClass> ValidSelect<Projection, OrderClass> for Grouped {}
+
+impl<Projection, OrderClass> ValidSelect<Projection, OrderClass> for Ungrouped
+where
+    Projection: ProjectionClass,
+    OrderClass: OrderCompatibleWith<<Projection as ProjectionClass>::Class>,
+{
+}
+
+impl<Projection, OrderClass> ValidSelect<Projection, OrderClass> for Aggregated
+where
+    // Column-free projection (aggregates and constants), not necessarily *all* aggregate — a
+    // constant like `SELECT 1` is valid in a whole-table aggregate. Ordering must still be
+    // aggregate-only (no bare-column `ORDER BY`).
+    Projection: ProjectionColumns<Columns = ColumnFree>,
+    OrderClass: OrderCompatibleWith<AggregateProjection>,
+{
+}
+
+/// Maps a chain's [grouping state](Ungrouped) through a `HAVING` whose predicate has column class
+/// `PredicateColumns` ([`ColumnFree`] / [`HasBareColumn`]). A chain that already has a `GROUP BY`
+/// stays [`Grouped`] for any predicate. Without one, a column-free predicate yields a whole-table
+/// [`Aggregated`] chain, while a bare-column predicate yields [`AggregateNeedsGroupBy`] — selectable
+/// only once a later `group_by` rescues it to [`Grouped`]. This makes the result independent of
+/// whether `having` or `group_by` was written first.
+#[doc(hidden)]
+pub trait HavingTransition<PredicateColumns> {
+    type Output;
+}
+
+impl<PredicateColumns> HavingTransition<PredicateColumns> for Grouped {
+    type Output = Grouped;
+}
+
+impl HavingTransition<ColumnFree> for Ungrouped {
+    type Output = Aggregated;
+}
+
+impl HavingTransition<HasBareColumn> for Ungrouped {
+    type Output = AggregateNeedsGroupBy;
+}
+
+impl HavingTransition<ColumnFree> for Aggregated {
+    type Output = Aggregated;
+}
+
+impl HavingTransition<HasBareColumn> for Aggregated {
+    type Output = AggregateNeedsGroupBy;
+}
+
+impl<PredicateColumns> HavingTransition<PredicateColumns> for AggregateNeedsGroupBy {
+    type Output = AggregateNeedsGroupBy;
+}
+
 /// Marker for predicate ASTs whose expression operands are all aggregate-free (see
 /// [`NonAggregateAst`]). `where_` requires it, keeping aggregates out of `WHERE` clauses.
 pub trait NonAggregatePredicate {}
@@ -713,6 +882,99 @@ where
 }
 
 impl<P> NonAggregatePredicate for NotPredicateAst<P> where P: NonAggregatePredicate {}
+
+/// Classifies a predicate AST as [`ColumnFree`] or [`HasBareColumn`] by combining its expression
+/// operands' [`ExprColumns`] classes. Used to validate `HAVING`: a whole-table-aggregate `HAVING`
+/// (no `GROUP BY`) requires a column-free predicate, mirroring how the projection must be
+/// aggregate-only there, while a later `GROUP BY` makes a bare column valid (a grouping key).
+#[doc(hidden)]
+pub trait PredicateColumns {
+    type Columns;
+}
+
+impl<Left, Right> PredicateColumns for ComparePredicateAst<Left, Right>
+where
+    Left: ExprColumns,
+    Right: ExprColumns,
+    <Left as ExprColumns>::Columns: CombineColumns<<Right as ExprColumns>::Columns>,
+{
+    type Columns =
+        <<Left as ExprColumns>::Columns as CombineColumns<<Right as ExprColumns>::Columns>>::Output;
+}
+
+impl<Left, Right> PredicateColumns for LikePredicateAst<Left, Right>
+where
+    Left: ExprColumns,
+    Right: ExprColumns,
+    <Left as ExprColumns>::Columns: CombineColumns<<Right as ExprColumns>::Columns>,
+{
+    type Columns =
+        <<Left as ExprColumns>::Columns as CombineColumns<<Right as ExprColumns>::Columns>>::Output;
+}
+
+impl<Operand, V> PredicateColumns for InPredicateAst<Operand, V>
+where
+    Operand: ExprColumns,
+{
+    type Columns = <Operand as ExprColumns>::Columns;
+}
+
+impl<Operand, Lo, Hi> PredicateColumns for BetweenPredicateAst<Operand, Lo, Hi>
+where
+    Operand: ExprColumns,
+    Lo: ExprColumns,
+    Hi: ExprColumns,
+    <Operand as ExprColumns>::Columns: CombineColumns<<Lo as ExprColumns>::Columns>,
+    <<Operand as ExprColumns>::Columns as CombineColumns<<Lo as ExprColumns>::Columns>>::Output:
+        CombineColumns<<Hi as ExprColumns>::Columns>,
+{
+    type Columns = <<<Operand as ExprColumns>::Columns as CombineColumns<
+        <Lo as ExprColumns>::Columns,
+    >>::Output as CombineColumns<<Hi as ExprColumns>::Columns>>::Output;
+}
+
+impl<Operand> PredicateColumns for NullCheckPredicateAst<Operand>
+where
+    Operand: ExprColumns,
+{
+    type Columns = <Operand as ExprColumns>::Columns;
+}
+
+impl<Operand> PredicateColumns for BoolTestPredicateAst<Operand>
+where
+    Operand: ExprColumns,
+{
+    type Columns = <Operand as ExprColumns>::Columns;
+}
+
+impl<Left, Right> PredicateColumns for AndPredicateAst<Left, Right>
+where
+    Left: PredicateColumns,
+    Right: PredicateColumns,
+    <Left as PredicateColumns>::Columns: CombineColumns<<Right as PredicateColumns>::Columns>,
+{
+    type Columns = <<Left as PredicateColumns>::Columns as CombineColumns<
+        <Right as PredicateColumns>::Columns,
+    >>::Output;
+}
+
+impl<Left, Right> PredicateColumns for OrPredicateAst<Left, Right>
+where
+    Left: PredicateColumns,
+    Right: PredicateColumns,
+    <Left as PredicateColumns>::Columns: CombineColumns<<Right as PredicateColumns>::Columns>,
+{
+    type Columns = <<Left as PredicateColumns>::Columns as CombineColumns<
+        <Right as PredicateColumns>::Columns,
+    >>::Output;
+}
+
+impl<P> PredicateColumns for NotPredicateAst<P>
+where
+    P: PredicateColumns,
+{
+    type Columns = <P as PredicateColumns>::Columns;
+}
 
 #[doc(hidden)]
 pub trait ExprVisitor {

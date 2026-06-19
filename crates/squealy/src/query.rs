@@ -2593,6 +2593,19 @@ pub trait SelectSink {
         P: PredicateKind,
         PredicateAst: crate::RenderPredicateAst<Self::Backend>;
 
+    fn push_group<K, Ast>(&mut self, key: &Expr<'_, K, Ast>) -> Result<(), Self::Error>
+    where
+        K: ExprKind,
+        Ast: RenderAst<Self::Backend>;
+
+    fn push_having<P, PredicateAst>(
+        &mut self,
+        predicate: Predicate<'_, P, PredicateAst>,
+    ) -> Result<(), Self::Error>
+    where
+        P: PredicateKind,
+        PredicateAst: crate::RenderPredicateAst<Self::Backend>;
+
     fn push_order<K, Ast>(&mut self, order: Order<'_, K, Ast>) -> Result<(), Self::Error>
     where
         K: ExprKind,
@@ -2799,9 +2812,41 @@ where
         sink.push_projection::<Shape, _>(self.projection.clone())?;
         self.base.lower_sources_into(sink)?;
         self.base.lower_filters_into(sink)?;
+        self.base.lower_groups_into(sink)?;
+        self.base.lower_havings_into(sink)?;
         self.base.lower_orders_into(sink)?;
         self.base.lower_bounds_into(sink)
     }
+}
+
+/// Combines a select chain's per-clause runtime params into render order
+/// (`sources ++ filters ++ groups ++ havings ++ orders`), so a chain's [`Params`](SelectAst::Params)
+/// shape matches how placeholders are numbered at render time regardless of the order the builder
+/// methods were called in. Runtime (`param`) placeholders are numbered as they render, while the
+/// `Params` shape is what callers bind against; keeping the two aligned is what makes out-of-order
+/// clause building (e.g. `order_by(..).where_(..)`) bind correctly.
+#[doc(hidden)]
+pub trait RenderOrderedParams {
+    type Params: HList;
+}
+
+impl<Sources, Filters, Groups, Havings, Orders> RenderOrderedParams
+    for (Sources, Filters, Groups, Havings, Orders)
+where
+    Sources: HList + crate::HAppend<Filters>,
+    Filters: HList,
+    Groups: HList,
+    Havings: HList,
+    Orders: HList,
+    <Sources as crate::HAppend<Filters>>::Output: crate::HAppend<Groups>,
+    <<Sources as crate::HAppend<Filters>>::Output as crate::HAppend<Groups>>::Output:
+        crate::HAppend<Havings>,
+    <<<Sources as crate::HAppend<Filters>>::Output as crate::HAppend<Groups>>::Output as crate::HAppend<
+        Havings,
+    >>::Output: crate::HAppend<Orders>,
+{
+    type Params = <<<<Sources as crate::HAppend<Filters>>::Output as crate::HAppend<Groups>>::Output
+        as crate::HAppend<Havings>>::Output as crate::HAppend<Orders>>::Output;
 }
 
 #[doc(hidden)]
@@ -2810,12 +2855,32 @@ where
     Conn: QueryBuilder,
 {
     type Exprs: HList + Clone + ToTuple;
+
+    /// The chain's runtime-parameter shape, in render order. Assembled from the per-clause buckets
+    /// below via [`RenderOrderedParams`] so it stays aligned with placeholder numbering even when
+    /// clauses are added out of SQL order.
     type Params: HList;
+
+    /// Runtime params contributed by `FROM`/`JOIN` sources (the first clauses to render).
+    type SourceParams: HList;
+    /// Runtime params contributed by `WHERE`.
+    type FilterParams: HList;
+    /// Runtime params contributed by `GROUP BY`.
+    type GroupParams: HList;
+    /// Runtime params contributed by `HAVING`.
+    type HavingParams: HList;
+    /// Runtime params contributed by `ORDER BY`.
+    type OrderParams: HList;
 
     /// Which kinds of `ORDER BY` terms this chain has (see [`OrderNone`](crate::OrderNone) /
     /// [`OrderScalar`](crate::OrderScalar) / [`OrderAggregate`](crate::OrderAggregate) /
     /// [`OrderMixed`](crate::OrderMixed)). `select` requires the ordering match the projection class.
     type OrderClass;
+
+    /// Whether this chain has a `GROUP BY` ([`Grouped`](crate::Grouped) /
+    /// [`Ungrouped`](crate::Ungrouped)). A grouped chain relaxes the homogeneous-projection and
+    /// order-compatibility rules `select` otherwise enforces (see [`ValidSelect`](crate::ValidSelect)).
+    type Grouped;
 
     fn depth(&self) -> usize;
 
@@ -2839,6 +2904,14 @@ where
     where
         Sink: SelectSink<Backend = B>;
 
+    fn lower_groups_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>;
+
+    fn lower_havings_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>;
+
     fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
         Sink: SelectSink<Backend = B>;
@@ -2851,8 +2924,11 @@ where
     where
         Sink: SelectSink<Backend = B>,
     {
+        // SQL clause order: WHERE → GROUP BY → HAVING → ORDER BY → LIMIT/OFFSET.
         self.lower_sources_into(sink)?;
         self.lower_filters_into(sink)?;
+        self.lower_groups_into(sink)?;
+        self.lower_havings_into(sink)?;
         self.lower_orders_into(sink)?;
         self.lower_bounds_into(sink)
     }
@@ -2864,7 +2940,13 @@ where
 {
     type Exprs = HNil;
     type Params = HNil;
+    type SourceParams = HNil;
+    type FilterParams = HNil;
+    type GroupParams = HNil;
+    type HavingParams = HNil;
+    type OrderParams = HNil;
     type OrderClass = crate::OrderNone;
+    type Grouped = crate::Ungrouped;
 
     fn depth(&self) -> usize {
         self.depth
@@ -2892,6 +2974,20 @@ where
     }
 
     fn lower_filters_into<Sink>(&self, _sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        Ok(())
+    }
+
+    fn lower_groups_into<Sink>(&self, _sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        Ok(())
+    }
+
+    fn lower_havings_into<Sink>(&self, _sink: &mut Sink) -> Result<(), Sink::Error>
     where
         Sink: SelectSink<Backend = B>,
     {
@@ -2980,7 +3076,13 @@ where
 {
     type Exprs = Exprs;
     type Params = Source::Params;
+    type SourceParams = Source::Params;
+    type FilterParams = HNil;
+    type GroupParams = HNil;
+    type HavingParams = HNil;
+    type OrderParams = HNil;
     type OrderClass = crate::OrderNone;
+    type Grouped = crate::Ungrouped;
 
     fn depth(&self) -> usize {
         self.depth
@@ -3011,6 +3113,20 @@ where
     }
 
     fn lower_filters_into<Sink>(&self, _sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        Ok(())
+    }
+
+    fn lower_groups_into<Sink>(&self, _sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        Ok(())
+    }
+
+    fn lower_havings_into<Sink>(&self, _sink: &mut Sink) -> Result<(), Sink::Error>
     where
         Sink: SelectSink<Backend = B>,
     {
@@ -3056,6 +3172,229 @@ where
     base: Base,
     order: Order<'scope, K, Ast>,
 }
+
+#[doc(hidden)]
+pub struct GroupBy<'scope, Base, K, Ast>
+where
+    K: ExprKind,
+    Ast: ExprAst,
+{
+    base: Base,
+    key: Expr<'scope, K, Ast>,
+}
+
+#[doc(hidden)]
+pub struct Having<'scope, Base, P, PredicateAst>
+where
+    P: PredicateKind,
+    PredicateAst: crate::PredicateAst,
+{
+    base: Base,
+    predicate: Predicate<'scope, P, PredicateAst>,
+}
+
+/// Applies one or more `GROUP BY` keys onto a select chain, producing the nested [`GroupBy`]
+/// node(s). Implemented for a single key (a column or expression) and for tuples of keys, so
+/// [`SourceQuery::group_by`] accepts `group_by(|(u,)| u.id)` or `group_by(|(u,)| (u.id, u.name))`.
+/// Each tuple arity delegates to the tail tuple, so the keys nest left-to-right and their params
+/// thread through the existing single-key [`GroupBy`] node.
+#[doc(hidden)]
+pub trait GroupByKeys<'scope, Base> {
+    type Output;
+
+    fn apply(self, base: Base) -> Self::Output;
+}
+
+// No keys: a no-op, and the recursion base case for the tuple impls below.
+impl<'scope, Base> GroupByKeys<'scope, Base> for () {
+    type Output = Base;
+
+    fn apply(self, base: Base) -> Self::Output {
+        base
+    }
+}
+
+impl<'scope, Base, K, Ast> GroupByKeys<'scope, Base> for Expr<'scope, K, Ast>
+where
+    K: ExprKind,
+    // A grouping item may not contain an aggregate (`GROUP BY COUNT(..)` is rejected by the database).
+    Ast: ExprAst + crate::NonAggregateAst,
+{
+    type Output = GroupBy<'scope, Base, K, Ast>;
+
+    fn apply(self, base: Base) -> Self::Output {
+        GroupBy { base, key: self }
+    }
+}
+
+impl<'scope, Base, K> GroupByKeys<'scope, Base> for ColumnRef<'scope, K>
+where
+    K: ExprKind,
+{
+    type Output = GroupBy<'scope, Base, K, ColumnExprAst<K>>;
+
+    fn apply(self, base: Base) -> Self::Output {
+        GroupBy {
+            base,
+            key: self.into_expr(),
+        }
+    }
+}
+
+macro_rules! impl_group_by_keys_tuple {
+    () => {};
+    ($head:ident $(, $tail:ident)*) => {
+        impl<'scope, Base, $head, $($tail,)*> GroupByKeys<'scope, Base> for ($head, $($tail,)*)
+        where
+            $head: GroupByKeys<'scope, Base>,
+            ($($tail,)*): GroupByKeys<'scope, <$head as GroupByKeys<'scope, Base>>::Output>,
+        {
+            type Output = <($($tail,)*) as GroupByKeys<
+                'scope,
+                <$head as GroupByKeys<'scope, Base>>::Output,
+            >>::Output;
+
+            #[allow(non_snake_case)]
+            fn apply(self, base: Base) -> Self::Output {
+                let ($head, $($tail,)*) = self;
+                GroupByKeys::apply(($($tail,)*), GroupByKeys::apply($head, base))
+            }
+        }
+
+        impl_group_by_keys_tuple!($($tail),*);
+    };
+}
+
+impl_group_by_keys_tuple!(
+    A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15
+);
+
+/// Applies one or more `HAVING` predicates onto a select chain, producing the nested [`Having`]
+/// node(s). Implemented for a single predicate and for tuples of predicates, so
+/// [`SourceQuery::having`] accepts `having(|(u,)| p)` or `having(|(u,)| (p1, p2))` (the predicates
+/// are `AND`-joined). Mirrors [`GroupByKeys`]: each tuple arity delegates to the tail tuple, so the
+/// predicates nest left-to-right and their params thread through the existing single-predicate
+/// [`Having`] node.
+#[doc(hidden)]
+pub trait HavingPredicates<'scope, Base> {
+    type Output;
+
+    fn apply(self, base: Base) -> Self::Output;
+}
+
+// No predicates: a no-op, and the recursion base case for the tuple impls below.
+impl<'scope, Base> HavingPredicates<'scope, Base> for () {
+    type Output = Base;
+
+    fn apply(self, base: Base) -> Self::Output {
+        base
+    }
+}
+
+impl<'scope, Base, P, Ast> HavingPredicates<'scope, Base> for Predicate<'scope, P, Ast>
+where
+    P: PredicateKind,
+    Ast: crate::PredicateAst,
+{
+    type Output = Having<'scope, Base, P, Ast>;
+
+    fn apply(self, base: Base) -> Self::Output {
+        Having {
+            base,
+            predicate: self,
+        }
+    }
+}
+
+macro_rules! impl_having_predicates_tuple {
+    () => {};
+    ($head:ident $(, $tail:ident)*) => {
+        impl<'scope, Base, $head, $($tail,)*> HavingPredicates<'scope, Base> for ($head, $($tail,)*)
+        where
+            $head: HavingPredicates<'scope, Base>,
+            ($($tail,)*): HavingPredicates<'scope, <$head as HavingPredicates<'scope, Base>>::Output>,
+        {
+            type Output = <($($tail,)*) as HavingPredicates<
+                'scope,
+                <$head as HavingPredicates<'scope, Base>>::Output,
+            >>::Output;
+
+            #[allow(non_snake_case)]
+            fn apply(self, base: Base) -> Self::Output {
+                let ($head, $($tail,)*) = self;
+                HavingPredicates::apply(($($tail,)*), HavingPredicates::apply($head, base))
+            }
+        }
+
+        impl_having_predicates_tuple!($($tail),*);
+    };
+}
+
+impl_having_predicates_tuple!(
+    A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15
+);
+
+/// Applies one or more `ORDER BY` terms onto a select chain, producing the nested [`OrderBy`]
+/// node(s). Implemented for a single ordering and for tuples of orderings, so
+/// [`SourceQuery::order_by`] accepts `order_by(|(u,)| u.id.asc())` or
+/// `order_by(|(u,)| (u.id.asc(), u.name.desc()))`. Mirrors [`GroupByKeys`]: each tuple arity
+/// delegates to the tail tuple, so the terms nest left-to-right and their params and order-class
+/// typestate thread through the existing single-term [`OrderBy`] node.
+#[doc(hidden)]
+pub trait OrderByTerms<'scope, Base> {
+    type Output;
+
+    fn apply(self, base: Base) -> Self::Output;
+}
+
+// No terms: a no-op, and the recursion base case for the tuple impls below.
+impl<'scope, Base> OrderByTerms<'scope, Base> for () {
+    type Output = Base;
+
+    fn apply(self, base: Base) -> Self::Output {
+        base
+    }
+}
+
+impl<'scope, Base, K, Ast> OrderByTerms<'scope, Base> for Order<'scope, K, Ast>
+where
+    K: ExprKind,
+    Ast: ExprAst,
+{
+    type Output = OrderBy<'scope, Base, K, Ast>;
+
+    fn apply(self, base: Base) -> Self::Output {
+        OrderBy { base, order: self }
+    }
+}
+
+macro_rules! impl_order_by_terms_tuple {
+    () => {};
+    ($head:ident $(, $tail:ident)*) => {
+        impl<'scope, Base, $head, $($tail,)*> OrderByTerms<'scope, Base> for ($head, $($tail,)*)
+        where
+            $head: OrderByTerms<'scope, Base>,
+            ($($tail,)*): OrderByTerms<'scope, <$head as OrderByTerms<'scope, Base>>::Output>,
+        {
+            type Output = <($($tail,)*) as OrderByTerms<
+                'scope,
+                <$head as OrderByTerms<'scope, Base>>::Output,
+            >>::Output;
+
+            #[allow(non_snake_case)]
+            fn apply(self, base: Base) -> Self::Output {
+                let ($head, $($tail,)*) = self;
+                OrderByTerms::apply(($($tail,)*), OrderByTerms::apply($head, base))
+            }
+        }
+
+        impl_order_by_terms_tuple!($($tail),*);
+    };
+}
+
+impl_order_by_terms_tuple!(
+    A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15
+);
 
 #[doc(hidden)]
 pub struct Limited<Base> {
@@ -3112,11 +3451,30 @@ where
     Base: SelectAst<'conn, 'scope, Conn>,
     P: PredicateKind,
     PredicateAst: crate::PredicateAst,
-    Base::Params: crate::HAppend<PredicateAst::Params>,
+    Base::FilterParams: crate::HAppend<PredicateAst::Params>,
+    (
+        Base::SourceParams,
+        <Base::FilterParams as crate::HAppend<PredicateAst::Params>>::Output,
+        Base::GroupParams,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
 {
     type Exprs = Base::Exprs;
-    type Params = <Base::Params as crate::HAppend<PredicateAst::Params>>::Output;
+    type Params = <(
+        Self::SourceParams,
+        Self::FilterParams,
+        Self::GroupParams,
+        Self::HavingParams,
+        Self::OrderParams,
+    ) as RenderOrderedParams>::Params;
+    type SourceParams = Base::SourceParams;
+    type FilterParams = <Base::FilterParams as crate::HAppend<PredicateAst::Params>>::Output;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
+    type Grouped = Base::Grouped;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3138,7 +3496,14 @@ where
     Base: RenderSelectAst<'conn, 'scope, Conn, B>,
     P: PredicateKind,
     PredicateAst: crate::RenderPredicateAst<B>,
-    Base::Params: crate::HAppend<PredicateAst::Params>,
+    Base::FilterParams: crate::HAppend<PredicateAst::Params>,
+    (
+        Base::SourceParams,
+        <Base::FilterParams as crate::HAppend<PredicateAst::Params>>::Output,
+        Base::GroupParams,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
     B: Backend,
 {
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3154,6 +3519,20 @@ where
     {
         self.base.lower_filters_into(sink)?;
         sink.push_filter(self.predicate.clone())
+    }
+
+    fn lower_groups_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_groups_into(sink)
+    }
+
+    fn lower_havings_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_havings_into(sink)
     }
 
     fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3178,14 +3557,33 @@ where
     Base: SelectAst<'conn, 'scope, Conn>,
     K: ExprKind,
     Ast: ExprAst + crate::AstProjectionClass,
-    Base::Params: crate::HAppend<Ast::Params>,
+    Base::OrderParams: crate::HAppend<Ast::Params>,
     Base::OrderClass: crate::ExtendOrderClass<<Ast as crate::AstProjectionClass>::Class>,
+    (
+        Base::SourceParams,
+        Base::FilterParams,
+        Base::GroupParams,
+        Base::HavingParams,
+        <Base::OrderParams as crate::HAppend<Ast::Params>>::Output,
+    ): RenderOrderedParams,
 {
     type Exprs = Base::Exprs;
-    type Params = <Base::Params as crate::HAppend<Ast::Params>>::Output;
+    type Params = <(
+        Self::SourceParams,
+        Self::FilterParams,
+        Self::GroupParams,
+        Self::HavingParams,
+        Self::OrderParams,
+    ) as RenderOrderedParams>::Params;
+    type SourceParams = Base::SourceParams;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = <Base::OrderParams as crate::HAppend<Ast::Params>>::Output;
     type OrderClass = <Base::OrderClass as crate::ExtendOrderClass<
         <Ast as crate::AstProjectionClass>::Class,
     >>::Output;
+    type Grouped = Base::Grouped;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3207,8 +3605,15 @@ where
     Base: RenderSelectAst<'conn, 'scope, Conn, B>,
     K: ExprKind,
     Ast: RenderAst<B> + crate::AstProjectionClass,
-    Base::Params: crate::HAppend<Ast::Params>,
+    Base::OrderParams: crate::HAppend<Ast::Params>,
     Base::OrderClass: crate::ExtendOrderClass<<Ast as crate::AstProjectionClass>::Class>,
+    (
+        Base::SourceParams,
+        Base::FilterParams,
+        Base::GroupParams,
+        Base::HavingParams,
+        <Base::OrderParams as crate::HAppend<Ast::Params>>::Output,
+    ): RenderOrderedParams,
     B: Backend,
 {
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3223,6 +3628,20 @@ where
         Sink: SelectSink<Backend = B>,
     {
         self.base.lower_filters_into(sink)
+    }
+
+    fn lower_groups_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_groups_into(sink)
+    }
+
+    fn lower_havings_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_havings_into(sink)
     }
 
     fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3241,6 +3660,227 @@ where
     }
 }
 
+impl<'conn, 'scope, Conn, Base, K, Ast> SelectAst<'conn, 'scope, Conn>
+    for GroupBy<'scope, Base, K, Ast>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    K: ExprKind,
+    Ast: ExprAst,
+    Base::GroupParams: crate::HAppend<Ast::Params>,
+    (
+        Base::SourceParams,
+        Base::FilterParams,
+        <Base::GroupParams as crate::HAppend<Ast::Params>>::Output,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
+{
+    type Exprs = Base::Exprs;
+    type Params = <(
+        Self::SourceParams,
+        Self::FilterParams,
+        Self::GroupParams,
+        Self::HavingParams,
+        Self::OrderParams,
+    ) as RenderOrderedParams>::Params;
+    type SourceParams = Base::SourceParams;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = <Base::GroupParams as crate::HAppend<Ast::Params>>::Output;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
+    type OrderClass = Base::OrderClass;
+    type Grouped = crate::Grouped;
+
+    fn depth(&self) -> usize {
+        self.base.depth()
+    }
+
+    fn connection(&self) -> &'conn Conn {
+        self.base.connection()
+    }
+
+    fn exprs(&self) -> Self::Exprs {
+        self.base.exprs()
+    }
+}
+
+impl<'conn, 'scope, Conn, Base, K, Ast, B> RenderSelectAst<'conn, 'scope, Conn, B>
+    for GroupBy<'scope, Base, K, Ast>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: RenderSelectAst<'conn, 'scope, Conn, B>,
+    K: ExprKind,
+    Ast: RenderAst<B>,
+    Base::GroupParams: crate::HAppend<Ast::Params>,
+    (
+        Base::SourceParams,
+        Base::FilterParams,
+        <Base::GroupParams as crate::HAppend<Ast::Params>>::Output,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
+    B: Backend,
+{
+    fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_sources_into(sink)
+    }
+
+    fn lower_filters_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_filters_into(sink)
+    }
+
+    fn lower_groups_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_groups_into(sink)?;
+        sink.push_group(&self.key)
+    }
+
+    fn lower_havings_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_havings_into(sink)
+    }
+
+    fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_orders_into(sink)
+    }
+
+    fn lower_bounds_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_bounds_into(sink)
+    }
+}
+
+impl<'conn, 'scope, Conn, Base, P, PredicateAst> SelectAst<'conn, 'scope, Conn>
+    for Having<'scope, Base, P, PredicateAst>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    P: PredicateKind,
+    PredicateAst: crate::PredicateAst,
+    Base::HavingParams: crate::HAppend<PredicateAst::Params>,
+    PredicateAst: crate::PredicateColumns,
+    Base::Grouped: crate::HavingTransition<<PredicateAst as crate::PredicateColumns>::Columns>,
+    (
+        Base::SourceParams,
+        Base::FilterParams,
+        Base::GroupParams,
+        <Base::HavingParams as crate::HAppend<PredicateAst::Params>>::Output,
+        Base::OrderParams,
+    ): RenderOrderedParams,
+{
+    type Exprs = Base::Exprs;
+    type Params = <(
+        Self::SourceParams,
+        Self::FilterParams,
+        Self::GroupParams,
+        Self::HavingParams,
+        Self::OrderParams,
+    ) as RenderOrderedParams>::Params;
+    type SourceParams = Base::SourceParams;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = <Base::HavingParams as crate::HAppend<PredicateAst::Params>>::Output;
+    type OrderParams = Base::OrderParams;
+    type OrderClass = Base::OrderClass;
+    // A bare `HAVING` (no `GROUP BY`) makes this a whole-table aggregate; if the predicate references
+    // a bare column the chain becomes `AggregateNeedsGroupBy` until a `group_by` rescues it. A
+    // `GROUP BY` already present keeps the chain `Grouped`.
+    type Grouped = <Base::Grouped as crate::HavingTransition<
+        <PredicateAst as crate::PredicateColumns>::Columns,
+    >>::Output;
+
+    fn depth(&self) -> usize {
+        self.base.depth()
+    }
+
+    fn connection(&self) -> &'conn Conn {
+        self.base.connection()
+    }
+
+    fn exprs(&self) -> Self::Exprs {
+        self.base.exprs()
+    }
+}
+
+impl<'conn, 'scope, Conn, Base, P, PredicateAst, B> RenderSelectAst<'conn, 'scope, Conn, B>
+    for Having<'scope, Base, P, PredicateAst>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: RenderSelectAst<'conn, 'scope, Conn, B>,
+    P: PredicateKind,
+    PredicateAst: crate::RenderPredicateAst<B>,
+    Base::HavingParams: crate::HAppend<PredicateAst::Params>,
+    PredicateAst: crate::PredicateColumns,
+    Base::Grouped: crate::HavingTransition<<PredicateAst as crate::PredicateColumns>::Columns>,
+    (
+        Base::SourceParams,
+        Base::FilterParams,
+        Base::GroupParams,
+        <Base::HavingParams as crate::HAppend<PredicateAst::Params>>::Output,
+        Base::OrderParams,
+    ): RenderOrderedParams,
+    B: Backend,
+{
+    fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_sources_into(sink)
+    }
+
+    fn lower_filters_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_filters_into(sink)
+    }
+
+    fn lower_groups_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_groups_into(sink)
+    }
+
+    fn lower_havings_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_havings_into(sink)?;
+        sink.push_having(self.predicate.clone())
+    }
+
+    fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_orders_into(sink)
+    }
+
+    fn lower_bounds_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_bounds_into(sink)
+    }
+}
+
 impl<'conn, 'scope, Conn, Base> SelectAst<'conn, 'scope, Conn> for Limited<Base>
 where
     Conn: QueryBuilder + 'conn,
@@ -3248,7 +3888,13 @@ where
 {
     type Exprs = Base::Exprs;
     type Params = Base::Params;
+    type SourceParams = Base::SourceParams;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
+    type Grouped = Base::Grouped;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3283,6 +3929,20 @@ where
         self.base.lower_filters_into(sink)
     }
 
+    fn lower_groups_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_groups_into(sink)
+    }
+
+    fn lower_havings_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_havings_into(sink)
+    }
+
     fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
         Sink: SelectSink<Backend = B>,
@@ -3306,7 +3966,13 @@ where
 {
     type Exprs = Base::Exprs;
     type Params = Base::Params;
+    type SourceParams = Base::SourceParams;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
+    type Grouped = Base::Grouped;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3341,6 +4007,20 @@ where
         self.base.lower_filters_into(sink)
     }
 
+    fn lower_groups_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_groups_into(sink)
+    }
+
+    fn lower_havings_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_havings_into(sink)
+    }
+
     fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
         Sink: SelectSink<Backend = B>,
@@ -3366,11 +4046,30 @@ where
     <Base::Exprs as PushBack<Expr>>::Output: Clone + ToTuple,
     Expr: Clone,
     Source: SourceSpec,
-    Base::Params: crate::HAppend<Source::Params>,
+    Base::SourceParams: crate::HAppend<Source::Params>,
+    (
+        <Base::SourceParams as crate::HAppend<Source::Params>>::Output,
+        Base::FilterParams,
+        Base::GroupParams,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
 {
     type Exprs = <Base::Exprs as PushBack<Expr>>::Output;
-    type Params = <Base::Params as crate::HAppend<Source::Params>>::Output;
+    type Params = <(
+        Self::SourceParams,
+        Self::FilterParams,
+        Self::GroupParams,
+        Self::HavingParams,
+        Self::OrderParams,
+    ) as RenderOrderedParams>::Params;
+    type SourceParams = <Base::SourceParams as crate::HAppend<Source::Params>>::Output;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
+    type Grouped = Base::Grouped;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3394,7 +4093,14 @@ where
     <Base::Exprs as PushBack<Expr>>::Output: Clone + ToTuple,
     Expr: Clone,
     Source: RenderSourceSpec<B>,
-    Base::Params: crate::HAppend<Source::Params>,
+    Base::SourceParams: crate::HAppend<Source::Params>,
+    (
+        <Base::SourceParams as crate::HAppend<Source::Params>>::Output,
+        Base::FilterParams,
+        Base::GroupParams,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
     B: Backend,
 {
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3410,6 +4116,20 @@ where
         Sink: SelectSink<Backend = B>,
     {
         self.base.lower_filters_into(sink)
+    }
+
+    fn lower_groups_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_groups_into(sink)
+    }
+
+    fn lower_havings_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_havings_into(sink)
     }
 
     fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3436,11 +4156,30 @@ where
     <Base::Exprs as PushBack<Expr>>::Output: Clone + ToTuple,
     Expr: Clone,
     Source: SourceSpec,
-    Base::Params: crate::HAppend<Source::Params>,
+    Base::SourceParams: crate::HAppend<Source::Params>,
+    (
+        <Base::SourceParams as crate::HAppend<Source::Params>>::Output,
+        Base::FilterParams,
+        Base::GroupParams,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
 {
     type Exprs = <Base::Exprs as PushBack<Expr>>::Output;
-    type Params = <Base::Params as crate::HAppend<Source::Params>>::Output;
+    type Params = <(
+        Self::SourceParams,
+        Self::FilterParams,
+        Self::GroupParams,
+        Self::HavingParams,
+        Self::OrderParams,
+    ) as RenderOrderedParams>::Params;
+    type SourceParams = <Base::SourceParams as crate::HAppend<Source::Params>>::Output;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
+    type Grouped = Base::Grouped;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3464,7 +4203,14 @@ where
     <Base::Exprs as PushBack<Expr>>::Output: Clone + ToTuple,
     Expr: Clone,
     Source: RenderSourceSpec<B>,
-    Base::Params: crate::HAppend<Source::Params>,
+    Base::SourceParams: crate::HAppend<Source::Params>,
+    (
+        <Base::SourceParams as crate::HAppend<Source::Params>>::Output,
+        Base::FilterParams,
+        Base::GroupParams,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
     B: Backend,
 {
     fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3480,6 +4226,20 @@ where
         Sink: SelectSink<Backend = B>,
     {
         self.base.lower_filters_into(sink)
+    }
+
+    fn lower_groups_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_groups_into(sink)
+    }
+
+    fn lower_havings_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_havings_into(sink)
     }
 
     fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3516,16 +4276,45 @@ where
         }
     }
 
-    fn order_by<K, Ast>(
+    /// Add one or more `ORDER BY` terms. The closure may return a single ordering or a tuple of
+    /// them (`order_by(|(u,)| (u.id.asc(), u.name.desc()))` -> `ORDER BY id ASC, name DESC`);
+    /// chaining `order_by` also accumulates terms.
+    fn order_by<Orders>(
         self,
-        order: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> Order<'scope, K, Ast>,
-    ) -> OrderBy<'scope, Self, K, Ast>
+        orders: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> Orders,
+    ) -> Orders::Output
     where
-        K: ExprKind,
-        Ast: ExprAst,
+        Orders: OrderByTerms<'scope, Self>,
     {
-        let order = order(self.exprs().to_tuple());
-        OrderBy { base: self, order }
+        orders(self.exprs().to_tuple()).apply(self)
+    }
+
+    /// Add one or more `GROUP BY` keys. The closure may return a single key (a column or
+    /// expression) or a tuple of keys (`group_by(|(u,)| (u.id, u.name))` -> `GROUP BY id, name`);
+    /// chaining `group_by` also accumulates keys. A grouped query may select grouping keys
+    /// alongside aggregates (the database validates that non-aggregate projected/ordered columns
+    /// are grouping keys).
+    fn group_by<Keys>(
+        self,
+        keys: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> Keys,
+    ) -> Keys::Output
+    where
+        Keys: GroupByKeys<'scope, Self>,
+    {
+        keys(self.exprs().to_tuple()).apply(self)
+    }
+
+    /// Add one or more `HAVING` predicates. The closure may return a single predicate or a tuple of
+    /// predicates (`having(|(u,)| (p1, p2))` -> `HAVING p1 AND p2`); chaining `having` also
+    /// accumulates predicates. Unlike `where_`, `HAVING` may reference aggregates.
+    fn having<Preds>(
+        self,
+        predicates: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> Preds,
+    ) -> Preds::Output
+    where
+        Preds: HavingPredicates<'scope, Self>,
+    {
+        predicates(self.exprs().to_tuple()).apply(self)
     }
 
     fn limit(self, rows: usize) -> Limited<Self> {
@@ -3561,13 +4350,11 @@ where
         projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
     ) -> Conn::Select<'conn, 'scope, Self, <P as ReturningProjection<'scope>>::Shape, P>
     where
-        // `ProjectionClass` rejects a SELECT list that mixes scalar columns and aggregates (it has
-        // no impl for a mixed tuple), since that is invalid without `GROUP BY`. An all-scalar or
-        // all-aggregate list is fine.
-        P: ReturningProjection<'scope> + Projectable + crate::ProjectionClass,
-        // ...and an aggregate-only projection cannot be ordered by a scalar (ungrouped) column.
-        <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass:
-            crate::OrderCompatibleWith<<P as crate::ProjectionClass>::Class>,
+        P: ReturningProjection<'scope> + Projectable,
+        // For an ungrouped query `ValidSelect` requires a homogeneous projection (no mixing of a
+        // bare column and an aggregate) with compatible ordering; a `GROUP BY` lifts that.
+        <Self as SelectAst<'conn, 'scope, Conn>>::Grouped:
+            crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
         <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
     {
