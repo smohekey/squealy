@@ -484,10 +484,10 @@ pub use expr::{
     SqlNumber, SqlSum, SqlText, SubtractExpr, SumExpr, param, render_ddl_predicate,
 };
 pub use expr::{
-    AggregateProjection, AggregateTerm, Aggregated, AstProjectionClass, ColumnTerm, CombineTerm,
-    ConstantTerm, ExtendOrderClass, Grouped, HavingState, OrderAggregate, OrderCompatibleWith,
-    OrderMixed, OrderNone, OrderScalar, ProjectionClass, TermProjectionClass, Ungrouped,
-    ValidSelect,
+    AggregateContextAst, AggregateContextPredicate, AggregateProjection, AggregateTerm, Aggregated,
+    AstProjectionClass, ColumnTerm, CombineTerm, ConstantTerm, ExtendOrderClass, Grouped,
+    HavingState, OrderAggregate, OrderCompatibleWith, OrderMixed, OrderNone, OrderScalar,
+    ProjectionClass, TermProjectionClass, Ungrouped, ValidHavingPredicate, ValidSelect,
 };
 pub use foreign_key::ForeignKey;
 pub use index::Index;

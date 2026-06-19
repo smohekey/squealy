@@ -3774,7 +3774,7 @@ where
     P: PredicateKind,
     PredicateAst: crate::PredicateAst,
     Base::HavingParams: crate::HAppend<PredicateAst::Params>,
-    Base::Grouped: crate::HavingState,
+    Base::Grouped: crate::HavingState + crate::ValidHavingPredicate<PredicateAst>,
     (
         Base::SourceParams,
         Base::FilterParams,
@@ -3822,7 +3822,7 @@ where
     P: PredicateKind,
     PredicateAst: crate::RenderPredicateAst<B>,
     Base::HavingParams: crate::HAppend<PredicateAst::Params>,
-    Base::Grouped: crate::HavingState,
+    Base::Grouped: crate::HavingState + crate::ValidHavingPredicate<PredicateAst>,
     (
         Base::SourceParams,
         Base::FilterParams,

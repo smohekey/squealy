@@ -1,0 +1,24 @@
+error[E0599]: the method `select` exists for struct `squealy::query::Having<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, GreaterThanPredicate<UserId, {integer}>, squealy::ComparePredicateAst<squealy::ColumnExprAst<UserId>, squealy::LiteralExprAst<{integer}>>>`, but its trait bounds were not satisfied
+  --> tests/compile_fail/bare_column_having_predicate_rejected_without_group_by.rs:17:10
+   |
+14 |       let _query = TestConnection
+   |  __________________-
+15 | |         .from::<User>()
+16 | |         .having(|(user,)| user.id.greater_than(0))
+17 | |         .select(|(user,)| user.id.count());
+   | |         -^^^^^^ method cannot be called due to unsatisfied trait bounds
+   | |_________|
+   |
+   |
+  ::: src/query.rs
+   |
+   |   pub struct Having<'scope, Base, P, PredicateAst>
+   |   ------------------------------------------------ doesn't satisfy `_: SelectAst<'_, '_, _>` or `_: SourceQuery<'_, '_, _>`
+   |
+   = note: the following trait bounds were not satisfied:
+           `squealy::query::Having<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, GreaterThanPredicate<UserId, {integer}>, squealy::ComparePredicateAst<squealy::ColumnExprAst<UserId>, squealy::LiteralExprAst<{integer}>>>: squealy::SelectAst<'_, '_, _>`
+           which is required by `squealy::query::Having<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, GreaterThanPredicate<UserId, {integer}>, squealy::ComparePredicateAst<squealy::ColumnExprAst<UserId>, squealy::LiteralExprAst<{integer}>>>: squealy::SourceQuery<'_, '_, _>`
+           `&squealy::query::Having<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, GreaterThanPredicate<UserId, {integer}>, squealy::ComparePredicateAst<squealy::ColumnExprAst<UserId>, squealy::LiteralExprAst<{integer}>>>: squealy::SelectAst<'_, '_, _>`
+           which is required by `&squealy::query::Having<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, GreaterThanPredicate<UserId, {integer}>, squealy::ComparePredicateAst<squealy::ColumnExprAst<UserId>, squealy::LiteralExprAst<{integer}>>>: squealy::SourceQuery<'_, '_, _>`
+           `&mut squealy::query::Having<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, GreaterThanPredicate<UserId, {integer}>, squealy::ComparePredicateAst<squealy::ColumnExprAst<UserId>, squealy::LiteralExprAst<{integer}>>>: squealy::SelectAst<'_, '_, _>`
+           which is required by `&mut squealy::query::Having<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, GreaterThanPredicate<UserId, {integer}>, squealy::ComparePredicateAst<squealy::ColumnExprAst<UserId>, squealy::LiteralExprAst<{integer}>>>: squealy::SourceQuery<'_, '_, _>`

@@ -758,6 +758,21 @@ fn test_group_by_having_full_clause_order() {
 }
 
 #[test]
+fn test_grouped_having_allows_grouping_key_predicate() {
+    // With a GROUP BY present, a HAVING predicate may reference a grouping key (a bare column) —
+    // the database validates it is grouped. Without GROUP BY this would be rejected at compile time.
+    let q = TestConnection
+        .from::<User>()
+        .group_by(|(user,)| user.id)
+        .having(|(user,)| user.id.greater_than(0))
+        .select(|(user,)| user.id);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 GROUP BY q0_0.id HAVING (q0_0.id > ?)"
+    );
+}
+
+#[test]
 fn test_having_without_group_by_on_whole_table_aggregate() {
     // `HAVING` is valid without `GROUP BY` over a whole-table aggregate, and may use aggregates.
     let q = TestConnection

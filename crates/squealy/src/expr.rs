@@ -466,6 +466,23 @@ where
 {
 }
 
+/// Marker for expression ASTs that contain no *bare* (ungrouped) column — only aggregates, literals,
+/// and params (and arithmetic of those). The dual of [`NonAggregateAst`]: where a `WHERE` operand
+/// must be aggregate-free, a `HAVING` operand on a whole-table-aggregate query (a `HAVING` with no
+/// `GROUP BY`) must be column-free, since a bare column belongs to no group. Not implemented for
+/// [`ColumnExprAst`], so a bare column is rejected there.
+pub trait AggregateContextAst {}
+
+impl<Operand> AggregateContextAst for AggregateExprAst<Operand> {}
+impl<K> AggregateContextAst for LiteralExprAst<K> where K: ExprKind {}
+impl<K> AggregateContextAst for ParamExprAst<K> {}
+impl<Left, Right> AggregateContextAst for BinaryExprAst<Left, Right>
+where
+    Left: AggregateContextAst,
+    Right: AggregateContextAst,
+{
+}
+
 /// Classification of a projection element as a plain scalar value (see [`ProjectionClass`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScalarProjection {}
@@ -728,6 +745,25 @@ impl HavingState for Aggregated {
     type Output = Aggregated;
 }
 
+/// Validates a `HAVING` predicate against a chain's [grouping state](Ungrouped). A `HAVING` with no
+/// `GROUP BY` (an [`Ungrouped`] or [`Aggregated`] base) is a whole-table aggregate, so its predicate
+/// must be column-free ([`AggregateContextPredicate`]) — a bare column belongs to no group. A
+/// [`Grouped`] chain lifts that: the database validates that bare columns are grouping keys.
+#[doc(hidden)]
+pub trait ValidHavingPredicate<PredicateAst> {}
+
+impl<PredicateAst> ValidHavingPredicate<PredicateAst> for Grouped {}
+
+impl<PredicateAst> ValidHavingPredicate<PredicateAst> for Ungrouped where
+    PredicateAst: AggregateContextPredicate
+{
+}
+
+impl<PredicateAst> ValidHavingPredicate<PredicateAst> for Aggregated where
+    PredicateAst: AggregateContextPredicate
+{
+}
+
 /// Marker for predicate ASTs whose expression operands are all aggregate-free (see
 /// [`NonAggregateAst`]). `where_` requires it, keeping aggregates out of `WHERE` clauses.
 pub trait NonAggregatePredicate {}
@@ -776,6 +812,64 @@ where
 }
 
 impl<P> NonAggregatePredicate for NotPredicateAst<P> where P: NonAggregatePredicate {}
+
+/// Marker for predicate ASTs whose expression operands contain no bare column (see
+/// [`AggregateContextAst`]). A whole-table-aggregate `HAVING` (a `HAVING` with no `GROUP BY`)
+/// requires it, mirroring how the projection must be aggregate-only there.
+pub trait AggregateContextPredicate {}
+
+impl<Left, Right> AggregateContextPredicate for ComparePredicateAst<Left, Right>
+where
+    Left: AggregateContextAst,
+    Right: AggregateContextAst,
+{
+}
+
+impl<Left, Right> AggregateContextPredicate for LikePredicateAst<Left, Right>
+where
+    Left: AggregateContextAst,
+    Right: AggregateContextAst,
+{
+}
+
+impl<Operand, V> AggregateContextPredicate for InPredicateAst<Operand, V> where
+    Operand: AggregateContextAst
+{
+}
+
+impl<Operand, Lo, Hi> AggregateContextPredicate for BetweenPredicateAst<Operand, Lo, Hi>
+where
+    Operand: AggregateContextAst,
+    Lo: AggregateContextAst,
+    Hi: AggregateContextAst,
+{
+}
+
+impl<Operand> AggregateContextPredicate for NullCheckPredicateAst<Operand> where
+    Operand: AggregateContextAst
+{
+}
+
+impl<Operand> AggregateContextPredicate for BoolTestPredicateAst<Operand> where
+    Operand: AggregateContextAst
+{
+}
+
+impl<Left, Right> AggregateContextPredicate for AndPredicateAst<Left, Right>
+where
+    Left: AggregateContextPredicate,
+    Right: AggregateContextPredicate,
+{
+}
+
+impl<Left, Right> AggregateContextPredicate for OrPredicateAst<Left, Right>
+where
+    Left: AggregateContextPredicate,
+    Right: AggregateContextPredicate,
+{
+}
+
+impl<P> AggregateContextPredicate for NotPredicateAst<P> where P: AggregateContextPredicate {}
 
 #[doc(hidden)]
 pub trait ExprVisitor {
