@@ -100,6 +100,8 @@ struct TestSelectSink<'writer, Writer> {
     columns: usize,
     sources: usize,
     filters: usize,
+    groups: usize,
+    havings: usize,
     orders: usize,
     limit: Option<usize>,
     offset: Option<usize>,
@@ -116,6 +118,8 @@ where
             columns: 0,
             sources: 0,
             filters: 0,
+            groups: 0,
+            havings: 0,
             orders: 0,
             limit: None,
             offset: None,
@@ -184,6 +188,34 @@ where
             self.writer.write_all(b" AND ")?;
         }
         self.filters += 1;
+        write_predicate_value(&predicate, self.writer)
+    }
+
+    fn push_group<K, Ast>(&mut self, key: &Expr<'_, K, Ast>) -> io::Result<()>
+    where
+        K: ExprKind,
+        Ast: RenderAst<crate::TestBackend>,
+    {
+        if self.groups == 0 {
+            self.writer.write_all(b" GROUP BY ")?;
+        } else {
+            self.writer.write_all(b", ")?;
+        }
+        self.groups += 1;
+        write_expr_value(key, self.writer)
+    }
+
+    fn push_having<P, Ast>(&mut self, predicate: Predicate<'_, P, Ast>) -> io::Result<()>
+    where
+        P: PredicateKind,
+        Ast: RenderPredicateAst<crate::TestBackend>,
+    {
+        if self.havings == 0 {
+            self.writer.write_all(b" HAVING ")?;
+        } else {
+            self.writer.write_all(b" AND ")?;
+        }
+        self.havings += 1;
         write_predicate_value(&predicate, self.writer)
     }
 

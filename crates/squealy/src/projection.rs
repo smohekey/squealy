@@ -2,9 +2,10 @@ use std::borrow::Cow;
 use std::marker::PhantomData;
 
 use crate::{
-    AddExpr, AvgExpr, ColumnNullableValue, ColumnRef, ColumnValue, CountExpr, Decode, DivideExpr,
-    Expr, ExprAst, ExprKind, MaxExpr, MinExpr, MultiplyExpr, Nullable, ProjectionClass,
-    ReturningProjection, ScalarProjection, SchemaTable, SourceAlias, SubtractExpr, SumExpr,
+    AddExpr, AvgExpr, ColumnFree, ColumnNullableValue, ColumnRef, ColumnValue, CountExpr, Decode,
+    DivideExpr, Expr, ExprAst, ExprKind, MaxExpr, MinExpr, MultiplyExpr, Nullable, ProjectionClass,
+    ProjectionColumns, ReturningProjection, ScalarProjection, SchemaTable, SourceAlias,
+    SubtractExpr, SumExpr,
 };
 
 /// A projection shape that can produce scoped expression values for a SQL alias.
@@ -266,6 +267,18 @@ where
     T: ExprKind<Value = T>,
 {
     type Class = ScalarProjection;
+}
+
+impl ProjectionColumns for () {
+    type Columns = ColumnFree;
+}
+
+// A bare value literal is a constant, so it is column-free. (Mirrors the `ProjectionClass` blanket.)
+impl<T> ProjectionColumns for T
+where
+    T: ExprKind<Value = T>,
+{
+    type Columns = ColumnFree;
 }
 
 impl<B> RenderProjectable<B> for ()

@@ -1,0 +1,16 @@
+error[E0277]: the trait bound `squealy::AggregateExprAst<squealy::ColumnExprAst<UserId>>: NonAggregateAst` is not satisfied
+  --> tests/compile_fail/aggregate_group_by_key_rejected.rs:15:10
+   |
+15 |         .group_by(|(user,)| user.id.count())
+   |          ^^^^^^^^ the trait `NonAggregateAst` is not implemented for `squealy::AggregateExprAst<squealy::ColumnExprAst<UserId>>`
+   |
+help: the trait `squealy::query::GroupByKeys<'_, Base>` is implemented for `Expr<'_, K, Ast>`
+  --> src/query.rs
+   |
+   | / impl<'scope, Base, K, Ast> GroupByKeys<'scope, Base> for Expr<'scope, K, Ast>
+   | | where
+   | |     K: ExprKind,
+   | |     // A grouping item may not contain an aggregate (`GROUP BY COUNT(..)` is rejected by the database).
+   | |     Ast: ExprAst + crate::NonAggregateAst,
+   | |__________________________________________^
+   = note: required for `Expr<'_, CountExpr<UserId>, squealy::AggregateExprAst<squealy::ColumnExprAst<UserId>>>` to implement `squealy::query::GroupByKeys<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>>`

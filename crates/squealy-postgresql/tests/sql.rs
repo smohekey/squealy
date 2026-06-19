@@ -809,6 +809,22 @@ fn postgres_count_and_sum_render_as_aggregates() {
 }
 
 #[test]
+fn postgres_group_by_having_renders_with_numbered_placeholders() {
+    let q = Postgres
+        .from::<User>()
+        .where_(|user| user.id.greater_than(0))
+        .group_by(|(user,)| user.name)
+        .having(|(user,)| user.id.count().greater_than(1i64))
+        .select(|(user,)| (user.name, user.id.count()));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.\"name\" AS \"t0_name\", COUNT(q0_0.\"id\") AS \"t1_expr\" \
+         FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"id\" > $1) GROUP BY q0_0.\"name\" \
+         HAVING (COUNT(q0_0.\"id\") > $2)"
+    );
+}
+
+#[test]
 fn postgres_avg_min_max_render_as_aggregates() {
     let q = Postgres
         .from::<User>()

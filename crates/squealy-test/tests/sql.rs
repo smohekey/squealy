@@ -719,3 +719,195 @@ fn test_aggregate_nullable_operand_types_unwrap() {
     let min: <MinExpr<Nullable<i32>> as ExprKind>::Value = Some(0i32);
     let _: Option<i32> = min;
 }
+
+#[test]
+fn test_group_by_allows_mixed_projection() {
+    // A grouped query may select a grouping key alongside an aggregate (rejected without GROUP BY).
+    let q = TestConnection
+        .from::<User>()
+        .group_by(|(user,)| user.name)
+        .select(|(user,)| (user.name, user.id.count()));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.name AS t0_name, COUNT(q0_0.id) AS t1_expr \
+         FROM public.users AS q0_0 GROUP BY q0_0.name"
+    );
+}
+
+#[test]
+fn test_group_by_having_full_clause_order() {
+    // WHERE -> GROUP BY (multiple keys) -> HAVING (aggregate) -> ORDER BY, with params in order.
+    let q = TestConnection
+        .from::<User>()
+        .where_(|user| user.id.greater_than(0))
+        .group_by(|(user,)| user.id)
+        .group_by(|(user,)| user.name)
+        .having(|(user,)| user.id.count().greater_than(1i64))
+        .order_by(|(user,)| user.name.asc())
+        .select(|(user,)| (user.id, user.name, user.id.count()));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS t0_id, q0_0.name AS t1_name, COUNT(q0_0.id) AS t2_expr \
+         FROM public.users AS q0_0 WHERE (q0_0.id > ?) GROUP BY q0_0.id, q0_0.name \
+         HAVING (COUNT(q0_0.id) > ?) ORDER BY q0_0.name ASC"
+    );
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![TestParam::Int(0), TestParam::Int(1)]
+    );
+}
+
+#[test]
+fn test_grouped_having_allows_grouping_key_predicate() {
+    // With a GROUP BY present, a HAVING predicate may reference a grouping key (a bare column) —
+    // the database validates it is grouped. Without GROUP BY this would be rejected at compile time.
+    let q = TestConnection
+        .from::<User>()
+        .group_by(|(user,)| user.id)
+        .having(|(user,)| user.id.greater_than(0))
+        .select(|(user,)| user.id);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 GROUP BY q0_0.id HAVING (q0_0.id > ?)"
+    );
+}
+
+#[test]
+fn test_having_before_group_by_is_order_independent() {
+    // A bare-column HAVING predicate is rescued by a *later* group_by: building `having` before
+    // `group_by` compiles and renders identically to the canonical order (the renderer always emits
+    // GROUP BY before HAVING). Validation is based on the final chain state, not call order.
+    let reversed = TestConnection
+        .from::<User>()
+        .having(|(user,)| user.id.greater_than(0))
+        .group_by(|(user,)| user.id)
+        .select(|(user,)| user.id);
+    let canonical = TestConnection
+        .from::<User>()
+        .group_by(|(user,)| user.id)
+        .having(|(user,)| user.id.greater_than(0))
+        .select(|(user,)| user.id);
+    assert_eq!(
+        reversed.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 GROUP BY q0_0.id HAVING (q0_0.id > ?)"
+    );
+    assert_eq!(reversed.to_sql(), canonical.to_sql());
+}
+
+#[test]
+fn test_whole_table_having_allows_constant_projection() {
+    // A whole-table-aggregate query (HAVING, no GROUP BY) may project constants alongside
+    // aggregates — they do not depend on an ungrouped row. Only bare columns are rejected there.
+    let q = TestConnection
+        .from::<User>()
+        .having(|(user,)| user.id.count().greater_than(0i64))
+        .select(|(user,)| (1, user.id.count()));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT ? AS t0_expr, COUNT(q0_0.id) AS t1_expr \
+         FROM public.users AS q0_0 HAVING (COUNT(q0_0.id) > ?)"
+    );
+}
+
+#[test]
+fn test_having_without_group_by_on_whole_table_aggregate() {
+    // `HAVING` is valid without `GROUP BY` over a whole-table aggregate, and may use aggregates.
+    let q = TestConnection
+        .from::<User>()
+        .having(|(user,)| user.id.count().greater_than(0i64))
+        .select(|(user,)| user.id.count());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT COUNT(q0_0.id) AS expr FROM public.users AS q0_0 HAVING (COUNT(q0_0.id) > ?)"
+    );
+}
+
+#[test]
+fn test_group_by_tuple_matches_chained_keys() {
+    // A tuple of keys in one call renders identically to chaining `group_by`.
+    let tuple = TestConnection
+        .from::<User>()
+        .group_by(|(user,)| (user.id, user.name))
+        .select(|(user,)| (user.id, user.name, user.id.count()));
+    let chained = TestConnection
+        .from::<User>()
+        .group_by(|(user,)| user.id)
+        .group_by(|(user,)| user.name)
+        .select(|(user,)| (user.id, user.name, user.id.count()));
+    assert_eq!(
+        tuple.to_sql(),
+        "SELECT q0_0.id AS t0_id, q0_0.name AS t1_name, COUNT(q0_0.id) AS t2_expr \
+         FROM public.users AS q0_0 GROUP BY q0_0.id, q0_0.name"
+    );
+    assert_eq!(tuple.to_sql(), chained.to_sql());
+}
+
+#[test]
+fn test_runtime_params_use_render_order_regardless_of_build_order() {
+    // Regression: runtime `param` placeholders are numbered as they render (WHERE before ORDER BY),
+    // so the `Params` shape callers bind against must be render-ordered (the WHERE param, then the
+    // ORDER BY param) no matter what order `where_`/`order_by` were called in. Both build orders must
+    // therefore share the exact same `Params` shape — pinned here at the type level.
+    fn assert_filter_then_order_shape<'conn, 'scope, Q>(_query: &Q)
+    where
+        Q: SelectAst<'conn, 'scope, TestConnection, Params = HCons<String, HCons<i32, HNil>>>,
+    {
+    }
+
+    let canonical = TestConnection
+        .from::<User>()
+        .where_(|user| user.name.equals(param::<UserName>()))
+        .order_by(|(user,)| (user.id + param::<UserId>()).asc());
+    let reversed = TestConnection
+        .from::<User>()
+        .order_by(|(user,)| (user.id + param::<UserId>()).asc())
+        .where_(|(user,)| user.name.equals(param::<UserName>()));
+
+    assert_filter_then_order_shape(&canonical);
+    assert_filter_then_order_shape(&reversed);
+}
+
+#[test]
+fn test_order_by_tuple_matches_chained_terms() {
+    // A tuple of orderings in one call renders identically to chaining `order_by`.
+    let tuple = TestConnection
+        .from::<User>()
+        .order_by(|(user,)| (user.id.asc(), user.name.desc()))
+        .select(|(user,)| (user.id, user.name));
+    let chained = TestConnection
+        .from::<User>()
+        .order_by(|(user,)| user.id.asc())
+        .order_by(|(user,)| user.name.desc())
+        .select(|(user,)| (user.id, user.name));
+    assert_eq!(
+        tuple.to_sql(),
+        "SELECT q0_0.id AS t0_id, q0_0.name AS t1_name \
+         FROM public.users AS q0_0 ORDER BY q0_0.id ASC, q0_0.name DESC"
+    );
+    assert_eq!(tuple.to_sql(), chained.to_sql());
+}
+
+#[test]
+fn test_having_tuple_predicates_are_anded() {
+    // A tuple of HAVING predicates is AND-joined, identically to chaining `having`.
+    let q = TestConnection
+        .from::<User>()
+        .group_by(|(user,)| user.name)
+        .having(|(user,)| {
+            (
+                user.id.count().greater_than(1i64),
+                user.id.count().less_than(10i64),
+            )
+        })
+        .select(|(user,)| (user.name, user.id.count()));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.name AS t0_name, COUNT(q0_0.id) AS t1_expr \
+         FROM public.users AS q0_0 GROUP BY q0_0.name \
+         HAVING (COUNT(q0_0.id) > ?) AND (COUNT(q0_0.id) < ?)"
+    );
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![TestParam::Int(1), TestParam::Int(10)]
+    );
+}
