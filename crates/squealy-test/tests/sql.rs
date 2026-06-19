@@ -773,6 +773,28 @@ fn test_grouped_having_allows_grouping_key_predicate() {
 }
 
 #[test]
+fn test_having_before_group_by_is_order_independent() {
+    // A bare-column HAVING predicate is rescued by a *later* group_by: building `having` before
+    // `group_by` compiles and renders identically to the canonical order (the renderer always emits
+    // GROUP BY before HAVING). Validation is based on the final chain state, not call order.
+    let reversed = TestConnection
+        .from::<User>()
+        .having(|(user,)| user.id.greater_than(0))
+        .group_by(|(user,)| user.id)
+        .select(|(user,)| user.id);
+    let canonical = TestConnection
+        .from::<User>()
+        .group_by(|(user,)| user.id)
+        .having(|(user,)| user.id.greater_than(0))
+        .select(|(user,)| user.id);
+    assert_eq!(
+        reversed.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 GROUP BY q0_0.id HAVING (q0_0.id > ?)"
+    );
+    assert_eq!(reversed.to_sql(), canonical.to_sql());
+}
+
+#[test]
 fn test_having_without_group_by_on_whole_table_aggregate() {
     // `HAVING` is valid without `GROUP BY` over a whole-table aggregate, and may use aggregates.
     let q = TestConnection
