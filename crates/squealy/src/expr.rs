@@ -674,14 +674,21 @@ pub enum Ungrouped {}
 /// Grouping state of a select chain: the chain has a `GROUP BY`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Grouped {}
+/// Grouping state of a select chain: the chain has a `HAVING` but no `GROUP BY`, so SQL evaluates it
+/// as a single (whole-table) group. The projection and ordering must then be aggregate-only — a bare
+/// column is invalid without `GROUP BY`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Aggregated {}
 
 /// Validates a `SELECT`'s projection and ordering for a chain's [grouping state](Ungrouped).
 ///
 /// An [`Ungrouped`] query must be *homogeneous* — every projected element the same class
 /// ([`ProjectionClass`]) — and its ordering must match ([`OrderCompatibleWith`]), since without
-/// `GROUP BY` a list cannot mix a bare column with an aggregate. A [`Grouped`] query lifts those
-/// restrictions: a grouped list may mix grouping keys and aggregates, and may order by either; the
-/// database validates that the non-aggregate terms are grouping keys.
+/// `GROUP BY` a list cannot mix a bare column with an aggregate. An [`Aggregated`] query (a `HAVING`
+/// with no `GROUP BY`) is stricter still: the projection must be aggregate-*only*, since a bare
+/// column has no group to belong to. A [`Grouped`] query lifts those restrictions: a grouped list
+/// may mix grouping keys and aggregates, and may order by either; the database validates that the
+/// non-aggregate terms are grouping keys.
 #[doc(hidden)]
 pub trait ValidSelect<Projection, OrderClass> {}
 
@@ -692,6 +699,33 @@ where
     Projection: ProjectionClass,
     OrderClass: OrderCompatibleWith<<Projection as ProjectionClass>::Class>,
 {
+}
+
+impl<Projection, OrderClass> ValidSelect<Projection, OrderClass> for Aggregated
+where
+    Projection: ProjectionClass<Class = AggregateProjection>,
+    OrderClass: OrderCompatibleWith<AggregateProjection>,
+{
+}
+
+/// Maps a chain's [grouping state](Ungrouped) through a `HAVING`. A bare `HAVING` (no `GROUP BY`)
+/// turns an [`Ungrouped`] chain into a whole-table [`Aggregated`] one; a chain that already has a
+/// `GROUP BY` stays [`Grouped`], and an [`Aggregated`] chain stays aggregated.
+#[doc(hidden)]
+pub trait HavingState {
+    type Output;
+}
+
+impl HavingState for Ungrouped {
+    type Output = Aggregated;
+}
+
+impl HavingState for Grouped {
+    type Output = Grouped;
+}
+
+impl HavingState for Aggregated {
+    type Output = Aggregated;
 }
 
 /// Marker for predicate ASTs whose expression operands are all aggregate-free (see

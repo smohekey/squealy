@@ -3774,6 +3774,7 @@ where
     P: PredicateKind,
     PredicateAst: crate::PredicateAst,
     Base::HavingParams: crate::HAppend<PredicateAst::Params>,
+    Base::Grouped: crate::HavingState,
     (
         Base::SourceParams,
         Base::FilterParams,
@@ -3796,7 +3797,9 @@ where
     type HavingParams = <Base::HavingParams as crate::HAppend<PredicateAst::Params>>::Output;
     type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
-    type Grouped = Base::Grouped;
+    // A bare `HAVING` (no `GROUP BY`) makes this a whole-table aggregate, so `select` must reject
+    // bare-column projections; a `GROUP BY` already present keeps the chain `Grouped`.
+    type Grouped = <Base::Grouped as crate::HavingState>::Output;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -3819,6 +3822,7 @@ where
     P: PredicateKind,
     PredicateAst: crate::RenderPredicateAst<B>,
     Base::HavingParams: crate::HAppend<PredicateAst::Params>,
+    Base::Grouped: crate::HavingState,
     (
         Base::SourceParams,
         Base::FilterParams,
