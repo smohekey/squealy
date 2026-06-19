@@ -1,0 +1,22 @@
+error[E0271]: type mismatch resolving `<PlainAmount as ExprKind>::Value == LedgerRef`
+  --> tests/compile_fail/in_subquery_newtype_mismatch.rs:30:30
+   |
+30 |                 .in_subquery(sub.from::<Plain>().select_subquery(|(plain,)| plain.amount))
+   |                  ----------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ type mismatch resolving `<PlainAmount as ExprKind>::Value == LedgerRef`
+   |                  |
+   |                  required by a bound introduced by this call
+   |
+note: expected this to be `LedgerRef`
+  --> tests/compile_fail/in_subquery_newtype_mismatch.rs:14:35
+   |
+14 | #[derive(Clone, Debug, PartialEq, Table)]
+   |                                   ^^^^^
+note: required by a bound in `ColumnRef::<'scope, K>::in_subquery`
+  --> src/expr.rs
+   |
+   |     pub fn in_subquery<Sub>(
+   |            ----------- required by a bound in this associated function
+...
+   |         Sub::OutputKind: ExprKind<Value = K::Value>,
+   |                                   ^^^^^^^^^^^^^^^^ required by this bound in `ColumnRef::<'scope, K>::in_subquery`
+   = note: this error originates in the derive macro `Table` (in Nightly builds, run with -Z macro-backtrace for more info)
