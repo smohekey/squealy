@@ -1,1 +1,1 @@
-{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":5,"timestamp":1781997849,"nonce":"vVVZv9KCcsI/KXKokXNe9yeS7RM=","added":["roadmap","query-builder"],"removed":null}]}
+{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":2,"timestamp":1781998290,"nonce":"1/mNbZadCs1homE8V8zZ8nSYaHI=","title":"Query builder: SELECT DISTINCT","was":"Add `SELECT DISTINCT` support to the query builder."}]}
