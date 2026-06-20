@@ -9,24 +9,24 @@ use crate::common::{
 
 pub(crate) fn derive(input: TokenStream) -> TokenStream {
     match table_struct(input) {
-        Ok(table) => table.expand(),
+        Ok(table) => table.expand(false),
         Err(error) => error.into_compile_error(),
     }
 }
 
-struct TableStruct {
-    ident: Ident,
+pub(crate) struct TableStruct {
+    pub(crate) ident: Ident,
     visibility: TokenStream2,
-    fields: Vec<Field>,
+    pub(crate) fields: Vec<Field>,
     indexes: Vec<IndexAttrs>,
     primary_key: Option<PrimaryKeyAttrs>,
     uniques: Vec<UniqueAttrs>,
-    schema: Option<proc_macro2::TokenStream>,
+    pub(crate) schema: Option<proc_macro2::TokenStream>,
 }
 
-struct Field {
-    ident: Ident,
-    value_ty: proc_macro2::TokenStream,
+pub(crate) struct Field {
+    pub(crate) ident: Ident,
+    pub(crate) value_ty: proc_macro2::TokenStream,
     attrs: FieldAttrs,
 }
 
@@ -105,7 +105,10 @@ struct ForeignKeyAttrs {
 }
 
 impl TableStruct {
-    fn expand(&self) -> TokenStream {
+    /// Expands the projection/metadata machinery. When `is_view` is set, the write-side impls
+    /// (`InsertableTable`/`UpdateableTable` and the write builder) are omitted: a view is a read-only
+    /// `FROM` source, so it gets queryable projections without an insert/update surface.
+    pub(crate) fn expand(&self, is_view: bool) -> TokenStream {
         let ident = proc_macro2::Ident::new(&self.ident.to_string(), Span::call_site());
         let name = Literal::string(&to_snake_plural(&ident.to_string()));
         let fields = self
@@ -425,8 +428,24 @@ impl TableStruct {
             .unwrap_or_else(|| quote::quote! { ::squealy::DefaultSchema });
         let write_builder = self.write_builder_tokens(&ident, &expr_kind_idents);
         let visibility = &self.visibility;
-        let write_builder_defs = write_builder.definitions;
-        let write_table_impl = write_builder.table_impl;
+        // A view is read-only: skip the write builder and the insertable/updateable markers.
+        let (write_builder_defs, write_table_impl, write_marker_impls) = if is_view {
+            (
+                proc_macro2::TokenStream::new(),
+                proc_macro2::TokenStream::new(),
+                proc_macro2::TokenStream::new(),
+            )
+        } else {
+            (
+                write_builder.definitions,
+                write_builder.table_impl,
+                quote::quote! {
+                    impl<'scope> ::squealy::InsertableTable for #ident <'scope, ::squealy::ColumnExpr> {}
+
+                    impl<'scope> ::squealy::UpdateableTable for #ident <'scope, ::squealy::ColumnExpr> {}
+                },
+            )
+        };
         let insert_column_key_impls = self
             .fields
             .iter()
@@ -679,10 +698,9 @@ impl TableStruct {
             // Generic over the expr `'scope` (not pinned to `'static`) so that, behind a generic
             // `async fn -> impl Future + Send` trait, the inferred table lifetime satisfies these
             // markers "for any lifetime" — mirroring `TableProjection`, which is why selects/deletes
-            // already work there. Insertability does not depend on the scope lifetime.
-            impl<'scope> ::squealy::InsertableTable for #ident <'scope, ::squealy::ColumnExpr> {}
-
-            impl<'scope> ::squealy::UpdateableTable for #ident <'scope, ::squealy::ColumnExpr> {}
+            // already work there. Insertability does not depend on the scope lifetime. Omitted for
+            // views, which are read-only.
+            #write_marker_impls
 
             #write_table_impl
 
@@ -1563,7 +1581,7 @@ impl IndexAttrs {
 }
 
 impl Field {
-    fn column_name(&self) -> String {
+    pub(crate) fn column_name(&self) -> String {
         self.attrs
             .column_name
             .clone()
@@ -1761,7 +1779,7 @@ impl Field {
     }
 }
 
-fn table_struct(input: TokenStream) -> Result<TableStruct, MacroError> {
+pub(crate) fn table_struct(input: TokenStream) -> Result<TableStruct, MacroError> {
     let tokens = input.into_iter().collect::<Vec<_>>();
     let struct_index = tokens
         .iter()

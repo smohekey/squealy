@@ -37,11 +37,12 @@ pub use refactor::{
 pub use squealy::{
     CheckModel, ColumnModel, Constraint, ConstraintCapabilities, ConstraintDeferrability,
     ConstraintEnforcement, ConstraintValidation, DatabaseModel, DatabasePlan, DatabasePlanStep,
-    DdlExecutor, DefaultValue, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
+    DdlExecutor, DefaultValue, ExprFragment, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     IndexCapabilities, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
-    IndexOperatorClass, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect,
-    SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore, SchemaPublishRecord,
-    SchemaRefactorStore, SqlType, TableModel, TablePlanStep,
+    IndexOperatorClass, ProjectionItem, SchemaBackend, SchemaCapabilities, SchemaConnect,
+    SchemaIntrospect, SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore,
+    SchemaPublishRecord, SchemaRefactorStore, SourceRef, SqlType, TableModel, TablePlanStep,
+    ViewColumnModel, ViewModel, ViewQueryModel,
 };
 
 use std::collections::BTreeSet;
@@ -609,6 +610,7 @@ mod tests {
         DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "memberships".to_owned(),
                     comment: None,
@@ -652,6 +654,7 @@ mod tests {
         DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "memberships".to_owned(),
                     comment: None,

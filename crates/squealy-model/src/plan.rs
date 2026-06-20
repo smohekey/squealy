@@ -36,9 +36,11 @@ pub fn plan_step_risk(step: &DatabasePlanStep) -> ChangeRisk {
             ChangeRisk::Safe
         }
         DatabasePlanStep::RenameTable { .. } => ChangeRisk::Safe,
-        DatabasePlanStep::DropSchema { .. } | DatabasePlanStep::DropTable { .. } => {
-            ChangeRisk::Destructive
-        }
+        // Create-or-replace of a view loses no data and re-runs cleanly.
+        DatabasePlanStep::CreateView { .. } => ChangeRisk::Safe,
+        DatabasePlanStep::DropSchema { .. }
+        | DatabasePlanStep::DropTable { .. }
+        | DatabasePlanStep::DropView { .. } => ChangeRisk::Destructive,
         DatabasePlanStep::AlterTable { change, .. } => table_plan_step_risk(change),
     }
 }
@@ -166,6 +168,14 @@ fn plan_step_as_diff_change(step: &DatabasePlanStep) -> DatabaseDiffChange {
             table: table.clone(),
             changes: vec![table_plan_step_as_diff_change(change)],
         },
+        DatabasePlanStep::CreateView { schema, view } => DatabaseDiffChange::CreateView {
+            schema: schema.clone(),
+            view: view.as_ref().clone(),
+        },
+        DatabasePlanStep::DropView { schema, view } => DatabaseDiffChange::DropView {
+            schema: schema.clone(),
+            view: view.as_ref().clone(),
+        },
     }
 }
 
@@ -280,6 +290,18 @@ fn flatten_diff(diff: &DatabaseDiff) -> Vec<DatabasePlanStep> {
                         change: Box::new(table_plan_step(table_change)),
                     });
                 }
+            }
+            DatabaseDiffChange::CreateView { schema, view } => {
+                steps.push(DatabasePlanStep::CreateView {
+                    schema: schema.clone(),
+                    view: Box::new(view.clone()),
+                });
+            }
+            DatabaseDiffChange::DropView { schema, view } => {
+                steps.push(DatabasePlanStep::DropView {
+                    schema: schema.clone(),
+                    view: Box::new(view.clone()),
+                });
             }
         }
     }

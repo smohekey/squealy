@@ -4745,6 +4745,25 @@ where
         > as SelectQuery<'conn, 'scope, Self, P>>::build_selected(connection, selected)
     }
 
+    /// Like [`select`](Self::select), but returns the backend-neutral [`Selected`] directly instead of
+    /// wrapping it in the backend's executable query type. View definitions use this so their body can
+    /// be lowered into the schema model without a real backend; it enforces the same projection
+    /// validity rules as `select`.
+    fn project<P>(
+        self,
+        projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
+    ) -> Selected<'scope, Self, <P as ReturningProjection<'scope>>::Shape, P>
+    where
+        P: ReturningProjection<'scope> + Projectable,
+        <Self as SelectAst<'conn, 'scope, Conn>>::Grouped:
+            crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
+        <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
+    {
+        let exprs = self.exprs();
+        let projection = projection(exprs.to_tuple());
+        Selected::<'scope, _, <P as ReturningProjection<'scope>>::Shape, _>::new(self, projection)
+    }
+
     /// Like [`select`](Self::select), but the projection closure also receives a [`Subqueries`]
     /// handle for projecting scalar subqueries (`SELECT (SELECT …)`), which may be correlated.
     ///
@@ -4922,7 +4941,9 @@ where
         Conn: Connection + 'conn,
         'scope: 'conn,
         Self: 'conn,
-        Self::Table: 'conn,
+        // A view is read-only: it does not implement `UpdateableTable`, so deleting through one is a
+        // compile error rather than a `DELETE` that would mutate base tables or fail at runtime.
+        Self::Table: UpdateableTable + 'conn,
         Self::Filters: PredicateNodes,
         <Self::Filters as PredicateNodes>::Params: NoRuntimeParams,
         // See `insert`: the future captures the query object, so require it `Send`.
@@ -4946,7 +4967,8 @@ where
         projection: impl FnOnce(<Self::Table as ProjectionShape>::Exprs<'scope>) -> P,
     ) -> Conn::Delete<'conn, Self::Table, <P as ReturningProjection<'scope>>::Shape, Self::Filters, P>
     where
-        Self::Table: 'conn,
+        // Read-only views do not implement `UpdateableTable`, so they cannot be deleted from.
+        Self::Table: UpdateableTable + 'conn,
         // Aggregates are never valid in `RETURNING`, so require an aggregate-free projection.
         P: ReturningProjection<'scope>
             + Projectable

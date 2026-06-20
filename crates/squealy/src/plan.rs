@@ -1,4 +1,6 @@
-use crate::{CheckModel, ColumnModel, Constraint, ForeignKeyModel, IndexModel, TableModel};
+use crate::{
+    CheckModel, ColumnModel, Constraint, ForeignKeyModel, IndexModel, TableModel, ViewModel,
+};
 
 /// An ordered backend-neutral schema deployment plan.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -42,6 +44,15 @@ pub enum DatabasePlanStep {
         table: String,
         // Boxed for the same reason as the `TableModel` payloads above.
         change: Box<TablePlanStep>,
+    },
+    CreateView {
+        schema: Option<String>,
+        // Boxed like the table payloads: `ViewModel` carries the structural body and column list.
+        view: Box<ViewModel>,
+    },
+    DropView {
+        schema: Option<String>,
+        view: Box<ViewModel>,
     },
 }
 

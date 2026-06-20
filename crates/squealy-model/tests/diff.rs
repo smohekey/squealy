@@ -1,7 +1,8 @@
 use squealy_model::{
     ChangeRisk, CheckModel, ColumnModel, Constraint, DatabaseDiffChange, DatabaseModel,
-    DefaultValue, DiffPolicy, ForeignKeyAction, ForeignKeyModel, IndexModel, SchemaModel, SqlType,
-    TableDiffChange, TableModel, check_diff_policy, diff_models,
+    DefaultValue, DiffPolicy, ExprFragment, ForeignKeyAction, ForeignKeyModel, IndexModel,
+    ProjectionItem, SchemaModel, SourceRef, SqlType, TableDiffChange, TableModel, ViewColumnModel,
+    ViewModel, ViewQueryModel, check_diff_policy, diff_models,
 };
 
 #[test]
@@ -321,6 +322,7 @@ fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some(schema.to_owned()),
+            views: Vec::new(),
             tables,
         }],
     }
@@ -398,4 +400,95 @@ fn index(name: &str, columns: &[&str]) -> IndexModel {
         operator_classes: vec![],
         predicate: None,
     }
+}
+
+fn schema_with(name: &str, tables: Vec<TableModel>, views: Vec<ViewModel>) -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some(name.to_owned()),
+            tables,
+            views,
+        }],
+    }
+}
+
+// A view named `name` selecting from a single source `from` (a table or another view).
+fn dep_view(name: &str, from: &str) -> ViewModel {
+    ViewModel {
+        name: name.to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "id".to_owned(),
+            ty: SqlType::I32,
+            nullable: false,
+        }],
+        query: ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "id".to_owned(),
+                expr: ExprFragment("q0_0.\"id\"".to_owned()),
+            }],
+            from: Some(SourceRef {
+                schema: Some("public".to_owned()),
+                name: from.to_owned(),
+                alias: "q0_0".to_owned(),
+            }),
+            joins: Vec::new(),
+            filter: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        },
+    }
+}
+
+#[test]
+fn diff_creates_dependent_views_after_their_dependencies() {
+    // `child` selects from `parent`; both are newly added. The create plan must list `parent` first.
+    let desired = schema_with(
+        "public",
+        vec![table("events")],
+        vec![dep_view("child", "parent"), dep_view("parent", "events")],
+    );
+    let actual = schema_with("public", vec![table("events")], vec![]);
+
+    let changes = diff_models(&desired, &actual).changes;
+    let pos = |name: &str| {
+        changes
+            .iter()
+            .position(
+                |c| matches!(c, DatabaseDiffChange::CreateView { view, .. } if view.name == name),
+            )
+            .expect("create present")
+    };
+    assert!(
+        pos("parent") < pos("child"),
+        "dependency must be created first: {changes:?}"
+    );
+}
+
+#[test]
+fn diff_drops_dependent_views_before_their_dependencies() {
+    // Both views removed; `child` selects from `parent`, so `child` must be dropped first.
+    let desired = schema_with("public", vec![table("events")], vec![]);
+    let actual = schema_with(
+        "public",
+        vec![table("events")],
+        vec![dep_view("parent", "events"), dep_view("child", "parent")],
+    );
+
+    let changes = diff_models(&desired, &actual).changes;
+    let pos = |name: &str| {
+        changes
+            .iter()
+            .position(
+                |c| matches!(c, DatabaseDiffChange::DropView { view, .. } if view.name == name),
+            )
+            .expect("drop present")
+    };
+    assert!(
+        pos("child") < pos("parent"),
+        "dependent must be dropped first: {changes:?}"
+    );
 }
