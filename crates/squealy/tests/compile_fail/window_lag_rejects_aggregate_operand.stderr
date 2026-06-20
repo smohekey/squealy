@@ -24,14 +24,14 @@ error[E0277]: the trait bound `SumExpr<PostId>: squealy::IntoWindowNullable` is 
    |         required by a bound introduced by this call
    |
    = help: the following other types implement trait `squealy::IntoWindowNullable`:
+             AddExpr<L, R>
+             DivideExpr<L, R>
+             MultiplyExpr<L, R>
              Nullable<K>
              PostId
              PostUserId
+             RuntimeParam<K>
              ScalarNullable<K>
-             bool
-             f32
-             f64
-             i128
            and $N others
 note: required by a bound in `squealy::lag`
   --> src/expr.rs
@@ -49,12 +49,12 @@ error[E0277]: the trait bound `SumExpr<PostId>: squealy::IntoWindowNullable` is 
    |         ^^^^^^^^^^^^^^^^^^^^^ the trait `squealy::IntoWindowNullable` is not implemented for `SumExpr<PostId>`
    |
    = help: the following other types implement trait `squealy::IntoWindowNullable`:
+             AddExpr<L, R>
+             DivideExpr<L, R>
+             MultiplyExpr<L, R>
              Nullable<K>
              PostId
              PostUserId
+             RuntimeParam<K>
              ScalarNullable<K>
-             bool
-             f32
-             f64
-             i128
            and $N others

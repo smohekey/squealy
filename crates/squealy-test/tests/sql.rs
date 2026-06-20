@@ -1358,3 +1358,19 @@ fn test_window_lag_over_left_joined_column_flattens_nullable() {
     }
     assert_row_option_i32(&q);
 }
+
+#[test]
+fn test_window_lag_over_a_derived_expression() {
+    // LAG over a derived scalar expression (`post.id + 1`) compiles and renders.
+    let q = TestConnection
+        .from::<Post>()
+        .select(|(post,)| lag(post.id + 1, 1).over(|w| w.order_by(post.id.asc())));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT LAG((q0_0.id + ?), ?) OVER (ORDER BY q0_0.id ASC) AS expr FROM posts AS q0_0"
+    );
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![TestParam::Int(1), TestParam::Int(1)]
+    );
+}

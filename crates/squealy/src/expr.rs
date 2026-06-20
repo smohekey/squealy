@@ -1758,6 +1758,31 @@ where
     type Kind = ScalarNullable<K>;
 }
 
+// Derived scalar expression kinds (arithmetic, runtime params) are non-null, so a LAG/LEAD over
+// them becomes `ScalarNullable<…>` — letting `lag(post.id + 1, 1)` and friends compile.
+macro_rules! impl_into_window_nullable_for_expr_kind {
+    ($($ty:ty),* $(,)?) => {
+        $(impl<L, R> IntoWindowNullable for $ty
+        where
+            $ty: ExprKind,
+        {
+            type Kind = ScalarNullable<$ty>;
+        })*
+    };
+}
+impl_into_window_nullable_for_expr_kind!(
+    AddExpr<L, R>,
+    SubtractExpr<L, R>,
+    MultiplyExpr<L, R>,
+    DivideExpr<L, R>,
+);
+impl<K> IntoWindowNullable for RuntimeParam<K>
+where
+    RuntimeParam<K>: ExprKind,
+{
+    type Kind = ScalarNullable<RuntimeParam<K>>;
+}
+
 /// A `uuid::Uuid` value can be used as a literal predicate operand (`col.equals(id)`) or a
 /// write-builder setter (`.id(id)`), like the scalar value types above.
 #[cfg(feature = "uuid")]
