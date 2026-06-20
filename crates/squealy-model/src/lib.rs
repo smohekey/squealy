@@ -41,7 +41,8 @@ pub use squealy::{
     IndexCapabilities, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
     IndexOperatorClass, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect,
     SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore, SchemaPublishRecord,
-    SchemaRefactorStore, SqlType, TableModel, TablePlanStep,
+    SchemaRefactorStore, SqlType, TableModel, TablePlanStep, ViewColumnModel, ViewModel,
+    ViewQueryModel,
 };
 
 use std::collections::BTreeSet;

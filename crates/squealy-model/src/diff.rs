@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, ForeignKeyModel, IndexModel, SchemaModel,
-    TableModel,
+    TableModel, ViewModel,
 };
 
 /// The structured diff from an actual database model to a desired database model.
@@ -125,17 +125,28 @@ pub enum DatabaseDiffChange {
         table: String,
         changes: Vec<TableDiffChange>,
     },
+    /// Create-or-replace a view. A view-body change is expressed as a single `CreateView` (rendered
+    /// `CREATE OR REPLACE VIEW`); a change that alters the column set is a `DropView` + `CreateView`.
+    CreateView {
+        schema: Option<String>,
+        view: ViewModel,
+    },
+    DropView {
+        schema: Option<String>,
+        view: ViewModel,
+    },
 }
 
 impl DatabaseDiffChange {
     pub fn risk(&self) -> ChangeRisk {
         match self {
-            DatabaseDiffChange::CreateSchema { .. } | DatabaseDiffChange::CreateTable { .. } => {
-                ChangeRisk::Safe
-            }
-            DatabaseDiffChange::DropSchema { .. } | DatabaseDiffChange::DropTable { .. } => {
-                ChangeRisk::Destructive
-            }
+            DatabaseDiffChange::CreateSchema { .. }
+            | DatabaseDiffChange::CreateTable { .. }
+            // Create-or-replace of a view loses no data and can be re-run.
+            | DatabaseDiffChange::CreateView { .. } => ChangeRisk::Safe,
+            DatabaseDiffChange::DropSchema { .. }
+            | DatabaseDiffChange::DropTable { .. }
+            | DatabaseDiffChange::DropView { .. } => ChangeRisk::Destructive,
             DatabaseDiffChange::AlterTable { changes, .. } => classify_table_changes(changes),
         }
     }
@@ -279,8 +290,22 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
                         table: table.clone(),
                     });
                 }
+                // Views are created after every table in the schema exists.
+                for view in &desired_schema.views {
+                    changes.push(DatabaseDiffChange::CreateView {
+                        schema: desired_schema.name.clone(),
+                        view: view.clone(),
+                    });
+                }
             }
             (None, Some(actual_schema)) => {
+                // Views are dropped before the tables they depend on.
+                for view in &actual_schema.views {
+                    changes.push(DatabaseDiffChange::DropView {
+                        schema: actual_schema.name.clone(),
+                        view: view.clone(),
+                    });
+                }
                 for table in &actual_schema.tables {
                     changes.push(DatabaseDiffChange::DropTable {
                         schema: actual_schema.name.clone(),
@@ -302,6 +327,12 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
 }
 
 fn diff_schema(desired: &SchemaModel, actual: &SchemaModel, changes: &mut Vec<DatabaseDiffChange>) {
+    // View drops run before table changes (a view may depend on a table being dropped); view creates
+    // run after (a view may depend on a table being added). Compute both up front, emit drops now and
+    // creates last.
+    let (view_drops, view_creates) = diff_views(desired, actual);
+    changes.extend(view_drops);
+
     let desired_tables = keyed_tables(&desired.tables);
     let actual_tables = keyed_tables(&actual.tables);
 
@@ -331,6 +362,49 @@ fn diff_schema(desired: &SchemaModel, actual: &SchemaModel, changes: &mut Vec<Da
             (None, None) => {}
         }
     }
+
+    changes.extend(view_creates);
+}
+
+/// Diffs the views of a schema, returning `(drops, creates)` so the caller can order drops before
+/// table changes and creates after. A view present in both that differs becomes a create-or-replace
+/// (`CreateView`); when its column set changes it also needs a preceding `DropView`, since
+/// `CREATE OR REPLACE VIEW` cannot rename or retype columns.
+fn diff_views(
+    desired: &SchemaModel,
+    actual: &SchemaModel,
+) -> (Vec<DatabaseDiffChange>, Vec<DatabaseDiffChange>) {
+    let desired_views = keyed(&desired.views, &|view: &ViewModel| view.name.clone());
+    let actual_views = keyed(&actual.views, &|view: &ViewModel| view.name.clone());
+
+    let mut drops = Vec::new();
+    let mut creates = Vec::new();
+    for view_name in sorted_keys(&desired_views, &actual_views) {
+        match (desired_views.get(&view_name), actual_views.get(&view_name)) {
+            (Some(desired_view), None) => creates.push(DatabaseDiffChange::CreateView {
+                schema: desired.name.clone(),
+                view: (*desired_view).clone(),
+            }),
+            (None, Some(actual_view)) => drops.push(DatabaseDiffChange::DropView {
+                schema: actual.name.clone(),
+                view: (*actual_view).clone(),
+            }),
+            (Some(desired_view), Some(actual_view)) if desired_view != actual_view => {
+                if desired_view.columns != actual_view.columns {
+                    drops.push(DatabaseDiffChange::DropView {
+                        schema: actual.name.clone(),
+                        view: (*actual_view).clone(),
+                    });
+                }
+                creates.push(DatabaseDiffChange::CreateView {
+                    schema: desired.name.clone(),
+                    view: (*desired_view).clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    (drops, creates)
 }
 
 pub(crate) fn diff_table(desired: &TableModel, actual: &TableModel) -> Vec<TableDiffChange> {

@@ -56,7 +56,7 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
     // another view follows it.
     for (schema_name, view) in ordered_views(model) {
         statement(writer, &mut first)?;
-        write_create_view(schema_name, view, writer)?;
+        write_create_view(schema_name, view, false, writer)?;
     }
 
     if !first {
@@ -128,9 +128,14 @@ fn ordered_views(model: &DatabaseModel) -> Vec<(Option<&str>, &ViewModel)> {
 fn write_create_view(
     schema: Option<&str>,
     view: &ViewModel,
+    or_replace: bool,
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    writer.write_all(b"CREATE VIEW ")?;
+    writer.write_all(if or_replace {
+        b"CREATE OR REPLACE VIEW ".as_slice()
+    } else {
+        b"CREATE VIEW ".as_slice()
+    })?;
     write_qualified_name(schema, &view.name, writer)?;
     // The declared columns name the view's outputs positionally; fall back to the SELECT aliases for
     // hand-built models without declared columns.
@@ -359,6 +364,17 @@ fn write_plan_step(
             table,
             change,
         } => write_table_plan_step(schema.as_deref(), table, change, writer, first)?,
+        DatabasePlanStep::CreateView { schema, view } => {
+            statement(writer, first)?;
+            // `CREATE OR REPLACE VIEW` so a body change re-runs cleanly; a column-set change is
+            // preceded by a `DropView` from the diff.
+            write_create_view(schema.as_deref(), view, true, writer)?;
+        }
+        DatabasePlanStep::DropView { schema, view } => {
+            statement(writer, first)?;
+            writer.write_all(b"DROP VIEW ")?;
+            write_qualified_name(schema.as_deref(), &view.name, writer)?;
+        }
     }
     Ok(())
 }

@@ -1314,3 +1314,65 @@ fn mysql_view_fragment_requoting_preserves_string_literals() {
         "fragment requoting wrong: {sql}"
     );
 }
+
+// Incremental plan rendering: CreateView -> CREATE OR REPLACE VIEW, DropView -> DROP VIEW, with
+// fragments re-quoted to backticks.
+#[test]
+fn mysql_renders_view_plan_steps() {
+    let view = ViewModel {
+        name: "active_users".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "id".to_owned(),
+            ty: SqlType::I32,
+            nullable: false,
+        }],
+        query: ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "id".to_owned(),
+                expr: ExprFragment("q0_0.\"id\"".to_owned()),
+            }],
+            from: Some(SourceRef {
+                schema: Some("app".to_owned()),
+                name: "users".to_owned(),
+                alias: "q0_0".to_owned(),
+            }),
+            joins: Vec::new(),
+            filter: Some(ExprFragment("(q0_0.\"id\" > 0)".to_owned())),
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        },
+    };
+
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::CreateView {
+                schema: Some("app".to_owned()),
+                view: Box::new(view.clone()),
+            },
+            DatabasePlanStep::DropView {
+                schema: Some("app".to_owned()),
+                view: Box::new(view),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE OR REPLACE VIEW `app`.`active_users` (`id`) AS \
+SELECT q0_0.`id` FROM `app`.`users` AS q0_0 WHERE (q0_0.`id` > 0)"
+        ),
+        "missing create-or-replace: {sql}"
+    );
+    assert!(
+        sql.contains("DROP VIEW `app`.`active_users`"),
+        "missing drop view: {sql}"
+    );
+}

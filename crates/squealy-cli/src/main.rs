@@ -1066,6 +1066,12 @@ fn describe_plan_step(step: &DatabasePlanStep) -> String {
             describe_table_plan_step(change),
             qualified(schema, table)
         ),
+        DatabasePlanStep::CreateView { schema, view } => {
+            format!("create view {}", qualified(schema, &view.name))
+        }
+        DatabasePlanStep::DropView { schema, view } => {
+            format!("drop view {}", qualified(schema, &view.name))
+        }
     }
 }
 
@@ -1427,6 +1433,26 @@ fn database_diff_change_json(change: &DatabaseDiffChange) -> serde_json::Value {
                 "changes": changes,
             })
         }
+        DatabaseDiffChange::CreateView { schema, view } => {
+            json!({
+                "kind": "view",
+                "action": "create",
+                "risk": risk,
+                "schema": schema,
+                "view": view.name,
+                "name": qualified(schema, &view.name),
+            })
+        }
+        DatabaseDiffChange::DropView { schema, view } => {
+            json!({
+                "kind": "view",
+                "action": "drop",
+                "risk": risk,
+                "schema": schema,
+                "view": view.name,
+                "name": qualified(schema, &view.name),
+            })
+        }
     }
 }
 
@@ -1699,6 +1725,12 @@ fn print_diff(diff: &squealy_model::DatabaseDiff) {
                     print_table_change(schema, table, table_change);
                 }
             }
+            DatabaseDiffChange::CreateView { schema, view } => {
+                println!("{risk} view + {}", qualified(schema, &view.name));
+            }
+            DatabaseDiffChange::DropView { schema, view } => {
+                println!("{risk} view - {}", qualified(schema, &view.name));
+            }
         }
     }
 }
@@ -1800,6 +1832,12 @@ fn describe_diff_change(change: &DatabaseDiffChange) -> String {
         }
         DatabaseDiffChange::AlterTable { schema, table, .. } => {
             format!("alter table {}", qualified(schema, table))
+        }
+        DatabaseDiffChange::CreateView { schema, view } => {
+            format!("create view {}", qualified(schema, &view.name))
+        }
+        DatabaseDiffChange::DropView { schema, view } => {
+            format!("drop view {}", qualified(schema, &view.name))
         }
     }
 }

@@ -286,7 +286,7 @@ pub(crate) mod ddl {
         // so a view that selects from another view is created after it.
         for (schema_name, view) in ordered_views(model) {
             statement(writer, &mut first)?;
-            write_create_view(schema_name, view, writer)?;
+            write_create_view(schema_name, view, false, writer)?;
         }
 
         // Terminate the final statement (the separator only terminates *preceding* ones).
@@ -363,9 +363,14 @@ pub(crate) mod ddl {
     fn write_create_view(
         schema: Option<&str>,
         view: &ViewModel,
+        or_replace: bool,
         writer: &mut impl Write,
     ) -> io::Result<()> {
-        writer.write_all(b"CREATE VIEW ")?;
+        writer.write_all(if or_replace {
+            b"CREATE OR REPLACE VIEW ".as_slice()
+        } else {
+            b"CREATE VIEW ".as_slice()
+        })?;
         write_qualified_name(schema, &view.name, writer)?;
         // The declared columns name the view's outputs positionally, independent of the builder's
         // internal projection aliases. Falling back to the SELECT aliases keeps hand-built models
@@ -562,6 +567,17 @@ pub(crate) mod ddl {
                 table,
                 change,
             } => write_table_plan_step(schema.as_deref(), table, change, writer, first)?,
+            DatabasePlanStep::CreateView { schema, view } => {
+                statement(writer, first)?;
+                // Incremental view changes use `CREATE OR REPLACE VIEW`, so a body change re-runs
+                // cleanly without a drop. A column-set change is preceded by a `DropView` from the diff.
+                write_create_view(schema.as_deref(), view, true, writer)?;
+            }
+            DatabasePlanStep::DropView { schema, view } => {
+                statement(writer, first)?;
+                writer.write_all(b"DROP VIEW ")?;
+                write_qualified_name(schema.as_deref(), &view.name, writer)?;
+            }
         }
         Ok(())
     }

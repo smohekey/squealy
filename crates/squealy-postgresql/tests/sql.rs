@@ -2357,3 +2357,65 @@ SELECT q0_0.\"id\" FROM \"public\".\"active_users\" AS q0_0"
         "a view must be created after the view it depends on: {sql}"
     );
 }
+
+// Incremental plan rendering: a CreateView step renders CREATE OR REPLACE VIEW (so a body change
+// re-runs cleanly) and a DropView step renders DROP VIEW.
+#[test]
+fn postgres_renders_view_plan_steps() {
+    let view = ViewModel {
+        name: "active_users".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "id".to_owned(),
+            ty: SqlType::I32,
+            nullable: false,
+        }],
+        query: ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "id".to_owned(),
+                expr: ExprFragment("q0_0.\"id\"".to_owned()),
+            }],
+            from: Some(SourceRef {
+                schema: Some("public".to_owned()),
+                name: "users".to_owned(),
+                alias: "q0_0".to_owned(),
+            }),
+            joins: Vec::new(),
+            filter: Some(ExprFragment("(q0_0.\"id\" > 0)".to_owned())),
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        },
+    };
+
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::CreateView {
+                schema: Some("public".to_owned()),
+                view: Box::new(view.clone()),
+            },
+            DatabasePlanStep::DropView {
+                schema: Some("public".to_owned()),
+                view: Box::new(view),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE OR REPLACE VIEW \"public\".\"active_users\" (\"id\") AS \
+SELECT q0_0.\"id\" FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"id\" > 0)"
+        ),
+        "missing create-or-replace: {sql}"
+    );
+    assert!(
+        sql.contains("DROP VIEW \"public\".\"active_users\""),
+        "missing drop view: {sql}"
+    );
+}
