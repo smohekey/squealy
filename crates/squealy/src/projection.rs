@@ -4,8 +4,8 @@ use std::marker::PhantomData;
 use crate::{
     AddExpr, AvgExpr, ColumnFree, ColumnNullableValue, ColumnRef, ColumnValue, CountExpr, Decode,
     DivideExpr, Expr, ExprAst, ExprKind, MaxExpr, MinExpr, MultiplyExpr, Nullable, ProjectionClass,
-    ProjectionColumns, ReturningProjection, ScalarProjection, SchemaTable, SourceAlias,
-    SubtractExpr, SumExpr,
+    ProjectionColumns, ReturningProjection, ScalarNullable, ScalarProjection, SchemaTable,
+    SourceAlias, SubtractExpr, SumExpr,
 };
 
 /// A projection shape that can produce scoped expression values for a SQL alias.
@@ -107,6 +107,26 @@ where
 {
     type Exprs<'scope> = ColumnRef<'scope, Nullable<K>>;
     type ReboundExprs<'scope> = Expr<'scope, Nullable<K>>;
+    type Row = Option<K::Value>;
+
+    fn exprs<'scope>(alias: SourceAlias) -> Self::Exprs<'scope> {
+        ColumnRef::column(alias, "expr")
+    }
+
+    fn rebound_exprs<'scope>(alias: SourceAlias) -> Self::ReboundExprs<'scope> {
+        Expr::column(alias, "expr")
+    }
+}
+
+// A scalar subquery decodes as `Option<K::Value>` (it may be NULL when zero rows match), while its
+// value type stays `K::Value` for comparison — see [`ScalarNullable`](crate::ScalarNullable).
+impl<K> ProjectionShape for ScalarNullable<K>
+where
+    K: ExprKind,
+    K::Value: Send,
+{
+    type Exprs<'scope> = ColumnRef<'scope, ScalarNullable<K>>;
+    type ReboundExprs<'scope> = Expr<'scope, ScalarNullable<K>>;
     type Row = Option<K::Value>;
 
     fn exprs<'scope>(alias: SourceAlias) -> Self::Exprs<'scope> {

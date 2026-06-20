@@ -7,8 +7,9 @@ use squealy::{
     InsertRowVisitor, InsertableTable, Order, OrderDirection, Predicate, PredicateAstVisitor,
     PredicateKind, PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder,
     RenderAssignment, RenderAst, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst,
-    RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderUpdateAssignments, SchemaTable,
-    SelectSink, Selected, SourceAlias, SqlType, Table, TableProjection, UpdateableTable,
+    RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderSubquery,
+    RenderUpdateAssignments, SchemaTable, SelectSink, Selected, SourceAlias, SqlType, Table,
+    TableProjection, UpdateableTable,
 };
 
 use crate::query::{TestParam, TestParamWriter};
@@ -880,6 +881,17 @@ where
     predicate.visit(&mut RenderExpr { writer })
 }
 
+/// Render an embedded subquery as a nested `SELECT …` into the same writer (the test backend uses
+/// bare `?` placeholders, so there is no parameter counter to share).
+fn write_subselect<Sub>(subquery: &Sub, writer: &mut impl SqlWriter) -> io::Result<()>
+where
+    Sub: RenderSubquery<crate::TestBackend>,
+{
+    let mut sink = TestSelectSink::new(writer)?;
+    subquery.lower_subquery(&mut sink)?;
+    sink.finish()
+}
+
 fn write_order_value<K, Ast>(
     order: &Order<'_, K, Ast>,
     writer: &mut impl SqlWriter,
@@ -989,6 +1001,15 @@ where
         // skips the integer-division cast the real backends emit.
         write!(self.writer, "{}(", render_aggregate_func(func))?;
         operand(self)?;
+        self.writer.write_all(b")")
+    }
+
+    fn visit_scalar_subquery<Sub>(&mut self, subquery: &Sub) -> Result<(), Self::Error>
+    where
+        Sub: RenderSubquery<crate::TestBackend>,
+    {
+        self.writer.write_all(b"(")?;
+        write_subselect(subquery, &mut *self.writer)?;
         self.writer.write_all(b")")
     }
 }
@@ -1144,6 +1165,37 @@ where
         }
         operand(self)?;
         self.writer.write_all(b")")
+    }
+
+    fn visit_in_subquery<O, Sub>(
+        &mut self,
+        negated: bool,
+        operand: O,
+        subquery: &Sub,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Sub: RenderSubquery<crate::TestBackend>,
+    {
+        self.writer.write_all(b"(")?;
+        operand(self)?;
+        self.writer
+            .write_all(if negated { b" NOT IN (" } else { b" IN (" })?;
+        write_subselect(subquery, &mut *self.writer)?;
+        self.writer.write_all(b"))")
+    }
+
+    fn visit_exists<Sub>(&mut self, negated: bool, subquery: &Sub) -> Result<(), Self::Error>
+    where
+        Sub: RenderSubquery<crate::TestBackend>,
+    {
+        self.writer.write_all(if negated {
+            b"(NOT EXISTS ("
+        } else {
+            b"(EXISTS ("
+        })?;
+        write_subselect(subquery, &mut *self.writer)?;
+        self.writer.write_all(b"))")
     }
 }
 
