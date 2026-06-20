@@ -1,1 +1,1 @@
-{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":5,"timestamp":1781997849,"nonce":"yfCpVlE83SGE0I1LvX7Oa991BPo=","added":["roadmap","mutations"],"removed":null}]}
+{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":2,"timestamp":1781998290,"nonce":"HdVbL7hLMOIkdGD9cWZDF1qR5F4=","title":"Mutations: upsert (ON CONFLICT / ON DUPLICATE KEY)","was":"Add upsert: PostgreSQL `INSERT … ON CONFLICT …` and MySQL"}]}
