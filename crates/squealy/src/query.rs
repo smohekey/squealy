@@ -4707,7 +4707,12 @@ where
         projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
     ) -> Conn::Select<'conn, 'scope, Self, <P as ReturningProjection<'scope>>::Shape, P>
     where
-        P: ReturningProjection<'scope> + Projectable,
+        // The projection must carry no runtime params: a projected scalar subquery renders before
+        // the outer FROM, but the executable/prepared param shape is the source chain's, so a
+        // `param` in the SELECT list would be an unbindable placeholder. Bare columns, aggregates,
+        // arithmetic over literals, and correlated (column-referencing) scalar subqueries all have
+        // empty projection params; only a runtime `param` in the SELECT list is rejected.
+        P: ReturningProjection<'scope> + Projectable + crate::ProjectionParams<Params = HNil>,
         // For an ungrouped query `ValidSelect` requires a homogeneous projection (no mixing of a
         // bare column and an aggregate) with compatible ordering; a `GROUP BY` lifts that.
         <Self as SelectAst<'conn, 'scope, Conn>>::Grouped:
