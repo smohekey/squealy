@@ -37,12 +37,12 @@ pub use refactor::{
 pub use squealy::{
     CheckModel, ColumnModel, Constraint, ConstraintCapabilities, ConstraintDeferrability,
     ConstraintEnforcement, ConstraintValidation, DatabaseModel, DatabasePlan, DatabasePlanStep,
-    DdlExecutor, DefaultValue, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
+    DdlExecutor, DefaultValue, ExprFragment, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     IndexCapabilities, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
-    IndexOperatorClass, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect,
-    SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore, SchemaPublishRecord,
-    SchemaRefactorStore, SqlType, TableModel, TablePlanStep, ViewColumnModel, ViewModel,
-    ViewQueryModel,
+    IndexOperatorClass, ProjectionItem, SchemaBackend, SchemaCapabilities, SchemaConnect,
+    SchemaIntrospect, SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore,
+    SchemaPublishRecord, SchemaRefactorStore, SourceRef, SqlType, TableModel, TablePlanStep,
+    ViewColumnModel, ViewModel, ViewQueryModel,
 };
 
 use std::collections::BTreeSet;

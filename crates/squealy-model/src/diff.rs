@@ -404,7 +404,61 @@ fn diff_views(
             _ => {}
         }
     }
+
+    // Order creates dependencies-first (a view after every other view it selects from) and drops
+    // dependents-first, so a view-on-view never references a sibling that does not exist yet (create)
+    // or has already been removed (drop). Mirrors the full-create path's `ordered_views`.
+    let desired_order = view_dependency_order(&desired.views);
+    let actual_order = view_dependency_order(&actual.views);
+    creates.sort_by_key(|change| dependency_rank(&desired_order, view_change_name(change)));
+    drops.sort_by_key(|change| {
+        std::cmp::Reverse(dependency_rank(&actual_order, view_change_name(change)))
+    });
     (drops, creates)
+}
+
+/// The view's name from a `CreateView`/`DropView` change.
+fn view_change_name(change: &DatabaseDiffChange) -> &str {
+    match change {
+        DatabaseDiffChange::CreateView { view, .. } | DatabaseDiffChange::DropView { view, .. } => {
+            &view.name
+        }
+        _ => "",
+    }
+}
+
+fn dependency_rank(order: &[String], name: &str) -> usize {
+    order
+        .iter()
+        .position(|view| view == name)
+        .unwrap_or(usize::MAX)
+}
+
+/// Returns the schema's view names in dependency order — a view appears after every other view in the
+/// schema that it selects from. A depth-first post-order; reference cycles (which SQL rejects) fall
+/// back to declaration order.
+fn view_dependency_order(views: &[ViewModel]) -> Vec<String> {
+    fn visit(current: usize, views: &[ViewModel], visited: &mut [bool], order: &mut Vec<String>) {
+        if visited[current] {
+            return;
+        }
+        visited[current] = true;
+        for source in views[current].referenced_sources() {
+            if let Some(dep) = views.iter().position(|view| view.name == source.name)
+                && dep != current
+            {
+                visit(dep, views, visited, order);
+            }
+        }
+        order.push(views[current].name.clone());
+    }
+
+    let mut order = Vec::with_capacity(views.len());
+    let mut visited = vec![false; views.len()];
+    for current in 0..views.len() {
+        visit(current, views, &mut visited, &mut order);
+    }
+    order
 }
 
 pub(crate) fn diff_table(desired: &TableModel, actual: &TableModel) -> Vec<TableDiffChange> {
