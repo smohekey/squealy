@@ -1406,3 +1406,74 @@ SELECT q0_0.`id` FROM `app`.`users` AS q0_0 WHERE (q0_0.`id` > 0)"
         "missing drop view: {sql}"
     );
 }
+
+// The same structural expression IR renders in MySQL's dialect: `/` is already fractional (no float
+// cast), identifiers use backticks, and aggregate casts use MySQL's `SIGNED`.
+#[test]
+fn mysql_renders_view_expression_ir_in_its_dialect() {
+    fn col(c: &str) -> ExprNode {
+        ExprNode::Column {
+            alias: "q0_0".to_owned(),
+            column: c.to_owned(),
+        }
+    }
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: vec![ViewModel {
+                name: "metrics".to_owned(),
+                comment: None,
+                columns: vec![
+                    ViewColumnModel { name: "ratio".to_owned(), ty: SqlType::F64, nullable: false },
+                    ViewColumnModel { name: "total".to_owned(), ty: SqlType::I64, nullable: false },
+                ],
+                query: ViewQueryModel {
+                    projection: vec![
+                        ProjectionItem {
+                            output_name: "ratio".to_owned(),
+                            expr: ExprNode::Binary {
+                                op: ArithmeticOp::Divide,
+                                left: Box::new(col("count")),
+                                right: Box::new(ExprNode::Literal("2".to_owned())),
+                            },
+                        },
+                        ProjectionItem {
+                            output_name: "total".to_owned(),
+                            expr: ExprNode::Aggregate {
+                                func: AggregateFunc::Sum,
+                                operand: Box::new(col("amount")),
+                                result: Some(SqlType::I64),
+                            },
+                        },
+                    ],
+                    from: Some(SourceRef {
+                        schema: Some("app".to_owned()),
+                        name: "events".to_owned(),
+                        alias: "q0_0".to_owned(),
+                    }),
+                    joins: Vec::new(),
+                    filter: None,
+                    group_by: Vec::new(),
+                    having: None,
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                },
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // MySQL `/` is already fractional, so no float cast is injected — and identifiers are backticks.
+    assert!(sql.contains("(q0_0.`count` / 2)"), "plain MySQL division missing: {sql}");
+    assert!(!sql.contains("double precision"), "MySQL must not get PG casts: {sql}");
+    // Aggregate result cast uses MySQL's `SIGNED`.
+    assert!(
+        sql.contains("CAST(SUM(q0_0.`amount`) AS SIGNED)"),
+        "MySQL aggregate cast missing: {sql}"
+    );
+}

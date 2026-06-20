@@ -2492,3 +2492,78 @@ fn postgres_exists_correlated_subquery_renders() {
          (q1_0.\"user_id\" = q0_0.\"id\")))"
     );
 }
+
+// The structural expression IR is rendered per-dialect: PostgreSQL keeps the fractional-division
+// float casts and precise integer cast types that a single canonical fragment could not express.
+#[test]
+fn postgres_renders_view_expression_ir_in_its_dialect() {
+    fn col(c: &str) -> ExprNode {
+        ExprNode::Column {
+            alias: "q0_0".to_owned(),
+            column: c.to_owned(),
+        }
+    }
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("public".to_owned()),
+            tables: Vec::new(),
+            views: vec![ViewModel {
+                name: "metrics".to_owned(),
+                comment: None,
+                columns: vec![
+                    ViewColumnModel { name: "ratio".to_owned(), ty: SqlType::F64, nullable: false },
+                    ViewColumnModel { name: "total".to_owned(), ty: SqlType::I64, nullable: false },
+                ],
+                query: ViewQueryModel {
+                    projection: vec![
+                        // count / 2 — fractional division.
+                        ProjectionItem {
+                            output_name: "ratio".to_owned(),
+                            expr: ExprNode::Binary {
+                                op: ArithmeticOp::Divide,
+                                left: Box::new(col("count")),
+                                right: Box::new(ExprNode::Literal("2".to_owned())),
+                            },
+                        },
+                        // SUM(amount) cast to i64 so the column wire type matches.
+                        ProjectionItem {
+                            output_name: "total".to_owned(),
+                            expr: ExprNode::Aggregate {
+                                func: AggregateFunc::Sum,
+                                operand: Box::new(col("amount")),
+                                result: Some(SqlType::I64),
+                            },
+                        },
+                    ],
+                    from: Some(SourceRef {
+                        schema: Some("public".to_owned()),
+                        name: "events".to_owned(),
+                        alias: "q0_0".to_owned(),
+                    }),
+                    joins: Vec::new(),
+                    filter: None,
+                    group_by: Vec::new(),
+                    having: None,
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                },
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // Fractional division: operands cast to double precision (no silent integer truncation).
+    assert!(
+        sql.contains("(CAST(q0_0.\"count\" AS double precision) / CAST(2 AS double precision))"),
+        "division float-cast missing: {sql}"
+    );
+    // Aggregate result cast uses the precise integer type name, not `numeric`.
+    assert!(
+        sql.contains("CAST(SUM(q0_0.\"amount\") AS bigint)"),
+        "aggregate integer cast missing: {sql}"
+    );
+}
