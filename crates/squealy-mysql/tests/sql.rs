@@ -1256,12 +1256,61 @@ fn mysql_renders_view_after_tables() {
     assert!(
         sql.contains(
             "CREATE VIEW `app`.`active_users` (`id`) AS \
-SELECT q0_0.\"id\" FROM `app`.`users` AS q0_0 WHERE (q0_0.\"id\" > 0)"
+SELECT q0_0.`id` FROM `app`.`users` AS q0_0 WHERE (q0_0.`id` > 0)"
         ),
         "unexpected view DDL: {sql}"
     );
     assert!(
         sql.find("CREATE TABLE").unwrap() < sql.find("CREATE VIEW").unwrap(),
         "view must be created after tables: {sql}"
+    );
+}
+
+// Re-quoting identifiers to backticks must not touch single-quoted string literals: a `"` that is part
+// of a string value stays, while the `"`-quoted column identifier becomes a backtick.
+#[test]
+fn mysql_view_fragment_requoting_preserves_string_literals() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: Vec::new(),
+            views: vec![ViewModel {
+                name: "tricky".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "name".to_owned(),
+                    ty: SqlType::String,
+                    nullable: false,
+                }],
+                query: ViewQueryModel {
+                    projection: vec![ProjectionItem {
+                        output_name: "name".to_owned(),
+                        expr: ExprFragment("q0_0.\"name\"".to_owned()),
+                    }],
+                    from: Some(SourceRef {
+                        schema: None,
+                        name: "people".to_owned(),
+                        alias: "q0_0".to_owned(),
+                    }),
+                    joins: Vec::new(),
+                    // A string literal that itself contains a double quote.
+                    filter: Some(ExprFragment("(q0_0.\"name\" = 'a\"b')".to_owned())),
+                    group_by: Vec::new(),
+                    having: None,
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                },
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains("SELECT q0_0.`name` FROM `people` AS q0_0 WHERE (q0_0.`name` = 'a\"b')"),
+        "fragment requoting wrong: {sql}"
     );
 }

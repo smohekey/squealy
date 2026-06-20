@@ -4534,7 +4534,9 @@ where
         Conn: Connection + 'conn,
         'scope: 'conn,
         Self: 'conn,
-        Self::Table: 'conn,
+        // A view is read-only: it does not implement `UpdateableTable`, so deleting through one is a
+        // compile error rather than a `DELETE` that would mutate base tables or fail at runtime.
+        Self::Table: UpdateableTable + 'conn,
         Self::Filters: PredicateNodes,
         <Self::Filters as PredicateNodes>::Params: NoRuntimeParams,
         // See `insert`: the future captures the query object, so require it `Send`.
@@ -4558,7 +4560,8 @@ where
         projection: impl FnOnce(<Self::Table as ProjectionShape>::Exprs<'scope>) -> P,
     ) -> Conn::Delete<'conn, Self::Table, <P as ReturningProjection<'scope>>::Shape, Self::Filters, P>
     where
-        Self::Table: 'conn,
+        // Read-only views do not implement `UpdateableTable`, so they cannot be deleted from.
+        Self::Table: UpdateableTable + 'conn,
         // Aggregates are never valid in `RETURNING`, so require an aggregate-free projection.
         P: ReturningProjection<'scope>
             + Projectable

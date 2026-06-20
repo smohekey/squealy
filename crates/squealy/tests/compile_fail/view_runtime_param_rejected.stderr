@@ -1,0 +1,17 @@
+error[E0277]: the trait bound `HCons<std::string::String, HNil>: NoRuntimeParams` is not satisfied
+  --> tests/compile_fail/view_runtime_param_rejected.rs:30:46
+   |
+30 |       fn definition(db: &'static ModelConn) -> impl ViewSelect<Row = <Self as SchemaView>::Row> {
+   |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `NoRuntimeParams` is not implemented for `HCons<std::string::String, HNil>`
+31 |           // Wrong: a view body cannot carry a runtime parameter.
+32 | /         db.from::<User>()
+33 | |             .where_(|user| user.name.equals(param::<UserName>()))
+34 | |             .project(|(user,)| (user.id, user.name))
+   | |____________________________________________________- return type was inferred to be `squealy::Selected<'_, squealy::Where<'_, squealy::From<'_, '_, squealy::ModelConn, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, EqualsPredicate<UserName, RuntimeParam<UserName>>, squealy::ComparePredicateAst<squealy::ColumnExprAst<UserName>, squealy::ParamExprAst<UserName>>>, (UserId, UserName), (ColumnRef<'_, UserId>, ColumnRef<'_, UserName>)>` here
+   |
+help: the trait `NoRuntimeParams` is implemented for `HNil`
+  --> src/list.rs
+   |
+   | impl NoRuntimeParams for HNil {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: required for `squealy::Selected<'_, squealy::Where<'_, squealy::From<'_, '_, squealy::ModelConn, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, EqualsPredicate<UserName, RuntimeParam<UserName>>, squealy::ComparePredicateAst<squealy::ColumnExprAst<UserName>, squealy::ParamExprAst<UserName>>>, (UserId, UserName), (ColumnRef<'_, UserId>, ColumnRef<'_, UserName>)>` to implement `squealy::ViewSelect`

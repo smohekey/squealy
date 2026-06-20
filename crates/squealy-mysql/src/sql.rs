@@ -121,10 +121,10 @@ fn ordered_views(model: &DatabaseModel) -> Vec<(Option<&str>, &ViewModel)> {
 
 /// Renders `CREATE VIEW <qualified> AS <select>` from a view's structural body.
 ///
-/// Structural identifiers (schema/table/alias, output column names) are quoted with MySQL backticks;
-/// the inner scalar expressions are the canonical model fragments, which use ANSI double quotes. The
-/// statement therefore must be run with `ANSI_QUOTES` in `sql_mode` so MySQL reads those as
-/// identifiers.
+/// Structural identifiers (schema/table/alias, output column names) are quoted with MySQL backticks.
+/// The inner scalar expressions are the canonical model fragments, which quote identifiers with ANSI
+/// double quotes; [`write_fragment`] re-quotes those to backticks (leaving single-quoted string
+/// literals untouched) so the statement runs on a default connection without `ANSI_QUOTES`.
 fn write_create_view(
     schema: Option<&str>,
     view: &ViewModel,
@@ -158,7 +158,7 @@ fn write_view_query(
         if index > 0 {
             writer.write_all(b", ")?;
         }
-        writer.write_all(item.expr.0.as_bytes())?;
+        write_fragment(&item.expr.0, writer)?;
         if alias_projections {
             writer.write_all(b" AS ")?;
             write_quoted_ident(&item.output_name, writer)?;
@@ -177,27 +177,27 @@ fn write_view_query(
         }
         write_view_source(&join.source, writer)?;
         writer.write_all(b" ON ")?;
-        writer.write_all(join.on.0.as_bytes())?;
+        write_fragment(&join.on.0, writer)?;
     }
 
     if let Some(filter) = &query.filter {
         writer.write_all(b" WHERE ")?;
-        writer.write_all(filter.0.as_bytes())?;
+        write_fragment(&filter.0, writer)?;
     }
 
     for (index, key) in query.group_by.iter().enumerate() {
         writer.write_all(if index == 0 { b" GROUP BY " } else { b", " })?;
-        writer.write_all(key.0.as_bytes())?;
+        write_fragment(&key.0, writer)?;
     }
 
     if let Some(having) = &query.having {
         writer.write_all(b" HAVING ")?;
-        writer.write_all(having.0.as_bytes())?;
+        write_fragment(&having.0, writer)?;
     }
 
     for (index, order) in query.order_by.iter().enumerate() {
         writer.write_all(if index == 0 { b" ORDER BY " } else { b", " })?;
-        writer.write_all(order.expr.0.as_bytes())?;
+        write_fragment(&order.expr.0, writer)?;
         match order.direction {
             Some(OrderDirection::Asc) => writer.write_all(b" ASC")?,
             Some(OrderDirection::Desc) => writer.write_all(b" DESC")?,
@@ -223,6 +223,51 @@ fn write_view_query(
 fn write_view_source(source: &SourceRef, writer: &mut impl Write) -> io::Result<()> {
     write_qualified_name(source.schema.as_deref(), &source.name, writer)?;
     write!(writer, " AS {}", source.alias)
+}
+
+/// Writes a canonical expression fragment in MySQL syntax by re-quoting identifiers from ANSI double
+/// quotes to backticks. Single-quoted string literals are copied verbatim (so a `"` inside a string is
+/// left alone), `""` inside an identifier is un-doubled, and any literal backtick is re-escaped — so
+/// the result is valid MySQL without relying on `ANSI_QUOTES`.
+fn write_fragment(fragment: &str, writer: &mut impl Write) -> io::Result<()> {
+    let mut chars = fragment.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // String literal: copy through to the closing quote, preserving `''` escapes.
+            '\'' => {
+                writer.write_all(b"'")?;
+                while let Some(c) = chars.next() {
+                    write!(writer, "{c}")?;
+                    if c == '\'' {
+                        if chars.peek() == Some(&'\'') {
+                            writer.write_all(b"'")?;
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            // ANSI-quoted identifier: re-emit delimited by backticks.
+            '"' => {
+                writer.write_all(b"`")?;
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' if chars.peek() == Some(&'"') => {
+                            writer.write_all(b"\"")?;
+                            chars.next();
+                        }
+                        '"' => break,
+                        '`' => writer.write_all(b"``")?,
+                        other => write!(writer, "{other}")?,
+                    }
+                }
+                writer.write_all(b"`")?;
+            }
+            other => write!(writer, "{other}")?,
+        }
+    }
+    Ok(())
 }
 
 /// Renders an ordered incremental DDL plan.

@@ -470,6 +470,10 @@ where
     Shape: ProjectionShape,
     Projection: Projectable + RenderProjectable<ModelBackend>,
     Base: RenderSelectAst<'static, 'scope, ModelConn, ModelBackend>,
+    // A view body has no bind parameters — every value is inlined as a literal. Requiring an empty
+    // runtime-parameter shape rejects a definition that uses `param::<K>()` at compile time, rather
+    // than silently dropping the placeholder and emitting invalid DDL.
+    <Base as SelectAst<'static, 'scope, ModelConn>>::Params: crate::NoRuntimeParams,
 {
     type Row = Shape::Row;
 
