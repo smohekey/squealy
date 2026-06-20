@@ -1893,6 +1893,8 @@ where
         P: ReturningProjection<'static>
             + Projectable
             + crate::ProjectionClass<Class = crate::ScalarProjection>
+            // Window functions are invalid in a RETURNING clause; `ReturnableProjection` excludes them
+            + crate::ReturnableProjection
             + crate::ProjectionParams<Params = HNil>,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
         Conn::Backend: SupportsReturning,
@@ -2047,6 +2049,8 @@ where
         P: ReturningProjection<'static>
             + Projectable
             + crate::ProjectionClass<Class = crate::ScalarProjection>
+            // Window functions are invalid in a RETURNING clause; `ReturnableProjection` excludes them
+            + crate::ReturnableProjection
             + crate::ProjectionParams<Params = HNil>,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
         Conn::Backend: SupportsReturning,
@@ -4951,6 +4955,8 @@ where
         P: ReturningProjection<'scope>
             + Projectable
             + crate::ProjectionClass<Class = crate::ScalarProjection>
+            // Window functions are invalid in a RETURNING clause; `ReturnableProjection` excludes them
+            + crate::ReturnableProjection
             + crate::ProjectionParams<Params = HNil>,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
         Conn::Backend: SupportsReturning,

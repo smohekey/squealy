@@ -645,6 +645,33 @@ impl<Operand, Parts, Ords> AstProjectionClass for WindowExprAst<Operand, Parts, 
 // evaluated after grouping, so the backends reject it in any of those clauses. Normal `SELECT`/
 // `ORDER BY` classify via `AstProjectionClass` above, so they are unaffected.
 
+/// Marker for an expression AST that is not a window function (recursive through [`BinaryExprAst`]).
+/// Window functions are evaluated after the result rows are produced, so they are invalid in a
+/// `RETURNING` clause; this marker (via [`ReturnableProjection`]) gates them out while still allowing
+/// columns, literals, params, aggregates, arithmetic, and scalar subqueries. Notably *not*
+/// implemented for [`WindowExprAst`].
+#[doc(hidden)]
+pub trait NonWindowAst {}
+impl<K> NonWindowAst for ColumnExprAst<K> {}
+impl<K> NonWindowAst for LiteralExprAst<K> where K: ExprKind {}
+impl<K> NonWindowAst for ParamExprAst<K> {}
+impl<Operand> NonWindowAst for AggregateExprAst<Operand> {}
+impl<Sub> NonWindowAst for ScalarSubqueryExprAst<Sub> {}
+impl<Left, Right> NonWindowAst for BinaryExprAst<Left, Right>
+where
+    Left: NonWindowAst,
+    Right: NonWindowAst,
+{
+}
+
+/// Marker for a projection valid in a `RETURNING` clause: it contains no window function.
+/// Implemented for columns, bare values, expressions over [`NonWindowAst`], the unit projection,
+/// tuples of returnable projections, and whole-table projections (via the `Table` derive).
+#[doc(hidden)]
+pub trait ReturnableProjection {}
+impl<'scope, K, Ast> ReturnableProjection for Expr<'scope, K, Ast> where Ast: ExprAst + NonWindowAst {}
+impl<'scope, K> ReturnableProjection for ColumnRef<'scope, K> {}
+
 /// Empty operand for a no-argument window function (`ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`):
 /// renders nothing between the parentheses.
 #[doc(hidden)]
