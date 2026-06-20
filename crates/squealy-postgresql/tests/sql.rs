@@ -2312,7 +2312,7 @@ fn postgres_window_functions_render_with_numbered_placeholders() {
     assert!(sql.contains("LAG(q0_0.\"user_id\", $2)"), "{sql}");
     assert_eq!(
         args.collect_params().unwrap(),
-        vec![PostgresParam::Int32(4), PostgresParam::Int64(2)]
+        vec![PostgresParam::Int32(4), PostgresParam::Int32(2)]
     );
 
     // Aggregate-over wraps the cast around the whole window expression, not the inner aggregate.

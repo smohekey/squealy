@@ -922,11 +922,13 @@ pub fn ntile<'scope>(buckets: i32) -> PendingWindow<'scope, i32, LiteralExprAst<
 }
 
 /// The arguments of `LAG`/`LEAD`: a value expression and an integer offset, rendered `value, offset`.
+/// The offset is an `i32` (SQL `integer`): PostgreSQL's `lag`/`lead` take `int4`, so a `BIGINT`
+/// offset would be a parameter-type mismatch.
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct LagArgsAst<ValueAst> {
     value: ValueAst,
-    offset: i64,
+    offset: i32,
 }
 
 impl<ValueAst> ExprAst for LagArgsAst<ValueAst>
@@ -940,7 +942,7 @@ impl<ValueAst, B> RenderAst<B> for LagArgsAst<ValueAst>
 where
     ValueAst: RenderAst<B>,
     B: crate::Backend,
-    i64: crate::Encode<B>,
+    i32: crate::Encode<B>,
 {
     fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
@@ -956,7 +958,7 @@ where
 /// order). The result is nullable (`NULL` past the partition edge), so it decodes as `Option<T>`.
 pub fn lag<'scope, E>(
     value: E,
-    offset: i64,
+    offset: i32,
 ) -> PendingWindow<'scope, ScalarNullable<E::Kind>, LagArgsAst<E::Ast>>
 where
     E: WindowOperand<'scope>,
@@ -976,7 +978,7 @@ where
 /// past the partition edge; see [`lag`].
 pub fn lead<'scope, E>(
     value: E,
-    offset: i64,
+    offset: i32,
 ) -> PendingWindow<'scope, ScalarNullable<E::Kind>, LagArgsAst<E::Ast>>
 where
     E: WindowOperand<'scope>,
