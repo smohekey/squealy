@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, ForeignKeyModel, IndexModel, SchemaModel,
-    TableModel, ViewModel,
+    TableModel, ViewModel, ViewQueryModel,
 };
 
 /// The structured diff from an actual database model to a desired database model.
@@ -389,19 +389,30 @@ fn diff_views(
                 schema: actual.name.clone(),
                 view: (*actual_view).clone(),
             }),
-            (Some(desired_view), Some(actual_view)) if desired_view != actual_view => {
-                if desired_view.columns != actual_view.columns {
-                    drops.push(DatabaseDiffChange::DropView {
-                        schema: actual.name.clone(),
-                        view: (*actual_view).clone(),
+            (Some(desired_view), Some(actual_view)) => {
+                // A live-introspected view carries no structural body (it can't be reconstructed from
+                // the stored SQL), so compare those by columns only — otherwise the empty body would
+                // make every re-introspected view look changed. Models that do carry a body (e.g. from
+                // a package) are compared in full.
+                let changed = if actual_view.query == ViewQueryModel::default() {
+                    desired_view.columns != actual_view.columns
+                } else {
+                    desired_view != actual_view
+                };
+                if changed {
+                    if desired_view.columns != actual_view.columns {
+                        drops.push(DatabaseDiffChange::DropView {
+                            schema: actual.name.clone(),
+                            view: (*actual_view).clone(),
+                        });
+                    }
+                    creates.push(DatabaseDiffChange::CreateView {
+                        schema: desired.name.clone(),
+                        view: (*desired_view).clone(),
                     });
                 }
-                creates.push(DatabaseDiffChange::CreateView {
-                    schema: desired.name.clone(),
-                    view: (*desired_view).clone(),
-                });
             }
-            _ => {}
+            (None, None) => {}
         }
     }
 

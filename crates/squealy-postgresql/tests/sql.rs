@@ -2511,8 +2511,16 @@ fn postgres_renders_view_expression_ir_in_its_dialect() {
                 name: "metrics".to_owned(),
                 comment: None,
                 columns: vec![
-                    ViewColumnModel { name: "ratio".to_owned(), ty: SqlType::F64, nullable: false },
-                    ViewColumnModel { name: "total".to_owned(), ty: SqlType::I64, nullable: false },
+                    ViewColumnModel {
+                        name: "ratio".to_owned(),
+                        ty: SqlType::F64,
+                        nullable: false,
+                    },
+                    ViewColumnModel {
+                        name: "total".to_owned(),
+                        ty: SqlType::I64,
+                        nullable: false,
+                    },
                 ],
                 query: ViewQueryModel {
                     projection: vec![

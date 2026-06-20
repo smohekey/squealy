@@ -1425,8 +1425,16 @@ fn mysql_renders_view_expression_ir_in_its_dialect() {
                 name: "metrics".to_owned(),
                 comment: None,
                 columns: vec![
-                    ViewColumnModel { name: "ratio".to_owned(), ty: SqlType::F64, nullable: false },
-                    ViewColumnModel { name: "total".to_owned(), ty: SqlType::I64, nullable: false },
+                    ViewColumnModel {
+                        name: "ratio".to_owned(),
+                        ty: SqlType::F64,
+                        nullable: false,
+                    },
+                    ViewColumnModel {
+                        name: "total".to_owned(),
+                        ty: SqlType::I64,
+                        nullable: false,
+                    },
                 ],
                 query: ViewQueryModel {
                     projection: vec![
@@ -1469,8 +1477,14 @@ fn mysql_renders_view_expression_ir_in_its_dialect() {
     let sql = String::from_utf8(sql).unwrap();
 
     // MySQL `/` is already fractional, so no float cast is injected — and identifiers are backticks.
-    assert!(sql.contains("(q0_0.`count` / 2)"), "plain MySQL division missing: {sql}");
-    assert!(!sql.contains("double precision"), "MySQL must not get PG casts: {sql}");
+    assert!(
+        sql.contains("(q0_0.`count` / 2)"),
+        "plain MySQL division missing: {sql}"
+    );
+    assert!(
+        !sql.contains("double precision"),
+        "MySQL must not get PG casts: {sql}"
+    );
     // Aggregate result cast uses MySQL's `SIGNED`.
     assert!(
         sql.contains("CAST(SUM(q0_0.`amount`) AS SIGNED)"),

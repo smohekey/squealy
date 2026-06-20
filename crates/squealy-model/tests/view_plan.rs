@@ -126,3 +126,38 @@ fn changing_the_column_set_plans_drop_then_create() {
     assert!(matches!(plan.steps[0], DatabasePlanStep::DropView { .. }));
     assert!(matches!(plan.steps[1], DatabasePlanStep::CreateView { .. }));
 }
+
+// A live-introspected view has no structural body (it can't be rebuilt from stored SQL). The diff
+// must compare those by columns only, so re-introspecting an unchanged view plans nothing instead of
+// a spurious CreateView every run.
+fn introspected_view(columns: &[&str]) -> ViewModel {
+    let mut view = view("ignored-body", columns);
+    view.query = ViewQueryModel::default();
+    view
+}
+
+#[test]
+fn introspected_view_with_matching_columns_plans_nothing() {
+    let desired = model(vec![view("(q0_0.\"id\" > 0)", &["id"])]);
+    let actual = model(vec![introspected_view(&["id"])]);
+
+    let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan");
+
+    assert!(
+        plan.is_empty(),
+        "an unchanged introspected view must not be recreated: {plan:?}"
+    );
+}
+
+#[test]
+fn introspected_view_with_changed_columns_is_recreated() {
+    let desired = model(vec![view("(q0_0.\"id\" > 0)", &["id", "name"])]);
+    let actual = model(vec![introspected_view(&["id"])]);
+
+    let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan");
+
+    // A column-set change can't use CREATE OR REPLACE, so it drops then recreates.
+    assert_eq!(plan.steps.len(), 2);
+    assert!(matches!(plan.steps[0], DatabasePlanStep::DropView { .. }));
+    assert!(matches!(plan.steps[1], DatabasePlanStep::CreateView { .. }));
+}
