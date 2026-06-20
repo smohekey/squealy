@@ -37,6 +37,13 @@ struct Post<'scope, C: ColumnMode = ColumnExpr> {
     user_id: C::Type<'scope, i32>,
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+struct Comment<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    post_id: C::Type<'scope, i32>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ColumnType)]
 struct LedgerRef(i32);
 
@@ -1030,6 +1037,36 @@ fn test_not_exists_subquery_renders() {
          q1_0.user_id AS user_id FROM posts AS q1_0 WHERE (q1_0.user_id = ?)))"
     );
     assert_eq!(q.collect_params().unwrap(), vec![TestParam::Int(1)]);
+}
+
+#[test]
+fn test_nested_subqueries_reusing_handle_get_distinct_aliases() {
+    // Reuse the captured outer handle (`sub`) to build a subquery nested inside another of its
+    // subqueries. Each `from` hands out a fresh depth, so the inner table is `q2_0` (not a second
+    // `q1_0`), and the correlation references the enclosing subquery's `q1_0` unambiguously.
+    let q = TestConnection
+        .from::<User>()
+        .where_correlated(|(_user,), sub| {
+            exists(
+                sub.from::<Post>()
+                    .where_correlated(|(post,), _inner| {
+                        exists(
+                            sub.from::<Comment>()
+                                .where_(|comment| comment.post_id.equals(post.id))
+                                .select_subquery(|(comment,)| comment.post_id),
+                        )
+                    })
+                    .select_subquery(|(post,)| post.user_id),
+            )
+        })
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (EXISTS (SELECT \
+         q1_0.user_id AS user_id FROM posts AS q1_0 WHERE (EXISTS (SELECT \
+         q2_0.post_id AS post_id FROM comments AS q2_0 WHERE (q2_0.post_id = q1_0.id)))))"
+    );
 }
 
 #[test]

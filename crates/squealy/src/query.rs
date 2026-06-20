@@ -2949,15 +2949,20 @@ where
 
 /// A handle, passed to a correlated-predicate closure, for building subqueries that share the outer
 /// query's connection and `'scope` (so outer columns may be referenced — i.e. correlation) while
-/// nesting one level deeper, so the subquery's source aliases (`q{depth}_…`) never collide with the
-/// outer query's.
+/// nesting deeper, so the subquery's source aliases (`q{depth}_…`) never collide with the outer
+/// query's.
+///
+/// Each [`from`](Self::from) hands out a fresh, larger depth than the last, so building several
+/// subqueries from one handle — including reusing a captured handle inside an already-started
+/// subquery — never reuses an alias (which would silently corrupt a correlation predicate). The
+/// first `from` uses the handle's base depth, matching the simple single-subquery case.
 #[doc(hidden)]
 pub struct Subqueries<'conn, 'scope, Conn>
 where
     Conn: QueryBuilder,
 {
     connection: &'conn Conn,
-    depth: usize,
+    next_depth: std::cell::Cell<usize>,
     _scope: PhantomData<&'scope ()>,
 }
 
@@ -2968,19 +2973,22 @@ where
     fn new(connection: &'conn Conn, depth: usize) -> Self {
         Self {
             connection,
-            depth,
+            next_depth: std::cell::Cell::new(depth),
             _scope: PhantomData,
         }
     }
 
-    /// Start a subquery from table `S`, sharing the outer query's scope.
+    /// Start a subquery from table `S`, sharing the outer query's scope. Allocates the next fresh
+    /// depth so sibling and nested subqueries built from this handle get distinct source aliases.
     pub fn from<S>(
         &self,
     ) -> From<'conn, 'scope, Conn, HCons<<S as ProjectionShape>::Exprs<'scope>, HNil>, RootSource<S>>
     where
         S: TableProjection,
     {
-        From::new(self.connection, self.depth)
+        let depth = self.next_depth.get();
+        self.next_depth.set(depth + 1);
+        From::new(self.connection, depth)
     }
 }
 
