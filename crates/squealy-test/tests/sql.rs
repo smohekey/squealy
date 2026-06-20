@@ -1331,3 +1331,30 @@ fn test_window_lag_and_lead_render_with_offset() {
     );
     assert_eq!(led.collect_params().unwrap(), vec![TestParam::Int(2)]);
 }
+
+#[test]
+fn test_window_lag_over_left_joined_column_flattens_nullable() {
+    // LAG over a left-joined (already-nullable) column must flatten to a single `Option<T>`, not
+    // `Option<Option<T>>`. This compiles only because the result row type is `Option<i32>`.
+    let q = TestConnection
+        .from::<User>()
+        .left_join::<Post>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .select(|(user, post)| lag(post.user_id, 1).over(|w| w.order_by(user.id.asc())));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT LAG(q0_1.user_id, ?) OVER (ORDER BY q0_0.id ASC) AS expr FROM public.users AS q0_0 \
+         LEFT JOIN posts AS q0_1 ON (q0_1.user_id = q0_0.id)"
+    );
+
+    // Pin the decoded row type to `Option<i32>` (a regression to `Option<Option<i32>>` would fail
+    // this bound).
+    fn assert_row_option_i32<'b, 's, Base, Projection, Q>(_q: &Q)
+    where
+        Q: SelectQuery<'b, 's, Base, Projection, Row = Option<i32>>,
+        Base: SelectAst<'b, 's, Q::Builder>,
+        Projection: Projectable,
+    {
+    }
+    assert_row_option_i32(&q);
+}

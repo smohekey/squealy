@@ -477,6 +477,12 @@ impl TableStruct {
                     type Value = #field_inner_tys;
                 }
 
+                // A column is a non-null kind for LAG/LEAD purposes, so its window result becomes
+                // `ScalarNullable` (nullable past the partition edge).
+                impl ::squealy::IntoWindowNullable for #expr_kind_idents {
+                    type Kind = ::squealy::ScalarNullable<#expr_kind_idents>;
+                }
+
                 impl ::squealy::ColumnKey for #expr_kind_idents {
                     type Table = #ident <'static, ::squealy::ColumnExpr>;
                     type Nullability = #field_nullability_tys;

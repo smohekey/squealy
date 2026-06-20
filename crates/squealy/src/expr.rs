@@ -988,10 +988,11 @@ where
 pub fn lag<'scope, E>(
     value: E,
     offset: i32,
-) -> PendingWindow<'scope, ScalarNullable<E::Kind>, LagArgsAst<E::Ast>>
+) -> PendingWindow<'scope, <E::Kind as IntoWindowNullable>::Kind, LagArgsAst<E::Ast>>
 where
     E: WindowOperand<'scope>,
     E::Ast: NonAggregateAst,
+    E::Kind: IntoWindowNullable,
 {
     PendingWindow {
         func: WindowFunc::Lag,
@@ -1009,10 +1010,11 @@ where
 pub fn lead<'scope, E>(
     value: E,
     offset: i32,
-) -> PendingWindow<'scope, ScalarNullable<E::Kind>, LagArgsAst<E::Ast>>
+) -> PendingWindow<'scope, <E::Kind as IntoWindowNullable>::Kind, LagArgsAst<E::Ast>>
 where
     E: WindowOperand<'scope>,
     E::Ast: NonAggregateAst,
+    E::Kind: IntoWindowNullable,
 {
     PendingWindow {
         func: WindowFunc::Lead,
@@ -1721,6 +1723,9 @@ macro_rules! impl_value_expr_kind {
     ($($ty:ty),* $(,)?) => {
         $(impl ExprKind for $ty {
             type Value = $ty;
+        }
+        impl IntoWindowNullable for $ty {
+            type Kind = ScalarNullable<$ty>;
         })*
     };
 }
@@ -1729,6 +1734,29 @@ impl_value_expr_kind!(i8, i16, i32, i64, i128, isize);
 impl_value_expr_kind!(u8, u16, u32, u64, u128, usize);
 impl_value_expr_kind!(f32, f64);
 impl_value_expr_kind!(String, bool);
+
+/// Maps a window operand's kind to its `LAG`/`LEAD` result kind, which is always nullable (`NULL`
+/// past the partition edge). The mapping is idempotent over nullability: an already-nullable
+/// left-join projection (`Nullable<K>`) stays `Nullable<K>` so the result decodes as a single
+/// `Option<T>` rather than `Option<Option<T>>`, while a non-null kind becomes `ScalarNullable<K>`.
+/// Implemented for value types (here), nullable kinds (below), and each column kind (via the `Table`
+/// derive).
+#[doc(hidden)]
+pub trait IntoWindowNullable {
+    type Kind: ExprKind;
+}
+impl<K> IntoWindowNullable for Nullable<K>
+where
+    K: ExprKind,
+{
+    type Kind = Nullable<K>;
+}
+impl<K> IntoWindowNullable for ScalarNullable<K>
+where
+    K: ExprKind,
+{
+    type Kind = ScalarNullable<K>;
+}
 
 /// A `uuid::Uuid` value can be used as a literal predicate operand (`col.equals(id)`) or a
 /// write-builder setter (`.id(id)`), like the scalar value types above.
