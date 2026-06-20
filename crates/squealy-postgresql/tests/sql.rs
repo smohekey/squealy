@@ -67,6 +67,14 @@ struct Counter<'scope, C: ColumnMode = ColumnExpr> {
     count: C::Type<'scope, i32>,
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Public)]
+struct Post<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    user_id: C::Type<'scope, i32>,
+}
+
 #[allow(dead_code)]
 #[derive(Schema)]
 struct Public {
@@ -2417,5 +2425,54 @@ SELECT q0_0.\"id\" FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"id\" > 0)"
     assert!(
         sql.contains("DROP VIEW \"public\".\"active_users\""),
         "missing drop view: {sql}"
+    );
+}
+
+#[test]
+fn postgres_in_subquery_numbers_placeholders_across_the_nesting_boundary() {
+    // The subquery's literal ($1) and the outer filter's literal ($2) must number continuously
+    // across the nested SELECT — the whole point of sharing one `Renderer` between parent and child.
+    let q = Postgres
+        .from::<User>()
+        .where_correlated(|(user,), sub| {
+            user.id.in_subquery(
+                sub.from::<Post>()
+                    .where_(|post| post.user_id.equals(7))
+                    .select_subquery(|(post,)| post.user_id),
+            )
+        })
+        .where_(|(user,)| user.id.equals(1))
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.\"id\" AS \"id\" FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"id\" IN \
+         (SELECT q1_0.\"user_id\" AS \"user_id\" FROM \"public\".\"posts\" AS q1_0 WHERE \
+         (q1_0.\"user_id\" = $1))) AND (q0_0.\"id\" = $2)"
+    );
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![PostgresParam::Int32(7), PostgresParam::Int32(1)]
+    );
+}
+
+#[test]
+fn postgres_exists_correlated_subquery_renders() {
+    let q = Postgres
+        .from::<User>()
+        .where_correlated(|(user,), sub| {
+            exists(
+                sub.from::<Post>()
+                    .where_(|post| post.user_id.equals(user.id))
+                    .select_subquery(|(post,)| post.user_id),
+            )
+        })
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.\"id\" AS \"id\" FROM \"public\".\"users\" AS q0_0 WHERE (EXISTS \
+         (SELECT q1_0.\"user_id\" AS \"user_id\" FROM \"public\".\"posts\" AS q1_0 WHERE \
+         (q1_0.\"user_id\" = q0_0.\"id\")))"
     );
 }

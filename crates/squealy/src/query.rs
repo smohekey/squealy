@@ -1892,7 +1892,8 @@ where
         // Aggregates are never valid in `RETURNING`, so require an aggregate-free projection.
         P: ReturningProjection<'static>
             + Projectable
-            + crate::ProjectionClass<Class = crate::ScalarProjection>,
+            + crate::ProjectionClass<Class = crate::ScalarProjection>
+            + crate::ProjectionParams<Params = HNil>,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
         Conn::Backend: SupportsReturning,
     {
@@ -2045,7 +2046,8 @@ where
         // Aggregates are never valid in `RETURNING`, so require an aggregate-free projection.
         P: ReturningProjection<'static>
             + Projectable
-            + crate::ProjectionClass<Class = crate::ScalarProjection>,
+            + crate::ProjectionClass<Class = crate::ScalarProjection>
+            + crate::ProjectionParams<Params = HNil>,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
         Conn::Backend: SupportsReturning,
     {
@@ -2788,6 +2790,21 @@ where
     }
 }
 
+impl<'scope, Base, Shape, Projection> Clone for Selected<'scope, Base, Shape, Projection>
+where
+    Base: Clone,
+    Shape: ProjectionShape,
+    Projection: Projectable,
+{
+    fn clone(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            projection: self.projection.clone(),
+            _shape: PhantomData,
+        }
+    }
+}
+
 impl<'scope, Base, Shape, Projection> Selected<'scope, Base, Shape, Projection>
 where
     Shape: ProjectionShape,
@@ -2816,6 +2833,164 @@ where
         self.base.lower_havings_into(sink)?;
         self.base.lower_orders_into(sink)?;
         self.base.lower_bounds_into(sink)
+    }
+}
+
+/// A finished subquery — a [`Selected`] chain plus the connection type it was built against — erased
+/// behind the [`Subquery`]/[`RenderSubquery`] traits so it can be embedded in an
+/// expression/predicate AST and rendered without the embedding visitor naming the connection type.
+#[doc(hidden)]
+pub struct SubquerySelect<'conn, 'scope, Conn, Base, Shape, Projection>
+where
+    Conn: QueryBuilder,
+    Shape: ProjectionShape,
+    Projection: Projectable,
+{
+    selected: Selected<'scope, Base, Shape, Projection>,
+    _conn: PhantomData<fn() -> &'conn Conn>,
+}
+
+impl<'conn, 'scope, Conn, Base, Shape, Projection> Clone
+    for SubquerySelect<'conn, 'scope, Conn, Base, Shape, Projection>
+where
+    Conn: QueryBuilder,
+    Base: Clone,
+    Shape: ProjectionShape,
+    Projection: Projectable,
+{
+    fn clone(&self) -> Self {
+        Self {
+            selected: self.selected.clone(),
+            _conn: PhantomData,
+        }
+    }
+}
+
+/// Backend-independent facts about an embedded subquery: its runtime-parameter shape, so the outer
+/// query's [`Params`](SelectAst::Params) can absorb them in render order. Any subquery (including a
+/// multi-column or `SELECT 1` one used with `EXISTS`) satisfies this.
+#[doc(hidden)]
+pub trait Subquery: Clone {
+    type Params: HList;
+}
+
+/// A subquery that projects exactly one column, usable where a single value is expected
+/// (`IN (subquery)`, a scalar subquery). [`OutputKind`](Self::OutputKind) is that column's
+/// expression kind — the *kind*, not just its value type — so a `ColumnType` newtype and a column's
+/// nullability survive into the surrounding expression. Multi-column/table projections do not
+/// implement [`crate::ExprKind`] for their shape, so they are rejected from these positions.
+#[doc(hidden)]
+pub trait ScalarSubquery: Subquery {
+    type OutputKind: crate::ExprKind;
+}
+
+/// Backend-parameterized rendering of an embedded subquery (mirror of [`RenderSelectAst`]). The
+/// connection type is captured by the implementor, not the method, so an
+/// [`ExprVisitor`](crate::ExprVisitor)/[`PredicateAstVisitor`](crate::PredicateAstVisitor) can render
+/// a nested SELECT knowing only the backend.
+#[doc(hidden)]
+pub trait RenderSubquery<B>: Subquery
+where
+    B: Backend,
+{
+    fn lower_subquery<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>;
+}
+
+impl<'conn, 'scope, Conn, Base, Shape, Projection> Subquery
+    for SubquerySelect<'conn, 'scope, Conn, Base, Shape, Projection>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn> + Clone,
+    Shape: ProjectionShape,
+    Projection: Projectable + crate::ProjectionParams,
+    // Render order is projection → sources → filters → … , so the projection's params come first.
+    <Projection as crate::ProjectionParams>::Params:
+        crate::HAppend<<Base as SelectAst<'conn, 'scope, Conn>>::Params>,
+{
+    type Params = <<Projection as crate::ProjectionParams>::Params as crate::HAppend<
+        <Base as SelectAst<'conn, 'scope, Conn>>::Params,
+    >>::Output;
+}
+
+// A single-column projection's `Shape` is the projected column's kind, which is itself an
+// `ExprKind` (a table/tuple `Shape` is not), so this impl both surfaces the kind and enforces the
+// single-column requirement for `IN`/scalar subqueries.
+impl<'conn, 'scope, Conn, Base, Shape, Projection> ScalarSubquery
+    for SubquerySelect<'conn, 'scope, Conn, Base, Shape, Projection>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn> + Clone,
+    Shape: ProjectionShape + crate::ExprKind,
+    Projection: Projectable + crate::ProjectionParams,
+    <Projection as crate::ProjectionParams>::Params:
+        crate::HAppend<<Base as SelectAst<'conn, 'scope, Conn>>::Params>,
+{
+    type OutputKind = Shape;
+}
+
+impl<'conn, 'scope, Conn, Base, Shape, Projection, B> RenderSubquery<B>
+    for SubquerySelect<'conn, 'scope, Conn, Base, Shape, Projection>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: RenderSelectAst<'conn, 'scope, Conn, B> + Clone,
+    Shape: ProjectionShape,
+    Projection: crate::RenderProjectable<B> + crate::ProjectionParams,
+    <Projection as crate::ProjectionParams>::Params:
+        crate::HAppend<<Base as SelectAst<'conn, 'scope, Conn>>::Params>,
+    B: Backend,
+{
+    fn lower_subquery<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.selected.lower_into::<Conn, Sink>(sink)
+    }
+}
+
+/// A handle, passed to a correlated-predicate closure, for building subqueries that share the outer
+/// query's connection and `'scope` (so outer columns may be referenced — i.e. correlation) while
+/// nesting deeper, so the subquery's source aliases (`q{depth}_…`) never collide with the outer
+/// query's.
+///
+/// Each [`from`](Self::from) hands out a fresh, larger depth than the last, so building several
+/// subqueries from one handle — including reusing a captured handle inside an already-started
+/// subquery — never reuses an alias (which would silently corrupt a correlation predicate). The
+/// first `from` uses the handle's base depth, matching the simple single-subquery case.
+#[doc(hidden)]
+pub struct Subqueries<'conn, 'scope, Conn>
+where
+    Conn: QueryBuilder,
+{
+    connection: &'conn Conn,
+    next_depth: std::cell::Cell<usize>,
+    _scope: PhantomData<&'scope ()>,
+}
+
+impl<'conn, 'scope, Conn> Subqueries<'conn, 'scope, Conn>
+where
+    Conn: QueryBuilder + 'conn,
+{
+    fn new(connection: &'conn Conn, depth: usize) -> Self {
+        Self {
+            connection,
+            next_depth: std::cell::Cell::new(depth),
+            _scope: PhantomData,
+        }
+    }
+
+    /// Start a subquery from table `S`, sharing the outer query's scope. Allocates the next fresh
+    /// depth so sibling and nested subqueries built from this handle get distinct source aliases.
+    pub fn from<S>(
+        &self,
+    ) -> From<'conn, 'scope, Conn, HCons<<S as ProjectionShape>::Exprs<'scope>, HNil>, RootSource<S>>
+    where
+        S: TableProjection,
+    {
+        let depth = self.next_depth.get();
+        self.next_depth.set(depth + 1);
+        From::new(self.connection, depth)
     }
 }
 
@@ -3442,6 +3617,151 @@ pub struct JoinTarget<Base, S> {
 pub struct LeftJoinTarget<Base, S> {
     base: Base,
     _source: PhantomData<S>,
+}
+
+// Manual `Clone` impls for the select-chain typestate nodes. A subquery embeds a whole select chain
+// inside a predicate/expression AST, and `PredicateAst`/`ExprAst` require `Clone` (predicates are
+// cloned when lowered into a sink). The fields are all cheaply clonable — `&'conn Conn` is `Copy`,
+// `exprs`/predicates/orders are `Clone` — so these impls deliberately do *not* require `Conn: Clone`
+// the way `#[derive(Clone)]` would.
+
+impl<'conn, Conn> Clone for NoSources<'conn, Conn>
+where
+    Conn: QueryBuilder,
+{
+    fn clone(&self) -> Self {
+        Self {
+            connection: self.connection,
+            depth: self.depth,
+        }
+    }
+}
+
+impl<'conn, 'scope, Conn, Exprs, Source> Clone for From<'conn, 'scope, Conn, Exprs, Source>
+where
+    Conn: QueryBuilder,
+    Exprs: HList + Clone,
+    Source: SourceSpec + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            connection: self.connection,
+            depth: self.depth,
+            exprs: self.exprs.clone(),
+            source: self.source.clone(),
+            _scope: PhantomData,
+        }
+    }
+}
+
+impl<'scope, Base, P, PredicateAst> Clone for Where<'scope, Base, P, PredicateAst>
+where
+    Base: Clone,
+    P: PredicateKind,
+    PredicateAst: crate::PredicateAst,
+{
+    fn clone(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            predicate: self.predicate.clone(),
+        }
+    }
+}
+
+impl<'scope, Base, K, Ast> Clone for OrderBy<'scope, Base, K, Ast>
+where
+    Base: Clone,
+    K: ExprKind,
+    Ast: ExprAst,
+{
+    fn clone(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            order: self.order.clone(),
+        }
+    }
+}
+
+impl<'scope, Base, K, Ast> Clone for GroupBy<'scope, Base, K, Ast>
+where
+    Base: Clone,
+    K: ExprKind,
+    Ast: ExprAst,
+{
+    fn clone(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            key: self.key.clone(),
+        }
+    }
+}
+
+impl<'scope, Base, P, PredicateAst> Clone for Having<'scope, Base, P, PredicateAst>
+where
+    Base: Clone,
+    P: PredicateKind,
+    PredicateAst: crate::PredicateAst,
+{
+    fn clone(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            predicate: self.predicate.clone(),
+        }
+    }
+}
+
+impl<Base> Clone for Limited<Base>
+where
+    Base: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            rows: self.rows,
+        }
+    }
+}
+
+impl<Base> Clone for Offset<Base>
+where
+    Base: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            rows: self.rows,
+        }
+    }
+}
+
+impl<Base, Expr, Source> Clone for Join<Base, Expr, Source>
+where
+    Base: Clone,
+    Expr: Clone,
+    Source: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            expr: self.expr.clone(),
+            source: self.source.clone(),
+        }
+    }
+}
+
+impl<Base, Expr, Source> Clone for LeftJoin<Base, Expr, Source>
+where
+    Base: Clone,
+    Expr: Clone,
+    Source: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            expr: self.expr.clone(),
+            source: self.source.clone(),
+        }
+    }
 }
 
 impl<'conn, 'scope, Conn, Base, P, PredicateAst> SelectAst<'conn, 'scope, Conn>
@@ -4317,6 +4637,53 @@ where
         predicates(self.exprs().to_tuple()).apply(self)
     }
 
+    /// Like [`where_`](Self::where_), but the closure also receives a [`Subqueries`] handle for
+    /// building correlated subqueries (`IN (subquery)`, `EXISTS`, scalar) that may reference the
+    /// outer query's columns. The handle nests subqueries one level deeper so their aliases never
+    /// collide with the outer query's.
+    fn where_correlated<P, PredicateAst>(
+        self,
+        predicate: impl FnOnce(
+            <Self::Exprs as ToTuple>::Tuple,
+            Subqueries<'conn, 'scope, Conn>,
+        ) -> Predicate<'scope, P, PredicateAst>,
+    ) -> Where<'scope, Self, P, PredicateAst>
+    where
+        P: PredicateKind,
+        PredicateAst: crate::PredicateAst + crate::NonAggregatePredicate,
+    {
+        let subqueries = Subqueries::new(self.connection(), self.depth() + 1);
+        let predicate = predicate(self.exprs().to_tuple(), subqueries);
+        Where {
+            base: self,
+            predicate,
+        }
+    }
+
+    /// Finish this chain as an embeddable subquery rather than an executable query. The projection
+    /// must select exactly one column; the resulting [`SubquerySelect`] carries that column's type as
+    /// its [`Subquery::Output`] so an `IN (subquery)` or scalar use can be type-checked.
+    fn select_subquery<P>(
+        self,
+        projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
+    ) -> SubquerySelect<'conn, 'scope, Conn, Self, <P as ReturningProjection<'scope>>::Shape, P>
+    where
+        P: ReturningProjection<'scope> + Projectable,
+        <Self as SelectAst<'conn, 'scope, Conn>>::Grouped:
+            crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
+        <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
+    {
+        let exprs = self.exprs();
+        let projection = projection(exprs.to_tuple());
+        let selected = Selected::<'scope, _, <P as ReturningProjection<'scope>>::Shape, _>::new(
+            self, projection,
+        );
+        SubquerySelect {
+            selected,
+            _conn: PhantomData,
+        }
+    }
+
     fn limit(self, rows: usize) -> Limited<Self> {
         Limited { base: self, rows }
     }
@@ -4350,7 +4717,12 @@ where
         projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
     ) -> Conn::Select<'conn, 'scope, Self, <P as ReturningProjection<'scope>>::Shape, P>
     where
-        P: ReturningProjection<'scope> + Projectable,
+        // The projection must carry no runtime params: a projected scalar subquery renders before
+        // the outer FROM, but the executable/prepared param shape is the source chain's, so a
+        // `param` in the SELECT list would be an unbindable placeholder. Bare columns, aggregates,
+        // arithmetic over literals, and correlated (column-referencing) scalar subqueries all have
+        // empty projection params; only a runtime `param` in the SELECT list is rejected.
+        P: ReturningProjection<'scope> + Projectable + crate::ProjectionParams<Params = HNil>,
         // For an ungrouped query `ValidSelect` requires a homogeneous projection (no mixing of a
         // bare column and an aggregate) with compatible ordering; a `GROUP BY` lifts that.
         <Self as SelectAst<'conn, 'scope, Conn>>::Grouped:
@@ -4390,6 +4762,41 @@ where
         let exprs = self.exprs();
         let projection = projection(exprs.to_tuple());
         Selected::<'scope, _, <P as ReturningProjection<'scope>>::Shape, _>::new(self, projection)
+    }
+
+    /// Like [`select`](Self::select), but the projection closure also receives a [`Subqueries`]
+    /// handle for projecting scalar subqueries (`SELECT (SELECT …)`), which may be correlated.
+    ///
+    /// A projected scalar subquery renders before the outer `FROM`, so a runtime [`param`] inside it
+    /// would emit a placeholder the top-level query can't bind (its executable/prepared param shape
+    /// is the source chain's). To stop that from silently producing an unbound placeholder, the
+    /// projection must be free of runtime params (`P: ProjectionParams<Params = HNil>`). A correlated
+    /// scalar subquery referencing outer *columns* — the common case — carries none.
+    fn select_correlated<P>(
+        self,
+        projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple, Subqueries<'conn, 'scope, Conn>) -> P,
+    ) -> Conn::Select<'conn, 'scope, Self, <P as ReturningProjection<'scope>>::Shape, P>
+    where
+        P: ReturningProjection<'scope> + Projectable + crate::ProjectionParams<Params = HNil>,
+        <Self as SelectAst<'conn, 'scope, Conn>>::Grouped:
+            crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
+        <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
+        <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
+    {
+        let subqueries = Subqueries::new(self.connection(), self.depth() + 1);
+        let exprs = self.exprs();
+        let projection = projection(exprs.to_tuple(), subqueries);
+        let selected = Selected::<'scope, _, <P as ReturningProjection<'scope>>::Shape, _>::new(
+            self, projection,
+        );
+        let connection = selected.connection::<Conn>();
+        <<Conn as QueryBuilder>::Select<
+            'conn,
+            'scope,
+            Self,
+            <P as ReturningProjection<'scope>>::Shape,
+            P,
+        > as SelectQuery<'conn, 'scope, Self, P>>::build_selected(connection, selected)
     }
 }
 
@@ -4565,7 +4972,8 @@ where
         // Aggregates are never valid in `RETURNING`, so require an aggregate-free projection.
         P: ReturningProjection<'scope>
             + Projectable
-            + crate::ProjectionClass<Class = crate::ScalarProjection>,
+            + crate::ProjectionClass<Class = crate::ScalarProjection>
+            + crate::ProjectionParams<Params = HNil>,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
         Conn::Backend: SupportsReturning,
     {

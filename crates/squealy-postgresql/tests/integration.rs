@@ -500,6 +500,93 @@ async fn postgres_inner_joins_across_tables() {
 
 #[tokio::test]
 #[ignore]
+async fn postgres_correlated_exists_and_in_subqueries() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS join_posts; DROP TABLE IF EXISTS join_users")
+        .await
+        .expect("drop old join tables");
+
+    let ddl_backend = Postgres;
+    create_table::<JoinUser>(&client, &ddl_backend).await;
+    create_table::<JoinPost>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+
+    let ada = connection
+        .to::<JoinUser>()
+        .name("Ada")
+        .insert_returning(|user| user)
+        .fetch_one()
+        .await
+        .expect("insert Ada");
+    connection
+        .to::<JoinUser>()
+        .name("Grace")
+        .insert()
+        .await
+        .expect("insert Grace");
+    connection
+        .to::<JoinPost>()
+        .user_id(ada.id)
+        .title("Notes on the Analytical Engine")
+        .insert()
+        .await
+        .expect("insert post");
+
+    // Correlated EXISTS: only users that have at least one post.
+    let authors = connection
+        .from::<JoinUser>()
+        .where_correlated(|(user,), sub| {
+            exists(
+                sub.from::<JoinPost>()
+                    .where_(|post| post.user_id.equals(user.id))
+                    .select_subquery(|(post,)| post.user_id),
+            )
+        })
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| user.name)
+        .collect()
+        .await
+        .expect("fetch authors via correlated EXISTS");
+    assert_eq!(authors, vec!["Ada".to_owned()]);
+
+    // IN (subquery): users whose id appears among post authors.
+    let ids = connection
+        .from::<JoinUser>()
+        .where_correlated(|(user,), sub| {
+            user.id.in_subquery(
+                sub.from::<JoinPost>()
+                    .select_subquery(|(post,)| post.user_id),
+            )
+        })
+        .select(|(user,)| user.name)
+        .collect()
+        .await
+        .expect("fetch authors via IN (subquery)");
+    assert_eq!(ids, vec!["Ada".to_owned()]);
+
+    // Scalar subquery in a projection: count each user's posts, decoded end to end. A scalar
+    // subquery is always nullable (zero matching rows is SQL NULL), so it decodes as `Option`.
+    let counts = connection
+        .from::<JoinUser>()
+        .order_by(|(user,)| user.id.asc())
+        .select_correlated(|(user,), sub| {
+            scalar_subquery(
+                sub.from::<JoinPost>()
+                    .where_(|post| post.user_id.equals(user.id))
+                    .select_subquery(|(post,)| post.id.count()),
+            )
+        })
+        .collect()
+        .await
+        .expect("fetch post counts via scalar subquery");
+    assert_eq!(counts, vec![Some(1_i64), Some(0_i64)]);
+}
+
+#[tokio::test]
+#[ignore]
 async fn postgres_inserts_multiple_rows() {
     let _db_guard = db_lock().lock().await;
     let client = connect().await;

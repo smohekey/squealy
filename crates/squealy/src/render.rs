@@ -283,9 +283,9 @@ impl<B: Backend> SqlWriter<B> for ParamCollector<'_, B> {
     fn push_runtime_bind(&mut self, _index: usize) {}
 }
 
-struct SelectRenderSink<'writer, B, Writer> {
+struct SelectRenderSink<'writer, 'renderer, B, Writer> {
     writer: &'writer mut Writer,
-    renderer: Renderer,
+    renderer: &'renderer mut Renderer,
     columns: usize,
     sources: usize,
     filters: usize,
@@ -297,16 +297,19 @@ struct SelectRenderSink<'writer, B, Writer> {
     _backend: PhantomData<B>,
 }
 
-impl<'writer, B, Writer> SelectRenderSink<'writer, B, Writer>
+impl<'writer, 'renderer, B, Writer> SelectRenderSink<'writer, 'renderer, B, Writer>
 where
     B: Backend,
     Writer: SqlWriter<B>,
 {
-    fn new(writer: &'writer mut Writer, dialect: &'static dyn Dialect) -> io::Result<Self> {
+    /// Open a SELECT sharing the caller's [`Renderer`]. Borrowing (rather than owning) the renderer
+    /// is what lets a nested subquery continue the parent's placeholder numbering instead of
+    /// restarting from zero — see [`RenderExpr`]'s subquery visitor methods.
+    fn new(writer: &'writer mut Writer, renderer: &'renderer mut Renderer) -> io::Result<Self> {
         writer.write_all(b"SELECT ")?;
         Ok(Self {
             writer,
-            renderer: Renderer::new(dialect),
+            renderer,
             columns: 0,
             sources: 0,
             filters: 0,
@@ -352,7 +355,7 @@ where
             write!(self.writer, "{join} ")?;
             write_table_ref::<S>(self.renderer.dialect, self.writer)?;
             write!(self.writer, " AS {alias} ON ")?;
-            write_predicate_value(&on, self.writer, &mut self.renderer)?;
+            write_predicate_value(&on, self.writer, &mut *self.renderer)?;
         }
         Ok(())
     }
@@ -366,7 +369,7 @@ where
     }
 }
 
-impl<B, Writer> SelectSink for SelectRenderSink<'_, B, Writer>
+impl<B, Writer> SelectSink for SelectRenderSink<'_, '_, B, Writer>
 where
     B: Backend,
     Writer: SqlWriter<B>,
@@ -430,7 +433,7 @@ where
             self.writer.write_all(b" AND ")?;
         }
         self.filters += 1;
-        write_predicate_value(&predicate, self.writer, &mut self.renderer)
+        write_predicate_value(&predicate, self.writer, &mut *self.renderer)
     }
 
     fn push_group<K, Ast>(&mut self, key: &Expr<'_, K, Ast>) -> io::Result<()>
@@ -444,7 +447,7 @@ where
             self.writer.write_all(b", ")?;
         }
         self.groups += 1;
-        write_expr_value(key, self.writer, &mut self.renderer)
+        write_expr_value(key, self.writer, &mut *self.renderer)
     }
 
     fn push_having<P, Ast>(&mut self, predicate: Predicate<'_, P, Ast>) -> io::Result<()>
@@ -458,7 +461,7 @@ where
             self.writer.write_all(b" AND ")?;
         }
         self.havings += 1;
-        write_predicate_value(&predicate, self.writer, &mut self.renderer)
+        write_predicate_value(&predicate, self.writer, &mut *self.renderer)
     }
 
     fn push_order<K, Ast>(&mut self, order: Order<'_, K, Ast>) -> io::Result<()>
@@ -472,7 +475,7 @@ where
             self.writer.write_all(b", ")?;
         }
         self.orders += 1;
-        write_order_value(&order, self.writer, &mut self.renderer)
+        write_order_value(&order, self.writer, &mut *self.renderer)
     }
 
     fn set_limit(&mut self, rows: usize) -> io::Result<()> {
@@ -486,7 +489,7 @@ where
     }
 }
 
-impl<B, Writer> ProjectionVisitor for SelectRenderSink<'_, B, Writer>
+impl<B, Writer> ProjectionVisitor for SelectRenderSink<'_, '_, B, Writer>
 where
     B: Backend,
     Writer: SqlWriter<B>,
@@ -504,7 +507,7 @@ where
         Ast: RenderAst<B>,
     {
         self.push_projection_separator()?;
-        write_expr_value(expr, self.writer, &mut self.renderer)?;
+        write_expr_value(expr, self.writer, &mut *self.renderer)?;
         self.writer.write_all(b" AS ")?;
         self.renderer
             .dialect
@@ -521,7 +524,7 @@ where
         K: ExprKind,
     {
         self.push_projection_separator()?;
-        write_column_value(column, self.writer, &mut self.renderer)?;
+        write_column_value(column, self.writer, &mut *self.renderer)?;
         self.writer.write_all(b" AS ")?;
         self.renderer
             .dialect
@@ -540,7 +543,8 @@ pub fn render_selected_prepared<'conn, 'scope, Conn, Base, Shape, Projection>(
     Projection: RenderProjectable<Conn::Backend>,
 {
     buffer.clear();
-    let mut sink = SelectRenderSink::<Conn::Backend, _>::new(buffer, dialect).unwrap();
+    let mut renderer = Renderer::new(dialect);
+    let mut sink = SelectRenderSink::<Conn::Backend, _>::new(buffer, &mut renderer).unwrap();
     selected.lower_into::<Conn, _>(&mut sink).unwrap();
     sink.finish().unwrap();
 }
@@ -558,7 +562,8 @@ where
     Writer: Write,
 {
     let mut writer = SqlOnly(writer);
-    let mut sink = SelectRenderSink::<Conn::Backend, _>::new(&mut writer, dialect)?;
+    let mut renderer = Renderer::new(dialect);
+    let mut sink = SelectRenderSink::<Conn::Backend, _>::new(&mut writer, &mut renderer)?;
     selected.lower_into::<Conn, _>(&mut sink)?;
     sink.finish()
 }
@@ -575,7 +580,9 @@ where
     Projection: RenderProjectable<Conn::Backend>,
 {
     let mut writer = ParamCollector::<Conn::Backend>::new(params);
-    let mut select_sink = SelectRenderSink::<Conn::Backend, _>::new(&mut writer, dialect).unwrap();
+    let mut renderer = Renderer::new(dialect);
+    let mut select_sink =
+        SelectRenderSink::<Conn::Backend, _>::new(&mut writer, &mut renderer).unwrap();
     selected.lower_into::<Conn, _>(&mut select_sink).unwrap();
     select_sink.finish().unwrap();
     writer.finish()
@@ -1117,6 +1124,23 @@ where
     write_ast::<B, _>(writer, renderer, false, |visitor| predicate.visit(visitor))
 }
 
+/// Render an embedded subquery as a nested `SELECT …`, reusing the caller's [`Renderer`] so the
+/// subquery's placeholders continue the parent's numbering instead of restarting at zero.
+fn write_subselect<Sub, B, Writer>(
+    subquery: &Sub,
+    writer: &mut Writer,
+    renderer: &mut Renderer,
+) -> io::Result<()>
+where
+    Sub: crate::RenderSubquery<B>,
+    B: Backend,
+    Writer: SqlWriter<B>,
+{
+    let mut sink = SelectRenderSink::<B, Writer>::new(writer, renderer)?;
+    subquery.lower_subquery(&mut sink)?;
+    sink.finish()
+}
+
 pub(crate) fn write_order_value<K, Ast, B, Writer>(
     order: &Order<'_, K, Ast>,
     writer: &mut Writer,
@@ -1306,6 +1330,15 @@ where
             }
         }
     }
+
+    fn visit_scalar_subquery<Sub>(&mut self, subquery: &Sub) -> Result<(), Self::Error>
+    where
+        Sub: crate::RenderSubquery<B>,
+    {
+        self.writer.write_all(b"(")?;
+        write_subselect::<Sub, B, _>(subquery, &mut *self.writer, &mut *self.renderer)?;
+        self.writer.write_all(b")")
+    }
 }
 
 impl<B, Writer> PredicateAstVisitor for RenderExpr<'_, '_, B, Writer>
@@ -1462,6 +1495,37 @@ where
             operand(self)?;
             self.writer.write_all(b")")
         }
+    }
+
+    fn visit_in_subquery<O, Sub>(
+        &mut self,
+        negated: bool,
+        operand: O,
+        subquery: &Sub,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Sub: crate::RenderSubquery<B>,
+    {
+        self.writer.write_all(b"(")?;
+        operand(self)?;
+        self.writer
+            .write_all(if negated { b" NOT IN (" } else { b" IN (" })?;
+        write_subselect::<Sub, B, _>(subquery, &mut *self.writer, &mut *self.renderer)?;
+        self.writer.write_all(b"))")
+    }
+
+    fn visit_exists<Sub>(&mut self, negated: bool, subquery: &Sub) -> Result<(), Self::Error>
+    where
+        Sub: crate::RenderSubquery<B>,
+    {
+        self.writer.write_all(if negated {
+            b"(NOT EXISTS ("
+        } else {
+            b"(EXISTS ("
+        })?;
+        write_subselect::<Sub, B, _>(subquery, &mut *self.writer, &mut *self.renderer)?;
+        self.writer.write_all(b"))")
     }
 }
 

@@ -17,6 +17,13 @@ struct Counter<'scope, C: ColumnMode = ColumnExpr> {
     hits: C::Type<'scope, u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+struct Gadget<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    widget_id: C::Type<'scope, i32>,
+}
+
 #[test]
 fn mysql_renders_select_in_its_dialect() {
     let query = Mysql
@@ -134,5 +141,54 @@ fn mysql_unsigned_sum_casts_to_full_precision_decimal() {
             .contains("CAST(SUM(q0_0.`hits`) AS DECIMAL(65, 0))"),
         "{}",
         sum.to_sql()
+    );
+}
+
+#[test]
+fn mysql_correlated_in_subquery_renders_in_its_dialect() {
+    let query = Mysql
+        .from::<Widget>()
+        .where_correlated(|(widget,), sub| {
+            widget.id.in_subquery(
+                sub.from::<Gadget>()
+                    .where_(|gadget| gadget.widget_id.equals(widget.id))
+                    .select_subquery(|(gadget,)| gadget.widget_id),
+            )
+        })
+        .select(|(widget,)| widget.id);
+
+    assert_eq!(
+        query.to_sql(),
+        "SELECT q0_0.`id` AS `id` FROM `widgets` AS q0_0 WHERE (q0_0.`id` IN (SELECT \
+         q1_0.`widget_id` AS `widget_id` FROM `gadgets` AS q1_0 WHERE (q1_0.`widget_id` = q0_0.`id`)))"
+    );
+}
+
+#[test]
+fn mysql_exists_subquery_uses_question_mark_placeholders() {
+    let query = Mysql
+        .from::<Widget>()
+        .where_correlated(|(_widget,), sub| {
+            not_exists(
+                sub.from::<Gadget>()
+                    .where_(|gadget| gadget.widget_id.equals(3))
+                    .select_subquery(|(gadget,)| gadget.widget_id),
+            )
+        })
+        .select(|(widget,)| widget.id);
+
+    let sql = query.to_sql();
+    assert!(sql.contains("NOT EXISTS (SELECT"), "{sql}");
+    assert!(
+        sql.contains("= ?)"),
+        "expected `?` placeholder in subquery: {sql}"
+    );
+    assert!(
+        !sql.contains("$1"),
+        "must not use Postgres placeholders: {sql}"
+    );
+    assert_eq!(
+        query.collect_params().unwrap(),
+        vec![mysql_async::Value::Int(3)]
     );
 }
