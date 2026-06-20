@@ -93,3 +93,17 @@ fn database_walk_includes_views() {
     assert_eq!(view.query.from.as_ref().unwrap().name, "users");
     assert!(view.query.filter.as_ref().unwrap().0.contains("TRUE"));
 }
+
+// The view is queryable as a FROM source, including from another view's body (view-on-view).
+#[test]
+fn view_is_queryable_as_a_from_source() {
+    static CONN: ModelConn = ModelConn;
+    let query = CONN
+        .from::<ActiveUser>()
+        .where_(|active| active.id.greater_than(0))
+        .project(|(active,)| (active.id, active.name));
+
+    let model = lower_view(&query);
+    assert_eq!(model.from.as_ref().unwrap().name, "active_users");
+    assert_eq!(model.projection.len(), 2);
+}

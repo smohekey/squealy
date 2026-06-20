@@ -9,7 +9,13 @@ use crate::table::{TableStruct, table_struct};
 /// body separately by implementing `ViewDefinition::definition`.
 pub(crate) fn derive(input: TokenStream) -> TokenStream {
     match table_struct(input) {
-        Ok(view) => expand(&view),
+        Ok(view) => {
+            // The read-only projection machinery (so the view is queryable as a `FROM` source) plus
+            // the view's own `SchemaView` metadata.
+            let projection: proc_macro2::TokenStream = view.expand(true).into();
+            let schema_view: proc_macro2::TokenStream = expand(&view).into();
+            quote::quote! { #projection #schema_view }.into()
+        }
         Err(error) => error.into_compile_error(),
     }
 }
