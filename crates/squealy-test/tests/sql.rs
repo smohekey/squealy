@@ -30,6 +30,33 @@ struct Counter<'scope, C: ColumnMode = ColumnExpr> {
     count: C::Type<'scope, i32>,
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+struct Post<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    user_id: C::Type<'scope, i32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct Comment<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    post_id: C::Type<'scope, i32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ColumnType)]
+struct LedgerRef(i32);
+
+// A table with a `ColumnType` newtype column and a nullable column, for subquery kind/nullability
+// preservation tests.
+#[derive(Clone, Debug, PartialEq, Table)]
+struct Event<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    ledger_ref: C::Type<'scope, LedgerRef>,
+    label: C::Type<'scope, Option<String>>,
+}
+
 #[allow(dead_code)]
 #[derive(Schema)]
 struct Public {
@@ -909,5 +936,286 @@ fn test_having_tuple_predicates_are_anded() {
     assert_eq!(
         q.collect_params().unwrap(),
         vec![TestParam::Int(1), TestParam::Int(10)]
+    );
+}
+
+#[test]
+fn test_in_subquery_uncorrelated_renders_nested_select() {
+    let q = TestConnection
+        .from::<User>()
+        .where_correlated(|(user,), sub| {
+            user.id.in_subquery(
+                sub.from::<Post>()
+                    .where_(|post| post.user_id.equals(5))
+                    .select_subquery(|(post,)| post.user_id),
+            )
+        })
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.id IN (SELECT \
+         q1_0.user_id AS user_id FROM posts AS q1_0 WHERE (q1_0.user_id = ?)))"
+    );
+    assert_eq!(q.collect_params().unwrap(), vec![TestParam::Int(5)]);
+}
+
+#[test]
+fn test_in_subquery_correlated_references_outer_column() {
+    let q = TestConnection
+        .from::<User>()
+        .where_correlated(|(user,), sub| {
+            user.id.in_subquery(
+                sub.from::<Post>()
+                    .where_(|post| post.user_id.equals(user.id))
+                    .select_subquery(|(post,)| post.user_id),
+            )
+        })
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.id IN (SELECT \
+         q1_0.user_id AS user_id FROM posts AS q1_0 WHERE (q1_0.user_id = q0_0.id)))"
+    );
+    assert_eq!(q.collect_params().unwrap(), Vec::<TestParam>::new());
+}
+
+#[test]
+fn test_not_in_subquery_renders_not_in() {
+    let q = TestConnection
+        .from::<User>()
+        .where_correlated(|(user,), sub| {
+            user.id
+                .not_in_subquery(sub.from::<Post>().select_subquery(|(post,)| post.user_id))
+        })
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.id NOT IN (SELECT \
+         q1_0.user_id AS user_id FROM posts AS q1_0))"
+    );
+}
+
+#[test]
+fn test_exists_correlated_subquery_renders() {
+    let q = TestConnection
+        .from::<User>()
+        .where_correlated(|(user,), sub| {
+            exists(
+                sub.from::<Post>()
+                    .where_(|post| post.user_id.equals(user.id))
+                    .select_subquery(|(post,)| post.user_id),
+            )
+        })
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (EXISTS (SELECT \
+         q1_0.user_id AS user_id FROM posts AS q1_0 WHERE (q1_0.user_id = q0_0.id)))"
+    );
+}
+
+#[test]
+fn test_not_exists_subquery_renders() {
+    let q = TestConnection
+        .from::<User>()
+        .where_correlated(|(_user,), sub| {
+            not_exists(
+                sub.from::<Post>()
+                    .where_(|post| post.user_id.equals(1))
+                    .select_subquery(|(post,)| post.user_id),
+            )
+        })
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (NOT EXISTS (SELECT \
+         q1_0.user_id AS user_id FROM posts AS q1_0 WHERE (q1_0.user_id = ?)))"
+    );
+    assert_eq!(q.collect_params().unwrap(), vec![TestParam::Int(1)]);
+}
+
+#[test]
+fn test_nested_subqueries_reusing_handle_get_distinct_aliases() {
+    // Reuse the captured outer handle (`sub`) to build a subquery nested inside another of its
+    // subqueries. Each `from` hands out a fresh depth, so the inner table is `q2_0` (not a second
+    // `q1_0`), and the correlation references the enclosing subquery's `q1_0` unambiguously.
+    let q = TestConnection
+        .from::<User>()
+        .where_correlated(|(_user,), sub| {
+            exists(
+                sub.from::<Post>()
+                    .where_correlated(|(post,), _inner| {
+                        exists(
+                            sub.from::<Comment>()
+                                .where_(|comment| comment.post_id.equals(post.id))
+                                .select_subquery(|(comment,)| comment.post_id),
+                        )
+                    })
+                    .select_subquery(|(post,)| post.user_id),
+            )
+        })
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (EXISTS (SELECT \
+         q1_0.user_id AS user_id FROM posts AS q1_0 WHERE (EXISTS (SELECT \
+         q2_0.post_id AS post_id FROM comments AS q2_0 WHERE (q2_0.post_id = q1_0.id)))))"
+    );
+}
+
+#[test]
+fn test_exists_accepts_a_multi_column_subquery_projection() {
+    // EXISTS ignores the select-list shape, so a multi-column (tuple) projection is allowed.
+    let q = TestConnection
+        .from::<User>()
+        .where_correlated(|(user,), sub| {
+            exists(
+                sub.from::<Post>()
+                    .where_(|post| post.user_id.equals(user.id))
+                    .select_subquery(|(post,)| (post.id, post.user_id)),
+            )
+        })
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (EXISTS (SELECT \
+         q1_0.id AS t0_id, q1_0.user_id AS t1_user_id FROM posts AS q1_0 WHERE \
+         (q1_0.user_id = q0_0.id)))"
+    );
+}
+
+#[test]
+fn test_in_subquery_with_outer_and_inner_params_orders_binds() {
+    // Outer filter param, then a subquery containing its own literal: binds must come out in render
+    // order (outer WHERE operand has no bind here; the inner literal renders inside the subquery).
+    let q = TestConnection
+        .from::<User>()
+        .where_correlated(|(user,), sub| {
+            user.id.in_subquery(
+                sub.from::<Post>()
+                    .where_(|post| post.user_id.equals(7))
+                    .select_subquery(|(post,)| post.user_id),
+            )
+        })
+        .where_(|(user,)| user.name.equals("ada"))
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.id IN (SELECT \
+         q1_0.user_id AS user_id FROM posts AS q1_0 WHERE (q1_0.user_id = ?))) AND (q0_0.name = ?)"
+    );
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![TestParam::Int(7), TestParam::Text("ada".to_owned())]
+    );
+}
+
+#[test]
+fn test_scalar_subquery_as_comparison_operand() {
+    let q = TestConnection
+        .from::<User>()
+        .where_correlated(|(user,), sub| {
+            user.id.equals(scalar_subquery(
+                sub.from::<Post>()
+                    .where_(|post| post.user_id.equals(user.id))
+                    .select_subquery(|(post,)| post.user_id),
+            ))
+        })
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.id = (SELECT \
+         q1_0.user_id AS user_id FROM posts AS q1_0 WHERE (q1_0.user_id = q0_0.id)))"
+    );
+}
+
+#[test]
+fn test_scalar_subquery_in_projection() {
+    let q = TestConnection
+        .from::<User>()
+        .select_correlated(|(user,), sub| {
+            scalar_subquery(
+                sub.from::<Post>()
+                    .where_(|post| post.user_id.equals(user.id))
+                    .select_subquery(|(post,)| post.id),
+            )
+        });
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT (SELECT q1_0.id AS id FROM posts AS q1_0 WHERE (q1_0.user_id = q0_0.id)) AS expr \
+         FROM public.users AS q0_0"
+    );
+}
+
+#[test]
+fn test_in_subquery_against_a_newtype_column() {
+    // A `ColumnType` newtype operand matches a subquery projecting the same newtype column. (The
+    // value-type guard rejects mixing it with an `i32`-projecting subquery — see the compile-fail
+    // test `in_subquery_type_mismatch`.)
+    let q = TestConnection
+        .from::<Event>()
+        .where_correlated(|(event,), sub| {
+            event.ledger_ref.in_subquery(
+                sub.from::<Event>()
+                    .select_subquery(|(other,)| other.ledger_ref),
+            )
+        })
+        .select(|(event,)| event.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM events AS q0_0 WHERE (q0_0.ledger_ref IN (SELECT \
+         q1_0.ledger_ref AS ledger_ref FROM events AS q1_0))"
+    );
+}
+
+#[test]
+fn test_in_subquery_against_a_nullable_column_is_allowed() {
+    // `x IN (SELECT nullable_col …)` is valid SQL: the column kind's value type is the non-null
+    // inner type, so a `String` operand matches a nullable `Option<String>` projected column.
+    let q = TestConnection
+        .from::<User>()
+        .where_correlated(|(user,), sub| {
+            user.name
+                .in_subquery(sub.from::<Event>().select_subquery(|(event,)| event.label))
+        })
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.name IN (SELECT \
+         q1_0.label AS label FROM events AS q1_0))"
+    );
+}
+
+#[test]
+fn test_scalar_subquery_of_a_nullable_column_is_null_testable() {
+    // A scalar subquery over a nullable column keeps its nullable kind, so `is_null` is available.
+    let q = TestConnection
+        .from::<User>()
+        .where_correlated(|(_user,), sub| {
+            scalar_subquery(
+                sub.from::<Event>()
+                    .where_(|event| event.ledger_ref.equals(LedgerRef(1)))
+                    .select_subquery(|(event,)| event.label),
+            )
+            .is_null()
+        })
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE ((SELECT q1_0.label AS label \
+         FROM events AS q1_0 WHERE (q1_0.ledger_ref = ?)) IS NULL)"
     );
 }

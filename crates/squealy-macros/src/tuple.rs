@@ -527,6 +527,34 @@ fn tuple_projection_shape(arity: usize) -> proc_macro2::TokenStream {
     // tuple mixing a scalar column and an aggregate has no `ProjectionClass` impl.
     let first_type = &types[0];
     let rest_types = &types[1..];
+    // Each element's projection params, concatenated left-to-right (render order), so an embedded
+    // subquery's `Params` accounts for a runtime `param` in any projected expression.
+    let projection_param_types = types
+        .iter()
+        .map(|ty| quote::quote! { <#ty as crate::ProjectionParams>::Params })
+        .collect::<Vec<_>>();
+    let projection_params_folded = projection_param_types
+        .iter()
+        .rev()
+        .cloned()
+        .reduce(|tail, head| quote::quote! { <#head as crate::HAppend<#tail>>::Output })
+        .unwrap_or_else(|| quote::quote! { crate::HNil });
+    let projection_params_append_bounds = (0..arity)
+        .map(|index| {
+            match projection_param_types[(index + 1)..]
+                .iter()
+                .rev()
+                .cloned()
+                .reduce(|tail, head| quote::quote! { <#head as crate::HAppend<#tail>>::Output })
+            {
+                Some(tail) => {
+                    let head = &projection_param_types[index];
+                    quote::quote! { #head: crate::HAppend<#tail>, }
+                }
+                None => quote::quote! {},
+            }
+        })
+        .collect::<Vec<_>>();
     quote::quote! {
         impl<#(#types),*> ProjectionShape for (#(#types,)*)
         where
@@ -663,6 +691,14 @@ fn tuple_projection_shape(arity: usize) -> proc_macro2::TokenStream {
             #(#types: ::squealy::ProjectionColumns<Columns = ::squealy::ColumnFree>,)*
         {
             type Columns = ::squealy::ColumnFree;
+        }
+
+        impl<#(#types),*> crate::ProjectionParams for (#(#types,)*)
+        where
+            #( #types: crate::ProjectionParams, )*
+            #(#projection_params_append_bounds)*
+        {
+            type Params = #projection_params_folded;
         }
 
         impl<Backend, #(#types),*> Decode<Backend> for (#(#types,)*)

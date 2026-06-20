@@ -1011,6 +1011,12 @@ pub trait ExprVisitor {
     ) -> Result<(), Self::Error>
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render a scalar subquery — a single-row, single-column `(SELECT …)` used as a value
+    /// expression. The subquery shares the parent's placeholder numbering.
+    fn visit_scalar_subquery<Sub>(&mut self, subquery: &Sub) -> Result<(), Self::Error>
+    where
+        Sub: crate::RenderSubquery<Self::Backend>;
 }
 
 #[doc(hidden)]
@@ -1083,6 +1089,23 @@ pub trait PredicateAstVisitor: ExprVisitor {
     fn visit_bool_test<O>(&mut self, negated: bool, operand: O) -> Result<(), Self::Error>
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render a SQL `operand IN (subquery)` (or `NOT IN` when `negated`) membership test. The
+    /// subquery renders as a nested `(SELECT …)`, sharing the parent's placeholder numbering.
+    fn visit_in_subquery<O, Sub>(
+        &mut self,
+        negated: bool,
+        operand: O,
+        subquery: &Sub,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Sub: crate::RenderSubquery<Self::Backend>;
+
+    /// Render a SQL `EXISTS (subquery)` (or `NOT EXISTS` when `negated`) test.
+    fn visit_exists<Sub>(&mut self, negated: bool, subquery: &Sub) -> Result<(), Self::Error>
+    where
+        Sub: crate::RenderSubquery<Self::Backend>;
 }
 
 macro_rules! impl_value_expr_kind {
@@ -1135,6 +1158,58 @@ where
 pub trait NullableExpr {}
 
 impl<K> NullableExpr for Nullable<K> {}
+
+/// Type-level kind for a scalar subquery result. Its value type stays `K::Value` — so it compares
+/// against the same operands as `K` — but it is always nullable, because a scalar subquery that
+/// matches zero rows evaluates to SQL `NULL` regardless of the projected column's own nullability.
+/// It therefore decodes as `Option<K::Value>` and supports [`is_null`](Expr::is_null). (Unlike
+/// [`Nullable<K>`], whose *value* is `Option<…>`, this keeps the bare value type for comparison while
+/// only the decoded/projected row type gains the `Option`.)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScalarNullable<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> ExprKind for ScalarNullable<K>
+where
+    K: ExprKind,
+{
+    type Value = K::Value;
+}
+
+impl<K> NullableExpr for ScalarNullable<K> {}
+
+/// The runtime-parameter shape contributed by a projection's own expressions. An embedded subquery
+/// renders its `SELECT` list *before* its `FROM`/`WHERE`/…, so a runtime [`param`] appearing in the
+/// projection must be counted ahead of the rest of the subquery's params (see
+/// [`Subquery::Params`](crate::Subquery::Params)); otherwise it would be silently dropped from the
+/// surrounding query's bind list. Implemented for the single-column projection forms an embeddable
+/// subquery uses: a bare column or value carries no params, an expression carries its AST's.
+pub trait ProjectionParams {
+    type Params: crate::HList;
+}
+
+impl<'scope, K, Ast> ProjectionParams for Expr<'scope, K, Ast>
+where
+    Ast: ExprAst,
+{
+    type Params = Ast::Params;
+}
+
+impl<K> ProjectionParams for ColumnRef<'_, K> {
+    type Params = crate::HNil;
+}
+
+impl<T> ProjectionParams for T
+where
+    T: ExprKind<Value = T>,
+{
+    type Params = crate::HNil;
+}
+
+impl ProjectionParams for () {
+    type Params = crate::HNil;
+}
 
 /// Type-level identity for a prepared statement runtime parameter.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1326,6 +1401,12 @@ pub enum InPredicate<K> {
 }
 
 impl<K> PredicateKind for InPredicate<K> {}
+
+/// Type-level identity for a SQL `EXISTS (subquery)` test (not tied to any column kind).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExistsPredicate {}
+
+impl PredicateKind for ExistsPredicate {}
 
 /// Type-level identity for a SQL `BETWEEN` range test of an operand of kind `K`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1617,6 +1698,167 @@ where
             |visitor| self.operand.visit(visitor),
             &self.values,
         )
+    }
+}
+
+/// `operand IN (subquery)` / `NOT IN (subquery)` membership against a single-column subquery. The
+/// operand's parameters come first, then the subquery's, matching render order.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct InSubqueryPredicateAst<Operand, Sub> {
+    operand: Operand,
+    subquery: Sub,
+    negated: bool,
+}
+
+impl<Operand, Sub> PredicateAst for InSubqueryPredicateAst<Operand, Sub>
+where
+    Operand: ExprAst,
+    Sub: crate::Subquery,
+    Operand::Params: crate::HAppend<Sub::Params>,
+{
+    type Params = <Operand::Params as crate::HAppend<Sub::Params>>::Output;
+}
+
+impl<Operand, Sub, B> RenderPredicateAst<B> for InSubqueryPredicateAst<Operand, Sub>
+where
+    Operand: RenderAst<B>,
+    Sub: crate::RenderSubquery<B>,
+    Operand::Params: crate::HAppend<Sub::Params>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: PredicateAstVisitor<Backend = B>,
+    {
+        visitor.visit_in_subquery(
+            self.negated,
+            |visitor| self.operand.visit(visitor),
+            &self.subquery,
+        )
+    }
+}
+
+impl<Operand, Sub> NonAggregatePredicate for InSubqueryPredicateAst<Operand, Sub> where
+    Operand: NonAggregateAst
+{
+}
+
+/// `EXISTS (subquery)` / `NOT EXISTS (subquery)`. Only the subquery contributes parameters.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ExistsPredicateAst<Sub> {
+    subquery: Sub,
+    negated: bool,
+}
+
+impl<Sub> PredicateAst for ExistsPredicateAst<Sub>
+where
+    Sub: crate::Subquery,
+{
+    type Params = Sub::Params;
+}
+
+impl<Sub, B> RenderPredicateAst<B> for ExistsPredicateAst<Sub>
+where
+    Sub: crate::RenderSubquery<B>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: PredicateAstVisitor<Backend = B>,
+    {
+        visitor.visit_exists(self.negated, &self.subquery)
+    }
+}
+
+impl<Sub> NonAggregatePredicate for ExistsPredicateAst<Sub> {}
+
+/// SQL `EXISTS (subquery)` predicate. The subquery is typically correlated to the outer query.
+/// Build the subquery with the [`Subqueries`](crate::Subqueries) handle from
+/// [`where_correlated`](crate::SourceQuery::where_correlated).
+pub fn exists<'scope, Sub>(
+    subquery: Sub,
+) -> Predicate<'scope, ExistsPredicate, ExistsPredicateAst<Sub>>
+where
+    Sub: crate::Subquery,
+{
+    Predicate::new(ExistsPredicateAst {
+        subquery,
+        negated: false,
+    })
+}
+
+/// SQL `NOT EXISTS (subquery)`; see [`exists`].
+pub fn not_exists<'scope, Sub>(
+    subquery: Sub,
+) -> Predicate<'scope, ExistsPredicate, ExistsPredicateAst<Sub>>
+where
+    Sub: crate::Subquery,
+{
+    Predicate::new(ExistsPredicateAst {
+        subquery,
+        negated: true,
+    })
+}
+
+/// A scalar subquery used as a value expression: a single-row, single-column `(SELECT …)`.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ScalarSubqueryExprAst<Sub> {
+    subquery: Sub,
+}
+
+impl<Sub> ExprAst for ScalarSubqueryExprAst<Sub>
+where
+    Sub: crate::Subquery,
+{
+    type Params = Sub::Params;
+}
+
+impl<Sub, B> RenderAst<B> for ScalarSubqueryExprAst<Sub>
+where
+    Sub: crate::RenderSubquery<B>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_scalar_subquery(&self.subquery)
+    }
+}
+
+// A scalar subquery is a value, not an aggregate of the surrounding row, so it may appear in a
+// `GROUP BY` key or a `WHERE` predicate.
+impl<Sub> NonAggregateAst for ScalarSubqueryExprAst<Sub> {}
+
+// In a projection a scalar subquery behaves like a (data-dependent) column: it makes the projection
+// a `ScalarProjection`, and — like a bare column — may not be mixed with an aggregate absent a
+// `GROUP BY`.
+impl<Sub> AstProjectionClass for ScalarSubqueryExprAst<Sub> {
+    type Class = ColumnTerm;
+}
+
+/// Build a scalar subquery expression: a single-row, single-column `(SELECT …)` usable anywhere an
+/// [`Expr`] is — in a projection or as a comparison operand. The subquery may be correlated.
+///
+/// The result keeps the projected column's value type (so a `ColumnType` newtype is preserved and
+/// `x.equals(scalar_subquery(..))` type-checks against the same operands), but is **always nullable**
+/// ([`ScalarNullable`]): a scalar subquery that matches zero rows is SQL `NULL` even when the
+/// selected column is non-null, so it decodes as `Option<T>` and can be tested with
+/// [`is_null`](Expr::is_null). Returning more than one row at runtime is a SQL error, as in
+/// hand-written SQL.
+pub fn scalar_subquery<'scope, Sub>(
+    subquery: Sub,
+) -> Expr<'scope, ScalarNullable<Sub::OutputKind>, ScalarSubqueryExprAst<Sub>>
+where
+    Sub: crate::ScalarSubquery,
+{
+    Expr {
+        ast: ScalarSubqueryExprAst { subquery },
+        project_alias: Cow::Borrowed("expr"),
+        _phantom: PhantomData,
     }
 }
 
@@ -2104,6 +2346,32 @@ where
         self.into_expr().not_in(values)
     }
 
+    /// SQL `IN (subquery)` against a single-column subquery of this column's value type.
+    pub fn in_subquery<Sub>(
+        self,
+        subquery: Sub,
+    ) -> Predicate<'scope, InPredicate<K>, InSubqueryPredicateAst<ColumnExprAst<K>, Sub>>
+    where
+        Sub: crate::ScalarSubquery,
+        Sub::OutputKind: ExprKind<Value = K::Value>,
+        <ColumnExprAst<K> as ExprAst>::Params: crate::HAppend<Sub::Params>,
+    {
+        self.into_expr().in_subquery(subquery)
+    }
+
+    /// SQL `NOT IN (subquery)`; see [`in_subquery`](Self::in_subquery).
+    pub fn not_in_subquery<Sub>(
+        self,
+        subquery: Sub,
+    ) -> Predicate<'scope, InPredicate<K>, InSubqueryPredicateAst<ColumnExprAst<K>, Sub>>
+    where
+        Sub: crate::ScalarSubquery,
+        Sub::OutputKind: ExprKind<Value = K::Value>,
+        <ColumnExprAst<K> as ExprAst>::Params: crate::HAppend<Sub::Params>,
+    {
+        self.into_expr().not_in_subquery(subquery)
+    }
+
     /// SQL `BETWEEN lo AND hi` (inclusive).
     pub fn between<'other, Lo, Hi>(
         self,
@@ -2551,6 +2819,52 @@ where
         Predicate::new(InPredicateAst {
             operand: self.ast.clone(),
             values: values.into_iter().map(Into::into).collect(),
+            negated,
+        })
+    }
+
+    /// SQL `IN (subquery)`: membership against a subquery that projects exactly one column whose
+    /// kind matches this expression's value type. Matching by value type means a `ColumnType`
+    /// newtype is enforced and a nullable projected column (whose kind's value is the non-null inner
+    /// type) is accepted, as in SQL. The subquery may be correlated.
+    pub fn in_subquery<Sub>(
+        &self,
+        subquery: Sub,
+    ) -> Predicate<'scope, InPredicate<K>, InSubqueryPredicateAst<Ast, Sub>>
+    where
+        Sub: crate::ScalarSubquery,
+        Sub::OutputKind: ExprKind<Value = K::Value>,
+        Ast::Params: crate::HAppend<Sub::Params>,
+    {
+        self.in_subquery_impl(subquery, false)
+    }
+
+    /// SQL `NOT IN (subquery)`; see [`in_subquery`](Self::in_subquery).
+    pub fn not_in_subquery<Sub>(
+        &self,
+        subquery: Sub,
+    ) -> Predicate<'scope, InPredicate<K>, InSubqueryPredicateAst<Ast, Sub>>
+    where
+        Sub: crate::ScalarSubquery,
+        Sub::OutputKind: ExprKind<Value = K::Value>,
+        Ast::Params: crate::HAppend<Sub::Params>,
+    {
+        self.in_subquery_impl(subquery, true)
+    }
+
+    fn in_subquery_impl<Sub>(
+        &self,
+        subquery: Sub,
+        negated: bool,
+    ) -> Predicate<'scope, InPredicate<K>, InSubqueryPredicateAst<Ast, Sub>>
+    where
+        Sub: crate::ScalarSubquery,
+        Sub::OutputKind: ExprKind<Value = K::Value>,
+        Ast::Params: crate::HAppend<Sub::Params>,
+    {
+        Predicate::new(InSubqueryPredicateAst {
+            operand: self.ast.clone(),
+            subquery,
             negated,
         })
     }
