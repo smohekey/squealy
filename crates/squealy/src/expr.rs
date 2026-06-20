@@ -1159,6 +1159,54 @@ pub trait NullableExpr {}
 
 impl<K> NullableExpr for Nullable<K> {}
 
+/// Type-level kind for a scalar subquery result. Its value type stays `K::Value` — so it compares
+/// against the same operands as `K` — but it is always nullable, because a scalar subquery that
+/// matches zero rows evaluates to SQL `NULL` regardless of the projected column's own nullability.
+/// It therefore decodes as `Option<K::Value>` and supports [`is_null`](Expr::is_null). (Unlike
+/// [`Nullable<K>`], whose *value* is `Option<…>`, this keeps the bare value type for comparison while
+/// only the decoded/projected row type gains the `Option`.)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScalarNullable<K> {
+    _Marker(PhantomData<K>),
+}
+
+impl<K> ExprKind for ScalarNullable<K>
+where
+    K: ExprKind,
+{
+    type Value = K::Value;
+}
+
+impl<K> NullableExpr for ScalarNullable<K> {}
+
+/// The runtime-parameter shape contributed by a projection's own expressions. An embedded subquery
+/// renders its `SELECT` list *before* its `FROM`/`WHERE`/…, so a runtime [`param`] appearing in the
+/// projection must be counted ahead of the rest of the subquery's params (see
+/// [`Subquery::Params`](crate::Subquery::Params)); otherwise it would be silently dropped from the
+/// surrounding query's bind list. Implemented for the single-column projection forms an embeddable
+/// subquery uses: a bare column or value carries no params, an expression carries its AST's.
+pub trait ProjectionParams {
+    type Params: crate::HList;
+}
+
+impl<'scope, K, Ast> ProjectionParams for Expr<'scope, K, Ast>
+where
+    Ast: ExprAst,
+{
+    type Params = Ast::Params;
+}
+
+impl<K> ProjectionParams for ColumnRef<'_, K> {
+    type Params = crate::HNil;
+}
+
+impl<T> ProjectionParams for T
+where
+    T: ExprKind<Value = T>,
+{
+    type Params = crate::HNil;
+}
+
 /// Type-level identity for a prepared statement runtime parameter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeParam<K> {
@@ -1789,13 +1837,17 @@ impl<Sub> AstProjectionClass for ScalarSubqueryExprAst<Sub> {
 }
 
 /// Build a scalar subquery expression: a single-row, single-column `(SELECT …)` usable anywhere an
-/// [`Expr`] is — in a projection or as a comparison operand. The subquery may be correlated. It
-/// takes on the projected column's *kind*, so a `ColumnType` newtype is preserved and a nullable
-/// projected column yields a nullable expression (projecting as `Option<T>`, and `is_null`-testable).
-/// Returning more than one row at runtime is a SQL error, as in hand-written SQL.
+/// [`Expr`] is — in a projection or as a comparison operand. The subquery may be correlated.
+///
+/// The result keeps the projected column's value type (so a `ColumnType` newtype is preserved and
+/// `x.equals(scalar_subquery(..))` type-checks against the same operands), but is **always nullable**
+/// ([`ScalarNullable`]): a scalar subquery that matches zero rows is SQL `NULL` even when the
+/// selected column is non-null, so it decodes as `Option<T>` and can be tested with
+/// [`is_null`](Expr::is_null). Returning more than one row at runtime is a SQL error, as in
+/// hand-written SQL.
 pub fn scalar_subquery<'scope, Sub>(
     subquery: Sub,
-) -> Expr<'scope, Sub::OutputKind, ScalarSubqueryExprAst<Sub>>
+) -> Expr<'scope, ScalarNullable<Sub::OutputKind>, ScalarSubqueryExprAst<Sub>>
 where
     Sub: crate::ScalarSubquery,
 {

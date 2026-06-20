@@ -2902,9 +2902,14 @@ where
     Conn: QueryBuilder + 'conn,
     Base: SelectAst<'conn, 'scope, Conn> + Clone,
     Shape: ProjectionShape,
-    Projection: Projectable,
+    Projection: Projectable + crate::ProjectionParams,
+    // Render order is projection → sources → filters → … , so the projection's params come first.
+    <Projection as crate::ProjectionParams>::Params:
+        crate::HAppend<<Base as SelectAst<'conn, 'scope, Conn>>::Params>,
 {
-    type Params = <Base as SelectAst<'conn, 'scope, Conn>>::Params;
+    type Params = <<Projection as crate::ProjectionParams>::Params as crate::HAppend<
+        <Base as SelectAst<'conn, 'scope, Conn>>::Params,
+    >>::Output;
 }
 
 // A single-column projection's `Shape` is the projected column's kind, which is itself an
@@ -2916,7 +2921,9 @@ where
     Conn: QueryBuilder + 'conn,
     Base: SelectAst<'conn, 'scope, Conn> + Clone,
     Shape: ProjectionShape + crate::ExprKind,
-    Projection: Projectable,
+    Projection: Projectable + crate::ProjectionParams,
+    <Projection as crate::ProjectionParams>::Params:
+        crate::HAppend<<Base as SelectAst<'conn, 'scope, Conn>>::Params>,
 {
     type OutputKind = Shape;
 }
@@ -2927,7 +2934,9 @@ where
     Conn: QueryBuilder + 'conn,
     Base: RenderSelectAst<'conn, 'scope, Conn, B> + Clone,
     Shape: ProjectionShape,
-    Projection: crate::RenderProjectable<B>,
+    Projection: crate::RenderProjectable<B> + crate::ProjectionParams,
+    <Projection as crate::ProjectionParams>::Params:
+        crate::HAppend<<Base as SelectAst<'conn, 'scope, Conn>>::Params>,
     B: Backend,
 {
     fn lower_subquery<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>

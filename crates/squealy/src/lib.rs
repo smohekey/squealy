@@ -480,9 +480,9 @@ pub use expr::{
     MaxExpr, MinExpr, MultiplyExpr, NonAggregateAst, NonAggregatePredicate, NotEqualsPredicate,
     NotPredicate, NullCheckPredicateAst, Nullable, NullableExpr, OrPredicate, Order,
     OrderDirection, ParamExprAst, Predicate, PredicateAst, PredicateAstVisitor, PredicateKind,
-    RenderAst, RenderPredicateAst, RuntimeParam, SameValue, ScalarProjection,
-    ScalarSubqueryExprAst, SourceAlias, SqlDivide, SqlNumber, SqlSum, SqlText, SubtractExpr,
-    SumExpr, exists, not_exists, param, render_ddl_predicate, scalar_subquery,
+    ProjectionParams, RenderAst, RenderPredicateAst, RuntimeParam, SameValue, ScalarNullable,
+    ScalarProjection, ScalarSubqueryExprAst, SourceAlias, SqlDivide, SqlNumber, SqlSum, SqlText,
+    SubtractExpr, SumExpr, exists, not_exists, param, render_ddl_predicate, scalar_subquery,
 };
 pub use expr::{
     AggregateNeedsGroupBy, AggregateProjection, AggregateTerm, Aggregated, AstProjectionClass,

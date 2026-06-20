@@ -567,7 +567,8 @@ async fn postgres_correlated_exists_and_in_subqueries() {
         .expect("fetch authors via IN (subquery)");
     assert_eq!(ids, vec!["Ada".to_owned()]);
 
-    // Scalar subquery in a projection: count each user's posts, decoded end to end.
+    // Scalar subquery in a projection: count each user's posts, decoded end to end. A scalar
+    // subquery is always nullable (zero matching rows is SQL NULL), so it decodes as `Option`.
     let counts = connection
         .from::<JoinUser>()
         .order_by(|(user,)| user.id.asc())
@@ -581,7 +582,7 @@ async fn postgres_correlated_exists_and_in_subqueries() {
         .collect()
         .await
         .expect("fetch post counts via scalar subquery");
-    assert_eq!(counts, vec![1_i64, 0_i64]);
+    assert_eq!(counts, vec![Some(1_i64), Some(0_i64)]);
 }
 
 #[tokio::test]
