@@ -18,8 +18,8 @@ use crate::render::{
 };
 use crate::{
     Backend, ColumnRef, Decode, Dialect, Encode, Expr, ExprFragment, ExprKind, InsertableTable,
-    JoinItem, JoinKind, Order, ParamWriter, Predicate, PredicateKind, ProjectionItem,
-    ProjectionShape, ProjectionVisitor, Projectable, QueryBuilder, RenderAst, RenderPredicateAst,
+    JoinItem, JoinKind, Order, ParamWriter, Predicate, PredicateKind, Projectable, ProjectionItem,
+    ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAst, RenderPredicateAst,
     RenderProjectable, RenderSelectAst, RowReader, SelectAst, SelectSink, Selected, SourceAlias,
     SourceRef, SqlType, Table, TableProjection, ViewQueryModel,
 };
@@ -118,7 +118,9 @@ macro_rules! encode_display {
     };
 }
 
-encode_display!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64);
+encode_display!(
+    i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64
+);
 
 impl Encode<ModelBackend> for bool {
     fn encode(&self, out: &mut ModelParamWriter<'_>) -> Result<(), ModelError> {
@@ -339,7 +341,8 @@ impl SelectSink for ModelSink {
         P: PredicateKind,
         Ast: RenderPredicateAst<ModelBackend>,
     {
-        let predicate = fragment(|writer, renderer| write_predicate_value(&predicate, writer, renderer));
+        let predicate =
+            fragment(|writer, renderer| write_predicate_value(&predicate, writer, renderer));
         and(&mut self.query.filter, predicate);
         Ok(())
     }
@@ -359,7 +362,8 @@ impl SelectSink for ModelSink {
         P: PredicateKind,
         Ast: RenderPredicateAst<ModelBackend>,
     {
-        let predicate = fragment(|writer, renderer| write_predicate_value(&predicate, writer, renderer));
+        let predicate =
+            fragment(|writer, renderer| write_predicate_value(&predicate, writer, renderer));
         and(&mut self.query.having, predicate);
         Ok(())
     }
@@ -563,7 +567,10 @@ where
     type Shape = Shape;
     type Row = Shape::Row;
 
-    fn build_selected(_builder: &'builder ModelConn, _selected: Selected<'scope, Base, Shape, Projection>) -> Self {
+    fn build_selected(
+        _builder: &'builder ModelConn,
+        _selected: Selected<'scope, Base, Shape, Projection>,
+    ) -> Self {
         unreachable!("ModelConn never builds a select")
     }
 }

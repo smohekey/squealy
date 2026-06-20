@@ -18,9 +18,9 @@ use std::path::Path;
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
     CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintEnforcement,
-    ConstraintValidation, DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyMatch,
-    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    ExprFragment, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
+    ConstraintValidation, DatabaseModel, DefaultValue, ExprFragment, ForeignKeyAction,
+    ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
+    IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
     IndexOperatorClass, JoinItem, JoinKind, OrderDirection, OrderItem, OrderNulls, ProjectionItem,
     SchemaModel, SourceRef, SqlType, TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
 };
@@ -476,10 +476,16 @@ fn view_column_to_node(column: &ViewColumnModel) -> KdlNode {
 fn view_query_to_node(query: &ViewQueryModel) -> KdlNode {
     let mut node = KdlNode::new("query");
     if let Some(limit) = query.limit {
-        node.push(KdlEntry::new_prop("limit", KdlValue::Integer(limit as i128)));
+        node.push(KdlEntry::new_prop(
+            "limit",
+            KdlValue::Integer(limit as i128),
+        ));
     }
     if let Some(offset) = query.offset {
-        node.push(KdlEntry::new_prop("offset", KdlValue::Integer(offset as i128)));
+        node.push(KdlEntry::new_prop(
+            "offset",
+            KdlValue::Integer(offset as i128),
+        ));
     }
 
     let mut body = KdlDocument::new();
@@ -490,7 +496,8 @@ fn view_query_to_node(query: &ViewQueryModel) -> KdlNode {
         body.nodes_mut().push(projection);
     }
     if let Some(from) = &query.from {
-        body.nodes_mut().push(view_source_to_node("from", from, None));
+        body.nodes_mut()
+            .push(view_source_to_node("from", from, None));
     }
     for join in &query.joins {
         let kind = match join.kind {

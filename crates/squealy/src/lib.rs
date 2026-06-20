@@ -499,16 +499,13 @@ pub use list::{
 };
 pub use model::{
     CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintEnforcement,
-    ConstraintValidation, DatabaseModel, DefaultValue, ExprFragment, ForeignKeyAction, ForeignKeyMatch,
-    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
-    JoinItem, JoinKind, OrderItem, OrderNulls, ProjectionItem, SchemaModel, SourceRef, SqlType,
-    TableModel, ViewColumnModel, ViewDef, ViewModel, ViewQueryModel,
+    ConstraintValidation, DatabaseModel, DefaultValue, ExprFragment, ForeignKeyAction,
+    ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
+    IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
+    IndexOperatorClass, JoinItem, JoinKind, OrderItem, OrderNulls, ProjectionItem, SchemaModel,
+    SourceRef, SqlType, TableModel, ViewColumnModel, ViewDef, ViewModel, ViewQueryModel,
 };
 pub use plan::{DatabasePlan, DatabasePlanStep, TablePlanStep};
-pub use view::{ModelBackend, ModelConn, SchemaView, ViewDefinition, ViewSelect};
-#[doc(hidden)]
-pub use view::{lower_view, view_definition_model};
 pub use projection::{
     Maybe, Projectable, ProjectionShape, ProjectionVisitor, RenderProjectable, TableProjection,
 };
@@ -538,3 +535,6 @@ pub use table::{
     InsertableTable, SchemaTable, Table, TablePrimaryKey, TableUnique, UpdateableTable,
     WriteableTable,
 };
+pub use view::{ModelBackend, ModelConn, SchemaView, ViewDefinition, ViewSelect};
+#[doc(hidden)]
+pub use view::{lower_view, view_definition_model};

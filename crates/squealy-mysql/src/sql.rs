@@ -9,8 +9,8 @@ use std::io::{self, Write};
 
 use squealy::{
     CheckModel, ColumnDefault, ColumnModel, DatabaseModel, DatabasePlan, DatabasePlanStep,
-    DefaultValue, ForeignKeyModel, GeneratedStorage, IndexModel, JoinKind, OrderDirection, SourceRef,
-    SqlType, Table, TableModel, TablePlanStep, ViewModel, ViewQueryModel,
+    DefaultValue, ForeignKeyModel, GeneratedStorage, IndexModel, JoinKind, OrderDirection,
+    SourceRef, SqlType, Table, TableModel, TablePlanStep, ViewModel, ViewQueryModel,
 };
 
 /// Renders ordered create-from-scratch DDL for a whole model. Statements are `;`-terminated and

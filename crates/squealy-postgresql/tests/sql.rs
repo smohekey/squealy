@@ -2244,7 +2244,12 @@ fn postgres_is_not_null_composes_with_other_predicates() {
 // tables, and views are ordered so a view that selects from another view is created after it.
 #[test]
 fn postgres_renders_views_in_dependency_order() {
-    fn view(name: &str, from: &str, projection: &[(&str, &str)], filter: Option<&str>) -> ViewModel {
+    fn view(
+        name: &str,
+        from: &str,
+        projection: &[(&str, &str)],
+        filter: Option<&str>,
+    ) -> ViewModel {
         ViewModel {
             name: name.to_owned(),
             comment: None,
@@ -2343,7 +2348,10 @@ SELECT q0_0.\"id\" FROM \"public\".\"active_users\" AS q0_0"
     let table_pos = sql.find("CREATE TABLE").unwrap();
     let active_users_pos = sql.find("\"active_users\" (").unwrap();
     let active_ids_pos = sql.find("\"active_user_ids\" (").unwrap();
-    assert!(table_pos < active_users_pos, "tables must precede views: {sql}");
+    assert!(
+        table_pos < active_users_pos,
+        "tables must precede views: {sql}"
+    );
     assert!(
         active_users_pos < active_ids_pos,
         "a view must be created after the view it depends on: {sql}"
