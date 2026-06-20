@@ -15,11 +15,12 @@ use std::marker::PhantomData;
 
 use crate::{
     AggregateFunc, ArithmeticOp, Backend, ColumnRef, CompareOp, Decode, Encode, Expr, ExprKind,
-    ExprNode, ExprVisitor, InsertableTable, JoinItem, JoinKind, LogicalOp, Order, OrderItem,
-    ParamWriter, Predicate, PredicateAstVisitor, PredicateKind, Projectable, ProjectionItem,
-    ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAst, RenderPredicateAst,
-    RenderProjectable, RenderSelectAst, RenderSubquery, RowReader, SelectAst, SelectSink, Selected,
-    SourceAlias, SourceRef, SqlType, Table, TableProjection, ViewQueryModel,
+    ExprNode, ExprVisitor, InsertableTable, JoinItem, JoinKind, LogicalOp, Order, OrderDirection,
+    OrderItem, ParamWriter, Predicate, PredicateAstVisitor, PredicateKind, Projectable,
+    ProjectionItem, ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAst,
+    RenderPredicateAst, RenderProjectable, RenderSelectAst, RenderSubquery, RowReader, SelectAst,
+    SelectSink, Selected, SourceAlias, SourceRef, SqlType, Table, TableProjection, ViewQueryModel,
+    WindowFunc, WindowOrderTerm,
 };
 
 // ---------------------------------------------------------------------------
@@ -179,6 +180,9 @@ where
 #[derive(Default)]
 struct IrBuilder {
     stack: Vec<ExprNode>,
+    /// Window `ORDER BY` directions, recorded by `visit_window_order_direction` and paired with the
+    /// order expressions in `visit_window`.
+    window_order_directions: Vec<OrderDirection>,
 }
 
 impl IrBuilder {
@@ -266,6 +270,67 @@ impl ExprVisitor for IrBuilder {
             .push(ExprNode::ScalarSubquery(Box::new(lower_subquery(
                 subquery,
             )?)));
+        Ok(())
+    }
+
+    fn visit_window<Operand, Partitions, Orders>(
+        &mut self,
+        func: WindowFunc,
+        cast: Option<&SqlType>,
+        operand: Operand,
+        has_partitions: bool,
+        partitions: Partitions,
+        has_orders: bool,
+        orders: Orders,
+    ) -> io::Result<()>
+    where
+        Operand: FnOnce(&mut Self) -> io::Result<()>,
+        Partitions: FnOnce(&mut Self) -> io::Result<()>,
+        Orders: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        // Each list closure pushes its (variable number of) element nodes; capture them by splitting
+        // the stack at the depth recorded before the closure ran. Window order directions are recorded
+        // in parallel by `visit_window_order_direction` and zipped with the order expressions.
+        let args_start = self.stack.len();
+        operand(self)?;
+        let args = self.stack.split_off(args_start);
+
+        let partitions_start = self.stack.len();
+        if has_partitions {
+            partitions(self)?;
+        }
+        let partition_by = self.stack.split_off(partitions_start);
+
+        let directions_start = self.window_order_directions.len();
+        let orders_start = self.stack.len();
+        if has_orders {
+            orders(self)?;
+        }
+        let order_exprs = self.stack.split_off(orders_start);
+        let directions = self.window_order_directions.split_off(directions_start);
+        let order_by = order_exprs
+            .into_iter()
+            .zip(directions)
+            .map(|(expr, direction)| WindowOrderTerm { expr, direction })
+            .collect();
+
+        self.stack.push(ExprNode::Window {
+            func,
+            args,
+            partition_by,
+            order_by,
+            result: cast.cloned(),
+        });
+        Ok(())
+    }
+
+    fn visit_window_separator(&mut self) -> io::Result<()> {
+        // List elements are already separated as distinct nodes on the stack.
+        Ok(())
+    }
+
+    fn visit_window_order_direction(&mut self, direction: OrderDirection) -> io::Result<()> {
+        self.window_order_directions.push(direction);
         Ok(())
     }
 }

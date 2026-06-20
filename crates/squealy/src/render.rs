@@ -1339,6 +1339,60 @@ where
         write_subselect::<Sub, B, _>(subquery, &mut *self.writer, &mut *self.renderer)?;
         self.writer.write_all(b")")
     }
+
+    fn visit_window<Operand, Partitions, Orders>(
+        &mut self,
+        func: crate::WindowFunc,
+        cast: Option<&SqlType>,
+        operand: Operand,
+        has_partitions: bool,
+        partitions: Partitions,
+        has_orders: bool,
+        orders: Orders,
+    ) -> Result<(), Self::Error>
+    where
+        Operand: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Partitions: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Orders: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        if cast.is_some() {
+            self.writer.write_all(b"CAST(")?;
+        }
+        write!(self.writer, "{}(", render_window_func(func))?;
+        operand(self)?;
+        self.writer.write_all(b") OVER (")?;
+        if has_partitions {
+            self.writer.write_all(b"PARTITION BY ")?;
+            partitions(self)?;
+        }
+        if has_orders {
+            if has_partitions {
+                self.writer.write_all(b" ")?;
+            }
+            self.writer.write_all(b"ORDER BY ")?;
+            orders(self)?;
+        }
+        self.writer.write_all(b")")?;
+        if let Some(ty) = cast {
+            self.writer.write_all(b" AS ")?;
+            self.renderer
+                .dialect
+                .write_cast_type(ty, &mut *self.writer)?;
+            self.writer.write_all(b")")?;
+        }
+        Ok(())
+    }
+
+    fn visit_window_separator(&mut self) -> Result<(), Self::Error> {
+        self.writer.write_all(b", ")
+    }
+
+    fn visit_window_order_direction(
+        &mut self,
+        direction: OrderDirection,
+    ) -> Result<(), Self::Error> {
+        write!(self.writer, " {}", render_order_direction(direction))
+    }
 }
 
 impl<B, Writer> PredicateAstVisitor for RenderExpr<'_, '_, B, Writer>
@@ -1545,6 +1599,18 @@ fn render_aggregate_func(func: AggregateFunc) -> &'static str {
         AggregateFunc::Avg => "AVG",
         AggregateFunc::Min => "MIN",
         AggregateFunc::Max => "MAX",
+    }
+}
+
+fn render_window_func(func: crate::WindowFunc) -> &'static str {
+    match func {
+        crate::WindowFunc::Aggregate(aggregate) => render_aggregate_func(aggregate),
+        crate::WindowFunc::RowNumber => "ROW_NUMBER",
+        crate::WindowFunc::Rank => "RANK",
+        crate::WindowFunc::DenseRank => "DENSE_RANK",
+        crate::WindowFunc::Ntile => "NTILE",
+        crate::WindowFunc::Lag => "LAG",
+        crate::WindowFunc::Lead => "LEAD",
     }
 }
 

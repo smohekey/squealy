@@ -23,7 +23,8 @@ use squealy::{
     GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
     IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, JoinItem,
     JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem, SchemaModel,
-    SourceRef, SqlType, TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
+    SourceRef, SqlType, TableModel, ViewColumnModel, ViewModel, ViewQueryModel, WindowFunc,
+    WindowOrderTerm,
 };
 
 use crate::{CastColumn, RefactorLog, RefactorOperation, RenameColumn, RenameTable};
@@ -695,6 +696,50 @@ fn expr_to_node(expr: &ExprNode) -> KdlNode {
             push_child(&mut node, view_query_to_node(subquery));
             node
         }
+        ExprNode::Window {
+            func,
+            args,
+            partition_by,
+            order_by,
+            result,
+        } => {
+            let mut node = KdlNode::new("window");
+            node.push(KdlEntry::new_prop("func", window_func_str(*func)));
+            if let Some(ty) = result {
+                write_sql_type(&mut node, ty);
+            }
+            for arg in args {
+                push_child(&mut node, wrap_expr("arg", arg));
+            }
+            for partition in partition_by {
+                push_child(&mut node, wrap_expr("partition", partition));
+            }
+            for order in order_by {
+                let mut order_node = KdlNode::new("order");
+                order_node.push(KdlEntry::new_prop(
+                    "direction",
+                    match order.direction {
+                        OrderDirection::Asc => "asc",
+                        OrderDirection::Desc => "desc",
+                    },
+                ));
+                push_child(&mut order_node, expr_to_node(&order.expr));
+                push_child(&mut node, order_node);
+            }
+            node
+        }
+    }
+}
+
+fn window_func_str(func: WindowFunc) -> &'static str {
+    match func {
+        WindowFunc::Aggregate(aggregate) => aggregate_func_str(aggregate),
+        WindowFunc::RowNumber => "row_number",
+        WindowFunc::Rank => "rank",
+        WindowFunc::DenseRank => "dense_rank",
+        WindowFunc::Ntile => "ntile",
+        WindowFunc::Lag => "lag",
+        WindowFunc::Lead => "lead",
     }
 }
 
@@ -1334,7 +1379,41 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
             negated: prop_bool(node, "negated"),
             subquery: nth_query(0)?,
         },
+        "window" => ExprNode::Window {
+            func: window_func_from_str(&required_prop(node, "func")?)?,
+            args: child_nodes(node, "arg")
+                .map(first_child_expr)
+                .collect::<Result<Vec<_>, _>>()?,
+            partition_by: child_nodes(node, "partition")
+                .map(first_child_expr)
+                .collect::<Result<Vec<_>, _>>()?,
+            order_by: child_nodes(node, "order")
+                .map(|order| {
+                    Ok::<_, PackageError>(WindowOrderTerm {
+                        expr: first_child_expr(order)?,
+                        direction: match prop(order, "direction") {
+                            Some("desc") => OrderDirection::Desc,
+                            _ => OrderDirection::Asc,
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            result: optional_sql_type_from_node(node)?,
+        },
         other => return Err(malformed(format!("unknown view expression node `{other}`"))),
+    })
+}
+
+fn window_func_from_str(value: &str) -> Result<WindowFunc, PackageError> {
+    Ok(match value {
+        "row_number" => WindowFunc::RowNumber,
+        "rank" => WindowFunc::Rank,
+        "dense_rank" => WindowFunc::DenseRank,
+        "ntile" => WindowFunc::Ntile,
+        "lag" => WindowFunc::Lag,
+        "lead" => WindowFunc::Lead,
+        // The remaining names are aggregates used as window functions (`SUM(..) OVER (..)`).
+        aggregate => WindowFunc::Aggregate(aggregate_func_from_str(aggregate)?),
     })
 }
 

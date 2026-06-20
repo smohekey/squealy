@@ -12,7 +12,7 @@
 
 use crate::{
     AggregateFunc, ArithmeticOp, Column, ColumnDefault, ColumnType, CompareOp, Database,
-    DatabaseSchema, ForeignKey, Index, OrderDirection, Table,
+    DatabaseSchema, ForeignKey, Index, OrderDirection, Table, WindowFunc,
 };
 
 /// An owned, backend-neutral model of a whole database.
@@ -672,6 +672,21 @@ pub enum ExprNode {
         negated: bool,
         subquery: Box<ViewQueryModel>,
     },
+    /// A window function: `FUNC(<args>) OVER (PARTITION BY … ORDER BY …)`, optionally cast to `result`.
+    Window {
+        func: WindowFunc,
+        args: Vec<ExprNode>,
+        partition_by: Vec<ExprNode>,
+        order_by: Vec<WindowOrderTerm>,
+        result: Option<SqlType>,
+    },
+}
+
+/// One `ORDER BY` term inside a window function's `OVER (…)` clause.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowOrderTerm {
+    pub expr: ExprNode,
+    pub direction: OrderDirection,
 }
 
 /// Conjunction/disjunction for [`ExprNode::Logical`].

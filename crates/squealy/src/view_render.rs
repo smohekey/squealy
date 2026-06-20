@@ -9,7 +9,7 @@ use std::io::{self, Write};
 
 use crate::{
     AggregateFunc, ArithmeticOp, DatabaseModel, Dialect, ExprNode, JoinKind, LogicalOp,
-    OrderDirection, OrderNulls, SourceRef, SqlType, ViewModel, ViewQueryModel,
+    OrderDirection, OrderNulls, SourceRef, SqlType, ViewModel, ViewQueryModel, WindowFunc,
 };
 
 /// Renders `CREATE [OR REPLACE] VIEW <qualified> [(<cols>)] AS <select>` for the given dialect.
@@ -370,6 +370,69 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
             render_select(subquery, true, dialect, writer)?;
             writer.write_all(b"))")
         }
+        ExprNode::Window {
+            func,
+            args,
+            partition_by,
+            order_by,
+            result,
+        } => {
+            if result.is_some() {
+                writer.write_all(b"CAST(")?;
+            }
+            write!(writer, "{}(", window_func_name(*func))?;
+            for (index, arg) in args.iter().enumerate() {
+                if index > 0 {
+                    writer.write_all(b", ")?;
+                }
+                render_expr(arg, dialect, writer)?;
+            }
+            writer.write_all(b") OVER (")?;
+            if !partition_by.is_empty() {
+                writer.write_all(b"PARTITION BY ")?;
+                for (index, partition) in partition_by.iter().enumerate() {
+                    if index > 0 {
+                        writer.write_all(b", ")?;
+                    }
+                    render_expr(partition, dialect, writer)?;
+                }
+            }
+            if !order_by.is_empty() {
+                if !partition_by.is_empty() {
+                    writer.write_all(b" ")?;
+                }
+                writer.write_all(b"ORDER BY ")?;
+                for (index, order) in order_by.iter().enumerate() {
+                    if index > 0 {
+                        writer.write_all(b", ")?;
+                    }
+                    render_expr(&order.expr, dialect, writer)?;
+                    writer.write_all(match order.direction {
+                        OrderDirection::Asc => b" ASC".as_slice(),
+                        OrderDirection::Desc => b" DESC".as_slice(),
+                    })?;
+                }
+            }
+            writer.write_all(b")")?;
+            if let Some(ty) = result {
+                writer.write_all(b" AS ")?;
+                dialect.write_cast_type(ty, writer)?;
+                writer.write_all(b")")?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn window_func_name(func: WindowFunc) -> &'static str {
+    match func {
+        WindowFunc::Aggregate(aggregate) => aggregate_name(aggregate),
+        WindowFunc::RowNumber => "ROW_NUMBER",
+        WindowFunc::Rank => "RANK",
+        WindowFunc::DenseRank => "DENSE_RANK",
+        WindowFunc::Ntile => "NTILE",
+        WindowFunc::Lag => "LAG",
+        WindowFunc::Lead => "LEAD",
     }
 }
 

@@ -9,7 +9,7 @@ use squealy::{
     RenderAssignment, RenderAst, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst,
     RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderSubquery,
     RenderUpdateAssignments, SchemaTable, SelectSink, Selected, SourceAlias, SqlType, Table,
-    TableProjection, UpdateableTable,
+    TableProjection, UpdateableTable, WindowFunc,
 };
 
 use crate::query::{TestParam, TestParamWriter};
@@ -1012,6 +1012,51 @@ where
         write_subselect(subquery, &mut *self.writer)?;
         self.writer.write_all(b")")
     }
+
+    fn visit_window<Operand, Partitions, Orders>(
+        &mut self,
+        func: WindowFunc,
+        _cast: Option<&SqlType>,
+        operand: Operand,
+        has_partitions: bool,
+        partitions: Partitions,
+        has_orders: bool,
+        orders: Orders,
+    ) -> Result<(), Self::Error>
+    where
+        Operand: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Partitions: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Orders: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        // The in-memory test backend renders the bare window call (no dialect cast), matching how it
+        // skips the aggregate casts the real backends emit.
+        write!(self.writer, "{}(", render_window_func(func))?;
+        operand(self)?;
+        self.writer.write_all(b") OVER (")?;
+        if has_partitions {
+            self.writer.write_all(b"PARTITION BY ")?;
+            partitions(self)?;
+        }
+        if has_orders {
+            if has_partitions {
+                self.writer.write_all(b" ")?;
+            }
+            self.writer.write_all(b"ORDER BY ")?;
+            orders(self)?;
+        }
+        self.writer.write_all(b")")
+    }
+
+    fn visit_window_separator(&mut self) -> Result<(), Self::Error> {
+        self.writer.write_all(b", ")
+    }
+
+    fn visit_window_order_direction(
+        &mut self,
+        direction: OrderDirection,
+    ) -> Result<(), Self::Error> {
+        write!(self.writer, " {}", render_order_direction(direction))
+    }
 }
 
 impl<Writer> PredicateAstVisitor for RenderExpr<'_, Writer>
@@ -1215,6 +1260,18 @@ fn render_aggregate_func(func: AggregateFunc) -> &'static str {
         AggregateFunc::Avg => "AVG",
         AggregateFunc::Min => "MIN",
         AggregateFunc::Max => "MAX",
+    }
+}
+
+fn render_window_func(func: WindowFunc) -> &'static str {
+    match func {
+        WindowFunc::Aggregate(aggregate) => render_aggregate_func(aggregate),
+        WindowFunc::RowNumber => "ROW_NUMBER",
+        WindowFunc::Rank => "RANK",
+        WindowFunc::DenseRank => "DENSE_RANK",
+        WindowFunc::Ntile => "NTILE",
+        WindowFunc::Lag => "LAG",
+        WindowFunc::Lead => "LEAD",
     }
 }
 

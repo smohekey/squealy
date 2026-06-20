@@ -472,19 +472,23 @@ pub use database::Database;
 pub use dialect::Dialect;
 pub use expr::{
     AddExpr, AggregateExprAst, AggregateFunc, AggregateScalar, AndPredicate, AnyPredicate,
-    ArithmeticOp, AvgExpr, BetweenPredicate, BetweenPredicateAst, BinaryExprAst, BoolTestPredicate,
-    BoolTestPredicateAst, ColumnBetween, ColumnComparison, ColumnExprAst, ColumnLike, ColumnRef,
-    CompareOp, ComparePredicateAst, CountExpr, DdlExprAst, DdlPredicateAst, DdlSqlLiteral,
-    DivideExpr, EqualsPredicate, ExistsPredicate, ExistsPredicateAst, Expr, ExprAst, ExprKind,
-    ExprVisitor, GreaterThanOrEqualsPredicate, GreaterThanPredicate, InPredicate, InPredicateAst,
-    InSubqueryPredicateAst, IntoExpr, IsNotNullPredicate, IsNullPredicate,
-    LessThanOrEqualsPredicate, LessThanPredicate, LikePredicate, LikePredicateAst, LiteralExprAst,
-    MaxExpr, MinExpr, MultiplyExpr, NonAggregateAst, NonAggregatePredicate, NotEqualsPredicate,
+    AppendOrder, AppendPartition, ArithmeticOp, AvgExpr, BetweenPredicate, BetweenPredicateAst,
+    BinaryExprAst, BoolTestPredicate, BoolTestPredicateAst, ColumnBetween, ColumnComparison,
+    ColumnExprAst, ColumnLike, ColumnRef, CompareOp, ComparePredicateAst, CountExpr, DdlExprAst,
+    DdlPredicateAst, DdlSqlLiteral, DivideExpr, EqualsPredicate, ExistsPredicate,
+    ExistsPredicateAst, Expr, ExprAst, ExprKind, ExprVisitor, GreaterThanOrEqualsPredicate,
+    GreaterThanPredicate, InPredicate, InPredicateAst, InSubqueryPredicateAst, IntoExpr,
+    IntoWindowNullable, IsNotNullPredicate, IsNullPredicate, LagArgsAst, LessThanOrEqualsPredicate,
+    LessThanPredicate, LikePredicate, LikePredicateAst, LiteralExprAst, MaxExpr, MinExpr,
+    MultiplyExpr, NonAggregateAst, NonAggregatePredicate, NonWindowAst, NotEqualsPredicate,
     NotPredicate, NullCheckPredicateAst, Nullable, NullableExpr, OrPredicate, Order,
-    OrderDirection, ParamExprAst, Predicate, PredicateAst, PredicateAstVisitor, PredicateKind,
-    ProjectionParams, RenderAst, RenderPredicateAst, RuntimeParam, SameValue, ScalarNullable,
-    ScalarProjection, ScalarSubqueryExprAst, SourceAlias, SqlDivide, SqlNumber, SqlSum, SqlText,
-    SubtractExpr, SumExpr, exists, not_exists, param, render_ddl_predicate, scalar_subquery,
+    OrderDirection, ParamExprAst, PendingWindow, Predicate, PredicateAst, PredicateAstVisitor,
+    PredicateKind, ProjectionParams, RenderAst, RenderPredicateAst, RenderWindowList,
+    ReturnableProjection, RuntimeParam, SameValue, ScalarNullable, ScalarProjection,
+    ScalarSubqueryExprAst, SourceAlias, SqlDivide, SqlNumber, SqlSum, SqlText, SubtractExpr,
+    SumExpr, Window, WindowExprAst, WindowFunc, WindowListParams, WindowNil, WindowNoArg,
+    WindowOperand, WindowOrder, WindowPartition, dense_rank, exists, lag, lead, not_exists, ntile,
+    param, rank, render_ddl_predicate, row_number, scalar_subquery,
 };
 pub use expr::{
     AggregateNeedsGroupBy, AggregateProjection, AggregateTerm, Aggregated, AstProjectionClass,
@@ -505,7 +509,7 @@ pub use model::{
     ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
     IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
     JoinItem, JoinKind, LogicalOp, OrderItem, OrderNulls, ProjectionItem, SchemaModel, SourceRef,
-    SqlType, TableModel, ViewColumnModel, ViewDef, ViewModel, ViewQueryModel,
+    SqlType, TableModel, ViewColumnModel, ViewDef, ViewModel, ViewQueryModel, WindowOrderTerm,
 };
 pub use plan::{DatabasePlan, DatabasePlanStep, TablePlanStep};
 pub use projection::{
