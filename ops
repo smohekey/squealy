@@ -1,1 +1,1 @@
-{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":5,"timestamp":1781997849,"nonce":"MfE7v8z/3FYsu34o1BGXUTOYAD0=","added":["roadmap","query-builder"],"removed":null}]}
+{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":2,"timestamp":1781998290,"nonce":"8JLpMhfv+vj98tJicsvNwORZsDw=","title":"Query builder: right_join / full_join (complete the join matrix)","was":"Add `right_join` and `full_join` to complete the join matrix (only `join`"}]}
