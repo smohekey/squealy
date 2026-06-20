@@ -1892,7 +1892,8 @@ where
         // Aggregates are never valid in `RETURNING`, so require an aggregate-free projection.
         P: ReturningProjection<'static>
             + Projectable
-            + crate::ProjectionClass<Class = crate::ScalarProjection>,
+            + crate::ProjectionClass<Class = crate::ScalarProjection>
+            + crate::ProjectionParams<Params = HNil>,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
         Conn::Backend: SupportsReturning,
     {
@@ -2045,7 +2046,8 @@ where
         // Aggregates are never valid in `RETURNING`, so require an aggregate-free projection.
         P: ReturningProjection<'static>
             + Projectable
-            + crate::ProjectionClass<Class = crate::ScalarProjection>,
+            + crate::ProjectionClass<Class = crate::ScalarProjection>
+            + crate::ProjectionParams<Params = HNil>,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
         Conn::Backend: SupportsReturning,
     {
@@ -4948,7 +4950,8 @@ where
         // Aggregates are never valid in `RETURNING`, so require an aggregate-free projection.
         P: ReturningProjection<'scope>
             + Projectable
-            + crate::ProjectionClass<Class = crate::ScalarProjection>,
+            + crate::ProjectionClass<Class = crate::ScalarProjection>
+            + crate::ProjectionParams<Params = HNil>,
         <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
         Conn::Backend: SupportsReturning,
     {

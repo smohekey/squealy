@@ -1262,7 +1262,7 @@ impl TableStruct {
                         ) -> P,
                     ) -> <Conn as ::squealy::QueryBuilder>::Update<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape, UpdateColumns, Filters, P>
                     where
-                        P: ::squealy::ReturningProjection<'static> + ::squealy::Projectable + ::squealy::ProjectionClass<Class = ::squealy::ScalarProjection>,
+                        P: ::squealy::ReturningProjection<'static> + ::squealy::Projectable + ::squealy::ProjectionClass<Class = ::squealy::ScalarProjection> + ::squealy::ProjectionParams<Params = ::squealy::HNil>,
                         <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<<Conn as ::squealy::QueryBuilder>::Backend>,
                     {
                         let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);

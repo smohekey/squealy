@@ -58,7 +58,10 @@ pub trait QueryBuilder: Sized {
         P,
     >
     where
-        P: ReturningProjection<'static> + Projectable,
+        // As in [`SourceQuery::select`], the projection must carry no runtime params: a projected
+        // scalar subquery renders before the (empty) FROM, but the query's param shape is its source
+        // chain's, so a `param` in the SELECT list would be an unbindable placeholder.
+        P: ReturningProjection<'static> + Projectable + crate::ProjectionParams<Params = HNil>,
         <P as ReturningProjection<'static>>::Shape: ProjectionShape,
         <<P as ReturningProjection<'static>>::Shape as ProjectionShape>::Row: Decode<Self::Backend>,
     {
