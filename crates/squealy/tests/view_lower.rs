@@ -152,3 +152,35 @@ fn view_definition_walks_into_a_view_model() {
         }
     ));
 }
+
+// A window function lowers into a structural `ExprNode::Window`, with its partition/order lists and
+// direction captured (so it can be rendered per-dialect).
+#[test]
+fn lowers_window_function() {
+    let conn = ModelConn;
+    let query = conn.from::<User>().project(|(user,)| {
+        row_number().over(|w| w.partition_by(user.name).order_by(user.id.asc()))
+    });
+
+    let model = lower_view(&query);
+
+    assert_eq!(model.projection.len(), 1);
+    match &model.projection[0].expr {
+        ExprNode::Window {
+            func,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            assert!(matches!(func, WindowFunc::RowNumber));
+            assert_eq!(partition_by.len(), 1);
+            assert!(
+                matches!(&partition_by[0], ExprNode::Column { column, .. } if column == "name")
+            );
+            assert_eq!(order_by.len(), 1);
+            assert!(matches!(&order_by[0].expr, ExprNode::Column { column, .. } if column == "id"));
+            assert!(matches!(order_by[0].direction, OrderDirection::Asc));
+        }
+        other => panic!("expected a window node, got {other:?}"),
+    }
+}
