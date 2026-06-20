@@ -1,1 +1,1 @@
-{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":5,"timestamp":1781997849,"nonce":"Vgryk7gWJZ0JrzXPrDMLT/s2gIE=","added":["roadmap","query-builder"],"removed":null}]}
+{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":2,"timestamp":1781998290,"nonce":"3cYk5rz2JPtx5fCFQG8C7DZeSUg=","title":"Query builder: CTEs (WITH [RECURSIVE])","was":"Add Common Table Expressions: `WITH name AS (…) SELECT …`, then `WITH RECURSIVE`."}]}
