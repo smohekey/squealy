@@ -1219,3 +1219,158 @@ fn test_scalar_subquery_of_a_nullable_column_is_null_testable() {
          FROM events AS q1_0 WHERE (q1_0.ledger_ref = ?)) IS NULL)"
     );
 }
+
+#[test]
+fn test_window_aggregate_over_partition_and_order() {
+    let q = TestConnection.from::<Post>().select(|(post,)| {
+        post.user_id
+            .sum()
+            .over(|w| w.partition_by(post.user_id).order_by(post.id.asc()))
+    });
+    assert_eq!(
+        q.to_sql(),
+        "SELECT SUM(q0_0.user_id) OVER (PARTITION BY q0_0.user_id ORDER BY q0_0.id ASC) AS expr \
+         FROM posts AS q0_0"
+    );
+}
+
+#[test]
+fn test_window_partition_only_and_order_only() {
+    let part = TestConnection
+        .from::<Post>()
+        .select(|(post,)| post.user_id.sum().over(|w| w.partition_by(post.user_id)));
+    assert_eq!(
+        part.to_sql(),
+        "SELECT SUM(q0_0.user_id) OVER (PARTITION BY q0_0.user_id) AS expr FROM posts AS q0_0"
+    );
+
+    let ord = TestConnection
+        .from::<Post>()
+        .select(|(post,)| post.user_id.sum().over(|w| w.order_by(post.id.desc())));
+    assert_eq!(
+        ord.to_sql(),
+        "SELECT SUM(q0_0.user_id) OVER (ORDER BY q0_0.id DESC) AS expr FROM posts AS q0_0"
+    );
+}
+
+#[test]
+fn test_window_multiple_partition_and_order_terms() {
+    let q = TestConnection.from::<Post>().select(|(post,)| {
+        post.id.sum().over(|w| {
+            w.partition_by(post.user_id)
+                .partition_by(post.id)
+                .order_by(post.id.asc())
+                .order_by(post.user_id.desc())
+        })
+    });
+    assert_eq!(
+        q.to_sql(),
+        "SELECT SUM(q0_0.id) OVER (PARTITION BY q0_0.user_id, q0_0.id ORDER BY q0_0.id ASC, \
+         q0_0.user_id DESC) AS expr FROM posts AS q0_0"
+    );
+}
+
+#[test]
+fn test_window_ranking_functions_render() {
+    let row_num = TestConnection.from::<Post>().select(|(post,)| {
+        row_number().over(|w| w.partition_by(post.user_id).order_by(post.id.asc()))
+    });
+    assert_eq!(
+        row_num.to_sql(),
+        "SELECT ROW_NUMBER() OVER (PARTITION BY q0_0.user_id ORDER BY q0_0.id ASC) AS expr \
+         FROM posts AS q0_0"
+    );
+
+    let ranked = TestConnection
+        .from::<Post>()
+        .select(|(post,)| rank().over(|w| w.order_by(post.id.desc())));
+    assert_eq!(
+        ranked.to_sql(),
+        "SELECT RANK() OVER (ORDER BY q0_0.id DESC) AS expr FROM posts AS q0_0"
+    );
+
+    let dense = TestConnection
+        .from::<Post>()
+        .select(|(post,)| dense_rank().over(|w| w.order_by(post.id.asc())));
+    assert_eq!(
+        dense.to_sql(),
+        "SELECT DENSE_RANK() OVER (ORDER BY q0_0.id ASC) AS expr FROM posts AS q0_0"
+    );
+}
+
+#[test]
+fn test_window_ntile_binds_its_argument() {
+    let q = TestConnection
+        .from::<Post>()
+        .select(|(post,)| ntile(4).over(|w| w.order_by(post.id.asc())));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT NTILE(?) OVER (ORDER BY q0_0.id ASC) AS expr FROM posts AS q0_0"
+    );
+    assert_eq!(q.collect_params().unwrap(), vec![TestParam::Int(4)]);
+}
+
+#[test]
+fn test_window_lag_and_lead_render_with_offset() {
+    let lagged = TestConnection
+        .from::<Post>()
+        .select(|(post,)| lag(post.user_id, 1).over(|w| w.order_by(post.id.asc())));
+    assert_eq!(
+        lagged.to_sql(),
+        "SELECT LAG(q0_0.user_id, ?) OVER (ORDER BY q0_0.id ASC) AS expr FROM posts AS q0_0"
+    );
+    assert_eq!(lagged.collect_params().unwrap(), vec![TestParam::Int(1)]);
+
+    let led = TestConnection.from::<Post>().select(|(post,)| {
+        lead(post.user_id, 2).over(|w| w.partition_by(post.user_id).order_by(post.id.asc()))
+    });
+    assert_eq!(
+        led.to_sql(),
+        "SELECT LEAD(q0_0.user_id, ?) OVER (PARTITION BY q0_0.user_id ORDER BY q0_0.id ASC) AS expr \
+         FROM posts AS q0_0"
+    );
+    assert_eq!(led.collect_params().unwrap(), vec![TestParam::Int(2)]);
+}
+
+#[test]
+fn test_window_lag_over_left_joined_column_flattens_nullable() {
+    // LAG over a left-joined (already-nullable) column must flatten to a single `Option<T>`, not
+    // `Option<Option<T>>`. This compiles only because the result row type is `Option<i32>`.
+    let q = TestConnection
+        .from::<User>()
+        .left_join::<Post>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .select(|(user, post)| lag(post.user_id, 1).over(|w| w.order_by(user.id.asc())));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT LAG(q0_1.user_id, ?) OVER (ORDER BY q0_0.id ASC) AS expr FROM public.users AS q0_0 \
+         LEFT JOIN posts AS q0_1 ON (q0_1.user_id = q0_0.id)"
+    );
+
+    // Pin the decoded row type to `Option<i32>` (a regression to `Option<Option<i32>>` would fail
+    // this bound).
+    fn assert_row_option_i32<'b, 's, Base, Projection, Q>(_q: &Q)
+    where
+        Q: SelectQuery<'b, 's, Base, Projection, Row = Option<i32>>,
+        Base: SelectAst<'b, 's, Q::Builder>,
+        Projection: Projectable,
+    {
+    }
+    assert_row_option_i32(&q);
+}
+
+#[test]
+fn test_window_lag_over_a_derived_expression() {
+    // LAG over a derived scalar expression (`post.id + 1`) compiles and renders.
+    let q = TestConnection
+        .from::<Post>()
+        .select(|(post,)| lag(post.id + 1, 1).over(|w| w.order_by(post.id.asc())));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT LAG((q0_0.id + ?), ?) OVER (ORDER BY q0_0.id ASC) AS expr FROM posts AS q0_0"
+    );
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![TestParam::Int(1), TestParam::Int(1)]
+    );
+}

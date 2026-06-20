@@ -301,6 +301,11 @@ where
     type Columns = ColumnFree;
 }
 
+impl crate::ReturnableProjection for () {}
+
+// A bare value literal contains no window function.
+impl<T> crate::ReturnableProjection for T where T: ExprKind<Value = T> {}
+
 impl<B> RenderProjectable<B> for ()
 where
     B: crate::Backend,

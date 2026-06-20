@@ -192,3 +192,33 @@ fn mysql_exists_subquery_uses_question_mark_placeholders() {
         vec![mysql_async::Value::Int(3)]
     );
 }
+
+#[test]
+fn mysql_window_functions_use_question_mark_placeholders() {
+    let row_num = Mysql.from::<Widget>().select(|(widget,)| {
+        row_number().over(|w| w.partition_by(widget.name).order_by(widget.id.asc()))
+    });
+    assert_eq!(
+        row_num.to_sql(),
+        "SELECT ROW_NUMBER() OVER (PARTITION BY q0_0.`name` ORDER BY q0_0.`id` ASC) AS `expr` \
+         FROM `widgets` AS q0_0"
+    );
+
+    let args = Mysql.from::<Widget>().select(|(widget,)| {
+        (
+            ntile(4).over(|w| w.order_by(widget.id.asc())),
+            lag(widget.id, 1).over(|w| w.order_by(widget.id.asc())),
+        )
+    });
+    let sql = args.to_sql();
+    assert!(sql.contains("NTILE(?)"), "{sql}");
+    assert!(sql.contains("LAG(q0_0.`id`, ?)"), "{sql}");
+    assert!(
+        !sql.contains("$1"),
+        "must not use Postgres placeholders: {sql}"
+    );
+    assert_eq!(
+        args.collect_params().unwrap(),
+        vec![mysql_async::Value::Int(4), mysql_async::Value::Int(1)]
+    );
+}

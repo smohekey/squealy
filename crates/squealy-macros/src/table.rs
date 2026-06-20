@@ -496,6 +496,12 @@ impl TableStruct {
                     type Value = #field_inner_tys;
                 }
 
+                // A column is a non-null kind for LAG/LEAD purposes, so its window result becomes
+                // `ScalarNullable` (nullable past the partition edge).
+                impl ::squealy::IntoWindowNullable for #expr_kind_idents {
+                    type Kind = ::squealy::ScalarNullable<#expr_kind_idents>;
+                }
+
                 impl ::squealy::ColumnKey for #expr_kind_idents {
                     type Table = #ident <'static, ::squealy::ColumnExpr>;
                     type Nullability = #field_nullability_tys;
@@ -786,6 +792,12 @@ impl TableStruct {
             impl<'scope> ::squealy::ProjectionParams for #nullable_rebound_exprs_ident <'scope> {
                 type Params = ::squealy::HNil;
             }
+
+            // A whole-table projection contains no window function, so it is valid in `RETURNING`.
+            impl<'scope> ::squealy::ReturnableProjection for #exprs_ident <'scope> {}
+            impl<'scope> ::squealy::ReturnableProjection for #rebound_exprs_ident <'scope> {}
+            impl<'scope> ::squealy::ReturnableProjection for #nullable_exprs_ident <'scope> {}
+            impl<'scope> ::squealy::ReturnableProjection for #nullable_rebound_exprs_ident <'scope> {}
 
             impl<'scope> ::squealy::Projectable for #rebound_exprs_ident <'scope> {
                 type Rebound<'next_scope> = #rebound_exprs_ident <'next_scope>;
@@ -1280,7 +1292,7 @@ impl TableStruct {
                         ) -> P,
                     ) -> <Conn as ::squealy::QueryBuilder>::Update<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape, UpdateColumns, Filters, P>
                     where
-                        P: ::squealy::ReturningProjection<'static> + ::squealy::Projectable + ::squealy::ProjectionClass<Class = ::squealy::ScalarProjection> + ::squealy::ProjectionParams<Params = ::squealy::HNil>,
+                        P: ::squealy::ReturningProjection<'static> + ::squealy::Projectable + ::squealy::ProjectionClass<Class = ::squealy::ScalarProjection> + ::squealy::ReturnableProjection + ::squealy::ProjectionParams<Params = ::squealy::HNil>,
                         <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<<Conn as ::squealy::QueryBuilder>::Backend>,
                     {
                         let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
@@ -1484,7 +1496,7 @@ impl TableStruct {
                     ) -> P,
                 ) -> <Conn as ::squealy::QueryBuilder>::Insert<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape, ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>, P>
                 where
-                    P: ::squealy::ReturningProjection<'static> + ::squealy::Projectable + ::squealy::ProjectionClass<Class = ::squealy::ScalarProjection>,
+                    P: ::squealy::ReturningProjection<'static> + ::squealy::Projectable + ::squealy::ProjectionClass<Class = ::squealy::ScalarProjection> + ::squealy::ReturnableProjection + ::squealy::ProjectionParams<Params = ::squealy::HNil>,
                     <P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<<Conn as ::squealy::QueryBuilder>::Backend>,
                 {
                     let insert_rows = ::squealy::HCons {

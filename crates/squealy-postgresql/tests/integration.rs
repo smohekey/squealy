@@ -896,3 +896,43 @@ where
     let ddl = String::from_utf8(ddl).expect("DDL should be valid UTF-8");
     client.batch_execute(&ddl).await.expect("create table");
 }
+
+#[tokio::test]
+#[ignore]
+async fn postgres_window_functions_round_trip() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS join_posts; DROP TABLE IF EXISTS join_users")
+        .await
+        .expect("drop old join tables");
+
+    let ddl_backend = Postgres;
+    create_table::<JoinUser>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+    connection
+        .to::<JoinUser>()
+        .name("Ada")
+        .insert()
+        .await
+        .expect("insert Ada");
+    connection
+        .to::<JoinUser>()
+        .name("Grace")
+        .insert()
+        .await
+        .expect("insert Grace");
+
+    // ROW_NUMBER() over the users ordered by id, decoded end to end.
+    let ranked = connection
+        .from::<JoinUser>()
+        .select(|(user,)| (user.name, row_number().over(|w| w.order_by(user.id.asc()))))
+        .collect()
+        .await
+        .expect("fetch window row numbers");
+    assert_eq!(
+        ranked,
+        vec![("Ada".to_owned(), 1_i64), ("Grace".to_owned(), 2_i64)]
+    );
+}
