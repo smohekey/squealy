@@ -1,1 +1,1 @@
-{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":5,"timestamp":1781997849,"nonce":"97waCvX+2ltM29r73Lex6vtxTUI=","added":["roadmap","query-builder"],"removed":null}]}
+{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":2,"timestamp":1781998290,"nonce":"3B6sCDqUq79KWsoVX954k0yjoR0=","title":"Query builder: CASE WHEN expressions","was":"Add `CASE WHEN … THEN … ELSE … END` expressions."}]}
