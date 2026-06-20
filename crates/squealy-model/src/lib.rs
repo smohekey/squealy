@@ -37,10 +37,10 @@ pub use refactor::{
 pub use squealy::{
     CheckModel, ColumnModel, Constraint, ConstraintCapabilities, ConstraintDeferrability,
     ConstraintEnforcement, ConstraintValidation, DatabaseModel, DatabasePlan, DatabasePlanStep,
-    DdlExecutor, DefaultValue, ExprFragment, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
+    DdlExecutor, DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     IndexCapabilities, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
-    IndexOperatorClass, ProjectionItem, SchemaBackend, SchemaCapabilities, SchemaConnect,
-    SchemaIntrospect, SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore,
+    IndexOperatorClass, LogicalOp, ProjectionItem, SchemaBackend, SchemaCapabilities,
+    SchemaConnect, SchemaIntrospect, SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore,
     SchemaPublishRecord, SchemaRefactorStore, SourceRef, SqlType, TableModel, TablePlanStep,
     ViewColumnModel, ViewModel, ViewQueryModel,
 };

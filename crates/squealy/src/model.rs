@@ -11,8 +11,8 @@
 //! See `docs/ddl-management.md` for the design.
 
 use crate::{
-    Column, ColumnDefault, ColumnType, Database, DatabaseSchema, ForeignKey, Index, OrderDirection,
-    Table,
+    AggregateFunc, ArithmeticOp, Column, ColumnDefault, ColumnType, CompareOp, Database,
+    DatabaseSchema, ForeignKey, Index, OrderDirection, Table,
 };
 
 /// An owned, backend-neutral model of a whole database.
@@ -532,29 +532,28 @@ pub struct ViewColumnModel {
 
 /// The backend-neutral structural body of a view's `SELECT`.
 ///
-/// Source/join/projection structure (the identifiers we own) is captured explicitly so each backend
-/// can re-quote per dialect and so view-on-view dependencies can be extracted for ordering. The inner
-/// scalar expressions (predicate bodies, projection expressions, group/having/order keys) are rendered
-/// to portable [`ExprFragment`] text by the canonical model dialect, with any literals inlined (a view
-/// body cannot carry bind parameters).
+/// Source/join/projection structure and the inner scalar expressions (predicate bodies, projection
+/// expressions, group/having/order keys) are all captured structurally as [`ExprNode`] trees, so each
+/// backend renders them in its own dialect. Literals are inlined (a view body carries no bind
+/// parameters).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ViewQueryModel {
     pub projection: Vec<ProjectionItem>,
     pub from: Option<SourceRef>,
     pub joins: Vec<JoinItem>,
-    pub filter: Option<ExprFragment>,
-    pub group_by: Vec<ExprFragment>,
-    pub having: Option<ExprFragment>,
+    pub filter: Option<ExprNode>,
+    pub group_by: Vec<ExprNode>,
+    pub having: Option<ExprNode>,
     pub order_by: Vec<OrderItem>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
 }
 
 /// One projected output expression together with its output column name.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProjectionItem {
     pub output_name: String,
-    pub expr: ExprFragment,
+    pub expr: ExprNode,
 }
 
 /// A table or view referenced in a view body, with the alias bound to it in the `SELECT`.
@@ -566,11 +565,11 @@ pub struct SourceRef {
 }
 
 /// A join in a view body.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct JoinItem {
     pub kind: JoinKind,
     pub source: SourceRef,
-    pub on: ExprFragment,
+    pub on: ExprNode,
 }
 
 /// The kind of join in a view body.
@@ -581,9 +580,9 @@ pub enum JoinKind {
 }
 
 /// One `ORDER BY` term in a view body.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OrderItem {
-    pub expr: ExprFragment,
+    pub expr: ExprNode,
     pub direction: Option<OrderDirection>,
     pub nulls: Option<OrderNulls>,
 }
@@ -595,13 +594,92 @@ pub enum OrderNulls {
     Last,
 }
 
-/// A canonical-dialect-rendered scalar expression from a view body, with literals inlined.
+/// A backend-neutral SQL expression from a view body.
 ///
-/// Backends emit this text inside their own dialect-quoted `CREATE VIEW`. The canonical dialect quotes
-/// identifiers with ANSI double quotes, so Postgres consumes it directly and MySQL must create the view
-/// under `ANSI_QUOTES`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExprFragment(pub String);
+/// Stored structurally (rather than as pre-rendered text) so each backend renders it in its own
+/// dialect — correct identifier quoting, cast type names, integer-division casts, and `LIKE`/`ILIKE`.
+/// Literals are inlined, since a view body carries no bind parameters.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExprNode {
+    /// A qualified column reference, rendered as `<alias>.<column>`.
+    Column { alias: String, column: String },
+    /// An inlined SQL literal, already formatted (e.g. `'Ada'`, `42`, `TRUE`, `NULL`).
+    Literal(String),
+    /// Binary arithmetic; `Divide` uses the backend's fractional-division handling.
+    Binary {
+        op: ArithmeticOp,
+        left: Box<ExprNode>,
+        right: Box<ExprNode>,
+    },
+    /// `CAST(<operand> AS <ty>)`, with the backend's spelling of `ty`.
+    Cast { operand: Box<ExprNode>, ty: SqlType },
+    /// An aggregate call `FUNC(<operand>)`, optionally wrapped in a cast to `result` so the output
+    /// column's wire type matches the view's declared column type.
+    Aggregate {
+        func: AggregateFunc,
+        operand: Box<ExprNode>,
+        result: Option<SqlType>,
+    },
+    /// A comparison `<left> <op> <right>`.
+    Compare {
+        op: CompareOp,
+        left: Box<ExprNode>,
+        right: Box<ExprNode>,
+    },
+    /// A logical `AND`/`OR`.
+    Logical {
+        op: LogicalOp,
+        left: Box<ExprNode>,
+        right: Box<ExprNode>,
+    },
+    /// `NOT (<operand>)`.
+    Not(Box<ExprNode>),
+    /// `<operand> IS [NOT] NULL`.
+    IsNull {
+        negated: bool,
+        operand: Box<ExprNode>,
+    },
+    /// `<operand> [NOT] LIKE <pattern>` (`ILIKE` for `case_insensitive` on supporting dialects).
+    Like {
+        case_insensitive: bool,
+        negated: bool,
+        operand: Box<ExprNode>,
+        pattern: Box<ExprNode>,
+    },
+    /// `<operand> [NOT] IN (<items>)` against an inline value list.
+    In {
+        negated: bool,
+        operand: Box<ExprNode>,
+        items: Vec<ExprNode>,
+    },
+    /// `<operand> [NOT] BETWEEN <low> AND <high>`.
+    Between {
+        negated: bool,
+        operand: Box<ExprNode>,
+        low: Box<ExprNode>,
+        high: Box<ExprNode>,
+    },
+    /// A scalar subquery `(SELECT …)` used as a value.
+    ScalarSubquery(Box<ViewQueryModel>),
+    /// `<operand> [NOT] IN (<subquery>)`.
+    InSubquery {
+        negated: bool,
+        operand: Box<ExprNode>,
+        subquery: Box<ViewQueryModel>,
+    },
+    /// `[NOT] EXISTS (<subquery>)`.
+    Exists {
+        negated: bool,
+        subquery: Box<ViewQueryModel>,
+    },
+}
+
+/// Conjunction/disjunction for [`ExprNode::Logical`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogicalOp {
+    And,
+    Or,
+}
 
 /// Object-safe runtime metadata and body lowering for a view, consumed by the model walker.
 ///

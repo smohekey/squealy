@@ -1230,7 +1230,10 @@ fn mysql_renders_view_after_tables() {
                 query: ViewQueryModel {
                     projection: vec![ProjectionItem {
                         output_name: "id".to_owned(),
-                        expr: ExprFragment("q0_0.\"id\"".to_owned()),
+                        expr: ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: "id".to_owned(),
+                        },
                     }],
                     from: Some(SourceRef {
                         schema: Some("app".to_owned()),
@@ -1238,7 +1241,14 @@ fn mysql_renders_view_after_tables() {
                         alias: "q0_0".to_owned(),
                     }),
                     joins: Vec::new(),
-                    filter: Some(ExprFragment("(q0_0.\"id\" > 0)".to_owned())),
+                    filter: Some(ExprNode::Compare {
+                        op: CompareOp::GreaterThan,
+                        left: Box::new(ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: "id".to_owned(),
+                        }),
+                        right: Box::new(ExprNode::Literal("0".to_owned())),
+                    }),
                     group_by: Vec::new(),
                     having: None,
                     order_by: Vec::new(),
@@ -1285,7 +1295,10 @@ fn mysql_view_fragment_requoting_preserves_string_literals() {
                 query: ViewQueryModel {
                     projection: vec![ProjectionItem {
                         output_name: "name".to_owned(),
-                        expr: ExprFragment("q0_0.\"name\"".to_owned()),
+                        expr: ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: "name".to_owned(),
+                        },
                     }],
                     from: Some(SourceRef {
                         schema: None,
@@ -1294,7 +1307,14 @@ fn mysql_view_fragment_requoting_preserves_string_literals() {
                     }),
                     joins: Vec::new(),
                     // A string literal that itself contains a double quote.
-                    filter: Some(ExprFragment("(q0_0.\"name\" = 'a\"b')".to_owned())),
+                    filter: Some(ExprNode::Compare {
+                        op: CompareOp::Equals,
+                        left: Box::new(ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: "name".to_owned(),
+                        }),
+                        right: Box::new(ExprNode::Literal("'a\"b'".to_owned())),
+                    }),
                     group_by: Vec::new(),
                     having: None,
                     order_by: Vec::new(),
@@ -1330,7 +1350,10 @@ fn mysql_renders_view_plan_steps() {
         query: ViewQueryModel {
             projection: vec![ProjectionItem {
                 output_name: "id".to_owned(),
-                expr: ExprFragment("q0_0.\"id\"".to_owned()),
+                expr: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "id".to_owned(),
+                },
             }],
             from: Some(SourceRef {
                 schema: Some("app".to_owned()),
@@ -1338,7 +1361,14 @@ fn mysql_renders_view_plan_steps() {
                 alias: "q0_0".to_owned(),
             }),
             joins: Vec::new(),
-            filter: Some(ExprFragment("(q0_0.\"id\" > 0)".to_owned())),
+            filter: Some(ExprNode::Compare {
+                op: CompareOp::GreaterThan,
+                left: Box::new(ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "id".to_owned(),
+                }),
+                right: Box::new(ExprNode::Literal("0".to_owned())),
+            }),
             group_by: Vec::new(),
             having: None,
             order_by: Vec::new(),

@@ -2252,11 +2252,12 @@ fn postgres_is_not_null_composes_with_other_predicates() {
 // tables, and views are ordered so a view that selects from another view is created after it.
 #[test]
 fn postgres_renders_views_in_dependency_order() {
+    // `projection` is `(output_name, column)`; each expression is `q0_0.<column>`.
     fn view(
         name: &str,
         from: &str,
         projection: &[(&str, &str)],
-        filter: Option<&str>,
+        filter: Option<ExprNode>,
     ) -> ViewModel {
         ViewModel {
             name: name.to_owned(),
@@ -2272,9 +2273,12 @@ fn postgres_renders_views_in_dependency_order() {
             query: ViewQueryModel {
                 projection: projection
                     .iter()
-                    .map(|(output, expr)| ProjectionItem {
+                    .map(|(output, column)| ProjectionItem {
                         output_name: (*output).to_owned(),
-                        expr: ExprFragment((*expr).to_owned()),
+                        expr: ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: (*column).to_owned(),
+                        },
                     })
                     .collect(),
                 from: Some(SourceRef {
@@ -2283,7 +2287,7 @@ fn postgres_renders_views_in_dependency_order() {
                     alias: "q0_0".to_owned(),
                 }),
                 joins: Vec::new(),
-                filter: filter.map(|f| ExprFragment(f.to_owned())),
+                filter,
                 group_by: Vec::new(),
                 having: None,
                 order_by: Vec::new(),
@@ -2318,17 +2322,19 @@ fn postgres_renders_views_in_dependency_order() {
             // `active_user_ids` selects from the `active_users` view, so it must be created after it
             // even though it is declared first.
             views: vec![
-                view(
-                    "active_user_ids",
-                    "active_users",
-                    &[("id", "q0_0.\"id\"")],
-                    None,
-                ),
+                view("active_user_ids", "active_users", &[("id", "id")], None),
                 view(
                     "active_users",
                     "users",
-                    &[("id", "q0_0.\"id\"")],
-                    Some("(q0_0.\"id\" > 0)"),
+                    &[("id", "id")],
+                    Some(ExprNode::Compare {
+                        op: CompareOp::GreaterThan,
+                        left: Box::new(ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: "id".to_owned(),
+                        }),
+                        right: Box::new(ExprNode::Literal("0".to_owned())),
+                    }),
                 ),
             ],
         }],
@@ -2381,7 +2387,10 @@ fn postgres_renders_view_plan_steps() {
         query: ViewQueryModel {
             projection: vec![ProjectionItem {
                 output_name: "id".to_owned(),
-                expr: ExprFragment("q0_0.\"id\"".to_owned()),
+                expr: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "id".to_owned(),
+                },
             }],
             from: Some(SourceRef {
                 schema: Some("public".to_owned()),
@@ -2389,7 +2398,14 @@ fn postgres_renders_view_plan_steps() {
                 alias: "q0_0".to_owned(),
             }),
             joins: Vec::new(),
-            filter: Some(ExprFragment("(q0_0.\"id\" > 0)".to_owned())),
+            filter: Some(ExprNode::Compare {
+                op: CompareOp::GreaterThan,
+                left: Box::new(ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "id".to_owned(),
+                }),
+                right: Box::new(ExprNode::Literal("0".to_owned())),
+            }),
             group_by: Vec::new(),
             having: None,
             order_by: Vec::new(),

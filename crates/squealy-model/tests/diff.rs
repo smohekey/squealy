@@ -1,6 +1,6 @@
 use squealy_model::{
     ChangeRisk, CheckModel, ColumnModel, Constraint, DatabaseDiffChange, DatabaseModel,
-    DefaultValue, DiffPolicy, ExprFragment, ForeignKeyAction, ForeignKeyModel, IndexModel,
+    DefaultValue, DiffPolicy, ExprNode, ForeignKeyAction, ForeignKeyModel, IndexModel,
     ProjectionItem, SchemaModel, SourceRef, SqlType, TableDiffChange, TableModel, ViewColumnModel,
     ViewModel, ViewQueryModel, check_diff_policy, diff_models,
 };
@@ -425,7 +425,10 @@ fn dep_view(name: &str, from: &str) -> ViewModel {
         query: ViewQueryModel {
             projection: vec![ProjectionItem {
                 output_name: "id".to_owned(),
-                expr: ExprFragment("q0_0.\"id\"".to_owned()),
+                expr: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "id".to_owned(),
+                },
             }],
             from: Some(SourceRef {
                 schema: Some("public".to_owned()),

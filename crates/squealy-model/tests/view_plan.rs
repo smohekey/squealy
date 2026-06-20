@@ -1,7 +1,7 @@
 //! Incremental diff/plan coverage for views: adding, removing, and changing a view between the
 //! desired and actual model must produce the right plan steps and risk classification.
 
-use squealy::{ExprFragment, ProjectionItem, SourceRef, ViewQueryModel};
+use squealy::{ExprNode, ProjectionItem, SourceRef, ViewQueryModel};
 use squealy_model::{
     ChangeRisk, DatabaseModel, DatabasePlanStep, DiffPolicy, SchemaModel, SqlType, TableModel,
     ViewColumnModel, ViewModel, classified_plan_steps, plan_models,
@@ -37,7 +37,10 @@ fn view(filter: &str, columns: &[&str]) -> ViewModel {
                 .iter()
                 .map(|name| ProjectionItem {
                     output_name: (*name).to_owned(),
-                    expr: ExprFragment(format!("q0_0.\"{name}\"")),
+                    expr: ExprNode::Column {
+                        alias: "q0_0".to_owned(),
+                        column: (*name).to_owned(),
+                    },
                 })
                 .collect(),
             from: Some(SourceRef {
@@ -46,7 +49,9 @@ fn view(filter: &str, columns: &[&str]) -> ViewModel {
                 alias: "q0_0".to_owned(),
             }),
             joins: Vec::new(),
-            filter: Some(ExprFragment(filter.to_owned())),
+            // The filter is a stand-in expression that differs between view variants so the diff sees a
+            // body change.
+            filter: Some(ExprNode::Literal(filter.to_owned())),
             group_by: Vec::new(),
             having: None,
             order_by: Vec::new(),
