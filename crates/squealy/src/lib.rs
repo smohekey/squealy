@@ -506,7 +506,7 @@ pub use model::{
     TableModel, ViewColumnModel, ViewDef, ViewModel, ViewQueryModel,
 };
 pub use plan::{DatabasePlan, DatabasePlanStep, TablePlanStep};
-pub use view::{ModelBackend, ModelConn, ViewDefinition, ViewSelect};
+pub use view::{ModelBackend, ModelConn, SchemaView, ViewDefinition, ViewSelect};
 #[doc(hidden)]
 pub use view::lower_view;
 pub use projection::{
@@ -533,7 +533,7 @@ pub use query::{
     Where, default,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
-pub use squealy_macros::{ColumnType, Database, Schema, Table};
+pub use squealy_macros::{ColumnType, Database, Schema, Table, View};
 pub use table::{
     InsertableTable, SchemaTable, Table, TablePrimaryKey, TableUnique, UpdateableTable,
     WriteableTable,

@@ -14,19 +14,19 @@ pub(crate) fn derive(input: TokenStream) -> TokenStream {
     }
 }
 
-struct TableStruct {
-    ident: Ident,
+pub(crate) struct TableStruct {
+    pub(crate) ident: Ident,
     visibility: TokenStream2,
-    fields: Vec<Field>,
+    pub(crate) fields: Vec<Field>,
     indexes: Vec<IndexAttrs>,
     primary_key: Option<PrimaryKeyAttrs>,
     uniques: Vec<UniqueAttrs>,
-    schema: Option<proc_macro2::TokenStream>,
+    pub(crate) schema: Option<proc_macro2::TokenStream>,
 }
 
-struct Field {
-    ident: Ident,
-    value_ty: proc_macro2::TokenStream,
+pub(crate) struct Field {
+    pub(crate) ident: Ident,
+    pub(crate) value_ty: proc_macro2::TokenStream,
     attrs: FieldAttrs,
 }
 
@@ -1549,7 +1549,7 @@ impl IndexAttrs {
 }
 
 impl Field {
-    fn column_name(&self) -> String {
+    pub(crate) fn column_name(&self) -> String {
         self.attrs
             .column_name
             .clone()
@@ -1747,7 +1747,7 @@ impl Field {
     }
 }
 
-fn table_struct(input: TokenStream) -> Result<TableStruct, MacroError> {
+pub(crate) fn table_struct(input: TokenStream) -> Result<TableStruct, MacroError> {
     let tokens = input.into_iter().collect::<Vec<_>>();
     let struct_index = tokens
         .iter()

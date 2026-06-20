@@ -74,7 +74,7 @@ fn lowers_group_by_having_and_aggregate() {
 // the body's projection.
 struct ActiveUsers;
 
-impl ViewDefinition for ActiveUsers {
+impl SchemaView for ActiveUsers {
     type Row = (i32, String);
 
     fn schema_name() -> Option<&'static str> {
@@ -99,8 +99,10 @@ impl ViewDefinition for ActiveUsers {
             },
         ]
     }
+}
 
-    fn definition(db: &'static ModelConn) -> impl ViewSelect<Row = Self::Row> {
+impl ViewDefinition for ActiveUsers {
+    fn definition(db: &'static ModelConn) -> impl ViewSelect<Row = <Self as SchemaView>::Row> {
         db.from::<User>()
             .where_(|user| user.active.equals(true))
             .project(|(user,)| (user.id, user.name))
