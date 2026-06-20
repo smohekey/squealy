@@ -956,12 +956,15 @@ where
 
 /// The `LAG(value, offset)` window function (the row `offset` rows before the current one in window
 /// order). The result is nullable (`NULL` past the partition edge), so it decodes as `Option<T>`.
+/// The value must be a row-level scalar (`NonAggregateAst`): a nested window or aggregate operand is
+/// rejected by the backends.
 pub fn lag<'scope, E>(
     value: E,
     offset: i32,
 ) -> PendingWindow<'scope, ScalarNullable<E::Kind>, LagArgsAst<E::Ast>>
 where
     E: WindowOperand<'scope>,
+    E::Ast: NonAggregateAst,
 {
     PendingWindow {
         func: WindowFunc::Lag,
@@ -982,6 +985,7 @@ pub fn lead<'scope, E>(
 ) -> PendingWindow<'scope, ScalarNullable<E::Kind>, LagArgsAst<E::Ast>>
 where
     E: WindowOperand<'scope>,
+    E::Ast: NonAggregateAst,
 {
     PendingWindow {
         func: WindowFunc::Lead,

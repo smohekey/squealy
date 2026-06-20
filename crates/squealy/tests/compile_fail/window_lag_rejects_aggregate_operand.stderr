@@ -1,0 +1,16 @@
+error[E0277]: the trait bound `squealy::AggregateExprAst<squealy::ColumnExprAst<PostId>>: NonAggregateAst` is not satisfied
+  --> tests/compile_fail/window_lag_rejects_aggregate_operand.rs:15:13
+   |
+15 |         lag(post.id.sum(), 1).over(|w| w.order_by(post.id.asc()))
+   |         --- ^^^^^^^^^^^^^ the trait `NonAggregateAst` is not implemented for `squealy::AggregateExprAst<squealy::ColumnExprAst<PostId>>`
+   |         |
+   |         required by a bound introduced by this call
+   |
+note: required by a bound in `squealy::lag`
+  --> src/expr.rs
+   |
+   | pub fn lag<'scope, E>(
+   |        --- required by a bound in this function
+...
+   |     E::Ast: NonAggregateAst,
+   |             ^^^^^^^^^^^^^^^ required by this bound in `lag`
