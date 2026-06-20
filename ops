@@ -1,1 +1,1 @@
-{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":5,"timestamp":1781997849,"nonce":"rIA3rx8NpKsnCoi9lcRhH3ArCsY=","added":["roadmap","query-builder"],"removed":null}]}
+{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":2,"timestamp":1781998290,"nonce":"pZjnmjCdKjZsJRV2DMSndAFXa+4=","title":"Query builder: set operations (UNION / INTERSECT / EXCEPT)","was":"Add set operations: `UNION`, `UNION ALL`, `INTERSECT`, `EXCEPT`."}]}
