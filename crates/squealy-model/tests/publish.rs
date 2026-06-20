@@ -321,6 +321,7 @@ fn alter_column_baseline_model() -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("publish_demo_alter".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,
@@ -360,6 +361,7 @@ fn alter_column_desired_model() -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("publish_demo_alter".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,
@@ -399,6 +401,7 @@ fn rich_model() -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("publish_demo_rich".to_owned()),
+            views: Vec::new(),
             tables: vec![
                 TableModel {
                     name: "memberships".to_owned(),

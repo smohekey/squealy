@@ -18,10 +18,11 @@ use std::path::Path;
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
     CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintEnforcement,
-    ConstraintValidation, DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyMatch,
-    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
-    SchemaModel, SqlType, TableModel,
+    ConstraintValidation, DatabaseModel, DefaultValue, ExprFragment, ForeignKeyAction,
+    ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
+    IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
+    IndexOperatorClass, JoinItem, JoinKind, OrderDirection, OrderItem, OrderNulls, ProjectionItem,
+    SchemaModel, SourceRef, SqlType, TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
 };
 
 use crate::{CastColumn, RefactorLog, RefactorOperation, RenameColumn, RenameTable};
@@ -409,6 +410,9 @@ fn schema_to_node(schema: &SchemaModel) -> KdlNode {
     for table in &schema.tables {
         tables.nodes_mut().push(table_to_node(table));
     }
+    for view in &schema.views {
+        tables.nodes_mut().push(view_to_node(view));
+    }
     node.set_children(tables);
     node
 }
@@ -441,6 +445,121 @@ fn table_to_node(table: &TableModel) -> KdlNode {
         body.nodes_mut().push(check_to_node(check));
     }
     node.set_children(body);
+    node
+}
+
+fn view_to_node(view: &ViewModel) -> KdlNode {
+    let mut node = KdlNode::new("view");
+    node.push(KdlEntry::new(view.name.clone()));
+    if let Some(comment) = &view.comment {
+        node.push(KdlEntry::new_prop("comment", comment.clone()));
+    }
+    let mut body = KdlDocument::new();
+    for column in &view.columns {
+        body.nodes_mut().push(view_column_to_node(column));
+    }
+    body.nodes_mut().push(view_query_to_node(&view.query));
+    node.set_children(body);
+    node
+}
+
+fn view_column_to_node(column: &ViewColumnModel) -> KdlNode {
+    let mut node = KdlNode::new("column");
+    node.push(KdlEntry::new(column.name.clone()));
+    write_sql_type(&mut node, &column.ty);
+    if column.nullable {
+        node.push(KdlEntry::new_prop("nullable", KdlValue::Bool(true)));
+    }
+    node
+}
+
+fn view_query_to_node(query: &ViewQueryModel) -> KdlNode {
+    let mut node = KdlNode::new("query");
+    if let Some(limit) = query.limit {
+        node.push(KdlEntry::new_prop(
+            "limit",
+            KdlValue::Integer(limit as i128),
+        ));
+    }
+    if let Some(offset) = query.offset {
+        node.push(KdlEntry::new_prop(
+            "offset",
+            KdlValue::Integer(offset as i128),
+        ));
+    }
+
+    let mut body = KdlDocument::new();
+    for item in &query.projection {
+        let mut projection = KdlNode::new("projection");
+        projection.push(KdlEntry::new(item.output_name.clone()));
+        projection.push(KdlEntry::new_prop("expr", item.expr.0.clone()));
+        body.nodes_mut().push(projection);
+    }
+    if let Some(from) = &query.from {
+        body.nodes_mut()
+            .push(view_source_to_node("from", from, None));
+    }
+    for join in &query.joins {
+        let kind = match join.kind {
+            JoinKind::Inner => "inner",
+            JoinKind::Left => "left",
+        };
+        let mut node = view_source_to_node("join", &join.source, Some(kind));
+        node.push(KdlEntry::new_prop("on", join.on.0.clone()));
+        body.nodes_mut().push(node);
+    }
+    if let Some(filter) = &query.filter {
+        let mut node = KdlNode::new("filter");
+        node.push(KdlEntry::new(filter.0.clone()));
+        body.nodes_mut().push(node);
+    }
+    for key in &query.group_by {
+        let mut node = KdlNode::new("group-by");
+        node.push(KdlEntry::new(key.0.clone()));
+        body.nodes_mut().push(node);
+    }
+    if let Some(having) = &query.having {
+        let mut node = KdlNode::new("having");
+        node.push(KdlEntry::new(having.0.clone()));
+        body.nodes_mut().push(node);
+    }
+    for order in &query.order_by {
+        let mut node = KdlNode::new("order-by");
+        node.push(KdlEntry::new(order.expr.0.clone()));
+        if let Some(direction) = order.direction {
+            node.push(KdlEntry::new_prop(
+                "direction",
+                match direction {
+                    OrderDirection::Asc => "asc",
+                    OrderDirection::Desc => "desc",
+                },
+            ));
+        }
+        if let Some(nulls) = order.nulls {
+            node.push(KdlEntry::new_prop(
+                "nulls",
+                match nulls {
+                    OrderNulls::First => "first",
+                    OrderNulls::Last => "last",
+                },
+            ));
+        }
+        body.nodes_mut().push(node);
+    }
+    node.set_children(body);
+    node
+}
+
+fn view_source_to_node(kind: &str, source: &SourceRef, join_kind: Option<&str>) -> KdlNode {
+    let mut node = KdlNode::new(kind);
+    node.push(KdlEntry::new(source.name.clone()));
+    if let Some(schema) = &source.schema {
+        node.push(KdlEntry::new_prop("schema", schema.clone()));
+    }
+    node.push(KdlEntry::new_prop("alias", source.alias.clone()));
+    if let Some(join_kind) = join_kind {
+        node.push(KdlEntry::new_prop("kind", join_kind));
+    }
     node
 }
 
@@ -751,9 +870,13 @@ fn schema_from_node(node: &KdlNode) -> Result<SchemaModel, PackageError> {
     let tables = child_nodes(node, "table")
         .map(table_from_node)
         .collect::<Result<Vec<_>, _>>()?;
+    let views = child_nodes(node, "view")
+        .map(view_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(SchemaModel {
         name: first_arg(node).map(str::to_owned),
         tables,
+        views,
     })
 }
 
@@ -791,6 +914,124 @@ fn table_from_node(node: &KdlNode) -> Result<TableModel, PackageError> {
         uniques,
         checks,
         indexes,
+    })
+}
+
+fn view_from_node(node: &KdlNode) -> Result<ViewModel, PackageError> {
+    let name = first_arg(node)
+        .ok_or_else(|| malformed("`view` is missing its name"))?
+        .to_owned();
+    let columns = child_nodes(node, "column")
+        .map(view_column_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
+    let query = child_nodes(node, "query")
+        .next()
+        .map(view_query_from_node)
+        .transpose()?
+        .unwrap_or_default();
+    Ok(ViewModel {
+        name,
+        comment: prop(node, "comment").map(str::to_owned),
+        columns,
+        query,
+    })
+}
+
+fn view_column_from_node(node: &KdlNode) -> Result<ViewColumnModel, PackageError> {
+    Ok(ViewColumnModel {
+        name: first_arg(node)
+            .ok_or_else(|| malformed("view `column` is missing its name"))?
+            .to_owned(),
+        ty: sql_type_from_node(node)?,
+        nullable: prop_bool(node, "nullable"),
+    })
+}
+
+fn view_query_from_node(node: &KdlNode) -> Result<ViewQueryModel, PackageError> {
+    let projection = child_nodes(node, "projection")
+        .map(|item| {
+            Ok::<_, PackageError>(ProjectionItem {
+                output_name: first_arg(item)
+                    .ok_or_else(|| malformed("`projection` is missing its output name"))?
+                    .to_owned(),
+                expr: ExprFragment(required_prop(item, "expr")?),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let from = child_nodes(node, "from")
+        .next()
+        .map(view_source_from_node)
+        .transpose()?;
+    let joins = child_nodes(node, "join")
+        .map(view_join_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
+    let filter = child_nodes(node, "filter")
+        .next()
+        .and_then(first_arg)
+        .map(|expr| ExprFragment(expr.to_owned()));
+    let group_by = child_nodes(node, "group-by")
+        .filter_map(first_arg)
+        .map(|expr| ExprFragment(expr.to_owned()))
+        .collect();
+    let having = child_nodes(node, "having")
+        .next()
+        .and_then(first_arg)
+        .map(|expr| ExprFragment(expr.to_owned()));
+    let order_by = child_nodes(node, "order-by")
+        .map(view_order_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ViewQueryModel {
+        projection,
+        from,
+        joins,
+        filter,
+        group_by,
+        having,
+        order_by,
+        limit: prop_usize(node, "limit")?,
+        offset: prop_usize(node, "offset")?,
+    })
+}
+
+fn view_source_from_node(node: &KdlNode) -> Result<SourceRef, PackageError> {
+    Ok(SourceRef {
+        schema: prop(node, "schema").map(str::to_owned),
+        name: first_arg(node)
+            .ok_or_else(|| malformed("view source is missing its table name"))?
+            .to_owned(),
+        alias: required_prop(node, "alias")?,
+    })
+}
+
+fn view_join_from_node(node: &KdlNode) -> Result<JoinItem, PackageError> {
+    let kind = match prop(node, "kind") {
+        Some("left") => JoinKind::Left,
+        _ => JoinKind::Inner,
+    };
+    Ok(JoinItem {
+        kind,
+        source: view_source_from_node(node)?,
+        on: ExprFragment(required_prop(node, "on")?),
+    })
+}
+
+fn view_order_from_node(node: &KdlNode) -> Result<OrderItem, PackageError> {
+    Ok(OrderItem {
+        expr: ExprFragment(
+            first_arg(node)
+                .ok_or_else(|| malformed("`order-by` is missing its expression"))?
+                .to_owned(),
+        ),
+        direction: match prop(node, "direction") {
+            Some("asc") => Some(OrderDirection::Asc),
+            Some("desc") => Some(OrderDirection::Desc),
+            _ => None,
+        },
+        nulls: match prop(node, "nulls") {
+            Some("first") => Some(OrderNulls::First),
+            Some("last") => Some(OrderNulls::Last),
+            _ => None,
+        },
     })
 }
 
@@ -937,6 +1178,21 @@ fn required_u32(node: &KdlNode, key: &str) -> Result<u32, PackageError> {
             ))
         })?;
     u32::try_from(value).map_err(|_| malformed(format!("`{key}` is out of range for u32")))
+}
+
+/// Reads an optional non-negative integer property as `usize` (view `limit`/`offset`).
+fn prop_usize(node: &KdlNode, key: &str) -> Result<Option<usize>, PackageError> {
+    let Some(value) = node
+        .entries()
+        .iter()
+        .find(|entry| entry.name().map(|name| name.value()) == Some(key))
+        .and_then(|entry| entry.value().as_integer())
+    else {
+        return Ok(None);
+    };
+    usize::try_from(value)
+        .map(Some)
+        .map_err(|_| malformed(format!("`{key}` is out of range for usize")))
 }
 
 fn default_from_node(node: &KdlNode) -> Result<Option<DefaultValue>, PackageError> {
@@ -1257,6 +1513,7 @@ mod tests {
         DatabaseModel {
             schemas: vec![SchemaModel {
                 name: Some("public".to_owned()),
+                views: Vec::new(),
                 tables: vec![
                     TableModel {
                         name: "orgs".to_owned(),
@@ -1378,6 +1635,72 @@ mod tests {
     }
 
     #[test]
+    fn kdl_round_trips_views() {
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: Some("public".to_owned()),
+                tables: Vec::new(),
+                views: vec![ViewModel {
+                    name: "active_members".to_owned(),
+                    comment: Some("Members of active orgs".to_owned()),
+                    columns: vec![
+                        ViewColumnModel {
+                            name: "id".to_owned(),
+                            ty: SqlType::I32,
+                            nullable: false,
+                        },
+                        ViewColumnModel {
+                            name: "name".to_owned(),
+                            ty: SqlType::String,
+                            nullable: true,
+                        },
+                    ],
+                    query: ViewQueryModel {
+                        projection: vec![
+                            ProjectionItem {
+                                output_name: "id".to_owned(),
+                                expr: ExprFragment("q0_0.\"id\"".to_owned()),
+                            },
+                            ProjectionItem {
+                                output_name: "name".to_owned(),
+                                expr: ExprFragment("q0_1.\"name\"".to_owned()),
+                            },
+                        ],
+                        from: Some(SourceRef {
+                            schema: Some("public".to_owned()),
+                            name: "memberships".to_owned(),
+                            alias: "q0_0".to_owned(),
+                        }),
+                        joins: vec![JoinItem {
+                            kind: JoinKind::Left,
+                            source: SourceRef {
+                                schema: Some("public".to_owned()),
+                                name: "orgs".to_owned(),
+                                alias: "q0_1".to_owned(),
+                            },
+                            on: ExprFragment("(q0_0.\"org_id\" = q0_1.\"id\")".to_owned()),
+                        }],
+                        filter: Some(ExprFragment("q0_1.\"active\"".to_owned())),
+                        group_by: vec![ExprFragment("q0_0.\"id\"".to_owned())],
+                        having: Some(ExprFragment("(COUNT(q0_0.\"id\") > 0)".to_owned())),
+                        order_by: vec![OrderItem {
+                            expr: ExprFragment("q0_0.\"id\"".to_owned()),
+                            direction: Some(OrderDirection::Desc),
+                            nulls: Some(OrderNulls::Last),
+                        }],
+                        limit: Some(10),
+                        offset: Some(5),
+                    },
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("view model.kdl should parse");
+        assert_eq!(parsed, model, "view KDL round-trip diverged:\n{kdl}");
+    }
+
+    #[test]
     fn package_content_hash_includes_refactor_log() {
         let model = sample_model();
         let empty = RefactorLog::default();
@@ -1493,6 +1816,7 @@ mod tests {
         let model = DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -1573,6 +1897,7 @@ mod tests {
         let model = DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "structured".to_owned(),
                     comment: None,
@@ -1673,6 +1998,7 @@ mod tests {
         let model = DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "derived_columns".to_owned(),
                     comment: None,
@@ -1724,6 +2050,7 @@ mod tests {
         let model = DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -1773,6 +2100,7 @@ mod tests {
         let model = DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -1822,6 +2150,7 @@ mod tests {
         let model = DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -1871,6 +2200,7 @@ mod tests {
         let model = DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -1925,6 +2255,7 @@ mod tests {
         let model = DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -1983,6 +2314,7 @@ mod tests {
         let model = DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -2006,6 +2338,7 @@ mod tests {
         let model = DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -2050,6 +2383,7 @@ mod tests {
         let model = DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,

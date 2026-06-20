@@ -1,0 +1,11 @@
+error[E0271]: type mismatch resolving `<Selected<'_, From<'_, '_, ModelConn, HCons<__SquealyUserExprsProjection<'_>, HNil>, RootSource<User<'_>>>, (UserId, UserActive), (ColumnRef<'_, UserId>, ColumnRef<'_, UserActive>)> as ViewSelect>::Row == (i32, String)`
+  --> tests/compile_fail/view_projection_mismatch.rs:31:46
+   |
+31 |     fn definition(db: &'static ModelConn) -> impl ViewSelect<Row = <Self as SchemaView>::Row> {
+   |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `(i32, String)`, found `(i32, bool)`
+32 |         // Wrong: projects `active` (bool) where the declared column is `name` (String).
+33 |         db.from::<User>().project(|(user,)| (user.id, user.active))
+   |         ----------------------------------------------------------- return type was inferred to be `squealy::Selected<'_, squealy::From<'_, '_, squealy::ModelConn, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, (UserId, UserActive), (ColumnRef<'_, UserId>, ColumnRef<'_, UserActive>)>` here
+   |
+   = note: expected tuple `(i32, std::string::String)`
+              found tuple `(i32, bool)`

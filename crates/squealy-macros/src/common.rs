@@ -4,6 +4,8 @@ use proc_macro2::{Literal, Span};
 pub(crate) struct StructField {
     pub ident: proc_macro::Ident,
     pub ty: proc_macro2::TokenStream,
+    /// Names of the outer attributes on the field (e.g. `view` for `#[view]`).
+    pub attributes: Vec<String>,
 }
 
 pub(crate) fn struct_fields(
@@ -13,9 +15,16 @@ pub(crate) fn struct_fields(
     let tokens = group.stream().into_iter().collect::<Vec<_>>();
     let mut fields = Vec::new();
     let mut index = 0;
+    let mut pending_attributes: Vec<String> = Vec::new();
 
     while index < tokens.len() {
         if is_attribute_start(&tokens[index]) {
+            // `#` then a `[..]` group whose first token names the attribute (e.g. `view`).
+            if let Some(TokenTree::Group(group)) = tokens.get(index + 1)
+                && let Some(TokenTree::Ident(name)) = group.stream().into_iter().next()
+            {
+                pending_attributes.push(name.to_string());
+            }
             index += 2;
             continue;
         }
@@ -62,6 +71,7 @@ pub(crate) fn struct_fields(
         fields.push(StructField {
             ident: ident.clone(),
             ty: proc_macro2::TokenStream::from(TokenStream::from_iter(type_tokens)),
+            attributes: std::mem::take(&mut pending_attributes),
         });
         index += 1;
     }

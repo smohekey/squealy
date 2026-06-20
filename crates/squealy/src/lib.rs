@@ -454,6 +454,7 @@ mod query;
 pub mod render;
 mod schema;
 mod table;
+mod view;
 
 pub use backend::{
     Backend, ConstraintCapabilities, DdlExecutor, Decode, DecodeNullable, Encode,
@@ -499,10 +500,11 @@ pub use list::{
 };
 pub use model::{
     CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintEnforcement,
-    ConstraintValidation, DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyMatch,
-    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
-    SchemaModel, SqlType, TableModel,
+    ConstraintValidation, DatabaseModel, DefaultValue, ExprFragment, ForeignKeyAction,
+    ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
+    IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
+    IndexOperatorClass, JoinItem, JoinKind, OrderItem, OrderNulls, ProjectionItem, SchemaModel,
+    SourceRef, SqlType, TableModel, ViewColumnModel, ViewDef, ViewModel, ViewQueryModel,
 };
 pub use plan::{DatabasePlan, DatabasePlanStep, TablePlanStep};
 pub use projection::{
@@ -529,8 +531,11 @@ pub use query::{
     UpdateAssignments, UpdateColumnKey, UpdateColumnValues, UpdateQuery, Where, default,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
-pub use squealy_macros::{ColumnType, Database, Schema, Table};
+pub use squealy_macros::{ColumnType, Database, Schema, Table, View};
 pub use table::{
     InsertableTable, SchemaTable, Table, TablePrimaryKey, TableUnique, UpdateableTable,
     WriteableTable,
 };
+pub use view::{ModelBackend, ModelConn, SchemaView, ViewDefinition, ViewSelect};
+#[doc(hidden)]
+pub use view::{lower_view, view_definition_model};

@@ -25,6 +25,7 @@ pub(crate) async fn database(conn: &mut mysql_async::Conn) -> Result<DatabaseMod
         {
             schemas.push(SchemaModel {
                 name: Some(table_ref.schema.clone()),
+                views: Vec::new(),
                 tables: Vec::new(),
             });
         }

@@ -273,6 +273,7 @@ fn alter_column_baseline_model() -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("catalog_alter".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,
@@ -312,6 +313,7 @@ fn alter_column_desired_model() -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("catalog_alter".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,
@@ -350,6 +352,7 @@ fn alter_column_desired_model() -> DatabaseModel {
 fn mysql_normalized_catalog_schema() -> SchemaModel {
     SchemaModel {
         name: Some("catalog".to_owned()),
+        views: Vec::new(),
         tables: vec![
             TableModel {
                 name: "parts".to_owned(),
@@ -468,6 +471,7 @@ fn rich_mysql_model() -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("catalog_rich".to_owned()),
+            views: Vec::new(),
             tables: vec![
                 TableModel {
                     name: "memberships".to_owned(),
@@ -637,6 +641,7 @@ fn rich_mysql_model() -> DatabaseModel {
 fn mysql_normalized_rich_schema() -> SchemaModel {
     SchemaModel {
         name: Some("catalog_rich".to_owned()),
+        views: Vec::new(),
         tables: vec![
             TableModel {
                 name: "memberships".to_owned(),
