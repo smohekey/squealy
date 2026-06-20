@@ -18,21 +18,66 @@ struct SchemaStruct {
 struct SchemaField {
     ident: Ident,
     ty: proc_macro2::TokenStream,
+    /// `true` when the field is marked `#[view]`, so it registers as a view rather than a table.
+    is_view: bool,
 }
 
 impl SchemaStruct {
     fn expand(&self) -> TokenStream {
         let ident = proc_macro2::Ident::new(&self.ident.to_string(), Span::call_site());
         let name = Literal::string(&to_snake(&ident.to_string()));
-        let table_idents = self
+        let table_fields = self
             .fields
+            .iter()
+            .filter(|field| !field.is_view)
+            .collect::<Vec<_>>();
+        let view_fields = self
+            .fields
+            .iter()
+            .filter(|field| field.is_view)
+            .collect::<Vec<_>>();
+        let table_idents = table_fields
             .iter()
             .map(|field| generated_ident(&ident, &field.ident.to_string(), "Table"))
             .collect::<Vec<_>>();
-        let table_types = self
-            .fields
+        let table_types = table_fields
             .iter()
             .map(|field| &field.ty)
+            .collect::<Vec<_>>();
+        let view_idents = view_fields
+            .iter()
+            .map(|field| generated_ident(&ident, &field.ident.to_string(), "View"))
+            .collect::<Vec<_>>();
+        let view_types = view_fields
+            .iter()
+            .map(|field| &field.ty)
+            .collect::<Vec<_>>();
+        let view_defs = view_idents
+            .iter()
+            .zip(view_types.iter())
+            .map(|(view_ident, view_type)| {
+                quote::quote! {
+                    struct #view_ident;
+
+                    impl ::squealy::ViewDef for #view_ident {
+                        fn schema_name(&self) -> Option<&'static str> {
+                            <#view_type as ::squealy::SchemaView>::schema_name()
+                        }
+
+                        fn name(&self) -> &'static str {
+                            <#view_type as ::squealy::SchemaView>::view_name()
+                        }
+
+                        fn columns(&self) -> ::std::vec::Vec<::squealy::ViewColumnModel> {
+                            <#view_type as ::squealy::SchemaView>::view_columns()
+                        }
+
+                        fn definition_model(&self) -> ::squealy::ViewQueryModel {
+                            ::squealy::view_definition_model::<#view_type>()
+                        }
+                    }
+                }
+            })
             .collect::<Vec<_>>();
         let table_defs = table_idents
             .iter()
@@ -71,11 +116,15 @@ impl SchemaStruct {
             .collect::<Vec<_>>();
         let tables_static = generated_ident(&ident, "tables", "Static");
         let tables_len = Literal::usize_unsuffixed(table_idents.len());
+        let views_static = generated_ident(&ident, "views", "Static");
+        let views_len = Literal::usize_unsuffixed(view_idents.len());
 
         quote::quote! {
             #(#table_defs)*
+            #(#view_defs)*
 
             static #tables_static: [&'static (dyn ::squealy::Table + Sync); #tables_len] = [#( &#table_idents, )*];
+            static #views_static: [&'static (dyn ::squealy::ViewDef + Sync); #views_len] = [#( &#view_idents, )*];
 
             impl ::squealy::Schema for #ident {
                 fn name() -> Option<&'static str> {
@@ -84,6 +133,10 @@ impl SchemaStruct {
 
                 fn tables() -> impl Iterator<Item = &'static (dyn ::squealy::Table + Sync)> {
                     #tables_static.into_iter()
+                }
+
+                fn views() -> impl Iterator<Item = &'static (dyn ::squealy::ViewDef + Sync)> {
+                    #views_static.into_iter()
                 }
             }
         }
@@ -126,6 +179,7 @@ fn schema_fields(group: &Group) -> Result<Vec<SchemaField>, String> {
             .map(|field| SchemaField {
                 ident: field.ident,
                 ty: field.ty,
+                is_view: field.attributes.iter().any(|attr| attr == "view"),
             })
             .collect()
     })

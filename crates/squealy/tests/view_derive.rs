@@ -26,6 +26,14 @@ struct ActiveUser<'scope, C: ColumnMode = ColumnExpr> {
 #[derive(Schema)]
 struct Public {
     users: User<'static, ColumnName>,
+    #[view]
+    active_users: ActiveUser<'static, ColumnName>,
+}
+
+#[allow(dead_code)]
+#[derive(Database)]
+struct AppDatabase {
+    public: Public,
 }
 
 impl<'scope, C: ColumnMode> ViewDefinition for ActiveUser<'scope, C> {
@@ -65,4 +73,23 @@ fn derived_view_lowers_its_body() {
     assert_eq!(from.name, "users");
     let filter = model.filter.expect("WHERE").0;
     assert!(filter.contains("TRUE"), "literal not inlined: {filter}");
+}
+
+#[test]
+fn database_walk_includes_views() {
+    let model = DatabaseModel::from_database::<AppDatabase>();
+    let schema = &model.schemas[0];
+    assert_eq!(schema.name.as_deref(), Some("public"));
+    assert_eq!(schema.tables.len(), 1);
+    assert_eq!(schema.tables[0].name, "users");
+
+    assert_eq!(schema.views.len(), 1);
+    let view = &schema.views[0];
+    assert_eq!(view.name, "active_users");
+    assert_eq!(view.columns.len(), 2);
+    assert_eq!(view.columns[0].name, "id");
+    assert_eq!(view.columns[1].name, "name");
+    assert_eq!(view.query.projection.len(), 2);
+    assert_eq!(view.query.from.as_ref().unwrap().name, "users");
+    assert!(view.query.filter.as_ref().unwrap().0.contains("TRUE"));
 }

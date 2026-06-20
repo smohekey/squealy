@@ -519,9 +519,19 @@ where
     }
 
     fn definition_model(&self) -> ViewQueryModel {
-        static MODEL_CONN: ModelConn = ModelConn;
-        T::definition(&MODEL_CONN).lower()
+        view_definition_model::<T>()
     }
+}
+
+/// Lowers a [`ViewDefinition`] type's body into the neutral model without needing an instance. The
+/// `#[derive(Schema)]`-generated `ViewDef` shims call this so a view registers from its type alone.
+#[doc(hidden)]
+pub fn view_definition_model<T>() -> ViewQueryModel
+where
+    T: ViewDefinition,
+{
+    static MODEL_CONN: ModelConn = ModelConn;
+    T::definition(&MODEL_CONN).lower()
 }
 
 // ---------------------------------------------------------------------------

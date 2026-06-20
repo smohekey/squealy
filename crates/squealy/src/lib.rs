@@ -508,7 +508,7 @@ pub use model::{
 pub use plan::{DatabasePlan, DatabasePlanStep, TablePlanStep};
 pub use view::{ModelBackend, ModelConn, SchemaView, ViewDefinition, ViewSelect};
 #[doc(hidden)]
-pub use view::lower_view;
+pub use view::{lower_view, view_definition_model};
 pub use projection::{
     Maybe, Projectable, ProjectionShape, ProjectionVisitor, RenderProjectable, TableProjection,
 };

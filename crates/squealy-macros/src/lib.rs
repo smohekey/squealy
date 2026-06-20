@@ -47,8 +47,9 @@ pub fn derive_column_type(input: TokenStream) -> TokenStream {
     column_type::derive(input)
 }
 
-/// Derives squealy schema metadata from fields containing table types.
-#[proc_macro_derive(Schema)]
+/// Derives squealy schema metadata from fields containing table types. A field marked `#[view]`
+/// registers as a view instead of a table.
+#[proc_macro_derive(Schema, attributes(view))]
 pub fn derive_schema(input: TokenStream) -> TokenStream {
     schema::derive(input)
 }

@@ -48,6 +48,10 @@ impl DatabaseStruct {
                         fn tables(&self) -> ::std::boxed::Box<dyn Iterator<Item = &'static (dyn ::squealy::Table + Sync)> + '_> {
                             ::std::boxed::Box::new(<#schema_type as ::squealy::Schema>::tables())
                         }
+
+                        fn views(&self) -> ::std::boxed::Box<dyn Iterator<Item = &'static (dyn ::squealy::ViewDef + Sync)> + '_> {
+                            ::std::boxed::Box::new(<#schema_type as ::squealy::Schema>::views())
+                        }
                     }
                 }
             })
