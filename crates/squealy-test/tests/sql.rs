@@ -1033,6 +1033,28 @@ fn test_not_exists_subquery_renders() {
 }
 
 #[test]
+fn test_exists_accepts_a_multi_column_subquery_projection() {
+    // EXISTS ignores the select-list shape, so a multi-column (tuple) projection is allowed.
+    let q = TestConnection
+        .from::<User>()
+        .where_correlated(|(user,), sub| {
+            exists(
+                sub.from::<Post>()
+                    .where_(|post| post.user_id.equals(user.id))
+                    .select_subquery(|(post,)| (post.id, post.user_id)),
+            )
+        })
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (EXISTS (SELECT \
+         q1_0.id AS t0_id, q1_0.user_id AS t1_user_id FROM posts AS q1_0 WHERE \
+         (q1_0.user_id = q0_0.id)))"
+    );
+}
+
+#[test]
 fn test_in_subquery_with_outer_and_inner_params_orders_binds() {
     // Outer filter param, then a subquery containing its own literal: binds must come out in render
     // order (outer WHERE operand has no bind here; the inner literal renders inside the subquery).

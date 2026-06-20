@@ -755,6 +755,20 @@ impl TableStruct {
                 type Class = ::squealy::ScalarProjection;
             }
 
+            // A whole-table projection is all columns, which carry no runtime parameters.
+            impl<'scope> ::squealy::ProjectionParams for #exprs_ident <'scope> {
+                type Params = ::squealy::HNil;
+            }
+            impl<'scope> ::squealy::ProjectionParams for #rebound_exprs_ident <'scope> {
+                type Params = ::squealy::HNil;
+            }
+            impl<'scope> ::squealy::ProjectionParams for #nullable_exprs_ident <'scope> {
+                type Params = ::squealy::HNil;
+            }
+            impl<'scope> ::squealy::ProjectionParams for #nullable_rebound_exprs_ident <'scope> {
+                type Params = ::squealy::HNil;
+            }
+
             impl<'scope> ::squealy::Projectable for #rebound_exprs_ident <'scope> {
                 type Rebound<'next_scope> = #rebound_exprs_ident <'next_scope>;
 

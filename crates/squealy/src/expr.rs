@@ -1207,6 +1207,10 @@ where
     type Params = crate::HNil;
 }
 
+impl ProjectionParams for () {
+    type Params = crate::HNil;
+}
+
 /// Type-level identity for a prepared statement runtime parameter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeParam<K> {

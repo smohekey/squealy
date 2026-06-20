@@ -4732,12 +4732,18 @@ where
 
     /// Like [`select`](Self::select), but the projection closure also receives a [`Subqueries`]
     /// handle for projecting scalar subqueries (`SELECT (SELECT …)`), which may be correlated.
+    ///
+    /// A projected scalar subquery renders before the outer `FROM`, so a runtime [`param`] inside it
+    /// would emit a placeholder the top-level query can't bind (its executable/prepared param shape
+    /// is the source chain's). To stop that from silently producing an unbound placeholder, the
+    /// projection must be free of runtime params (`P: ProjectionParams<Params = HNil>`). A correlated
+    /// scalar subquery referencing outer *columns* — the common case — carries none.
     fn select_correlated<P>(
         self,
         projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple, Subqueries<'conn, 'scope, Conn>) -> P,
     ) -> Conn::Select<'conn, 'scope, Self, <P as ReturningProjection<'scope>>::Shape, P>
     where
-        P: ReturningProjection<'scope> + Projectable,
+        P: ReturningProjection<'scope> + Projectable + crate::ProjectionParams<Params = HNil>,
         <Self as SelectAst<'conn, 'scope, Conn>>::Grouped:
             crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
