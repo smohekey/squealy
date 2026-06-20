@@ -640,13 +640,10 @@ where
 impl<Operand, Parts, Ords> AstProjectionClass for WindowExprAst<Operand, Parts, Ords> {
     type Class = ColumnTerm;
 }
-// For whole-table-aggregate (`HAVING` without `GROUP BY`) validity, treat a window like an aggregate:
-// column-free (it is not a bare ungrouped column).
-impl<Operand, Parts, Ords> ExprColumns for WindowExprAst<Operand, Parts, Ords> {
-    type Columns = ColumnFree;
-}
-// Deliberately NOT `NonAggregateAst`: window functions are computed after `WHERE`/`GROUP BY`, so the
-// type system keeps them out of those clauses (the same mechanism that excludes aggregates).
+// Deliberately NOT `NonAggregateAst` (keeps windows out of `WHERE`/`GROUP BY`) and deliberately NOT
+// `ExprColumns` (keeps them out of `HAVING`/whole-table-aggregate validity): a window function is
+// evaluated after grouping, so the backends reject it in any of those clauses. Normal `SELECT`/
+// `ORDER BY` classify via `AstProjectionClass` above, so they are unaffected.
 
 /// Empty operand for a no-argument window function (`ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`):
 /// renders nothing between the parentheses.
@@ -777,10 +774,12 @@ impl<'scope> Window<'scope, WindowNil, WindowNil> {
 }
 
 impl<'scope, Parts, Ords> Window<'scope, Parts, Ords> {
-    /// Add a `PARTITION BY` term (a column or scalar expression).
+    /// Add a `PARTITION BY` term (a column or scalar expression). The term may not itself be a window
+    /// or aggregate (a window definition is evaluated per row), enforced by `NonAggregateAst`.
     pub fn partition_by<E>(self, key: E) -> Window<'scope, Parts::Output, Ords>
     where
         E: WindowOperand<'scope>,
+        E::Ast: NonAggregateAst,
         Parts: AppendPartition<E::Ast>,
     {
         Window {
@@ -790,13 +789,14 @@ impl<'scope, Parts, Ords> Window<'scope, Parts, Ords> {
         }
     }
 
-    /// Add an `ORDER BY` term (`col.asc()` / `col.desc()`).
+    /// Add an `ORDER BY` term (`col.asc()` / `col.desc()`). The term may not itself be a window or
+    /// aggregate (a window definition is evaluated per row), enforced by `NonAggregateAst`.
     pub fn order_by<K, Ast>(
         self,
         order: Order<'scope, K, Ast>,
     ) -> Window<'scope, Parts, Ords::Output>
     where
-        Ast: ExprAst,
+        Ast: ExprAst + NonAggregateAst,
         Ords: AppendOrder<Ast>,
     {
         Window {
