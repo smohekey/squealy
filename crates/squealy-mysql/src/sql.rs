@@ -103,10 +103,10 @@ fn ordered_views(model: &DatabaseModel) -> Vec<(Option<&str>, &ViewModel)> {
         let (schema, view) = views[current];
         for source in view.referenced_sources() {
             let dep_schema = source.schema.as_deref().or(schema);
-            if let Some(dep) = index_of(dep_schema, &source.name) {
-                if dep != current {
-                    visit(dep, views, visited, ordered, index_of);
-                }
+            if let Some(dep) = index_of(dep_schema, &source.name)
+                && dep != current
+            {
+                visit(dep, views, visited, ordered, index_of);
             }
         }
         ordered.push((schema, view));

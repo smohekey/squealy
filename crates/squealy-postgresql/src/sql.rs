@@ -339,10 +339,10 @@ pub(crate) mod ddl {
                 // A reference resolves to a view only when another view shares its (schema, name);
                 // references to tables simply do not match and are skipped.
                 let dep_schema = source.schema.as_deref().or(schema);
-                if let Some(dep) = index_of(dep_schema, &source.name) {
-                    if dep != current {
-                        visit(dep, views, visited, ordered, index_of);
-                    }
+                if let Some(dep) = index_of(dep_schema, &source.name)
+                    && dep != current
+                {
+                    visit(dep, views, visited, ordered, index_of);
                 }
             }
             ordered.push((schema, view));
