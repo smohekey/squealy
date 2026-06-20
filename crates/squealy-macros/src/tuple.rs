@@ -693,6 +693,13 @@ fn tuple_projection_shape(arity: usize) -> proc_macro2::TokenStream {
             type Columns = ::squealy::ColumnFree;
         }
 
+        // A tuple projection is RETURNING-valid (window-free) when every element is.
+        impl<#(#types),*> ::squealy::ReturnableProjection for (#(#types,)*)
+        where
+            #(#types: ::squealy::ReturnableProjection,)*
+        {
+        }
+
         impl<#(#types),*> crate::ProjectionParams for (#(#types,)*)
         where
             #( #types: crate::ProjectionParams, )*
