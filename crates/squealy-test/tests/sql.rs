@@ -1374,3 +1374,32 @@ fn test_window_lag_over_a_derived_expression() {
         vec![TestParam::Int(1), TestParam::Int(1)]
     );
 }
+
+#[test]
+fn test_window_lag_lead_over_arithmetic_expression_kinds() {
+    // Exercise the non-`Add` arithmetic operand kinds (Subtract/Multiply/Divide) through LAG/LEAD,
+    // confirming their `IntoWindowNullable` impls accept derived-expression operands.
+    let subtract = TestConnection
+        .from::<Post>()
+        .select(|(post,)| lag(post.id - 1, 1).over(|w| w.order_by(post.id.asc())));
+    assert_eq!(
+        subtract.to_sql(),
+        "SELECT LAG((q0_0.id - ?), ?) OVER (ORDER BY q0_0.id ASC) AS expr FROM posts AS q0_0"
+    );
+
+    let multiply = TestConnection
+        .from::<Post>()
+        .select(|(post,)| lead(post.id * 2, 1).over(|w| w.order_by(post.id.asc())));
+    assert_eq!(
+        multiply.to_sql(),
+        "SELECT LEAD((q0_0.id * ?), ?) OVER (ORDER BY q0_0.id ASC) AS expr FROM posts AS q0_0"
+    );
+
+    let divide = TestConnection
+        .from::<Post>()
+        .select(|(post,)| lag(post.id / 2, 1).over(|w| w.order_by(post.id.asc())));
+    assert_eq!(
+        divide.to_sql(),
+        "SELECT LAG((q0_0.id / ?), ?) OVER (ORDER BY q0_0.id ASC) AS expr FROM posts AS q0_0"
+    );
+}
