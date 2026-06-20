@@ -30,14 +30,14 @@ use std::marker::PhantomData;
 /// renderer. The dialect is `&'static` (backend dialects are zero-sized unit values), so carrying it
 /// adds no lifetime to the renderer or the rendering structs.
 #[derive(Clone, Copy)]
-struct Renderer {
+pub(crate) struct Renderer {
     dialect: &'static dyn Dialect,
     next_param: usize,
     next_runtime_param: usize,
 }
 
 impl Renderer {
-    fn new(dialect: &'static dyn Dialect) -> Self {
+    pub(crate) fn new(dialect: &'static dyn Dialect) -> Self {
         Self {
             dialect,
             next_param: 0,
@@ -174,7 +174,7 @@ where
 
 /// Encode-side render sink: produces SQL text and records each placeholder's bind, either a literal
 /// (encoded now via [`Encode`]) or a runtime-parameter slot resolved later.
-trait SqlWriter<B: Backend>: Write {
+pub(crate) trait SqlWriter<B: Backend>: Write {
     fn push_bind<T>(&mut self, value: &T)
     where
         T: Encode<B>;
@@ -1043,7 +1043,7 @@ where
     }
 }
 
-fn write_expr_value<K, Ast, B, Writer>(
+pub(crate) fn write_expr_value<K, Ast, B, Writer>(
     expr: &Expr<'_, K, Ast>,
     writer: &mut Writer,
     renderer: &mut Renderer,
@@ -1057,7 +1057,7 @@ where
     write_expr_value_node(expr, writer, renderer, false)
 }
 
-fn write_column_value<K, B, Writer>(
+pub(crate) fn write_column_value<K, B, Writer>(
     column: ColumnRef<'_, K>,
     writer: &mut Writer,
     renderer: &mut Renderer,
@@ -1103,7 +1103,7 @@ where
     })
 }
 
-fn write_predicate_value<K, Ast, B, Writer>(
+pub(crate) fn write_predicate_value<K, Ast, B, Writer>(
     predicate: &Predicate<'_, K, Ast>,
     writer: &mut Writer,
     renderer: &mut Renderer,
@@ -1117,7 +1117,7 @@ where
     write_ast::<B, _>(writer, renderer, false, |visitor| predicate.visit(visitor))
 }
 
-fn write_order_value<K, Ast, B, Writer>(
+pub(crate) fn write_order_value<K, Ast, B, Writer>(
     order: &Order<'_, K, Ast>,
     writer: &mut Writer,
     renderer: &mut Renderer,

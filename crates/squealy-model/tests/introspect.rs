@@ -23,6 +23,7 @@ async fn introspect_delegates_to_connection() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("app".to_owned()),
+            views: Vec::new(),
             tables: Vec::new(),
         }],
     };

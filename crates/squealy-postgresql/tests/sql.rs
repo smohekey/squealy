@@ -1677,6 +1677,7 @@ fn postgres_renders_table_and_column_comments() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: Some("Tenant records".to_owned()),
@@ -1717,6 +1718,7 @@ fn postgres_renders_foreign_key_match_type() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
+            views: Vec::new(),
             tables: vec![
                 TableModel {
                     name: "memberships".to_owned(),
@@ -1793,6 +1795,7 @@ fn postgres_renders_partial_indexes() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -1844,6 +1847,7 @@ fn postgres_renders_expression_indexes() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -1895,6 +1899,7 @@ fn postgres_renders_covering_indexes() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -1958,6 +1963,7 @@ fn postgres_renders_index_null_ordering() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -2009,6 +2015,7 @@ fn postgres_renders_index_operator_classes() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2063,6 +2070,7 @@ fn postgres_renders_index_collations() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2229,5 +2237,115 @@ fn postgres_is_not_null_composes_with_other_predicates() {
     assert_eq!(
         subscribers.collect_params().unwrap(),
         vec![PostgresParam::Int32(1)]
+    );
+}
+
+// View rendering: a view's structural body becomes `CREATE VIEW … AS SELECT …`, emitted after all
+// tables, and views are ordered so a view that selects from another view is created after it.
+#[test]
+fn postgres_renders_views_in_dependency_order() {
+    fn view(name: &str, from: &str, projection: &[(&str, &str)], filter: Option<&str>) -> ViewModel {
+        ViewModel {
+            name: name.to_owned(),
+            comment: None,
+            columns: projection
+                .iter()
+                .map(|(output, _)| ViewColumnModel {
+                    name: (*output).to_owned(),
+                    ty: SqlType::I32,
+                    nullable: false,
+                })
+                .collect(),
+            query: ViewQueryModel {
+                projection: projection
+                    .iter()
+                    .map(|(output, expr)| ProjectionItem {
+                        output_name: (*output).to_owned(),
+                        expr: ExprFragment((*expr).to_owned()),
+                    })
+                    .collect(),
+                from: Some(SourceRef {
+                    schema: Some("public".to_owned()),
+                    name: from.to_owned(),
+                    alias: "q0_0".to_owned(),
+                }),
+                joins: Vec::new(),
+                filter: filter.map(|f| ExprFragment(f.to_owned())),
+                group_by: Vec::new(),
+                having: None,
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+            },
+        }
+    }
+
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("public".to_owned()),
+            tables: vec![TableModel {
+                name: "users".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "id".to_owned(),
+                    comment: None,
+                    ty: SqlType::I32,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+            // `active_user_ids` selects from the `active_users` view, so it must be created after it
+            // even though it is declared first.
+            views: vec![
+                view(
+                    "active_user_ids",
+                    "active_users",
+                    &[("id", "q0_0.\"id\"")],
+                    None,
+                ),
+                view(
+                    "active_users",
+                    "users",
+                    &[("id", "q0_0.\"id\"")],
+                    Some("(q0_0.\"id\" > 0)"),
+                ),
+            ],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE VIEW \"public\".\"active_users\" (\"id\") AS \
+SELECT q0_0.\"id\" FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"id\" > 0)"
+        ),
+        "missing active_users view: {sql}"
+    );
+    assert!(
+        sql.contains(
+            "CREATE VIEW \"public\".\"active_user_ids\" (\"id\") AS \
+SELECT q0_0.\"id\" FROM \"public\".\"active_users\" AS q0_0"
+        ),
+        "missing active_user_ids view: {sql}"
+    );
+
+    let table_pos = sql.find("CREATE TABLE").unwrap();
+    let active_users_pos = sql.find("\"active_users\" (").unwrap();
+    let active_ids_pos = sql.find("\"active_user_ids\" (").unwrap();
+    assert!(table_pos < active_users_pos, "tables must precede views: {sql}");
+    assert!(
+        active_users_pos < active_ids_pos,
+        "a view must be created after the view it depends on: {sql}"
     );
 }

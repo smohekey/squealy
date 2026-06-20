@@ -11,7 +11,8 @@
 //! See `docs/ddl-management.md` for the design.
 
 use crate::{
-    Column, ColumnDefault, ColumnType, Database, DatabaseSchema, ForeignKey, Index, Table,
+    Column, ColumnDefault, ColumnType, Database, DatabaseSchema, ForeignKey, Index, OrderDirection,
+    Table,
 };
 
 /// An owned, backend-neutral model of a whole database.
@@ -21,11 +22,14 @@ pub struct DatabaseModel {
 }
 
 /// A namespace within a database (a SQL "schema").
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SchemaModel {
     /// The namespace name, or `None` for the default/unqualified namespace.
     pub name: Option<String>,
     pub tables: Vec<TableModel>,
+    /// Views declared in this namespace. A view is a named `SELECT` with a typed output schema and a
+    /// backend-neutral structural body; see [`ViewModel`].
+    pub views: Vec<ViewModel>,
 }
 
 /// A table and its table-level, named constraints.
@@ -501,6 +505,132 @@ impl IndexMethod {
     }
 }
 
+/// A view: a named `SELECT` with a typed output schema and a backend-neutral structural body.
+///
+/// The compile-time `#[derive(View)]` type is the source of truth; the walker materializes it here so
+/// the same DDL-management operations (render, package export/import, future diff) that consume
+/// [`TableModel`] also consume views. The body is structural ([`ViewQueryModel`]) so each backend
+/// renders its own dialect and the model round-trips through a package.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ViewModel {
+    pub name: String,
+    pub comment: Option<String>,
+    /// The view's output columns, in projection order. Powers DDL (the optional column list),
+    /// packaging, introspection, and the queryable typed face.
+    pub columns: Vec<ViewColumnModel>,
+    /// The structural body of the view's `SELECT`.
+    pub query: ViewQueryModel,
+}
+
+/// One output column of a [`ViewModel`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ViewColumnModel {
+    pub name: String,
+    pub ty: SqlType,
+    pub nullable: bool,
+}
+
+/// The backend-neutral structural body of a view's `SELECT`.
+///
+/// Source/join/projection structure (the identifiers we own) is captured explicitly so each backend
+/// can re-quote per dialect and so view-on-view dependencies can be extracted for ordering. The inner
+/// scalar expressions (predicate bodies, projection expressions, group/having/order keys) are rendered
+/// to portable [`ExprFragment`] text by the canonical model dialect, with any literals inlined (a view
+/// body cannot carry bind parameters).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ViewQueryModel {
+    pub projection: Vec<ProjectionItem>,
+    pub from: Option<SourceRef>,
+    pub joins: Vec<JoinItem>,
+    pub filter: Option<ExprFragment>,
+    pub group_by: Vec<ExprFragment>,
+    pub having: Option<ExprFragment>,
+    pub order_by: Vec<OrderItem>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+/// One projected output expression together with its output column name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectionItem {
+    pub output_name: String,
+    pub expr: ExprFragment,
+}
+
+/// A table or view referenced in a view body, with the alias bound to it in the `SELECT`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceRef {
+    pub schema: Option<String>,
+    pub name: String,
+    pub alias: String,
+}
+
+/// A join in a view body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoinItem {
+    pub kind: JoinKind,
+    pub source: SourceRef,
+    pub on: ExprFragment,
+}
+
+/// The kind of join in a view body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinKind {
+    Inner,
+    Left,
+}
+
+/// One `ORDER BY` term in a view body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrderItem {
+    pub expr: ExprFragment,
+    pub direction: Option<OrderDirection>,
+    pub nulls: Option<OrderNulls>,
+}
+
+/// Null ordering for an `ORDER BY` term.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderNulls {
+    First,
+    Last,
+}
+
+/// A canonical-dialect-rendered scalar expression from a view body, with literals inlined.
+///
+/// Backends emit this text inside their own dialect-quoted `CREATE VIEW`. The canonical dialect quotes
+/// identifiers with ANSI double quotes, so Postgres consumes it directly and MySQL must create the view
+/// under `ANSI_QUOTES`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExprFragment(pub String);
+
+/// Object-safe runtime metadata and body lowering for a view, consumed by the model walker.
+///
+/// The `#[derive(View)]` macro generates an implementation: the typed `ViewDefinition` the user writes
+/// is lowered into [`Self::definition_model`] through the canonical model sink.
+pub trait ViewDef: Sync {
+    fn schema_name(&self) -> Option<&'static str>;
+
+    fn name(&self) -> &'static str;
+
+    /// The view's output columns, in projection order.
+    fn columns(&self) -> Vec<ViewColumnModel>;
+
+    /// The structural body of the view's `SELECT`, with literals inlined.
+    fn definition_model(&self) -> ViewQueryModel;
+}
+
+impl ViewModel {
+    /// The names of the views this view depends on (other views referenced in its `FROM`/`JOIN`s),
+    /// used to topologically order view creation. Dependencies on tables are irrelevant to view
+    /// ordering because all tables are created before any view.
+    pub fn referenced_sources(&self) -> impl Iterator<Item = &SourceRef> {
+        self.query
+            .from
+            .iter()
+            .chain(self.query.joins.iter().map(|join| &join.source))
+    }
+}
+
 impl DatabaseModel {
     /// Walks a compile-time [`Database`] into an owned model.
     pub fn from_database<D: Database>() -> Self {
@@ -514,6 +644,16 @@ fn schema_from_dyn(schema: &(dyn DatabaseSchema + Sync)) -> SchemaModel {
     SchemaModel {
         name: schema.name().map(str::to_owned),
         tables: schema.tables().map(table_from_dyn).collect(),
+        views: schema.views().map(view_from_dyn).collect(),
+    }
+}
+
+fn view_from_dyn(view: &(dyn crate::ViewDef + Sync)) -> ViewModel {
+    ViewModel {
+        name: view.name().to_owned(),
+        comment: None,
+        columns: view.columns(),
+        query: view.definition_model(),
     }
 }
 

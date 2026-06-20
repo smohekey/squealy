@@ -26,6 +26,7 @@ pub(crate) async fn database(client: &Client) -> Result<DatabaseModel, PostgresE
             schemas.push(SchemaModel {
                 name: Some(table_ref.schema.clone()),
                 tables: Vec::new(),
+                views: Vec::new(),
             });
         }
 

@@ -672,6 +672,7 @@ fn mysql_renders_table_and_column_comments() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("shop".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: Some("Tenant records".to_owned()),
@@ -710,6 +711,7 @@ fn mysql_rejects_foreign_key_match_types() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("shop".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -754,6 +756,7 @@ fn mysql_rejects_deferrable_foreign_keys() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("shop".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -798,6 +801,7 @@ fn mysql_rejects_check_constraint_enforcement() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("shop".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -835,6 +839,7 @@ fn mysql_rejects_partial_index_predicates() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("shop".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -879,6 +884,7 @@ fn mysql_rejects_expression_indexes() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("shop".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -923,6 +929,7 @@ fn mysql_rejects_covering_index_include_columns() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("shop".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -979,6 +986,7 @@ fn mysql_rejects_index_null_ordering() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("shop".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -1023,6 +1031,7 @@ fn mysql_rejects_index_operator_classes() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("shop".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -1070,6 +1079,7 @@ fn mysql_rejects_index_collations() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("shop".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -1179,5 +1189,79 @@ fn mysql_defers_foreign_keys_until_all_tables_are_created() {
     assert!(
         comments_create < posts_create && posts_create < fk,
         "foreign key not deferred until after both tables were created: {sql}"
+    );
+}
+
+// View rendering: the structural body becomes `CREATE VIEW … AS SELECT …`, emitted after tables.
+// Structural identifiers use MySQL backticks; the canonical expression fragments use ANSI double
+// quotes (so the statement must run under `ANSI_QUOTES`).
+#[test]
+fn mysql_renders_view_after_tables() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![TableModel {
+                name: "users".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "id".to_owned(),
+                    comment: None,
+                    ty: SqlType::I32,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+            views: vec![ViewModel {
+                name: "active_users".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "id".to_owned(),
+                    ty: SqlType::I32,
+                    nullable: false,
+                }],
+                query: ViewQueryModel {
+                    projection: vec![ProjectionItem {
+                        output_name: "id".to_owned(),
+                        expr: ExprFragment("q0_0.\"id\"".to_owned()),
+                    }],
+                    from: Some(SourceRef {
+                        schema: Some("app".to_owned()),
+                        name: "users".to_owned(),
+                        alias: "q0_0".to_owned(),
+                    }),
+                    joins: Vec::new(),
+                    filter: Some(ExprFragment("(q0_0.\"id\" > 0)".to_owned())),
+                    group_by: Vec::new(),
+                    having: None,
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                },
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE VIEW `app`.`active_users` (`id`) AS \
+SELECT q0_0.\"id\" FROM `app`.`users` AS q0_0 WHERE (q0_0.\"id\" > 0)"
+        ),
+        "unexpected view DDL: {sql}"
+    );
+    assert!(
+        sql.find("CREATE TABLE").unwrap() < sql.find("CREATE VIEW").unwrap(),
+        "view must be created after tables: {sql}"
     );
 }

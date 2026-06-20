@@ -9,8 +9,8 @@ use std::io::{self, Write};
 
 use squealy::{
     CheckModel, ColumnDefault, ColumnModel, DatabaseModel, DatabasePlan, DatabasePlanStep,
-    DefaultValue, ForeignKeyModel, GeneratedStorage, IndexModel, SqlType, Table, TableModel,
-    TablePlanStep,
+    DefaultValue, ForeignKeyModel, GeneratedStorage, IndexModel, JoinKind, OrderDirection, SourceRef,
+    SqlType, Table, TableModel, TablePlanStep, ViewModel, ViewQueryModel,
 };
 
 /// Renders ordered create-from-scratch DDL for a whole model. Statements are `;`-terminated and
@@ -52,10 +52,177 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
         }
     }
 
+    // Views are created last (all tables exist) and in dependency order so a view that selects from
+    // another view follows it.
+    for (schema_name, view) in ordered_views(model) {
+        statement(writer, &mut first)?;
+        write_create_view(schema_name, view, writer)?;
+    }
+
     if !first {
         writer.write_all(b";")?;
     }
     Ok(())
+}
+
+/// Orders every view so a view is emitted after any other view it selects from. Dependencies on
+/// tables are ignored because all tables are created before any view; reference cycles fall back to
+/// declaration order.
+fn ordered_views(model: &DatabaseModel) -> Vec<(Option<&str>, &ViewModel)> {
+    let views: Vec<(Option<&str>, &ViewModel)> = model
+        .schemas
+        .iter()
+        .flat_map(|schema| {
+            schema
+                .views
+                .iter()
+                .map(move |view| (schema.name.as_deref(), view))
+        })
+        .collect();
+
+    let index_of = |schema: Option<&str>, name: &str| {
+        views
+            .iter()
+            .position(|(s, v)| *s == schema && v.name == name)
+    };
+
+    let mut ordered = Vec::with_capacity(views.len());
+    let mut visited = vec![false; views.len()];
+
+    fn visit<'a>(
+        current: usize,
+        views: &[(Option<&'a str>, &'a ViewModel)],
+        visited: &mut [bool],
+        ordered: &mut Vec<(Option<&'a str>, &'a ViewModel)>,
+        index_of: &impl Fn(Option<&str>, &str) -> Option<usize>,
+    ) {
+        if visited[current] {
+            return;
+        }
+        visited[current] = true;
+        let (schema, view) = views[current];
+        for source in view.referenced_sources() {
+            let dep_schema = source.schema.as_deref().or(schema);
+            if let Some(dep) = index_of(dep_schema, &source.name) {
+                if dep != current {
+                    visit(dep, views, visited, ordered, index_of);
+                }
+            }
+        }
+        ordered.push((schema, view));
+    }
+
+    for current in 0..views.len() {
+        visit(current, &views, &mut visited, &mut ordered, &index_of);
+    }
+
+    ordered
+}
+
+/// Renders `CREATE VIEW <qualified> AS <select>` from a view's structural body.
+///
+/// Structural identifiers (schema/table/alias, output column names) are quoted with MySQL backticks;
+/// the inner scalar expressions are the canonical model fragments, which use ANSI double quotes. The
+/// statement therefore must be run with `ANSI_QUOTES` in `sql_mode` so MySQL reads those as
+/// identifiers.
+fn write_create_view(
+    schema: Option<&str>,
+    view: &ViewModel,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    writer.write_all(b"CREATE VIEW ")?;
+    write_qualified_name(schema, &view.name, writer)?;
+    // The declared columns name the view's outputs positionally; fall back to the SELECT aliases for
+    // hand-built models without declared columns.
+    if !view.columns.is_empty() {
+        writer.write_all(b" (")?;
+        for (index, column) in view.columns.iter().enumerate() {
+            if index > 0 {
+                writer.write_all(b", ")?;
+            }
+            write_quoted_ident(&column.name, writer)?;
+        }
+        writer.write_all(b")")?;
+    }
+    writer.write_all(b" AS ")?;
+    write_view_query(&view.query, view.columns.is_empty(), writer)
+}
+
+fn write_view_query(
+    query: &ViewQueryModel,
+    alias_projections: bool,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    writer.write_all(b"SELECT ")?;
+    for (index, item) in query.projection.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        writer.write_all(item.expr.0.as_bytes())?;
+        if alias_projections {
+            writer.write_all(b" AS ")?;
+            write_quoted_ident(&item.output_name, writer)?;
+        }
+    }
+
+    if let Some(from) = &query.from {
+        writer.write_all(b" FROM ")?;
+        write_view_source(from, writer)?;
+    }
+
+    for join in &query.joins {
+        match join.kind {
+            JoinKind::Inner => writer.write_all(b" INNER JOIN ")?,
+            JoinKind::Left => writer.write_all(b" LEFT JOIN ")?,
+        }
+        write_view_source(&join.source, writer)?;
+        writer.write_all(b" ON ")?;
+        writer.write_all(join.on.0.as_bytes())?;
+    }
+
+    if let Some(filter) = &query.filter {
+        writer.write_all(b" WHERE ")?;
+        writer.write_all(filter.0.as_bytes())?;
+    }
+
+    for (index, key) in query.group_by.iter().enumerate() {
+        writer.write_all(if index == 0 { b" GROUP BY " } else { b", " })?;
+        writer.write_all(key.0.as_bytes())?;
+    }
+
+    if let Some(having) = &query.having {
+        writer.write_all(b" HAVING ")?;
+        writer.write_all(having.0.as_bytes())?;
+    }
+
+    for (index, order) in query.order_by.iter().enumerate() {
+        writer.write_all(if index == 0 { b" ORDER BY " } else { b", " })?;
+        writer.write_all(order.expr.0.as_bytes())?;
+        match order.direction {
+            Some(OrderDirection::Asc) => writer.write_all(b" ASC")?,
+            Some(OrderDirection::Desc) => writer.write_all(b" DESC")?,
+            None => {}
+        }
+        // MySQL has no `NULLS FIRST/LAST`; its `NULL`s sort first ascending. The neutral ordering is
+        // emitted only when a backend supports it, so any `nulls` hint is dropped here.
+        let _ = order.nulls;
+    }
+
+    if let Some(limit) = query.limit {
+        write!(writer, " LIMIT {limit}")?;
+    }
+    if let Some(offset) = query.offset {
+        write!(writer, " OFFSET {offset}")?;
+    }
+
+    Ok(())
+}
+
+/// Writes a `<qualified> AS <alias>` source. The alias is emitted unquoted to match the canonical
+/// expression fragments, which qualify columns with the bare alias (e.g. `q0_0."id"`).
+fn write_view_source(source: &SourceRef, writer: &mut impl Write) -> io::Result<()> {
+    write_qualified_name(source.schema.as_deref(), &source.name, writer)?;
+    write!(writer, " AS {}", source.alias)
 }
 
 /// Renders an ordered incremental DDL plan.
@@ -1047,6 +1214,7 @@ mod tests {
         let model = DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "people".to_owned(),
                     comment: None,

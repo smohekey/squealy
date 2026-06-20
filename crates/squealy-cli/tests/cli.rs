@@ -2198,6 +2198,7 @@ fn empty_model() -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("public".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,
@@ -2216,6 +2217,7 @@ fn live_introspection_model() -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("cli_live_introspect".to_owned()),
+            views: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,

@@ -609,6 +609,7 @@ mod tests {
         DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "memberships".to_owned(),
                     comment: None,
@@ -652,6 +653,7 @@ mod tests {
         DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "memberships".to_owned(),
                     comment: None,

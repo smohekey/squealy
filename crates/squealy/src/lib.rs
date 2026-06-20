@@ -454,6 +454,7 @@ mod query;
 pub mod render;
 mod schema;
 mod table;
+mod view;
 
 pub use backend::{
     Backend, ConstraintCapabilities, DdlExecutor, Decode, DecodeNullable, Encode,
@@ -498,12 +499,16 @@ pub use list::{
 };
 pub use model::{
     CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintEnforcement,
-    ConstraintValidation, DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyMatch,
+    ConstraintValidation, DatabaseModel, DefaultValue, ExprFragment, ForeignKeyAction, ForeignKeyMatch,
     ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
     IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
-    SchemaModel, SqlType, TableModel,
+    JoinItem, JoinKind, OrderItem, OrderNulls, ProjectionItem, SchemaModel, SourceRef, SqlType,
+    TableModel, ViewColumnModel, ViewDef, ViewModel, ViewQueryModel,
 };
 pub use plan::{DatabasePlan, DatabasePlanStep, TablePlanStep};
+pub use view::{ModelBackend, ModelConn, ViewDefinition, ViewSelect};
+#[doc(hidden)]
+pub use view::lower_view;
 pub use projection::{
     Maybe, Projectable, ProjectionShape, ProjectionVisitor, RenderProjectable, TableProjection,
 };

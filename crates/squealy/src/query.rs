@@ -4372,6 +4372,25 @@ where
             P,
         > as SelectQuery<'conn, 'scope, Self, P>>::build_selected(connection, selected)
     }
+
+    /// Like [`select`](Self::select), but returns the backend-neutral [`Selected`] directly instead of
+    /// wrapping it in the backend's executable query type. View definitions use this so their body can
+    /// be lowered into the schema model without a real backend; it enforces the same projection
+    /// validity rules as `select`.
+    fn project<P>(
+        self,
+        projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
+    ) -> Selected<'scope, Self, <P as ReturningProjection<'scope>>::Shape, P>
+    where
+        P: ReturningProjection<'scope> + Projectable,
+        <Self as SelectAst<'conn, 'scope, Conn>>::Grouped:
+            crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
+        <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
+    {
+        let exprs = self.exprs();
+        let projection = projection(exprs.to_tuple());
+        Selected::<'scope, _, <P as ReturningProjection<'scope>>::Shape, _>::new(self, projection)
+    }
 }
 
 impl<'conn, 'scope, Conn, Query> SourceQuery<'conn, 'scope, Conn> for Query

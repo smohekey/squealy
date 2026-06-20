@@ -204,7 +204,8 @@ pub(crate) mod ddl {
     use squealy::{
         CheckModel, ColumnModel, ConstraintEnforcement, ConstraintValidation, DatabaseModel,
         DatabasePlan, DatabasePlanStep, DefaultValue, ForeignKeyModel, IdentityMode, IndexModel,
-        TableModel, TablePlanStep,
+        JoinKind, OrderDirection, OrderNulls, SourceRef, TableModel, TablePlanStep, ViewModel,
+        ViewQueryModel,
     };
 
     use super::{write_pg_sql_type, write_qualified_name, write_quoted_ident, write_quoted_text};
@@ -281,12 +282,185 @@ pub(crate) mod ddl {
             }
         }
 
+        // Views are created last: all tables already exist, and views are emitted in dependency order
+        // so a view that selects from another view is created after it.
+        for (schema_name, view) in ordered_views(model) {
+            statement(writer, &mut first)?;
+            write_create_view(schema_name, view, writer)?;
+        }
+
         // Terminate the final statement (the separator only terminates *preceding* ones).
         if !first {
             writer.write_all(b";")?;
         }
 
         Ok(())
+    }
+
+    /// Orders every view in the model so a view is emitted after any other view it selects from.
+    ///
+    /// Dependencies on tables are ignored because all tables are created before any view. The sort is
+    /// a stable depth-first post-order keyed by `(schema, name)`; views in a reference cycle (which SQL
+    /// rejects anyway) fall back to declaration order.
+    fn ordered_views(model: &DatabaseModel) -> Vec<(Option<&str>, &ViewModel)> {
+        let views: Vec<(Option<&str>, &ViewModel)> = model
+            .schemas
+            .iter()
+            .flat_map(|schema| {
+                schema
+                    .views
+                    .iter()
+                    .map(move |view| (schema.name.as_deref(), view))
+            })
+            .collect();
+
+        let index_of = |schema: Option<&str>, name: &str| {
+            views
+                .iter()
+                .position(|(s, v)| *s == schema && v.name == name)
+        };
+
+        let mut ordered = Vec::with_capacity(views.len());
+        let mut visited = vec![false; views.len()];
+
+        fn visit<'a>(
+            current: usize,
+            views: &[(Option<&'a str>, &'a ViewModel)],
+            visited: &mut [bool],
+            ordered: &mut Vec<(Option<&'a str>, &'a ViewModel)>,
+            index_of: &impl Fn(Option<&str>, &str) -> Option<usize>,
+        ) {
+            if visited[current] {
+                return;
+            }
+            visited[current] = true;
+            let (schema, view) = views[current];
+            for source in view.referenced_sources() {
+                // A reference resolves to a view only when another view shares its (schema, name);
+                // references to tables simply do not match and are skipped.
+                let dep_schema = source.schema.as_deref().or(schema);
+                if let Some(dep) = index_of(dep_schema, &source.name) {
+                    if dep != current {
+                        visit(dep, views, visited, ordered, index_of);
+                    }
+                }
+            }
+            ordered.push((schema, view));
+        }
+
+        for current in 0..views.len() {
+            visit(current, &views, &mut visited, &mut ordered, &index_of);
+        }
+
+        ordered
+    }
+
+    /// Renders `CREATE VIEW <qualified> AS <select>` from a view's structural body.
+    ///
+    /// Structural identifiers (schema/table/alias, output column names) are quoted in the PostgreSQL
+    /// dialect; the inner scalar expressions are the canonical model fragments, which use ANSI double
+    /// quotes and so are emitted verbatim.
+    fn write_create_view(
+        schema: Option<&str>,
+        view: &ViewModel,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        writer.write_all(b"CREATE VIEW ")?;
+        write_qualified_name(schema, &view.name, writer)?;
+        // The declared columns name the view's outputs positionally, independent of the builder's
+        // internal projection aliases. Falling back to the SELECT aliases keeps hand-built models
+        // (no declared columns) renderable.
+        if !view.columns.is_empty() {
+            writer.write_all(b" (")?;
+            for (index, column) in view.columns.iter().enumerate() {
+                if index > 0 {
+                    writer.write_all(b", ")?;
+                }
+                write_quoted_ident(&column.name, writer)?;
+            }
+            writer.write_all(b")")?;
+        }
+        writer.write_all(b" AS ")?;
+        write_view_query(&view.query, view.columns.is_empty(), writer)
+    }
+
+    fn write_view_query(
+        query: &ViewQueryModel,
+        alias_projections: bool,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        writer.write_all(b"SELECT ")?;
+        for (index, item) in query.projection.iter().enumerate() {
+            if index > 0 {
+                writer.write_all(b", ")?;
+            }
+            writer.write_all(item.expr.0.as_bytes())?;
+            if alias_projections {
+                writer.write_all(b" AS ")?;
+                write_quoted_ident(&item.output_name, writer)?;
+            }
+        }
+
+        if let Some(from) = &query.from {
+            writer.write_all(b" FROM ")?;
+            write_view_source(from, writer)?;
+        }
+
+        for join in &query.joins {
+            match join.kind {
+                JoinKind::Inner => writer.write_all(b" INNER JOIN ")?,
+                JoinKind::Left => writer.write_all(b" LEFT JOIN ")?,
+            }
+            write_view_source(&join.source, writer)?;
+            writer.write_all(b" ON ")?;
+            writer.write_all(join.on.0.as_bytes())?;
+        }
+
+        if let Some(filter) = &query.filter {
+            writer.write_all(b" WHERE ")?;
+            writer.write_all(filter.0.as_bytes())?;
+        }
+
+        for (index, key) in query.group_by.iter().enumerate() {
+            writer.write_all(if index == 0 { b" GROUP BY " } else { b", " })?;
+            writer.write_all(key.0.as_bytes())?;
+        }
+
+        if let Some(having) = &query.having {
+            writer.write_all(b" HAVING ")?;
+            writer.write_all(having.0.as_bytes())?;
+        }
+
+        for (index, order) in query.order_by.iter().enumerate() {
+            writer.write_all(if index == 0 { b" ORDER BY " } else { b", " })?;
+            writer.write_all(order.expr.0.as_bytes())?;
+            match order.direction {
+                Some(OrderDirection::Asc) => writer.write_all(b" ASC")?,
+                Some(OrderDirection::Desc) => writer.write_all(b" DESC")?,
+                None => {}
+            }
+            match order.nulls {
+                Some(OrderNulls::First) => writer.write_all(b" NULLS FIRST")?,
+                Some(OrderNulls::Last) => writer.write_all(b" NULLS LAST")?,
+                None => {}
+            }
+        }
+
+        if let Some(limit) = query.limit {
+            write!(writer, " LIMIT {limit}")?;
+        }
+        if let Some(offset) = query.offset {
+            write!(writer, " OFFSET {offset}")?;
+        }
+
+        Ok(())
+    }
+
+    /// Writes a `<qualified> AS <alias>` source. The alias is emitted unquoted to match the canonical
+    /// expression fragments, which qualify columns with the bare alias (e.g. `q0_0."id"`).
+    fn write_view_source(source: &SourceRef, writer: &mut impl Write) -> io::Result<()> {
+        write_qualified_name(source.schema.as_deref(), &source.name, writer)?;
+        write!(writer, " AS {}", source.alias)
     }
 
     /// Renders an ordered incremental DDL plan.
@@ -1329,6 +1503,7 @@ mod tests {
         let model = DatabaseModel {
             schemas: vec![SchemaModel {
                 name: None,
+                views: Vec::new(),
                 tables: vec![TableModel {
                     name: "people".to_owned(),
                     comment: None,
