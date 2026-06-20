@@ -446,6 +446,552 @@ where
     }
 }
 
+// ===== Window functions =====
+
+/// The function part of a window expression (`func(args) OVER (…)`): a SQL aggregate used as a
+/// window, or a dedicated window function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowFunc {
+    /// An aggregate (`SUM`/`AVG`/`COUNT`/`MIN`/`MAX`) used as a window function.
+    Aggregate(AggregateFunc),
+    RowNumber,
+    Rank,
+    DenseRank,
+    Ntile,
+    Lag,
+    Lead,
+}
+
+/// Empty terminator for a window `PARTITION BY` / `ORDER BY` list.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowNil;
+
+/// One `PARTITION BY` expression, consed onto the rest of the list.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowPartition<Ast, Rest> {
+    ast: Ast,
+    rest: Rest,
+}
+
+/// One `ORDER BY` term (expression + direction), consed onto the rest of the list.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowOrder<Ast, Rest> {
+    ast: Ast,
+    dir: OrderDirection,
+    rest: Rest,
+}
+
+/// The runtime params of a window list, concatenated head-to-tail (render order).
+#[doc(hidden)]
+pub trait WindowListParams {
+    type Params: crate::HList;
+}
+impl WindowListParams for WindowNil {
+    type Params = crate::HNil;
+}
+impl<Ast, Rest> WindowListParams for WindowPartition<Ast, Rest>
+where
+    Ast: ExprAst,
+    Rest: WindowListParams,
+    Ast::Params: crate::HAppend<Rest::Params>,
+{
+    type Params = <Ast::Params as crate::HAppend<Rest::Params>>::Output;
+}
+impl<Ast, Rest> WindowListParams for WindowOrder<Ast, Rest>
+where
+    Ast: ExprAst,
+    Rest: WindowListParams,
+    Ast::Params: crate::HAppend<Rest::Params>,
+{
+    type Params = <Ast::Params as crate::HAppend<Rest::Params>>::Output;
+}
+
+/// Backend-parameterized rendering of a window list: emits each element comma-separated (the
+/// `PARTITION BY` / `ORDER BY` keyword is written by [`ExprVisitor::visit_window`]).
+#[doc(hidden)]
+pub trait RenderWindowList<B>: WindowListParams
+where
+    B: crate::Backend,
+{
+    /// Whether the list has at least one element (so the keyword should be emitted).
+    const NON_EMPTY: bool;
+
+    fn render<V>(&self, visitor: &mut V, first: &mut bool) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>;
+}
+impl<B> RenderWindowList<B> for WindowNil
+where
+    B: crate::Backend,
+{
+    const NON_EMPTY: bool = false;
+    fn render<V>(&self, _visitor: &mut V, _first: &mut bool) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        Ok(())
+    }
+}
+impl<Ast, Rest, B> RenderWindowList<B> for WindowPartition<Ast, Rest>
+where
+    Ast: RenderAst<B>,
+    Rest: RenderWindowList<B>,
+    Ast::Params: crate::HAppend<Rest::Params>,
+    B: crate::Backend,
+{
+    const NON_EMPTY: bool = true;
+    fn render<V>(&self, visitor: &mut V, first: &mut bool) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        if !*first {
+            visitor.visit_window_separator()?;
+        }
+        *first = false;
+        self.ast.visit(visitor)?;
+        self.rest.render(visitor, first)
+    }
+}
+impl<Ast, Rest, B> RenderWindowList<B> for WindowOrder<Ast, Rest>
+where
+    Ast: RenderAst<B>,
+    Rest: RenderWindowList<B>,
+    Ast::Params: crate::HAppend<Rest::Params>,
+    B: crate::Backend,
+{
+    const NON_EMPTY: bool = true;
+    fn render<V>(&self, visitor: &mut V, first: &mut bool) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        if !*first {
+            visitor.visit_window_separator()?;
+        }
+        *first = false;
+        self.ast.visit(visitor)?;
+        visitor.visit_window_order_direction(self.dir)?;
+        self.rest.render(visitor, first)
+    }
+}
+
+/// An expression AST node for a window function: `func(operand) OVER (PARTITION BY … ORDER BY …)`,
+/// optionally wrapped in a `CAST` (used by aggregate-over to pin the widened result's wire type).
+/// `operand` renders the function's arguments (nothing for `ROW_NUMBER()`); `partitions`/`orders`
+/// are the `OVER` lists.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct WindowExprAst<Operand, Parts, Ords> {
+    func: WindowFunc,
+    cast: Option<crate::SqlType>,
+    operand: Operand,
+    partitions: Parts,
+    orders: Ords,
+}
+
+impl<Operand, Parts, Ords> ExprAst for WindowExprAst<Operand, Parts, Ords>
+where
+    Operand: ExprAst,
+    Parts: WindowListParams + Clone,
+    Ords: WindowListParams + Clone,
+    Operand::Params: crate::HAppend<Parts::Params>,
+    <Operand::Params as crate::HAppend<Parts::Params>>::Output: crate::HAppend<Ords::Params>,
+{
+    type Params = <<Operand::Params as crate::HAppend<Parts::Params>>::Output as crate::HAppend<
+        Ords::Params,
+    >>::Output;
+}
+
+impl<Operand, Parts, Ords, B> RenderAst<B> for WindowExprAst<Operand, Parts, Ords>
+where
+    Operand: RenderAst<B>,
+    Parts: RenderWindowList<B> + Clone,
+    Ords: RenderWindowList<B> + Clone,
+    Operand::Params: crate::HAppend<Parts::Params>,
+    <Operand::Params as crate::HAppend<Parts::Params>>::Output: crate::HAppend<Ords::Params>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_window(
+            self.func,
+            self.cast.as_ref(),
+            |visitor| self.operand.visit(visitor),
+            <Parts as RenderWindowList<B>>::NON_EMPTY,
+            |visitor| {
+                let mut first = true;
+                self.partitions.render(visitor, &mut first)
+            },
+            <Ords as RenderWindowList<B>>::NON_EMPTY,
+            |visitor| {
+                let mut first = true;
+                self.orders.render(visitor, &mut first)
+            },
+        )
+    }
+}
+
+// A window function yields one value per row (a scalar projection that needs no `GROUP BY`), so it
+// is a `ColumnTerm`/`ScalarProjection` and may be selected alongside bare columns.
+impl<Operand, Parts, Ords> AstProjectionClass for WindowExprAst<Operand, Parts, Ords> {
+    type Class = ColumnTerm;
+}
+// For whole-table-aggregate (`HAVING` without `GROUP BY`) validity, treat a window like an aggregate:
+// column-free (it is not a bare ungrouped column).
+impl<Operand, Parts, Ords> ExprColumns for WindowExprAst<Operand, Parts, Ords> {
+    type Columns = ColumnFree;
+}
+// Deliberately NOT `NonAggregateAst`: window functions are computed after `WHERE`/`GROUP BY`, so the
+// type system keeps them out of those clauses (the same mechanism that excludes aggregates).
+
+/// Empty operand for a no-argument window function (`ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`):
+/// renders nothing between the parentheses.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowNoArg;
+
+impl ExprAst for WindowNoArg {
+    type Params = crate::HNil;
+}
+impl<B> RenderAst<B> for WindowNoArg
+where
+    B: crate::Backend,
+{
+    fn visit<V>(&self, _visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        Ok(())
+    }
+}
+
+/// A window operand: a column or scalar expression, used as a `PARTITION BY` term or as the value
+/// argument of `LAG`/`LEAD`. Exposes both its kind (for typing a function result) and its AST.
+#[doc(hidden)]
+pub trait WindowOperand<'scope> {
+    type Kind: ExprKind;
+    type Ast: ExprAst;
+    fn into_window_ast(self) -> Self::Ast;
+}
+impl<'scope, K> WindowOperand<'scope> for ColumnRef<'scope, K>
+where
+    K: ExprKind,
+{
+    type Kind = K;
+    type Ast = ColumnExprAst<K>;
+    fn into_window_ast(self) -> Self::Ast {
+        self.into_expr().ast
+    }
+}
+impl<'scope, K, Ast> WindowOperand<'scope> for Expr<'scope, K, Ast>
+where
+    K: ExprKind,
+    Ast: ExprAst,
+{
+    type Kind = K;
+    type Ast = Ast;
+    fn into_window_ast(self) -> Self::Ast {
+        self.ast
+    }
+}
+
+/// Append one `PARTITION BY` term's AST to the end of a partition list.
+#[doc(hidden)]
+pub trait AppendPartition<Ast> {
+    type Output;
+    fn append_partition(self, ast: Ast) -> Self::Output;
+}
+impl<Ast> AppendPartition<Ast> for WindowNil {
+    type Output = WindowPartition<Ast, WindowNil>;
+    fn append_partition(self, ast: Ast) -> Self::Output {
+        WindowPartition {
+            ast,
+            rest: WindowNil,
+        }
+    }
+}
+impl<Head, Rest, Ast> AppendPartition<Ast> for WindowPartition<Head, Rest>
+where
+    Rest: AppendPartition<Ast>,
+{
+    type Output = WindowPartition<Head, Rest::Output>;
+    fn append_partition(self, ast: Ast) -> Self::Output {
+        WindowPartition {
+            ast: self.ast,
+            rest: self.rest.append_partition(ast),
+        }
+    }
+}
+
+/// Append one `ORDER BY` term (AST + direction) to the end of an order list.
+#[doc(hidden)]
+pub trait AppendOrder<Ast> {
+    type Output;
+    fn append_order(self, ast: Ast, direction: OrderDirection) -> Self::Output;
+}
+impl<Ast> AppendOrder<Ast> for WindowNil {
+    type Output = WindowOrder<Ast, WindowNil>;
+    fn append_order(self, ast: Ast, direction: OrderDirection) -> Self::Output {
+        WindowOrder {
+            ast,
+            dir: direction,
+            rest: WindowNil,
+        }
+    }
+}
+impl<Head, Rest, Ast> AppendOrder<Ast> for WindowOrder<Head, Rest>
+where
+    Rest: AppendOrder<Ast>,
+{
+    type Output = WindowOrder<Head, Rest::Output>;
+    fn append_order(self, ast: Ast, direction: OrderDirection) -> Self::Output {
+        WindowOrder {
+            ast: self.ast,
+            dir: self.dir,
+            rest: self.rest.append_order(ast, direction),
+        }
+    }
+}
+
+/// The `OVER (…)` specification, built inside an `.over(|w| …)` closure. Chain
+/// [`partition_by`](Self::partition_by) and [`order_by`](Self::order_by); each call appends one
+/// term, so `.partition_by(a).partition_by(b)` yields `PARTITION BY a, b`.
+pub struct Window<'scope, Parts = WindowNil, Ords = WindowNil> {
+    partitions: Parts,
+    orders: Ords,
+    _scope: PhantomData<&'scope ()>,
+}
+
+impl<'scope> Window<'scope, WindowNil, WindowNil> {
+    fn new() -> Self {
+        Self {
+            partitions: WindowNil,
+            orders: WindowNil,
+            _scope: PhantomData,
+        }
+    }
+}
+
+impl<'scope, Parts, Ords> Window<'scope, Parts, Ords> {
+    /// Add a `PARTITION BY` term (a column or scalar expression).
+    pub fn partition_by<E>(self, key: E) -> Window<'scope, Parts::Output, Ords>
+    where
+        E: WindowOperand<'scope>,
+        Parts: AppendPartition<E::Ast>,
+    {
+        Window {
+            partitions: self.partitions.append_partition(key.into_window_ast()),
+            orders: self.orders,
+            _scope: PhantomData,
+        }
+    }
+
+    /// Add an `ORDER BY` term (`col.asc()` / `col.desc()`).
+    pub fn order_by<K, Ast>(
+        self,
+        order: Order<'scope, K, Ast>,
+    ) -> Window<'scope, Parts, Ords::Output>
+    where
+        Ast: ExprAst,
+        Ords: AppendOrder<Ast>,
+    {
+        Window {
+            partitions: self.partitions,
+            orders: self.orders.append_order(order.ast, order.direction),
+            _scope: PhantomData,
+        }
+    }
+}
+
+impl<'scope, K, Operand> Expr<'scope, K, AggregateExprAst<Operand>>
+where
+    Operand: ExprAst,
+{
+    /// Turn this aggregate into a window function: `SUM(x) OVER (…)`. The result keeps the
+    /// aggregate's value type but is a per-row scalar (no `GROUP BY` required); build the `OVER`
+    /// clause with the `Window` handle (`.partition_by(...)`, `.order_by(...)`).
+    pub fn over<F, Parts, Ords>(
+        self,
+        build: F,
+    ) -> Expr<'scope, K, WindowExprAst<Operand, Parts, Ords>>
+    where
+        F: FnOnce(Window<'scope, WindowNil, WindowNil>) -> Window<'scope, Parts, Ords>,
+        Parts: Clone,
+        Ords: Clone,
+        WindowExprAst<Operand, Parts, Ords>: ExprAst,
+    {
+        let window = build(Window::new());
+        Expr {
+            ast: WindowExprAst {
+                func: WindowFunc::Aggregate(self.ast.func),
+                cast: self.ast.cast,
+                operand: self.ast.operand,
+                partitions: window.partitions,
+                orders: window.orders,
+            },
+            project_alias: Cow::Borrowed("expr"),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+/// A dedicated window function awaiting its `OVER (…)` clause (`OVER` is mandatory for a window
+/// function). Call [`over`](Self::over) to complete it into an [`Expr`].
+pub struct PendingWindow<'scope, K, Operand> {
+    func: WindowFunc,
+    cast: Option<crate::SqlType>,
+    operand: Operand,
+    _marker: PhantomData<(&'scope (), K)>,
+}
+
+impl<'scope, K, Operand> PendingWindow<'scope, K, Operand>
+where
+    Operand: ExprAst,
+{
+    /// Complete the window function with its `OVER (…)` clause.
+    pub fn over<F, Parts, Ords>(
+        self,
+        build: F,
+    ) -> Expr<'scope, K, WindowExprAst<Operand, Parts, Ords>>
+    where
+        F: FnOnce(Window<'scope, WindowNil, WindowNil>) -> Window<'scope, Parts, Ords>,
+        Parts: Clone,
+        Ords: Clone,
+        WindowExprAst<Operand, Parts, Ords>: ExprAst,
+    {
+        let window = build(Window::new());
+        Expr {
+            ast: WindowExprAst {
+                func: self.func,
+                cast: self.cast,
+                operand: self.operand,
+                partitions: window.partitions,
+                orders: window.orders,
+            },
+            project_alias: Cow::Borrowed("expr"),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+/// The `ROW_NUMBER()` window function (sequential row number within the window). Returns `i64`.
+pub fn row_number<'scope>() -> PendingWindow<'scope, i64, WindowNoArg> {
+    PendingWindow {
+        func: WindowFunc::RowNumber,
+        cast: None,
+        operand: WindowNoArg,
+        _marker: PhantomData,
+    }
+}
+
+/// The `RANK()` window function (rank with gaps after ties). Returns `i64`.
+pub fn rank<'scope>() -> PendingWindow<'scope, i64, WindowNoArg> {
+    PendingWindow {
+        func: WindowFunc::Rank,
+        cast: None,
+        operand: WindowNoArg,
+        _marker: PhantomData,
+    }
+}
+
+/// The `DENSE_RANK()` window function (rank without gaps). Returns `i64`.
+pub fn dense_rank<'scope>() -> PendingWindow<'scope, i64, WindowNoArg> {
+    PendingWindow {
+        func: WindowFunc::DenseRank,
+        cast: None,
+        operand: WindowNoArg,
+        _marker: PhantomData,
+    }
+}
+
+/// The `NTILE(buckets)` window function (assigns rows to `buckets` ranked groups). Returns `i32`.
+pub fn ntile<'scope>(buckets: i32) -> PendingWindow<'scope, i32, LiteralExprAst<i32>> {
+    PendingWindow {
+        func: WindowFunc::Ntile,
+        cast: None,
+        operand: LiteralExprAst {
+            value: buckets,
+            _kind: PhantomData,
+        },
+        _marker: PhantomData,
+    }
+}
+
+/// The arguments of `LAG`/`LEAD`: a value expression and an integer offset, rendered `value, offset`.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct LagArgsAst<ValueAst> {
+    value: ValueAst,
+    offset: i64,
+}
+
+impl<ValueAst> ExprAst for LagArgsAst<ValueAst>
+where
+    ValueAst: ExprAst,
+{
+    type Params = ValueAst::Params;
+}
+
+impl<ValueAst, B> RenderAst<B> for LagArgsAst<ValueAst>
+where
+    ValueAst: RenderAst<B>,
+    B: crate::Backend,
+    i64: crate::Encode<B>,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        self.value.visit(visitor)?;
+        visitor.visit_window_separator()?;
+        visitor.visit_literal(&self.offset)
+    }
+}
+
+/// The `LAG(value, offset)` window function (the row `offset` rows before the current one in window
+/// order). The result is nullable (`NULL` past the partition edge), so it decodes as `Option<T>`.
+pub fn lag<'scope, E>(
+    value: E,
+    offset: i64,
+) -> PendingWindow<'scope, ScalarNullable<E::Kind>, LagArgsAst<E::Ast>>
+where
+    E: WindowOperand<'scope>,
+{
+    PendingWindow {
+        func: WindowFunc::Lag,
+        cast: None,
+        operand: LagArgsAst {
+            value: value.into_window_ast(),
+            offset,
+        },
+        _marker: PhantomData,
+    }
+}
+
+/// The `LEAD(value, offset)` window function (the row `offset` rows after the current one). Nullable
+/// past the partition edge; see [`lag`].
+pub fn lead<'scope, E>(
+    value: E,
+    offset: i64,
+) -> PendingWindow<'scope, ScalarNullable<E::Kind>, LagArgsAst<E::Ast>>
+where
+    E: WindowOperand<'scope>,
+{
+    PendingWindow {
+        func: WindowFunc::Lead,
+        cast: None,
+        operand: LagArgsAst {
+            value: value.into_window_ast(),
+            offset,
+        },
+        _marker: PhantomData,
+    }
+}
+
 /// Marker for expression ASTs that are *not* a SQL aggregate function call (`COUNT`/`SUM`/…) and do
 /// not contain one. It is implemented for every expression AST node except [`AggregateExprAst`]
 /// (recursively for [`BinaryExprAst`]), so an aggregate cannot satisfy it.
@@ -1017,6 +1563,36 @@ pub trait ExprVisitor {
     fn visit_scalar_subquery<Sub>(&mut self, subquery: &Sub) -> Result<(), Self::Error>
     where
         Sub: crate::RenderSubquery<Self::Backend>;
+
+    /// Render a window function: `func(operand) OVER (PARTITION BY … ORDER BY …)`, optionally wrapped
+    /// in `CAST(… AS cast)`. `operand` renders the function arguments (nothing for `ROW_NUMBER()`);
+    /// `partitions`/`orders` render their lists (each uses [`visit_window_separator`] between
+    /// elements, and orders use [`visit_window_order_direction`]). The `has_*` flags say whether to
+    /// emit the `PARTITION BY` / `ORDER BY` keyword.
+    #[allow(clippy::too_many_arguments)]
+    fn visit_window<Operand, Partitions, Orders>(
+        &mut self,
+        func: WindowFunc,
+        cast: Option<&crate::SqlType>,
+        operand: Operand,
+        has_partitions: bool,
+        partitions: Partitions,
+        has_orders: bool,
+        orders: Orders,
+    ) -> Result<(), Self::Error>
+    where
+        Operand: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Partitions: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Orders: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render the separator (`, `) between elements of a window `PARTITION BY` / `ORDER BY` list.
+    fn visit_window_separator(&mut self) -> Result<(), Self::Error>;
+
+    /// Render a window `ORDER BY` term's direction (` ASC` / ` DESC`).
+    fn visit_window_order_direction(
+        &mut self,
+        direction: OrderDirection,
+    ) -> Result<(), Self::Error>;
 }
 
 #[doc(hidden)]

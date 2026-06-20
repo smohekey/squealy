@@ -2288,3 +2288,40 @@ fn postgres_exists_correlated_subquery_renders() {
          (q1_0.\"user_id\" = q0_0.\"id\")))"
     );
 }
+
+#[test]
+fn postgres_window_functions_render_with_numbered_placeholders() {
+    let row_num = Postgres.from::<Post>().select(|(post,)| {
+        row_number().over(|w| w.partition_by(post.user_id).order_by(post.id.asc()))
+    });
+    assert_eq!(
+        row_num.to_sql(),
+        "SELECT ROW_NUMBER() OVER (PARTITION BY q0_0.\"user_id\" ORDER BY q0_0.\"id\" ASC) \
+         AS \"expr\" FROM \"public\".\"posts\" AS q0_0"
+    );
+
+    // NTILE and LAG bind their integer arguments, numbered continuously ($1, $2).
+    let args = Postgres.from::<Post>().select(|(post,)| {
+        (
+            ntile(4).over(|w| w.order_by(post.id.asc())),
+            lag(post.user_id, 2).over(|w| w.order_by(post.id.asc())),
+        )
+    });
+    let sql = args.to_sql();
+    assert!(sql.contains("NTILE($1)"), "{sql}");
+    assert!(sql.contains("LAG(q0_0.\"user_id\", $2)"), "{sql}");
+    assert_eq!(
+        args.collect_params().unwrap(),
+        vec![PostgresParam::Int32(4), PostgresParam::Int64(2)]
+    );
+
+    // Aggregate-over wraps the cast around the whole window expression, not the inner aggregate.
+    let summed = Postgres
+        .from::<Post>()
+        .select(|(post,)| post.user_id.sum().over(|w| w.partition_by(post.user_id)));
+    let summed_sql = summed.to_sql();
+    assert!(
+        summed_sql.contains("SUM(q0_0.\"user_id\") OVER (PARTITION BY q0_0.\"user_id\")"),
+        "{summed_sql}"
+    );
+}
