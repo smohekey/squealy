@@ -98,6 +98,7 @@ impl SqlWriter for ParamCollector<'_> {
 
 struct TestSelectSink<'writer, Writer> {
     writer: &'writer mut Writer,
+    distinct: bool,
     columns: usize,
     sources: usize,
     filters: usize,
@@ -116,6 +117,7 @@ where
         writer.write_all(b"SELECT ")?;
         Ok(Self {
             writer,
+            distinct: false,
             columns: 0,
             sources: 0,
             filters: 0,
@@ -135,12 +137,20 @@ where
     type Error = io::Error;
     type Backend = crate::TestBackend;
 
+    fn set_distinct(&mut self) -> io::Result<()> {
+        self.distinct = true;
+        Ok(())
+    }
+
     fn push_projection<Shape, P>(&mut self, projection: P) -> io::Result<()>
     where
         Shape: ProjectionShape,
         P: RenderProjectable<crate::TestBackend>,
     {
         _ = std::marker::PhantomData::<Shape>;
+        if self.distinct {
+            self.writer.write_all(b"DISTINCT ")?;
+        }
         projection.visit_projection(self)
     }
 
@@ -991,6 +1001,7 @@ where
     fn visit_aggregate<O>(
         &mut self,
         func: AggregateFunc,
+        distinct: bool,
         _cast: Option<&SqlType>,
         operand: O,
     ) -> Result<(), Self::Error>
@@ -999,7 +1010,8 @@ where
     {
         // The in-memory test backend renders the bare aggregate (no dialect casts), matching how it
         // skips the integer-division cast the real backends emit.
-        write!(self.writer, "{}(", render_aggregate_func(func))?;
+        let distinct = if distinct { "DISTINCT " } else { "" };
+        write!(self.writer, "{}({distinct}", render_aggregate_func(func))?;
         operand(self)?;
         self.writer.write_all(b")")
     }

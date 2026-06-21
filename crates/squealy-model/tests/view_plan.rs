@@ -33,6 +33,7 @@ fn view(filter: &str, columns: &[&str]) -> ViewModel {
             })
             .collect(),
         query: ViewQueryModel {
+            distinct: false,
             projection: columns
                 .iter()
                 .map(|name| ProjectionItem {

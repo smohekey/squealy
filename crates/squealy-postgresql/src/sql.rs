@@ -395,6 +395,9 @@ pub(crate) mod ddl {
         writer: &mut impl Write,
     ) -> io::Result<()> {
         writer.write_all(b"SELECT ")?;
+        if query.distinct {
+            writer.write_all(b"DISTINCT ")?;
+        }
         for (index, item) in query.projection.iter().enumerate() {
             if index > 0 {
                 writer.write_all(b", ")?;

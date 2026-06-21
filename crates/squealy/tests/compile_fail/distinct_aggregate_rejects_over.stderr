@@ -1,0 +1,7 @@
+error[E0599]: no method named `over` found for struct `Expr<'_, CountExpr<PostId>, squealy::AggregateExprAst<squealy::ColumnExprAst<PostId>, true>>` in the current scope
+  --> tests/compile_fail/distinct_aggregate_rejects_over.rs:16:54
+   |
+16 |         .select(|(post,)| post.id.count().distinct().over(|w| w.order_by(post.id.asc())));
+   |                                                      ^^^^ method not found in `Expr<'_, CountExpr<PostId>, squealy::AggregateExprAst<squealy::ColumnExprAst<PostId>, true>>`
+   |
+   = note: the method was found for `Expr<'scope, K, squealy::AggregateExprAst<Operand>>`

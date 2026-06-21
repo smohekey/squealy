@@ -475,6 +475,9 @@ fn view_column_to_node(column: &ViewColumnModel) -> KdlNode {
 
 fn view_query_to_node(query: &ViewQueryModel) -> KdlNode {
     let mut node = KdlNode::new("query");
+    if query.distinct {
+        node.push(KdlEntry::new_prop("distinct", KdlValue::Bool(true)));
+    }
     if let Some(limit) = query.limit {
         node.push(KdlEntry::new_prop(
             "limit",
@@ -981,6 +984,7 @@ fn view_query_from_node(node: &KdlNode) -> Result<ViewQueryModel, PackageError> 
         .map(view_order_from_node)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ViewQueryModel {
+        distinct: prop_bool(node, "distinct"),
         projection,
         from,
         joins,
@@ -1656,6 +1660,7 @@ mod tests {
                         },
                     ],
                     query: ViewQueryModel {
+                        distinct: true,
                         projection: vec![
                             ProjectionItem {
                                 output_name: "id".to_owned(),
@@ -1696,6 +1701,10 @@ mod tests {
         };
 
         let kdl = to_kdl(&model);
+        assert!(
+            kdl.contains("distinct"),
+            "DISTINCT view flag not serialized:\n{kdl}"
+        );
         let parsed = from_kdl(&kdl).expect("view model.kdl should parse");
         assert_eq!(parsed, model, "view KDL round-trip diverged:\n{kdl}");
     }
