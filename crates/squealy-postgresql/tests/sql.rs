@@ -1153,6 +1153,37 @@ fn postgres_backend_writes_table_ddl() {
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Vault)]
+struct Secret<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    ciphertext: C::Type<'scope, Vec<u8>>,
+    wrapped_dek: C::Type<'scope, Option<Vec<u8>>>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct Vault {
+    secrets: Secret<'static, ColumnName>,
+}
+
+#[test]
+fn postgres_writes_bytea_column_ddl() {
+    let mut sql = Vec::new();
+    let tables = <Vault as Schema>::tables().collect::<Vec<_>>();
+    Postgres.write_table(tables[0], &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // A `Vec<u8>` column renders as non-null `bytea`; the `Option<Vec<u8>>` column as nullable `bytea`.
+    assert!(sql.contains("\"ciphertext\" bytea NOT NULL"), "{sql}");
+    assert!(sql.contains("\"wrapped_dek\" bytea"), "{sql}");
+    assert!(
+        !sql.contains("\"wrapped_dek\" bytea NOT NULL"),
+        "nullable bytea must not be NOT NULL: {sql}"
+    );
+}
+
+#[derive(Clone, Debug, PartialEq, Table)]
 struct Account<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,

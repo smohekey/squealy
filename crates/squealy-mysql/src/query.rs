@@ -122,7 +122,21 @@ macro_rules! impl_mysql_decode_from_u64 {
 // `DECIMAL`/text representation too, so a widened `SUM` (cast to `DECIMAL(65, 0)`) that exceeds 64
 // bits still decodes — unlike routing through `i64`/`u64`, which would truncate or fail conversion.
 impl_mysql_decode_direct!(
-    i8, i16, i32, i64, i128, u8, u16, u32, u64, u128, f32, f64, bool, String
+    i8,
+    i16,
+    i32,
+    i64,
+    i128,
+    u8,
+    u16,
+    u32,
+    u64,
+    u128,
+    f32,
+    f64,
+    bool,
+    String,
+    Vec<u8>
 );
 // Pointer-sized widths MySQL has no native column type for; the model carries them as 64-bit.
 impl_mysql_decode_from_i64!(isize);
@@ -249,6 +263,13 @@ impl Encode<Mysql> for str {
 impl Encode<Mysql> for String {
     fn encode(&self, out: &mut MysqlParamWriter<'_>) -> Result<(), MysqlError> {
         out.push(Value::Bytes(self.clone().into_bytes()));
+        Ok(())
+    }
+}
+
+impl Encode<Mysql> for Vec<u8> {
+    fn encode(&self, out: &mut MysqlParamWriter<'_>) -> Result<(), MysqlError> {
+        out.push(Value::Bytes(self.clone()));
         Ok(())
     }
 }
@@ -537,5 +558,21 @@ mod tests {
             Value::Bytes(b"hi".to_vec())
         );
         assert_eq!(encode_to_value(&Option::<i32>::None).unwrap(), Value::NULL);
+    }
+
+    #[test]
+    fn encodes_bytes_as_value_bytes() {
+        assert_eq!(
+            encode_to_value(&vec![0xDEu8, 0xAD, 0xBE, 0xEF]).unwrap(),
+            Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF])
+        );
+        assert_eq!(
+            encode_to_value(&Some(vec![1u8, 2, 3])).unwrap(),
+            Value::Bytes(vec![1, 2, 3])
+        );
+        assert_eq!(
+            encode_to_value(&Option::<Vec<u8>>::None).unwrap(),
+            Value::NULL
+        );
     }
 }

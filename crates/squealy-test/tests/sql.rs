@@ -57,6 +57,15 @@ struct Event<'scope, C: ColumnMode = ColumnExpr> {
     label: C::Type<'scope, Option<String>>,
 }
 
+// A `Vec<u8>` (bytea) column plus its nullable form — regression coverage for ed37021.
+#[derive(Clone, Debug, PartialEq, Table)]
+struct Blob<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    data: C::Type<'scope, Vec<u8>>,
+    maybe: C::Type<'scope, Option<Vec<u8>>>,
+}
+
 #[allow(dead_code)]
 #[derive(Schema)]
 struct Public {
@@ -1567,4 +1576,118 @@ fn test_right_join_then_inner_join_keeps_earlier_base_nullable() {
          INNER JOIN comments AS q0_2 ON (q0_2.post_id = q0_1.id)"
     );
     assert_row::<_, _, _, (Option<i32>, i32, i32)>(&q);
+}
+
+#[test]
+fn test_bytea_vec_u8_column_binds_in_queries() {
+    // Regression for ed37021: a `Vec<u8>` (bytea) column must compile in insert/where/select and a
+    // nullable `Option<Vec<u8>>` column too. Before the fix, `Vec<u8>: ColumnNullability/ExprKind`
+    // were unsatisfied and these builders failed to compile.
+    let insert = TestConnection
+        .to::<Blob>()
+        .data(vec![0xDE, 0xAD, 0xBE, 0xEF])
+        .maybe(Some(vec![0x01, 0x02]))
+        .insert_returning(|blob| blob.id);
+    assert_eq!(
+        insert.to_sql(),
+        "INSERT INTO blobs (data, maybe) VALUES (?, ?) RETURNING q0_0.id AS id"
+    );
+    assert_eq!(
+        insert.collect_params().unwrap(),
+        vec![
+            TestParam::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            TestParam::Bytes(vec![0x01, 0x02]),
+        ]
+    );
+
+    // A NULL for the nullable column.
+    let insert_null = TestConnection
+        .to::<Blob>()
+        .data(vec![0x00])
+        .maybe(None)
+        .insert_returning(|blob| blob.id);
+    assert_eq!(
+        insert_null.collect_params().unwrap(),
+        vec![TestParam::Bytes(vec![0x00]), TestParam::Null]
+    );
+
+    // Predicate operand + projection of both the non-null and nullable byte columns.
+    let q = TestConnection
+        .from::<Blob>()
+        .where_(|b| b.data.equals(vec![1u8, 2, 3]))
+        .select(|(b,)| (b.data, b.maybe));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.data AS t0_data, q0_0.maybe AS t1_maybe FROM blobs AS q0_0 WHERE (q0_0.data = ?)"
+    );
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![TestParam::Bytes(vec![1, 2, 3])]
+    );
+    // `data` decodes `Vec<u8>`, the nullable column decodes `Option<Vec<u8>>`.
+    assert_row::<_, _, _, (Vec<u8>, Option<Vec<u8>>)>(&q);
+}
+
+#[test]
+fn test_bytea_borrowed_setters_and_operands() {
+    // `&[u8]` / `&Vec<u8>` work as setters and predicate operands (mirroring `&str`/`&String`),
+    // skipping a caller-side clone.
+    let owned = vec![0xCAu8, 0xFE];
+    let insert = TestConnection
+        .to::<Blob>()
+        .data(&owned[..]) // &[u8]
+        .maybe(Some(owned.clone()))
+        .insert_returning(|blob| blob.id);
+    assert_eq!(
+        insert.collect_params().unwrap(),
+        vec![
+            TestParam::Bytes(vec![0xCA, 0xFE]),
+            TestParam::Bytes(vec![0xCA, 0xFE]),
+        ]
+    );
+
+    let q = TestConnection
+        .from::<Blob>()
+        .where_(|b| b.data.equals(&owned)) // &Vec<u8>
+        .select(|(b,)| b.id);
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![TestParam::Bytes(vec![0xCA, 0xFE])]
+    );
+
+    // Nullable setter: borrowed `&[u8]` and a bare owned `Vec<u8>` (not just `Some(..)`/`None`).
+    let nullable_borrowed = TestConnection
+        .to::<Blob>()
+        .data(vec![0x00])
+        .maybe(&owned[..])
+        .insert_returning(|blob| blob.id);
+    assert_eq!(
+        nullable_borrowed.collect_params().unwrap(),
+        vec![
+            TestParam::Bytes(vec![0x00]),
+            TestParam::Bytes(vec![0xCA, 0xFE])
+        ]
+    );
+    let nullable_owned_bare = TestConnection
+        .to::<Blob>()
+        .data(vec![0x00])
+        .maybe(vec![0x09]) // bare owned Vec<u8> on a nullable column
+        .insert_returning(|blob| blob.id);
+    assert_eq!(
+        nullable_owned_bare.collect_params().unwrap(),
+        vec![TestParam::Bytes(vec![0x00]), TestParam::Bytes(vec![0x09])]
+    );
+
+    // Explicit multi-column row insert with borrowed bytes (non-null + nullable columns).
+    let explicit = TestConnection
+        .to_columns::<Blob, (BlobData, BlobMaybe)>()
+        .row((&owned[..], &owned[..]))
+        .insert_returning(|blob| blob.id);
+    assert_eq!(
+        explicit.collect_params().unwrap(),
+        vec![
+            TestParam::Bytes(vec![0xCA, 0xFE]),
+            TestParam::Bytes(vec![0xCA, 0xFE]),
+        ]
+    );
 }

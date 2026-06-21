@@ -164,7 +164,7 @@ macro_rules! impl_postgres_decode_from_numeric {
     };
 }
 
-impl_postgres_decode_direct!(i16, i32, i64, f32, f64, String, bool);
+impl_postgres_decode_direct!(i16, i32, i64, f32, f64, String, bool, Vec<u8>);
 impl_postgres_decode_from_i64!(i8, isize, u8, u16, u32, usize);
 impl_postgres_decode_from_numeric!(i128, u64, u128);
 
@@ -343,6 +343,7 @@ pub enum PostgresParam {
     Float32(f32),
     Float64(f64),
     Text(String),
+    Bytes(Vec<u8>),
     Bool(bool),
     Null(PostgresNull),
     #[cfg(feature = "uuid")]
@@ -388,6 +389,7 @@ impl PostgresParam {
             Self::Float32(value) => value,
             Self::Float64(value) => value,
             Self::Text(value) => value,
+            Self::Bytes(value) => value,
             Self::Bool(value) => value,
             Self::Null(value) => value,
             #[cfg(feature = "uuid")]
@@ -604,6 +606,13 @@ impl Encode<Postgres> for str {
 impl Encode<Postgres> for String {
     fn encode(&self, out: &mut PostgresParamWriter<'_>) -> Result<(), PostgresError> {
         out.push(PostgresParam::Text(self.clone()));
+        Ok(())
+    }
+}
+
+impl Encode<Postgres> for Vec<u8> {
+    fn encode(&self, out: &mut PostgresParamWriter<'_>) -> Result<(), PostgresError> {
+        out.push(PostgresParam::Bytes(self.clone()));
         Ok(())
     }
 }
@@ -2302,6 +2311,23 @@ mod tests {
         assert!(matches!(
             encode_to_param(&Some(5i32)),
             Ok(PostgresParam::Int32(5))
+        ));
+    }
+
+    #[test]
+    fn bytes_encode_to_bytea_param() {
+        assert!(matches!(
+            encode_to_param(&vec![0xDEu8, 0xAD, 0xBE, 0xEF]),
+            Ok(PostgresParam::Bytes(value)) if value == [0xDE, 0xAD, 0xBE, 0xEF]
+        ));
+        // The nullable form routes through the same Bytes param / a typed NULL.
+        assert!(matches!(
+            encode_to_param(&Some(vec![1u8, 2, 3])),
+            Ok(PostgresParam::Bytes(value)) if value == [1, 2, 3]
+        ));
+        assert!(matches!(
+            encode_to_param(&Option::<Vec<u8>>::None),
+            Ok(PostgresParam::Null(_))
         ));
     }
 
