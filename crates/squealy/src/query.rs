@@ -507,6 +507,30 @@ where
     }
 }
 
+// Borrowed `bytea`/`BLOB` setters, mirroring `&str`/`&String`: `.col(&bytes)` / `.col(&bytes[..])`
+// without an owned `Vec<u8>` at the call site.
+impl<K> IntoAssignmentValue<K> for &[u8]
+where
+    K: ColumnKey<Value = Vec<u8>>,
+{
+    type Value = StaticAssignmentValue<Vec<u8>>;
+
+    fn into_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(self.to_vec())
+    }
+}
+
+impl<K> IntoAssignmentValue<K> for &Vec<u8>
+where
+    K: ColumnKey<Value = Vec<u8>>,
+{
+    type Value = StaticAssignmentValue<Vec<u8>>;
+
+    fn into_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(self.clone())
+    }
+}
+
 impl<K> IntoAssignmentValue<K> for DefaultValueNode
 where
     K: ColumnKey,
@@ -546,6 +570,28 @@ where
     K: ColumnKey<Value = String>,
 {
     type Value = StaticAssignmentValue<String>;
+
+    fn into_insert_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(self.clone())
+    }
+}
+
+impl<K> IntoInsertAssignmentValue<K> for &[u8]
+where
+    K: ColumnKey<Value = Vec<u8>>,
+{
+    type Value = StaticAssignmentValue<Vec<u8>>;
+
+    fn into_insert_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(self.to_vec())
+    }
+}
+
+impl<K> IntoInsertAssignmentValue<K> for &Vec<u8>
+where
+    K: ColumnKey<Value = Vec<u8>>,
+{
+    type Value = StaticAssignmentValue<Vec<u8>>;
 
     fn into_insert_assignment_value(self) -> Self::Value {
         StaticAssignmentValue::new(self.clone())
@@ -597,6 +643,7 @@ impl_nullable_assignment_value! {
     f32, f64,
     String,
     bool,
+    Vec<u8>,
 }
 
 // Native `uuid` column support: a bare `uuid::Uuid` value can be assigned to a nullable UUID column
@@ -651,6 +698,50 @@ where
     K: ColumnKey<Value = String>,
 {
     type Value = StaticAssignmentValue<String>;
+
+    fn into_nullable_insert_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(self.clone())
+    }
+}
+
+impl<K> IntoNullableAssignmentValue<K> for &[u8]
+where
+    K: ColumnKey<Value = Vec<u8>>,
+{
+    type Value = StaticAssignmentValue<Vec<u8>>;
+
+    fn into_nullable_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(self.to_vec())
+    }
+}
+
+impl<K> IntoNullableInsertAssignmentValue<K> for &[u8]
+where
+    K: ColumnKey<Value = Vec<u8>>,
+{
+    type Value = StaticAssignmentValue<Vec<u8>>;
+
+    fn into_nullable_insert_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(self.to_vec())
+    }
+}
+
+impl<K> IntoNullableAssignmentValue<K> for &Vec<u8>
+where
+    K: ColumnKey<Value = Vec<u8>>,
+{
+    type Value = StaticAssignmentValue<Vec<u8>>;
+
+    fn into_nullable_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(self.clone())
+    }
+}
+
+impl<K> IntoNullableInsertAssignmentValue<K> for &Vec<u8>
+where
+    K: ColumnKey<Value = Vec<u8>>,
+{
+    type Value = StaticAssignmentValue<Vec<u8>>;
 
     fn into_nullable_insert_assignment_value(self) -> Self::Value {
         StaticAssignmentValue::new(self.clone())

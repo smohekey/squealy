@@ -213,6 +213,7 @@ impl_column_type! {
     f64 => F64,
     String => String,
     bool => Bool,
+    Vec<u8> => Bytes,
 }
 
 /// A bare `uuid::Uuid` field maps to a `uuid` column, so no `#[column(db_type = "uuid")]`

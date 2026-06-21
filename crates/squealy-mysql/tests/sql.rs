@@ -1410,6 +1410,37 @@ SELECT q0_0.`id` FROM `app`.`users` AS q0_0 WHERE (q0_0.`id` > 0)"
     );
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Vault)]
+struct Secret<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, i32>,
+    ciphertext: C::Type<'scope, Vec<u8>>,
+    wrapped_dek: C::Type<'scope, Option<Vec<u8>>>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct Vault {
+    secrets: Secret<'static, ColumnName>,
+}
+
+#[test]
+fn mysql_writes_blob_column_ddl() {
+    let mut sql = Vec::new();
+    let tables = <Vault as Schema>::tables().collect::<Vec<_>>();
+    Mysql.write_table(tables[0], &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // A `Vec<u8>` column renders as non-null `BLOB`; the `Option<Vec<u8>>` column as nullable `BLOB`.
+    assert!(sql.contains("`ciphertext` BLOB NOT NULL"), "{sql}");
+    assert!(sql.contains("`wrapped_dek` BLOB"), "{sql}");
+    assert!(
+        !sql.contains("`wrapped_dek` BLOB NOT NULL"),
+        "nullable BLOB must not be NOT NULL: {sql}"
+    );
+}
+
 // The same structural expression IR renders in MySQL's dialect: `/` is already fractional (no float
 // cast), identifiers use backticks, and aggregate casts use MySQL's `SIGNED`.
 #[test]

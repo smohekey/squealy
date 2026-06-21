@@ -65,6 +65,7 @@ impl_decode_nullable_via_option! {
     f64,
     String,
     bool,
+    Vec<u8>,
 }
 
 // Native `uuid` column support: a `uuid::Uuid` field can appear in a nullable column or in a
