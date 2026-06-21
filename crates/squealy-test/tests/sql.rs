@@ -1532,6 +1532,25 @@ fn test_right_join_makes_base_nullable() {
 // covered by the PostgreSQL backend tests.)
 
 #[test]
+fn test_right_join_flattens_already_nullable_base_column() {
+    // A base column already declared `Option<T>` (`Event::label`) must stay a single `Option<T>` after
+    // the right-join nullable-wrap, not become `Option<Option<T>>`. This holds because a column kind's
+    // `Value` is the inner non-null type, so `Nullable<K>` adds exactly one `Option` layer.
+    let q = TestConnection
+        .from::<Event>()
+        .right_join::<Post>()
+        .on(|(event,), post| post.id.equals(event.id))
+        .select(|(event, post)| (event.label, post.id));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.label AS t0_label, q0_1.id AS t1_id FROM events AS q0_0 \
+         RIGHT JOIN posts AS q0_1 ON (q0_1.id = q0_0.id)"
+    );
+    // `event.label` decodes `Option<String>` (one layer), `post.id` stays `i32`.
+    assert_row::<_, _, _, (Option<String>, i32)>(&q);
+}
+
+#[test]
 fn test_right_join_then_inner_join_keeps_earlier_base_nullable() {
     // A later inner join does not un-nullable the already-right-joined base; the new table is non-null.
     let q = TestConnection
