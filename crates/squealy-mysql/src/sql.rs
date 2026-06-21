@@ -182,6 +182,10 @@ fn write_view_query(
         match join.kind {
             JoinKind::Inner => writer.write_all(b" INNER JOIN ")?,
             JoinKind::Left => writer.write_all(b" LEFT JOIN ")?,
+            JoinKind::Right => writer.write_all(b" RIGHT JOIN ")?,
+            // MySQL has no FULL JOIN; a full-join view is Postgres-targeted (see `full_join`). Rendered
+            // for completeness — deploying it to MySQL fails at DDL exec.
+            JoinKind::Full => writer.write_all(b" FULL JOIN ")?,
         }
         write_view_source(&join.source, writer)?;
         writer.write_all(b" ON ")?;

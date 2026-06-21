@@ -7,9 +7,10 @@ use futures_core::Stream;
 
 use crate::{
     Backend, ColumnExprAst, ColumnRef, Connection, Decode, Expr, ExprAst, ExprKind, HCons, HList,
-    HNil, InsertableTable, Maybe, NoRuntimeParams, Order, ParamExprAst, Predicate, PredicateKind,
-    Projectable, ProjectionShape, PushBack, QueryBuilder, RenderAst, RenderProjectable,
-    RuntimeParam, SourceAlias, SupportsReturning, TableProjection, ToTuple, UpdateableTable,
+    HNil, InsertableTable, IntoNullableExprs, Maybe, NoRuntimeParams, Order, ParamExprAst,
+    Predicate, PredicateKind, Projectable, ProjectionShape, PushBack, QueryBuilder, RenderAst,
+    RenderProjectable, RuntimeParam, SourceAlias, SupportsReturning, TableProjection, ToTuple,
+    UpdateableTable,
 };
 
 type ErrorOf<Builder> = <<Builder as QueryBuilder>::Backend as Backend>::Error;
@@ -2558,6 +2559,62 @@ where
 }
 
 #[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RightJoinSource<'scope, S, P, PredicateAst>
+where
+    S: TableProjection,
+    P: PredicateKind,
+    PredicateAst: crate::PredicateAst,
+{
+    alias: SourceAlias,
+    on: Predicate<'scope, P, PredicateAst>,
+    _phantom: PhantomData<S>,
+}
+
+impl<'scope, S, P, PredicateAst> RightJoinSource<'scope, S, P, PredicateAst>
+where
+    S: TableProjection,
+    P: PredicateKind,
+    PredicateAst: crate::PredicateAst,
+{
+    fn new(alias: SourceAlias, on: Predicate<'scope, P, PredicateAst>) -> Self {
+        Self {
+            alias,
+            on,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FullJoinSource<'scope, S, P, PredicateAst>
+where
+    S: TableProjection,
+    P: PredicateKind,
+    PredicateAst: crate::PredicateAst,
+{
+    alias: SourceAlias,
+    on: Predicate<'scope, P, PredicateAst>,
+    _phantom: PhantomData<S>,
+}
+
+impl<'scope, S, P, PredicateAst> FullJoinSource<'scope, S, P, PredicateAst>
+where
+    S: TableProjection,
+    P: PredicateKind,
+    PredicateAst: crate::PredicateAst,
+{
+    fn new(alias: SourceAlias, on: Predicate<'scope, P, PredicateAst>) -> Self {
+        Self {
+            alias,
+            on,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+#[doc(hidden)]
 pub trait SelectSink {
     type Error;
     type Backend: Backend;
@@ -2582,6 +2639,26 @@ pub trait SelectSink {
         PredicateAst: crate::RenderPredicateAst<Self::Backend>;
 
     fn push_left_join<S, P, PredicateAst>(
+        &mut self,
+        alias: SourceAlias,
+        on: Predicate<'_, P, PredicateAst>,
+    ) -> Result<(), Self::Error>
+    where
+        S: TableProjection,
+        P: PredicateKind,
+        PredicateAst: crate::RenderPredicateAst<Self::Backend>;
+
+    fn push_right_join<S, P, PredicateAst>(
+        &mut self,
+        alias: SourceAlias,
+        on: Predicate<'_, P, PredicateAst>,
+    ) -> Result<(), Self::Error>
+    where
+        S: TableProjection,
+        P: PredicateKind,
+        PredicateAst: crate::RenderPredicateAst<Self::Backend>;
+
+    fn push_full_join<S, P, PredicateAst>(
         &mut self,
         alias: SourceAlias,
         on: Predicate<'_, P, PredicateAst>,
@@ -2710,6 +2787,54 @@ where
         Sink: SelectSink<Backend = B>,
     {
         sink.push_left_join::<S, P, PredicateAst>(self.alias, self.on.clone())
+    }
+}
+
+impl<S, P, PredicateAst> SourceSpec for RightJoinSource<'_, S, P, PredicateAst>
+where
+    S: TableProjection,
+    P: PredicateKind,
+    PredicateAst: crate::PredicateAst,
+{
+    type Params = PredicateAst::Params;
+}
+
+impl<S, P, PredicateAst, B> RenderSourceSpec<B> for RightJoinSource<'_, S, P, PredicateAst>
+where
+    S: TableProjection,
+    P: PredicateKind,
+    PredicateAst: crate::RenderPredicateAst<B>,
+    B: Backend,
+{
+    fn push_source<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        sink.push_right_join::<S, P, PredicateAst>(self.alias, self.on.clone())
+    }
+}
+
+impl<S, P, PredicateAst> SourceSpec for FullJoinSource<'_, S, P, PredicateAst>
+where
+    S: TableProjection,
+    P: PredicateKind,
+    PredicateAst: crate::PredicateAst,
+{
+    type Params = PredicateAst::Params;
+}
+
+impl<S, P, PredicateAst, B> RenderSourceSpec<B> for FullJoinSource<'_, S, P, PredicateAst>
+where
+    S: TableProjection,
+    P: PredicateKind,
+    PredicateAst: crate::RenderPredicateAst<B>,
+    B: Backend,
+{
+    fn push_source<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        sink.push_full_join::<S, P, PredicateAst>(self.alias, self.on.clone())
     }
 }
 
@@ -3649,6 +3774,29 @@ pub struct LeftJoinTarget<Base, S> {
     _source: PhantomData<S>,
 }
 
+/// Outer join node shared by `right_join` and `full_join`: both nullable-wrap the **accumulated base**
+/// columns (unlike `LeftJoin`, which only nullable-wraps the newly joined table). They differ only in
+/// the stored `Expr` (the new table — non-null for right, `Maybe`-nullable for full) and the `Source`
+/// (`RightJoinSource`/`FullJoinSource`, which render `RIGHT JOIN`/`FULL JOIN`).
+#[doc(hidden)]
+pub struct OuterJoin<Base, Expr, Source> {
+    base: Base,
+    expr: Expr,
+    source: Source,
+}
+
+#[doc(hidden)]
+pub struct RightJoinTarget<Base, S> {
+    base: Base,
+    _source: PhantomData<S>,
+}
+
+#[doc(hidden)]
+pub struct FullJoinTarget<Base, S> {
+    base: Base,
+    _source: PhantomData<S>,
+}
+
 // Manual `Clone` impls for the select-chain typestate nodes. A subquery embeds a whole select chain
 // inside a predicate/expression AST, and `PredicateAst`/`ExprAst` require `Clone` (predicates are
 // cloned when lowered into a sink). The fields are all cheaply clonable — `&'conn Conn` is `Copy`,
@@ -3791,6 +3939,21 @@ where
 }
 
 impl<Base, Expr, Source> Clone for LeftJoin<Base, Expr, Source>
+where
+    Base: Clone,
+    Expr: Clone,
+    Source: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            expr: self.expr.clone(),
+            source: self.source.clone(),
+        }
+    }
+}
+
+impl<Base, Expr, Source> Clone for OuterJoin<Base, Expr, Source>
 where
     Base: Clone,
     Expr: Clone,
@@ -4760,6 +4923,130 @@ where
     }
 }
 
+impl<'conn, 'scope, Conn, Base, Expr, Source> SelectAst<'conn, 'scope, Conn>
+    for OuterJoin<Base, Expr, Source>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Base::Exprs: crate::IntoNullableExprs,
+    <Base::Exprs as crate::IntoNullableExprs>::Output: PushBack<Expr>,
+    <<Base::Exprs as crate::IntoNullableExprs>::Output as PushBack<Expr>>::Output: Clone + ToTuple,
+    Expr: Clone,
+    Source: SourceSpec,
+    Base::SourceParams: crate::HAppend<Source::Params>,
+    (
+        <Base::SourceParams as crate::HAppend<Source::Params>>::Output,
+        Base::FilterParams,
+        Base::GroupParams,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
+{
+    // The accumulated base columns are nullable-wrapped (`RIGHT`/`FULL JOIN` can produce all-NULL base
+    // rows); the new table's `Expr` is appended as supplied (non-null for right, `Maybe` for full).
+    type Exprs = <<Base::Exprs as crate::IntoNullableExprs>::Output as PushBack<Expr>>::Output;
+    type Params = <(
+        Self::SourceParams,
+        Self::FilterParams,
+        Self::GroupParams,
+        Self::HavingParams,
+        Self::OrderParams,
+    ) as RenderOrderedParams>::Params;
+    type SourceParams = <Base::SourceParams as crate::HAppend<Source::Params>>::Output;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
+    type OrderClass = Base::OrderClass;
+    type Grouped = Base::Grouped;
+
+    fn depth(&self) -> usize {
+        self.base.depth()
+    }
+
+    fn connection(&self) -> &'conn Conn {
+        self.base.connection()
+    }
+
+    fn exprs(&self) -> Self::Exprs {
+        self.base
+            .exprs()
+            .into_nullable_exprs()
+            .push_back(self.expr.clone())
+    }
+}
+
+impl<'conn, 'scope, Conn, Base, Expr, Source, B> RenderSelectAst<'conn, 'scope, Conn, B>
+    for OuterJoin<Base, Expr, Source>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: RenderSelectAst<'conn, 'scope, Conn, B>,
+    Base::Exprs: crate::IntoNullableExprs,
+    <Base::Exprs as crate::IntoNullableExprs>::Output: PushBack<Expr>,
+    <<Base::Exprs as crate::IntoNullableExprs>::Output as PushBack<Expr>>::Output: Clone + ToTuple,
+    Expr: Clone,
+    Source: RenderSourceSpec<B>,
+    Base::SourceParams: crate::HAppend<Source::Params>,
+    (
+        <Base::SourceParams as crate::HAppend<Source::Params>>::Output,
+        Base::FilterParams,
+        Base::GroupParams,
+        Base::HavingParams,
+        Base::OrderParams,
+    ): RenderOrderedParams,
+    B: Backend,
+{
+    fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_sources_into(sink)?;
+        self.source.push_source(sink)
+    }
+
+    fn lower_filters_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_filters_into(sink)
+    }
+
+    fn lower_groups_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_groups_into(sink)
+    }
+
+    fn lower_havings_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_havings_into(sink)
+    }
+
+    fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_orders_into(sink)
+    }
+
+    fn lower_bounds_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_bounds_into(sink)
+    }
+
+    fn lower_distinct_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_distinct_into(sink)
+    }
+}
+
 pub trait SourceQuery<'conn, 'scope, Conn>: SelectAst<'conn, 'scope, Conn> + Sized
 where
     Conn: QueryBuilder + 'conn,
@@ -4901,6 +5188,33 @@ where
         S: TableProjection,
     {
         LeftJoinTarget {
+            base: self,
+            _source: PhantomData,
+        }
+    }
+
+    /// `RIGHT JOIN`: the joined table's columns stay non-null while the accumulated base columns
+    /// become nullable (an unmatched right-side row yields all-NULL base columns). Both backends
+    /// support it.
+    fn right_join<S>(self) -> RightJoinTarget<Self, S>
+    where
+        S: TableProjection,
+    {
+        RightJoinTarget {
+            base: self,
+            _source: PhantomData,
+        }
+    }
+
+    /// `FULL [OUTER] JOIN`: both the joined table and the accumulated base become nullable.
+    /// Gated to backends whose dialect supports it ([`SupportsFullJoin`] — PostgreSQL, and the view
+    /// model backend); MySQL has no `FULL JOIN`, so this does not compile against it.
+    fn full_join<S>(self) -> FullJoinTarget<Self, S>
+    where
+        S: TableProjection,
+        Conn::Backend: crate::SupportsFullJoin,
+    {
+        FullJoinTarget {
             base: self,
             _source: PhantomData,
         }
@@ -5064,6 +5378,78 @@ where
             base: self.base,
             expr: projection,
             source: LeftJoinSource::new(alias, join_on),
+        }
+    }
+}
+
+impl<Base, S> RightJoinTarget<Base, S>
+where
+    S: TableProjection,
+{
+    pub fn on<'conn, 'scope, Conn, P, PredicateAst>(
+        self,
+        on: impl FnOnce(
+            <Base::Exprs as ToTuple>::Tuple,
+            <S as ProjectionShape>::Exprs<'scope>,
+        ) -> Predicate<'scope, P, PredicateAst>,
+    ) -> OuterJoin<
+        Base,
+        <S as ProjectionShape>::Exprs<'scope>,
+        RightJoinSource<'scope, S, P, PredicateAst>,
+    >
+    where
+        Conn: QueryBuilder + 'conn,
+        Base: SelectAst<'conn, 'scope, Conn>,
+        P: PredicateKind,
+        PredicateAst: crate::PredicateAst + crate::NonAggregatePredicate,
+        <S as ProjectionShape>::Exprs<'scope>: Clone,
+    {
+        // The joined table stays non-null (like an inner join); the accumulated base becomes nullable
+        // when `OuterJoin::exprs` nullable-wraps it. The ON predicate references columns by alias, so
+        // it sees the non-null views (nullability only changes the projected/decoded shape).
+        let alias = SourceAlias::new(self.base.depth(), Base::Exprs::LEN);
+        let right = S::exprs(alias);
+        let join_on = on(self.base.exprs().to_tuple(), right.clone());
+        OuterJoin {
+            base: self.base,
+            expr: right,
+            source: RightJoinSource::new(alias, join_on),
+        }
+    }
+}
+
+impl<Base, S> FullJoinTarget<Base, S>
+where
+    S: TableProjection,
+    Maybe<S>: ProjectionShape,
+{
+    pub fn on<'conn, 'scope, Conn, P, PredicateAst>(
+        self,
+        on: impl FnOnce(
+            <Base::Exprs as ToTuple>::Tuple,
+            <S as ProjectionShape>::Exprs<'scope>,
+        ) -> Predicate<'scope, P, PredicateAst>,
+    ) -> OuterJoin<
+        Base,
+        <Maybe<S> as ProjectionShape>::Exprs<'scope>,
+        FullJoinSource<'scope, S, P, PredicateAst>,
+    >
+    where
+        Conn: QueryBuilder + 'conn,
+        Base: SelectAst<'conn, 'scope, Conn>,
+        P: PredicateKind,
+        PredicateAst: crate::PredicateAst + crate::NonAggregatePredicate,
+    {
+        // Both sides nullable: the new table is projected via `Maybe<S>` and the accumulated base is
+        // nullable-wrapped by `OuterJoin::exprs`. (`full_join` is gated to `SupportsFullJoin` backends.)
+        let alias = SourceAlias::new(self.base.depth(), Base::Exprs::LEN);
+        let joined = S::exprs(alias);
+        let projection = Maybe::<S>::exprs(alias);
+        let join_on = on(self.base.exprs().to_tuple(), joined);
+        OuterJoin {
+            base: self.base,
+            expr: projection,
+            source: FullJoinSource::new(alias, join_on),
         }
     }
 }

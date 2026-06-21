@@ -5,10 +5,31 @@ use squealy_test::{
 
 #[derive(Debug, PartialEq, Eq)]
 enum LoweringEvent {
-    Projection { shape: &'static str },
-    Table { table: String, alias: SourceAlias },
-    InnerJoin { table: String, alias: SourceAlias },
-    LeftJoin { table: String, alias: SourceAlias },
+    Projection {
+        shape: &'static str,
+    },
+    Table {
+        table: String,
+        alias: SourceAlias,
+    },
+    InnerJoin {
+        table: String,
+        alias: SourceAlias,
+    },
+    LeftJoin {
+        table: String,
+        alias: SourceAlias,
+    },
+    #[allow(dead_code)]
+    RightJoin {
+        table: String,
+        alias: SourceAlias,
+    },
+    #[allow(dead_code)]
+    FullJoin {
+        table: String,
+        alias: SourceAlias,
+    },
     Filter,
     Group,
     Having,
@@ -78,6 +99,40 @@ impl SelectSink for RecordingSelectSink {
         Ast: RenderPredicateAst<TestBackend>,
     {
         self.events.push(LoweringEvent::LeftJoin {
+            table: S::qualified_name().into_owned(),
+            alias,
+        });
+        Ok(())
+    }
+
+    fn push_right_join<S, P, Ast>(
+        &mut self,
+        alias: SourceAlias,
+        _on: Predicate<'_, P, Ast>,
+    ) -> Result<(), Self::Error>
+    where
+        S: TableProjection,
+        P: PredicateKind,
+        Ast: RenderPredicateAst<TestBackend>,
+    {
+        self.events.push(LoweringEvent::RightJoin {
+            table: S::qualified_name().into_owned(),
+            alias,
+        });
+        Ok(())
+    }
+
+    fn push_full_join<S, P, Ast>(
+        &mut self,
+        alias: SourceAlias,
+        _on: Predicate<'_, P, Ast>,
+    ) -> Result<(), Self::Error>
+    where
+        S: TableProjection,
+        P: PredicateKind,
+        Ast: RenderPredicateAst<TestBackend>,
+    {
+        self.events.push(LoweringEvent::FullJoin {
             table: S::qualified_name().into_owned(),
             alias,
         });
