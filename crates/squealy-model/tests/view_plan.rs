@@ -137,33 +137,34 @@ fn introspected_view(columns: &[&str]) -> ViewModel {
 }
 
 #[test]
-fn introspected_view_with_matching_columns_plans_nothing() {
+fn introspected_view_with_matching_columns_is_replaced_without_drop() {
+    // An introspected view has no comparable body, so the desired definition is re-applied as a safe
+    // CREATE OR REPLACE every run (no drop, since the column set is unchanged) — this is how a
+    // body-only change reaches a live database.
     let desired = model(vec![view("(q0_0.\"id\" > 0)", &["id"])]);
     let actual = model(vec![introspected_view(&["id"])]);
 
-    let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan");
+    // A lone CREATE OR REPLACE is non-destructive, so the default policy allows it.
+    let plan = plan_models(&desired, &actual, DiffPolicy::default()).expect("plan");
 
-    assert!(
-        plan.is_empty(),
-        "an unchanged introspected view must not be recreated: {plan:?}"
-    );
+    assert_eq!(plan.steps.len(), 1, "expected a single replace: {plan:?}");
+    assert!(matches!(plan.steps[0], DatabasePlanStep::CreateView { .. }));
 }
 
 #[test]
-fn introspected_view_nullability_difference_plans_nothing() {
+fn introspected_view_nullability_difference_replaces_without_drop() {
     // Introspected view nullability is unreliable (PostgreSQL `attnotnull` is usually false for view
-    // outputs), so a difference only in nullability must not churn a drop+recreate.
+    // outputs), so a difference only in nullability must not drop+recreate — it is a same-shape view,
+    // so it gets a safe CREATE OR REPLACE.
     let desired = model(vec![view("(q0_0.\"id\" > 0)", &["id"])]);
     let mut actual_view = introspected_view(&["id"]);
     actual_view.columns[0].nullable = !desired.schemas[0].views[0].columns[0].nullable;
     let actual = model(vec![actual_view]);
 
-    let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan");
+    let plan = plan_models(&desired, &actual, DiffPolicy::default()).expect("plan");
 
-    assert!(
-        plan.is_empty(),
-        "an introspected view that differs only in nullability must not be recreated: {plan:?}"
-    );
+    assert_eq!(plan.steps.len(), 1, "expected a single replace: {plan:?}");
+    assert!(matches!(plan.steps[0], DatabasePlanStep::CreateView { .. }));
 }
 
 #[test]

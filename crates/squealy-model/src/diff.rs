@@ -391,28 +391,30 @@ fn diff_views(
             }),
             (Some(desired_view), Some(actual_view)) => {
                 // A live-introspected view carries no structural body (it can't be reconstructed from
-                // the stored SQL), so compare those by columns only — otherwise the empty body would
-                // make every re-introspected view look changed. Per-column nullability is also
-                // unreliable when introspected (e.g. PostgreSQL's `pg_attribute.attnotnull` is usually
-                // false for view outputs even over non-null inputs), and a view's DDL carries no
-                // per-column NOT NULL anyway, so introspected views compare by column name and type
-                // only. Models that carry a body (e.g. from a package) are compared in full.
-                let introspected = actual_view.query == ViewQueryModel::default();
-                let columns_changed = if introspected {
-                    view_columns_differ_ignoring_nullability(
+                // the stored SQL), so its body cannot be compared against the desired one. Rather than
+                // treat a same-shape view as unchanged (which would never re-apply a changed `SELECT`
+                // body), conservatively re-apply the desired definition as a `CREATE OR REPLACE VIEW`
+                // every run — idempotent and non-destructive. The replace can't change the column set,
+                // so a column change still drops first. Per-column nullability is unreliable when
+                // introspected (PostgreSQL's `pg_attribute.attnotnull` is usually false for view
+                // outputs) and a view's DDL carries no per-column NOT NULL, so the column comparison
+                // ignores it. Models that carry a body (e.g. from a package) are compared in full.
+                if actual_view.query == ViewQueryModel::default() {
+                    if view_columns_differ_ignoring_nullability(
                         &desired_view.columns,
                         &actual_view.columns,
-                    )
-                } else {
-                    desired_view.columns != actual_view.columns
-                };
-                let changed = if introspected {
-                    columns_changed
-                } else {
-                    desired_view != actual_view
-                };
-                if changed {
-                    if columns_changed {
+                    ) {
+                        drops.push(DatabaseDiffChange::DropView {
+                            schema: actual.name.clone(),
+                            view: (*actual_view).clone(),
+                        });
+                    }
+                    creates.push(DatabaseDiffChange::CreateView {
+                        schema: desired.name.clone(),
+                        view: (*desired_view).clone(),
+                    });
+                } else if desired_view != actual_view {
+                    if desired_view.columns != actual_view.columns {
                         drops.push(DatabaseDiffChange::DropView {
                             schema: actual.name.clone(),
                             view: (*actual_view).clone(),

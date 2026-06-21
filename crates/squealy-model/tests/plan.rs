@@ -768,9 +768,22 @@ async fn plan_from_database_canonicalizes_view_column_types() {
     .await
     .expect("plan");
 
+    // An introspected view is always re-applied as a safe CREATE OR REPLACE; the point here is that
+    // String/Text being equivalent on this backend keeps it a same-shape replace, not a destructive
+    // drop+recreate from a spurious column-type change.
     assert!(
-        plan.is_empty(),
-        "String/Text are equivalent on this backend; an unchanged view must not churn, got {:?}",
+        !plan
+            .steps
+            .iter()
+            .any(|step| matches!(step, DatabasePlanStep::DropView { .. })),
+        "String/Text are equivalent on this backend; the view must not drop+recreate, got {:?}",
+        plan.steps
+    );
+    assert!(
+        plan.steps
+            .iter()
+            .any(|step| matches!(step, DatabasePlanStep::CreateView { .. })),
+        "expected a CREATE OR REPLACE for the introspected view, got {:?}",
         plan.steps
     );
 }
