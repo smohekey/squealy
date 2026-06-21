@@ -188,6 +188,32 @@ where
         self.push_join::<S, P, Ast>(alias, on, "LEFT JOIN")
     }
 
+    fn push_right_join<S, P, Ast>(
+        &mut self,
+        alias: SourceAlias,
+        on: Predicate<'_, P, Ast>,
+    ) -> io::Result<()>
+    where
+        S: TableProjection,
+        P: PredicateKind,
+        Ast: RenderPredicateAst<crate::TestBackend>,
+    {
+        self.push_join::<S, P, Ast>(alias, on, "RIGHT JOIN")
+    }
+
+    fn push_full_join<S, P, Ast>(
+        &mut self,
+        alias: SourceAlias,
+        on: Predicate<'_, P, Ast>,
+    ) -> io::Result<()>
+    where
+        S: TableProjection,
+        P: PredicateKind,
+        Ast: RenderPredicateAst<crate::TestBackend>,
+    {
+        self.push_join::<S, P, Ast>(alias, on, "FULL JOIN")
+    }
+
     fn push_filter<P, Ast>(&mut self, predicate: Predicate<'_, P, Ast>) -> io::Result<()>
     where
         P: PredicateKind,

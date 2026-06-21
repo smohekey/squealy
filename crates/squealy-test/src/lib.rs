@@ -53,6 +53,9 @@ impl Backend for TestBackend {
 
 // The test backend renders a generic dialect and exercises the returning builders.
 impl SupportsReturning for TestBackend {}
+// Deliberately does NOT implement `SupportsFullJoin` (it stands in for a MySQL-like dialect with no
+// FULL JOIN), so the compile-fail suite can assert `full_join` is gated. `right_join` is ungated and
+// works here; full-join *rendering* is covered by the PostgreSQL backend tests.
 
 impl QueryBuilder for TestConnection {
     type Backend = TestBackend;

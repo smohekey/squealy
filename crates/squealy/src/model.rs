@@ -579,6 +579,8 @@ pub struct JoinItem {
 pub enum JoinKind {
     Inner,
     Left,
+    Right,
+    Full,
 }
 
 /// One `ORDER BY` term in a view body.

@@ -500,6 +500,81 @@ async fn postgres_inner_joins_across_tables() {
 
 #[tokio::test]
 #[ignore]
+async fn postgres_right_and_full_join_nullability() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS join_posts; DROP TABLE IF EXISTS join_users")
+        .await
+        .expect("drop old join tables");
+
+    let ddl_backend = Postgres;
+    create_table::<JoinUser>(&client, &ddl_backend).await;
+    create_table::<JoinPost>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+
+    let ada = connection
+        .to::<JoinUser>()
+        .name("Ada")
+        .insert_returning(|user| user)
+        .fetch_one()
+        .await
+        .expect("insert Ada");
+    connection
+        .to::<JoinUser>()
+        .name("Grace")
+        .insert()
+        .await
+        .expect("insert Grace");
+    connection
+        .to::<JoinPost>()
+        .user_id(ada.id)
+        .title("Notes")
+        .insert()
+        .await
+        .expect("insert post");
+
+    // RIGHT JOIN from posts to users: every user appears; Grace (no post) yields a NULL post title, so
+    // the base (post) side is nullable while the joined (user) side stays non-null.
+    let right: Vec<(String, Option<String>)> = connection
+        .from::<JoinPost>()
+        .right_join::<JoinUser>()
+        .on(|(post,), user| post.user_id.equals(user.id))
+        .order_by(|(_post, user)| user.name.asc())
+        .select(|(post, user)| (user.name, post.title))
+        .collect()
+        .await
+        .expect("right join");
+    assert_eq!(
+        right,
+        vec![
+            ("Ada".to_owned(), Some("Notes".to_owned())),
+            ("Grace".to_owned(), None),
+        ]
+    );
+
+    // FULL JOIN makes BOTH sides nullable, so the user name is now `Option<String>` too.
+    let full: Vec<(Option<String>, Option<String>)> = connection
+        .from::<JoinPost>()
+        .full_join::<JoinUser>()
+        .on(|(post,), user| post.user_id.equals(user.id))
+        .order_by(|(_post, user)| user.name.asc())
+        .select(|(post, user)| (user.name, post.title))
+        .collect()
+        .await
+        .expect("full join");
+    assert_eq!(
+        full,
+        vec![
+            (Some("Ada".to_owned()), Some("Notes".to_owned())),
+            (Some("Grace".to_owned()), None),
+        ]
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn postgres_correlated_exists_and_in_subqueries() {
     let _db_guard = db_lock().lock().await;
     let client = connect().await;

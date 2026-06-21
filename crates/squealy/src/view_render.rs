@@ -167,6 +167,8 @@ fn render_select(
         writer.write_all(match join.kind {
             JoinKind::Inner => b" INNER JOIN ".as_slice(),
             JoinKind::Left => b" LEFT JOIN ".as_slice(),
+            JoinKind::Right => b" RIGHT JOIN ".as_slice(),
+            JoinKind::Full => b" FULL JOIN ".as_slice(),
         })?;
         render_source(&join.source, dialect, writer)?;
         writer.write_all(b" ON ")?;

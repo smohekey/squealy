@@ -154,6 +154,12 @@ pub trait Backend: Sized {
 /// queries at compile time rather than failing at runtime.
 pub trait SupportsReturning: Backend {}
 
+/// Marker for backends whose dialect supports `FULL [OUTER] JOIN` (PostgreSQL). The `full_join`
+/// builder requires it, so a backend that does not implement it (such as MySQL, which has no
+/// `FULL JOIN`) rejects `full_join` at compile time rather than emitting SQL the database can't parse.
+/// `RIGHT JOIN` needs no marker — both backends support it.
+pub trait SupportsFullJoin: Backend {}
+
 /// Backend schema-management capabilities that are supported for full DDL/introspection
 /// round-trips.
 ///

@@ -2812,3 +2812,44 @@ fn postgres_sum_distinct_keeps_cast_around_distinct_call() {
          FROM \"public\".\"users\" AS q0_0"
     );
 }
+
+// Pin a query's decoded row type at compile time (a nullability regression fails the bound).
+fn assert_join_row<'b, 's, Base, Projection, Q, R>(_q: &Q)
+where
+    Q: squealy::SelectQuery<'b, 's, Base, Projection, Row = R>,
+    Base: squealy::SelectAst<'b, 's, Q::Builder>,
+    Projection: squealy::Projectable,
+{
+}
+
+#[test]
+fn postgres_right_join_renders_right_join() {
+    let q = Postgres
+        .from::<User>()
+        .right_join::<Post>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .select(|(user, post)| (user.id, post.id));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.\"id\" AS \"t0_id\", q0_1.\"id\" AS \"t1_id\" FROM \"public\".\"users\" AS q0_0 \
+         RIGHT JOIN \"public\".\"posts\" AS q0_1 ON (q0_1.\"user_id\" = q0_0.\"id\")"
+    );
+    // Base (`user.id`) becomes nullable; the joined table (`post.id`) stays non-null.
+    assert_join_row::<_, _, _, (Option<i32>, i32)>(&q);
+}
+
+#[test]
+fn postgres_full_join_renders_full_join() {
+    let q = Postgres
+        .from::<User>()
+        .full_join::<Post>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .select(|(user, post)| (user.id, post.id));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.\"id\" AS \"t0_id\", q0_1.\"id\" AS \"t1_id\" FROM \"public\".\"users\" AS q0_0 \
+         FULL JOIN \"public\".\"posts\" AS q0_1 ON (q0_1.\"user_id\" = q0_0.\"id\")"
+    );
+    // Both sides nullable.
+    assert_join_row::<_, _, _, (Option<i32>, Option<i32>)>(&q);
+}

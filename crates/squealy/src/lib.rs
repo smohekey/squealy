@@ -461,7 +461,7 @@ pub use backend::{
     Backend, ConstraintCapabilities, DdlExecutor, Decode, DecodeNullable, Encode,
     IndexCapabilities, ParamWriter, RowReader, SchemaBackend, SchemaCapabilities, SchemaConnect,
     SchemaIntrospect, SchemaMetadataStore, SchemaPublishHistoryStore, SchemaPublishRecord,
-    SchemaRefactorStore, SupportsReturning,
+    SchemaRefactorStore, SupportsFullJoin, SupportsReturning,
 };
 pub use column::{
     Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullability,
@@ -500,8 +500,8 @@ pub use expr::{
 pub use foreign_key::ForeignKey;
 pub use index::Index;
 pub use list::{
-    FixedList, HAppend, HCons, HList, HNil, IntoPreparedParam, MapFixedList, NoRuntimeParams,
-    PreparedParamValues, PushBack, ToTuple, TupleAppend, TupleConcat,
+    FixedList, HAppend, HCons, HList, HNil, IntoNullableExprs, IntoPreparedParam, MapFixedList,
+    NoRuntimeParams, PreparedParamValues, PushBack, ToTuple, TupleAppend, TupleConcat,
 };
 pub use model::{
     CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintEnforcement,
@@ -520,20 +520,21 @@ pub use query::{
     ColumnKey, DefaultAssignmentValue, DefaultValueNode, DeleteQuery, DeleteSourceAst,
     DeleteSourceQuery, Distinct, ExecutableDeleteQuery, ExecutableInsertQuery,
     ExecutableSelectQuery, ExecutableUpdateQuery, ExplicitUpdateBuilder, ExprAssignmentValue, From,
-    InnerJoinSource, InsertAssignment, InsertAssignmentNode, InsertAssignments, InsertColumnKey,
-    InsertColumnNullability, InsertColumnValues, InsertQuery, InsertReady, InsertRow,
-    InsertRowVisitor, InsertRows, InsertRowsBuilder, IntoAssignmentValue, IntoInsertColumnValue,
-    IntoNullableAssignmentValue, IntoUpdateColumnValue, IsNullable, Join, JoinTarget, LeftJoin,
-    LeftJoinSource, LeftJoinTarget, Limited, MutationFiltered, MutationUnfiltered, NoSources,
-    NonEmptyInsertRows, NonNullableColumn, NullableColumn, Offset, OrderBy, PredicateNodes,
-    PredicateVisitor, PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery,
-    PreparableUpdateQuery, PreparedMutationQuery, PreparedSelectQuery, RenderAssignment,
-    RenderAssignmentValue, RenderInsertAssignments, RenderInsertRows, RenderPredicateNodes,
-    RenderSelectAst, RenderSourceSpec, RenderSubquery, RenderUpdateAssignments,
-    ReturningProjection, RootSource, RowsAffected, RuntimeAssignmentValue, ScalarSubquery,
-    SelectAst, SelectQuery, SelectSink, Selected, SourceQuery, SourceSpec, StaticAssignmentValue,
-    Subqueries, Subquery, SubquerySelect, ToColumns, UpdateAssignment, UpdateAssignmentNode,
-    UpdateAssignments, UpdateColumnKey, UpdateColumnValues, UpdateQuery, Where, default,
+    FullJoinSource, FullJoinTarget, InnerJoinSource, InsertAssignment, InsertAssignmentNode,
+    InsertAssignments, InsertColumnKey, InsertColumnNullability, InsertColumnValues, InsertQuery,
+    InsertReady, InsertRow, InsertRowVisitor, InsertRows, InsertRowsBuilder, IntoAssignmentValue,
+    IntoInsertColumnValue, IntoNullableAssignmentValue, IntoUpdateColumnValue, IsNullable, Join,
+    JoinTarget, LeftJoin, LeftJoinSource, LeftJoinTarget, Limited, MutationFiltered,
+    MutationUnfiltered, NoSources, NonEmptyInsertRows, NonNullableColumn, NullableColumn, Offset,
+    OrderBy, OuterJoin, PredicateNodes, PredicateVisitor, PreparableDeleteQuery,
+    PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery, PreparedMutationQuery,
+    PreparedSelectQuery, RenderAssignment, RenderAssignmentValue, RenderInsertAssignments,
+    RenderInsertRows, RenderPredicateNodes, RenderSelectAst, RenderSourceSpec, RenderSubquery,
+    RenderUpdateAssignments, ReturningProjection, RightJoinSource, RightJoinTarget, RootSource,
+    RowsAffected, RuntimeAssignmentValue, ScalarSubquery, SelectAst, SelectQuery, SelectSink,
+    Selected, SourceQuery, SourceSpec, StaticAssignmentValue, Subqueries, Subquery, SubquerySelect,
+    ToColumns, UpdateAssignment, UpdateAssignmentNode, UpdateAssignments, UpdateColumnKey,
+    UpdateColumnValues, UpdateQuery, Where, default,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{ColumnType, Database, Schema, Table, View};

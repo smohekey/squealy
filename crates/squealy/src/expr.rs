@@ -2863,6 +2863,19 @@ where
         Expr::column_with_project_alias(self.alias, self.column, self.project_alias)
     }
 
+    /// Re-type this column reference as nullable (`ColumnRef<Nullable<K>>`), preserving alias, column,
+    /// and project alias. Used to nullable-wrap the accumulated base columns when building a
+    /// `RIGHT`/`FULL JOIN` (the kind is purely phantom, so this is a no-op rewrap).
+    #[doc(hidden)]
+    pub fn into_nullable(self) -> ColumnRef<'scope, Nullable<K>> {
+        ColumnRef {
+            alias: self.alias,
+            column: self.column,
+            project_alias: self.project_alias,
+            _phantom: PhantomData,
+        }
+    }
+
     #[doc(hidden)]
     pub fn visit<V>(self, visitor: &mut V) -> Result<(), V::Error>
     where

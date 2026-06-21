@@ -1500,3 +1500,71 @@ fn test_distinct_inside_subquery() {
          q1_0.user_id AS user_id FROM posts AS q1_0))"
     );
 }
+
+// Pin a query's decoded row type at compile time (a nullability regression fails the bound).
+fn assert_row<'b, 's, Base, Projection, Q, R>(_q: &Q)
+where
+    Q: SelectQuery<'b, 's, Base, Projection, Row = R>,
+    Base: SelectAst<'b, 's, Q::Builder>,
+    Projection: Projectable,
+{
+}
+
+#[test]
+fn test_right_join_makes_base_nullable() {
+    // RIGHT JOIN: the joined table (Post) stays non-null; the accumulated base (User) becomes nullable.
+    let q = TestConnection
+        .from::<User>()
+        .right_join::<Post>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .select(|(user, post)| (user.id, post.id));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS t0_id, q0_1.id AS t1_id FROM public.users AS q0_0 \
+         RIGHT JOIN posts AS q0_1 ON (q0_1.user_id = q0_0.id)"
+    );
+    // Base `user.id` decodes `Option<i32>`; joined `post.id` stays `i32`.
+    assert_row::<_, _, _, (Option<i32>, i32)>(&q);
+}
+
+// (FULL JOIN is gated to `SupportsFullJoin` backends, which `TestBackend` is not — see the
+// `full_join_rejected_without_capability` compile-fail case. Full-join rendering/nullability is
+// covered by the PostgreSQL backend tests.)
+
+#[test]
+fn test_right_join_flattens_already_nullable_base_column() {
+    // A base column already declared `Option<T>` (`Event::label`) must stay a single `Option<T>` after
+    // the right-join nullable-wrap, not become `Option<Option<T>>`. This holds because a column kind's
+    // `Value` is the inner non-null type, so `Nullable<K>` adds exactly one `Option` layer.
+    let q = TestConnection
+        .from::<Event>()
+        .right_join::<Post>()
+        .on(|(event,), post| post.id.equals(event.id))
+        .select(|(event, post)| (event.label, post.id));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.label AS t0_label, q0_1.id AS t1_id FROM events AS q0_0 \
+         RIGHT JOIN posts AS q0_1 ON (q0_1.id = q0_0.id)"
+    );
+    // `event.label` decodes `Option<String>` (one layer), `post.id` stays `i32`.
+    assert_row::<_, _, _, (Option<String>, i32)>(&q);
+}
+
+#[test]
+fn test_right_join_then_inner_join_keeps_earlier_base_nullable() {
+    // A later inner join does not un-nullable the already-right-joined base; the new table is non-null.
+    let q = TestConnection
+        .from::<User>()
+        .right_join::<Post>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .join::<Comment>()
+        .on(|(_user, post), comment| comment.post_id.equals(post.id))
+        .select(|(user, post, comment)| (user.id, post.id, comment.id));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS t0_id, q0_1.id AS t1_id, q0_2.id AS t2_id FROM public.users AS q0_0 \
+         RIGHT JOIN posts AS q0_1 ON (q0_1.user_id = q0_0.id) \
+         INNER JOIN comments AS q0_2 ON (q0_2.post_id = q0_1.id)"
+    );
+    assert_row::<_, _, _, (Option<i32>, i32, i32)>(&q);
+}

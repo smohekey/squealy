@@ -508,6 +508,8 @@ fn view_query_to_node(query: &ViewQueryModel) -> KdlNode {
         let kind = match join.kind {
             JoinKind::Inner => "inner",
             JoinKind::Left => "left",
+            JoinKind::Right => "right",
+            JoinKind::Full => "full",
         };
         let mut node = view_source_to_node("join", &join.source, Some(kind));
         // The join's single child is the `ON` predicate.
@@ -1242,6 +1244,8 @@ fn view_source_from_node(node: &KdlNode) -> Result<SourceRef, PackageError> {
 fn view_join_from_node(node: &KdlNode) -> Result<JoinItem, PackageError> {
     let kind = match prop(node, "kind") {
         Some("left") => JoinKind::Left,
+        Some("right") => JoinKind::Right,
+        Some("full") => JoinKind::Full,
         _ => JoinKind::Inner,
     };
     Ok(JoinItem {
@@ -2115,19 +2119,47 @@ mod tests {
                             name: "memberships".to_owned(),
                             alias: "q0_0".to_owned(),
                         }),
-                        joins: vec![JoinItem {
-                            kind: JoinKind::Left,
-                            source: SourceRef {
-                                schema: Some("public".to_owned()),
-                                name: "orgs".to_owned(),
-                                alias: "q0_1".to_owned(),
+                        joins: vec![
+                            JoinItem {
+                                kind: JoinKind::Left,
+                                source: SourceRef {
+                                    schema: Some("public".to_owned()),
+                                    name: "orgs".to_owned(),
+                                    alias: "q0_1".to_owned(),
+                                },
+                                on: ExprNode::Compare {
+                                    op: CompareOp::Equals,
+                                    left: Box::new(col("q0_0", "org_id")),
+                                    right: Box::new(col("q0_1", "id")),
+                                },
                             },
-                            on: ExprNode::Compare {
-                                op: CompareOp::Equals,
-                                left: Box::new(col("q0_0", "org_id")),
-                                right: Box::new(col("q0_1", "id")),
+                            JoinItem {
+                                kind: JoinKind::Right,
+                                source: SourceRef {
+                                    schema: Some("public".to_owned()),
+                                    name: "teams".to_owned(),
+                                    alias: "q0_2".to_owned(),
+                                },
+                                on: ExprNode::Compare {
+                                    op: CompareOp::Equals,
+                                    left: Box::new(col("q0_0", "team_id")),
+                                    right: Box::new(col("q0_2", "id")),
+                                },
                             },
-                        }],
+                            JoinItem {
+                                kind: JoinKind::Full,
+                                source: SourceRef {
+                                    schema: Some("public".to_owned()),
+                                    name: "regions".to_owned(),
+                                    alias: "q0_3".to_owned(),
+                                },
+                                on: ExprNode::Compare {
+                                    op: CompareOp::Equals,
+                                    left: Box::new(col("q0_0", "region_id")),
+                                    right: Box::new(col("q0_3", "id")),
+                                },
+                            },
+                        ],
                         // `(deleted_at IS NOT NULL) AND active` exercises Logical + IsNull.
                         filter: Some(ExprNode::Logical {
                             op: LogicalOp::And,
