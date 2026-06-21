@@ -1,1 +1,1 @@
-{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":2,"timestamp":1782079249,"nonce":"KO9q+FR7V1468Xbhu4ad3vLpD1I=","title":"Table derive: bytes::Bytes column binding (feature-gated)","was":"**Summary**"}]}
+{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":5,"timestamp":1782079250,"nonce":"gmlGzF1hr9SssPG3rRl7ZdiNplY=","added":["roadmap","table-derive"],"removed":null}]}
