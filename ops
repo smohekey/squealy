@@ -1,1 +1,1 @@
-{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":2,"timestamp":1782079249,"nonce":"9qZ/wHWMnTYDW2tUglR6sKrAONo=","title":"Table derive: fixed-size [u8; N] (BINARY) column binding","was":"**Summary**"}]}
+{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":5,"timestamp":1782079250,"nonce":"cZ2TgCo4R/+v0PA4DgK3Sbi2oZU=","added":["roadmap","table-derive"],"removed":null}]}
