@@ -9,7 +9,7 @@ use std::io::{self, Write};
 
 use crate::{
     AggregateFunc, ArithmeticOp, DatabaseModel, Dialect, ExprNode, JoinKind, LogicalOp,
-    OrderDirection, OrderNulls, SourceRef, SqlType, ViewModel, ViewQueryModel, WindowFunc,
+    OrderDirection, SourceRef, SqlType, ViewModel, ViewQueryModel, WindowFunc,
 };
 
 /// Renders `CREATE [OR REPLACE] VIEW <qualified> [(<cols>)] AS <select>` for the given dialect.
@@ -178,10 +178,8 @@ fn render_select(
             Some(OrderDirection::Desc) => writer.write_all(b" DESC")?,
             None => {}
         }
-        match order.nulls {
-            Some(OrderNulls::First) => writer.write_all(b" NULLS FIRST")?,
-            Some(OrderNulls::Last) => writer.write_all(b" NULLS LAST")?,
-            None => {}
+        if let Some(nulls) = order.nulls {
+            dialect.write_order_nulls(nulls, writer)?;
         }
     }
 

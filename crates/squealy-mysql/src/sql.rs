@@ -803,6 +803,16 @@ impl squealy::Dialect for MysqlDialect {
         // MySQL's empty-row insert form; `DEFAULT VALUES` is PostgreSQL-only.
         writer.write_all(b" () VALUES ()")
     }
+
+    fn write_order_nulls(
+        &self,
+        _nulls: squealy::OrderNulls,
+        _writer: &mut dyn Write,
+    ) -> io::Result<()> {
+        // MySQL has no `NULLS FIRST`/`NULLS LAST` modifier, so a view carrying one drops it here
+        // rather than emitting syntax MySQL rejects.
+        Ok(())
+    }
 }
 
 fn write_quoted_text(value: &str, writer: &mut impl Write) -> io::Result<()> {

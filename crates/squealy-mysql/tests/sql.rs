@@ -1491,3 +1491,65 @@ fn mysql_renders_view_expression_ir_in_its_dialect() {
         "MySQL aggregate cast missing: {sql}"
     );
 }
+
+// MySQL has no `NULLS FIRST`/`NULLS LAST` syntax, so a view body carrying an explicit null ordering
+// (e.g. from a package or hand-built model) must render without it rather than emitting invalid DDL.
+#[test]
+fn mysql_view_order_by_drops_nulls_modifier() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: vec![ViewModel {
+                name: "ranked".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "id".to_owned(),
+                    ty: SqlType::I32,
+                    nullable: true,
+                }],
+                query: ViewQueryModel {
+                    projection: vec![ProjectionItem {
+                        output_name: "id".to_owned(),
+                        expr: ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: "id".to_owned(),
+                        },
+                    }],
+                    from: Some(SourceRef {
+                        schema: Some("app".to_owned()),
+                        name: "events".to_owned(),
+                        alias: "q0_0".to_owned(),
+                    }),
+                    joins: Vec::new(),
+                    filter: None,
+                    group_by: Vec::new(),
+                    having: None,
+                    order_by: vec![OrderItem {
+                        expr: ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: "id".to_owned(),
+                        },
+                        direction: Some(OrderDirection::Desc),
+                        nulls: Some(OrderNulls::Last),
+                    }],
+                    limit: None,
+                    offset: None,
+                },
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains("ORDER BY q0_0.`id` DESC"),
+        "expected ORDER BY direction: {sql}"
+    );
+    assert!(
+        !sql.to_uppercase().contains("NULLS"),
+        "MySQL must not emit a NULLS modifier: {sql}"
+    );
+}

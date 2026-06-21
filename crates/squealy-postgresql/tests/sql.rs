@@ -2612,3 +2612,61 @@ fn postgres_window_functions_render_with_numbered_placeholders() {
         "{summed_sql}"
     );
 }
+
+// PostgreSQL supports `NULLS FIRST`/`NULLS LAST`, so a view body carrying an explicit null ordering
+// renders it (the counterpart to MySQL dropping it).
+#[test]
+fn postgres_view_order_by_keeps_nulls_modifier() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("public".to_owned()),
+            tables: Vec::new(),
+            views: vec![ViewModel {
+                name: "ranked".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "id".to_owned(),
+                    ty: SqlType::I32,
+                    nullable: true,
+                }],
+                query: ViewQueryModel {
+                    projection: vec![ProjectionItem {
+                        output_name: "id".to_owned(),
+                        expr: ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: "id".to_owned(),
+                        },
+                    }],
+                    from: Some(SourceRef {
+                        schema: Some("public".to_owned()),
+                        name: "events".to_owned(),
+                        alias: "q0_0".to_owned(),
+                    }),
+                    joins: Vec::new(),
+                    filter: None,
+                    group_by: Vec::new(),
+                    having: None,
+                    order_by: vec![OrderItem {
+                        expr: ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: "id".to_owned(),
+                        },
+                        direction: Some(OrderDirection::Desc),
+                        nulls: Some(OrderNulls::Last),
+                    }],
+                    limit: None,
+                    offset: None,
+                },
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains("ORDER BY q0_0.\"id\" DESC NULLS LAST"),
+        "expected NULLS LAST in PG view: {sql}"
+    );
+}
