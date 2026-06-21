@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, ForeignKeyModel, IndexModel, SchemaModel,
-    TableModel, ViewModel,
+    TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
 };
 
 /// The structured diff from an actual database model to a desired database model.
@@ -389,19 +389,44 @@ fn diff_views(
                 schema: actual.name.clone(),
                 view: (*actual_view).clone(),
             }),
-            (Some(desired_view), Some(actual_view)) if desired_view != actual_view => {
-                if desired_view.columns != actual_view.columns {
-                    drops.push(DatabaseDiffChange::DropView {
-                        schema: actual.name.clone(),
-                        view: (*actual_view).clone(),
+            (Some(desired_view), Some(actual_view)) => {
+                // A live-introspected view carries no structural body (it can't be reconstructed from
+                // the stored SQL), so its body cannot be compared against the desired one. Rather than
+                // treat a same-shape view as unchanged (which would never re-apply a changed `SELECT`
+                // body), conservatively re-apply the desired definition as a `CREATE OR REPLACE VIEW`
+                // every run — idempotent and non-destructive. The replace can't change the column set,
+                // so a column change still drops first. Per-column nullability is unreliable when
+                // introspected (PostgreSQL's `pg_attribute.attnotnull` is usually false for view
+                // outputs) and a view's DDL carries no per-column NOT NULL, so the column comparison
+                // ignores it. Models that carry a body (e.g. from a package) are compared in full.
+                if actual_view.query == ViewQueryModel::default() {
+                    if view_columns_differ_ignoring_nullability(
+                        &desired_view.columns,
+                        &actual_view.columns,
+                    ) {
+                        drops.push(DatabaseDiffChange::DropView {
+                            schema: actual.name.clone(),
+                            view: (*actual_view).clone(),
+                        });
+                    }
+                    creates.push(DatabaseDiffChange::CreateView {
+                        schema: desired.name.clone(),
+                        view: (*desired_view).clone(),
+                    });
+                } else if desired_view != actual_view {
+                    if desired_view.columns != actual_view.columns {
+                        drops.push(DatabaseDiffChange::DropView {
+                            schema: actual.name.clone(),
+                            view: (*actual_view).clone(),
+                        });
+                    }
+                    creates.push(DatabaseDiffChange::CreateView {
+                        schema: desired.name.clone(),
+                        view: (*desired_view).clone(),
                     });
                 }
-                creates.push(DatabaseDiffChange::CreateView {
-                    schema: desired.name.clone(),
-                    view: (*desired_view).clone(),
-                });
             }
-            _ => {}
+            (None, None) => {}
         }
     }
 
@@ -415,6 +440,19 @@ fn diff_views(
         std::cmp::Reverse(dependency_rank(&actual_order, view_change_name(change)))
     });
     (drops, creates)
+}
+
+/// Whether two view column lists differ in name or type, ignoring per-column nullability. Used when
+/// one side was introspected, where nullability is unreliable (and a view's DDL carries none anyway).
+fn view_columns_differ_ignoring_nullability(
+    desired: &[ViewColumnModel],
+    actual: &[ViewColumnModel],
+) -> bool {
+    desired.len() != actual.len()
+        || desired
+            .iter()
+            .zip(actual)
+            .any(|(desired, actual)| desired.name != actual.name || desired.ty != actual.ty)
 }
 
 /// The view's name from a `CreateView`/`DropView` change.

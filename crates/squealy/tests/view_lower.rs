@@ -39,24 +39,30 @@ fn lowers_filtered_projection_with_inlined_literals() {
     // Two projected columns. `output_name` is the builder's SELECT alias; a view's public column
     // names come from its declared `ViewColumnModel`, applied as an explicit column list in the DDL.
     assert_eq!(model.projection.len(), 2);
-    assert!(model.projection[0].expr.0.contains("\"id\""));
-    assert!(model.projection[1].expr.0.contains("\"name\""));
+    assert!(matches!(&model.projection[0].expr, ExprNode::Column { column, .. } if column == "id"));
+    assert!(
+        matches!(&model.projection[1].expr, ExprNode::Column { column, .. } if column == "name")
+    );
 
     let from = model.from.expect("a FROM source");
     assert_eq!(from.schema.as_deref(), Some("public"));
     assert_eq!(from.name, "users");
 
-    // The `true` literal is inlined (no `$1`/`?` placeholder) and the filter references the alias.
-    let filter = model.filter.expect("a WHERE filter").0;
-    assert!(filter.contains("TRUE"), "literal not inlined: {filter}");
-    assert!(
-        filter.contains(&format!("{}.\"active\"", from.alias)),
-        "filter does not reference the source alias: {filter}"
-    );
-    assert!(
-        !filter.contains('$') && !filter.contains('?'),
-        "view body must not contain bind placeholders: {filter}"
-    );
+    // The filter is `active = TRUE` structurally: the column references the source alias and the `true`
+    // literal is inlined as `TRUE` (no bind placeholder, just a `Literal` node).
+    match model.filter.expect("a WHERE filter") {
+        ExprNode::Compare {
+            op: CompareOp::Equals,
+            left,
+            right,
+        } => {
+            assert!(
+                matches!(*left, ExprNode::Column { ref alias, ref column } if *alias == from.alias && column == "active")
+            );
+            assert_eq!(*right, ExprNode::Literal("TRUE".to_owned()));
+        }
+        other => panic!("unexpected filter: {other:?}"),
+    }
 }
 
 #[test]
@@ -71,10 +77,26 @@ fn lowers_group_by_having_and_aggregate() {
     let model = lower_view(&query);
 
     assert_eq!(model.group_by.len(), 1);
-    assert!(model.group_by[0].0.contains("\"name\""));
-    let having = model.having.expect("a HAVING clause").0;
-    assert!(having.contains("COUNT"), "aggregate not rendered: {having}");
-    assert!(having.contains('1'), "literal not inlined: {having}");
+    assert!(matches!(&model.group_by[0], ExprNode::Column { column, .. } if column == "name"));
+
+    // HAVING is `COUNT(id) > 1`: a comparison of an aggregate against an inlined `1` literal.
+    match model.having.expect("a HAVING clause") {
+        ExprNode::Compare {
+            op: CompareOp::GreaterThan,
+            left,
+            right,
+        } => {
+            assert!(matches!(
+                *left,
+                ExprNode::Aggregate {
+                    func: AggregateFunc::Count,
+                    ..
+                }
+            ));
+            assert_eq!(*right, ExprNode::Literal("1".to_owned()));
+        }
+        other => panic!("unexpected having: {other:?}"),
+    }
 }
 
 #[test]
@@ -102,12 +124,16 @@ fn lowers_distinct_select_and_count_distinct() {
         "select-level distinct must not be set for a plain count(distinct) view"
     );
     assert!(
-        counted_model.projection[0]
-            .expr
-            .0
-            .contains("COUNT(DISTINCT "),
-        "count distinct not rendered in view body: {}",
-        counted_model.projection[0].expr.0
+        matches!(
+            &counted_model.projection[0].expr,
+            ExprNode::Aggregate {
+                func: AggregateFunc::Count,
+                distinct: true,
+                ..
+            }
+        ),
+        "count(distinct) not captured in view body: {:?}",
+        counted_model.projection[0].expr
     );
 }
 
@@ -188,6 +214,43 @@ fn view_definition_walks_into_a_view_model() {
 
     let query = view.definition_model();
     assert_eq!(query.projection.len(), 2);
-    let filter = query.filter.expect("WHERE").0;
-    assert!(filter.contains("TRUE"), "literal not inlined: {filter}");
+    assert!(matches!(
+        query.filter.expect("WHERE"),
+        ExprNode::Compare {
+            op: CompareOp::Equals,
+            ..
+        }
+    ));
+}
+
+// A window function lowers into a structural `ExprNode::Window`, with its partition/order lists and
+// direction captured (so it can be rendered per-dialect).
+#[test]
+fn lowers_window_function() {
+    let conn = ModelConn;
+    let query = conn.from::<User>().project(|(user,)| {
+        row_number().over(|w| w.partition_by(user.name).order_by(user.id.asc()))
+    });
+
+    let model = lower_view(&query);
+
+    assert_eq!(model.projection.len(), 1);
+    match &model.projection[0].expr {
+        ExprNode::Window {
+            func,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            assert!(matches!(func, WindowFunc::RowNumber));
+            assert_eq!(partition_by.len(), 1);
+            assert!(
+                matches!(&partition_by[0], ExprNode::Column { column, .. } if column == "name")
+            );
+            assert_eq!(order_by.len(), 1);
+            assert!(matches!(&order_by[0].expr, ExprNode::Column { column, .. } if column == "id"));
+            assert!(matches!(order_by[0].direction, OrderDirection::Asc));
+        }
+        other => panic!("expected a window node, got {other:?}"),
+    }
 }

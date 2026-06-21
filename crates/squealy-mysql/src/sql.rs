@@ -9,8 +9,8 @@ use std::io::{self, Write};
 
 use squealy::{
     CheckModel, ColumnDefault, ColumnModel, DatabaseModel, DatabasePlan, DatabasePlanStep,
-    DefaultValue, ForeignKeyModel, GeneratedStorage, IndexModel, JoinKind, OrderDirection,
-    SourceRef, SqlType, Table, TableModel, TablePlanStep, ViewModel, ViewQueryModel,
+    DefaultValue, ForeignKeyModel, GeneratedStorage, IndexModel, SqlType, Table, TableModel,
+    TablePlanStep,
 };
 
 /// Renders ordered create-from-scratch DDL for a whole model. Statements are `;`-terminated and
@@ -54,230 +54,13 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
 
     // Views are created last (all tables exist) and in dependency order so a view that selects from
     // another view follows it.
-    for (schema_name, view) in ordered_views(model) {
+    for (schema_name, view) in squealy::ordered_views(model) {
         statement(writer, &mut first)?;
-        write_create_view(schema_name, view, false, writer)?;
+        squealy::render_create_view(schema_name, view, false, &MysqlDialect, writer)?;
     }
 
     if !first {
         writer.write_all(b";")?;
-    }
-    Ok(())
-}
-
-/// Orders every view so a view is emitted after any other view it selects from. Dependencies on
-/// tables are ignored because all tables are created before any view; reference cycles fall back to
-/// declaration order.
-fn ordered_views(model: &DatabaseModel) -> Vec<(Option<&str>, &ViewModel)> {
-    let views: Vec<(Option<&str>, &ViewModel)> = model
-        .schemas
-        .iter()
-        .flat_map(|schema| {
-            schema
-                .views
-                .iter()
-                .map(move |view| (schema.name.as_deref(), view))
-        })
-        .collect();
-
-    let index_of = |schema: Option<&str>, name: &str| {
-        views
-            .iter()
-            .position(|(s, v)| *s == schema && v.name == name)
-    };
-
-    let mut ordered = Vec::with_capacity(views.len());
-    let mut visited = vec![false; views.len()];
-
-    fn visit<'a>(
-        current: usize,
-        views: &[(Option<&'a str>, &'a ViewModel)],
-        visited: &mut [bool],
-        ordered: &mut Vec<(Option<&'a str>, &'a ViewModel)>,
-        index_of: &impl Fn(Option<&str>, &str) -> Option<usize>,
-    ) {
-        if visited[current] {
-            return;
-        }
-        visited[current] = true;
-        let (schema, view) = views[current];
-        for source in view.referenced_sources() {
-            let dep_schema = source.schema.as_deref().or(schema);
-            if let Some(dep) = index_of(dep_schema, &source.name)
-                && dep != current
-            {
-                visit(dep, views, visited, ordered, index_of);
-            }
-        }
-        ordered.push((schema, view));
-    }
-
-    for current in 0..views.len() {
-        visit(current, &views, &mut visited, &mut ordered, &index_of);
-    }
-
-    ordered
-}
-
-/// Renders `CREATE VIEW <qualified> AS <select>` from a view's structural body.
-///
-/// Structural identifiers (schema/table/alias, output column names) are quoted with MySQL backticks.
-/// The inner scalar expressions are the canonical model fragments, which quote identifiers with ANSI
-/// double quotes; [`write_fragment`] re-quotes those to backticks (leaving single-quoted string
-/// literals untouched) so the statement runs on a default connection without `ANSI_QUOTES`.
-fn write_create_view(
-    schema: Option<&str>,
-    view: &ViewModel,
-    or_replace: bool,
-    writer: &mut impl Write,
-) -> io::Result<()> {
-    writer.write_all(if or_replace {
-        b"CREATE OR REPLACE VIEW ".as_slice()
-    } else {
-        b"CREATE VIEW ".as_slice()
-    })?;
-    write_qualified_name(schema, &view.name, writer)?;
-    // The declared columns name the view's outputs positionally; fall back to the SELECT aliases for
-    // hand-built models without declared columns.
-    if !view.columns.is_empty() {
-        writer.write_all(b" (")?;
-        for (index, column) in view.columns.iter().enumerate() {
-            if index > 0 {
-                writer.write_all(b", ")?;
-            }
-            write_quoted_ident(&column.name, writer)?;
-        }
-        writer.write_all(b")")?;
-    }
-    writer.write_all(b" AS ")?;
-    write_view_query(&view.query, view.columns.is_empty(), writer)
-}
-
-fn write_view_query(
-    query: &ViewQueryModel,
-    alias_projections: bool,
-    writer: &mut impl Write,
-) -> io::Result<()> {
-    writer.write_all(b"SELECT ")?;
-    if query.distinct {
-        writer.write_all(b"DISTINCT ")?;
-    }
-    for (index, item) in query.projection.iter().enumerate() {
-        if index > 0 {
-            writer.write_all(b", ")?;
-        }
-        write_fragment(&item.expr.0, writer)?;
-        if alias_projections {
-            writer.write_all(b" AS ")?;
-            write_quoted_ident(&item.output_name, writer)?;
-        }
-    }
-
-    if let Some(from) = &query.from {
-        writer.write_all(b" FROM ")?;
-        write_view_source(from, writer)?;
-    }
-
-    for join in &query.joins {
-        match join.kind {
-            JoinKind::Inner => writer.write_all(b" INNER JOIN ")?,
-            JoinKind::Left => writer.write_all(b" LEFT JOIN ")?,
-            JoinKind::Right => writer.write_all(b" RIGHT JOIN ")?,
-            // MySQL has no FULL JOIN; a full-join view is Postgres-targeted (see `full_join`). Rendered
-            // for completeness — deploying it to MySQL fails at DDL exec.
-            JoinKind::Full => writer.write_all(b" FULL JOIN ")?,
-        }
-        write_view_source(&join.source, writer)?;
-        writer.write_all(b" ON ")?;
-        write_fragment(&join.on.0, writer)?;
-    }
-
-    if let Some(filter) = &query.filter {
-        writer.write_all(b" WHERE ")?;
-        write_fragment(&filter.0, writer)?;
-    }
-
-    for (index, key) in query.group_by.iter().enumerate() {
-        writer.write_all(if index == 0 { b" GROUP BY " } else { b", " })?;
-        write_fragment(&key.0, writer)?;
-    }
-
-    if let Some(having) = &query.having {
-        writer.write_all(b" HAVING ")?;
-        write_fragment(&having.0, writer)?;
-    }
-
-    for (index, order) in query.order_by.iter().enumerate() {
-        writer.write_all(if index == 0 { b" ORDER BY " } else { b", " })?;
-        write_fragment(&order.expr.0, writer)?;
-        match order.direction {
-            Some(OrderDirection::Asc) => writer.write_all(b" ASC")?,
-            Some(OrderDirection::Desc) => writer.write_all(b" DESC")?,
-            None => {}
-        }
-        // MySQL has no `NULLS FIRST/LAST`; its `NULL`s sort first ascending. The neutral ordering is
-        // emitted only when a backend supports it, so any `nulls` hint is dropped here.
-        let _ = order.nulls;
-    }
-
-    if let Some(limit) = query.limit {
-        write!(writer, " LIMIT {limit}")?;
-    }
-    if let Some(offset) = query.offset {
-        write!(writer, " OFFSET {offset}")?;
-    }
-
-    Ok(())
-}
-
-/// Writes a `<qualified> AS <alias>` source. The alias is emitted unquoted to match the canonical
-/// expression fragments, which qualify columns with the bare alias (e.g. `q0_0."id"`).
-fn write_view_source(source: &SourceRef, writer: &mut impl Write) -> io::Result<()> {
-    write_qualified_name(source.schema.as_deref(), &source.name, writer)?;
-    write!(writer, " AS {}", source.alias)
-}
-
-/// Writes a canonical expression fragment in MySQL syntax by re-quoting identifiers from ANSI double
-/// quotes to backticks. Single-quoted string literals are copied verbatim (so a `"` inside a string is
-/// left alone), `""` inside an identifier is un-doubled, and any literal backtick is re-escaped — so
-/// the result is valid MySQL without relying on `ANSI_QUOTES`.
-fn write_fragment(fragment: &str, writer: &mut impl Write) -> io::Result<()> {
-    let mut chars = fragment.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            // String literal: copy through to the closing quote, preserving `''` escapes.
-            '\'' => {
-                writer.write_all(b"'")?;
-                while let Some(c) = chars.next() {
-                    write!(writer, "{c}")?;
-                    if c == '\'' {
-                        if chars.peek() == Some(&'\'') {
-                            writer.write_all(b"'")?;
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-            // ANSI-quoted identifier: re-emit delimited by backticks.
-            '"' => {
-                writer.write_all(b"`")?;
-                while let Some(c) = chars.next() {
-                    match c {
-                        '"' if chars.peek() == Some(&'"') => {
-                            writer.write_all(b"\"")?;
-                            chars.next();
-                        }
-                        '"' => break,
-                        '`' => writer.write_all(b"``")?,
-                        other => write!(writer, "{other}")?,
-                    }
-                }
-                writer.write_all(b"`")?;
-            }
-            other => write!(writer, "{other}")?,
-        }
     }
     Ok(())
 }
@@ -375,12 +158,11 @@ fn write_plan_step(
             statement(writer, first)?;
             // `CREATE OR REPLACE VIEW` so a body change re-runs cleanly; a column-set change is
             // preceded by a `DropView` from the diff.
-            write_create_view(schema.as_deref(), view, true, writer)?;
+            squealy::render_create_view(schema.as_deref(), view, true, &MysqlDialect, writer)?;
         }
         DatabasePlanStep::DropView { schema, view } => {
             statement(writer, first)?;
-            writer.write_all(b"DROP VIEW ")?;
-            write_qualified_name(schema.as_deref(), &view.name, writer)?;
+            squealy::render_drop_view(schema.as_deref(), &view.name, &MysqlDialect, writer)?;
         }
     }
     Ok(())
@@ -1020,6 +802,16 @@ impl squealy::Dialect for MysqlDialect {
     fn write_default_row_insert(&self, writer: &mut dyn Write) -> io::Result<()> {
         // MySQL's empty-row insert form; `DEFAULT VALUES` is PostgreSQL-only.
         writer.write_all(b" () VALUES ()")
+    }
+
+    fn write_order_nulls(
+        &self,
+        _nulls: squealy::OrderNulls,
+        _writer: &mut dyn Write,
+    ) -> io::Result<()> {
+        // MySQL has no `NULLS FIRST`/`NULLS LAST` modifier, so a view carrying one drops it here
+        // rather than emitting syntax MySQL rejects.
+        Ok(())
     }
 }
 

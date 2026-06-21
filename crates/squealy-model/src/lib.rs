@@ -37,10 +37,10 @@ pub use refactor::{
 pub use squealy::{
     CheckModel, ColumnModel, Constraint, ConstraintCapabilities, ConstraintDeferrability,
     ConstraintEnforcement, ConstraintValidation, DatabaseModel, DatabasePlan, DatabasePlanStep,
-    DdlExecutor, DefaultValue, ExprFragment, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
+    DdlExecutor, DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     IndexCapabilities, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
-    IndexOperatorClass, ProjectionItem, SchemaBackend, SchemaCapabilities, SchemaConnect,
-    SchemaIntrospect, SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore,
+    IndexOperatorClass, LogicalOp, ProjectionItem, SchemaBackend, SchemaCapabilities,
+    SchemaConnect, SchemaIntrospect, SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore,
     SchemaPublishRecord, SchemaRefactorStore, SourceRef, SqlType, TableModel, TablePlanStep,
     ViewColumnModel, ViewModel, ViewQueryModel,
 };
@@ -277,6 +277,15 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
             }
             for check in &mut table.checks {
                 check.expression = connection.canonical_check_expression(&check.expression);
+            }
+        }
+        // A view's declared output columns are compared against introspected ones (which come back in
+        // the backend's physical types), so canonicalize them the same way table columns are —
+        // otherwise an unchanged view whose column type has a physical/logical alias (MySQL
+        // `String`/`Varchar(255)`, PostgreSQL `Text`/`String`) would churn a drop+recreate every run.
+        for view in &mut schema.views {
+            for column in &mut view.columns {
+                column.ty = connection.canonical_sql_type(&column.ty);
             }
         }
     }

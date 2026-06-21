@@ -1,27 +1,26 @@
 //! Canonical "model" backend and the view-body lowering it drives.
 //!
-//! A view body is a `SELECT` that must render into a backend-neutral [`ViewQueryModel`] with its
+//! A view body is a `SELECT` that must become a backend-neutral [`ViewQueryModel`] whose expressions
+//! are stored **structurally** ([`ExprNode`]) so each backend renders them in its own dialect, with
 //! literals **inlined** (a view definition carries no bind parameters). The query builder only lets a
 //! literal out through [`Encode`], and only lowers a query through a [`SelectSink`] bound to a
 //! concrete [`Backend`]. So this module defines a render-only [`ModelBackend`]/[`ModelConn`] whose
-//! `Encode` impls emit SQL-literal text, and a [`ModelSink`] that reuses the existing render helpers
-//! to fill a structural [`ViewQueryModel`]. None of this ever executes — it exists purely to turn a
-//! typed definition into the neutral model that backends render `CREATE VIEW` from.
+//! `Encode` impls format SQL literals, and a [`ModelSink`] + [`IrBuilder`] that walk the typed AST's
+//! structural visitors into an [`ExprNode`] tree. None of this ever executes — it exists purely to
+//! turn a typed definition into the neutral model that backends render `CREATE VIEW` from.
 
 use std::borrow::Cow;
 use std::io::{self, Write};
 use std::marker::PhantomData;
 
-use crate::render::{
-    Renderer, SqlWriter, write_column_value, write_expr_value, write_order_value,
-    write_predicate_value,
-};
 use crate::{
-    Backend, ColumnRef, Decode, Dialect, Encode, Expr, ExprFragment, ExprKind, InsertableTable,
-    JoinItem, JoinKind, Order, ParamWriter, Predicate, PredicateKind, Projectable, ProjectionItem,
-    ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAst, RenderPredicateAst,
-    RenderProjectable, RenderSelectAst, RowReader, SelectAst, SelectSink, Selected, SourceAlias,
-    SourceRef, SqlType, Table, TableProjection, ViewQueryModel,
+    AggregateFunc, ArithmeticOp, Backend, ColumnRef, CompareOp, Decode, Encode, Expr, ExprKind,
+    ExprNode, ExprVisitor, InsertableTable, JoinItem, JoinKind, LogicalOp, Order, OrderDirection,
+    OrderItem, ParamWriter, Predicate, PredicateAstVisitor, PredicateKind, Projectable,
+    ProjectionItem, ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAst,
+    RenderPredicateAst, RenderProjectable, RenderSelectAst, RenderSubquery, RowReader, SelectAst,
+    SelectSink, Selected, SourceAlias, SourceRef, SqlType, Table, TableProjection, ViewQueryModel,
+    WindowFunc, WindowOrderTerm,
 };
 
 // ---------------------------------------------------------------------------
@@ -163,101 +162,412 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Canonical dialect: ANSI-quoted identifiers, literals already inlined (no placeholders)
+// Expression IR builder
 // ---------------------------------------------------------------------------
 
-/// The canonical dialect used to render view fragments: ANSI double-quoted identifiers and no
-/// placeholders (literals are inlined by [`ModelWriter`], so the placeholder is a no-op).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ModelDialect;
+/// Encodes a literal value to inlined SQL text via [`ModelBackend`]'s `Encode` impls.
+fn encode_literal<T>(value: &T) -> String
+where
+    T: Encode<ModelBackend>,
+{
+    let mut params = Vec::new();
+    {
+        let mut writer = ModelBackend::param_writer(&mut params);
+        // `Encode` for `ModelBackend` is infallible.
+        let _ = value.encode(&mut writer);
+    }
+    params.concat()
+}
 
-const MODEL_DIALECT: &dyn Dialect = &ModelDialect;
+/// Builds a neutral [`ExprNode`] tree from the typed expression/predicate AST with a node stack: each
+/// leaf pushes a node and each combinator runs its child closures (which push their nodes) then pops
+/// and combines. Driven by the structural [`ExprVisitor`]/[`PredicateAstVisitor`] visits.
+#[derive(Default)]
+struct IrBuilder {
+    stack: Vec<ExprNode>,
+    /// Window `ORDER BY` directions, recorded by `visit_window_order_direction` and paired with the
+    /// order expressions in `visit_window`.
+    window_order_directions: Vec<OrderDirection>,
+}
 
-impl Dialect for ModelDialect {
-    fn write_placeholder(&self, _index: usize, _writer: &mut dyn Write) -> io::Result<()> {
-        // Literals are written inline by `ModelWriter::push_bind`; there is no placeholder to emit.
+impl IrBuilder {
+    fn pop(&mut self) -> Box<ExprNode> {
+        Box::new(self.stack.pop().expect("expression IR stack underflow"))
+    }
+
+    /// Runs a child visit closure and returns the node it pushed.
+    fn child<F>(&mut self, child: F) -> io::Result<Box<ExprNode>>
+    where
+        F: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        child(self)?;
+        Ok(self.pop())
+    }
+
+    fn finish(mut self) -> ExprNode {
+        self.stack.pop().expect("expression IR produced no node")
+    }
+}
+
+impl ExprVisitor for IrBuilder {
+    type Error = io::Error;
+    type Backend = ModelBackend;
+
+    fn visit_column(&mut self, alias: SourceAlias, column: &str) -> io::Result<()> {
+        self.stack.push(ExprNode::Column {
+            alias: alias.to_string(),
+            column: column.to_owned(),
+        });
         Ok(())
     }
 
-    fn write_quoted_ident(&self, ident: &str, writer: &mut dyn Write) -> io::Result<()> {
-        write!(writer, "\"{}\"", ident.replace('"', "\"\""))
-    }
-
-    fn write_cast_type(&self, ty: &SqlType, writer: &mut dyn Write) -> io::Result<()> {
-        // A neutral spelling; casts are rare in view bodies and the backends accept the standard names.
-        let name = match ty {
-            SqlType::Bool => "boolean",
-            SqlType::F32 => "real",
-            SqlType::F64 => "double precision",
-            SqlType::String | SqlType::Text => "text",
-            _ => "numeric",
-        };
-        writer.write_all(name.as_bytes())
-    }
-
-    fn integer_division_needs_float_cast(&self) -> bool {
-        // Avoid injecting backend-specific float casts into portable fragments.
-        false
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Literal-inlining writer
-// ---------------------------------------------------------------------------
-
-/// A render target that inlines each literal as SQL text instead of recording a bind. Used to render
-/// one expression fragment of a view body into memory.
-struct ModelWriter {
-    buf: Vec<u8>,
-}
-
-impl Write for ModelWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.buf.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl SqlWriter<ModelBackend> for ModelWriter {
-    fn push_bind<T>(&mut self, value: &T)
+    fn visit_literal<T>(&mut self, value: &T) -> io::Result<()>
     where
         T: Encode<ModelBackend>,
     {
-        let mut params = Vec::new();
-        {
-            let mut writer = ModelBackend::param_writer(&mut params);
-            // `encode` is infallible for the model backend.
-            let _ = value.encode(&mut writer);
-        }
-        for literal in params {
-            self.buf.extend_from_slice(literal.as_bytes());
-        }
+        self.stack.push(ExprNode::Literal(encode_literal(value)));
+        Ok(())
     }
 
-    fn push_runtime_bind(&mut self, _index: usize) {
-        // A view body cannot carry runtime parameters; the builder never emits one here.
+    fn visit_param(&mut self) -> io::Result<()> {
+        // `ViewSelect`'s `NoRuntimeParams` bound rejects parameterized definitions upstream, so a
+        // runtime parameter never reaches the lowering.
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "a view body cannot contain a runtime parameter",
+        ))
+    }
+
+    fn visit_binary<L, R>(&mut self, op: ArithmeticOp, left: L, right: R) -> io::Result<()>
+    where
+        L: FnOnce(&mut Self) -> io::Result<()>,
+        R: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        let left = self.child(left)?;
+        let right = self.child(right)?;
+        self.stack.push(ExprNode::Binary { op, left, right });
+        Ok(())
+    }
+
+    fn visit_aggregate<O>(
+        &mut self,
+        func: AggregateFunc,
+        distinct: bool,
+        cast: Option<&SqlType>,
+        operand: O,
+    ) -> io::Result<()>
+    where
+        O: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        let operand = self.child(operand)?;
+        self.stack.push(ExprNode::Aggregate {
+            func,
+            distinct,
+            operand,
+            result: cast.cloned(),
+        });
+        Ok(())
+    }
+
+    fn visit_scalar_subquery<Sub>(&mut self, subquery: &Sub) -> io::Result<()>
+    where
+        Sub: RenderSubquery<ModelBackend>,
+    {
+        self.stack
+            .push(ExprNode::ScalarSubquery(Box::new(lower_subquery(
+                subquery,
+            )?)));
+        Ok(())
+    }
+
+    fn visit_window<Operand, Partitions, Orders>(
+        &mut self,
+        func: WindowFunc,
+        cast: Option<&SqlType>,
+        operand: Operand,
+        has_partitions: bool,
+        partitions: Partitions,
+        has_orders: bool,
+        orders: Orders,
+    ) -> io::Result<()>
+    where
+        Operand: FnOnce(&mut Self) -> io::Result<()>,
+        Partitions: FnOnce(&mut Self) -> io::Result<()>,
+        Orders: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        // Each list closure pushes its (variable number of) element nodes; capture them by splitting
+        // the stack at the depth recorded before the closure ran. Window order directions are recorded
+        // in parallel by `visit_window_order_direction` and zipped with the order expressions.
+        let args_start = self.stack.len();
+        operand(self)?;
+        let args = self.stack.split_off(args_start);
+
+        let partitions_start = self.stack.len();
+        if has_partitions {
+            partitions(self)?;
+        }
+        let partition_by = self.stack.split_off(partitions_start);
+
+        let directions_start = self.window_order_directions.len();
+        let orders_start = self.stack.len();
+        if has_orders {
+            orders(self)?;
+        }
+        let order_exprs = self.stack.split_off(orders_start);
+        let directions = self.window_order_directions.split_off(directions_start);
+        let order_by = order_exprs
+            .into_iter()
+            .zip(directions)
+            .map(|(expr, direction)| WindowOrderTerm { expr, direction })
+            .collect();
+
+        self.stack.push(ExprNode::Window {
+            func,
+            args,
+            partition_by,
+            order_by,
+            result: cast.cloned(),
+        });
+        Ok(())
+    }
+
+    fn visit_window_separator(&mut self) -> io::Result<()> {
+        // List elements are already separated as distinct nodes on the stack.
+        Ok(())
+    }
+
+    fn visit_window_order_direction(&mut self, direction: OrderDirection) -> io::Result<()> {
+        self.window_order_directions.push(direction);
+        Ok(())
     }
 }
 
-/// Renders one expression fragment of a view body into canonical text.
-fn fragment<F>(render: F) -> ExprFragment
+impl PredicateAstVisitor for IrBuilder {
+    fn visit_compare<L, R>(&mut self, op: CompareOp, left: L, right: R) -> io::Result<()>
+    where
+        L: FnOnce(&mut Self) -> io::Result<()>,
+        R: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        let left = self.child(left)?;
+        let right = self.child(right)?;
+        self.stack.push(ExprNode::Compare { op, left, right });
+        Ok(())
+    }
+
+    fn visit_and<L, R>(&mut self, left: L, right: R) -> io::Result<()>
+    where
+        L: FnOnce(&mut Self) -> io::Result<()>,
+        R: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        let left = self.child(left)?;
+        let right = self.child(right)?;
+        self.stack.push(ExprNode::Logical {
+            op: LogicalOp::And,
+            left,
+            right,
+        });
+        Ok(())
+    }
+
+    fn visit_or<L, R>(&mut self, left: L, right: R) -> io::Result<()>
+    where
+        L: FnOnce(&mut Self) -> io::Result<()>,
+        R: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        let left = self.child(left)?;
+        let right = self.child(right)?;
+        self.stack.push(ExprNode::Logical {
+            op: LogicalOp::Or,
+            left,
+            right,
+        });
+        Ok(())
+    }
+
+    fn visit_not<P>(&mut self, predicate: P) -> io::Result<()>
+    where
+        P: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        let operand = self.child(predicate)?;
+        self.stack.push(ExprNode::Not(operand));
+        Ok(())
+    }
+
+    fn visit_is_null<O>(&mut self, negated: bool, operand: O) -> io::Result<()>
+    where
+        O: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        let operand = self.child(operand)?;
+        self.stack.push(ExprNode::IsNull { negated, operand });
+        Ok(())
+    }
+
+    fn visit_like<O, P>(
+        &mut self,
+        case_insensitive: bool,
+        negated: bool,
+        operand: O,
+        pattern: P,
+    ) -> io::Result<()>
+    where
+        O: FnOnce(&mut Self) -> io::Result<()>,
+        P: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        let operand = self.child(operand)?;
+        let pattern = self.child(pattern)?;
+        self.stack.push(ExprNode::Like {
+            case_insensitive,
+            negated,
+            operand,
+            pattern,
+        });
+        Ok(())
+    }
+
+    fn visit_in<O, T>(&mut self, negated: bool, operand: O, values: &[T]) -> io::Result<()>
+    where
+        O: FnOnce(&mut Self) -> io::Result<()>,
+        T: Encode<ModelBackend>,
+    {
+        let operand = self.child(operand)?;
+        let items = values
+            .iter()
+            .map(|value| ExprNode::Literal(encode_literal(value)))
+            .collect();
+        self.stack.push(ExprNode::In {
+            negated,
+            operand,
+            items,
+        });
+        Ok(())
+    }
+
+    fn visit_between<O, Lo, Hi>(
+        &mut self,
+        negated: bool,
+        operand: O,
+        lo: Lo,
+        hi: Hi,
+    ) -> io::Result<()>
+    where
+        O: FnOnce(&mut Self) -> io::Result<()>,
+        Lo: FnOnce(&mut Self) -> io::Result<()>,
+        Hi: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        let operand = self.child(operand)?;
+        let low = self.child(lo)?;
+        let high = self.child(hi)?;
+        self.stack.push(ExprNode::Between {
+            negated,
+            operand,
+            low,
+            high,
+        });
+        Ok(())
+    }
+
+    fn visit_bool_test<O>(&mut self, negated: bool, operand: O) -> io::Result<()>
+    where
+        O: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        let operand = self.child(operand)?;
+        self.stack.push(if negated {
+            ExprNode::Not(operand)
+        } else {
+            *operand
+        });
+        Ok(())
+    }
+
+    fn visit_in_subquery<O, Sub>(
+        &mut self,
+        negated: bool,
+        operand: O,
+        subquery: &Sub,
+    ) -> io::Result<()>
+    where
+        O: FnOnce(&mut Self) -> io::Result<()>,
+        Sub: RenderSubquery<ModelBackend>,
+    {
+        let operand = self.child(operand)?;
+        self.stack.push(ExprNode::InSubquery {
+            negated,
+            operand,
+            subquery: Box::new(lower_subquery(subquery)?),
+        });
+        Ok(())
+    }
+
+    fn visit_exists<Sub>(&mut self, negated: bool, subquery: &Sub) -> io::Result<()>
+    where
+        Sub: RenderSubquery<ModelBackend>,
+    {
+        self.stack.push(ExprNode::Exists {
+            negated,
+            subquery: Box::new(lower_subquery(subquery)?),
+        });
+        Ok(())
+    }
+}
+
+fn build_expr<K, Ast>(expr: &Expr<'_, K, Ast>) -> io::Result<ExprNode>
 where
-    F: FnOnce(&mut ModelWriter, &mut Renderer) -> io::Result<()>,
+    K: ExprKind,
+    Ast: RenderAst<ModelBackend>,
 {
-    let mut writer = ModelWriter { buf: Vec::new() };
-    let mut renderer = Renderer::new(MODEL_DIALECT);
-    render(&mut writer, &mut renderer).expect("rendering a view fragment to memory cannot fail");
-    ExprFragment(String::from_utf8(writer.buf).expect("the renderer only writes UTF-8"))
+    let mut builder = IrBuilder::default();
+    expr.visit(&mut builder)?;
+    Ok(builder.finish())
 }
 
-fn and(slot: &mut Option<ExprFragment>, fragment: ExprFragment) {
+fn build_column<K>(column: ColumnRef<'_, K>) -> io::Result<ExprNode>
+where
+    K: ExprKind,
+{
+    let mut builder = IrBuilder::default();
+    column.visit(&mut builder)?;
+    Ok(builder.finish())
+}
+
+fn build_predicate<P, Ast>(predicate: &Predicate<'_, P, Ast>) -> io::Result<ExprNode>
+where
+    P: PredicateKind,
+    Ast: RenderPredicateAst<ModelBackend>,
+{
+    let mut builder = IrBuilder::default();
+    predicate.visit(&mut builder)?;
+    Ok(builder.finish())
+}
+
+fn build_order<K, Ast>(order: &Order<'_, K, Ast>) -> io::Result<ExprNode>
+where
+    K: ExprKind,
+    Ast: RenderAst<ModelBackend>,
+{
+    let mut builder = IrBuilder::default();
+    order.visit_expr(&mut builder)?;
+    Ok(builder.finish())
+}
+
+/// Lowers a nested subquery into its own [`ViewQueryModel`], reusing the structural lowering.
+fn lower_subquery<Sub>(subquery: &Sub) -> io::Result<ViewQueryModel>
+where
+    Sub: RenderSubquery<ModelBackend>,
+{
+    let mut sink = ModelSink::default();
+    subquery.lower_subquery(&mut sink)?;
+    Ok(sink.query)
+}
+
+/// Merges `node` into `slot` with `AND` (repeated `WHERE`/`HAVING` predicates).
+fn and_into(slot: &mut Option<ExprNode>, node: ExprNode) {
     *slot = Some(match slot.take() {
-        Some(previous) => ExprFragment(format!("{} AND {}", previous.0, fragment.0)),
-        None => fragment,
+        Some(previous) => ExprNode::Logical {
+            op: LogicalOp::And,
+            left: Box::new(previous),
+            right: Box::new(node),
+        },
+        None => node,
     });
 }
 
@@ -277,7 +587,7 @@ where
 // ---------------------------------------------------------------------------
 
 /// A [`SelectSink`] that records a query's structure into a [`ViewQueryModel`] instead of emitting a
-/// flat `SELECT` string. Scalar expressions are rendered to canonical [`ExprFragment`] text.
+/// flat `SELECT` string. Scalar expressions are captured structurally as [`ExprNode`] trees.
 #[derive(Default)]
 pub(crate) struct ModelSink {
     query: ViewQueryModel,
@@ -313,7 +623,7 @@ impl SelectSink for ModelSink {
         P: PredicateKind,
         Ast: RenderPredicateAst<ModelBackend>,
     {
-        let on = fragment(|writer, renderer| write_predicate_value(&on, writer, renderer));
+        let on = build_predicate(&on)?;
         self.query.joins.push(JoinItem {
             kind: JoinKind::Inner,
             source: source_ref::<S>(alias),
@@ -332,7 +642,7 @@ impl SelectSink for ModelSink {
         P: PredicateKind,
         Ast: RenderPredicateAst<ModelBackend>,
     {
-        let on = fragment(|writer, renderer| write_predicate_value(&on, writer, renderer));
+        let on = build_predicate(&on)?;
         self.query.joins.push(JoinItem {
             kind: JoinKind::Left,
             source: source_ref::<S>(alias),
@@ -351,7 +661,7 @@ impl SelectSink for ModelSink {
         P: PredicateKind,
         Ast: RenderPredicateAst<ModelBackend>,
     {
-        let on = fragment(|writer, renderer| write_predicate_value(&on, writer, renderer));
+        let on = build_predicate(&on)?;
         self.query.joins.push(JoinItem {
             kind: JoinKind::Right,
             source: source_ref::<S>(alias),
@@ -370,7 +680,7 @@ impl SelectSink for ModelSink {
         P: PredicateKind,
         Ast: RenderPredicateAst<ModelBackend>,
     {
-        let on = fragment(|writer, renderer| write_predicate_value(&on, writer, renderer));
+        let on = build_predicate(&on)?;
         self.query.joins.push(JoinItem {
             kind: JoinKind::Full,
             source: source_ref::<S>(alias),
@@ -384,9 +694,8 @@ impl SelectSink for ModelSink {
         P: PredicateKind,
         Ast: RenderPredicateAst<ModelBackend>,
     {
-        let predicate =
-            fragment(|writer, renderer| write_predicate_value(&predicate, writer, renderer));
-        and(&mut self.query.filter, predicate);
+        let node = build_predicate(&predicate)?;
+        and_into(&mut self.query.filter, node);
         Ok(())
     }
 
@@ -395,7 +704,7 @@ impl SelectSink for ModelSink {
         K: ExprKind,
         Ast: RenderAst<ModelBackend>,
     {
-        let key = fragment(|writer, renderer| write_expr_value(key, writer, renderer));
+        let key = build_expr(key)?;
         self.query.group_by.push(key);
         Ok(())
     }
@@ -405,9 +714,8 @@ impl SelectSink for ModelSink {
         P: PredicateKind,
         Ast: RenderPredicateAst<ModelBackend>,
     {
-        let predicate =
-            fragment(|writer, renderer| write_predicate_value(&predicate, writer, renderer));
-        and(&mut self.query.having, predicate);
+        let node = build_predicate(&predicate)?;
+        and_into(&mut self.query.having, node);
         Ok(())
     }
 
@@ -416,12 +724,10 @@ impl SelectSink for ModelSink {
         K: ExprKind,
         Ast: RenderAst<ModelBackend>,
     {
-        // `write_order_value` renders the expression plus `ASC`/`DESC`; the direction is baked into the
-        // fragment, so the structural direction/nulls stay `None`.
-        let expr = fragment(|writer, renderer| write_order_value(&order, writer, renderer));
-        self.query.order_by.push(crate::OrderItem {
+        let expr = build_order(&order)?;
+        self.query.order_by.push(OrderItem {
             expr,
-            direction: None,
+            direction: Some(order.direction()),
             nulls: None,
         });
         Ok(())
@@ -456,7 +762,7 @@ impl ProjectionVisitor for ModelSink {
         K: ExprKind,
         Ast: RenderAst<ModelBackend>,
     {
-        let expr = fragment(|writer, renderer| write_expr_value(expr, writer, renderer));
+        let expr = build_expr(expr)?;
         self.query.projection.push(ProjectionItem {
             output_name: alias.into_owned(),
             expr,
@@ -472,7 +778,7 @@ impl ProjectionVisitor for ModelSink {
     where
         K: ExprKind,
     {
-        let expr = fragment(|writer, renderer| write_column_value(column, writer, renderer));
+        let expr = build_column(column)?;
         self.query.projection.push(ProjectionItem {
             output_name: alias.into_owned(),
             expr,

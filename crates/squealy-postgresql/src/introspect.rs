@@ -3,7 +3,7 @@ use squealy::{
     DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
     IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, SchemaModel,
-    SqlType, TableModel,
+    SqlType, TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
 };
 use tokio_postgres::Client;
 
@@ -15,30 +15,114 @@ struct TableRef {
 }
 
 pub(crate) async fn database(client: &Client) -> Result<DatabaseModel, PostgresError> {
-    let table_refs = table_refs(client).await?;
     let mut schemas = Vec::<SchemaModel>::new();
 
-    for table_ref in table_refs {
-        if schemas
-            .last()
-            .is_none_or(|schema| schema.name.as_deref() != Some(table_ref.schema.as_str()))
-        {
-            schemas.push(SchemaModel {
-                name: Some(table_ref.schema.clone()),
-                tables: Vec::new(),
-                views: Vec::new(),
-            });
-        }
-
+    for table_ref in table_refs(client).await? {
         let table = table(client, &table_ref).await?;
-        schemas
-            .last_mut()
-            .expect("schema just pushed")
+        schema_entry(&mut schemas, &table_ref.schema)
             .tables
             .push(table);
     }
 
+    // Views are introspected by name and output columns only: a stored view definition cannot be
+    // reconstructed into the structural `ViewQueryModel`, so the body stays empty and the diff matches
+    // views by name and columns (it cannot detect a pure body change against a live database).
+    //
+    // Known limitation: because the body is empty, an introspected view exposes no dependencies, so the
+    // diff cannot order drops among several interdependent live views dropped/recreated in one plan (it
+    // may drop a parent before a dependent). Single live views and package-vs-package diffs are
+    // unaffected. Tracked for a follow-up that introspects view dependencies separately.
+    for view_ref in view_refs(client).await? {
+        let view = view(client, &view_ref).await?;
+        schema_entry(&mut schemas, &view_ref.schema)
+            .views
+            .push(view);
+    }
+
     Ok(DatabaseModel { schemas })
+}
+
+/// Finds the schema named `name`, creating and appending it (preserving discovery order) if absent.
+fn schema_entry<'a>(schemas: &'a mut Vec<SchemaModel>, name: &str) -> &'a mut SchemaModel {
+    if let Some(index) = schemas
+        .iter()
+        .position(|schema| schema.name.as_deref() == Some(name))
+    {
+        return &mut schemas[index];
+    }
+    schemas.push(SchemaModel {
+        name: Some(name.to_owned()),
+        tables: Vec::new(),
+        views: Vec::new(),
+    });
+    schemas.last_mut().expect("schema just pushed")
+}
+
+async fn view_refs(client: &Client) -> Result<Vec<TableRef>, PostgresError> {
+    let rows = client
+        .query(
+            "\
+SELECT n.nspname, c.relname
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind = 'v'
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', '__squealy')
+  AND n.nspname NOT LIKE 'pg_toast%'
+ORDER BY n.nspname, c.relname",
+            &[],
+        )
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| TableRef {
+            schema: row.get(0),
+            name: row.get(1),
+        })
+        .collect())
+}
+
+async fn view(client: &Client, view_ref: &TableRef) -> Result<ViewModel, PostgresError> {
+    Ok(ViewModel {
+        name: view_ref.name.clone(),
+        comment: None,
+        columns: view_columns(client, view_ref).await?,
+        query: ViewQueryModel::default(),
+    })
+}
+
+async fn view_columns(
+    client: &Client,
+    view_ref: &TableRef,
+) -> Result<Vec<ViewColumnModel>, PostgresError> {
+    let rows = client
+        .query(
+            "\
+SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_attribute a ON a.attrelid = c.oid
+WHERE n.nspname = $1
+  AND c.relname = $2
+  AND c.relkind = 'v'
+  AND a.attnum > 0
+  AND NOT a.attisdropped
+ORDER BY a.attnum",
+            &[&view_ref.schema, &view_ref.name],
+        )
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let db_type: String = row.get(1);
+            ViewColumnModel {
+                name: row.get(0),
+                ty: sql_type(&db_type),
+                nullable: !row.get::<_, bool>(2),
+            }
+        })
+        .collect())
 }
 
 async fn table_refs(client: &Client) -> Result<Vec<TableRef>, PostgresError> {
