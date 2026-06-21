@@ -1,1 +1,1 @@
-{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":5,"timestamp":1782031885,"nonce":"2E1Wtc4brBp2BqVcFFmhmz1KluQ=","added":["roadmap","query-builder"],"removed":null}]}
+{"author":{"id":"c52cb19fb02c210e51792121b2bae318d19fa8efb308ae796946bf1f79891ad1"},"ops":[{"type":2,"timestamp":1782031898,"nonce":"lbJ2kcb4xubwJfyt9HzLPzglUEk=","title":"Query builder: compile-time guard for DISTINCT + ORDER BY (order keys must be in projection)","was":"**Summary**"}]}
