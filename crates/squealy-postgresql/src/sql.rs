@@ -418,6 +418,8 @@ pub(crate) mod ddl {
             match join.kind {
                 JoinKind::Inner => writer.write_all(b" INNER JOIN ")?,
                 JoinKind::Left => writer.write_all(b" LEFT JOIN ")?,
+                JoinKind::Right => writer.write_all(b" RIGHT JOIN ")?,
+                JoinKind::Full => writer.write_all(b" FULL JOIN ")?,
             }
             write_view_source(&join.source, writer)?;
             writer.write_all(b" ON ")?;

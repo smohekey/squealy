@@ -12,6 +12,14 @@ struct User<'scope, C: ColumnMode = ColumnExpr> {
     active: C::Type<'scope, bool>,
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Public)]
+struct Post<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    user_id: C::Type<'scope, i32>,
+}
+
 #[allow(dead_code)]
 #[derive(Schema)]
 struct Public {
@@ -101,6 +109,30 @@ fn lowers_distinct_select_and_count_distinct() {
         "count distinct not rendered in view body: {}",
         counted_model.projection[0].expr.0
     );
+}
+
+#[test]
+fn lowers_right_and_full_joins() {
+    use squealy::JoinKind;
+    let conn = ModelConn;
+
+    let right = conn
+        .from::<User>()
+        .right_join::<Post>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .project(|(user, post)| (user.id, post.id));
+    let right_model = lower_view(&right);
+    assert_eq!(right_model.joins.len(), 1);
+    assert_eq!(right_model.joins[0].kind, JoinKind::Right);
+
+    // `full_join` compiles against the model backend (`ModelBackend: SupportsFullJoin`).
+    let full = conn
+        .from::<User>()
+        .full_join::<Post>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .project(|(user, post)| (user.id, post.id));
+    let full_model = lower_view(&full);
+    assert_eq!(full_model.joins[0].kind, JoinKind::Full);
 }
 
 // A hand-written `ViewDefinition` (what `#[derive(View)]` will generate) walks through the object-safe
