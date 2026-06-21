@@ -161,3 +161,51 @@ fn introspected_view_with_changed_columns_is_recreated() {
     assert!(matches!(plan.steps[0], DatabasePlanStep::DropView { .. }));
     assert!(matches!(plan.steps[1], DatabasePlanStep::CreateView { .. }));
 }
+
+#[test]
+fn subquery_only_view_dependency_orders_create_after_it() {
+    // `child` references `parent` ONLY inside an EXISTS subquery in its filter (not in FROM/JOIN), so
+    // the dependency is invisible unless the source walker recurses into subqueries.
+    let mut parent = view("(q0_0.\"id\" > 0)", &["id"]);
+    parent.name = "parent".to_owned();
+
+    let mut child = view("(q0_0.\"id\" > 0)", &["id"]);
+    child.name = "child".to_owned();
+    child.query.filter = Some(ExprNode::Exists {
+        negated: false,
+        subquery: Box::new(ViewQueryModel {
+            from: Some(SourceRef {
+                schema: Some("public".to_owned()),
+                name: "parent".to_owned(),
+                alias: "q1_0".to_owned(),
+            }),
+            ..ViewQueryModel::default()
+        }),
+    });
+
+    // Declared child-first, so a correct order must come from the dependency, not declaration order.
+    let desired = model(vec![child, parent]);
+    let actual = model(vec![]);
+
+    let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan");
+    let created: Vec<&str> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            DatabasePlanStep::CreateView { view, .. } => Some(view.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let parent_at = created
+        .iter()
+        .position(|name| *name == "parent")
+        .expect("parent created");
+    let child_at = created
+        .iter()
+        .position(|name| *name == "child")
+        .expect("child created");
+    assert!(
+        parent_at < child_at,
+        "parent must be created before the child whose subquery selects from it: {created:?}"
+    );
+}

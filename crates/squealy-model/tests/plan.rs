@@ -1,3 +1,4 @@
+use squealy::{SourceRef, ViewColumnModel, ViewModel, ViewQueryModel};
 use squealy_model::{
     AppliedRefactorError, CastColumn, ChangeRisk, CheckModel, ColumnModel, DatabaseModel,
     DatabasePlanStep, DdlExecutor, DiffPolicy, IndexModel, PlanApplyOptions, RefactorLog,
@@ -716,6 +717,60 @@ async fn plan_from_database_canonicalizes_backend_equivalent_types() {
     assert!(
         plan.is_empty(),
         "String/Text are equivalent on this backend; expected no changes, got {:?}",
+        plan.steps
+    );
+}
+
+#[tokio::test]
+async fn plan_from_database_canonicalizes_view_column_types() {
+    // The live schema introspects a view column as `String` (with an empty body); the desired view
+    // authored it as `Text`. On a backend where they are the same physical type, comparing the view
+    // by columns must canonicalize both sides, so an unchanged view does not churn a drop+recreate.
+    let view = |ty: SqlType, introspected: bool| ViewModel {
+        name: "active".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "note".to_owned(),
+            ty,
+            nullable: false,
+        }],
+        query: if introspected {
+            ViewQueryModel::default()
+        } else {
+            ViewQueryModel {
+                from: Some(SourceRef {
+                    schema: Some("public".to_owned()),
+                    name: "events".to_owned(),
+                    alias: "q0_0".to_owned(),
+                }),
+                ..ViewQueryModel::default()
+            }
+        },
+    };
+    let schema = |view: ViewModel| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("public".to_owned()),
+            tables: Vec::new(),
+            views: vec![view],
+        }],
+    };
+    let mut connection = TestConnection {
+        model: schema(view(SqlType::String, true)),
+        applied_refactor_ids: Vec::new(),
+        executed: Vec::new(),
+    };
+
+    let plan = plan_from_database(
+        &schema(view(SqlType::Text, false)),
+        &mut connection,
+        DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("plan");
+
+    assert!(
+        plan.is_empty(),
+        "String/Text are equivalent on this backend; an unchanged view must not churn, got {:?}",
         plan.steps
     );
 }

@@ -27,6 +27,11 @@ pub(crate) async fn database(client: &Client) -> Result<DatabaseModel, PostgresE
     // Views are introspected by name and output columns only: a stored view definition cannot be
     // reconstructed into the structural `ViewQueryModel`, so the body stays empty and the diff matches
     // views by name and columns (it cannot detect a pure body change against a live database).
+    //
+    // Known limitation: because the body is empty, an introspected view exposes no dependencies, so the
+    // diff cannot order drops among several interdependent live views dropped/recreated in one plan (it
+    // may drop a parent before a dependent). Single live views and package-vs-package diffs are
+    // unaffected. Tracked for a follow-up that introspects view dependencies separately.
     for view_ref in view_refs(client).await? {
         let view = view(client, &view_ref).await?;
         schema_entry(&mut schemas, &view_ref.schema)

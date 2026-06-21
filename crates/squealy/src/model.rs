@@ -713,14 +713,101 @@ pub trait ViewDef: Sync {
 }
 
 impl ViewModel {
-    /// The names of the views this view depends on (other views referenced in its `FROM`/`JOIN`s),
-    /// used to topologically order view creation. Dependencies on tables are irrelevant to view
-    /// ordering because all tables are created before any view.
+    /// The sources this view depends on, used to topologically order view creation. This walks the
+    /// whole body — `FROM`/`JOIN`s and every expression, recursing into scalar/`IN`/`EXISTS`
+    /// subqueries — so a view that references another view only inside a subquery is still ordered
+    /// after it. Dependencies on tables are irrelevant to view ordering (all tables precede any view).
     pub fn referenced_sources(&self) -> impl Iterator<Item = &SourceRef> {
-        self.query
-            .from
-            .iter()
-            .chain(self.query.joins.iter().map(|join| &join.source))
+        let mut sources = Vec::new();
+        collect_query_sources(&self.query, &mut sources);
+        sources.into_iter()
+    }
+}
+
+/// Collects every [`SourceRef`] reachable from a query body, recursing through subqueries.
+fn collect_query_sources<'a>(query: &'a ViewQueryModel, sources: &mut Vec<&'a SourceRef>) {
+    sources.extend(query.from.iter());
+    for join in &query.joins {
+        sources.push(&join.source);
+        collect_expr_sources(&join.on, sources);
+    }
+    for item in &query.projection {
+        collect_expr_sources(&item.expr, sources);
+    }
+    if let Some(filter) = &query.filter {
+        collect_expr_sources(filter, sources);
+    }
+    for expr in &query.group_by {
+        collect_expr_sources(expr, sources);
+    }
+    if let Some(having) = &query.having {
+        collect_expr_sources(having, sources);
+    }
+    for order in &query.order_by {
+        collect_expr_sources(&order.expr, sources);
+    }
+}
+
+/// Collects every [`SourceRef`] reachable from an expression, recursing through nested subqueries.
+fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>) {
+    match expr {
+        ExprNode::Column { .. } | ExprNode::Literal(_) => {}
+        ExprNode::Binary { left, right, .. }
+        | ExprNode::Compare { left, right, .. }
+        | ExprNode::Logical { left, right, .. } => {
+            collect_expr_sources(left, sources);
+            collect_expr_sources(right, sources);
+        }
+        ExprNode::Cast { operand, .. } | ExprNode::Aggregate { operand, .. } => {
+            collect_expr_sources(operand, sources);
+        }
+        ExprNode::Not(operand) | ExprNode::IsNull { operand, .. } => {
+            collect_expr_sources(operand, sources);
+        }
+        ExprNode::Like {
+            operand, pattern, ..
+        } => {
+            collect_expr_sources(operand, sources);
+            collect_expr_sources(pattern, sources);
+        }
+        ExprNode::In { operand, items, .. } => {
+            collect_expr_sources(operand, sources);
+            for item in items {
+                collect_expr_sources(item, sources);
+            }
+        }
+        ExprNode::Between {
+            operand, low, high, ..
+        } => {
+            collect_expr_sources(operand, sources);
+            collect_expr_sources(low, sources);
+            collect_expr_sources(high, sources);
+        }
+        ExprNode::ScalarSubquery(subquery) | ExprNode::Exists { subquery, .. } => {
+            collect_query_sources(subquery, sources);
+        }
+        ExprNode::InSubquery {
+            operand, subquery, ..
+        } => {
+            collect_expr_sources(operand, sources);
+            collect_query_sources(subquery, sources);
+        }
+        ExprNode::Window {
+            args,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            for arg in args {
+                collect_expr_sources(arg, sources);
+            }
+            for partition in partition_by {
+                collect_expr_sources(partition, sources);
+            }
+            for order in order_by {
+                collect_expr_sources(&order.expr, sources);
+            }
+        }
     }
 }
 

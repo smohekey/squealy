@@ -279,6 +279,15 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 check.expression = connection.canonical_check_expression(&check.expression);
             }
         }
+        // A view's declared output columns are compared against introspected ones (which come back in
+        // the backend's physical types), so canonicalize them the same way table columns are —
+        // otherwise an unchanged view whose column type has a physical/logical alias (MySQL
+        // `String`/`Varchar(255)`, PostgreSQL `Text`/`String`) would churn a drop+recreate every run.
+        for view in &mut schema.views {
+            for column in &mut view.columns {
+                column.ty = connection.canonical_sql_type(&column.ty);
+            }
+        }
     }
     model
 }
