@@ -423,6 +423,7 @@ fn dep_view(name: &str, from: &str) -> ViewModel {
             nullable: false,
         }],
         query: ViewQueryModel {
+            distinct: false,
             projection: vec![ProjectionItem {
                 output_name: "id".to_owned(),
                 expr: ExprNode::Column {

@@ -247,6 +247,7 @@ impl ExprVisitor for IrBuilder {
     fn visit_aggregate<O>(
         &mut self,
         func: AggregateFunc,
+        distinct: bool,
         cast: Option<&SqlType>,
         operand: O,
     ) -> io::Result<()>
@@ -256,6 +257,7 @@ impl ExprVisitor for IrBuilder {
         let operand = self.child(operand)?;
         self.stack.push(ExprNode::Aggregate {
             func,
+            distinct,
             operand,
             result: cast.cloned(),
         });
@@ -695,6 +697,11 @@ impl SelectSink for ModelSink {
 
     fn set_offset(&mut self, rows: usize) -> Result<(), Self::Error> {
         self.query.offset = Some(rows);
+        Ok(())
+    }
+
+    fn set_distinct(&mut self) -> Result<(), Self::Error> {
+        self.query.distinct = true;
         Ok(())
     }
 }

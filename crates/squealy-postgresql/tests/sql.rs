@@ -2271,6 +2271,7 @@ fn postgres_renders_views_in_dependency_order() {
                 })
                 .collect(),
             query: ViewQueryModel {
+                distinct: false,
                 projection: projection
                     .iter()
                     .map(|(output, column)| ProjectionItem {
@@ -2385,6 +2386,7 @@ fn postgres_renders_view_plan_steps() {
             nullable: false,
         }],
         query: ViewQueryModel {
+            distinct: false,
             projection: vec![ProjectionItem {
                 output_name: "id".to_owned(),
                 expr: ExprNode::Column {
@@ -2441,6 +2443,60 @@ SELECT q0_0.\"id\" FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"id\" > 0)"
     assert!(
         sql.contains("DROP VIEW \"public\".\"active_users\""),
         "missing drop view: {sql}"
+    );
+}
+
+#[test]
+fn postgres_renders_distinct_view_body() {
+    let view = ViewModel {
+        name: "distinct_names".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "name".to_owned(),
+            ty: SqlType::String,
+            nullable: false,
+        }],
+        query: ViewQueryModel {
+            distinct: true,
+            projection: vec![ProjectionItem {
+                output_name: "name".to_owned(),
+                expr: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "name".to_owned(),
+                },
+            }],
+            from: Some(SourceRef {
+                schema: Some("public".to_owned()),
+                name: "users".to_owned(),
+                alias: "q0_0".to_owned(),
+            }),
+            joins: Vec::new(),
+            filter: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        },
+    };
+
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::CreateView {
+            schema: Some("public".to_owned()),
+            view: Box::new(view),
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE OR REPLACE VIEW \"public\".\"distinct_names\" (\"name\") AS \
+SELECT DISTINCT q0_0.\"name\" FROM \"public\".\"users\" AS q0_0"
+        ),
+        "distinct view body not rendered: {sql}"
     );
 }
 
@@ -2523,6 +2579,7 @@ fn postgres_renders_view_expression_ir_in_its_dialect() {
                     },
                 ],
                 query: ViewQueryModel {
+                    distinct: false,
                     projection: vec![
                         // count / 2 — fractional division.
                         ProjectionItem {
@@ -2538,6 +2595,7 @@ fn postgres_renders_view_expression_ir_in_its_dialect() {
                             output_name: "total".to_owned(),
                             expr: ExprNode::Aggregate {
                                 func: AggregateFunc::Sum,
+                                distinct: false,
                                 operand: Box::new(col("amount")),
                                 result: Some(SqlType::I64),
                             },
@@ -2630,6 +2688,7 @@ fn postgres_view_order_by_keeps_nulls_modifier() {
                     nullable: true,
                 }],
                 query: ViewQueryModel {
+                    distinct: false,
                     projection: vec![ProjectionItem {
                         output_name: "id".to_owned(),
                         expr: ExprNode::Column {
@@ -2698,5 +2757,58 @@ fn postgres_render_rejects_empty_view_body() {
         result.is_err(),
         "rendering an introspected empty-body view must fail, got: {}",
         String::from_utf8_lossy(&sql)
+    );
+}
+
+#[test]
+fn postgres_distinct_renders_after_select() {
+    let users = Postgres
+        .from::<User>()
+        .distinct()
+        .select(|(user,)| user.name);
+    assert_eq!(
+        users.to_sql(),
+        "SELECT DISTINCT q0_0.\"name\" AS \"name\" FROM \"public\".\"users\" AS q0_0"
+    );
+}
+
+#[test]
+fn postgres_distinct_leaves_numbered_placeholders_unaffected() {
+    let users = Postgres
+        .from::<User>()
+        .where_(|user| user.id.equals(1))
+        .distinct()
+        .select(|(user,)| user.name);
+    assert_eq!(
+        users.to_sql(),
+        "SELECT DISTINCT q0_0.\"name\" AS \"name\" FROM \"public\".\"users\" AS q0_0 \
+         WHERE (q0_0.\"id\" = $1)"
+    );
+    assert_eq!(
+        users.collect_params().unwrap(),
+        vec![PostgresParam::Int32(1)]
+    );
+}
+
+#[test]
+fn postgres_count_distinct_renders_distinct_inside_call() {
+    let q = Postgres
+        .from::<User>()
+        .select(|(user,)| user.id.count().distinct());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT COUNT(DISTINCT q0_0.\"id\") AS \"expr\" FROM \"public\".\"users\" AS q0_0"
+    );
+}
+
+#[test]
+fn postgres_sum_distinct_keeps_cast_around_distinct_call() {
+    let q = Postgres
+        .from::<User>()
+        .select(|(user,)| user.id.sum().distinct());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT CAST(SUM(DISTINCT q0_0.\"id\") AS bigint) AS \"expr\" \
+         FROM \"public\".\"users\" AS q0_0"
     );
 }

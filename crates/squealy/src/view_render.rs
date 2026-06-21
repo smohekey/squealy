@@ -144,6 +144,9 @@ fn render_select(
     writer: &mut dyn Write,
 ) -> io::Result<()> {
     writer.write_all(b"SELECT ")?;
+    if query.distinct {
+        writer.write_all(b"DISTINCT ")?;
+    }
     for (index, item) in query.projection.iter().enumerate() {
         if index > 0 {
             writer.write_all(b", ")?;
@@ -249,22 +252,26 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
         }
         ExprNode::Aggregate {
             func,
+            distinct,
             operand,
             result,
-        } => match result {
-            Some(ty) => {
-                write!(writer, "CAST({}(", aggregate_name(*func))?;
-                render_expr(operand, dialect, writer)?;
-                writer.write_all(b") AS ")?;
+        } => {
+            if result.is_some() {
+                writer.write_all(b"CAST(")?;
+            }
+            write!(writer, "{}(", aggregate_name(*func))?;
+            if *distinct {
+                writer.write_all(b"DISTINCT ")?;
+            }
+            render_expr(operand, dialect, writer)?;
+            writer.write_all(b")")?;
+            if let Some(ty) = result {
+                writer.write_all(b" AS ")?;
                 dialect.write_cast_type(ty, writer)?;
-                writer.write_all(b")")
+                writer.write_all(b")")?;
             }
-            None => {
-                write!(writer, "{}(", aggregate_name(*func))?;
-                render_expr(operand, dialect, writer)?;
-                writer.write_all(b")")
-            }
-        },
+            Ok(())
+        }
         ExprNode::Compare { op, left, right } => {
             writer.write_all(b"(")?;
             render_expr(left, dialect, writer)?;

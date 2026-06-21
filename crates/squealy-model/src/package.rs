@@ -477,6 +477,9 @@ fn view_column_to_node(column: &ViewColumnModel) -> KdlNode {
 
 fn view_query_to_node(query: &ViewQueryModel) -> KdlNode {
     let mut node = KdlNode::new("query");
+    if query.distinct {
+        node.push(KdlEntry::new_prop("distinct", KdlValue::Bool(true)));
+    }
     if let Some(limit) = query.limit {
         node.push(KdlEntry::new_prop(
             "limit",
@@ -591,11 +594,15 @@ fn expr_to_node(expr: &ExprNode) -> KdlNode {
         }
         ExprNode::Aggregate {
             func,
+            distinct,
             operand,
             result,
         } => {
             let mut node = KdlNode::new("aggregate");
             node.push(KdlEntry::new_prop("func", aggregate_func_str(*func)));
+            if *distinct {
+                node.push(KdlEntry::new_prop("distinct", KdlValue::Bool(true)));
+            }
             if let Some(ty) = result {
                 write_sql_type(&mut node, ty);
             }
@@ -1209,6 +1216,7 @@ fn view_query_from_node(node: &KdlNode) -> Result<ViewQueryModel, PackageError> 
         .map(view_order_from_node)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ViewQueryModel {
+        distinct: prop_bool(node, "distinct"),
         projection,
         from,
         joins,
@@ -1323,6 +1331,7 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
         },
         "aggregate" => ExprNode::Aggregate {
             func: aggregate_func_from_str(&required_prop(node, "func")?)?,
+            distinct: prop_bool(node, "distinct"),
             operand: nth_expr(0)?,
             result: optional_sql_type_from_node(node)?,
         },
@@ -2086,6 +2095,7 @@ mod tests {
                         },
                     ],
                     query: ViewQueryModel {
+                        distinct: true,
                         projection: vec![
                             ProjectionItem {
                                 output_name: "id".to_owned(),
@@ -2133,6 +2143,7 @@ mod tests {
                             op: CompareOp::GreaterThan,
                             left: Box::new(ExprNode::Aggregate {
                                 func: AggregateFunc::Count,
+                                distinct: false,
                                 operand: Box::new(col("q0_0", "id")),
                                 result: None,
                             }),
@@ -2151,6 +2162,10 @@ mod tests {
         };
 
         let kdl = to_kdl(&model);
+        assert!(
+            kdl.contains("distinct"),
+            "DISTINCT view flag not serialized:\n{kdl}"
+        );
         let parsed = from_kdl(&kdl).expect("view model.kdl should parse");
         assert_eq!(parsed, model, "view KDL round-trip diverged:\n{kdl}");
     }

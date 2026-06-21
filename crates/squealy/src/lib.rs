@@ -518,9 +518,9 @@ pub use projection::{
 pub use query::{
     AllRows, AssignmentNode, AssignmentValueNode, AssignmentValueVisitor, AssignmentVisitor,
     ColumnKey, DefaultAssignmentValue, DefaultValueNode, DeleteQuery, DeleteSourceAst,
-    DeleteSourceQuery, ExecutableDeleteQuery, ExecutableInsertQuery, ExecutableSelectQuery,
-    ExecutableUpdateQuery, ExplicitUpdateBuilder, ExprAssignmentValue, From, InnerJoinSource,
-    InsertAssignment, InsertAssignmentNode, InsertAssignments, InsertColumnKey,
+    DeleteSourceQuery, Distinct, ExecutableDeleteQuery, ExecutableInsertQuery,
+    ExecutableSelectQuery, ExecutableUpdateQuery, ExplicitUpdateBuilder, ExprAssignmentValue, From,
+    InnerJoinSource, InsertAssignment, InsertAssignmentNode, InsertAssignments, InsertColumnKey,
     InsertColumnNullability, InsertColumnValues, InsertQuery, InsertReady, InsertRow,
     InsertRowVisitor, InsertRows, InsertRowsBuilder, IntoAssignmentValue, IntoInsertColumnValue,
     IntoNullableAssignmentValue, IntoUpdateColumnValue, IsNullable, Join, JoinTarget, LeftJoin,

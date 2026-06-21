@@ -1228,6 +1228,7 @@ fn mysql_renders_view_after_tables() {
                     nullable: false,
                 }],
                 query: ViewQueryModel {
+                    distinct: false,
                     projection: vec![ProjectionItem {
                         output_name: "id".to_owned(),
                         expr: ExprNode::Column {
@@ -1293,6 +1294,7 @@ fn mysql_view_fragment_requoting_preserves_string_literals() {
                     nullable: false,
                 }],
                 query: ViewQueryModel {
+                    distinct: false,
                     projection: vec![ProjectionItem {
                         output_name: "name".to_owned(),
                         expr: ExprNode::Column {
@@ -1348,6 +1350,7 @@ fn mysql_renders_view_plan_steps() {
             nullable: false,
         }],
         query: ViewQueryModel {
+            distinct: false,
             projection: vec![ProjectionItem {
                 output_name: "id".to_owned(),
                 expr: ExprNode::Column {
@@ -1437,6 +1440,7 @@ fn mysql_renders_view_expression_ir_in_its_dialect() {
                     },
                 ],
                 query: ViewQueryModel {
+                    distinct: false,
                     projection: vec![
                         ProjectionItem {
                             output_name: "ratio".to_owned(),
@@ -1450,6 +1454,7 @@ fn mysql_renders_view_expression_ir_in_its_dialect() {
                             output_name: "total".to_owned(),
                             expr: ExprNode::Aggregate {
                                 func: AggregateFunc::Sum,
+                                distinct: false,
                                 operand: Box::new(col("amount")),
                                 result: Some(SqlType::I64),
                             },
@@ -1509,6 +1514,7 @@ fn mysql_view_order_by_drops_nulls_modifier() {
                     nullable: true,
                 }],
                 query: ViewQueryModel {
+                    distinct: false,
                     projection: vec![ProjectionItem {
                         output_name: "id".to_owned(),
                         expr: ExprNode::Column {

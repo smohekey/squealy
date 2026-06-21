@@ -538,6 +538,8 @@ pub struct ViewColumnModel {
 /// parameters).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ViewQueryModel {
+    /// Whether the view body is `SELECT DISTINCT`.
+    pub distinct: bool,
     pub projection: Vec<ProjectionItem>,
     pub from: Option<SourceRef>,
     pub joins: Vec<JoinItem>,
@@ -613,10 +615,11 @@ pub enum ExprNode {
     },
     /// `CAST(<operand> AS <ty>)`, with the backend's spelling of `ty`.
     Cast { operand: Box<ExprNode>, ty: SqlType },
-    /// An aggregate call `FUNC(<operand>)`, optionally wrapped in a cast to `result` so the output
-    /// column's wire type matches the view's declared column type.
+    /// An aggregate call `FUNC([DISTINCT] <operand>)`, optionally wrapped in a cast to `result` so the
+    /// output column's wire type matches the view's declared column type.
     Aggregate {
         func: AggregateFunc,
+        distinct: bool,
         operand: Box<ExprNode>,
         result: Option<SqlType>,
     },
