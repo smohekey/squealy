@@ -539,6 +539,8 @@ pub struct ViewColumnModel {
 /// body cannot carry bind parameters).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ViewQueryModel {
+    /// Whether the view body is `SELECT DISTINCT`.
+    pub distinct: bool,
     pub projection: Vec<ProjectionItem>,
     pub from: Option<SourceRef>,
     pub joins: Vec<JoinItem>,

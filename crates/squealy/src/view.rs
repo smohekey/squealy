@@ -393,6 +393,11 @@ impl SelectSink for ModelSink {
         self.query.offset = Some(rows);
         Ok(())
     }
+
+    fn set_distinct(&mut self) -> Result<(), Self::Error> {
+        self.query.distinct = true;
+        Ok(())
+    }
 }
 
 impl ProjectionVisitor for ModelSink {

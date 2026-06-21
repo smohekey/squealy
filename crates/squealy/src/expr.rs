@@ -418,20 +418,20 @@ where
 /// `SUM`/`AVG` whose native type would otherwise be `numeric`).
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq)]
-pub struct AggregateExprAst<Operand> {
+pub struct AggregateExprAst<Operand, const DISTINCT: bool = false> {
     func: AggregateFunc,
     cast: Option<crate::SqlType>,
     operand: Operand,
 }
 
-impl<Operand> ExprAst for AggregateExprAst<Operand>
+impl<Operand, const DISTINCT: bool> ExprAst for AggregateExprAst<Operand, DISTINCT>
 where
     Operand: ExprAst,
 {
     type Params = Operand::Params;
 }
 
-impl<Operand, B> RenderAst<B> for AggregateExprAst<Operand>
+impl<Operand, B, const DISTINCT: bool> RenderAst<B> for AggregateExprAst<Operand, DISTINCT>
 where
     Operand: RenderAst<B>,
     B: crate::Backend,
@@ -440,7 +440,7 @@ where
     where
         V: ExprVisitor<Backend = B>,
     {
-        visitor.visit_aggregate(self.func, self.cast.as_ref(), |visitor| {
+        visitor.visit_aggregate(self.func, DISTINCT, self.cast.as_ref(), |visitor| {
             self.operand.visit(visitor)
         })
     }
@@ -655,7 +655,7 @@ pub trait NonWindowAst {}
 impl<K> NonWindowAst for ColumnExprAst<K> {}
 impl<K> NonWindowAst for LiteralExprAst<K> where K: ExprKind {}
 impl<K> NonWindowAst for ParamExprAst<K> {}
-impl<Operand> NonWindowAst for AggregateExprAst<Operand> {}
+impl<Operand, const DISTINCT: bool> NonWindowAst for AggregateExprAst<Operand, DISTINCT> {}
 impl<Sub> NonWindowAst for ScalarSubqueryExprAst<Sub> {}
 impl<Left, Right> NonWindowAst for BinaryExprAst<Left, Right>
 where
@@ -834,10 +834,25 @@ impl<'scope, Parts, Ords> Window<'scope, Parts, Ords> {
     }
 }
 
-impl<'scope, K, Operand> Expr<'scope, K, AggregateExprAst<Operand>>
+impl<'scope, K, Operand> Expr<'scope, K, AggregateExprAst<Operand, false>>
 where
     Operand: ExprAst,
 {
+    /// Make this aggregate `DISTINCT` — `COUNT(DISTINCT x)`, `SUM(DISTINCT x)`, etc. Deduplicates the
+    /// operand values before aggregating. Not available on a window aggregate (`DISTINCT` is invalid
+    /// with `OVER (…)`), and `.over()` is in turn unavailable once `.distinct()` has been applied.
+    pub fn distinct(self) -> Expr<'scope, K, AggregateExprAst<Operand, true>> {
+        Expr {
+            ast: AggregateExprAst {
+                func: self.ast.func,
+                cast: self.ast.cast,
+                operand: self.ast.operand,
+            },
+            project_alias: self.project_alias,
+            _phantom: PhantomData,
+        }
+    }
+
     /// Turn this aggregate into a window function: `SUM(x) OVER (…)`. The result keeps the
     /// aggregate's value type but is a per-row scalar (no `GROUP BY` required); build the `OVER`
     /// clause with the `Window` handle (`.partition_by(...)`, `.order_by(...)`).
@@ -1084,7 +1099,7 @@ pub trait ExprColumns {
 impl<K> ExprColumns for ColumnExprAst<K> {
     type Columns = HasBareColumn;
 }
-impl<Operand> ExprColumns for AggregateExprAst<Operand> {
+impl<Operand, const DISTINCT: bool> ExprColumns for AggregateExprAst<Operand, DISTINCT> {
     type Columns = ColumnFree;
 }
 impl<K> ExprColumns for LiteralExprAst<K>
@@ -1146,7 +1161,7 @@ pub trait AstProjectionClass {
     type Class;
 }
 
-impl<Operand> AstProjectionClass for AggregateExprAst<Operand> {
+impl<Operand, const DISTINCT: bool> AstProjectionClass for AggregateExprAst<Operand, DISTINCT> {
     type Class = AggregateTerm;
 }
 impl<K> AstProjectionClass for ColumnExprAst<K> {
@@ -1587,6 +1602,7 @@ pub trait ExprVisitor {
     fn visit_aggregate<O>(
         &mut self,
         func: AggregateFunc,
+        distinct: bool,
         cast: Option<&crate::SqlType>,
         operand: O,
     ) -> Result<(), Self::Error>

@@ -222,3 +222,32 @@ fn mysql_window_functions_use_question_mark_placeholders() {
         vec![mysql_async::Value::Int(4), mysql_async::Value::Int(1)]
     );
 }
+
+#[test]
+fn mysql_distinct_renders_after_select() {
+    let query = Mysql
+        .from::<Widget>()
+        .distinct()
+        .select(|(widget,)| widget.name);
+    let sql = query.to_sql();
+    assert!(
+        sql.starts_with("SELECT DISTINCT "),
+        "expected DISTINCT right after SELECT: {sql}"
+    );
+    assert!(
+        sql.contains("`name`") && sql.contains("`widgets`"),
+        "expected backtick-quoted identifiers: {sql}"
+    );
+}
+
+#[test]
+fn mysql_count_distinct_renders_distinct_inside_call() {
+    let query = Mysql
+        .from::<Widget>()
+        .select(|(widget,)| widget.id.count().distinct());
+    let sql = query.to_sql();
+    assert!(
+        sql.contains("COUNT(DISTINCT ") && sql.contains("`id`)"),
+        "expected COUNT(DISTINCT …`id`): {sql}"
+    );
+}

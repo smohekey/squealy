@@ -69,6 +69,40 @@ fn lowers_group_by_having_and_aggregate() {
     assert!(having.contains('1'), "literal not inlined: {having}");
 }
 
+#[test]
+fn lowers_distinct_select_and_count_distinct() {
+    let conn = ModelConn;
+
+    // `SELECT DISTINCT` view body: the flag is captured on the model (it was previously dropped).
+    let distinct = conn
+        .from::<User>()
+        .distinct()
+        .project(|(user,)| (user.id, user.name));
+    let distinct_model = lower_view(&distinct);
+    assert!(
+        distinct_model.distinct,
+        "distinct flag not captured in the view model"
+    );
+
+    // Aggregate DISTINCT inside a (non-distinct) view body renders inside the call.
+    let counted = conn
+        .from::<User>()
+        .project(|(user,)| user.id.count().distinct());
+    let counted_model = lower_view(&counted);
+    assert!(
+        !counted_model.distinct,
+        "select-level distinct must not be set for a plain count(distinct) view"
+    );
+    assert!(
+        counted_model.projection[0]
+            .expr
+            .0
+            .contains("COUNT(DISTINCT "),
+        "count distinct not rendered in view body: {}",
+        counted_model.projection[0].expr.0
+    );
+}
+
 // A hand-written `ViewDefinition` (what `#[derive(View)]` will generate) walks through the object-safe
 // `ViewDef` into a `ViewModel`, exercising the compile-time `Row` match between declared columns and
 // the body's projection.
