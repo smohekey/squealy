@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use crate::SqlType;
+use crate::{OrderNulls, SqlType};
 
 /// The SQL-dialect differences the query renderer needs from a backend.
 ///
@@ -69,5 +69,18 @@ pub trait Dialect {
     ) -> io::Result<()> {
         let _ = case_insensitive;
         writer.write_all(if negated { b" NOT LIKE " } else { b" LIKE " })
+    }
+
+    /// Writes a `NULLS FIRST`/`NULLS LAST` ordering modifier (with a leading space) for an `ORDER BY`
+    /// term in a view body.
+    ///
+    /// The default emits the standard modifier, which PostgreSQL supports. MySQL has no such syntax
+    /// and overrides this to drop it (its `NULL`s already sort lowest), so a view carrying an explicit
+    /// null-ordering still renders to valid MySQL DDL.
+    fn write_order_nulls(&self, nulls: OrderNulls, writer: &mut dyn Write) -> io::Result<()> {
+        writer.write_all(match nulls {
+            OrderNulls::First => b" NULLS FIRST",
+            OrderNulls::Last => b" NULLS LAST",
+        })
     }
 }

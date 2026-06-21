@@ -9,7 +9,7 @@ error[E0277]: the trait bound `squealy::WindowExprAst<squealy::WindowNoArg, sque
    | |__________________________^ unsatisfied trait bound
    |
    = help: the trait `NonAggregateAst` is not implemented for `squealy::WindowExprAst<squealy::WindowNoArg, squealy::WindowNil, squealy::WindowOrder<squealy::ColumnExprAst<PostId>, squealy::WindowNil>>`
-note: required by a bound in `Window::<'scope, Parts, Ords>::order_by`
+note: required by a bound in `squealy::Window::<'scope, Parts, Ords>::order_by`
   --> src/expr.rs
    |
    |     pub fn order_by<K, Ast>(
