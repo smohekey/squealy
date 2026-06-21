@@ -4877,6 +4877,11 @@ where
 
     /// Render the select as `SELECT DISTINCT …` (deduplicate whole rows). Composes with the other
     /// clauses regardless of where in the chain it is called.
+    ///
+    /// Note: SQL requires every `ORDER BY` expression to also appear in the projection when
+    /// `DISTINCT` is used. Ordering a distinct query by a column that is not selected
+    /// (`distinct().order_by(|(u,)| u.id.asc()).select(|(u,)| u.name)`) is rejected by the database at
+    /// execution time. This is not yet enforced at compile time (tracked as a follow-up).
     fn distinct(self) -> Distinct<Self> {
         Distinct { base: self }
     }
