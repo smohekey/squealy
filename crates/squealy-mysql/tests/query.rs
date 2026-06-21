@@ -251,3 +251,19 @@ fn mysql_count_distinct_renders_distinct_inside_call() {
         "expected COUNT(DISTINCT …`id`): {sql}"
     );
 }
+
+#[test]
+fn mysql_right_join_renders_right_join() {
+    // RIGHT JOIN is supported on MySQL (FULL JOIN is not — `full_join` won't compile against Mysql).
+    let query = Mysql
+        .from::<Widget>()
+        .right_join::<Gadget>()
+        .on(|(widget,), gadget| gadget.widget_id.equals(widget.id))
+        .select(|(widget, gadget)| (widget.id, gadget.id));
+    let sql = query.to_sql();
+    assert!(
+        sql.contains("RIGHT JOIN `gadgets`"),
+        "expected RIGHT JOIN with backtick quoting: {sql}"
+    );
+    assert!(!sql.contains("FULL JOIN"), "unexpected FULL JOIN: {sql}");
+}

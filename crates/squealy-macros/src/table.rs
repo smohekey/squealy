@@ -560,6 +560,27 @@ impl TableStruct {
                 #( pub #fields: ::squealy::Expr<'scope, ::squealy::Nullable<#expr_kind_idents>>, )*
             }
 
+            // Nullable-wrap this table's accumulated columns for a RIGHT/FULL JOIN base. The non-null
+            // exprs map to the nullable struct (each column `K` -> `Nullable<K>`); the nullable struct
+            // is idempotent so re-wrapping an already-outer-joined table does not nest `Nullable`.
+            impl<'scope> ::squealy::IntoNullableExprs for #exprs_ident <'scope> {
+                type Output = #nullable_exprs_ident <'scope>;
+
+                fn into_nullable_exprs(self) -> Self::Output {
+                    #nullable_exprs_ident {
+                        #( #fields: self.#fields.into_nullable(), )*
+                    }
+                }
+            }
+
+            impl<'scope> ::squealy::IntoNullableExprs for #nullable_exprs_ident <'scope> {
+                type Output = #nullable_exprs_ident <'scope>;
+
+                fn into_nullable_exprs(self) -> Self::Output {
+                    self
+                }
+            }
+
             #write_builder_defs
 
             static #columns_static: [&'static dyn ::squealy::Column; #columns_len] = [#( &#column_idents, )*];

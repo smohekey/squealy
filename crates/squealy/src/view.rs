@@ -101,6 +101,11 @@ impl Backend for ModelBackend {
     }
 }
 
+// View bodies are dialect-neutral, so the model backend allows `full_join` (a full-join view is valid
+// against PostgreSQL; deploying it to MySQL — which has no `FULL JOIN` — fails at DDL exec, as noted on
+// `full_join`).
+impl crate::SupportsFullJoin for ModelBackend {}
+
 // ---------------------------------------------------------------------------
 // Literal encoding: every value becomes its SQL-literal text
 // ---------------------------------------------------------------------------
@@ -330,6 +335,44 @@ impl SelectSink for ModelSink {
         let on = fragment(|writer, renderer| write_predicate_value(&on, writer, renderer));
         self.query.joins.push(JoinItem {
             kind: JoinKind::Left,
+            source: source_ref::<S>(alias),
+            on,
+        });
+        Ok(())
+    }
+
+    fn push_right_join<S, P, Ast>(
+        &mut self,
+        alias: SourceAlias,
+        on: Predicate<'_, P, Ast>,
+    ) -> Result<(), Self::Error>
+    where
+        S: TableProjection,
+        P: PredicateKind,
+        Ast: RenderPredicateAst<ModelBackend>,
+    {
+        let on = fragment(|writer, renderer| write_predicate_value(&on, writer, renderer));
+        self.query.joins.push(JoinItem {
+            kind: JoinKind::Right,
+            source: source_ref::<S>(alias),
+            on,
+        });
+        Ok(())
+    }
+
+    fn push_full_join<S, P, Ast>(
+        &mut self,
+        alias: SourceAlias,
+        on: Predicate<'_, P, Ast>,
+    ) -> Result<(), Self::Error>
+    where
+        S: TableProjection,
+        P: PredicateKind,
+        Ast: RenderPredicateAst<ModelBackend>,
+    {
+        let on = fragment(|writer, renderer| write_predicate_value(&on, writer, renderer));
+        self.query.joins.push(JoinItem {
+            kind: JoinKind::Full,
             source: source_ref::<S>(alias),
             on,
         });
