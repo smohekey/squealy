@@ -507,6 +507,30 @@ where
     }
 }
 
+// Borrowed `bytea`/`BLOB` setters, mirroring `&str`/`&String`: `.col(&bytes)` / `.col(&bytes[..])`
+// without an owned `Vec<u8>` at the call site.
+impl<K> IntoAssignmentValue<K> for &[u8]
+where
+    K: ColumnKey<Value = Vec<u8>>,
+{
+    type Value = StaticAssignmentValue<Vec<u8>>;
+
+    fn into_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(self.to_vec())
+    }
+}
+
+impl<K> IntoAssignmentValue<K> for &Vec<u8>
+where
+    K: ColumnKey<Value = Vec<u8>>,
+{
+    type Value = StaticAssignmentValue<Vec<u8>>;
+
+    fn into_assignment_value(self) -> Self::Value {
+        StaticAssignmentValue::new(self.clone())
+    }
+}
+
 impl<K> IntoAssignmentValue<K> for DefaultValueNode
 where
     K: ColumnKey,

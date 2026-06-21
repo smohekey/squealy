@@ -71,6 +71,7 @@ pub enum TestParam {
     UInt(u128),
     Float(f64),
     Text(String),
+    Bytes(Vec<u8>),
     Bool(bool),
     Null,
 }
@@ -82,6 +83,7 @@ impl PartialEq for TestParam {
             (Self::UInt(left), Self::UInt(right)) => left == right,
             (Self::Float(left), Self::Float(right)) => left == right,
             (Self::Text(left), Self::Text(right)) => left == right,
+            (Self::Bytes(left), Self::Bytes(right)) => left == right,
             (Self::Bool(left), Self::Bool(right)) => left == right,
             (Self::Null, Self::Null) => true,
             _ => false,
@@ -159,6 +161,13 @@ impl Encode<TestBackend> for String {
     }
 }
 
+impl Encode<TestBackend> for Vec<u8> {
+    fn encode(&self, out: &mut TestParamWriter<'_>) -> Result<(), TestError> {
+        out.push(TestParam::Bytes(self.clone()));
+        Ok(())
+    }
+}
+
 impl<T> Encode<TestBackend> for Option<T>
 where
     T: Encode<TestBackend>,
@@ -190,6 +199,7 @@ impl_test_decode_no_rows!(i8, i16, i32, i64, i128, isize);
 impl_test_decode_no_rows!(u8, u16, u32, u64, u128, usize);
 impl_test_decode_no_rows!(f32, f64);
 impl_test_decode_no_rows!(String, bool);
+impl_test_decode_no_rows!(Vec<u8>);
 
 impl<T> Decode<TestBackend> for Option<T>
 where

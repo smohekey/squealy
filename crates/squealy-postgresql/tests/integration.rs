@@ -49,6 +49,14 @@ struct IntegrationNullable<'scope, C: ColumnMode = ColumnExpr> {
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
+struct IntegrationBytes<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    data: C::Type<'scope, Vec<u8>>,
+    maybe: C::Type<'scope, Option<Vec<u8>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Table)]
 struct JoinUser<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
@@ -1055,4 +1063,53 @@ async fn postgres_distinct_deduplicates_rows() {
         .await
         .expect("fetch count distinct");
     assert_eq!(distinct_names, 2_i64);
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_bytea_column_round_trips() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS integration_bytess")
+        .await
+        .expect("drop old bytes table");
+
+    let ddl_backend = Postgres;
+    create_table::<IntegrationBytes>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+
+    let payload = vec![0xDEu8, 0xAD, 0xBE, 0xEF, 0x00, 0xFF];
+    let inserted = connection
+        .to::<IntegrationBytes>()
+        .data(payload.clone())
+        .maybe(Some(vec![0x01, 0x02, 0x03]))
+        .insert_returning(|row| row)
+        .fetch_one()
+        .await
+        .expect("insert bytea row");
+    assert_eq!(inserted.data, payload);
+    assert_eq!(inserted.maybe, Some(vec![0x01, 0x02, 0x03]));
+
+    // A NULL for the nullable bytea column.
+    connection
+        .to::<IntegrationBytes>()
+        .data(vec![])
+        .maybe(None)
+        .insert()
+        .await
+        .expect("insert null-bytea row");
+
+    let rows: Vec<(Vec<u8>, Option<Vec<u8>>)> = connection
+        .from::<IntegrationBytes>()
+        .order_by(|(row,)| row.id.asc())
+        .select(|(row,)| (row.data, row.maybe))
+        .collect()
+        .await
+        .expect("select bytea rows");
+    assert_eq!(
+        rows,
+        vec![(payload, Some(vec![0x01, 0x02, 0x03])), (Vec::new(), None),]
+    );
 }

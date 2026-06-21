@@ -1750,6 +1750,9 @@ impl_value_expr_kind!(i8, i16, i32, i64, i128, isize);
 impl_value_expr_kind!(u8, u16, u32, u64, u128, usize);
 impl_value_expr_kind!(f32, f64);
 impl_value_expr_kind!(String, bool);
+// `Vec<u8>` is a `bytea`/`BLOB` column value type (binary payloads), usable as a literal predicate
+// operand and a write-builder setter like the scalar value types above.
+impl_value_expr_kind!(Vec<u8>);
 
 /// Maps a window operand's kind to its `LAG`/`LEAD` result kind, which is always nullable (`NULL`
 /// past the partition edge). The mapping is idempotent over nullability: an already-nullable
@@ -4409,6 +4412,26 @@ impl<'scope> IntoExpr<'scope> for &String {
 
     fn into_expr(self) -> Expr<'scope, Self::Kind, Self::Ast> {
         Expr::lit(self)
+    }
+}
+
+// Borrowed `bytea`/`BLOB` literals, mirroring `&str`/`&String` (both convert to the owned `Vec<u8>`
+// the literal stores). Lets `col.equals(&bytes)` / `col.equals(&bytes[..])` skip a caller-side clone.
+impl<'scope> IntoExpr<'scope> for &[u8] {
+    type Kind = Vec<u8>;
+    type Ast = LiteralExprAst<Vec<u8>>;
+
+    fn into_expr(self) -> Expr<'scope, Self::Kind, Self::Ast> {
+        Expr::lit(self)
+    }
+}
+
+impl<'scope> IntoExpr<'scope> for &Vec<u8> {
+    type Kind = Vec<u8>;
+    type Ast = LiteralExprAst<Vec<u8>>;
+
+    fn into_expr(self) -> Expr<'scope, Self::Kind, Self::Ast> {
+        Expr::lit(self.clone())
     }
 }
 
