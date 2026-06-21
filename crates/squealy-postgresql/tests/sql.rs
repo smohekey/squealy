@@ -2513,3 +2513,56 @@ fn postgres_window_functions_render_with_numbered_placeholders() {
         "{summed_sql}"
     );
 }
+
+#[test]
+fn postgres_distinct_renders_after_select() {
+    let users = Postgres
+        .from::<User>()
+        .distinct()
+        .select(|(user,)| user.name);
+    assert_eq!(
+        users.to_sql(),
+        "SELECT DISTINCT q0_0.\"name\" AS \"name\" FROM \"public\".\"users\" AS q0_0"
+    );
+}
+
+#[test]
+fn postgres_distinct_leaves_numbered_placeholders_unaffected() {
+    let users = Postgres
+        .from::<User>()
+        .where_(|user| user.id.equals(1))
+        .distinct()
+        .select(|(user,)| user.name);
+    assert_eq!(
+        users.to_sql(),
+        "SELECT DISTINCT q0_0.\"name\" AS \"name\" FROM \"public\".\"users\" AS q0_0 \
+         WHERE (q0_0.\"id\" = $1)"
+    );
+    assert_eq!(
+        users.collect_params().unwrap(),
+        vec![PostgresParam::Int32(1)]
+    );
+}
+
+#[test]
+fn postgres_count_distinct_renders_distinct_inside_call() {
+    let q = Postgres
+        .from::<User>()
+        .select(|(user,)| user.id.count().distinct());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT COUNT(DISTINCT q0_0.\"id\") AS \"expr\" FROM \"public\".\"users\" AS q0_0"
+    );
+}
+
+#[test]
+fn postgres_sum_distinct_keeps_cast_around_distinct_call() {
+    let q = Postgres
+        .from::<User>()
+        .select(|(user,)| user.id.sum().distinct());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT CAST(SUM(DISTINCT q0_0.\"id\") AS bigint) AS \"expr\" \
+         FROM \"public\".\"users\" AS q0_0"
+    );
+}

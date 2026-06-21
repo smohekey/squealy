@@ -936,3 +936,48 @@ async fn postgres_window_functions_round_trip() {
         vec![("Ada".to_owned(), 1_i64), ("Grace".to_owned(), 2_i64)]
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn postgres_distinct_deduplicates_rows() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS integration_users")
+        .await
+        .expect("drop old integration table");
+
+    let ddl_backend = Postgres;
+    create_table::<IntegrationUser>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+
+    for name in ["dup", "dup", "unique"] {
+        connection
+            .to::<IntegrationUser>()
+            .name(name)
+            .insert()
+            .await
+            .expect("insert row");
+    }
+
+    let names = connection
+        .from::<IntegrationUser>()
+        .distinct()
+        .order_by(|(user,)| user.name.asc())
+        .select(|(user,)| user.name)
+        .collect()
+        .await
+        .expect("fetch distinct names");
+
+    assert_eq!(names, vec!["dup".to_owned(), "unique".to_owned()]);
+
+    // COUNT(DISTINCT name) over {dup, dup, unique} = 2 distinct names (vs COUNT(name) = 3).
+    let distinct_names = connection
+        .from::<IntegrationUser>()
+        .select(|(user,)| user.name.count().distinct())
+        .fetch_one()
+        .await
+        .expect("fetch count distinct");
+    assert_eq!(distinct_names, 2_i64);
+}

@@ -2620,6 +2620,13 @@ pub trait SelectSink {
     fn set_limit(&mut self, rows: usize) -> Result<(), Self::Error>;
 
     fn set_offset(&mut self, rows: usize) -> Result<(), Self::Error>;
+
+    /// Mark the select as `DISTINCT`. Called before the projection is pushed (see
+    /// [`Selected::lower_into`]), so the rendered `DISTINCT` keyword lands between `SELECT` and the
+    /// column list. Defaulted to a no-op so sinks that don't render it need no change.
+    fn set_distinct(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 #[doc(hidden)]
@@ -2830,6 +2837,8 @@ where
         Sink: SelectSink,
         Projection: RenderProjectable<Sink::Backend>,
     {
+        // Before the projection (DISTINCT renders between SELECT and the column list).
+        self.base.lower_distinct_into(sink)?;
         sink.push_projection::<Shape, _>(self.projection.clone())?;
         self.base.lower_sources_into(sink)?;
         self.base.lower_filters_into(sink)?;
@@ -3098,6 +3107,16 @@ where
     fn lower_bounds_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
         Sink: SelectSink<Backend = B>;
+
+    /// Communicate `DISTINCT`-ness to the sink before the projection is pushed. Defaulted to a no-op;
+    /// wrapper nodes forward to their base and [`Distinct`] flips the sink flag.
+    fn lower_distinct_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        let _ = sink;
+        Ok(())
+    }
 
     fn lower_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
@@ -3587,6 +3606,13 @@ pub struct Offset<Base> {
     rows: usize,
 }
 
+/// Marks a select as `DISTINCT`. Wraps the chain and forwards everything to `Base`; the only effect
+/// is flipping the sink's distinct flag during lowering (see `lower_distinct_into`).
+#[doc(hidden)]
+pub struct Distinct<Base> {
+    base: Base,
+}
+
 /// Typestate marker used by generated mutation builders before a filter or all-rows intent exists.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3738,6 +3764,17 @@ where
     }
 }
 
+impl<Base> Clone for Distinct<Base>
+where
+    Base: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+        }
+    }
+}
+
 impl<Base, Expr, Source> Clone for Join<Base, Expr, Source>
 where
     Base: Clone,
@@ -3872,6 +3909,13 @@ where
     {
         self.base.lower_bounds_into(sink)
     }
+
+    fn lower_distinct_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_distinct_into(sink)
+    }
 }
 
 impl<'conn, 'scope, Conn, Base, K, Ast> SelectAst<'conn, 'scope, Conn>
@@ -3982,6 +4026,13 @@ where
     {
         self.base.lower_bounds_into(sink)
     }
+
+    fn lower_distinct_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_distinct_into(sink)
+    }
 }
 
 impl<'conn, 'scope, Conn, Base, K, Ast> SelectAst<'conn, 'scope, Conn>
@@ -4087,6 +4138,13 @@ where
         Sink: SelectSink<Backend = B>,
     {
         self.base.lower_bounds_into(sink)
+    }
+
+    fn lower_distinct_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_distinct_into(sink)
     }
 }
 
@@ -4203,6 +4261,13 @@ where
     {
         self.base.lower_bounds_into(sink)
     }
+
+    fn lower_distinct_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_distinct_into(sink)
+    }
 }
 
 impl<'conn, 'scope, Conn, Base> SelectAst<'conn, 'scope, Conn> for Limited<Base>
@@ -4280,6 +4345,13 @@ where
     {
         self.base.lower_bounds_into(sink)?;
         sink.set_limit(self.rows)
+    }
+
+    fn lower_distinct_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_distinct_into(sink)
     }
 }
 
@@ -4359,6 +4431,99 @@ where
         self.base.lower_bounds_into(sink)?;
         sink.set_offset(self.rows)
     }
+
+    fn lower_distinct_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_distinct_into(sink)
+    }
+}
+
+impl<'conn, 'scope, Conn, Base> SelectAst<'conn, 'scope, Conn> for Distinct<Base>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+{
+    type Exprs = Base::Exprs;
+    type Params = Base::Params;
+    type SourceParams = Base::SourceParams;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
+    type OrderClass = Base::OrderClass;
+    type Grouped = Base::Grouped;
+
+    fn depth(&self) -> usize {
+        self.base.depth()
+    }
+
+    fn connection(&self) -> &'conn Conn {
+        self.base.connection()
+    }
+
+    fn exprs(&self) -> Self::Exprs {
+        self.base.exprs()
+    }
+}
+
+impl<'conn, 'scope, Conn, Base, B> RenderSelectAst<'conn, 'scope, Conn, B> for Distinct<Base>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: RenderSelectAst<'conn, 'scope, Conn, B>,
+    B: Backend,
+{
+    fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_sources_into(sink)
+    }
+
+    fn lower_filters_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_filters_into(sink)
+    }
+
+    fn lower_groups_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_groups_into(sink)
+    }
+
+    fn lower_havings_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_havings_into(sink)
+    }
+
+    fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_orders_into(sink)
+    }
+
+    fn lower_bounds_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_bounds_into(sink)
+    }
+
+    fn lower_distinct_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        // Forward first (a nested DISTINCT is idempotent), then flip the flag for this node.
+        self.base.lower_distinct_into(sink)?;
+        sink.set_distinct()
+    }
 }
 
 impl<'conn, 'scope, Conn, Base, Expr, Source> SelectAst<'conn, 'scope, Conn>
@@ -4469,6 +4634,13 @@ where
     {
         self.base.lower_bounds_into(sink)
     }
+
+    fn lower_distinct_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_distinct_into(sink)
+    }
 }
 
 impl<'conn, 'scope, Conn, Base, Expr, Source> SelectAst<'conn, 'scope, Conn>
@@ -4578,6 +4750,13 @@ where
         Sink: SelectSink<Backend = B>,
     {
         self.base.lower_bounds_into(sink)
+    }
+
+    fn lower_distinct_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_distinct_into(sink)
     }
 }
 
@@ -4694,6 +4873,12 @@ where
 
     fn offset(self, rows: usize) -> Offset<Self> {
         Offset { base: self, rows }
+    }
+
+    /// Render the select as `SELECT DISTINCT …` (deduplicate whole rows). Composes with the other
+    /// clauses regardless of where in the chain it is called.
+    fn distinct(self) -> Distinct<Self> {
+        Distinct { base: self }
     }
 
     fn join<S>(self) -> JoinTarget<Self, S>

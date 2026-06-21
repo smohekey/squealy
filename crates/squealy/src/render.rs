@@ -286,6 +286,7 @@ impl<B: Backend> SqlWriter<B> for ParamCollector<'_, B> {
 struct SelectRenderSink<'writer, 'renderer, B, Writer> {
     writer: &'writer mut Writer,
     renderer: &'renderer mut Renderer,
+    distinct: bool,
     columns: usize,
     sources: usize,
     filters: usize,
@@ -310,6 +311,7 @@ where
         Ok(Self {
             writer,
             renderer,
+            distinct: false,
             columns: 0,
             sources: 0,
             filters: 0,
@@ -377,12 +379,20 @@ where
     type Error = io::Error;
     type Backend = B;
 
+    fn set_distinct(&mut self) -> io::Result<()> {
+        self.distinct = true;
+        Ok(())
+    }
+
     fn push_projection<Shape, P>(&mut self, projection: P) -> io::Result<()>
     where
         Shape: ProjectionShape,
         P: RenderProjectable<B>,
     {
         _ = std::marker::PhantomData::<Shape>;
+        if self.distinct {
+            self.writer.write_all(b"DISTINCT ")?;
+        }
         projection.visit_projection(self)
     }
 
@@ -1305,17 +1315,23 @@ where
     fn visit_aggregate<O>(
         &mut self,
         func: AggregateFunc,
+        distinct: bool,
         cast: Option<&SqlType>,
         operand: O,
     ) -> Result<(), Self::Error>
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>,
     {
+        let distinct = if distinct { "DISTINCT " } else { "" };
         // Some aggregates (`SUM`/`AVG`) have a database result type that differs from the Rust type
         // Squealy advertises (e.g. PostgreSQL `avg(int)` is `numeric`); a cast pins the wire type.
         match cast {
             Some(ty) => {
-                write!(self.writer, "CAST({}(", render_aggregate_func(func))?;
+                write!(
+                    self.writer,
+                    "CAST({}({distinct}",
+                    render_aggregate_func(func)
+                )?;
                 operand(self)?;
                 self.writer.write_all(b") AS ")?;
                 self.renderer
@@ -1324,7 +1340,7 @@ where
                 self.writer.write_all(b")")
             }
             None => {
-                write!(self.writer, "{}(", render_aggregate_func(func))?;
+                write!(self.writer, "{}({distinct}", render_aggregate_func(func))?;
                 operand(self)?;
                 self.writer.write_all(b")")
             }

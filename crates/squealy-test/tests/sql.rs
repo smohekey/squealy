@@ -1403,3 +1403,100 @@ fn test_window_lag_lead_over_arithmetic_expression_kinds() {
         "SELECT LAG((q0_0.id / ?), ?) OVER (ORDER BY q0_0.id ASC) AS expr FROM posts AS q0_0"
     );
 }
+
+#[test]
+fn test_distinct_single_column() {
+    let q = TestConnection
+        .from::<User>()
+        .distinct()
+        .select(|(user,)| user.name);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT DISTINCT q0_0.name AS name FROM public.users AS q0_0"
+    );
+}
+
+#[test]
+fn test_distinct_tuple_projection() {
+    let q = TestConnection
+        .from::<User>()
+        .distinct()
+        .select(|(user,)| (user.id, user.name));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT DISTINCT q0_0.id AS t0_id, q0_0.name AS t1_name FROM public.users AS q0_0"
+    );
+}
+
+#[test]
+fn test_distinct_composes_with_where_order_limit() {
+    // `distinct()` works regardless of chain position (here before order_by/limit) and the rendered
+    // DISTINCT still lands directly after SELECT.
+    let q = TestConnection
+        .from::<User>()
+        .where_(|user| user.id.greater_than(0))
+        .distinct()
+        .order_by(|(user,)| user.name.asc())
+        .limit(10)
+        .select(|(user,)| user.name);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT DISTINCT q0_0.name AS name FROM public.users AS q0_0 \
+         WHERE (q0_0.id > ?) ORDER BY q0_0.name ASC LIMIT 10"
+    );
+    assert_eq!(q.collect_params().unwrap(), vec![TestParam::Int(0)]);
+}
+
+#[test]
+fn test_count_distinct_renders_distinct_inside_call() {
+    let q = TestConnection
+        .from::<User>()
+        .select(|(user,)| user.id.count().distinct());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT COUNT(DISTINCT q0_0.id) AS expr FROM public.users AS q0_0"
+    );
+}
+
+#[test]
+fn test_sum_distinct_renders_distinct_inside_call() {
+    // `.distinct()` generalizes across aggregates (test backend omits the SUM cast the real backends
+    // emit).
+    let q = TestConnection
+        .from::<User>()
+        .select(|(user,)| user.id.sum().distinct());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT SUM(DISTINCT q0_0.id) AS expr FROM public.users AS q0_0"
+    );
+}
+
+#[test]
+fn test_count_without_distinct_unchanged() {
+    let q = TestConnection
+        .from::<User>()
+        .select(|(user,)| user.id.count());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT COUNT(q0_0.id) AS expr FROM public.users AS q0_0"
+    );
+}
+
+#[test]
+fn test_distinct_inside_subquery() {
+    let q = TestConnection
+        .from::<User>()
+        .where_correlated(|(user,), sub| {
+            user.id.in_subquery(
+                sub.from::<Post>()
+                    .distinct()
+                    .select_subquery(|(post,)| post.user_id),
+            )
+        })
+        .select(|(user,)| user.id);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 WHERE (q0_0.id IN (SELECT DISTINCT \
+         q1_0.user_id AS user_id FROM posts AS q1_0))"
+    );
+}
