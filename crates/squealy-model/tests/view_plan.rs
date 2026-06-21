@@ -1,7 +1,7 @@
 //! Incremental diff/plan coverage for views: adding, removing, and changing a view between the
 //! desired and actual model must produce the right plan steps and risk classification.
 
-use squealy::{ExprFragment, ProjectionItem, SourceRef, ViewQueryModel};
+use squealy::{ExprNode, ProjectionItem, SourceRef, ViewQueryModel};
 use squealy_model::{
     ChangeRisk, DatabaseModel, DatabasePlanStep, DiffPolicy, SchemaModel, SqlType, TableModel,
     ViewColumnModel, ViewModel, classified_plan_steps, plan_models,
@@ -38,7 +38,10 @@ fn view(filter: &str, columns: &[&str]) -> ViewModel {
                 .iter()
                 .map(|name| ProjectionItem {
                     output_name: (*name).to_owned(),
-                    expr: ExprFragment(format!("q0_0.\"{name}\"")),
+                    expr: ExprNode::Column {
+                        alias: "q0_0".to_owned(),
+                        column: (*name).to_owned(),
+                    },
                 })
                 .collect(),
             from: Some(SourceRef {
@@ -47,7 +50,9 @@ fn view(filter: &str, columns: &[&str]) -> ViewModel {
                 alias: "q0_0".to_owned(),
             }),
             joins: Vec::new(),
-            filter: Some(ExprFragment(filter.to_owned())),
+            // The filter is a stand-in expression that differs between view variants so the diff sees a
+            // body change.
+            filter: Some(ExprNode::Literal(filter.to_owned())),
             group_by: Vec::new(),
             having: None,
             order_by: Vec::new(),
@@ -121,4 +126,105 @@ fn changing_the_column_set_plans_drop_then_create() {
     assert_eq!(plan.steps.len(), 2);
     assert!(matches!(plan.steps[0], DatabasePlanStep::DropView { .. }));
     assert!(matches!(plan.steps[1], DatabasePlanStep::CreateView { .. }));
+}
+
+// A live-introspected view has no structural body (it can't be rebuilt from stored SQL). The diff
+// must compare those by columns only, so re-introspecting an unchanged view plans nothing instead of
+// a spurious CreateView every run.
+fn introspected_view(columns: &[&str]) -> ViewModel {
+    let mut view = view("ignored-body", columns);
+    view.query = ViewQueryModel::default();
+    view
+}
+
+#[test]
+fn introspected_view_with_matching_columns_is_replaced_without_drop() {
+    // An introspected view has no comparable body, so the desired definition is re-applied as a safe
+    // CREATE OR REPLACE every run (no drop, since the column set is unchanged) — this is how a
+    // body-only change reaches a live database.
+    let desired = model(vec![view("(q0_0.\"id\" > 0)", &["id"])]);
+    let actual = model(vec![introspected_view(&["id"])]);
+
+    // A lone CREATE OR REPLACE is non-destructive, so the default policy allows it.
+    let plan = plan_models(&desired, &actual, DiffPolicy::default()).expect("plan");
+
+    assert_eq!(plan.steps.len(), 1, "expected a single replace: {plan:?}");
+    assert!(matches!(plan.steps[0], DatabasePlanStep::CreateView { .. }));
+}
+
+#[test]
+fn introspected_view_nullability_difference_replaces_without_drop() {
+    // Introspected view nullability is unreliable (PostgreSQL `attnotnull` is usually false for view
+    // outputs), so a difference only in nullability must not drop+recreate — it is a same-shape view,
+    // so it gets a safe CREATE OR REPLACE.
+    let desired = model(vec![view("(q0_0.\"id\" > 0)", &["id"])]);
+    let mut actual_view = introspected_view(&["id"]);
+    actual_view.columns[0].nullable = !desired.schemas[0].views[0].columns[0].nullable;
+    let actual = model(vec![actual_view]);
+
+    let plan = plan_models(&desired, &actual, DiffPolicy::default()).expect("plan");
+
+    assert_eq!(plan.steps.len(), 1, "expected a single replace: {plan:?}");
+    assert!(matches!(plan.steps[0], DatabasePlanStep::CreateView { .. }));
+}
+
+#[test]
+fn introspected_view_with_changed_columns_is_recreated() {
+    let desired = model(vec![view("(q0_0.\"id\" > 0)", &["id", "name"])]);
+    let actual = model(vec![introspected_view(&["id"])]);
+
+    let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan");
+
+    // A column-set change can't use CREATE OR REPLACE, so it drops then recreates.
+    assert_eq!(plan.steps.len(), 2);
+    assert!(matches!(plan.steps[0], DatabasePlanStep::DropView { .. }));
+    assert!(matches!(plan.steps[1], DatabasePlanStep::CreateView { .. }));
+}
+
+#[test]
+fn subquery_only_view_dependency_orders_create_after_it() {
+    // `child` references `parent` ONLY inside an EXISTS subquery in its filter (not in FROM/JOIN), so
+    // the dependency is invisible unless the source walker recurses into subqueries.
+    let mut parent = view("(q0_0.\"id\" > 0)", &["id"]);
+    parent.name = "parent".to_owned();
+
+    let mut child = view("(q0_0.\"id\" > 0)", &["id"]);
+    child.name = "child".to_owned();
+    child.query.filter = Some(ExprNode::Exists {
+        negated: false,
+        subquery: Box::new(ViewQueryModel {
+            from: Some(SourceRef {
+                schema: Some("public".to_owned()),
+                name: "parent".to_owned(),
+                alias: "q1_0".to_owned(),
+            }),
+            ..ViewQueryModel::default()
+        }),
+    });
+
+    // Declared child-first, so a correct order must come from the dependency, not declaration order.
+    let desired = model(vec![child, parent]);
+    let actual = model(vec![]);
+
+    let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan");
+    let created: Vec<&str> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            DatabasePlanStep::CreateView { view, .. } => Some(view.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let parent_at = created
+        .iter()
+        .position(|name| *name == "parent")
+        .expect("parent created");
+    let child_at = created
+        .iter()
+        .position(|name| *name == "child")
+        .expect("child created");
+    assert!(
+        parent_at < child_at,
+        "parent must be created before the child whose subquery selects from it: {created:?}"
+    );
 }

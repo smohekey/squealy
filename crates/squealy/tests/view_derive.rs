@@ -71,8 +71,13 @@ fn derived_view_lowers_its_body() {
     assert_eq!(model.projection.len(), 2);
     let from = model.from.expect("FROM source");
     assert_eq!(from.name, "users");
-    let filter = model.filter.expect("WHERE").0;
-    assert!(filter.contains("TRUE"), "literal not inlined: {filter}");
+    assert!(matches!(
+        model.filter.expect("WHERE"),
+        ExprNode::Compare {
+            op: CompareOp::Equals,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -91,7 +96,13 @@ fn database_walk_includes_views() {
     assert_eq!(view.columns[1].name, "name");
     assert_eq!(view.query.projection.len(), 2);
     assert_eq!(view.query.from.as_ref().unwrap().name, "users");
-    assert!(view.query.filter.as_ref().unwrap().0.contains("TRUE"));
+    assert!(matches!(
+        view.query.filter.as_ref().unwrap(),
+        ExprNode::Compare {
+            op: CompareOp::Equals,
+            ..
+        }
+    ));
 }
 
 // The view is queryable as a FROM source, including from another view's body (view-on-view).

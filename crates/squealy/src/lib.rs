@@ -455,6 +455,7 @@ pub mod render;
 mod schema;
 mod table;
 mod view;
+pub mod view_render;
 
 pub use backend::{
     Backend, ConstraintCapabilities, DdlExecutor, Decode, DecodeNullable, Encode,
@@ -504,11 +505,11 @@ pub use list::{
 };
 pub use model::{
     CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintEnforcement,
-    ConstraintValidation, DatabaseModel, DefaultValue, ExprFragment, ForeignKeyAction,
-    ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
-    IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
-    IndexOperatorClass, JoinItem, JoinKind, OrderItem, OrderNulls, ProjectionItem, SchemaModel,
-    SourceRef, SqlType, TableModel, ViewColumnModel, ViewDef, ViewModel, ViewQueryModel,
+    ConstraintValidation, DatabaseModel, DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch,
+    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
+    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
+    JoinItem, JoinKind, LogicalOp, OrderItem, OrderNulls, ProjectionItem, SchemaModel, SourceRef,
+    SqlType, TableModel, ViewColumnModel, ViewDef, ViewModel, ViewQueryModel, WindowOrderTerm,
 };
 pub use plan::{DatabasePlan, DatabasePlanStep, TablePlanStep};
 pub use projection::{
@@ -544,3 +545,4 @@ pub use table::{
 pub use view::{ModelBackend, ModelConn, SchemaView, ViewDefinition, ViewSelect};
 #[doc(hidden)]
 pub use view::{lower_view, view_definition_model};
+pub use view_render::{ordered_views, render_create_view, render_drop_view};

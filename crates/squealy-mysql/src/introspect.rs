@@ -5,6 +5,7 @@ use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
     ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
     IdentityModel, IndexDirection, IndexMethod, IndexModel, SchemaModel, SqlType, TableModel,
+    ViewColumnModel, ViewModel, ViewQueryModel,
 };
 
 use crate::MysqlError;
@@ -15,30 +16,97 @@ struct TableRef {
 }
 
 pub(crate) async fn database(conn: &mut mysql_async::Conn) -> Result<DatabaseModel, MysqlError> {
-    let table_refs = table_refs(conn).await?;
     let mut schemas = Vec::<SchemaModel>::new();
 
-    for table_ref in table_refs {
-        if schemas
-            .last()
-            .is_none_or(|schema| schema.name.as_deref() != Some(table_ref.schema.as_str()))
-        {
-            schemas.push(SchemaModel {
-                name: Some(table_ref.schema.clone()),
-                views: Vec::new(),
-                tables: Vec::new(),
-            });
-        }
-
+    for table_ref in table_refs(conn).await? {
         let table = table(conn, &table_ref).await?;
-        schemas
-            .last_mut()
-            .expect("schema just pushed")
+        schema_entry(&mut schemas, &table_ref.schema)
             .tables
             .push(table);
     }
 
+    // Views are introspected by name and output columns only: a stored view definition cannot be
+    // reconstructed into the structural `ViewQueryModel`, so the body stays empty and the diff matches
+    // views by name and columns (it cannot detect a pure body change against a live database).
+    //
+    // Known limitation: because the body is empty, an introspected view exposes no dependencies, so the
+    // diff cannot order drops among several interdependent live views dropped/recreated in one plan (it
+    // may drop a parent before a dependent). Single live views and package-vs-package diffs are
+    // unaffected. Tracked for a follow-up that introspects view dependencies separately.
+    for view_ref in view_refs(conn).await? {
+        let view = view(conn, &view_ref).await?;
+        schema_entry(&mut schemas, &view_ref.schema)
+            .views
+            .push(view);
+    }
+
     Ok(DatabaseModel { schemas })
+}
+
+/// Finds the schema named `name`, creating and appending it (preserving discovery order) if absent.
+fn schema_entry<'a>(schemas: &'a mut Vec<SchemaModel>, name: &str) -> &'a mut SchemaModel {
+    if let Some(index) = schemas
+        .iter()
+        .position(|schema| schema.name.as_deref() == Some(name))
+    {
+        return &mut schemas[index];
+    }
+    schemas.push(SchemaModel {
+        name: Some(name.to_owned()),
+        tables: Vec::new(),
+        views: Vec::new(),
+    });
+    schemas.last_mut().expect("schema just pushed")
+}
+
+async fn view_refs(conn: &mut mysql_async::Conn) -> Result<Vec<TableRef>, MysqlError> {
+    conn.query_map(
+        "\
+SELECT TABLE_SCHEMA, TABLE_NAME
+FROM information_schema.TABLES
+WHERE TABLE_TYPE = 'VIEW'
+  AND TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys', '__squealy')
+ORDER BY TABLE_SCHEMA, TABLE_NAME",
+        |(schema, name)| TableRef { schema, name },
+    )
+    .await
+    .map_err(MysqlError::Introspect)
+}
+
+async fn view(conn: &mut mysql_async::Conn, view_ref: &TableRef) -> Result<ViewModel, MysqlError> {
+    Ok(ViewModel {
+        name: view_ref.name.clone(),
+        comment: None,
+        columns: view_columns(conn, view_ref).await?,
+        query: ViewQueryModel::default(),
+    })
+}
+
+async fn view_columns(
+    conn: &mut mysql_async::Conn,
+    view_ref: &TableRef,
+) -> Result<Vec<ViewColumnModel>, MysqlError> {
+    conn.exec_map(
+        "\
+SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE
+FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = :schema
+  AND TABLE_NAME = :view
+ORDER BY ORDINAL_POSITION",
+        params! {
+            "schema" => &view_ref.schema,
+            "view" => &view_ref.name,
+        },
+        |(name, data_type, column_type, is_nullable): (String, String, String, String)| {
+            ViewColumnModel {
+                name,
+                ty: sql_type(&data_type, &column_type),
+                nullable: is_nullable.eq_ignore_ascii_case("YES"),
+            }
+        },
+    )
+    .await
+    .map_err(MysqlError::Introspect)
 }
 
 async fn table_refs(conn: &mut mysql_async::Conn) -> Result<Vec<TableRef>, MysqlError> {

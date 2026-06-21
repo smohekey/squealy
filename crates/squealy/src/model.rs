@@ -11,8 +11,8 @@
 //! See `docs/ddl-management.md` for the design.
 
 use crate::{
-    Column, ColumnDefault, ColumnType, Database, DatabaseSchema, ForeignKey, Index, OrderDirection,
-    Table,
+    AggregateFunc, ArithmeticOp, Column, ColumnDefault, ColumnType, CompareOp, Database,
+    DatabaseSchema, ForeignKey, Index, OrderDirection, Table, WindowFunc,
 };
 
 /// An owned, backend-neutral model of a whole database.
@@ -532,11 +532,10 @@ pub struct ViewColumnModel {
 
 /// The backend-neutral structural body of a view's `SELECT`.
 ///
-/// Source/join/projection structure (the identifiers we own) is captured explicitly so each backend
-/// can re-quote per dialect and so view-on-view dependencies can be extracted for ordering. The inner
-/// scalar expressions (predicate bodies, projection expressions, group/having/order keys) are rendered
-/// to portable [`ExprFragment`] text by the canonical model dialect, with any literals inlined (a view
-/// body cannot carry bind parameters).
+/// Source/join/projection structure and the inner scalar expressions (predicate bodies, projection
+/// expressions, group/having/order keys) are all captured structurally as [`ExprNode`] trees, so each
+/// backend renders them in its own dialect. Literals are inlined (a view body carries no bind
+/// parameters).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ViewQueryModel {
     /// Whether the view body is `SELECT DISTINCT`.
@@ -544,19 +543,19 @@ pub struct ViewQueryModel {
     pub projection: Vec<ProjectionItem>,
     pub from: Option<SourceRef>,
     pub joins: Vec<JoinItem>,
-    pub filter: Option<ExprFragment>,
-    pub group_by: Vec<ExprFragment>,
-    pub having: Option<ExprFragment>,
+    pub filter: Option<ExprNode>,
+    pub group_by: Vec<ExprNode>,
+    pub having: Option<ExprNode>,
     pub order_by: Vec<OrderItem>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
 }
 
 /// One projected output expression together with its output column name.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProjectionItem {
     pub output_name: String,
-    pub expr: ExprFragment,
+    pub expr: ExprNode,
 }
 
 /// A table or view referenced in a view body, with the alias bound to it in the `SELECT`.
@@ -568,11 +567,11 @@ pub struct SourceRef {
 }
 
 /// A join in a view body.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct JoinItem {
     pub kind: JoinKind,
     pub source: SourceRef,
-    pub on: ExprFragment,
+    pub on: ExprNode,
 }
 
 /// The kind of join in a view body.
@@ -585,9 +584,9 @@ pub enum JoinKind {
 }
 
 /// One `ORDER BY` term in a view body.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OrderItem {
-    pub expr: ExprFragment,
+    pub expr: ExprNode,
     pub direction: Option<OrderDirection>,
     pub nulls: Option<OrderNulls>,
 }
@@ -599,13 +598,108 @@ pub enum OrderNulls {
     Last,
 }
 
-/// A canonical-dialect-rendered scalar expression from a view body, with literals inlined.
+/// A backend-neutral SQL expression from a view body.
 ///
-/// Backends emit this text inside their own dialect-quoted `CREATE VIEW`. The canonical dialect quotes
-/// identifiers with ANSI double quotes, so Postgres consumes it directly and MySQL must create the view
-/// under `ANSI_QUOTES`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExprFragment(pub String);
+/// Stored structurally (rather than as pre-rendered text) so each backend renders it in its own
+/// dialect — correct identifier quoting, cast type names, integer-division casts, and `LIKE`/`ILIKE`.
+/// Literals are inlined, since a view body carries no bind parameters.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExprNode {
+    /// A qualified column reference, rendered as `<alias>.<column>`.
+    Column { alias: String, column: String },
+    /// An inlined SQL literal, already formatted (e.g. `'Ada'`, `42`, `TRUE`, `NULL`).
+    Literal(String),
+    /// Binary arithmetic; `Divide` uses the backend's fractional-division handling.
+    Binary {
+        op: ArithmeticOp,
+        left: Box<ExprNode>,
+        right: Box<ExprNode>,
+    },
+    /// `CAST(<operand> AS <ty>)`, with the backend's spelling of `ty`.
+    Cast { operand: Box<ExprNode>, ty: SqlType },
+    /// An aggregate call `FUNC([DISTINCT] <operand>)`, optionally wrapped in a cast to `result` so the
+    /// output column's wire type matches the view's declared column type.
+    Aggregate {
+        func: AggregateFunc,
+        distinct: bool,
+        operand: Box<ExprNode>,
+        result: Option<SqlType>,
+    },
+    /// A comparison `<left> <op> <right>`.
+    Compare {
+        op: CompareOp,
+        left: Box<ExprNode>,
+        right: Box<ExprNode>,
+    },
+    /// A logical `AND`/`OR`.
+    Logical {
+        op: LogicalOp,
+        left: Box<ExprNode>,
+        right: Box<ExprNode>,
+    },
+    /// `NOT (<operand>)`.
+    Not(Box<ExprNode>),
+    /// `<operand> IS [NOT] NULL`.
+    IsNull {
+        negated: bool,
+        operand: Box<ExprNode>,
+    },
+    /// `<operand> [NOT] LIKE <pattern>` (`ILIKE` for `case_insensitive` on supporting dialects).
+    Like {
+        case_insensitive: bool,
+        negated: bool,
+        operand: Box<ExprNode>,
+        pattern: Box<ExprNode>,
+    },
+    /// `<operand> [NOT] IN (<items>)` against an inline value list.
+    In {
+        negated: bool,
+        operand: Box<ExprNode>,
+        items: Vec<ExprNode>,
+    },
+    /// `<operand> [NOT] BETWEEN <low> AND <high>`.
+    Between {
+        negated: bool,
+        operand: Box<ExprNode>,
+        low: Box<ExprNode>,
+        high: Box<ExprNode>,
+    },
+    /// A scalar subquery `(SELECT …)` used as a value.
+    ScalarSubquery(Box<ViewQueryModel>),
+    /// `<operand> [NOT] IN (<subquery>)`.
+    InSubquery {
+        negated: bool,
+        operand: Box<ExprNode>,
+        subquery: Box<ViewQueryModel>,
+    },
+    /// `[NOT] EXISTS (<subquery>)`.
+    Exists {
+        negated: bool,
+        subquery: Box<ViewQueryModel>,
+    },
+    /// A window function: `FUNC(<args>) OVER (PARTITION BY … ORDER BY …)`, optionally cast to `result`.
+    Window {
+        func: WindowFunc,
+        args: Vec<ExprNode>,
+        partition_by: Vec<ExprNode>,
+        order_by: Vec<WindowOrderTerm>,
+        result: Option<SqlType>,
+    },
+}
+
+/// One `ORDER BY` term inside a window function's `OVER (…)` clause.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowOrderTerm {
+    pub expr: ExprNode,
+    pub direction: OrderDirection,
+}
+
+/// Conjunction/disjunction for [`ExprNode::Logical`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogicalOp {
+    And,
+    Or,
+}
 
 /// Object-safe runtime metadata and body lowering for a view, consumed by the model walker.
 ///
@@ -624,14 +718,101 @@ pub trait ViewDef: Sync {
 }
 
 impl ViewModel {
-    /// The names of the views this view depends on (other views referenced in its `FROM`/`JOIN`s),
-    /// used to topologically order view creation. Dependencies on tables are irrelevant to view
-    /// ordering because all tables are created before any view.
+    /// The sources this view depends on, used to topologically order view creation. This walks the
+    /// whole body — `FROM`/`JOIN`s and every expression, recursing into scalar/`IN`/`EXISTS`
+    /// subqueries — so a view that references another view only inside a subquery is still ordered
+    /// after it. Dependencies on tables are irrelevant to view ordering (all tables precede any view).
     pub fn referenced_sources(&self) -> impl Iterator<Item = &SourceRef> {
-        self.query
-            .from
-            .iter()
-            .chain(self.query.joins.iter().map(|join| &join.source))
+        let mut sources = Vec::new();
+        collect_query_sources(&self.query, &mut sources);
+        sources.into_iter()
+    }
+}
+
+/// Collects every [`SourceRef`] reachable from a query body, recursing through subqueries.
+fn collect_query_sources<'a>(query: &'a ViewQueryModel, sources: &mut Vec<&'a SourceRef>) {
+    sources.extend(query.from.iter());
+    for join in &query.joins {
+        sources.push(&join.source);
+        collect_expr_sources(&join.on, sources);
+    }
+    for item in &query.projection {
+        collect_expr_sources(&item.expr, sources);
+    }
+    if let Some(filter) = &query.filter {
+        collect_expr_sources(filter, sources);
+    }
+    for expr in &query.group_by {
+        collect_expr_sources(expr, sources);
+    }
+    if let Some(having) = &query.having {
+        collect_expr_sources(having, sources);
+    }
+    for order in &query.order_by {
+        collect_expr_sources(&order.expr, sources);
+    }
+}
+
+/// Collects every [`SourceRef`] reachable from an expression, recursing through nested subqueries.
+fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>) {
+    match expr {
+        ExprNode::Column { .. } | ExprNode::Literal(_) => {}
+        ExprNode::Binary { left, right, .. }
+        | ExprNode::Compare { left, right, .. }
+        | ExprNode::Logical { left, right, .. } => {
+            collect_expr_sources(left, sources);
+            collect_expr_sources(right, sources);
+        }
+        ExprNode::Cast { operand, .. } | ExprNode::Aggregate { operand, .. } => {
+            collect_expr_sources(operand, sources);
+        }
+        ExprNode::Not(operand) | ExprNode::IsNull { operand, .. } => {
+            collect_expr_sources(operand, sources);
+        }
+        ExprNode::Like {
+            operand, pattern, ..
+        } => {
+            collect_expr_sources(operand, sources);
+            collect_expr_sources(pattern, sources);
+        }
+        ExprNode::In { operand, items, .. } => {
+            collect_expr_sources(operand, sources);
+            for item in items {
+                collect_expr_sources(item, sources);
+            }
+        }
+        ExprNode::Between {
+            operand, low, high, ..
+        } => {
+            collect_expr_sources(operand, sources);
+            collect_expr_sources(low, sources);
+            collect_expr_sources(high, sources);
+        }
+        ExprNode::ScalarSubquery(subquery) | ExprNode::Exists { subquery, .. } => {
+            collect_query_sources(subquery, sources);
+        }
+        ExprNode::InSubquery {
+            operand, subquery, ..
+        } => {
+            collect_expr_sources(operand, sources);
+            collect_query_sources(subquery, sources);
+        }
+        ExprNode::Window {
+            args,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            for arg in args {
+                collect_expr_sources(arg, sources);
+            }
+            for partition in partition_by {
+                collect_expr_sources(partition, sources);
+            }
+            for order in order_by {
+                collect_expr_sources(&order.expr, sources);
+            }
+        }
     }
 }
 

@@ -2252,11 +2252,12 @@ fn postgres_is_not_null_composes_with_other_predicates() {
 // tables, and views are ordered so a view that selects from another view is created after it.
 #[test]
 fn postgres_renders_views_in_dependency_order() {
+    // `projection` is `(output_name, column)`; each expression is `q0_0.<column>`.
     fn view(
         name: &str,
         from: &str,
         projection: &[(&str, &str)],
-        filter: Option<&str>,
+        filter: Option<ExprNode>,
     ) -> ViewModel {
         ViewModel {
             name: name.to_owned(),
@@ -2273,9 +2274,12 @@ fn postgres_renders_views_in_dependency_order() {
                 distinct: false,
                 projection: projection
                     .iter()
-                    .map(|(output, expr)| ProjectionItem {
+                    .map(|(output, column)| ProjectionItem {
                         output_name: (*output).to_owned(),
-                        expr: ExprFragment((*expr).to_owned()),
+                        expr: ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: (*column).to_owned(),
+                        },
                     })
                     .collect(),
                 from: Some(SourceRef {
@@ -2284,7 +2288,7 @@ fn postgres_renders_views_in_dependency_order() {
                     alias: "q0_0".to_owned(),
                 }),
                 joins: Vec::new(),
-                filter: filter.map(|f| ExprFragment(f.to_owned())),
+                filter,
                 group_by: Vec::new(),
                 having: None,
                 order_by: Vec::new(),
@@ -2319,17 +2323,19 @@ fn postgres_renders_views_in_dependency_order() {
             // `active_user_ids` selects from the `active_users` view, so it must be created after it
             // even though it is declared first.
             views: vec![
-                view(
-                    "active_user_ids",
-                    "active_users",
-                    &[("id", "q0_0.\"id\"")],
-                    None,
-                ),
+                view("active_user_ids", "active_users", &[("id", "id")], None),
                 view(
                     "active_users",
                     "users",
-                    &[("id", "q0_0.\"id\"")],
-                    Some("(q0_0.\"id\" > 0)"),
+                    &[("id", "id")],
+                    Some(ExprNode::Compare {
+                        op: CompareOp::GreaterThan,
+                        left: Box::new(ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: "id".to_owned(),
+                        }),
+                        right: Box::new(ExprNode::Literal("0".to_owned())),
+                    }),
                 ),
             ],
         }],
@@ -2383,7 +2389,10 @@ fn postgres_renders_view_plan_steps() {
             distinct: false,
             projection: vec![ProjectionItem {
                 output_name: "id".to_owned(),
-                expr: ExprFragment("q0_0.\"id\"".to_owned()),
+                expr: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "id".to_owned(),
+                },
             }],
             from: Some(SourceRef {
                 schema: Some("public".to_owned()),
@@ -2391,7 +2400,14 @@ fn postgres_renders_view_plan_steps() {
                 alias: "q0_0".to_owned(),
             }),
             joins: Vec::new(),
-            filter: Some(ExprFragment("(q0_0.\"id\" > 0)".to_owned())),
+            filter: Some(ExprNode::Compare {
+                op: CompareOp::GreaterThan,
+                left: Box::new(ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "id".to_owned(),
+                }),
+                right: Box::new(ExprNode::Literal("0".to_owned())),
+            }),
             group_by: Vec::new(),
             having: None,
             order_by: Vec::new(),
@@ -2444,7 +2460,10 @@ fn postgres_renders_distinct_view_body() {
             distinct: true,
             projection: vec![ProjectionItem {
                 output_name: "name".to_owned(),
-                expr: ExprFragment("q0_0.\"name\"".to_owned()),
+                expr: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "name".to_owned(),
+                },
             }],
             from: Some(SourceRef {
                 schema: Some("public".to_owned()),
@@ -2530,6 +2549,91 @@ fn postgres_exists_correlated_subquery_renders() {
     );
 }
 
+// The structural expression IR is rendered per-dialect: PostgreSQL keeps the fractional-division
+// float casts and precise integer cast types that a single canonical fragment could not express.
+#[test]
+fn postgres_renders_view_expression_ir_in_its_dialect() {
+    fn col(c: &str) -> ExprNode {
+        ExprNode::Column {
+            alias: "q0_0".to_owned(),
+            column: c.to_owned(),
+        }
+    }
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("public".to_owned()),
+            tables: Vec::new(),
+            views: vec![ViewModel {
+                name: "metrics".to_owned(),
+                comment: None,
+                columns: vec![
+                    ViewColumnModel {
+                        name: "ratio".to_owned(),
+                        ty: SqlType::F64,
+                        nullable: false,
+                    },
+                    ViewColumnModel {
+                        name: "total".to_owned(),
+                        ty: SqlType::I64,
+                        nullable: false,
+                    },
+                ],
+                query: ViewQueryModel {
+                    distinct: false,
+                    projection: vec![
+                        // count / 2 — fractional division.
+                        ProjectionItem {
+                            output_name: "ratio".to_owned(),
+                            expr: ExprNode::Binary {
+                                op: ArithmeticOp::Divide,
+                                left: Box::new(col("count")),
+                                right: Box::new(ExprNode::Literal("2".to_owned())),
+                            },
+                        },
+                        // SUM(amount) cast to i64 so the column wire type matches.
+                        ProjectionItem {
+                            output_name: "total".to_owned(),
+                            expr: ExprNode::Aggregate {
+                                func: AggregateFunc::Sum,
+                                distinct: false,
+                                operand: Box::new(col("amount")),
+                                result: Some(SqlType::I64),
+                            },
+                        },
+                    ],
+                    from: Some(SourceRef {
+                        schema: Some("public".to_owned()),
+                        name: "events".to_owned(),
+                        alias: "q0_0".to_owned(),
+                    }),
+                    joins: Vec::new(),
+                    filter: None,
+                    group_by: Vec::new(),
+                    having: None,
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                },
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // Fractional division: operands cast to double precision (no silent integer truncation).
+    assert!(
+        sql.contains("(CAST(q0_0.\"count\" AS double precision) / CAST(2 AS double precision))"),
+        "division float-cast missing: {sql}"
+    );
+    // Aggregate result cast uses the precise integer type name, not `numeric`.
+    assert!(
+        sql.contains("CAST(SUM(q0_0.\"amount\") AS bigint)"),
+        "aggregate integer cast missing: {sql}"
+    );
+}
+
 #[test]
 fn postgres_window_functions_render_with_numbered_placeholders() {
     let row_num = Postgres.from::<Post>().select(|(post,)| {
@@ -2564,6 +2668,95 @@ fn postgres_window_functions_render_with_numbered_placeholders() {
     assert!(
         summed_sql.contains("SUM(q0_0.\"user_id\") OVER (PARTITION BY q0_0.\"user_id\")"),
         "{summed_sql}"
+    );
+}
+
+// PostgreSQL supports `NULLS FIRST`/`NULLS LAST`, so a view body carrying an explicit null ordering
+// renders it (the counterpart to MySQL dropping it).
+#[test]
+fn postgres_view_order_by_keeps_nulls_modifier() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("public".to_owned()),
+            tables: Vec::new(),
+            views: vec![ViewModel {
+                name: "ranked".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "id".to_owned(),
+                    ty: SqlType::I32,
+                    nullable: true,
+                }],
+                query: ViewQueryModel {
+                    distinct: false,
+                    projection: vec![ProjectionItem {
+                        output_name: "id".to_owned(),
+                        expr: ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: "id".to_owned(),
+                        },
+                    }],
+                    from: Some(SourceRef {
+                        schema: Some("public".to_owned()),
+                        name: "events".to_owned(),
+                        alias: "q0_0".to_owned(),
+                    }),
+                    joins: Vec::new(),
+                    filter: None,
+                    group_by: Vec::new(),
+                    having: None,
+                    order_by: vec![OrderItem {
+                        expr: ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: "id".to_owned(),
+                        },
+                        direction: Some(OrderDirection::Desc),
+                        nulls: Some(OrderNulls::Last),
+                    }],
+                    limit: None,
+                    offset: None,
+                },
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains("ORDER BY q0_0.\"id\" DESC NULLS LAST"),
+        "expected NULLS LAST in PG view: {sql}"
+    );
+}
+
+// An introspected view carries an empty body (its definition can't be reconstructed). Rendering DDL
+// from such a model is misuse and must fail clearly rather than emit `AS SELECT` with no projection.
+#[test]
+fn postgres_render_rejects_empty_view_body() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("public".to_owned()),
+            tables: Vec::new(),
+            views: vec![ViewModel {
+                name: "broken".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "id".to_owned(),
+                    ty: SqlType::I32,
+                    nullable: false,
+                }],
+                query: ViewQueryModel::default(),
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let result = Postgres.render_create(&model, &mut sql);
+    assert!(
+        result.is_err(),
+        "rendering an introspected empty-body view must fail, got: {}",
+        String::from_utf8_lossy(&sql)
     );
 }
 

@@ -17,12 +17,14 @@ use std::path::Path;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
-    CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintEnforcement,
-    ConstraintValidation, DatabaseModel, DefaultValue, ExprFragment, ForeignKeyAction,
-    ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
-    IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
-    IndexOperatorClass, JoinItem, JoinKind, OrderDirection, OrderItem, OrderNulls, ProjectionItem,
-    SchemaModel, SourceRef, SqlType, TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
+    AggregateFunc, ArithmeticOp, CheckModel, ColumnModel, CompareOp, Constraint,
+    ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, DatabaseModel,
+    DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
+    GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
+    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, JoinItem,
+    JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem, SchemaModel,
+    SourceRef, SqlType, TableModel, ViewColumnModel, ViewModel, ViewQueryModel, WindowFunc,
+    WindowOrderTerm,
 };
 
 use crate::{CastColumn, RefactorLog, RefactorOperation, RenameColumn, RenameTable};
@@ -495,7 +497,7 @@ fn view_query_to_node(query: &ViewQueryModel) -> KdlNode {
     for item in &query.projection {
         let mut projection = KdlNode::new("projection");
         projection.push(KdlEntry::new(item.output_name.clone()));
-        projection.push(KdlEntry::new_prop("expr", item.expr.0.clone()));
+        push_child(&mut projection, expr_to_node(&item.expr));
         body.nodes_mut().push(projection);
     }
     if let Some(from) = &query.from {
@@ -510,27 +512,21 @@ fn view_query_to_node(query: &ViewQueryModel) -> KdlNode {
             JoinKind::Full => "full",
         };
         let mut node = view_source_to_node("join", &join.source, Some(kind));
-        node.push(KdlEntry::new_prop("on", join.on.0.clone()));
+        // The join's single child is the `ON` predicate.
+        push_child(&mut node, expr_to_node(&join.on));
         body.nodes_mut().push(node);
     }
     if let Some(filter) = &query.filter {
-        let mut node = KdlNode::new("filter");
-        node.push(KdlEntry::new(filter.0.clone()));
-        body.nodes_mut().push(node);
+        body.nodes_mut().push(wrap_expr("filter", filter));
     }
     for key in &query.group_by {
-        let mut node = KdlNode::new("group-by");
-        node.push(KdlEntry::new(key.0.clone()));
-        body.nodes_mut().push(node);
+        body.nodes_mut().push(wrap_expr("group-by", key));
     }
     if let Some(having) = &query.having {
-        let mut node = KdlNode::new("having");
-        node.push(KdlEntry::new(having.0.clone()));
-        body.nodes_mut().push(node);
+        body.nodes_mut().push(wrap_expr("having", having));
     }
     for order in &query.order_by {
         let mut node = KdlNode::new("order-by");
-        node.push(KdlEntry::new(order.expr.0.clone()));
         if let Some(direction) = order.direction {
             node.push(KdlEntry::new_prop(
                 "direction",
@@ -549,10 +545,247 @@ fn view_query_to_node(query: &ViewQueryModel) -> KdlNode {
                 },
             ));
         }
+        push_child(&mut node, expr_to_node(&order.expr));
         body.nodes_mut().push(node);
     }
     node.set_children(body);
     node
+}
+
+/// Appends `child` to `parent`'s children document, creating it if absent.
+fn push_child(parent: &mut KdlNode, child: KdlNode) {
+    let mut document = parent.children().cloned().unwrap_or_default();
+    document.nodes_mut().push(child);
+    parent.set_children(document);
+}
+
+/// A `<name> { <expr> }` wrapper node (for `filter`/`group-by`/`having`).
+fn wrap_expr(name: &str, expr: &ExprNode) -> KdlNode {
+    let mut node = KdlNode::new(name);
+    push_child(&mut node, expr_to_node(expr));
+    node
+}
+
+/// Serializes an [`ExprNode`] tree to a KDL node: scalar fields become args/props, sub-expressions
+/// (and nested subqueries) become child nodes in operand order.
+fn expr_to_node(expr: &ExprNode) -> KdlNode {
+    match expr {
+        ExprNode::Column { alias, column } => {
+            let mut node = KdlNode::new("col");
+            node.push(KdlEntry::new(alias.clone()));
+            node.push(KdlEntry::new(column.clone()));
+            node
+        }
+        ExprNode::Literal(text) => {
+            let mut node = KdlNode::new("lit");
+            node.push(KdlEntry::new(text.clone()));
+            node
+        }
+        ExprNode::Binary { op, left, right } => {
+            let mut node = KdlNode::new("binary");
+            node.push(KdlEntry::new_prop("op", arithmetic_op_str(*op)));
+            push_child(&mut node, expr_to_node(left));
+            push_child(&mut node, expr_to_node(right));
+            node
+        }
+        ExprNode::Cast { operand, ty } => {
+            let mut node = KdlNode::new("cast");
+            write_sql_type(&mut node, ty);
+            push_child(&mut node, expr_to_node(operand));
+            node
+        }
+        ExprNode::Aggregate {
+            func,
+            distinct,
+            operand,
+            result,
+        } => {
+            let mut node = KdlNode::new("aggregate");
+            node.push(KdlEntry::new_prop("func", aggregate_func_str(*func)));
+            if *distinct {
+                node.push(KdlEntry::new_prop("distinct", KdlValue::Bool(true)));
+            }
+            if let Some(ty) = result {
+                write_sql_type(&mut node, ty);
+            }
+            push_child(&mut node, expr_to_node(operand));
+            node
+        }
+        ExprNode::Compare { op, left, right } => {
+            let mut node = KdlNode::new("compare");
+            node.push(KdlEntry::new_prop("op", compare_op_str(*op)));
+            push_child(&mut node, expr_to_node(left));
+            push_child(&mut node, expr_to_node(right));
+            node
+        }
+        ExprNode::Logical { op, left, right } => {
+            let mut node = KdlNode::new("logical");
+            node.push(KdlEntry::new_prop(
+                "op",
+                match op {
+                    LogicalOp::And => "and",
+                    LogicalOp::Or => "or",
+                },
+            ));
+            push_child(&mut node, expr_to_node(left));
+            push_child(&mut node, expr_to_node(right));
+            node
+        }
+        ExprNode::Not(operand) => {
+            let mut node = KdlNode::new("not");
+            push_child(&mut node, expr_to_node(operand));
+            node
+        }
+        ExprNode::IsNull { negated, operand } => {
+            let mut node = KdlNode::new("is-null");
+            push_negated(&mut node, *negated);
+            push_child(&mut node, expr_to_node(operand));
+            node
+        }
+        ExprNode::Like {
+            case_insensitive,
+            negated,
+            operand,
+            pattern,
+        } => {
+            let mut node = KdlNode::new("like");
+            if *case_insensitive {
+                node.push(KdlEntry::new_prop("ci", KdlValue::Bool(true)));
+            }
+            push_negated(&mut node, *negated);
+            push_child(&mut node, expr_to_node(operand));
+            push_child(&mut node, expr_to_node(pattern));
+            node
+        }
+        ExprNode::In {
+            negated,
+            operand,
+            items,
+        } => {
+            let mut node = KdlNode::new("in");
+            push_negated(&mut node, *negated);
+            push_child(&mut node, expr_to_node(operand));
+            for item in items {
+                push_child(&mut node, expr_to_node(item));
+            }
+            node
+        }
+        ExprNode::Between {
+            negated,
+            operand,
+            low,
+            high,
+        } => {
+            let mut node = KdlNode::new("between");
+            push_negated(&mut node, *negated);
+            push_child(&mut node, expr_to_node(operand));
+            push_child(&mut node, expr_to_node(low));
+            push_child(&mut node, expr_to_node(high));
+            node
+        }
+        ExprNode::ScalarSubquery(subquery) => {
+            let mut node = KdlNode::new("scalar-subquery");
+            push_child(&mut node, view_query_to_node(subquery));
+            node
+        }
+        ExprNode::InSubquery {
+            negated,
+            operand,
+            subquery,
+        } => {
+            let mut node = KdlNode::new("in-subquery");
+            push_negated(&mut node, *negated);
+            push_child(&mut node, expr_to_node(operand));
+            push_child(&mut node, view_query_to_node(subquery));
+            node
+        }
+        ExprNode::Exists { negated, subquery } => {
+            let mut node = KdlNode::new("exists");
+            push_negated(&mut node, *negated);
+            push_child(&mut node, view_query_to_node(subquery));
+            node
+        }
+        ExprNode::Window {
+            func,
+            args,
+            partition_by,
+            order_by,
+            result,
+        } => {
+            let mut node = KdlNode::new("window");
+            node.push(KdlEntry::new_prop("func", window_func_str(*func)));
+            if let Some(ty) = result {
+                write_sql_type(&mut node, ty);
+            }
+            for arg in args {
+                push_child(&mut node, wrap_expr("arg", arg));
+            }
+            for partition in partition_by {
+                push_child(&mut node, wrap_expr("partition", partition));
+            }
+            for order in order_by {
+                let mut order_node = KdlNode::new("order");
+                order_node.push(KdlEntry::new_prop(
+                    "direction",
+                    match order.direction {
+                        OrderDirection::Asc => "asc",
+                        OrderDirection::Desc => "desc",
+                    },
+                ));
+                push_child(&mut order_node, expr_to_node(&order.expr));
+                push_child(&mut node, order_node);
+            }
+            node
+        }
+    }
+}
+
+fn window_func_str(func: WindowFunc) -> &'static str {
+    match func {
+        WindowFunc::Aggregate(aggregate) => aggregate_func_str(aggregate),
+        WindowFunc::RowNumber => "row_number",
+        WindowFunc::Rank => "rank",
+        WindowFunc::DenseRank => "dense_rank",
+        WindowFunc::Ntile => "ntile",
+        WindowFunc::Lag => "lag",
+        WindowFunc::Lead => "lead",
+    }
+}
+
+fn push_negated(node: &mut KdlNode, negated: bool) {
+    if negated {
+        node.push(KdlEntry::new_prop("negated", KdlValue::Bool(true)));
+    }
+}
+
+fn arithmetic_op_str(op: ArithmeticOp) -> &'static str {
+    match op {
+        ArithmeticOp::Add => "add",
+        ArithmeticOp::Subtract => "subtract",
+        ArithmeticOp::Multiply => "multiply",
+        ArithmeticOp::Divide => "divide",
+    }
+}
+
+fn aggregate_func_str(func: AggregateFunc) -> &'static str {
+    match func {
+        AggregateFunc::Count => "count",
+        AggregateFunc::Sum => "sum",
+        AggregateFunc::Avg => "avg",
+        AggregateFunc::Min => "min",
+        AggregateFunc::Max => "max",
+    }
+}
+
+fn compare_op_str(op: CompareOp) -> &'static str {
+    match op {
+        CompareOp::Equals => "eq",
+        CompareOp::NotEquals => "ne",
+        CompareOp::LessThan => "lt",
+        CompareOp::LessThanOrEquals => "le",
+        CompareOp::GreaterThan => "gt",
+        CompareOp::GreaterThanOrEquals => "ge",
+    }
 }
 
 fn view_source_to_node(kind: &str, source: &SourceRef, join_kind: Option<&str>) -> KdlNode {
@@ -959,7 +1192,7 @@ fn view_query_from_node(node: &KdlNode) -> Result<ViewQueryModel, PackageError> 
                 output_name: first_arg(item)
                     .ok_or_else(|| malformed("`projection` is missing its output name"))?
                     .to_owned(),
-                expr: ExprFragment(required_prop(item, "expr")?),
+                expr: first_child_expr(item)?,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -972,16 +1205,15 @@ fn view_query_from_node(node: &KdlNode) -> Result<ViewQueryModel, PackageError> 
         .collect::<Result<Vec<_>, _>>()?;
     let filter = child_nodes(node, "filter")
         .next()
-        .and_then(first_arg)
-        .map(|expr| ExprFragment(expr.to_owned()));
+        .map(first_child_expr)
+        .transpose()?;
     let group_by = child_nodes(node, "group-by")
-        .filter_map(first_arg)
-        .map(|expr| ExprFragment(expr.to_owned()))
-        .collect();
+        .map(first_child_expr)
+        .collect::<Result<Vec<_>, _>>()?;
     let having = child_nodes(node, "having")
         .next()
-        .and_then(first_arg)
-        .map(|expr| ExprFragment(expr.to_owned()));
+        .map(first_child_expr)
+        .transpose()?;
     let order_by = child_nodes(node, "order-by")
         .map(view_order_from_node)
         .collect::<Result<Vec<_>, _>>()?;
@@ -1019,17 +1251,13 @@ fn view_join_from_node(node: &KdlNode) -> Result<JoinItem, PackageError> {
     Ok(JoinItem {
         kind,
         source: view_source_from_node(node)?,
-        on: ExprFragment(required_prop(node, "on")?),
+        on: first_child_expr(node)?,
     })
 }
 
 fn view_order_from_node(node: &KdlNode) -> Result<OrderItem, PackageError> {
     Ok(OrderItem {
-        expr: ExprFragment(
-            first_arg(node)
-                .ok_or_else(|| malformed("`order-by` is missing its expression"))?
-                .to_owned(),
-        ),
+        expr: first_child_expr(node)?,
         direction: match prop(node, "direction") {
             Some("asc") => Some(OrderDirection::Asc),
             Some("desc") => Some(OrderDirection::Desc),
@@ -1040,6 +1268,206 @@ fn view_order_from_node(node: &KdlNode) -> Result<OrderItem, PackageError> {
             Some("last") => Some(OrderNulls::Last),
             _ => None,
         },
+    })
+}
+
+/// The child KDL nodes of `node`, in order.
+fn expr_child_nodes(node: &KdlNode) -> Vec<&KdlNode> {
+    node.children()
+        .map(|document| document.nodes().iter().collect())
+        .unwrap_or_default()
+}
+
+/// Parses the first child of `node` as an [`ExprNode`] (for `projection`/`filter`/`group-by`/
+/// `having`/`order-by`/`join` whose single child is the expression).
+fn first_child_expr(node: &KdlNode) -> Result<ExprNode, PackageError> {
+    let child = expr_child_nodes(node).into_iter().next().ok_or_else(|| {
+        malformed(format!(
+            "`{}` is missing its expression",
+            node.name().value()
+        ))
+    })?;
+    expr_from_node(child)
+}
+
+/// Parses an [`ExprNode`] tree from a KDL node (the inverse of [`expr_to_node`]).
+fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
+    let kind = node.name().value();
+    let children = expr_child_nodes(node);
+    let nth_expr = |index: usize| -> Result<Box<ExprNode>, PackageError> {
+        let child = children
+            .get(index)
+            .ok_or_else(|| malformed(format!("`{kind}` is missing operand {index}")))?;
+        Ok(Box::new(expr_from_node(child)?))
+    };
+    let nth_query = |index: usize| -> Result<Box<ViewQueryModel>, PackageError> {
+        let child = children
+            .get(index)
+            .ok_or_else(|| malformed(format!("`{kind}` is missing its subquery")))?;
+        Ok(Box::new(view_query_from_node(child)?))
+    };
+
+    Ok(match kind {
+        "col" => {
+            let args = args(node);
+            let mut args = args.into_iter();
+            let alias = args
+                .next()
+                .ok_or_else(|| malformed("`col` is missing its alias"))?;
+            let column = args
+                .next()
+                .ok_or_else(|| malformed("`col` is missing its column"))?;
+            ExprNode::Column { alias, column }
+        }
+        "lit" => ExprNode::Literal(
+            first_arg(node)
+                .ok_or_else(|| malformed("`lit` is missing its text"))?
+                .to_owned(),
+        ),
+        "binary" => ExprNode::Binary {
+            op: arithmetic_op_from_str(&required_prop(node, "op")?)?,
+            left: nth_expr(0)?,
+            right: nth_expr(1)?,
+        },
+        "cast" => ExprNode::Cast {
+            operand: nth_expr(0)?,
+            ty: sql_type_from_node(node)?,
+        },
+        "aggregate" => ExprNode::Aggregate {
+            func: aggregate_func_from_str(&required_prop(node, "func")?)?,
+            distinct: prop_bool(node, "distinct"),
+            operand: nth_expr(0)?,
+            result: optional_sql_type_from_node(node)?,
+        },
+        "compare" => ExprNode::Compare {
+            op: compare_op_from_str(&required_prop(node, "op")?)?,
+            left: nth_expr(0)?,
+            right: nth_expr(1)?,
+        },
+        "logical" => ExprNode::Logical {
+            op: match required_prop(node, "op")?.as_str() {
+                "or" => LogicalOp::Or,
+                _ => LogicalOp::And,
+            },
+            left: nth_expr(0)?,
+            right: nth_expr(1)?,
+        },
+        "not" => ExprNode::Not(nth_expr(0)?),
+        "is-null" => ExprNode::IsNull {
+            negated: prop_bool(node, "negated"),
+            operand: nth_expr(0)?,
+        },
+        "like" => ExprNode::Like {
+            case_insensitive: prop_bool(node, "ci"),
+            negated: prop_bool(node, "negated"),
+            operand: nth_expr(0)?,
+            pattern: nth_expr(1)?,
+        },
+        "in" => {
+            let operand = nth_expr(0)?;
+            let items = children
+                .iter()
+                .skip(1)
+                .map(|child| expr_from_node(child))
+                .collect::<Result<Vec<_>, _>>()?;
+            ExprNode::In {
+                negated: prop_bool(node, "negated"),
+                operand,
+                items,
+            }
+        }
+        "between" => ExprNode::Between {
+            negated: prop_bool(node, "negated"),
+            operand: nth_expr(0)?,
+            low: nth_expr(1)?,
+            high: nth_expr(2)?,
+        },
+        "scalar-subquery" => ExprNode::ScalarSubquery(nth_query(0)?),
+        "in-subquery" => ExprNode::InSubquery {
+            negated: prop_bool(node, "negated"),
+            operand: nth_expr(0)?,
+            subquery: nth_query(1)?,
+        },
+        "exists" => ExprNode::Exists {
+            negated: prop_bool(node, "negated"),
+            subquery: nth_query(0)?,
+        },
+        "window" => ExprNode::Window {
+            func: window_func_from_str(&required_prop(node, "func")?)?,
+            args: child_nodes(node, "arg")
+                .map(first_child_expr)
+                .collect::<Result<Vec<_>, _>>()?,
+            partition_by: child_nodes(node, "partition")
+                .map(first_child_expr)
+                .collect::<Result<Vec<_>, _>>()?,
+            order_by: child_nodes(node, "order")
+                .map(|order| {
+                    Ok::<_, PackageError>(WindowOrderTerm {
+                        expr: first_child_expr(order)?,
+                        direction: match prop(order, "direction") {
+                            Some("desc") => OrderDirection::Desc,
+                            _ => OrderDirection::Asc,
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            result: optional_sql_type_from_node(node)?,
+        },
+        other => return Err(malformed(format!("unknown view expression node `{other}`"))),
+    })
+}
+
+fn window_func_from_str(value: &str) -> Result<WindowFunc, PackageError> {
+    Ok(match value {
+        "row_number" => WindowFunc::RowNumber,
+        "rank" => WindowFunc::Rank,
+        "dense_rank" => WindowFunc::DenseRank,
+        "ntile" => WindowFunc::Ntile,
+        "lag" => WindowFunc::Lag,
+        "lead" => WindowFunc::Lead,
+        // The remaining names are aggregates used as window functions (`SUM(..) OVER (..)`).
+        aggregate => WindowFunc::Aggregate(aggregate_func_from_str(aggregate)?),
+    })
+}
+
+fn optional_sql_type_from_node(node: &KdlNode) -> Result<Option<SqlType>, PackageError> {
+    if prop(node, "type").is_some() {
+        Ok(Some(sql_type_from_node(node)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn arithmetic_op_from_str(value: &str) -> Result<ArithmeticOp, PackageError> {
+    Ok(match value {
+        "add" => ArithmeticOp::Add,
+        "subtract" => ArithmeticOp::Subtract,
+        "multiply" => ArithmeticOp::Multiply,
+        "divide" => ArithmeticOp::Divide,
+        other => return Err(malformed(format!("unknown arithmetic op `{other}`"))),
+    })
+}
+
+fn aggregate_func_from_str(value: &str) -> Result<AggregateFunc, PackageError> {
+    Ok(match value {
+        "count" => AggregateFunc::Count,
+        "sum" => AggregateFunc::Sum,
+        "avg" => AggregateFunc::Avg,
+        "min" => AggregateFunc::Min,
+        "max" => AggregateFunc::Max,
+        other => return Err(malformed(format!("unknown aggregate func `{other}`"))),
+    })
+}
+
+fn compare_op_from_str(value: &str) -> Result<CompareOp, PackageError> {
+    Ok(match value {
+        "eq" => CompareOp::Equals,
+        "ne" => CompareOp::NotEquals,
+        "lt" => CompareOp::LessThan,
+        "le" => CompareOp::LessThanOrEquals,
+        "gt" => CompareOp::GreaterThan,
+        "ge" => CompareOp::GreaterThanOrEquals,
+        other => return Err(malformed(format!("unknown compare op `{other}`"))),
     })
 }
 
@@ -1644,6 +2072,13 @@ mod tests {
 
     #[test]
     fn kdl_round_trips_views() {
+        fn col(alias: &str, column: &str) -> ExprNode {
+            ExprNode::Column {
+                alias: alias.to_owned(),
+                column: column.to_owned(),
+            }
+        }
+
         let model = DatabaseModel {
             schemas: vec![SchemaModel {
                 name: Some("public".to_owned()),
@@ -1668,11 +2103,15 @@ mod tests {
                         projection: vec![
                             ProjectionItem {
                                 output_name: "id".to_owned(),
-                                expr: ExprFragment("q0_0.\"id\"".to_owned()),
+                                expr: col("q0_0", "id"),
                             },
+                            // A `CAST` exercises the structured cast node and its SqlType round-trip.
                             ProjectionItem {
                                 output_name: "name".to_owned(),
-                                expr: ExprFragment("q0_1.\"name\"".to_owned()),
+                                expr: ExprNode::Cast {
+                                    operand: Box::new(col("q0_1", "name")),
+                                    ty: SqlType::Text,
+                                },
                             },
                         ],
                         from: Some(SourceRef {
@@ -1688,7 +2127,11 @@ mod tests {
                                     name: "orgs".to_owned(),
                                     alias: "q0_1".to_owned(),
                                 },
-                                on: ExprFragment("(q0_0.\"org_id\" = q0_1.\"id\")".to_owned()),
+                                on: ExprNode::Compare {
+                                    op: CompareOp::Equals,
+                                    left: Box::new(col("q0_0", "org_id")),
+                                    right: Box::new(col("q0_1", "id")),
+                                },
                             },
                             JoinItem {
                                 kind: JoinKind::Right,
@@ -1697,7 +2140,11 @@ mod tests {
                                     name: "teams".to_owned(),
                                     alias: "q0_2".to_owned(),
                                 },
-                                on: ExprFragment("(q0_0.\"team_id\" = q0_2.\"id\")".to_owned()),
+                                on: ExprNode::Compare {
+                                    op: CompareOp::Equals,
+                                    left: Box::new(col("q0_0", "team_id")),
+                                    right: Box::new(col("q0_2", "id")),
+                                },
                             },
                             JoinItem {
                                 kind: JoinKind::Full,
@@ -1706,14 +2153,36 @@ mod tests {
                                     name: "regions".to_owned(),
                                     alias: "q0_3".to_owned(),
                                 },
-                                on: ExprFragment("(q0_0.\"region_id\" = q0_3.\"id\")".to_owned()),
+                                on: ExprNode::Compare {
+                                    op: CompareOp::Equals,
+                                    left: Box::new(col("q0_0", "region_id")),
+                                    right: Box::new(col("q0_3", "id")),
+                                },
                             },
                         ],
-                        filter: Some(ExprFragment("q0_1.\"active\"".to_owned())),
-                        group_by: vec![ExprFragment("q0_0.\"id\"".to_owned())],
-                        having: Some(ExprFragment("(COUNT(q0_0.\"id\") > 0)".to_owned())),
+                        // `(deleted_at IS NOT NULL) AND active` exercises Logical + IsNull.
+                        filter: Some(ExprNode::Logical {
+                            op: LogicalOp::And,
+                            left: Box::new(ExprNode::IsNull {
+                                negated: true,
+                                operand: Box::new(col("q0_1", "deleted_at")),
+                            }),
+                            right: Box::new(col("q0_1", "active")),
+                        }),
+                        group_by: vec![col("q0_0", "id")],
+                        // `COUNT(id) > 0` exercises Aggregate + Compare + Literal.
+                        having: Some(ExprNode::Compare {
+                            op: CompareOp::GreaterThan,
+                            left: Box::new(ExprNode::Aggregate {
+                                func: AggregateFunc::Count,
+                                distinct: false,
+                                operand: Box::new(col("q0_0", "id")),
+                                result: None,
+                            }),
+                            right: Box::new(ExprNode::Literal("0".to_owned())),
+                        }),
                         order_by: vec![OrderItem {
-                            expr: ExprFragment("q0_0.\"id\"".to_owned()),
+                            expr: col("q0_0", "id"),
                             direction: Some(OrderDirection::Desc),
                             nulls: Some(OrderNulls::Last),
                         }],
