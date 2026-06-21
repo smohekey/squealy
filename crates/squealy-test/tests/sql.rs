@@ -1654,4 +1654,40 @@ fn test_bytea_borrowed_setters_and_operands() {
         q.collect_params().unwrap(),
         vec![TestParam::Bytes(vec![0xCA, 0xFE])]
     );
+
+    // Nullable setter: borrowed `&[u8]` and a bare owned `Vec<u8>` (not just `Some(..)`/`None`).
+    let nullable_borrowed = TestConnection
+        .to::<Blob>()
+        .data(vec![0x00])
+        .maybe(&owned[..])
+        .insert_returning(|blob| blob.id);
+    assert_eq!(
+        nullable_borrowed.collect_params().unwrap(),
+        vec![
+            TestParam::Bytes(vec![0x00]),
+            TestParam::Bytes(vec![0xCA, 0xFE])
+        ]
+    );
+    let nullable_owned_bare = TestConnection
+        .to::<Blob>()
+        .data(vec![0x00])
+        .maybe(vec![0x09]) // bare owned Vec<u8> on a nullable column
+        .insert_returning(|blob| blob.id);
+    assert_eq!(
+        nullable_owned_bare.collect_params().unwrap(),
+        vec![TestParam::Bytes(vec![0x00]), TestParam::Bytes(vec![0x09])]
+    );
+
+    // Explicit multi-column row insert with borrowed bytes (non-null + nullable columns).
+    let explicit = TestConnection
+        .to_columns::<Blob, (BlobData, BlobMaybe)>()
+        .row((&owned[..], &owned[..]))
+        .insert_returning(|blob| blob.id);
+    assert_eq!(
+        explicit.collect_params().unwrap(),
+        vec![
+            TestParam::Bytes(vec![0xCA, 0xFE]),
+            TestParam::Bytes(vec![0xCA, 0xFE]),
+        ]
+    );
 }
