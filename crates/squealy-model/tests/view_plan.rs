@@ -150,6 +150,23 @@ fn introspected_view_with_matching_columns_plans_nothing() {
 }
 
 #[test]
+fn introspected_view_nullability_difference_plans_nothing() {
+    // Introspected view nullability is unreliable (PostgreSQL `attnotnull` is usually false for view
+    // outputs), so a difference only in nullability must not churn a drop+recreate.
+    let desired = model(vec![view("(q0_0.\"id\" > 0)", &["id"])]);
+    let mut actual_view = introspected_view(&["id"]);
+    actual_view.columns[0].nullable = !desired.schemas[0].views[0].columns[0].nullable;
+    let actual = model(vec![actual_view]);
+
+    let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan");
+
+    assert!(
+        plan.is_empty(),
+        "an introspected view that differs only in nullability must not be recreated: {plan:?}"
+    );
+}
+
+#[test]
 fn introspected_view_with_changed_columns_is_recreated() {
     let desired = model(vec![view("(q0_0.\"id\" > 0)", &["id", "name"])]);
     let actual = model(vec![introspected_view(&["id"])]);

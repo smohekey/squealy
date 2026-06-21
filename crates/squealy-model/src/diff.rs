@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, ForeignKeyModel, IndexModel, SchemaModel,
-    TableModel, ViewModel, ViewQueryModel,
+    TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
 };
 
 /// The structured diff from an actual database model to a desired database model.
@@ -392,15 +392,27 @@ fn diff_views(
             (Some(desired_view), Some(actual_view)) => {
                 // A live-introspected view carries no structural body (it can't be reconstructed from
                 // the stored SQL), so compare those by columns only — otherwise the empty body would
-                // make every re-introspected view look changed. Models that do carry a body (e.g. from
-                // a package) are compared in full.
-                let changed = if actual_view.query == ViewQueryModel::default() {
+                // make every re-introspected view look changed. Per-column nullability is also
+                // unreliable when introspected (e.g. PostgreSQL's `pg_attribute.attnotnull` is usually
+                // false for view outputs even over non-null inputs), and a view's DDL carries no
+                // per-column NOT NULL anyway, so introspected views compare by column name and type
+                // only. Models that carry a body (e.g. from a package) are compared in full.
+                let introspected = actual_view.query == ViewQueryModel::default();
+                let columns_changed = if introspected {
+                    view_columns_differ_ignoring_nullability(
+                        &desired_view.columns,
+                        &actual_view.columns,
+                    )
+                } else {
                     desired_view.columns != actual_view.columns
+                };
+                let changed = if introspected {
+                    columns_changed
                 } else {
                     desired_view != actual_view
                 };
                 if changed {
-                    if desired_view.columns != actual_view.columns {
+                    if columns_changed {
                         drops.push(DatabaseDiffChange::DropView {
                             schema: actual.name.clone(),
                             view: (*actual_view).clone(),
@@ -426,6 +438,19 @@ fn diff_views(
         std::cmp::Reverse(dependency_rank(&actual_order, view_change_name(change)))
     });
     (drops, creates)
+}
+
+/// Whether two view column lists differ in name or type, ignoring per-column nullability. Used when
+/// one side was introspected, where nullability is unreliable (and a view's DDL carries none anyway).
+fn view_columns_differ_ignoring_nullability(
+    desired: &[ViewColumnModel],
+    actual: &[ViewColumnModel],
+) -> bool {
+    desired.len() != actual.len()
+        || desired
+            .iter()
+            .zip(actual)
+            .any(|(desired, actual)| desired.name != actual.name || desired.ty != actual.ty)
 }
 
 /// The view's name from a `CreateView`/`DropView` change.
