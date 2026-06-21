@@ -20,6 +20,21 @@ pub fn render_create_view(
     dialect: &dyn Dialect,
     writer: &mut dyn Write,
 ) -> io::Result<()> {
+    // A view with no projection cannot render a valid `SELECT`. The only models that carry such a body
+    // are live-introspected ones (whose definition could not be reconstructed into the structural IR);
+    // they exist to diff against, not to materialize. Fail clearly rather than emit `AS SELECT` with no
+    // output, which would turn a database containing views into an unusable package/plan.
+    if view.query.projection.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "cannot render view `{}`: its body has no projection — an introspected view (whose \
+                 definition could not be reconstructed) cannot be rendered to DDL",
+                view.name
+            ),
+        ));
+    }
+
     writer.write_all(if or_replace {
         b"CREATE OR REPLACE VIEW ".as_slice()
     } else {

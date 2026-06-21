@@ -2670,3 +2670,33 @@ fn postgres_view_order_by_keeps_nulls_modifier() {
         "expected NULLS LAST in PG view: {sql}"
     );
 }
+
+// An introspected view carries an empty body (its definition can't be reconstructed). Rendering DDL
+// from such a model is misuse and must fail clearly rather than emit `AS SELECT` with no projection.
+#[test]
+fn postgres_render_rejects_empty_view_body() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("public".to_owned()),
+            tables: Vec::new(),
+            views: vec![ViewModel {
+                name: "broken".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "id".to_owned(),
+                    ty: SqlType::I32,
+                    nullable: false,
+                }],
+                query: ViewQueryModel::default(),
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let result = Postgres.render_create(&model, &mut sql);
+    assert!(
+        result.is_err(),
+        "rendering an introspected empty-body view must fail, got: {}",
+        String::from_utf8_lossy(&sql)
+    );
+}
