@@ -163,6 +163,12 @@ fn dropping_a_view_for_a_column_change_drops_and_recreates_its_dependents() {
     desired_parent.name = "parent".to_owned();
     let mut desired_child = view("(q0_0.\"id\" > 0)", &["id"]);
     desired_child.name = "child".to_owned();
+    // The desired child genuinely selects from parent, so the create phase orders parent before it.
+    desired_child.query.from = Some(SourceRef {
+        schema: Some("public".to_owned()),
+        name: "parent".to_owned(),
+        alias: "q0_0".to_owned(),
+    });
     let desired = model(vec![desired_parent, desired_child]);
 
     let actual = model(vec![
@@ -249,6 +255,96 @@ fn cross_schema_dependent_is_not_promoted_by_a_same_named_view() {
     assert!(
         !dropped.contains(&"report"),
         "a cross-schema dependent must not be promoted: {dropped:?}"
+    );
+}
+
+#[test]
+fn cross_schema_dependent_is_dropped_and_recreated() {
+    // `reporting.child` selects from `public.parent`; `public.parent` changes its column set, so it
+    // must DROP+recreate. The cross-schema dependent must be dropped before it and recreated after —
+    // which a per-schema diff would miss entirely.
+    fn schema(name: &str, views: Vec<ViewModel>) -> SchemaModel {
+        SchemaModel {
+            name: Some(name.to_owned()),
+            tables: Vec::new(),
+            views,
+        }
+    }
+
+    let mut desired_parent = view("(q0_0.\"id\" > 0)", &["id", "name"]);
+    desired_parent.name = "parent".to_owned();
+    let mut desired_child = view("(q0_0.\"id\" > 0)", &["id"]);
+    desired_child.name = "child".to_owned();
+    desired_child.query.from = Some(SourceRef {
+        schema: Some("public".to_owned()),
+        name: "parent".to_owned(),
+        alias: "q0_0".to_owned(),
+    });
+
+    let mut actual_child = introspected_view_named("child", &["id"], &[]);
+    actual_child.query.dependencies = vec![SourceRef {
+        schema: Some("public".to_owned()),
+        name: "parent".to_owned(),
+        alias: "parent".to_owned(),
+    }];
+
+    let desired = DatabaseModel {
+        schemas: vec![
+            schema("public", vec![desired_parent]),
+            schema("reporting", vec![desired_child]),
+        ],
+    };
+    let actual = DatabaseModel {
+        schemas: vec![
+            schema(
+                "public",
+                vec![introspected_view_named("parent", &["id"], &[])],
+            ),
+            schema("reporting", vec![actual_child]),
+        ],
+    };
+
+    let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan");
+    let dropped: Vec<&str> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            DatabasePlanStep::DropView { view, .. } => Some(view.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let created: Vec<&str> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            DatabasePlanStep::CreateView { view, .. } => Some(view.name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    let child_drop = dropped
+        .iter()
+        .position(|name| *name == "child")
+        .expect("cross-schema dependent dropped");
+    let parent_drop = dropped
+        .iter()
+        .position(|name| *name == "parent")
+        .expect("parent dropped");
+    assert!(
+        child_drop < parent_drop,
+        "cross-schema dependent must drop before its dependency: {dropped:?}"
+    );
+    let parent_create = created
+        .iter()
+        .position(|name| *name == "parent")
+        .expect("parent recreated");
+    let child_create = created
+        .iter()
+        .position(|name| *name == "child")
+        .expect("cross-schema dependent recreated");
+    assert!(
+        parent_create < child_create,
+        "dependency must be recreated before the cross-schema dependent: {created:?}"
     );
 }
 
