@@ -4,8 +4,8 @@ use mysql_async::{params, prelude::Queryable};
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
     ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
-    IdentityModel, IndexDirection, IndexMethod, IndexModel, SchemaModel, SqlType, TableModel,
-    ViewColumnModel, ViewModel, ViewQueryModel,
+    IdentityModel, IndexDirection, IndexMethod, IndexModel, SchemaModel, SourceRef, SqlType,
+    TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
 };
 
 use crate::MysqlError;
@@ -27,12 +27,9 @@ pub(crate) async fn database(conn: &mut mysql_async::Conn) -> Result<DatabaseMod
 
     // Views are introspected by name and output columns only: a stored view definition cannot be
     // reconstructed into the structural `ViewQueryModel`, so the body stays empty and the diff matches
-    // views by name and columns (it cannot detect a pure body change against a live database).
-    //
-    // Known limitation: because the body is empty, an introspected view exposes no dependencies, so the
-    // diff cannot order drops among several interdependent live views dropped/recreated in one plan (it
-    // may drop a parent before a dependent). Single live views and package-vs-package diffs are
-    // unaffected. Tracked for a follow-up that introspects view dependencies separately.
+    // views by name and columns (it cannot detect a pure body change against a live database). Their
+    // view-on-view dependencies are read separately (see `view_dependencies`) so the diff can still
+    // order live drops correctly.
     for view_ref in view_refs(conn).await? {
         let view = view(conn, &view_ref).await?;
         schema_entry(&mut schemas, &view_ref.schema)
@@ -78,8 +75,47 @@ async fn view(conn: &mut mysql_async::Conn, view_ref: &TableRef) -> Result<ViewM
         name: view_ref.name.clone(),
         comment: None,
         columns: view_columns(conn, view_ref).await?,
-        query: ViewQueryModel::default(),
+        // The body can't be reconstructed, but the view-on-view dependencies can — they let the diff
+        // order live drops (drop a dependent before the view it selects from).
+        query: ViewQueryModel {
+            dependencies: view_dependencies(conn, view_ref).await?,
+            ..ViewQueryModel::default()
+        },
     })
+}
+
+/// The other views this view depends on, from `information_schema.VIEW_TABLE_USAGE` (MySQL 8.0.13+).
+/// Joined against `VIEWS` so only view-on-view edges are kept (table dependencies are irrelevant to
+/// view ordering — every table is created before any view). Note `VIEW_TABLE_USAGE` can resolve a
+/// reference through to base tables, so deeply nested view-on-view edges may be incomplete.
+async fn view_dependencies(
+    conn: &mut mysql_async::Conn,
+    view_ref: &TableRef,
+) -> Result<Vec<SourceRef>, MysqlError> {
+    conn.exec_map(
+        "\
+SELECT u.TABLE_SCHEMA, u.TABLE_NAME
+FROM information_schema.VIEW_TABLE_USAGE u
+JOIN information_schema.VIEWS v
+  ON v.TABLE_SCHEMA = u.TABLE_SCHEMA AND v.TABLE_NAME = u.TABLE_NAME
+WHERE u.VIEW_SCHEMA = :schema
+  AND u.VIEW_NAME = :view
+  AND NOT (u.TABLE_SCHEMA = :schema AND u.TABLE_NAME = :view)
+ORDER BY u.TABLE_SCHEMA, u.TABLE_NAME",
+        params! {
+            "schema" => &view_ref.schema,
+            "view" => &view_ref.name,
+        },
+        |(schema, name): (String, String)| SourceRef {
+            schema: Some(schema),
+            // The alias is never rendered (an introspected view has no body to render); it only needs
+            // to be present, so reuse the dependency name.
+            alias: name.clone(),
+            name,
+        },
+    )
+    .await
+    .map_err(MysqlError::Introspect)
 }
 
 async fn view_columns(

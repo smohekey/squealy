@@ -1228,6 +1228,9 @@ fn view_query_from_node(node: &KdlNode) -> Result<ViewQueryModel, PackageError> 
         order_by,
         limit: prop_usize(node, "limit")?,
         offset: prop_usize(node, "offset")?,
+        // Dependencies are an introspection-only aid and are never serialized; a packaged view's
+        // dependencies come from walking its (present) body.
+        dependencies: Vec::new(),
     })
 }
 
@@ -2099,6 +2102,7 @@ mod tests {
                         },
                     ],
                     query: ViewQueryModel {
+                        dependencies: Vec::new(),
                         distinct: true,
                         projection: vec![
                             ProjectionItem {

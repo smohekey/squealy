@@ -33,6 +33,7 @@ fn view(filter: &str, columns: &[&str]) -> ViewModel {
             })
             .collect(),
         query: ViewQueryModel {
+            dependencies: Vec::new(),
             distinct: false,
             projection: columns
                 .iter()
@@ -135,6 +136,57 @@ fn introspected_view(columns: &[&str]) -> ViewModel {
     let mut view = view("ignored-body", columns);
     view.query = ViewQueryModel::default();
     view
+}
+
+// An introspected view with a body that cannot be reconstructed still records its view-on-view
+// dependencies (read from the catalogs), which drive drop ordering.
+fn introspected_view_named(name: &str, columns: &[&str], depends_on: &[&str]) -> ViewModel {
+    let mut view = introspected_view(columns);
+    view.name = name.to_owned();
+    view.query.dependencies = depends_on
+        .iter()
+        .map(|dependency| SourceRef {
+            schema: Some("public".to_owned()),
+            name: (*dependency).to_owned(),
+            alias: (*dependency).to_owned(),
+        })
+        .collect();
+    view
+}
+
+#[test]
+fn introspected_interdependent_views_drop_dependents_first() {
+    // Two live views where `child` selects from `parent`; both are removed (absent from desired). The
+    // plan must DROP `child` before `parent`, or the database rejects dropping a view still in use.
+    // Introspected views carry no body, so this ordering relies on their recorded dependencies.
+    let parent = introspected_view_named("parent", &["id"], &[]);
+    let child = introspected_view_named("child", &["id"], &["parent"]);
+
+    // Declared parent-first, so a correct order must come from the dependency, not declaration order.
+    let desired = model(vec![]);
+    let actual = model(vec![parent, child]);
+
+    let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan");
+    let dropped: Vec<&str> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            DatabasePlanStep::DropView { view, .. } => Some(view.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let child_at = dropped
+        .iter()
+        .position(|name| *name == "child")
+        .expect("child dropped");
+    let parent_at = dropped
+        .iter()
+        .position(|name| *name == "parent")
+        .expect("parent dropped");
+    assert!(
+        child_at < parent_at,
+        "the dependent view must be dropped before the one it selects from: {dropped:?}"
+    );
 }
 
 #[test]

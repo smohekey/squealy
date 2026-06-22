@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, ForeignKeyModel, IndexModel, SchemaModel,
-    TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
+    TableModel, ViewColumnModel, ViewModel,
 };
 
 /// The structured diff from an actual database model to a desired database model.
@@ -399,7 +399,10 @@ fn diff_views(
                 // introspected (PostgreSQL's `pg_attribute.attnotnull` is usually false for view
                 // outputs) and a view's DDL carries no per-column NOT NULL, so the column comparison
                 // ignores it. Models that carry a body (e.g. from a package) are compared in full.
-                if actual_view.query == ViewQueryModel::default() {
+                //
+                // An introspected view has no projection (only its name, columns, and dependencies are
+                // recovered), so an empty projection is the marker for "introspected, body unknown".
+                if actual_view.query.projection.is_empty() {
                     if view_columns_differ_ignoring_nullability(
                         &desired_view.columns,
                         &actual_view.columns,

@@ -549,6 +549,11 @@ pub struct ViewQueryModel {
     pub order_by: Vec<OrderItem>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    /// View-on-view dependencies recorded by live introspection, which cannot reconstruct the body
+    /// into the structural form above. Empty for declared/package views, whose dependencies are found
+    /// by walking the body; [`ViewModel::referenced_sources`] folds these in so live drop ordering
+    /// still sees view-on-view edges. Not serialized (introspected models are never packaged).
+    pub dependencies: Vec<SourceRef>,
 }
 
 /// One projected output expression together with its output column name.
@@ -731,6 +736,9 @@ impl ViewModel {
 
 /// Collects every [`SourceRef`] reachable from a query body, recursing through subqueries.
 fn collect_query_sources<'a>(query: &'a ViewQueryModel, sources: &mut Vec<&'a SourceRef>) {
+    // Introspected views carry no body but record their dependencies here; declared/package views
+    // leave this empty and contribute their sources by walking the body below.
+    sources.extend(query.dependencies.iter());
     sources.extend(query.from.iter());
     for join in &query.joins {
         sources.push(&join.source);
