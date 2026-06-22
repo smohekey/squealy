@@ -577,6 +577,415 @@ where
     }
 }
 
+// ===== Searched CASE expressions =====
+
+/// Terminator of the `WHEN … THEN …` arm cons-list (mirrors [`WindowNil`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaseNil;
+
+/// One `WHEN <pred> THEN <val>` arm, consed onto the rest.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CaseWhen<PredAst, ValAst, Rest> {
+    when: PredAst,
+    then: ValAst,
+    rest: Rest,
+}
+
+/// The "no `ELSE`" slot of a `CASE` (result is then nullable). Renders nothing.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoElse;
+
+impl ExprAst for NoElse {
+    type Params = crate::HNil;
+}
+impl<B> RenderAst<B> for NoElse
+where
+    B: crate::Backend,
+{
+    fn visit<V>(&self, _visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        Ok(())
+    }
+}
+impl NonAggregateAst for NoElse {}
+impl NonWindowAst for NoElse {}
+impl AstProjectionClass for NoElse {
+    type Class = ConstantTerm;
+}
+impl ExprColumns for NoElse {
+    type Columns = ColumnFree;
+}
+
+/// Append a `WHEN/THEN` arm to the tail of the arm list (mirrors [`AppendOrder`]), so arms render in
+/// the order they were added.
+#[doc(hidden)]
+pub trait AppendArm<PredAst, ValAst> {
+    type Output;
+    fn append_arm(self, when: PredAst, then: ValAst) -> Self::Output;
+}
+impl<PredAst, ValAst> AppendArm<PredAst, ValAst> for CaseNil {
+    type Output = CaseWhen<PredAst, ValAst, CaseNil>;
+    fn append_arm(self, when: PredAst, then: ValAst) -> Self::Output {
+        CaseWhen {
+            when,
+            then,
+            rest: CaseNil,
+        }
+    }
+}
+impl<PredAst, ValAst, HPred, HVal, Rest> AppendArm<PredAst, ValAst> for CaseWhen<HPred, HVal, Rest>
+where
+    Rest: AppendArm<PredAst, ValAst>,
+{
+    type Output = CaseWhen<HPred, HVal, Rest::Output>;
+    fn append_arm(self, when: PredAst, then: ValAst) -> Self::Output {
+        CaseWhen {
+            when: self.when,
+            then: self.then,
+            rest: self.rest.append_arm(when, then),
+        }
+    }
+}
+
+/// Marker for a non-empty arm list (at least one `WHEN`). Gates `otherwise`/`end` so an empty
+/// `CASE END` (invalid SQL) cannot be built.
+#[doc(hidden)]
+pub trait NonEmptyArms {}
+impl<PredAst, ValAst, Rest> NonEmptyArms for CaseWhen<PredAst, ValAst, Rest> {}
+
+/// Runtime params of the arm list, concatenated `WHEN`-params ++ `THEN`-params per arm, in order.
+#[doc(hidden)]
+pub trait CaseArmsParams {
+    type Params: crate::HList;
+}
+impl CaseArmsParams for CaseNil {
+    type Params = crate::HNil;
+}
+impl<PredAst, ValAst, Rest> CaseArmsParams for CaseWhen<PredAst, ValAst, Rest>
+where
+    PredAst: PredicateAst,
+    ValAst: ExprAst,
+    Rest: CaseArmsParams,
+    PredAst::Params: crate::HAppend<ValAst::Params>,
+    <PredAst::Params as crate::HAppend<ValAst::Params>>::Output: crate::HAppend<Rest::Params>,
+{
+    type Params = <<PredAst::Params as crate::HAppend<ValAst::Params>>::Output as crate::HAppend<
+        Rest::Params,
+    >>::Output;
+}
+
+/// All arm predicates are aggregate-free and all `THEN` values are aggregate-free — so the whole
+/// `CASE` may be used in `WHERE` (combined with the `ELSE` check on [`CaseExprAst`]).
+#[doc(hidden)]
+pub trait CaseArmsNonAggregate {}
+impl CaseArmsNonAggregate for CaseNil {}
+impl<PredAst, ValAst, Rest> CaseArmsNonAggregate for CaseWhen<PredAst, ValAst, Rest>
+where
+    PredAst: NonAggregatePredicate,
+    ValAst: NonAggregateAst,
+    Rest: CaseArmsNonAggregate,
+{
+}
+
+/// All arm predicates and `THEN` values are window-free — so the whole `CASE` may be used in a
+/// `RETURNING` clause (combined with the `ELSE` check on [`CaseExprAst`]).
+#[doc(hidden)]
+pub trait CaseArmsNonWindow {}
+impl CaseArmsNonWindow for CaseNil {}
+impl<PredAst, ValAst, Rest> CaseArmsNonWindow for CaseWhen<PredAst, ValAst, Rest>
+where
+    PredAst: NonWindowPredicate,
+    ValAst: NonWindowAst,
+    Rest: CaseArmsNonWindow,
+{
+}
+
+/// Folds the arm `THEN` values' [terms](ConstantTerm) via [`CombineTerm`] (constant identity at the
+/// tail), giving the value-term contributed by the arms.
+#[doc(hidden)]
+pub trait CaseArmsTerm {
+    type Term;
+}
+impl CaseArmsTerm for CaseNil {
+    type Term = ConstantTerm;
+}
+impl<PredAst, ValAst, Rest> CaseArmsTerm for CaseWhen<PredAst, ValAst, Rest>
+where
+    PredAst: PredicateTerm,
+    ValAst: AstProjectionClass,
+    Rest: CaseArmsTerm,
+    // The arm's own term combines its `THEN` value with its `WHEN` condition's term (so an aggregate
+    // in the condition makes the arm aggregate, and a bare column keeps its column dependency), then
+    // folds with the remaining arms.
+    <ValAst as AstProjectionClass>::Class: CombineTerm<<PredAst as PredicateTerm>::Term>,
+    <<ValAst as AstProjectionClass>::Class as CombineTerm<<PredAst as PredicateTerm>::Term>>::Output:
+        CombineTerm<Rest::Term>,
+{
+    type Term = <<<ValAst as AstProjectionClass>::Class as CombineTerm<
+        <PredAst as PredicateTerm>::Term,
+    >>::Output as CombineTerm<Rest::Term>>::Output;
+}
+
+/// Folds the arm predicate columns and `THEN` value columns via [`CombineColumns`] (for `HAVING`
+/// validity: a bare column anywhere in the `CASE` makes it [`HasBareColumn`]).
+#[doc(hidden)]
+pub trait CaseArmsColumns {
+    type Columns;
+}
+impl CaseArmsColumns for CaseNil {
+    type Columns = ColumnFree;
+}
+impl<PredAst, ValAst, Rest> CaseArmsColumns for CaseWhen<PredAst, ValAst, Rest>
+where
+    PredAst: crate::PredicateColumns,
+    ValAst: ExprColumns,
+    Rest: CaseArmsColumns,
+    <ValAst as ExprColumns>::Columns: CombineColumns<Rest::Columns>,
+    <PredAst as crate::PredicateColumns>::Columns:
+        CombineColumns<<<ValAst as ExprColumns>::Columns as CombineColumns<Rest::Columns>>::Output>,
+{
+    type Columns = <<PredAst as crate::PredicateColumns>::Columns as CombineColumns<
+        <<ValAst as ExprColumns>::Columns as CombineColumns<Rest::Columns>>::Output,
+    >>::Output;
+}
+
+/// Backend-parameterized rendering of the arm list: emits each `WHEN <pred> THEN <val>` via
+/// [`ExprVisitor::visit_case_when`] / [`visit_case_then`](ExprVisitor::visit_case_then). Requires a
+/// [`PredicateAstVisitor`] because the `WHEN` condition is a predicate.
+#[doc(hidden)]
+pub trait RenderCaseArms<B>: CaseArmsParams
+where
+    B: crate::Backend,
+{
+    /// Number of arms (lets a structural visitor like the view IR pair predicate/value nodes).
+    const LEN: usize;
+
+    /// Render each `WHEN <pred> THEN <value>` arm. `cast` (the result type, when set) wraps each
+    /// `THEN` value in `CAST(<value> AS <cast>)` so an all-parameter branch is typeable.
+    fn render<V>(&self, visitor: &mut V, cast: Option<&crate::SqlType>) -> Result<(), V::Error>
+    where
+        V: PredicateAstVisitor<Backend = B>;
+}
+impl<B> RenderCaseArms<B> for CaseNil
+where
+    B: crate::Backend,
+{
+    const LEN: usize = 0;
+    fn render<V>(&self, _visitor: &mut V, _cast: Option<&crate::SqlType>) -> Result<(), V::Error>
+    where
+        V: PredicateAstVisitor<Backend = B>,
+    {
+        Ok(())
+    }
+}
+impl<PredAst, ValAst, Rest, B> RenderCaseArms<B> for CaseWhen<PredAst, ValAst, Rest>
+where
+    PredAst: RenderPredicateAst<B>,
+    ValAst: RenderAst<B>,
+    Rest: RenderCaseArms<B>,
+    PredAst::Params: crate::HAppend<ValAst::Params>,
+    <PredAst::Params as crate::HAppend<ValAst::Params>>::Output: crate::HAppend<Rest::Params>,
+    B: crate::Backend,
+{
+    const LEN: usize = 1 + Rest::LEN;
+    fn render<V>(&self, visitor: &mut V, cast: Option<&crate::SqlType>) -> Result<(), V::Error>
+    where
+        V: PredicateAstVisitor<Backend = B>,
+    {
+        visitor.visit_case_when()?;
+        self.when.visit(visitor)?;
+        visitor.visit_case_then()?;
+        visitor.visit_case_value_open(cast)?;
+        self.then.visit(visitor)?;
+        visitor.visit_case_value_close(cast)?;
+        self.rest.render(visitor, cast)
+    }
+}
+
+/// A searched `CASE WHEN … THEN … [ELSE …] END` value expression. `Arms` is the `WHEN/THEN`
+/// cons-list; `Else` is the `ELSE` value AST or [`NoElse`].
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CaseExprAst<Arms, Else> {
+    arms: Arms,
+    else_ast: Option<Else>,
+    /// The result type to `CAST` the whole `CASE` to. The builder sets this from the (type-level) result
+    /// value type `T`, so that a `CASE` whose branches are all bind parameters still has a determinable
+    /// type for the database (Postgres can't infer `CASE … THEN $1 ELSE $2 END` otherwise). Mirrors the
+    /// aggregate `CAST` wrapper.
+    result: Option<crate::SqlType>,
+}
+
+impl<Arms, Else> ExprAst for CaseExprAst<Arms, Else>
+where
+    Arms: CaseArmsParams + Clone,
+    Else: ExprAst,
+    Arms::Params: crate::HAppend<Else::Params>,
+{
+    type Params = <Arms::Params as crate::HAppend<Else::Params>>::Output;
+}
+
+impl<Arms, Else, B> RenderAst<B> for CaseExprAst<Arms, Else>
+where
+    Arms: RenderCaseArms<B> + Clone,
+    Else: RenderAst<B>,
+    Arms::Params: crate::HAppend<Else::Params>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_case(&self.arms, self.else_ast.as_ref(), self.result.as_ref())
+    }
+}
+
+impl<Arms, Else> NonAggregateAst for CaseExprAst<Arms, Else>
+where
+    Arms: CaseArmsNonAggregate,
+    Else: NonAggregateAst,
+{
+}
+
+// A window-free `CASE` (every arm predicate/value and the `ELSE` is window-free) is usable in a
+// `RETURNING` clause.
+impl<Arms, Else> NonWindowAst for CaseExprAst<Arms, Else>
+where
+    Arms: CaseArmsNonWindow,
+    Else: NonWindowAst,
+{
+}
+
+impl<Arms, Else> AstProjectionClass for CaseExprAst<Arms, Else>
+where
+    Arms: CaseArmsTerm,
+    Else: AstProjectionClass,
+    <Arms as CaseArmsTerm>::Term: CombineTerm<<Else as AstProjectionClass>::Class>,
+{
+    type Class =
+        <<Arms as CaseArmsTerm>::Term as CombineTerm<<Else as AstProjectionClass>::Class>>::Output;
+}
+
+impl<Arms, Else> ExprColumns for CaseExprAst<Arms, Else>
+where
+    Arms: CaseArmsColumns,
+    Else: ExprColumns,
+    <Arms as CaseArmsColumns>::Columns: CombineColumns<<Else as ExprColumns>::Columns>,
+{
+    type Columns = <<Arms as CaseArmsColumns>::Columns as CombineColumns<
+        <Else as ExprColumns>::Columns,
+    >>::Output;
+}
+
+/// Builder for a searched [`CASE`](case) expression. Add arms with [`when`](Self::when), then finish
+/// with [`otherwise`](Self::otherwise) (non-null result) or [`end`](Self::end) (nullable, no `ELSE`).
+pub struct CaseBuilder<'scope, T, Arms, Null = CaseNonNull> {
+    arms: Arms,
+    _marker: PhantomData<(&'scope (), T, Null)>,
+}
+
+/// Start a searched `CASE WHEN <pred> THEN <val> … [ELSE <val>] END` value expression. Every arm's
+/// `THEN` value (and the `ELSE`) must share a value type `T`.
+pub fn case<'scope, T>() -> CaseBuilder<'scope, T, CaseNil, CaseNonNull> {
+    CaseBuilder {
+        arms: CaseNil,
+        _marker: PhantomData,
+    }
+}
+
+impl<'scope, T, Arms, Null> CaseBuilder<'scope, T, Arms, Null> {
+    /// Add a `WHEN <condition> THEN <value>` arm. The condition is a predicate (as `where_` takes); the
+    /// value must have value type `T`. A nullable `THEN` value makes the whole `CASE` nullable (folded
+    /// into `Null`).
+    pub fn when<P, PredAst, E>(
+        self,
+        condition: Predicate<'scope, P, PredAst>,
+        value: E,
+    ) -> CaseBuilder<'scope, T, Arms::Output, Null::Output>
+    where
+        P: PredicateKind,
+        PredAst: PredicateAst,
+        E: IntoExpr<'scope>,
+        // The branch's value type `T` is its (non-null inner) `KindNullability::Value`, which unwraps an
+        // `Option<_>` kind so outer-join columns / `SUM` aggregates can be branches; its nullability is
+        // folded into `Null`.
+        E::Kind: KindNullability<Value = T>,
+        Null: CaseNullOr<<E::Kind as KindNullability>::Nullable>,
+        Arms: AppendArm<PredAst, E::Ast>,
+    {
+        CaseBuilder {
+            arms: self.arms.append_arm(condition.ast, value.into_expr().ast),
+            _marker: PhantomData,
+        }
+    }
+}
+
+// `otherwise`/`end` require at least one `WHEN` arm (`Arms: NonEmptyArms`), so an empty `CASE END`
+// (invalid SQL) cannot be built. The whole `CASE` is cast to `T`'s SQL type so all-parameter branches
+// still have a determinable type for the database.
+impl<'scope, T, Arms, Null> CaseBuilder<'scope, T, Arms, Null> {
+    /// Finish with an `ELSE <value>` branch. With an `ELSE` the `CASE` is total, so the result is the
+    /// non-null value type `T` — *unless* some branch (a `THEN` value or the `ELSE`) is itself nullable
+    /// (a `scalar_subquery`, `lag`, or nullable column), in which case the result is `Option<T>`.
+    #[allow(clippy::type_complexity)] // the result kind is a type-level nullability fold
+    pub fn otherwise<E>(
+        self,
+        value: E,
+    ) -> Expr<
+        'scope,
+        <<Null as CaseNullOr<<E::Kind as KindNullability>::Nullable>>::Output as CaseNull>::Result<
+            T,
+        >,
+        CaseExprAst<Arms, E::Ast>,
+    >
+    where
+        Arms: NonEmptyArms,
+        T: ExprKind + crate::HasColumnType,
+        E: IntoExpr<'scope>,
+        E::Kind: KindNullability<Value = T>,
+        Null: CaseNullOr<<E::Kind as KindNullability>::Nullable>,
+        CaseExprAst<Arms, E::Ast>: ExprAst,
+    {
+        Expr {
+            ast: CaseExprAst {
+                arms: self.arms,
+                else_ast: Some(value.into_expr().ast),
+                result: Some(crate::SqlType::from(
+                    <T as crate::HasColumnType>::COLUMN_TYPE,
+                )),
+            },
+            project_alias: Cow::Borrowed("expr"),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Finish without an `ELSE`. An unmatched row yields SQL `NULL`, so the result is nullable
+    /// ([`ScalarNullable<T>`], value `Option<T>`).
+    pub fn end(self) -> Expr<'scope, ScalarNullable<T>, CaseExprAst<Arms, NoElse>>
+    where
+        Arms: NonEmptyArms,
+        T: ExprKind + crate::HasColumnType,
+        CaseExprAst<Arms, NoElse>: ExprAst,
+    {
+        Expr {
+            ast: CaseExprAst {
+                arms: self.arms,
+                else_ast: None,
+                result: Some(crate::SqlType::from(
+                    <T as crate::HasColumnType>::COLUMN_TYPE,
+                )),
+            },
+            project_alias: Cow::Borrowed("expr"),
+            _phantom: PhantomData,
+        }
+    }
+}
+
 /// An expression AST node for a window function: `func(operand) OVER (PARTITION BY … ORDER BY …)`,
 /// optionally wrapped in a `CAST` (used by aggregate-over to pin the widened result's wire type).
 /// `operand` renders the function's arguments (nothing for `ROW_NUMBER()`); `partitions`/`orders`
@@ -1479,6 +1888,54 @@ where
 
 impl<P> NonAggregatePredicate for NotPredicateAst<P> where P: NonAggregatePredicate {}
 
+/// Marker for predicate ASTs whose expression operands are all window-free (see [`NonWindowAst`]).
+/// Lets a searched `CASE` used in a `RETURNING` clause require its `WHEN` conditions to be window-free
+/// too (a window function is invalid in `RETURNING`).
+#[doc(hidden)]
+pub trait NonWindowPredicate {}
+impl<Left, Right> NonWindowPredicate for ComparePredicateAst<Left, Right>
+where
+    Left: NonWindowAst,
+    Right: NonWindowAst,
+{
+}
+impl<Left, Right> NonWindowPredicate for LikePredicateAst<Left, Right>
+where
+    Left: NonWindowAst,
+    Right: NonWindowAst,
+{
+}
+impl<Operand, V> NonWindowPredicate for InPredicateAst<Operand, V> where Operand: NonWindowAst {}
+impl<Operand, Lo, Hi> NonWindowPredicate for BetweenPredicateAst<Operand, Lo, Hi>
+where
+    Operand: NonWindowAst,
+    Lo: NonWindowAst,
+    Hi: NonWindowAst,
+{
+}
+impl<Operand> NonWindowPredicate for NullCheckPredicateAst<Operand> where Operand: NonWindowAst {}
+impl<Operand> NonWindowPredicate for BoolTestPredicateAst<Operand> where Operand: NonWindowAst {}
+impl<Left, Right> NonWindowPredicate for AndPredicateAst<Left, Right>
+where
+    Left: NonWindowPredicate,
+    Right: NonWindowPredicate,
+{
+}
+impl<Left, Right> NonWindowPredicate for OrPredicateAst<Left, Right>
+where
+    Left: NonWindowPredicate,
+    Right: NonWindowPredicate,
+{
+}
+impl<P> NonWindowPredicate for NotPredicateAst<P> where P: NonWindowPredicate {}
+// A subquery condition is its own scope (its body is rendered separately), so it is window-free at the
+// outer level regardless of the subquery's contents.
+impl<Operand, Sub> NonWindowPredicate for InSubqueryPredicateAst<Operand, Sub> where
+    Operand: NonWindowAst
+{
+}
+impl<Sub> NonWindowPredicate for ExistsPredicateAst<Sub> {}
+
 /// Classifies a predicate AST as [`ColumnFree`] or [`HasBareColumn`] by combining its expression
 /// operands' [`ExprColumns`] classes. Used to validate `HAVING`: a whole-table-aggregate `HAVING`
 /// (no `GROUP BY`) requires a column-free predicate, mirroring how the projection must be
@@ -1571,6 +2028,118 @@ where
 {
     type Columns = <P as PredicateColumns>::Columns;
 }
+// Matching `PredicateTerm`: a subquery condition is treated as potentially correlated (outer-row
+// dependent), so it carries a bare column for HAVING/aggregate validity.
+impl<Operand, Sub> PredicateColumns for InSubqueryPredicateAst<Operand, Sub> {
+    type Columns = HasBareColumn;
+}
+impl<Sub> PredicateColumns for ExistsPredicateAst<Sub> {
+    type Columns = HasBareColumn;
+}
+
+/// A predicate AST's [term](ConstantTerm) — its operand terms combined via [`CombineTerm`] (columns
+/// preserved, *not* collapsed). Used to fold a `CASE` arm's `WHEN` condition into the result term: an
+/// aggregate in the condition makes the `CASE` aggregate, and a *bare column* in the condition keeps
+/// its column dependency (so `WHEN id > 0 THEN COUNT(..)` is rejected ungrouped, exactly as
+/// `COUNT(id) + id` is). Mirrors [`PredicateColumns`] but over terms instead of columns.
+#[doc(hidden)]
+pub trait PredicateTerm {
+    type Term;
+}
+impl<Left, Right> PredicateTerm for ComparePredicateAst<Left, Right>
+where
+    Left: AstProjectionClass,
+    Right: AstProjectionClass,
+    <Left as AstProjectionClass>::Class: CombineTerm<<Right as AstProjectionClass>::Class>,
+{
+    type Term = <<Left as AstProjectionClass>::Class as CombineTerm<
+        <Right as AstProjectionClass>::Class,
+    >>::Output;
+}
+impl<Left, Right> PredicateTerm for LikePredicateAst<Left, Right>
+where
+    Left: AstProjectionClass,
+    Right: AstProjectionClass,
+    <Left as AstProjectionClass>::Class: CombineTerm<<Right as AstProjectionClass>::Class>,
+{
+    type Term = <<Left as AstProjectionClass>::Class as CombineTerm<
+        <Right as AstProjectionClass>::Class,
+    >>::Output;
+}
+impl<Operand, V> PredicateTerm for InPredicateAst<Operand, V>
+where
+    Operand: AstProjectionClass,
+{
+    type Term = <Operand as AstProjectionClass>::Class;
+}
+impl<Operand, Lo, Hi> PredicateTerm for BetweenPredicateAst<Operand, Lo, Hi>
+where
+    Operand: AstProjectionClass,
+    Lo: AstProjectionClass,
+    Hi: AstProjectionClass,
+    <Operand as AstProjectionClass>::Class: CombineTerm<<Lo as AstProjectionClass>::Class>,
+    <<Operand as AstProjectionClass>::Class as CombineTerm<<Lo as AstProjectionClass>::Class>>::Output:
+        CombineTerm<<Hi as AstProjectionClass>::Class>,
+{
+    type Term = <<<Operand as AstProjectionClass>::Class as CombineTerm<
+        <Lo as AstProjectionClass>::Class,
+    >>::Output as CombineTerm<<Hi as AstProjectionClass>::Class>>::Output;
+}
+impl<Operand> PredicateTerm for NullCheckPredicateAst<Operand>
+where
+    Operand: AstProjectionClass,
+{
+    type Term = <Operand as AstProjectionClass>::Class;
+}
+impl<Operand> PredicateTerm for BoolTestPredicateAst<Operand>
+where
+    Operand: AstProjectionClass,
+{
+    type Term = <Operand as AstProjectionClass>::Class;
+}
+impl<Left, Right> PredicateTerm for AndPredicateAst<Left, Right>
+where
+    Left: PredicateTerm,
+    Right: PredicateTerm,
+    <Left as PredicateTerm>::Term: CombineTerm<<Right as PredicateTerm>::Term>,
+{
+    type Term =
+        <<Left as PredicateTerm>::Term as CombineTerm<<Right as PredicateTerm>::Term>>::Output;
+}
+impl<Left, Right> PredicateTerm for OrPredicateAst<Left, Right>
+where
+    Left: PredicateTerm,
+    Right: PredicateTerm,
+    <Left as PredicateTerm>::Term: CombineTerm<<Right as PredicateTerm>::Term>,
+{
+    type Term =
+        <<Left as PredicateTerm>::Term as CombineTerm<<Right as PredicateTerm>::Term>>::Output;
+}
+impl<P> PredicateTerm for NotPredicateAst<P>
+where
+    P: PredicateTerm,
+{
+    type Term = <P as PredicateTerm>::Term;
+}
+// A subquery condition may be *correlated* (reference an outer row), so it is classified
+// conservatively as row-dependent (a `ColumnTerm` is folded in): a `CASE` arm whose condition is
+// `exists`/`in_subquery` combined with an aggregate value is rejected (like a bare column +
+// aggregate), rather than type-checking as aggregate-only and rendering an ungrouped outer column the
+// database rejects. The subquery's own params/columns are its own scope.
+//
+// `IN (subquery)` also combines its *operand*'s term, so an aggregate operand (e.g.
+// `count(x).in_subquery(…)`) is not silently downgraded to a column — `Aggregate + Column` has no
+// `CombineTerm`, so such a condition is rejected rather than rendering an ungrouped `COUNT(…)`.
+impl<Operand, Sub> PredicateTerm for InSubqueryPredicateAst<Operand, Sub>
+where
+    Operand: AstProjectionClass,
+    <Operand as AstProjectionClass>::Class: CombineTerm<ColumnTerm>,
+{
+    type Term = <<Operand as AstProjectionClass>::Class as CombineTerm<ColumnTerm>>::Output;
+}
+impl<Sub> PredicateTerm for ExistsPredicateAst<Sub> {
+    type Term = ColumnTerm;
+}
 
 #[doc(hidden)]
 pub trait ExprVisitor {
@@ -1644,6 +2213,34 @@ pub trait ExprVisitor {
         &mut self,
         direction: OrderDirection,
     ) -> Result<(), Self::Error>;
+
+    /// Render a searched `CASE WHEN … THEN … [ELSE …] END`. `arms` renders each `WHEN`/`THEN` pair
+    /// (emitting [`visit_case_when`](Self::visit_case_when) / [`visit_case_then`](Self::visit_case_then)
+    /// around the predicate and value); `else_` is the optional `ELSE` value. The implementor emits the
+    /// `CASE` / ` ELSE ` / ` END` keywords.
+    fn visit_case<Arms, Else>(
+        &mut self,
+        arms: &Arms,
+        else_: Option<&Else>,
+        result: Option<&crate::SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        Arms: RenderCaseArms<Self::Backend>,
+        Else: RenderAst<Self::Backend>;
+
+    /// Emit the ` WHEN ` keyword before a `CASE` arm's predicate.
+    fn visit_case_when(&mut self) -> Result<(), Self::Error>;
+
+    /// Emit the ` THEN ` keyword between a `CASE` arm's predicate and value.
+    fn visit_case_then(&mut self) -> Result<(), Self::Error>;
+
+    /// Open a `CASE` branch value: emit `CAST(` when `cast` is set (so an all-parameter branch is
+    /// typeable), nothing otherwise. Paired with [`visit_case_value_close`](Self::visit_case_value_close)
+    /// around each `THEN`/`ELSE` value.
+    fn visit_case_value_open(&mut self, cast: Option<&crate::SqlType>) -> Result<(), Self::Error>;
+
+    /// Close a `CASE` branch value: emit ` AS <cast>)` when `cast` is set, nothing otherwise.
+    fn visit_case_value_close(&mut self, cast: Option<&crate::SqlType>) -> Result<(), Self::Error>;
 }
 
 #[doc(hidden)]
@@ -1742,6 +2339,10 @@ macro_rules! impl_value_expr_kind {
         }
         impl IntoWindowNullable for $ty {
             type Kind = ScalarNullable<$ty>;
+        }
+        impl KindNullability for $ty {
+            type Value = $ty;
+            type Nullable = CaseNonNull;
         })*
     };
 }
@@ -1786,6 +2387,13 @@ macro_rules! impl_into_window_nullable_for_expr_kind {
             $ty: ExprKind,
         {
             type Kind = ScalarNullable<$ty>;
+        }
+        impl<L, R> KindNullability for $ty
+        where
+            $ty: ExprKind,
+        {
+            type Value = <$ty as ExprKind>::Value;
+            type Nullable = CaseNonNull;
         })*
     };
 }
@@ -1801,12 +2409,25 @@ where
 {
     type Kind = ScalarNullable<RuntimeParam<K>>;
 }
+// A runtime parameter binds a non-null value (a nullable column uses a nullable kind, not a param).
+impl<K> KindNullability for RuntimeParam<K>
+where
+    RuntimeParam<K>: ExprKind,
+{
+    type Value = <RuntimeParam<K> as ExprKind>::Value;
+    type Nullable = CaseNonNull;
+}
 
 /// A `uuid::Uuid` value can be used as a literal predicate operand (`col.equals(id)`) or a
 /// write-builder setter (`.id(id)`), like the scalar value types above.
 #[cfg(feature = "uuid")]
 impl ExprKind for uuid::Uuid {
     type Value = uuid::Uuid;
+}
+#[cfg(feature = "uuid")]
+impl KindNullability for uuid::Uuid {
+    type Value = uuid::Uuid;
+    type Nullable = CaseNonNull;
 }
 
 // Native timestamp values can be used as literal predicate operands and write-builder setters.
@@ -1859,6 +2480,95 @@ where
 }
 
 impl<K> NullableExpr for ScalarNullable<K> {}
+
+/// Type-level boolean tracking whether a searched `CASE` branch (or the accumulated set of branches)
+/// can evaluate to SQL `NULL`. The builder folds it across branches to pick the result kind: a `CASE`
+/// is nullable if *any* branch is nullable — even with an `ELSE` — so a nullable branch
+/// (`scalar_subquery(…)`, `lag(…)`, a nullable column) decodes as `Option<T>` rather than misdecoding
+/// `NULL` as a non-null `T`. (It is a separate type-level bool because Rust can't branch on whether a
+/// kind implements [`NullableExpr`].)
+#[doc(hidden)]
+pub trait CaseNull {
+    /// The `CASE` result kind for value type `T`: [`CaseNonNull`] → `T`, [`CaseMaybeNull`] →
+    /// [`ScalarNullable<T>`].
+    type Result<T: ExprKind>: ExprKind;
+}
+/// No branch seen so far can be `NULL`.
+#[doc(hidden)]
+pub struct CaseNonNull;
+/// At least one branch can be `NULL`.
+#[doc(hidden)]
+pub struct CaseMaybeNull;
+impl CaseNull for CaseNonNull {
+    type Result<T: ExprKind> = T;
+}
+impl CaseNull for CaseMaybeNull {
+    type Result<T: ExprKind> = ScalarNullable<T>;
+}
+
+/// Maps a column's type-level nullability marker ([`crate::NonNullableColumn`] /
+/// [`crate::NullableColumn`]) to its searched-`CASE` branch nullability. Lets the `Table` derive set a
+/// column kind's [`KindNullability`] from the alias-transparent [`ColumnNullability`](crate::ColumnNullability)
+/// path rather than a syntactic `Option<…>` token check (which misses a type-aliased nullable column).
+#[doc(hidden)]
+pub trait ColumnCaseNull {
+    type CaseNull: CaseNull;
+}
+impl ColumnCaseNull for crate::NonNullableColumn {
+    type CaseNull = CaseNonNull;
+}
+impl ColumnCaseNull for crate::NullableColumn {
+    type CaseNull = CaseMaybeNull;
+}
+
+/// Type-level OR over [`CaseNull`]: folds a new branch's nullability into the accumulated one.
+#[doc(hidden)]
+pub trait CaseNullOr<Rhs: CaseNull>: CaseNull {
+    type Output: CaseNull;
+}
+impl CaseNullOr<CaseNonNull> for CaseNonNull {
+    type Output = CaseNonNull;
+}
+impl CaseNullOr<CaseMaybeNull> for CaseNonNull {
+    type Output = CaseMaybeNull;
+}
+impl CaseNullOr<CaseNonNull> for CaseMaybeNull {
+    type Output = CaseMaybeNull;
+}
+impl CaseNullOr<CaseMaybeNull> for CaseMaybeNull {
+    type Output = CaseMaybeNull;
+}
+
+/// How an expression kind behaves as a searched-`CASE` branch. Implemented for every kind that can be
+/// a branch (value types, computed/aggregate kinds, runtime params, the nullable kinds, and — via the
+/// `Table` derive — each column kind).
+///
+/// [`Value`](Self::Value) is the non-null value type the branch contributes (the `CASE` result `T`):
+/// it unwraps an `Option<_>` value type so an outer-join `Nullable<K>` column or a `SUM`/`AVG`/`MIN`/
+/// `MAX` aggregate can be a branch (their `ExprKind::Value` is `Option<_>`), while [`Nullable`](Self::Nullable)
+/// captures whether the branch can be SQL `NULL` (folded into the result's nullability — mirrors
+/// [`NullableExpr`]).
+#[doc(hidden)]
+pub trait KindNullability {
+    type Value;
+    type Nullable: CaseNull;
+}
+impl<K> KindNullability for Nullable<K>
+where
+    K: ExprKind,
+{
+    // An outer-join column: its `ExprKind::Value` is `Option<K::Value>`; the branch value type is the
+    // inner `K::Value`, and it is nullable.
+    type Value = <K as ExprKind>::Value;
+    type Nullable = CaseMaybeNull;
+}
+impl<K> KindNullability for ScalarNullable<K>
+where
+    K: ExprKind,
+{
+    type Value = <K as ExprKind>::Value;
+    type Nullable = CaseMaybeNull;
+}
 
 /// The runtime-parameter shape contributed by a projection's own expressions. An embedded subquery
 /// renders its `SELECT` list *before* its `FROM`/`WHERE`/…, so a runtime [`param`] appearing in the
@@ -2039,6 +2749,48 @@ where
     K::Value: AggregateScalar,
 {
     type Value = Option<<K::Value as AggregateScalar>::Scalar>;
+}
+
+// Aggregate kinds as `CASE` branches: `COUNT` is non-null `i64`; `SUM`/`AVG`/`MIN`/`MAX` are nullable
+// (NULL over empty input), and their branch value type is the inner type behind their `Option<…>`
+// `ExprKind::Value`, so `case().when(pred, x.sum()).otherwise(0)` yields `Option<…>`.
+impl<K> KindNullability for CountExpr<K> {
+    type Value = i64;
+    type Nullable = CaseNonNull;
+}
+impl<K> KindNullability for SumExpr<K>
+where
+    K: ExprKind,
+    K::Value: AggregateScalar,
+    <K::Value as AggregateScalar>::Scalar: SqlSum,
+{
+    type Value = <<K::Value as AggregateScalar>::Scalar as SqlSum>::Output;
+    type Nullable = CaseMaybeNull;
+}
+impl<K> KindNullability for AvgExpr<K>
+where
+    K: ExprKind,
+    K::Value: AggregateScalar,
+    <K::Value as AggregateScalar>::Scalar: SqlNumber,
+{
+    type Value = f64;
+    type Nullable = CaseMaybeNull;
+}
+impl<K> KindNullability for MinExpr<K>
+where
+    K: ExprKind,
+    K::Value: AggregateScalar,
+{
+    type Value = <K::Value as AggregateScalar>::Scalar;
+    type Nullable = CaseMaybeNull;
+}
+impl<K> KindNullability for MaxExpr<K>
+where
+    K: ExprKind,
+    K::Value: AggregateScalar,
+{
+    type Value = <K::Value as AggregateScalar>::Scalar;
+    type Nullable = CaseMaybeNull;
 }
 
 /// Type-level identity for a SQL predicate.

@@ -1113,3 +1113,47 @@ async fn postgres_bytea_column_round_trips() {
         vec![(payload, Some(vec![0x01, 0x02, 0x03])), (Vec::new(), None),]
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn postgres_case_expression_round_trips() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS integration_users")
+        .await
+        .expect("drop old integration table");
+
+    let ddl_backend = Postgres;
+    create_table::<IntegrationUser>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+    for name in ["Ada", "Grace"] {
+        connection
+            .to::<IntegrationUser>()
+            .name(name)
+            .insert()
+            .await
+            .expect("insert user");
+    }
+
+    // CASE WHEN name = 'Ada' THEN 100 ELSE 0 END, ordered by id.
+    let labels: Vec<i32> = connection
+        .from::<IntegrationUser>()
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| case().when(user.name.equals("Ada"), 100).otherwise(0))
+        .collect()
+        .await
+        .expect("fetch case labels");
+    assert_eq!(labels, vec![100, 0]);
+
+    // Without ELSE the result is nullable.
+    let nullable: Vec<Option<i32>> = connection
+        .from::<IntegrationUser>()
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| case().when(user.name.equals("Ada"), 100).end())
+        .collect()
+        .await
+        .expect("fetch nullable case labels");
+    assert_eq!(nullable, vec![Some(100), None]);
+}

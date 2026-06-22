@@ -14,13 +14,13 @@ use std::io::{self, Write};
 use std::marker::PhantomData;
 
 use crate::{
-    AggregateFunc, ArithmeticOp, Backend, ColumnRef, CompareOp, Decode, Encode, Expr, ExprKind,
-    ExprNode, ExprVisitor, InsertableTable, JoinItem, JoinKind, LogicalOp, Order, OrderDirection,
-    OrderItem, ParamWriter, Predicate, PredicateAstVisitor, PredicateKind, Projectable,
-    ProjectionItem, ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAst,
-    RenderPredicateAst, RenderProjectable, RenderSelectAst, RenderSubquery, RowReader, SelectAst,
-    SelectSink, Selected, SourceAlias, SourceRef, SqlType, Table, TableProjection, ViewQueryModel,
-    WindowFunc, WindowOrderTerm,
+    AggregateFunc, ArithmeticOp, Backend, CaseArm, ColumnRef, CompareOp, Decode, Encode, Expr,
+    ExprKind, ExprNode, ExprVisitor, InsertableTable, JoinItem, JoinKind, LogicalOp, Order,
+    OrderDirection, OrderItem, ParamWriter, Predicate, PredicateAstVisitor, PredicateKind,
+    Projectable, ProjectionItem, ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAst,
+    RenderCaseArms, RenderPredicateAst, RenderProjectable, RenderSelectAst, RenderSubquery,
+    RowReader, SelectAst, SelectSink, Selected, SourceAlias, SourceRef, SqlType, Table,
+    TableProjection, ViewQueryModel, WindowFunc, WindowOrderTerm,
 };
 
 // ---------------------------------------------------------------------------
@@ -338,6 +338,58 @@ impl ExprVisitor for IrBuilder {
 
     fn visit_window_order_direction(&mut self, direction: OrderDirection) -> io::Result<()> {
         self.window_order_directions.push(direction);
+        Ok(())
+    }
+
+    fn visit_case<Arms, Else>(
+        &mut self,
+        arms: &Arms,
+        else_: Option<&Else>,
+        result: Option<&SqlType>,
+    ) -> io::Result<()>
+    where
+        Arms: RenderCaseArms<ModelBackend>,
+        Else: RenderAst<ModelBackend>,
+    {
+        // Each arm pushes its predicate node then its value node (the keyword/cast hooks are no-ops
+        // here; the cast is captured in `result` and applied per branch by the view renderer), so the
+        // stack grows by `2 * LEN`; split it off and pair the nodes back up.
+        let arms_start = self.stack.len();
+        arms.render(self, result)?;
+        let mut nodes = self.stack.split_off(arms_start).into_iter();
+        let mut case_arms = Vec::with_capacity(Arms::LEN);
+        for _ in 0..Arms::LEN {
+            let when = Box::new(nodes.next().expect("CASE arm predicate node"));
+            let then = Box::new(nodes.next().expect("CASE arm value node"));
+            case_arms.push(CaseArm { when, then });
+        }
+        let else_ = match else_ {
+            Some(else_) => Some(self.child(|builder| else_.visit(builder))?),
+            None => None,
+        };
+        self.stack.push(ExprNode::Case {
+            arms: case_arms,
+            else_,
+            result: result.cloned(),
+        });
+        Ok(())
+    }
+
+    fn visit_case_when(&mut self) -> io::Result<()> {
+        // Arm boundaries are recovered structurally from the node stack (see `visit_case`).
+        Ok(())
+    }
+
+    fn visit_case_then(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn visit_case_value_open(&mut self, _cast: Option<&SqlType>) -> io::Result<()> {
+        // The cast is captured in `ExprNode::Case::result` and applied per branch by the view renderer.
+        Ok(())
+    }
+
+    fn visit_case_value_close(&mut self, _cast: Option<&SqlType>) -> io::Result<()> {
         Ok(())
     }
 }
