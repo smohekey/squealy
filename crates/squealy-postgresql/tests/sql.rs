@@ -2587,7 +2587,9 @@ fn postgres_renders_case_view_body() {
     let sql = String::from_utf8(sql).unwrap();
 
     assert!(
-        sql.contains("CAST(CASE WHEN (q0_0.\"name\" IS NULL) THEN 0 ELSE 1 END AS integer)"),
+        sql.contains(
+            "CASE WHEN (q0_0.\"name\" IS NULL) THEN CAST(0 AS integer) ELSE CAST(1 AS integer) END"
+        ),
         "CASE view body not rendered: {sql}"
     );
 }
@@ -2951,11 +2953,11 @@ fn postgres_case_when_renders_with_numbered_placeholders() {
     let q = Postgres
         .from::<User>()
         .select(|(user,)| case().when(user.id.greater_than(10), 1).otherwise(0));
-    // The whole CASE is cast to its result type so the all-parameter THEN/ELSE branches are typeable.
+    // Each branch value is cast to the result type so the all-parameter THEN/ELSE branches are typeable.
     assert_eq!(
         q.to_sql(),
-        "SELECT CAST(CASE WHEN (q0_0.\"id\" > $1) THEN $2 ELSE $3 END AS integer) AS \"expr\" \
-         FROM \"public\".\"users\" AS q0_0"
+        "SELECT CASE WHEN (q0_0.\"id\" > $1) THEN CAST($2 AS integer) ELSE CAST($3 AS integer) END \
+         AS \"expr\" FROM \"public\".\"users\" AS q0_0"
     );
     assert_eq!(
         q.collect_params().unwrap(),

@@ -1778,3 +1778,28 @@ fn test_case_with_aggregate_condition_is_aggregate() {
         "SELECT CASE WHEN (COUNT(q0_0.id) > ?) THEN ? ELSE ? END AS expr FROM public.users AS q0_0"
     );
 }
+
+#[test]
+fn test_case_with_subquery_condition_classifies() {
+    // A CASE arm condition may be a subquery predicate (exists / in_subquery); the CASE still
+    // classifies as a projection (scalar here).
+    let q = TestConnection
+        .from::<User>()
+        .select_correlated(|(user,), sub| {
+            case()
+                .when(
+                    exists(
+                        sub.from::<Post>()
+                            .where_(|post| post.user_id.equals(user.id))
+                            .select_subquery(|(post,)| post.user_id),
+                    ),
+                    1,
+                )
+                .otherwise(0)
+        });
+    let sql = q.to_sql();
+    assert!(
+        sql.contains("CASE WHEN (EXISTS (SELECT") && sql.contains("END AS expr"),
+        "{sql}"
+    );
+}

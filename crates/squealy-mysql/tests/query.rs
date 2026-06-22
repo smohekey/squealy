@@ -274,8 +274,10 @@ fn mysql_case_when_renders_in_its_dialect() {
         .from::<Widget>()
         .select(|(widget,)| case().when(widget.id.greater_than(10), 1).otherwise(0));
     let sql = query.to_sql();
+    // Each branch value is cast to the result type (MySQL's dialect cast) so all-parameter branches
+    // are typeable.
     assert!(
-        sql.contains("CASE WHEN (q0_0.`id` > ?) THEN ? ELSE ? END"),
+        sql.contains("CASE WHEN (q0_0.`id` > ?) THEN CAST(? AS ") && sql.contains("END"),
         "{sql}"
     );
 }

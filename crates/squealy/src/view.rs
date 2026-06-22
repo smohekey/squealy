@@ -351,10 +351,11 @@ impl ExprVisitor for IrBuilder {
         Arms: RenderCaseArms<ModelBackend>,
         Else: RenderAst<ModelBackend>,
     {
-        // Each arm pushes its predicate node then its value node (the keyword hooks are no-ops here),
-        // so the stack grows by `2 * LEN`; split it off and pair the nodes back up.
+        // Each arm pushes its predicate node then its value node (the keyword/cast hooks are no-ops
+        // here; the cast is captured in `result` and applied per branch by the view renderer), so the
+        // stack grows by `2 * LEN`; split it off and pair the nodes back up.
         let arms_start = self.stack.len();
-        arms.render(self)?;
+        arms.render(self, result)?;
         let mut nodes = self.stack.split_off(arms_start).into_iter();
         let mut case_arms = Vec::with_capacity(Arms::LEN);
         for _ in 0..Arms::LEN {
@@ -380,6 +381,15 @@ impl ExprVisitor for IrBuilder {
     }
 
     fn visit_case_then(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn visit_case_value_open(&mut self, _cast: Option<&SqlType>) -> io::Result<()> {
+        // The cast is captured in `ExprNode::Case::result` and applied per branch by the view renderer.
+        Ok(())
+    }
+
+    fn visit_case_value_close(&mut self, _cast: Option<&SqlType>) -> io::Result<()> {
         Ok(())
     }
 }

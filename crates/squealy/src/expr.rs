@@ -751,7 +751,9 @@ where
     /// Number of arms (lets a structural visitor like the view IR pair predicate/value nodes).
     const LEN: usize;
 
-    fn render<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    /// Render each `WHEN <pred> THEN <value>` arm. `cast` (the result type, when set) wraps each
+    /// `THEN` value in `CAST(<value> AS <cast>)` so an all-parameter branch is typeable.
+    fn render<V>(&self, visitor: &mut V, cast: Option<&crate::SqlType>) -> Result<(), V::Error>
     where
         V: PredicateAstVisitor<Backend = B>;
 }
@@ -760,7 +762,7 @@ where
     B: crate::Backend,
 {
     const LEN: usize = 0;
-    fn render<V>(&self, _visitor: &mut V) -> Result<(), V::Error>
+    fn render<V>(&self, _visitor: &mut V, _cast: Option<&crate::SqlType>) -> Result<(), V::Error>
     where
         V: PredicateAstVisitor<Backend = B>,
     {
@@ -777,15 +779,17 @@ where
     B: crate::Backend,
 {
     const LEN: usize = 1 + Rest::LEN;
-    fn render<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    fn render<V>(&self, visitor: &mut V, cast: Option<&crate::SqlType>) -> Result<(), V::Error>
     where
         V: PredicateAstVisitor<Backend = B>,
     {
         visitor.visit_case_when()?;
         self.when.visit(visitor)?;
         visitor.visit_case_then()?;
+        visitor.visit_case_value_open(cast)?;
         self.then.visit(visitor)?;
-        self.rest.render(visitor)
+        visitor.visit_case_value_close(cast)?;
+        self.rest.render(visitor, cast)
     }
 }
 
@@ -1935,6 +1939,17 @@ where
 {
     type Columns = <P as PredicateColumns>::Columns;
 }
+// A subquery condition is its own scope: `IN (subquery)` exposes its outer operand's columns;
+// `EXISTS (subquery)` references no outer bare column.
+impl<Operand, Sub> PredicateColumns for InSubqueryPredicateAst<Operand, Sub>
+where
+    Operand: ExprColumns,
+{
+    type Columns = <Operand as ExprColumns>::Columns;
+}
+impl<Sub> PredicateColumns for ExistsPredicateAst<Sub> {
+    type Columns = ColumnFree;
+}
 
 /// A predicate AST's [term](ConstantTerm) — its operand terms combined via [`CombineTerm`] (columns
 /// preserved, *not* collapsed). Used to fold a `CASE` arm's `WHEN` condition into the result term: an
@@ -2019,6 +2034,17 @@ where
     P: PredicateTerm,
 {
     type Term = <P as PredicateTerm>::Term;
+}
+// A subquery condition is its own scope: `IN (subquery)` contributes its outer operand's term (so an
+// outer bare column or aggregate is still accounted for), and `EXISTS (subquery)` has no outer operand.
+impl<Operand, Sub> PredicateTerm for InSubqueryPredicateAst<Operand, Sub>
+where
+    Operand: AstProjectionClass,
+{
+    type Term = <Operand as AstProjectionClass>::Class;
+}
+impl<Sub> PredicateTerm for ExistsPredicateAst<Sub> {
+    type Term = ConstantTerm;
 }
 
 #[doc(hidden)]
@@ -2113,6 +2139,14 @@ pub trait ExprVisitor {
 
     /// Emit the ` THEN ` keyword between a `CASE` arm's predicate and value.
     fn visit_case_then(&mut self) -> Result<(), Self::Error>;
+
+    /// Open a `CASE` branch value: emit `CAST(` when `cast` is set (so an all-parameter branch is
+    /// typeable), nothing otherwise. Paired with [`visit_case_value_close`](Self::visit_case_value_close)
+    /// around each `THEN`/`ELSE` value.
+    fn visit_case_value_open(&mut self, cast: Option<&crate::SqlType>) -> Result<(), Self::Error>;
+
+    /// Close a `CASE` branch value: emit ` AS <cast>)` when `cast` is set, nothing otherwise.
+    fn visit_case_value_close(&mut self, cast: Option<&crate::SqlType>) -> Result<(), Self::Error>;
 }
 
 #[doc(hidden)]

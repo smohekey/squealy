@@ -448,28 +448,40 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
             else_,
             result,
         } => {
-            if result.is_some() {
-                writer.write_all(b"CAST(")?;
-            }
+            // Each branch value is wrapped in `CAST(… AS result)` (not the whole `CASE`) so an
+            // all-parameter branch is typeable; mirrors the query renderer.
             writer.write_all(b"CASE")?;
             for arm in arms {
                 writer.write_all(b" WHEN ")?;
                 render_expr(&arm.when, dialect, writer)?;
                 writer.write_all(b" THEN ")?;
-                render_expr(&arm.then, dialect, writer)?;
+                render_case_value(&arm.then, result.as_ref(), dialect, writer)?;
             }
             if let Some(else_) = else_ {
                 writer.write_all(b" ELSE ")?;
-                render_expr(else_, dialect, writer)?;
+                render_case_value(else_, result.as_ref(), dialect, writer)?;
             }
-            writer.write_all(b" END")?;
-            if let Some(ty) = result {
-                writer.write_all(b" AS ")?;
-                dialect.write_cast_type(ty, writer)?;
-                writer.write_all(b")")?;
-            }
-            Ok(())
+            writer.write_all(b" END")
         }
+    }
+}
+
+/// Renders a `CASE` branch value, wrapping it in `CAST(… AS <cast>)` when a result cast is set.
+fn render_case_value(
+    value: &ExprNode,
+    cast: Option<&SqlType>,
+    dialect: &dyn Dialect,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
+    match cast {
+        Some(ty) => {
+            writer.write_all(b"CAST(")?;
+            render_expr(value, dialect, writer)?;
+            writer.write_all(b" AS ")?;
+            dialect.write_cast_type(ty, writer)?;
+            writer.write_all(b")")
+        }
+        None => render_expr(value, dialect, writer),
     }
 }
 

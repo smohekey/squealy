@@ -1446,25 +1446,17 @@ where
         Arms: RenderCaseArms<B>,
         Else: RenderAst<B>,
     {
-        // A `CAST` pins the result type so all-parameter branches are typeable by the database.
-        if result.is_some() {
-            self.writer.write_all(b"CAST(")?;
-        }
+        // Each branch value is wrapped in `CAST(… AS result)` (not the whole `CASE`): an outer cast
+        // does not type the branch parameters, but casting each branch does.
         self.writer.write_all(b"CASE")?;
-        arms.render(self)?;
+        arms.render(self, result)?;
         if let Some(else_) = else_ {
             self.writer.write_all(b" ELSE ")?;
+            self.visit_case_value_open(result)?;
             else_.visit(self)?;
+            self.visit_case_value_close(result)?;
         }
-        self.writer.write_all(b" END")?;
-        if let Some(ty) = result {
-            self.writer.write_all(b" AS ")?;
-            self.renderer
-                .dialect
-                .write_cast_type(ty, &mut *self.writer)?;
-            self.writer.write_all(b")")?;
-        }
-        Ok(())
+        self.writer.write_all(b" END")
     }
 
     fn visit_case_when(&mut self) -> Result<(), Self::Error> {
@@ -1473,6 +1465,24 @@ where
 
     fn visit_case_then(&mut self) -> Result<(), Self::Error> {
         self.writer.write_all(b" THEN ")
+    }
+
+    fn visit_case_value_open(&mut self, cast: Option<&SqlType>) -> Result<(), Self::Error> {
+        if cast.is_some() {
+            self.writer.write_all(b"CAST(")?;
+        }
+        Ok(())
+    }
+
+    fn visit_case_value_close(&mut self, cast: Option<&SqlType>) -> Result<(), Self::Error> {
+        if let Some(ty) = cast {
+            self.writer.write_all(b" AS ")?;
+            self.renderer
+                .dialect
+                .write_cast_type(ty, &mut *self.writer)?;
+            self.writer.write_all(b")")?;
+        }
+        Ok(())
     }
 }
 

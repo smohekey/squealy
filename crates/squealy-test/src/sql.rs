@@ -1100,7 +1100,7 @@ where
         &mut self,
         arms: &Arms,
         else_: Option<&Else>,
-        _result: Option<&SqlType>,
+        result: Option<&SqlType>,
     ) -> Result<(), Self::Error>
     where
         Arms: RenderCaseArms<Self::Backend>,
@@ -1108,7 +1108,7 @@ where
     {
         // The in-memory test backend renders the bare CASE (no dialect cast), like its aggregates.
         self.writer.write_all(b"CASE")?;
-        arms.render(self)?;
+        arms.render(self, result)?;
         if let Some(else_) = else_ {
             self.writer.write_all(b" ELSE ")?;
             else_.visit(self)?;
@@ -1122,6 +1122,14 @@ where
 
     fn visit_case_then(&mut self) -> Result<(), Self::Error> {
         self.writer.write_all(b" THEN ")
+    }
+
+    fn visit_case_value_open(&mut self, _cast: Option<&SqlType>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn visit_case_value_close(&mut self, _cast: Option<&SqlType>) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
