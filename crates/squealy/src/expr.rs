@@ -613,6 +613,7 @@ where
     }
 }
 impl NonAggregateAst for NoElse {}
+impl NonWindowAst for NoElse {}
 impl AstProjectionClass for NoElse {
     type Class = ConstantTerm;
 }
@@ -688,6 +689,19 @@ where
     PredAst: NonAggregatePredicate,
     ValAst: NonAggregateAst,
     Rest: CaseArmsNonAggregate,
+{
+}
+
+/// All arm predicates and `THEN` values are window-free — so the whole `CASE` may be used in a
+/// `RETURNING` clause (combined with the `ELSE` check on [`CaseExprAst`]).
+#[doc(hidden)]
+pub trait CaseArmsNonWindow {}
+impl CaseArmsNonWindow for CaseNil {}
+impl<PredAst, ValAst, Rest> CaseArmsNonWindow for CaseWhen<PredAst, ValAst, Rest>
+where
+    PredAst: NonWindowPredicate,
+    ValAst: NonWindowAst,
+    Rest: CaseArmsNonWindow,
 {
 }
 
@@ -835,6 +849,15 @@ impl<Arms, Else> NonAggregateAst for CaseExprAst<Arms, Else>
 where
     Arms: CaseArmsNonAggregate,
     Else: NonAggregateAst,
+{
+}
+
+// A window-free `CASE` (every arm predicate/value and the `ELSE` is window-free) is usable in a
+// `RETURNING` clause.
+impl<Arms, Else> NonWindowAst for CaseExprAst<Arms, Else>
+where
+    Arms: CaseArmsNonWindow,
+    Else: NonWindowAst,
 {
 }
 
@@ -1864,6 +1887,54 @@ where
 }
 
 impl<P> NonAggregatePredicate for NotPredicateAst<P> where P: NonAggregatePredicate {}
+
+/// Marker for predicate ASTs whose expression operands are all window-free (see [`NonWindowAst`]).
+/// Lets a searched `CASE` used in a `RETURNING` clause require its `WHEN` conditions to be window-free
+/// too (a window function is invalid in `RETURNING`).
+#[doc(hidden)]
+pub trait NonWindowPredicate {}
+impl<Left, Right> NonWindowPredicate for ComparePredicateAst<Left, Right>
+where
+    Left: NonWindowAst,
+    Right: NonWindowAst,
+{
+}
+impl<Left, Right> NonWindowPredicate for LikePredicateAst<Left, Right>
+where
+    Left: NonWindowAst,
+    Right: NonWindowAst,
+{
+}
+impl<Operand, V> NonWindowPredicate for InPredicateAst<Operand, V> where Operand: NonWindowAst {}
+impl<Operand, Lo, Hi> NonWindowPredicate for BetweenPredicateAst<Operand, Lo, Hi>
+where
+    Operand: NonWindowAst,
+    Lo: NonWindowAst,
+    Hi: NonWindowAst,
+{
+}
+impl<Operand> NonWindowPredicate for NullCheckPredicateAst<Operand> where Operand: NonWindowAst {}
+impl<Operand> NonWindowPredicate for BoolTestPredicateAst<Operand> where Operand: NonWindowAst {}
+impl<Left, Right> NonWindowPredicate for AndPredicateAst<Left, Right>
+where
+    Left: NonWindowPredicate,
+    Right: NonWindowPredicate,
+{
+}
+impl<Left, Right> NonWindowPredicate for OrPredicateAst<Left, Right>
+where
+    Left: NonWindowPredicate,
+    Right: NonWindowPredicate,
+{
+}
+impl<P> NonWindowPredicate for NotPredicateAst<P> where P: NonWindowPredicate {}
+// A subquery condition is its own scope (its body is rendered separately), so it is window-free at the
+// outer level regardless of the subquery's contents.
+impl<Operand, Sub> NonWindowPredicate for InSubqueryPredicateAst<Operand, Sub> where
+    Operand: NonWindowAst
+{
+}
+impl<Sub> NonWindowPredicate for ExistsPredicateAst<Sub> {}
 
 /// Classifies a predicate AST as [`ColumnFree`] or [`HasBareColumn`] by combining its expression
 /// operands' [`ExprColumns`] classes. Used to validate `HAVING`: a whole-table-aggregate `HAVING`

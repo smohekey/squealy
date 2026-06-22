@@ -1930,3 +1930,17 @@ fn test_case_with_in_subquery_condition_classifies() {
         "{sql}"
     );
 }
+
+#[test]
+fn test_case_in_returning_clause() {
+    // A window-free CASE is valid in a RETURNING projection (it implements NonWindowAst).
+    let insert = TestConnection
+        .to::<User>()
+        .name("Ada")
+        .insert_returning(|user| case().when(user.id.greater_than(0), 1).otherwise(0));
+    let sql = insert.to_sql();
+    assert!(
+        sql.contains("RETURNING CASE WHEN") && sql.contains("END AS expr"),
+        "{sql}"
+    );
+}
