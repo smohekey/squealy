@@ -20,9 +20,9 @@ use crate::{
     CompareOp, Dialect, Encode, Expr, ExprKind, ExprVisitor, InsertRow, InsertRowVisitor,
     InsertableTable, Order, OrderDirection, Predicate, PredicateAstVisitor, PredicateKind,
     PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAssignment,
-    RenderAst, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst, RenderPredicateNodes,
-    RenderProjectable, RenderSelectAst, RenderUpdateAssignments, SchemaTable, SelectSink, Selected,
-    SourceAlias, SqlType, TableProjection, UpdateableTable,
+    RenderAst, RenderCaseArms, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst,
+    RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderUpdateAssignments, SchemaTable,
+    SelectSink, Selected, SourceAlias, SqlType, TableProjection, UpdateableTable,
 };
 use std::marker::PhantomData;
 
@@ -1434,6 +1434,55 @@ where
         direction: OrderDirection,
     ) -> Result<(), Self::Error> {
         write!(self.writer, " {}", render_order_direction(direction))
+    }
+
+    fn visit_case<Arms, Else>(
+        &mut self,
+        arms: &Arms,
+        else_: Option<&Else>,
+        result: Option<&SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        Arms: RenderCaseArms<B>,
+        Else: RenderAst<B>,
+    {
+        // Each branch value is wrapped in `CAST(… AS result)` (not the whole `CASE`): an outer cast
+        // does not type the branch parameters, but casting each branch does.
+        self.writer.write_all(b"CASE")?;
+        arms.render(self, result)?;
+        if let Some(else_) = else_ {
+            self.writer.write_all(b" ELSE ")?;
+            self.visit_case_value_open(result)?;
+            else_.visit(self)?;
+            self.visit_case_value_close(result)?;
+        }
+        self.writer.write_all(b" END")
+    }
+
+    fn visit_case_when(&mut self) -> Result<(), Self::Error> {
+        self.writer.write_all(b" WHEN ")
+    }
+
+    fn visit_case_then(&mut self) -> Result<(), Self::Error> {
+        self.writer.write_all(b" THEN ")
+    }
+
+    fn visit_case_value_open(&mut self, cast: Option<&SqlType>) -> Result<(), Self::Error> {
+        if cast.is_some() {
+            self.writer.write_all(b"CAST(")?;
+        }
+        Ok(())
+    }
+
+    fn visit_case_value_close(&mut self, cast: Option<&SqlType>) -> Result<(), Self::Error> {
+        if let Some(ty) = cast {
+            self.writer.write_all(b" AS ")?;
+            self.renderer
+                .dialect
+                .write_cast_type(ty, &mut *self.writer)?;
+            self.writer.write_all(b")")?;
+        }
+        Ok(())
     }
 }
 

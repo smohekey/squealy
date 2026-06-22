@@ -1691,3 +1691,256 @@ fn test_bytea_borrowed_setters_and_operands() {
         ]
     );
 }
+
+#[test]
+fn test_case_with_else_renders_and_binds_in_order() {
+    let q = TestConnection.from::<User>().select(|(user,)| {
+        case()
+            .when(user.id.greater_than(10), 1)
+            .when(user.id.greater_than(5), 2)
+            .otherwise(0)
+    });
+    assert_eq!(
+        q.to_sql(),
+        "SELECT CASE WHEN (q0_0.id > ?) THEN ? WHEN (q0_0.id > ?) THEN ? ELSE ? END AS expr \
+         FROM public.users AS q0_0"
+    );
+    // Binds in render order: pred, then, pred, then, else.
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![
+            TestParam::Int(10),
+            TestParam::Int(1),
+            TestParam::Int(5),
+            TestParam::Int(2),
+            TestParam::Int(0),
+        ]
+    );
+    assert_row::<_, _, _, i32>(&q);
+}
+
+#[test]
+fn test_case_without_else_is_nullable() {
+    let q = TestConnection
+        .from::<User>()
+        .select(|(user,)| case().when(user.id.greater_than(5), 1).end());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT CASE WHEN (q0_0.id > ?) THEN ? END AS expr FROM public.users AS q0_0"
+    );
+    // No ELSE -> Option<i32>.
+    assert_row::<_, _, _, Option<i32>>(&q);
+}
+
+#[test]
+fn test_case_usable_in_where() {
+    // A non-aggregate CASE is a valid WHERE operand.
+    let q = TestConnection
+        .from::<User>()
+        .where_(|user| {
+            case()
+                .when(user.id.greater_than(5), 1)
+                .otherwise(0)
+                .equals(1)
+        })
+        .select(|(user,)| user.id);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 \
+         WHERE (CASE WHEN (q0_0.id > ?) THEN ? ELSE ? END = ?)"
+    );
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![
+            TestParam::Int(5),
+            TestParam::Int(1),
+            TestParam::Int(0),
+            TestParam::Int(1),
+        ]
+    );
+}
+
+// (A CASE whose WHEN references a bare column *and* whose THEN is an aggregate is rejected — like
+// `COUNT(id) + id`, a column and an aggregate cannot mix in one expression. Aggregate *conditions*
+// with non-column comparisons are fine; see `test_case_with_aggregate_condition_is_aggregate`.)
+
+#[test]
+fn test_case_with_aggregate_condition_is_aggregate() {
+    // An aggregate inside a WHEN *condition* makes the whole CASE an aggregate projection — valid in a
+    // whole-table aggregate select even though every THEN/ELSE value is a constant.
+    let q = TestConnection.from::<User>().select(|(user,)| {
+        case()
+            .when(user.id.count().greater_than(1i64), 1i64)
+            .otherwise(0i64)
+    });
+    assert_eq!(
+        q.to_sql(),
+        "SELECT CASE WHEN (COUNT(q0_0.id) > ?) THEN ? ELSE ? END AS expr FROM public.users AS q0_0"
+    );
+}
+
+#[test]
+fn test_case_with_subquery_condition_classifies() {
+    // A CASE arm condition may be a subquery predicate (exists / in_subquery); the CASE still
+    // classifies as a projection (scalar here).
+    let q = TestConnection
+        .from::<User>()
+        .select_correlated(|(user,), sub| {
+            case()
+                .when(
+                    exists(
+                        sub.from::<Post>()
+                            .where_(|post| post.user_id.equals(user.id))
+                            .select_subquery(|(post,)| post.user_id),
+                    ),
+                    1,
+                )
+                .otherwise(0)
+        });
+    let sql = q.to_sql();
+    assert!(
+        sql.contains("CASE WHEN (EXISTS (SELECT") && sql.contains("END AS expr"),
+        "{sql}"
+    );
+}
+
+#[test]
+fn test_case_with_nullable_branch_is_nullable() {
+    // `event.label` is a nullable column, so a CASE with it as a branch is nullable *even with an
+    // ELSE* — its result decodes as `Option<String>`. `is_null` (only available on nullable
+    // expressions) is therefore callable on the result; a non-null-branch CASE rejects it (see the
+    // `case_nonnull_branches_are_not_nullable` compile-fail test).
+    let q = TestConnection
+        .from::<Event>()
+        .where_(|event| {
+            case()
+                .when(event.id.greater_than(0), event.label)
+                .otherwise("default".to_string())
+                .is_null()
+        })
+        .select(|(event,)| event.id);
+    let sql = q.to_sql();
+    assert!(sql.contains("IS NULL"), "{sql}");
+}
+
+#[test]
+fn test_case_with_columntype_newtype_branches() {
+    // A `#[derive(ColumnType)]` newtype value is a non-null value type usable as a CASE branch, and a
+    // newtype CASE result is projectable as a standalone scalar (it decodes back to the newtype).
+    let q = TestConnection.from::<Event>().select(|(event,)| {
+        case()
+            .when(event.id.greater_than(0), LedgerRef(1))
+            .otherwise(LedgerRef(0))
+    });
+    let sql = q.to_sql();
+    assert!(
+        sql.contains("CASE WHEN") && sql.contains("END AS expr"),
+        "{sql}"
+    );
+}
+
+#[test]
+fn test_case_with_sum_aggregate_branch_is_nullable() {
+    // A SUM/AVG/MIN/MAX aggregate has an `Option<_>` value type; as a CASE branch its value type is
+    // the inner type and the result is nullable, so the CASE finishes (regression: it used to set
+    // `T = Option<_>` and fail to finish). The COUNT condition keeps the whole CASE an aggregate (a
+    // bare-column condition + aggregate value would be rejected, like `COUNT(id) + id`).
+    let q = TestConnection.from::<Counter>().select(|(counter,)| {
+        case()
+            .when(
+                counter.count.count().greater_than(0i64),
+                counter.count.sum(),
+            )
+            .end()
+    });
+    let sql = q.to_sql();
+    assert!(
+        sql.contains("CASE WHEN") && sql.contains("SUM(") && sql.contains("END AS expr"),
+        "{sql}"
+    );
+}
+
+#[test]
+fn test_case_with_outer_join_column_branch_is_nullable() {
+    // A left-joined column is `Nullable<K>` (value type `Option<_>`); as a CASE branch its value type
+    // is the inner type and the result is nullable, so the CASE both finishes and `is_null`s.
+    let q = TestConnection
+        .from::<User>()
+        .left_join::<Post>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .where_(|(user, post)| {
+            case()
+                .when(user.id.greater_than(0), post.user_id)
+                .otherwise(0)
+                .is_null()
+        })
+        .select(|(user, _post)| user.id);
+    let sql = q.to_sql();
+    assert!(
+        sql.contains("CASE WHEN") && sql.contains("IS NULL"),
+        "{sql}"
+    );
+}
+
+// A nullable column declared through a type alias: nullability is only visible at the type level via
+// `ColumnNullability`, not a syntactic `Option<…>` token.
+type MaybeLabel = Option<String>;
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct Aliased<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    label: C::Type<'scope, MaybeLabel>,
+}
+
+#[test]
+fn test_case_with_type_aliased_nullable_branch_is_nullable() {
+    // The column kind's CASE nullability must come from the alias-transparent ColumnNullability path,
+    // so an aliased Option column branch makes the CASE nullable (is_null callable).
+    let q = TestConnection
+        .from::<Aliased>()
+        .where_(|row| {
+            case()
+                .when(row.id.greater_than(0), row.label)
+                .otherwise("x".to_string())
+                .is_null()
+        })
+        .select(|(row,)| row.id);
+    let sql = q.to_sql();
+    assert!(sql.contains("IS NULL"), "{sql}");
+}
+
+#[test]
+fn test_case_with_in_subquery_condition_classifies() {
+    // A non-aggregate `in_subquery` condition (column operand) keeps the CASE a scalar projection.
+    let q = TestConnection
+        .from::<User>()
+        .select_correlated(|(user,), sub| {
+            case()
+                .when(
+                    user.id
+                        .in_subquery(sub.from::<Post>().select_subquery(|(post,)| post.user_id)),
+                    1,
+                )
+                .otherwise(0)
+        });
+    let sql = q.to_sql();
+    assert!(
+        sql.contains("CASE WHEN (q0_0.id IN (SELECT") && sql.contains("END AS expr"),
+        "{sql}"
+    );
+}
+
+#[test]
+fn test_case_in_returning_clause() {
+    // A window-free CASE is valid in a RETURNING projection (it implements NonWindowAst).
+    let insert = TestConnection
+        .to::<User>()
+        .name("Ada")
+        .insert_returning(|user| case().when(user.id.greater_than(0), 1).otherwise(0));
+    let sql = insert.to_sql();
+    assert!(
+        sql.contains("RETURNING CASE WHEN") && sql.contains("END AS expr"),
+        "{sql}"
+    );
+}
