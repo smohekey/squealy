@@ -2532,6 +2532,66 @@ SELECT DISTINCT q0_0.\"name\" FROM \"public\".\"users\" AS q0_0"
 }
 
 #[test]
+fn postgres_renders_case_view_body() {
+    let view = ViewModel {
+        name: "labels".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "label".to_owned(),
+            ty: SqlType::I32,
+            nullable: false,
+        }],
+        query: ViewQueryModel {
+            distinct: false,
+            projection: vec![ProjectionItem {
+                output_name: "label".to_owned(),
+                expr: ExprNode::Case {
+                    arms: vec![CaseArm {
+                        when: Box::new(ExprNode::IsNull {
+                            negated: false,
+                            operand: Box::new(ExprNode::Column {
+                                alias: "q0_0".to_owned(),
+                                column: "name".to_owned(),
+                            }),
+                        }),
+                        then: Box::new(ExprNode::Literal("0".to_owned())),
+                    }],
+                    else_: Some(Box::new(ExprNode::Literal("1".to_owned()))),
+                },
+            }],
+            from: Some(SourceRef {
+                schema: Some("public".to_owned()),
+                name: "users".to_owned(),
+                alias: "q0_0".to_owned(),
+            }),
+            joins: Vec::new(),
+            filter: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        },
+    };
+
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::CreateView {
+            schema: Some("public".to_owned()),
+            view: Box::new(view),
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains("CASE WHEN (q0_0.\"name\" IS NULL) THEN 0 ELSE 1 END"),
+        "CASE view body not rendered: {sql}"
+    );
+}
+
+#[test]
 fn postgres_in_subquery_numbers_placeholders_across_the_nesting_boundary() {
     // The subquery's literal ($1) and the outer filter's literal ($2) must number continuously
     // across the nested SELECT — the whole point of sharing one `Renderer` between parent and child.
@@ -2883,4 +2943,24 @@ fn postgres_full_join_renders_full_join() {
     );
     // Both sides nullable.
     assert_join_row::<_, _, _, (Option<i32>, Option<i32>)>(&q);
+}
+
+#[test]
+fn postgres_case_when_renders_with_numbered_placeholders() {
+    let q = Postgres
+        .from::<User>()
+        .select(|(user,)| case().when(user.id.greater_than(10), 1).otherwise(0));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT CASE WHEN (q0_0.\"id\" > $1) THEN $2 ELSE $3 END AS \"expr\" \
+         FROM \"public\".\"users\" AS q0_0"
+    );
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![
+            PostgresParam::Int32(10),
+            PostgresParam::Int32(1),
+            PostgresParam::Int32(0),
+        ]
+    );
 }

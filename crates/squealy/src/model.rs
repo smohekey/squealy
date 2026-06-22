@@ -685,6 +685,11 @@ pub enum ExprNode {
         order_by: Vec<WindowOrderTerm>,
         result: Option<SqlType>,
     },
+    /// Searched `CASE WHEN … THEN … [ELSE …] END`.
+    Case {
+        arms: Vec<CaseArm>,
+        else_: Option<Box<ExprNode>>,
+    },
 }
 
 /// One `ORDER BY` term inside a window function's `OVER (…)` clause.
@@ -692,6 +697,13 @@ pub enum ExprNode {
 pub struct WindowOrderTerm {
     pub expr: ExprNode,
     pub direction: OrderDirection,
+}
+
+/// One `WHEN <when> THEN <then>` arm of an [`ExprNode::Case`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct CaseArm {
+    pub when: Box<ExprNode>,
+    pub then: Box<ExprNode>,
 }
 
 /// Conjunction/disjunction for [`ExprNode::Logical`].
@@ -811,6 +823,15 @@ fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>
             }
             for order in order_by {
                 collect_expr_sources(&order.expr, sources);
+            }
+        }
+        ExprNode::Case { arms, else_ } => {
+            for arm in arms {
+                collect_expr_sources(&arm.when, sources);
+                collect_expr_sources(&arm.then, sources);
+            }
+            if let Some(else_) = else_ {
+                collect_expr_sources(else_, sources);
             }
         }
     }

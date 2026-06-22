@@ -267,3 +267,15 @@ fn mysql_right_join_renders_right_join() {
     );
     assert!(!sql.contains("FULL JOIN"), "unexpected FULL JOIN: {sql}");
 }
+
+#[test]
+fn mysql_case_when_renders_in_its_dialect() {
+    let query = Mysql
+        .from::<Widget>()
+        .select(|(widget,)| case().when(widget.id.greater_than(10), 1).otherwise(0));
+    let sql = query.to_sql();
+    assert!(
+        sql.contains("CASE WHEN (q0_0.`id` > ?) THEN ? ELSE ? END"),
+        "{sql}"
+    );
+}

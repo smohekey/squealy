@@ -6,8 +6,8 @@ use squealy::{
     ColumnRef, ColumnType, CompareOp, Encode, Expr, ExprKind, ExprVisitor, InsertRow,
     InsertRowVisitor, InsertableTable, Order, OrderDirection, Predicate, PredicateAstVisitor,
     PredicateKind, PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder,
-    RenderAssignment, RenderAst, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst,
-    RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderSubquery,
+    RenderAssignment, RenderAst, RenderCaseArms, RenderInsertAssignments, RenderInsertRows,
+    RenderPredicateAst, RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderSubquery,
     RenderUpdateAssignments, SchemaTable, SelectSink, Selected, SourceAlias, SqlType, Table,
     TableProjection, UpdateableTable, WindowFunc,
 };
@@ -1094,6 +1094,32 @@ where
         direction: OrderDirection,
     ) -> Result<(), Self::Error> {
         write!(self.writer, " {}", render_order_direction(direction))
+    }
+
+    fn visit_case<Arms, Else>(
+        &mut self,
+        arms: &Arms,
+        else_: Option<&Else>,
+    ) -> Result<(), Self::Error>
+    where
+        Arms: RenderCaseArms<Self::Backend>,
+        Else: RenderAst<Self::Backend>,
+    {
+        self.writer.write_all(b"CASE")?;
+        arms.render(self)?;
+        if let Some(else_) = else_ {
+            self.writer.write_all(b" ELSE ")?;
+            else_.visit(self)?;
+        }
+        self.writer.write_all(b" END")
+    }
+
+    fn visit_case_when(&mut self) -> Result<(), Self::Error> {
+        self.writer.write_all(b" WHEN ")
+    }
+
+    fn visit_case_then(&mut self) -> Result<(), Self::Error> {
+        self.writer.write_all(b" THEN ")
     }
 }
 

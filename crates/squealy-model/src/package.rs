@@ -17,7 +17,7 @@ use std::path::Path;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
-    AggregateFunc, ArithmeticOp, CheckModel, ColumnModel, CompareOp, Constraint,
+    AggregateFunc, ArithmeticOp, CaseArm, CheckModel, ColumnModel, CompareOp, Constraint,
     ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, DatabaseModel,
     DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
@@ -737,6 +737,19 @@ fn expr_to_node(expr: &ExprNode) -> KdlNode {
             }
             node
         }
+        ExprNode::Case { arms, else_ } => {
+            let mut node = KdlNode::new("case");
+            for arm in arms {
+                let mut arm_node = KdlNode::new("arm");
+                push_child(&mut arm_node, wrap_expr("when", &arm.when));
+                push_child(&mut arm_node, wrap_expr("then", &arm.then));
+                push_child(&mut node, arm_node);
+            }
+            if let Some(else_) = else_ {
+                push_child(&mut node, wrap_expr("else", else_));
+            }
+            node
+        }
     }
 }
 
@@ -1413,6 +1426,27 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
                 .collect::<Result<Vec<_>, _>>()?,
             result: optional_sql_type_from_node(node)?,
         },
+        "case" => {
+            let arms = child_nodes(node, "arm")
+                .map(|arm| {
+                    let when = child_nodes(arm, "when")
+                        .next()
+                        .ok_or_else(|| malformed("CASE arm is missing `when`"))?;
+                    let then = child_nodes(arm, "then")
+                        .next()
+                        .ok_or_else(|| malformed("CASE arm is missing `then`"))?;
+                    Ok::<_, PackageError>(CaseArm {
+                        when: Box::new(first_child_expr(when)?),
+                        then: Box::new(first_child_expr(then)?),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let else_ = match child_nodes(node, "else").next() {
+                Some(else_node) => Some(Box::new(first_child_expr(else_node)?)),
+                None => None,
+            };
+            ExprNode::Case { arms, else_ }
+        }
         other => return Err(malformed(format!("unknown view expression node `{other}`"))),
     })
 }
@@ -2230,6 +2264,42 @@ mod tests {
                 .any(|(key, value)| key == PACKAGE_CONTENT_HASH_METADATA_KEY
                     && value.starts_with("fnv1a64:"))
         );
+    }
+
+    #[test]
+    fn expr_node_case_round_trips_through_kdl() {
+        let node = ExprNode::Case {
+            arms: vec![CaseArm {
+                when: Box::new(ExprNode::IsNull {
+                    negated: false,
+                    operand: Box::new(ExprNode::Column {
+                        alias: "q0_0".to_owned(),
+                        column: "id".to_owned(),
+                    }),
+                }),
+                then: Box::new(ExprNode::Literal("1".to_owned())),
+            }],
+            else_: Some(Box::new(ExprNode::Literal("0".to_owned()))),
+        };
+        let parsed = expr_from_node(&expr_to_node(&node)).expect("CASE node round-trips");
+        assert_eq!(parsed, node);
+
+        // No-ELSE variant.
+        let no_else = ExprNode::Case {
+            arms: vec![CaseArm {
+                when: Box::new(ExprNode::IsNull {
+                    negated: true,
+                    operand: Box::new(ExprNode::Column {
+                        alias: "q0_0".to_owned(),
+                        column: "id".to_owned(),
+                    }),
+                }),
+                then: Box::new(ExprNode::Literal("1".to_owned())),
+            }],
+            else_: None,
+        };
+        let parsed = expr_from_node(&expr_to_node(&no_else)).expect("no-ELSE CASE round-trips");
+        assert_eq!(parsed, no_else);
     }
 
     #[test]

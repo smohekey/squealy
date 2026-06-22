@@ -1691,3 +1691,105 @@ fn test_bytea_borrowed_setters_and_operands() {
         ]
     );
 }
+
+#[test]
+fn test_case_with_else_renders_and_binds_in_order() {
+    let q = TestConnection.from::<User>().select(|(user,)| {
+        case()
+            .when(user.id.greater_than(10), 1)
+            .when(user.id.greater_than(5), 2)
+            .otherwise(0)
+    });
+    assert_eq!(
+        q.to_sql(),
+        "SELECT CASE WHEN (q0_0.id > ?) THEN ? WHEN (q0_0.id > ?) THEN ? ELSE ? END AS expr \
+         FROM public.users AS q0_0"
+    );
+    // Binds in render order: pred, then, pred, then, else.
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![
+            TestParam::Int(10),
+            TestParam::Int(1),
+            TestParam::Int(5),
+            TestParam::Int(2),
+            TestParam::Int(0),
+        ]
+    );
+    assert_row::<_, _, _, i32>(&q);
+}
+
+#[test]
+fn test_case_without_else_is_nullable() {
+    let q = TestConnection
+        .from::<User>()
+        .select(|(user,)| case().when(user.id.greater_than(5), 1).end());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT CASE WHEN (q0_0.id > ?) THEN ? END AS expr FROM public.users AS q0_0"
+    );
+    // No ELSE -> Option<i32>.
+    assert_row::<_, _, _, Option<i32>>(&q);
+}
+
+#[test]
+fn test_case_usable_in_where() {
+    // A non-aggregate CASE is a valid WHERE operand.
+    let q = TestConnection
+        .from::<User>()
+        .where_(|user| {
+            case()
+                .when(user.id.greater_than(5), 1)
+                .otherwise(0)
+                .equals(1)
+        })
+        .select(|(user,)| user.id);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 \
+         WHERE (CASE WHEN (q0_0.id > ?) THEN ? ELSE ? END = ?)"
+    );
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![
+            TestParam::Int(5),
+            TestParam::Int(1),
+            TestParam::Int(0),
+            TestParam::Int(1),
+        ]
+    );
+}
+
+#[test]
+fn test_case_over_aggregate_in_grouped_select() {
+    // A CASE whose THEN is an aggregate classifies as an aggregate projection (valid in a grouped
+    // select alongside the grouping key).
+    let q = TestConnection
+        .from::<User>()
+        .group_by(|(user,)| user.id)
+        .select(|(user,)| {
+            case()
+                .when(user.id.greater_than(0), user.id.count())
+                .otherwise(0i64)
+        });
+    assert_eq!(
+        q.to_sql(),
+        "SELECT CASE WHEN (q0_0.id > ?) THEN COUNT(q0_0.id) ELSE ? END AS expr \
+         FROM public.users AS q0_0 GROUP BY q0_0.id"
+    );
+}
+
+#[test]
+fn test_case_with_aggregate_condition_is_aggregate() {
+    // An aggregate inside a WHEN *condition* makes the whole CASE an aggregate projection — valid in a
+    // whole-table aggregate select even though every THEN/ELSE value is a constant.
+    let q = TestConnection.from::<User>().select(|(user,)| {
+        case()
+            .when(user.id.count().greater_than(1i64), 1i64)
+            .otherwise(0i64)
+    });
+    assert_eq!(
+        q.to_sql(),
+        "SELECT CASE WHEN (COUNT(q0_0.id) > ?) THEN ? ELSE ? END AS expr FROM public.users AS q0_0"
+    );
+}

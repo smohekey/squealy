@@ -254,3 +254,21 @@ fn lowers_window_function() {
         other => panic!("expected a window node, got {other:?}"),
     }
 }
+
+#[test]
+fn lowers_case_expression_to_ir() {
+    let conn = ModelConn;
+    let query = conn
+        .from::<User>()
+        .project(|(user,)| case().when(user.active.equals(true), 1).otherwise(0));
+    let model = lower_view(&query);
+    match &model.projection[0].expr {
+        ExprNode::Case { arms, else_ } => {
+            assert_eq!(arms.len(), 1);
+            assert!(matches!(&*arms[0].when, ExprNode::Compare { .. }));
+            assert!(matches!(&*arms[0].then, ExprNode::Literal(_)));
+            assert!(matches!(else_.as_deref(), Some(ExprNode::Literal(_))));
+        }
+        other => panic!("expected CASE node, got {other:?}"),
+    }
+}

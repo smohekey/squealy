@@ -577,6 +577,346 @@ where
     }
 }
 
+// ===== Searched CASE expressions =====
+
+/// Terminator of the `WHEN … THEN …` arm cons-list (mirrors [`WindowNil`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaseNil;
+
+/// One `WHEN <pred> THEN <val>` arm, consed onto the rest.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CaseWhen<PredAst, ValAst, Rest> {
+    when: PredAst,
+    then: ValAst,
+    rest: Rest,
+}
+
+/// The "no `ELSE`" slot of a `CASE` (result is then nullable). Renders nothing.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoElse;
+
+impl ExprAst for NoElse {
+    type Params = crate::HNil;
+}
+impl<B> RenderAst<B> for NoElse
+where
+    B: crate::Backend,
+{
+    fn visit<V>(&self, _visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        Ok(())
+    }
+}
+impl NonAggregateAst for NoElse {}
+impl AstProjectionClass for NoElse {
+    type Class = ConstantTerm;
+}
+impl ExprColumns for NoElse {
+    type Columns = ColumnFree;
+}
+
+/// Append a `WHEN/THEN` arm to the tail of the arm list (mirrors [`AppendOrder`]), so arms render in
+/// the order they were added.
+#[doc(hidden)]
+pub trait AppendArm<PredAst, ValAst> {
+    type Output;
+    fn append_arm(self, when: PredAst, then: ValAst) -> Self::Output;
+}
+impl<PredAst, ValAst> AppendArm<PredAst, ValAst> for CaseNil {
+    type Output = CaseWhen<PredAst, ValAst, CaseNil>;
+    fn append_arm(self, when: PredAst, then: ValAst) -> Self::Output {
+        CaseWhen {
+            when,
+            then,
+            rest: CaseNil,
+        }
+    }
+}
+impl<PredAst, ValAst, HPred, HVal, Rest> AppendArm<PredAst, ValAst> for CaseWhen<HPred, HVal, Rest>
+where
+    Rest: AppendArm<PredAst, ValAst>,
+{
+    type Output = CaseWhen<HPred, HVal, Rest::Output>;
+    fn append_arm(self, when: PredAst, then: ValAst) -> Self::Output {
+        CaseWhen {
+            when: self.when,
+            then: self.then,
+            rest: self.rest.append_arm(when, then),
+        }
+    }
+}
+
+/// Runtime params of the arm list, concatenated `WHEN`-params ++ `THEN`-params per arm, in order.
+#[doc(hidden)]
+pub trait CaseArmsParams {
+    type Params: crate::HList;
+}
+impl CaseArmsParams for CaseNil {
+    type Params = crate::HNil;
+}
+impl<PredAst, ValAst, Rest> CaseArmsParams for CaseWhen<PredAst, ValAst, Rest>
+where
+    PredAst: PredicateAst,
+    ValAst: ExprAst,
+    Rest: CaseArmsParams,
+    PredAst::Params: crate::HAppend<ValAst::Params>,
+    <PredAst::Params as crate::HAppend<ValAst::Params>>::Output: crate::HAppend<Rest::Params>,
+{
+    type Params = <<PredAst::Params as crate::HAppend<ValAst::Params>>::Output as crate::HAppend<
+        Rest::Params,
+    >>::Output;
+}
+
+/// All arm predicates are aggregate-free and all `THEN` values are aggregate-free — so the whole
+/// `CASE` may be used in `WHERE` (combined with the `ELSE` check on [`CaseExprAst`]).
+#[doc(hidden)]
+pub trait CaseArmsNonAggregate {}
+impl CaseArmsNonAggregate for CaseNil {}
+impl<PredAst, ValAst, Rest> CaseArmsNonAggregate for CaseWhen<PredAst, ValAst, Rest>
+where
+    PredAst: NonAggregatePredicate,
+    ValAst: NonAggregateAst,
+    Rest: CaseArmsNonAggregate,
+{
+}
+
+/// Folds the arm `THEN` values' [terms](ConstantTerm) via [`CombineTerm`] (constant identity at the
+/// tail), giving the value-term contributed by the arms.
+#[doc(hidden)]
+pub trait CaseArmsTerm {
+    type Term;
+}
+impl CaseArmsTerm for CaseNil {
+    type Term = ConstantTerm;
+}
+impl<PredAst, ValAst, Rest> CaseArmsTerm for CaseWhen<PredAst, ValAst, Rest>
+where
+    PredAst: PredicateAggregateTerm,
+    ValAst: AstProjectionClass,
+    Rest: CaseArmsTerm,
+    // The arm's own term combines its `THEN` value with its `WHEN` condition's aggregate presence (so
+    // an aggregate inside the condition makes the arm aggregate), then folds with the remaining arms.
+    <ValAst as AstProjectionClass>::Class: CombineTerm<<PredAst as PredicateAggregateTerm>::Term>,
+    <<ValAst as AstProjectionClass>::Class as CombineTerm<
+        <PredAst as PredicateAggregateTerm>::Term,
+    >>::Output: CombineTerm<Rest::Term>,
+{
+    type Term = <<<ValAst as AstProjectionClass>::Class as CombineTerm<
+        <PredAst as PredicateAggregateTerm>::Term,
+    >>::Output as CombineTerm<Rest::Term>>::Output;
+}
+
+/// Folds the arm predicate columns and `THEN` value columns via [`CombineColumns`] (for `HAVING`
+/// validity: a bare column anywhere in the `CASE` makes it [`HasBareColumn`]).
+#[doc(hidden)]
+pub trait CaseArmsColumns {
+    type Columns;
+}
+impl CaseArmsColumns for CaseNil {
+    type Columns = ColumnFree;
+}
+impl<PredAst, ValAst, Rest> CaseArmsColumns for CaseWhen<PredAst, ValAst, Rest>
+where
+    PredAst: crate::PredicateColumns,
+    ValAst: ExprColumns,
+    Rest: CaseArmsColumns,
+    <ValAst as ExprColumns>::Columns: CombineColumns<Rest::Columns>,
+    <PredAst as crate::PredicateColumns>::Columns:
+        CombineColumns<<<ValAst as ExprColumns>::Columns as CombineColumns<Rest::Columns>>::Output>,
+{
+    type Columns = <<PredAst as crate::PredicateColumns>::Columns as CombineColumns<
+        <<ValAst as ExprColumns>::Columns as CombineColumns<Rest::Columns>>::Output,
+    >>::Output;
+}
+
+/// Backend-parameterized rendering of the arm list: emits each `WHEN <pred> THEN <val>` via
+/// [`ExprVisitor::visit_case_when`] / [`visit_case_then`](ExprVisitor::visit_case_then). Requires a
+/// [`PredicateAstVisitor`] because the `WHEN` condition is a predicate.
+#[doc(hidden)]
+pub trait RenderCaseArms<B>: CaseArmsParams
+where
+    B: crate::Backend,
+{
+    /// Number of arms (lets a structural visitor like the view IR pair predicate/value nodes).
+    const LEN: usize;
+
+    fn render<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: PredicateAstVisitor<Backend = B>;
+}
+impl<B> RenderCaseArms<B> for CaseNil
+where
+    B: crate::Backend,
+{
+    const LEN: usize = 0;
+    fn render<V>(&self, _visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: PredicateAstVisitor<Backend = B>,
+    {
+        Ok(())
+    }
+}
+impl<PredAst, ValAst, Rest, B> RenderCaseArms<B> for CaseWhen<PredAst, ValAst, Rest>
+where
+    PredAst: RenderPredicateAst<B>,
+    ValAst: RenderAst<B>,
+    Rest: RenderCaseArms<B>,
+    PredAst::Params: crate::HAppend<ValAst::Params>,
+    <PredAst::Params as crate::HAppend<ValAst::Params>>::Output: crate::HAppend<Rest::Params>,
+    B: crate::Backend,
+{
+    const LEN: usize = 1 + Rest::LEN;
+    fn render<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: PredicateAstVisitor<Backend = B>,
+    {
+        visitor.visit_case_when()?;
+        self.when.visit(visitor)?;
+        visitor.visit_case_then()?;
+        self.then.visit(visitor)?;
+        self.rest.render(visitor)
+    }
+}
+
+/// A searched `CASE WHEN … THEN … [ELSE …] END` value expression. `Arms` is the `WHEN/THEN`
+/// cons-list; `Else` is the `ELSE` value AST or [`NoElse`].
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CaseExprAst<Arms, Else> {
+    arms: Arms,
+    else_ast: Option<Else>,
+}
+
+impl<Arms, Else> ExprAst for CaseExprAst<Arms, Else>
+where
+    Arms: CaseArmsParams + Clone,
+    Else: ExprAst,
+    Arms::Params: crate::HAppend<Else::Params>,
+{
+    type Params = <Arms::Params as crate::HAppend<Else::Params>>::Output;
+}
+
+impl<Arms, Else, B> RenderAst<B> for CaseExprAst<Arms, Else>
+where
+    Arms: RenderCaseArms<B> + Clone,
+    Else: RenderAst<B>,
+    Arms::Params: crate::HAppend<Else::Params>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_case(&self.arms, self.else_ast.as_ref())
+    }
+}
+
+impl<Arms, Else> NonAggregateAst for CaseExprAst<Arms, Else>
+where
+    Arms: CaseArmsNonAggregate,
+    Else: NonAggregateAst,
+{
+}
+
+impl<Arms, Else> AstProjectionClass for CaseExprAst<Arms, Else>
+where
+    Arms: CaseArmsTerm,
+    Else: AstProjectionClass,
+    <Arms as CaseArmsTerm>::Term: CombineTerm<<Else as AstProjectionClass>::Class>,
+{
+    type Class =
+        <<Arms as CaseArmsTerm>::Term as CombineTerm<<Else as AstProjectionClass>::Class>>::Output;
+}
+
+impl<Arms, Else> ExprColumns for CaseExprAst<Arms, Else>
+where
+    Arms: CaseArmsColumns,
+    Else: ExprColumns,
+    <Arms as CaseArmsColumns>::Columns: CombineColumns<<Else as ExprColumns>::Columns>,
+{
+    type Columns = <<Arms as CaseArmsColumns>::Columns as CombineColumns<
+        <Else as ExprColumns>::Columns,
+    >>::Output;
+}
+
+/// Builder for a searched [`CASE`](case) expression. Add arms with [`when`](Self::when), then finish
+/// with [`otherwise`](Self::otherwise) (non-null result) or [`end`](Self::end) (nullable, no `ELSE`).
+pub struct CaseBuilder<'scope, T, Arms> {
+    arms: Arms,
+    _marker: PhantomData<(&'scope (), T)>,
+}
+
+/// Start a searched `CASE WHEN <pred> THEN <val> … [ELSE <val>] END` value expression. Every arm's
+/// `THEN` value (and the `ELSE`) must share a value type `T`.
+pub fn case<'scope, T>() -> CaseBuilder<'scope, T, CaseNil> {
+    CaseBuilder {
+        arms: CaseNil,
+        _marker: PhantomData,
+    }
+}
+
+impl<'scope, T, Arms> CaseBuilder<'scope, T, Arms> {
+    /// Add a `WHEN <condition> THEN <value>` arm. The condition is a predicate (as `where_` takes); the
+    /// value must have value type `T`.
+    pub fn when<P, PredAst, E>(
+        self,
+        condition: Predicate<'scope, P, PredAst>,
+        value: E,
+    ) -> CaseBuilder<'scope, T, Arms::Output>
+    where
+        P: PredicateKind,
+        PredAst: PredicateAst,
+        E: IntoExpr<'scope>,
+        E::Kind: ExprKind<Value = T>,
+        Arms: AppendArm<PredAst, E::Ast>,
+    {
+        CaseBuilder {
+            arms: self.arms.append_arm(condition.ast, value.into_expr().ast),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Finish with an `ELSE <value>` branch. With an `ELSE`, the result is the non-null value type `T`.
+    pub fn otherwise<E>(self, value: E) -> Expr<'scope, T, CaseExprAst<Arms, E::Ast>>
+    where
+        T: ExprKind,
+        E: IntoExpr<'scope>,
+        E::Kind: ExprKind<Value = T>,
+        CaseExprAst<Arms, E::Ast>: ExprAst,
+    {
+        Expr {
+            ast: CaseExprAst {
+                arms: self.arms,
+                else_ast: Some(value.into_expr().ast),
+            },
+            project_alias: Cow::Borrowed("expr"),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Finish without an `ELSE`. An unmatched row yields SQL `NULL`, so the result is nullable
+    /// ([`ScalarNullable<T>`], value `Option<T>`).
+    pub fn end(self) -> Expr<'scope, ScalarNullable<T>, CaseExprAst<Arms, NoElse>>
+    where
+        T: ExprKind,
+        CaseExprAst<Arms, NoElse>: ExprAst,
+    {
+        Expr {
+            ast: CaseExprAst {
+                arms: self.arms,
+                else_ast: None,
+            },
+            project_alias: Cow::Borrowed("expr"),
+            _phantom: PhantomData,
+        }
+    }
+}
+
 /// An expression AST node for a window function: `func(operand) OVER (PARTITION BY … ORDER BY …)`,
 /// optionally wrapped in a `CAST` (used by aggregate-over to pin the widened result's wire type).
 /// `operand` renders the function's arguments (nothing for `ROW_NUMBER()`); `partitions`/`orders`
@@ -1220,6 +1560,38 @@ impl CombineTerm<AggregateTerm> for AggregateTerm {
 // No `CombineTerm` between `ColumnTerm` and `AggregateTerm`: a bare column outside an aggregate is
 // invalid without `GROUP BY`.
 
+/// Collapses a [term](ConstantTerm) to its *aggregate presence* — a column becomes [`ConstantTerm`]
+/// (only aggregate-vs-not matters). Used to fold a `CASE` arm predicate into the result term: a
+/// predicate containing an aggregate (`WHEN COUNT(..) > 1`) makes the whole `CASE` aggregate, but a
+/// predicate merely referencing a column must not.
+#[doc(hidden)]
+pub trait CollapseColumnTerm {
+    type Output;
+}
+impl CollapseColumnTerm for ConstantTerm {
+    type Output = ConstantTerm;
+}
+impl CollapseColumnTerm for ColumnTerm {
+    type Output = ConstantTerm;
+}
+impl CollapseColumnTerm for AggregateTerm {
+    type Output = AggregateTerm;
+}
+
+/// An expression AST's aggregate presence: [`AggregateTerm`] if it contains an aggregate, else
+/// [`ConstantTerm`] (its column-ness collapsed away). Blanket over [`AstProjectionClass`].
+#[doc(hidden)]
+pub trait ExprAggregatePresence {
+    type Presence;
+}
+impl<A> ExprAggregatePresence for A
+where
+    A: AstProjectionClass,
+    <A as AstProjectionClass>::Class: CollapseColumnTerm,
+{
+    type Presence = <<A as AstProjectionClass>::Class as CollapseColumnTerm>::Output;
+}
+
 /// Maps an expression [term](ConstantTerm) to its projection class: constants and columns are
 /// [`ScalarProjection`], aggregates are [`AggregateProjection`].
 #[doc(hidden)]
@@ -1572,6 +1944,87 @@ where
     type Columns = <P as PredicateColumns>::Columns;
 }
 
+/// A predicate AST's aggregate presence ([`ConstantTerm`] / [`AggregateTerm`]), used to fold a `CASE`
+/// arm's `WHEN` condition into the result term so an aggregate inside a condition makes the whole
+/// `CASE` aggregate. Mirrors [`PredicateColumns`] but collapses columns (only aggregate-ness matters);
+/// combining two presences via [`CombineTerm`] gives "aggregate dominates".
+#[doc(hidden)]
+pub trait PredicateAggregateTerm {
+    type Term;
+}
+impl<Left, Right> PredicateAggregateTerm for ComparePredicateAst<Left, Right>
+where
+    Left: ExprAggregatePresence,
+    Right: ExprAggregatePresence,
+    Left::Presence: CombineTerm<Right::Presence>,
+{
+    type Term = <Left::Presence as CombineTerm<Right::Presence>>::Output;
+}
+impl<Left, Right> PredicateAggregateTerm for LikePredicateAst<Left, Right>
+where
+    Left: ExprAggregatePresence,
+    Right: ExprAggregatePresence,
+    Left::Presence: CombineTerm<Right::Presence>,
+{
+    type Term = <Left::Presence as CombineTerm<Right::Presence>>::Output;
+}
+impl<Operand, V> PredicateAggregateTerm for InPredicateAst<Operand, V>
+where
+    Operand: ExprAggregatePresence,
+{
+    type Term = <Operand as ExprAggregatePresence>::Presence;
+}
+impl<Operand, Lo, Hi> PredicateAggregateTerm for BetweenPredicateAst<Operand, Lo, Hi>
+where
+    Operand: ExprAggregatePresence,
+    Lo: ExprAggregatePresence,
+    Hi: ExprAggregatePresence,
+    Operand::Presence: CombineTerm<Lo::Presence>,
+    <Operand::Presence as CombineTerm<Lo::Presence>>::Output: CombineTerm<Hi::Presence>,
+{
+    type Term = <<Operand::Presence as CombineTerm<Lo::Presence>>::Output as CombineTerm<
+        Hi::Presence,
+    >>::Output;
+}
+impl<Operand> PredicateAggregateTerm for NullCheckPredicateAst<Operand>
+where
+    Operand: ExprAggregatePresence,
+{
+    type Term = <Operand as ExprAggregatePresence>::Presence;
+}
+impl<Operand> PredicateAggregateTerm for BoolTestPredicateAst<Operand>
+where
+    Operand: ExprAggregatePresence,
+{
+    type Term = <Operand as ExprAggregatePresence>::Presence;
+}
+impl<Left, Right> PredicateAggregateTerm for AndPredicateAst<Left, Right>
+where
+    Left: PredicateAggregateTerm,
+    Right: PredicateAggregateTerm,
+    <Left as PredicateAggregateTerm>::Term: CombineTerm<<Right as PredicateAggregateTerm>::Term>,
+{
+    type Term = <<Left as PredicateAggregateTerm>::Term as CombineTerm<
+        <Right as PredicateAggregateTerm>::Term,
+    >>::Output;
+}
+impl<Left, Right> PredicateAggregateTerm for OrPredicateAst<Left, Right>
+where
+    Left: PredicateAggregateTerm,
+    Right: PredicateAggregateTerm,
+    <Left as PredicateAggregateTerm>::Term: CombineTerm<<Right as PredicateAggregateTerm>::Term>,
+{
+    type Term = <<Left as PredicateAggregateTerm>::Term as CombineTerm<
+        <Right as PredicateAggregateTerm>::Term,
+    >>::Output;
+}
+impl<P> PredicateAggregateTerm for NotPredicateAst<P>
+where
+    P: PredicateAggregateTerm,
+{
+    type Term = <P as PredicateAggregateTerm>::Term;
+}
+
 #[doc(hidden)]
 pub trait ExprVisitor {
     type Error;
@@ -1644,6 +2097,25 @@ pub trait ExprVisitor {
         &mut self,
         direction: OrderDirection,
     ) -> Result<(), Self::Error>;
+
+    /// Render a searched `CASE WHEN … THEN … [ELSE …] END`. `arms` renders each `WHEN`/`THEN` pair
+    /// (emitting [`visit_case_when`](Self::visit_case_when) / [`visit_case_then`](Self::visit_case_then)
+    /// around the predicate and value); `else_` is the optional `ELSE` value. The implementor emits the
+    /// `CASE` / ` ELSE ` / ` END` keywords.
+    fn visit_case<Arms, Else>(
+        &mut self,
+        arms: &Arms,
+        else_: Option<&Else>,
+    ) -> Result<(), Self::Error>
+    where
+        Arms: RenderCaseArms<Self::Backend>,
+        Else: RenderAst<Self::Backend>;
+
+    /// Emit the ` WHEN ` keyword before a `CASE` arm's predicate.
+    fn visit_case_when(&mut self) -> Result<(), Self::Error>;
+
+    /// Emit the ` THEN ` keyword between a `CASE` arm's predicate and value.
+    fn visit_case_then(&mut self) -> Result<(), Self::Error>;
 }
 
 #[doc(hidden)]

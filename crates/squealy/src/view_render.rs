@@ -443,6 +443,20 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
             }
             Ok(())
         }
+        ExprNode::Case { arms, else_ } => {
+            writer.write_all(b"CASE")?;
+            for arm in arms {
+                writer.write_all(b" WHEN ")?;
+                render_expr(&arm.when, dialect, writer)?;
+                writer.write_all(b" THEN ")?;
+                render_expr(&arm.then, dialect, writer)?;
+            }
+            if let Some(else_) = else_ {
+                writer.write_all(b" ELSE ")?;
+                render_expr(else_, dialect, writer)?;
+            }
+            writer.write_all(b" END")
+        }
     }
 }
 
