@@ -433,6 +433,55 @@ fn diff_views(
         }
     }
 
+    // A view cannot be dropped while another live view still depends on it, so dropping/recreating one
+    // (for a column-set change or a removal) forces its transitive dependents to be dropped first and
+    // recreated after. Expand the drop/recreate set to that closure over the live dependency graph; the
+    // sort below then puts each dependent ahead of the view it selects from.
+    let mut dropped: BTreeSet<String> = drops
+        .iter()
+        .map(|change| view_change_name(change).to_owned())
+        .collect();
+    // Reverse edges: which live views select from each view.
+    let mut dependents_of: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for view in &actual.views {
+        for source in view.referenced_sources() {
+            dependents_of
+                .entry(source.name.as_str())
+                .or_default()
+                .push(view.name.as_str());
+        }
+    }
+    let mut worklist: Vec<String> = dropped.iter().cloned().collect();
+    while let Some(name) = worklist.pop() {
+        let Some(dependents) = dependents_of.get(name.as_str()) else {
+            continue;
+        };
+        for &dependent in dependents {
+            if !dropped.insert(dependent.to_owned()) {
+                continue;
+            }
+            worklist.push(dependent.to_owned());
+            if let Some(actual_view) = actual_views.get(dependent) {
+                drops.push(DatabaseDiffChange::DropView {
+                    schema: actual.name.clone(),
+                    view: (*actual_view).clone(),
+                });
+            }
+            // Recreate the dependent from the desired model if it still exists and a recreate is not
+            // already queued (e.g. from the conservative `CREATE OR REPLACE` of an introspected view).
+            if let Some(desired_view) = desired_views.get(dependent)
+                && !creates
+                    .iter()
+                    .any(|change| view_change_name(change) == dependent)
+            {
+                creates.push(DatabaseDiffChange::CreateView {
+                    schema: desired.name.clone(),
+                    view: (*desired_view).clone(),
+                });
+            }
+        }
+    }
+
     // Order creates dependencies-first (a view after every other view it selects from) and drops
     // dependents-first, so a view-on-view never references a sibling that does not exist yet (create)
     // or has already been removed (drop). Mirrors the full-create path's `ordered_views`.

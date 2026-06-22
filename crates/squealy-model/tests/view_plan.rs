@@ -155,6 +155,67 @@ fn introspected_view_named(name: &str, columns: &[&str], depends_on: &[&str]) ->
 }
 
 #[test]
+fn dropping_a_view_for_a_column_change_drops_and_recreates_its_dependents() {
+    // `parent` changes its column set (a REPLACE can't restructure columns, so it must DROP+recreate).
+    // `child` selects from `parent` but keeps its own columns; it must still be dropped before `parent`
+    // and recreated after, or `DROP parent` is rejected while `child` references it.
+    let mut desired_parent = view("(q0_0.\"id\" > 0)", &["id", "name"]);
+    desired_parent.name = "parent".to_owned();
+    let mut desired_child = view("(q0_0.\"id\" > 0)", &["id"]);
+    desired_child.name = "child".to_owned();
+    let desired = model(vec![desired_parent, desired_child]);
+
+    let actual = model(vec![
+        introspected_view_named("parent", &["id"], &[]),
+        introspected_view_named("child", &["id"], &["parent"]),
+    ]);
+
+    let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan");
+    let dropped: Vec<&str> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            DatabasePlanStep::DropView { view, .. } => Some(view.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let created: Vec<&str> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            DatabasePlanStep::CreateView { view, .. } => Some(view.name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    let child_drop = dropped
+        .iter()
+        .position(|name| *name == "child")
+        .expect("child dropped");
+    let parent_drop = dropped
+        .iter()
+        .position(|name| *name == "parent")
+        .expect("parent dropped");
+    assert!(
+        child_drop < parent_drop,
+        "the dependent must be dropped before its dependency: {dropped:?}"
+    );
+
+    let parent_create = created
+        .iter()
+        .position(|name| *name == "parent")
+        .expect("parent recreated");
+    let child_create = created
+        .iter()
+        .position(|name| *name == "child")
+        .expect("child recreated");
+    assert!(
+        parent_create < child_create,
+        "the dependency must be recreated before the dependent: {created:?}"
+    );
+}
+
+#[test]
 fn introspected_interdependent_views_drop_dependents_first() {
     // Two live views where `child` selects from `parent`; both are removed (absent from desired). The
     // plan must DROP `child` before `parent`, or the database rejects dropping a view still in use.
