@@ -3,7 +3,7 @@ use squealy::{
     DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
     IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, SchemaModel,
-    SqlType, TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
+    SourceRef, SqlType, TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
 };
 use tokio_postgres::Client;
 
@@ -26,12 +26,9 @@ pub(crate) async fn database(client: &Client) -> Result<DatabaseModel, PostgresE
 
     // Views are introspected by name and output columns only: a stored view definition cannot be
     // reconstructed into the structural `ViewQueryModel`, so the body stays empty and the diff matches
-    // views by name and columns (it cannot detect a pure body change against a live database).
-    //
-    // Known limitation: because the body is empty, an introspected view exposes no dependencies, so the
-    // diff cannot order drops among several interdependent live views dropped/recreated in one plan (it
-    // may drop a parent before a dependent). Single live views and package-vs-package diffs are
-    // unaffected. Tracked for a follow-up that introspects view dependencies separately.
+    // views by name and columns (it cannot detect a pure body change against a live database). Their
+    // view-on-view dependencies are read separately (see `view_dependencies`) so the diff can still
+    // order live drops correctly.
     for view_ref in view_refs(client).await? {
         let view = view(client, &view_ref).await?;
         schema_entry(&mut schemas, &view_ref.schema)
@@ -87,8 +84,55 @@ async fn view(client: &Client, view_ref: &TableRef) -> Result<ViewModel, Postgre
         name: view_ref.name.clone(),
         comment: None,
         columns: view_columns(client, view_ref).await?,
-        query: ViewQueryModel::default(),
+        // The body can't be reconstructed, but the view-on-view dependencies can — they let the diff
+        // order live drops (drop a dependent before the view it selects from).
+        query: ViewQueryModel {
+            dependencies: view_dependencies(client, view_ref).await?,
+            ..ViewQueryModel::default()
+        },
     })
+}
+
+/// The other views this view depends on, read from its `ON SELECT` rewrite rule's dependencies.
+/// Restricted to relations of kind `v` (other views); table dependencies are irrelevant to view
+/// ordering because every table is created before any view.
+async fn view_dependencies(
+    client: &Client,
+    view_ref: &TableRef,
+) -> Result<Vec<SourceRef>, PostgresError> {
+    let rows = client
+        .query(
+            "\
+SELECT DISTINCT dn.nspname, dc.relname
+FROM pg_rewrite r
+JOIN pg_depend d ON d.objid = r.oid AND d.deptype = 'n'
+JOIN pg_class sc ON sc.oid = r.ev_class
+JOIN pg_namespace sn ON sn.oid = sc.relnamespace
+JOIN pg_class dc ON dc.oid = d.refobjid
+JOIN pg_namespace dn ON dn.oid = dc.relnamespace
+WHERE sn.nspname = $1
+  AND sc.relname = $2
+  AND d.refclassid = 'pg_class'::regclass
+  AND dc.relkind = 'v'
+  AND dc.oid <> sc.oid
+ORDER BY dn.nspname, dc.relname",
+            &[&view_ref.schema, &view_ref.name],
+        )
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let name: String = row.get(1);
+            SourceRef {
+                schema: Some(row.get(0)),
+                // The alias is never rendered (an introspected view has no body to render); it only
+                // needs to be present, so reuse the dependency name.
+                alias: name.clone(),
+                name,
+            }
+        })
+        .collect())
 }
 
 async fn view_columns(

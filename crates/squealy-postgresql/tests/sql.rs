@@ -2302,6 +2302,7 @@ fn postgres_renders_views_in_dependency_order() {
                 })
                 .collect(),
             query: ViewQueryModel {
+                dependencies: Vec::new(),
                 distinct: false,
                 projection: projection
                     .iter()
@@ -2417,6 +2418,7 @@ fn postgres_renders_view_plan_steps() {
             nullable: false,
         }],
         query: ViewQueryModel {
+            dependencies: Vec::new(),
             distinct: false,
             projection: vec![ProjectionItem {
                 output_name: "id".to_owned(),
@@ -2488,6 +2490,7 @@ fn postgres_renders_distinct_view_body() {
             nullable: false,
         }],
         query: ViewQueryModel {
+            dependencies: Vec::new(),
             distinct: true,
             projection: vec![ProjectionItem {
                 output_name: "name".to_owned(),
@@ -2673,6 +2676,7 @@ fn postgres_renders_view_expression_ir_in_its_dialect() {
                     },
                 ],
                 query: ViewQueryModel {
+                    dependencies: Vec::new(),
                     distinct: false,
                     projection: vec![
                         // count / 2 — fractional division.
@@ -2782,6 +2786,7 @@ fn postgres_view_order_by_keeps_nulls_modifier() {
                     nullable: true,
                 }],
                 query: ViewQueryModel {
+                    dependencies: Vec::new(),
                     distinct: false,
                     projection: vec![ProjectionItem {
                         output_name: "id".to_owned(),

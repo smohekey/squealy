@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, ForeignKeyModel, IndexModel, SchemaModel,
-    TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
+    TableModel, ViewColumnModel, ViewModel,
 };
 
 /// The structured diff from an actual database model to a desired database model.
@@ -275,6 +275,13 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     let actual_schemas = keyed_schemas(&actual.schemas);
     let mut changes = Vec::new();
 
+    // Views are diffed across the whole model (not one schema at a time) so a view can depend on a view
+    // in another schema. Drops run before every table/schema change (a view may select from a table
+    // being dropped) and creates run after all of them (a view may select from a table or schema being
+    // added); the two phases bracket the per-schema table work below.
+    let (view_drops, view_creates) = diff_views_global(desired, actual);
+    changes.extend(view_drops);
+
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
         match (
             desired_schemas.get(&schema_key),
@@ -290,22 +297,10 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
                         table: table.clone(),
                     });
                 }
-                // Views are created after every table in the schema exists.
-                for view in &desired_schema.views {
-                    changes.push(DatabaseDiffChange::CreateView {
-                        schema: desired_schema.name.clone(),
-                        view: view.clone(),
-                    });
-                }
+                // This schema's views are created in the global create phase, after every table exists.
             }
             (None, Some(actual_schema)) => {
-                // Views are dropped before the tables they depend on.
-                for view in &actual_schema.views {
-                    changes.push(DatabaseDiffChange::DropView {
-                        schema: actual_schema.name.clone(),
-                        view: view.clone(),
-                    });
-                }
+                // This schema's views are dropped in the global drop phase, before any table.
                 for table in &actual_schema.tables {
                     changes.push(DatabaseDiffChange::DropTable {
                         schema: actual_schema.name.clone(),
@@ -317,22 +312,21 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
                 });
             }
             (Some(desired_schema), Some(actual_schema)) => {
-                diff_schema(desired_schema, actual_schema, &mut changes);
+                diff_schema_tables(desired_schema, actual_schema, &mut changes);
             }
             (None, None) => {}
         }
     }
 
+    changes.extend(view_creates);
     DatabaseDiff { changes }
 }
 
-fn diff_schema(desired: &SchemaModel, actual: &SchemaModel, changes: &mut Vec<DatabaseDiffChange>) {
-    // View drops run before table changes (a view may depend on a table being dropped); view creates
-    // run after (a view may depend on a table being added). Compute both up front, emit drops now and
-    // creates last.
-    let (view_drops, view_creates) = diff_views(desired, actual);
-    changes.extend(view_drops);
-
+fn diff_schema_tables(
+    desired: &SchemaModel,
+    actual: &SchemaModel,
+    changes: &mut Vec<DatabaseDiffChange>,
+) {
     let desired_tables = keyed_tables(&desired.tables);
     let actual_tables = keyed_tables(&actual.tables);
 
@@ -362,31 +356,53 @@ fn diff_schema(desired: &SchemaModel, actual: &SchemaModel, changes: &mut Vec<Da
             (None, None) => {}
         }
     }
-
-    changes.extend(view_creates);
 }
 
-/// Diffs the views of a schema, returning `(drops, creates)` so the caller can order drops before
+/// Diffs every view in the model, returning `(drops, creates)` so the caller can emit drops before
 /// table changes and creates after. A view present in both that differs becomes a create-or-replace
 /// (`CreateView`); when its column set changes it also needs a preceding `DropView`, since
 /// `CREATE OR REPLACE VIEW` cannot rename or retype columns.
-fn diff_views(
-    desired: &SchemaModel,
-    actual: &SchemaModel,
+/// A view's global identity across the model: its schema (`None` = the unqualified schema) and name.
+type ViewKey = (Option<String>, String);
+
+/// Every view in the model, keyed by `(schema, name)`.
+fn all_views(model: &DatabaseModel) -> BTreeMap<ViewKey, &ViewModel> {
+    let mut views = BTreeMap::new();
+    for schema in &model.schemas {
+        for view in &schema.views {
+            views.insert((schema.name.clone(), view.name.clone()), view);
+        }
+    }
+    views
+}
+
+/// The `(schema, name)` a `CreateView`/`DropView` change targets.
+fn view_change_key(change: &DatabaseDiffChange) -> ViewKey {
+    match change {
+        DatabaseDiffChange::CreateView { schema, view }
+        | DatabaseDiffChange::DropView { schema, view } => (schema.clone(), view.name.clone()),
+        _ => (None, String::new()),
+    }
+}
+
+fn diff_views_global(
+    desired: &DatabaseModel,
+    actual: &DatabaseModel,
 ) -> (Vec<DatabaseDiffChange>, Vec<DatabaseDiffChange>) {
-    let desired_views = keyed(&desired.views, &|view: &ViewModel| view.name.clone());
-    let actual_views = keyed(&actual.views, &|view: &ViewModel| view.name.clone());
+    let desired_views = all_views(desired);
+    let actual_views = all_views(actual);
 
     let mut drops = Vec::new();
     let mut creates = Vec::new();
-    for view_name in sorted_keys(&desired_views, &actual_views) {
-        match (desired_views.get(&view_name), actual_views.get(&view_name)) {
+    for key in sorted_keys(&desired_views, &actual_views) {
+        let schema = key.0.clone();
+        match (desired_views.get(&key), actual_views.get(&key)) {
             (Some(desired_view), None) => creates.push(DatabaseDiffChange::CreateView {
-                schema: desired.name.clone(),
+                schema,
                 view: (*desired_view).clone(),
             }),
             (None, Some(actual_view)) => drops.push(DatabaseDiffChange::DropView {
-                schema: actual.name.clone(),
+                schema,
                 view: (*actual_view).clone(),
             }),
             (Some(desired_view), Some(actual_view)) => {
@@ -399,29 +415,32 @@ fn diff_views(
                 // introspected (PostgreSQL's `pg_attribute.attnotnull` is usually false for view
                 // outputs) and a view's DDL carries no per-column NOT NULL, so the column comparison
                 // ignores it. Models that carry a body (e.g. from a package) are compared in full.
-                if actual_view.query == ViewQueryModel::default() {
+                //
+                // An introspected view has no projection (only its name, columns, and dependencies are
+                // recovered), so an empty projection is the marker for "introspected, body unknown".
+                if actual_view.query.projection.is_empty() {
                     if view_columns_differ_ignoring_nullability(
                         &desired_view.columns,
                         &actual_view.columns,
                     ) {
                         drops.push(DatabaseDiffChange::DropView {
-                            schema: actual.name.clone(),
+                            schema: schema.clone(),
                             view: (*actual_view).clone(),
                         });
                     }
                     creates.push(DatabaseDiffChange::CreateView {
-                        schema: desired.name.clone(),
+                        schema,
                         view: (*desired_view).clone(),
                     });
                 } else if desired_view != actual_view {
                     if desired_view.columns != actual_view.columns {
                         drops.push(DatabaseDiffChange::DropView {
-                            schema: actual.name.clone(),
+                            schema: schema.clone(),
                             view: (*actual_view).clone(),
                         });
                     }
                     creates.push(DatabaseDiffChange::CreateView {
-                        schema: desired.name.clone(),
+                        schema,
                         view: (*desired_view).clone(),
                     });
                 }
@@ -430,20 +449,69 @@ fn diff_views(
         }
     }
 
+    // A view cannot be dropped while another live view still depends on it, so dropping/recreating one
+    // (for a column-set change or a removal) forces its transitive dependents — in any schema — to be
+    // dropped first and recreated after. Expand the drop/recreate set to that closure over the live
+    // dependency graph; the sort below puts each dependent ahead of the view it selects from.
+    let mut dropped: BTreeSet<ViewKey> = drops.iter().map(view_change_key).collect();
+    // Reverse edges: which live views select from each view, keyed by the dependency's effective
+    // `(schema, name)` (an unqualified source resolves to its own view's schema).
+    let mut dependents_of: BTreeMap<ViewKey, Vec<ViewKey>> = BTreeMap::new();
+    for (key, view) in &actual_views {
+        for source in view.referenced_sources() {
+            let dependency = (
+                source.schema.clone().or_else(|| key.0.clone()),
+                source.name.clone(),
+            );
+            dependents_of
+                .entry(dependency)
+                .or_default()
+                .push(key.clone());
+        }
+    }
+    let mut worklist: Vec<ViewKey> = dropped.iter().cloned().collect();
+    while let Some(key) = worklist.pop() {
+        let Some(dependents) = dependents_of.get(&key) else {
+            continue;
+        };
+        for dependent in dependents.clone() {
+            if !dropped.insert(dependent.clone()) {
+                continue;
+            }
+            worklist.push(dependent.clone());
+            if let Some(actual_view) = actual_views.get(&dependent) {
+                drops.push(DatabaseDiffChange::DropView {
+                    schema: dependent.0.clone(),
+                    view: (*actual_view).clone(),
+                });
+            }
+            // Recreate the dependent from the desired model if it still exists and a recreate is not
+            // already queued (e.g. from the conservative `CREATE OR REPLACE` of an introspected view).
+            if let Some(desired_view) = desired_views.get(&dependent)
+                && !creates
+                    .iter()
+                    .any(|change| view_change_key(change) == dependent)
+            {
+                creates.push(DatabaseDiffChange::CreateView {
+                    schema: dependent.0.clone(),
+                    view: (*desired_view).clone(),
+                });
+            }
+        }
+    }
+
     // Order creates dependencies-first (a view after every other view it selects from) and drops
-    // dependents-first, so a view-on-view never references a sibling that does not exist yet (create)
-    // or has already been removed (drop). Mirrors the full-create path's `ordered_views`.
-    let desired_order = view_dependency_order(&desired.views);
-    let actual_order = view_dependency_order(&actual.views);
-    creates.sort_by_key(|change| dependency_rank(&desired_order, view_change_name(change)));
+    // dependents-first, spanning schemas, so a view-on-view never references a sibling that does not
+    // exist yet (create) or has already been removed (drop).
+    let desired_order = view_dependency_order(&desired_views);
+    let actual_order = view_dependency_order(&actual_views);
+    creates.sort_by_key(|change| dependency_rank(&desired_order, &view_change_key(change)));
     drops.sort_by_key(|change| {
-        std::cmp::Reverse(dependency_rank(&actual_order, view_change_name(change)))
+        std::cmp::Reverse(dependency_rank(&actual_order, &view_change_key(change)))
     });
     (drops, creates)
 }
 
-/// Whether two view column lists differ in name or type, ignoring per-column nullability. Used when
-/// one side was introspected, where nullability is unreliable (and a view's DDL carries none anyway).
 fn view_columns_differ_ignoring_nullability(
     desired: &[ViewColumnModel],
     actual: &[ViewColumnModel],
@@ -456,45 +524,48 @@ fn view_columns_differ_ignoring_nullability(
 }
 
 /// The view's name from a `CreateView`/`DropView` change.
-fn view_change_name(change: &DatabaseDiffChange) -> &str {
-    match change {
-        DatabaseDiffChange::CreateView { view, .. } | DatabaseDiffChange::DropView { view, .. } => {
-            &view.name
-        }
-        _ => "",
-    }
-}
-
-fn dependency_rank(order: &[String], name: &str) -> usize {
+fn dependency_rank(order: &[ViewKey], key: &ViewKey) -> usize {
     order
         .iter()
-        .position(|view| view == name)
+        .position(|candidate| candidate == key)
         .unwrap_or(usize::MAX)
 }
 
-/// Returns the schema's view names in dependency order — a view appears after every other view in the
-/// schema that it selects from. A depth-first post-order; reference cycles (which SQL rejects) fall
-/// back to declaration order.
-fn view_dependency_order(views: &[ViewModel]) -> Vec<String> {
-    fn visit(current: usize, views: &[ViewModel], visited: &mut [bool], order: &mut Vec<String>) {
-        if visited[current] {
+/// Returns every view's key in dependency order — a view appears after every other view it selects
+/// from (resolving an unqualified source to its own schema). A depth-first post-order; reference
+/// cycles (which SQL rejects) fall back to map order.
+fn view_dependency_order(views: &BTreeMap<ViewKey, &ViewModel>) -> Vec<ViewKey> {
+    fn visit(
+        index: usize,
+        keys: &[ViewKey],
+        views: &BTreeMap<ViewKey, &ViewModel>,
+        visited: &mut [bool],
+        order: &mut Vec<ViewKey>,
+    ) {
+        if visited[index] {
             return;
         }
-        visited[current] = true;
-        for source in views[current].referenced_sources() {
-            if let Some(dep) = views.iter().position(|view| view.name == source.name)
-                && dep != current
+        visited[index] = true;
+        let (schema, _) = &keys[index];
+        for source in views[&keys[index]].referenced_sources() {
+            let dependency = (
+                source.schema.clone().or_else(|| schema.clone()),
+                source.name.clone(),
+            );
+            if let Some(dependency_index) = keys.iter().position(|key| *key == dependency)
+                && dependency_index != index
             {
-                visit(dep, views, visited, order);
+                visit(dependency_index, keys, views, visited, order);
             }
         }
-        order.push(views[current].name.clone());
+        order.push(keys[index].clone());
     }
 
-    let mut order = Vec::with_capacity(views.len());
-    let mut visited = vec![false; views.len()];
-    for current in 0..views.len() {
-        visit(current, views, &mut visited, &mut order);
+    let keys: Vec<ViewKey> = views.keys().cloned().collect();
+    let mut order = Vec::with_capacity(keys.len());
+    let mut visited = vec![false; keys.len()];
+    for index in 0..keys.len() {
+        visit(index, &keys, views, &mut visited, &mut order);
     }
     order
 }
