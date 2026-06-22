@@ -1760,24 +1760,9 @@ fn test_case_usable_in_where() {
     );
 }
 
-#[test]
-fn test_case_over_aggregate_in_grouped_select() {
-    // A CASE whose THEN is an aggregate classifies as an aggregate projection (valid in a grouped
-    // select alongside the grouping key).
-    let q = TestConnection
-        .from::<User>()
-        .group_by(|(user,)| user.id)
-        .select(|(user,)| {
-            case()
-                .when(user.id.greater_than(0), user.id.count())
-                .otherwise(0i64)
-        });
-    assert_eq!(
-        q.to_sql(),
-        "SELECT CASE WHEN (q0_0.id > ?) THEN COUNT(q0_0.id) ELSE ? END AS expr \
-         FROM public.users AS q0_0 GROUP BY q0_0.id"
-    );
-}
+// (A CASE whose WHEN references a bare column *and* whose THEN is an aggregate is rejected — like
+// `COUNT(id) + id`, a column and an aggregate cannot mix in one expression. Aggregate *conditions*
+// with non-column comparisons are fine; see `test_case_with_aggregate_condition_is_aggregate`.)
 
 #[test]
 fn test_case_with_aggregate_condition_is_aggregate() {

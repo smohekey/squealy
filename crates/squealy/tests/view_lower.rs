@@ -263,7 +263,7 @@ fn lowers_case_expression_to_ir() {
         .project(|(user,)| case().when(user.active.equals(true), 1).otherwise(0));
     let model = lower_view(&query);
     match &model.projection[0].expr {
-        ExprNode::Case { arms, else_ } => {
+        ExprNode::Case { arms, else_, .. } => {
             assert_eq!(arms.len(), 1);
             assert!(matches!(&*arms[0].when, ExprNode::Compare { .. }));
             assert!(matches!(&*arms[0].then, ExprNode::Literal(_)));

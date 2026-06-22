@@ -1440,18 +1440,31 @@ where
         &mut self,
         arms: &Arms,
         else_: Option<&Else>,
+        result: Option<&SqlType>,
     ) -> Result<(), Self::Error>
     where
         Arms: RenderCaseArms<B>,
         Else: RenderAst<B>,
     {
+        // A `CAST` pins the result type so all-parameter branches are typeable by the database.
+        if result.is_some() {
+            self.writer.write_all(b"CAST(")?;
+        }
         self.writer.write_all(b"CASE")?;
         arms.render(self)?;
         if let Some(else_) = else_ {
             self.writer.write_all(b" ELSE ")?;
             else_.visit(self)?;
         }
-        self.writer.write_all(b" END")
+        self.writer.write_all(b" END")?;
+        if let Some(ty) = result {
+            self.writer.write_all(b" AS ")?;
+            self.renderer
+                .dialect
+                .write_cast_type(ty, &mut *self.writer)?;
+            self.writer.write_all(b")")?;
+        }
+        Ok(())
     }
 
     fn visit_case_when(&mut self) -> Result<(), Self::Error> {

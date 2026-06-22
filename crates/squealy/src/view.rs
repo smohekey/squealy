@@ -341,7 +341,12 @@ impl ExprVisitor for IrBuilder {
         Ok(())
     }
 
-    fn visit_case<Arms, Else>(&mut self, arms: &Arms, else_: Option<&Else>) -> io::Result<()>
+    fn visit_case<Arms, Else>(
+        &mut self,
+        arms: &Arms,
+        else_: Option<&Else>,
+        result: Option<&SqlType>,
+    ) -> io::Result<()>
     where
         Arms: RenderCaseArms<ModelBackend>,
         Else: RenderAst<ModelBackend>,
@@ -364,6 +369,7 @@ impl ExprVisitor for IrBuilder {
         self.stack.push(ExprNode::Case {
             arms: case_arms,
             else_,
+            result: result.cloned(),
         });
         Ok(())
     }

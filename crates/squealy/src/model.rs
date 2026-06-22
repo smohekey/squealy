@@ -685,10 +685,12 @@ pub enum ExprNode {
         order_by: Vec<WindowOrderTerm>,
         result: Option<SqlType>,
     },
-    /// Searched `CASE WHEN … THEN … [ELSE …] END`.
+    /// Searched `CASE WHEN … THEN … [ELSE …] END`, optionally wrapped in `CAST(… AS result)` to pin
+    /// the result type (so all-parameter branches stay typeable).
     Case {
         arms: Vec<CaseArm>,
         else_: Option<Box<ExprNode>>,
+        result: Option<SqlType>,
     },
 }
 
@@ -825,7 +827,7 @@ fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>
                 collect_expr_sources(&order.expr, sources);
             }
         }
-        ExprNode::Case { arms, else_ } => {
+        ExprNode::Case { arms, else_, .. } => {
             for arm in arms {
                 collect_expr_sources(&arm.when, sources);
                 collect_expr_sources(&arm.then, sources);

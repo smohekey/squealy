@@ -1100,11 +1100,13 @@ where
         &mut self,
         arms: &Arms,
         else_: Option<&Else>,
+        _result: Option<&SqlType>,
     ) -> Result<(), Self::Error>
     where
         Arms: RenderCaseArms<Self::Backend>,
         Else: RenderAst<Self::Backend>,
     {
+        // The in-memory test backend renders the bare CASE (no dialect cast), like its aggregates.
         self.writer.write_all(b"CASE")?;
         arms.render(self)?;
         if let Some(else_) = else_ {

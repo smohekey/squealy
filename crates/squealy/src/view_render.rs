@@ -443,7 +443,14 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
             }
             Ok(())
         }
-        ExprNode::Case { arms, else_ } => {
+        ExprNode::Case {
+            arms,
+            else_,
+            result,
+        } => {
+            if result.is_some() {
+                writer.write_all(b"CAST(")?;
+            }
             writer.write_all(b"CASE")?;
             for arm in arms {
                 writer.write_all(b" WHEN ")?;
@@ -455,7 +462,13 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
                 writer.write_all(b" ELSE ")?;
                 render_expr(else_, dialect, writer)?;
             }
-            writer.write_all(b" END")
+            writer.write_all(b" END")?;
+            if let Some(ty) = result {
+                writer.write_all(b" AS ")?;
+                dialect.write_cast_type(ty, writer)?;
+                writer.write_all(b")")?;
+            }
+            Ok(())
         }
     }
 }

@@ -651,6 +651,12 @@ where
     }
 }
 
+/// Marker for a non-empty arm list (at least one `WHEN`). Gates `otherwise`/`end` so an empty
+/// `CASE END` (invalid SQL) cannot be built.
+#[doc(hidden)]
+pub trait NonEmptyArms {}
+impl<PredAst, ValAst, Rest> NonEmptyArms for CaseWhen<PredAst, ValAst, Rest> {}
+
 /// Runtime params of the arm list, concatenated `WHEN`-params ++ `THEN`-params per arm, in order.
 #[doc(hidden)]
 pub trait CaseArmsParams {
@@ -696,18 +702,18 @@ impl CaseArmsTerm for CaseNil {
 }
 impl<PredAst, ValAst, Rest> CaseArmsTerm for CaseWhen<PredAst, ValAst, Rest>
 where
-    PredAst: PredicateAggregateTerm,
+    PredAst: PredicateTerm,
     ValAst: AstProjectionClass,
     Rest: CaseArmsTerm,
-    // The arm's own term combines its `THEN` value with its `WHEN` condition's aggregate presence (so
-    // an aggregate inside the condition makes the arm aggregate), then folds with the remaining arms.
-    <ValAst as AstProjectionClass>::Class: CombineTerm<<PredAst as PredicateAggregateTerm>::Term>,
-    <<ValAst as AstProjectionClass>::Class as CombineTerm<
-        <PredAst as PredicateAggregateTerm>::Term,
-    >>::Output: CombineTerm<Rest::Term>,
+    // The arm's own term combines its `THEN` value with its `WHEN` condition's term (so an aggregate
+    // in the condition makes the arm aggregate, and a bare column keeps its column dependency), then
+    // folds with the remaining arms.
+    <ValAst as AstProjectionClass>::Class: CombineTerm<<PredAst as PredicateTerm>::Term>,
+    <<ValAst as AstProjectionClass>::Class as CombineTerm<<PredAst as PredicateTerm>::Term>>::Output:
+        CombineTerm<Rest::Term>,
 {
     type Term = <<<ValAst as AstProjectionClass>::Class as CombineTerm<
-        <PredAst as PredicateAggregateTerm>::Term,
+        <PredAst as PredicateTerm>::Term,
     >>::Output as CombineTerm<Rest::Term>>::Output;
 }
 
@@ -790,6 +796,11 @@ where
 pub struct CaseExprAst<Arms, Else> {
     arms: Arms,
     else_ast: Option<Else>,
+    /// The result type to `CAST` the whole `CASE` to. The builder sets this from the (type-level) result
+    /// value type `T`, so that a `CASE` whose branches are all bind parameters still has a determinable
+    /// type for the database (Postgres can't infer `CASE … THEN $1 ELSE $2 END` otherwise). Mirrors the
+    /// aggregate `CAST` wrapper.
+    result: Option<crate::SqlType>,
 }
 
 impl<Arms, Else> ExprAst for CaseExprAst<Arms, Else>
@@ -812,7 +823,7 @@ where
     where
         V: ExprVisitor<Backend = B>,
     {
-        visitor.visit_case(&self.arms, self.else_ast.as_ref())
+        visitor.visit_case(&self.arms, self.else_ast.as_ref(), self.result.as_ref())
     }
 }
 
@@ -880,11 +891,17 @@ impl<'scope, T, Arms> CaseBuilder<'scope, T, Arms> {
             _marker: PhantomData,
         }
     }
+}
 
+// `otherwise`/`end` require at least one `WHEN` arm (`Arms: NonEmptyArms`), so an empty `CASE END`
+// (invalid SQL) cannot be built. The whole `CASE` is cast to `T`'s SQL type so all-parameter branches
+// still have a determinable type for the database.
+impl<'scope, T, Arms> CaseBuilder<'scope, T, Arms> {
     /// Finish with an `ELSE <value>` branch. With an `ELSE`, the result is the non-null value type `T`.
     pub fn otherwise<E>(self, value: E) -> Expr<'scope, T, CaseExprAst<Arms, E::Ast>>
     where
-        T: ExprKind,
+        Arms: NonEmptyArms,
+        T: ExprKind + crate::HasColumnType,
         E: IntoExpr<'scope>,
         E::Kind: ExprKind<Value = T>,
         CaseExprAst<Arms, E::Ast>: ExprAst,
@@ -893,6 +910,9 @@ impl<'scope, T, Arms> CaseBuilder<'scope, T, Arms> {
             ast: CaseExprAst {
                 arms: self.arms,
                 else_ast: Some(value.into_expr().ast),
+                result: Some(crate::SqlType::from(
+                    <T as crate::HasColumnType>::COLUMN_TYPE,
+                )),
             },
             project_alias: Cow::Borrowed("expr"),
             _phantom: PhantomData,
@@ -903,13 +923,17 @@ impl<'scope, T, Arms> CaseBuilder<'scope, T, Arms> {
     /// ([`ScalarNullable<T>`], value `Option<T>`).
     pub fn end(self) -> Expr<'scope, ScalarNullable<T>, CaseExprAst<Arms, NoElse>>
     where
-        T: ExprKind,
+        Arms: NonEmptyArms,
+        T: ExprKind + crate::HasColumnType,
         CaseExprAst<Arms, NoElse>: ExprAst,
     {
         Expr {
             ast: CaseExprAst {
                 arms: self.arms,
                 else_ast: None,
+                result: Some(crate::SqlType::from(
+                    <T as crate::HasColumnType>::COLUMN_TYPE,
+                )),
             },
             project_alias: Cow::Borrowed("expr"),
             _phantom: PhantomData,
@@ -1560,38 +1584,6 @@ impl CombineTerm<AggregateTerm> for AggregateTerm {
 // No `CombineTerm` between `ColumnTerm` and `AggregateTerm`: a bare column outside an aggregate is
 // invalid without `GROUP BY`.
 
-/// Collapses a [term](ConstantTerm) to its *aggregate presence* — a column becomes [`ConstantTerm`]
-/// (only aggregate-vs-not matters). Used to fold a `CASE` arm predicate into the result term: a
-/// predicate containing an aggregate (`WHEN COUNT(..) > 1`) makes the whole `CASE` aggregate, but a
-/// predicate merely referencing a column must not.
-#[doc(hidden)]
-pub trait CollapseColumnTerm {
-    type Output;
-}
-impl CollapseColumnTerm for ConstantTerm {
-    type Output = ConstantTerm;
-}
-impl CollapseColumnTerm for ColumnTerm {
-    type Output = ConstantTerm;
-}
-impl CollapseColumnTerm for AggregateTerm {
-    type Output = AggregateTerm;
-}
-
-/// An expression AST's aggregate presence: [`AggregateTerm`] if it contains an aggregate, else
-/// [`ConstantTerm`] (its column-ness collapsed away). Blanket over [`AstProjectionClass`].
-#[doc(hidden)]
-pub trait ExprAggregatePresence {
-    type Presence;
-}
-impl<A> ExprAggregatePresence for A
-where
-    A: AstProjectionClass,
-    <A as AstProjectionClass>::Class: CollapseColumnTerm,
-{
-    type Presence = <<A as AstProjectionClass>::Class as CollapseColumnTerm>::Output;
-}
-
 /// Maps an expression [term](ConstantTerm) to its projection class: constants and columns are
 /// [`ScalarProjection`], aggregates are [`AggregateProjection`].
 #[doc(hidden)]
@@ -1944,85 +1936,89 @@ where
     type Columns = <P as PredicateColumns>::Columns;
 }
 
-/// A predicate AST's aggregate presence ([`ConstantTerm`] / [`AggregateTerm`]), used to fold a `CASE`
-/// arm's `WHEN` condition into the result term so an aggregate inside a condition makes the whole
-/// `CASE` aggregate. Mirrors [`PredicateColumns`] but collapses columns (only aggregate-ness matters);
-/// combining two presences via [`CombineTerm`] gives "aggregate dominates".
+/// A predicate AST's [term](ConstantTerm) — its operand terms combined via [`CombineTerm`] (columns
+/// preserved, *not* collapsed). Used to fold a `CASE` arm's `WHEN` condition into the result term: an
+/// aggregate in the condition makes the `CASE` aggregate, and a *bare column* in the condition keeps
+/// its column dependency (so `WHEN id > 0 THEN COUNT(..)` is rejected ungrouped, exactly as
+/// `COUNT(id) + id` is). Mirrors [`PredicateColumns`] but over terms instead of columns.
 #[doc(hidden)]
-pub trait PredicateAggregateTerm {
+pub trait PredicateTerm {
     type Term;
 }
-impl<Left, Right> PredicateAggregateTerm for ComparePredicateAst<Left, Right>
+impl<Left, Right> PredicateTerm for ComparePredicateAst<Left, Right>
 where
-    Left: ExprAggregatePresence,
-    Right: ExprAggregatePresence,
-    Left::Presence: CombineTerm<Right::Presence>,
+    Left: AstProjectionClass,
+    Right: AstProjectionClass,
+    <Left as AstProjectionClass>::Class: CombineTerm<<Right as AstProjectionClass>::Class>,
 {
-    type Term = <Left::Presence as CombineTerm<Right::Presence>>::Output;
-}
-impl<Left, Right> PredicateAggregateTerm for LikePredicateAst<Left, Right>
-where
-    Left: ExprAggregatePresence,
-    Right: ExprAggregatePresence,
-    Left::Presence: CombineTerm<Right::Presence>,
-{
-    type Term = <Left::Presence as CombineTerm<Right::Presence>>::Output;
-}
-impl<Operand, V> PredicateAggregateTerm for InPredicateAst<Operand, V>
-where
-    Operand: ExprAggregatePresence,
-{
-    type Term = <Operand as ExprAggregatePresence>::Presence;
-}
-impl<Operand, Lo, Hi> PredicateAggregateTerm for BetweenPredicateAst<Operand, Lo, Hi>
-where
-    Operand: ExprAggregatePresence,
-    Lo: ExprAggregatePresence,
-    Hi: ExprAggregatePresence,
-    Operand::Presence: CombineTerm<Lo::Presence>,
-    <Operand::Presence as CombineTerm<Lo::Presence>>::Output: CombineTerm<Hi::Presence>,
-{
-    type Term = <<Operand::Presence as CombineTerm<Lo::Presence>>::Output as CombineTerm<
-        Hi::Presence,
+    type Term = <<Left as AstProjectionClass>::Class as CombineTerm<
+        <Right as AstProjectionClass>::Class,
     >>::Output;
 }
-impl<Operand> PredicateAggregateTerm for NullCheckPredicateAst<Operand>
+impl<Left, Right> PredicateTerm for LikePredicateAst<Left, Right>
 where
-    Operand: ExprAggregatePresence,
+    Left: AstProjectionClass,
+    Right: AstProjectionClass,
+    <Left as AstProjectionClass>::Class: CombineTerm<<Right as AstProjectionClass>::Class>,
 {
-    type Term = <Operand as ExprAggregatePresence>::Presence;
-}
-impl<Operand> PredicateAggregateTerm for BoolTestPredicateAst<Operand>
-where
-    Operand: ExprAggregatePresence,
-{
-    type Term = <Operand as ExprAggregatePresence>::Presence;
-}
-impl<Left, Right> PredicateAggregateTerm for AndPredicateAst<Left, Right>
-where
-    Left: PredicateAggregateTerm,
-    Right: PredicateAggregateTerm,
-    <Left as PredicateAggregateTerm>::Term: CombineTerm<<Right as PredicateAggregateTerm>::Term>,
-{
-    type Term = <<Left as PredicateAggregateTerm>::Term as CombineTerm<
-        <Right as PredicateAggregateTerm>::Term,
+    type Term = <<Left as AstProjectionClass>::Class as CombineTerm<
+        <Right as AstProjectionClass>::Class,
     >>::Output;
 }
-impl<Left, Right> PredicateAggregateTerm for OrPredicateAst<Left, Right>
+impl<Operand, V> PredicateTerm for InPredicateAst<Operand, V>
 where
-    Left: PredicateAggregateTerm,
-    Right: PredicateAggregateTerm,
-    <Left as PredicateAggregateTerm>::Term: CombineTerm<<Right as PredicateAggregateTerm>::Term>,
+    Operand: AstProjectionClass,
 {
-    type Term = <<Left as PredicateAggregateTerm>::Term as CombineTerm<
-        <Right as PredicateAggregateTerm>::Term,
-    >>::Output;
+    type Term = <Operand as AstProjectionClass>::Class;
 }
-impl<P> PredicateAggregateTerm for NotPredicateAst<P>
+impl<Operand, Lo, Hi> PredicateTerm for BetweenPredicateAst<Operand, Lo, Hi>
 where
-    P: PredicateAggregateTerm,
+    Operand: AstProjectionClass,
+    Lo: AstProjectionClass,
+    Hi: AstProjectionClass,
+    <Operand as AstProjectionClass>::Class: CombineTerm<<Lo as AstProjectionClass>::Class>,
+    <<Operand as AstProjectionClass>::Class as CombineTerm<<Lo as AstProjectionClass>::Class>>::Output:
+        CombineTerm<<Hi as AstProjectionClass>::Class>,
 {
-    type Term = <P as PredicateAggregateTerm>::Term;
+    type Term = <<<Operand as AstProjectionClass>::Class as CombineTerm<
+        <Lo as AstProjectionClass>::Class,
+    >>::Output as CombineTerm<<Hi as AstProjectionClass>::Class>>::Output;
+}
+impl<Operand> PredicateTerm for NullCheckPredicateAst<Operand>
+where
+    Operand: AstProjectionClass,
+{
+    type Term = <Operand as AstProjectionClass>::Class;
+}
+impl<Operand> PredicateTerm for BoolTestPredicateAst<Operand>
+where
+    Operand: AstProjectionClass,
+{
+    type Term = <Operand as AstProjectionClass>::Class;
+}
+impl<Left, Right> PredicateTerm for AndPredicateAst<Left, Right>
+where
+    Left: PredicateTerm,
+    Right: PredicateTerm,
+    <Left as PredicateTerm>::Term: CombineTerm<<Right as PredicateTerm>::Term>,
+{
+    type Term =
+        <<Left as PredicateTerm>::Term as CombineTerm<<Right as PredicateTerm>::Term>>::Output;
+}
+impl<Left, Right> PredicateTerm for OrPredicateAst<Left, Right>
+where
+    Left: PredicateTerm,
+    Right: PredicateTerm,
+    <Left as PredicateTerm>::Term: CombineTerm<<Right as PredicateTerm>::Term>,
+{
+    type Term =
+        <<Left as PredicateTerm>::Term as CombineTerm<<Right as PredicateTerm>::Term>>::Output;
+}
+impl<P> PredicateTerm for NotPredicateAst<P>
+where
+    P: PredicateTerm,
+{
+    type Term = <P as PredicateTerm>::Term;
 }
 
 #[doc(hidden)]
@@ -2106,6 +2102,7 @@ pub trait ExprVisitor {
         &mut self,
         arms: &Arms,
         else_: Option<&Else>,
+        result: Option<&crate::SqlType>,
     ) -> Result<(), Self::Error>
     where
         Arms: RenderCaseArms<Self::Backend>,

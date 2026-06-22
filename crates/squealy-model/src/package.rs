@@ -737,8 +737,15 @@ fn expr_to_node(expr: &ExprNode) -> KdlNode {
             }
             node
         }
-        ExprNode::Case { arms, else_ } => {
+        ExprNode::Case {
+            arms,
+            else_,
+            result,
+        } => {
             let mut node = KdlNode::new("case");
+            if let Some(ty) = result {
+                write_sql_type(&mut node, ty);
+            }
             for arm in arms {
                 let mut arm_node = KdlNode::new("arm");
                 push_child(&mut arm_node, wrap_expr("when", &arm.when));
@@ -1445,7 +1452,11 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
                 Some(else_node) => Some(Box::new(first_child_expr(else_node)?)),
                 None => None,
             };
-            ExprNode::Case { arms, else_ }
+            ExprNode::Case {
+                arms,
+                else_,
+                result: optional_sql_type_from_node(node)?,
+            }
         }
         other => return Err(malformed(format!("unknown view expression node `{other}`"))),
     })
@@ -2280,6 +2291,7 @@ mod tests {
                 then: Box::new(ExprNode::Literal("1".to_owned())),
             }],
             else_: Some(Box::new(ExprNode::Literal("0".to_owned()))),
+            result: Some(SqlType::I32),
         };
         let parsed = expr_from_node(&expr_to_node(&node)).expect("CASE node round-trips");
         assert_eq!(parsed, node);
@@ -2297,6 +2309,7 @@ mod tests {
                 then: Box::new(ExprNode::Literal("1".to_owned())),
             }],
             else_: None,
+            result: None,
         };
         let parsed = expr_from_node(&expr_to_node(&no_else)).expect("no-ELSE CASE round-trips");
         assert_eq!(parsed, no_else);
