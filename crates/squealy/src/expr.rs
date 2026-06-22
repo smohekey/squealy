@@ -2428,6 +2428,21 @@ impl CaseNull for CaseMaybeNull {
     type Result<T: ExprKind> = ScalarNullable<T>;
 }
 
+/// Maps a column's type-level nullability marker ([`crate::NonNullableColumn`] /
+/// [`crate::NullableColumn`]) to its searched-`CASE` branch nullability. Lets the `Table` derive set a
+/// column kind's [`KindNullability`] from the alias-transparent [`ColumnNullability`](crate::ColumnNullability)
+/// path rather than a syntactic `Option<…>` token check (which misses a type-aliased nullable column).
+#[doc(hidden)]
+pub trait ColumnCaseNull {
+    type CaseNull: CaseNull;
+}
+impl ColumnCaseNull for crate::NonNullableColumn {
+    type CaseNull = CaseNonNull;
+}
+impl ColumnCaseNull for crate::NullableColumn {
+    type CaseNull = CaseMaybeNull;
+}
+
 /// Type-level OR over [`CaseNull`]: folds a new branch's nullability into the accumulated one.
 #[doc(hidden)]
 pub trait CaseNullOr<Rhs: CaseNull>: CaseNull {

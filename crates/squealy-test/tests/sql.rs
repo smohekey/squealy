@@ -1881,3 +1881,31 @@ fn test_case_with_outer_join_column_branch_is_nullable() {
         "{sql}"
     );
 }
+
+// A nullable column declared through a type alias: nullability is only visible at the type level via
+// `ColumnNullability`, not a syntactic `Option<…>` token.
+type MaybeLabel = Option<String>;
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct Aliased<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    label: C::Type<'scope, MaybeLabel>,
+}
+
+#[test]
+fn test_case_with_type_aliased_nullable_branch_is_nullable() {
+    // The column kind's CASE nullability must come from the alias-transparent ColumnNullability path,
+    // so an aliased Option column branch makes the CASE nullable (is_null callable).
+    let q = TestConnection
+        .from::<Aliased>()
+        .where_(|row| {
+            case()
+                .when(row.id.greater_than(0), row.label)
+                .otherwise("x".to_string())
+                .is_null()
+        })
+        .select(|(row,)| row.id);
+    let sql = q.to_sql();
+    assert!(sql.contains("IS NULL"), "{sql}");
+}
