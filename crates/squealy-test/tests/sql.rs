@@ -1909,3 +1909,24 @@ fn test_case_with_type_aliased_nullable_branch_is_nullable() {
     let sql = q.to_sql();
     assert!(sql.contains("IS NULL"), "{sql}");
 }
+
+#[test]
+fn test_case_with_in_subquery_condition_classifies() {
+    // A non-aggregate `in_subquery` condition (column operand) keeps the CASE a scalar projection.
+    let q = TestConnection
+        .from::<User>()
+        .select_correlated(|(user,), sub| {
+            case()
+                .when(
+                    user.id
+                        .in_subquery(sub.from::<Post>().select_subquery(|(post,)| post.user_id)),
+                    1,
+                )
+                .otherwise(0)
+        });
+    let sql = q.to_sql();
+    assert!(
+        sql.contains("CASE WHEN (q0_0.id IN (SELECT") && sql.contains("END AS expr"),
+        "{sql}"
+    );
+}

@@ -2051,13 +2051,20 @@ where
     type Term = <P as PredicateTerm>::Term;
 }
 // A subquery condition may be *correlated* (reference an outer row), so it is classified
-// conservatively as row-dependent (`ColumnTerm`): a `CASE` arm whose condition is `exists`/
-// `in_subquery` combined with an aggregate value is rejected (like a bare column + aggregate),
-// rather than type-checking as aggregate-only and rendering an ungrouped outer column the database
-// rejects. The subquery's own params/columns are its own scope; this only models the outer-row
-// dependency the correlation can introduce.
-impl<Operand, Sub> PredicateTerm for InSubqueryPredicateAst<Operand, Sub> {
-    type Term = ColumnTerm;
+// conservatively as row-dependent (a `ColumnTerm` is folded in): a `CASE` arm whose condition is
+// `exists`/`in_subquery` combined with an aggregate value is rejected (like a bare column +
+// aggregate), rather than type-checking as aggregate-only and rendering an ungrouped outer column the
+// database rejects. The subquery's own params/columns are its own scope.
+//
+// `IN (subquery)` also combines its *operand*'s term, so an aggregate operand (e.g.
+// `count(x).in_subquery(…)`) is not silently downgraded to a column — `Aggregate + Column` has no
+// `CombineTerm`, so such a condition is rejected rather than rendering an ungrouped `COUNT(…)`.
+impl<Operand, Sub> PredicateTerm for InSubqueryPredicateAst<Operand, Sub>
+where
+    Operand: AstProjectionClass,
+    <Operand as AstProjectionClass>::Class: CombineTerm<ColumnTerm>,
+{
+    type Term = <<Operand as AstProjectionClass>::Class as CombineTerm<ColumnTerm>>::Output;
 }
 impl<Sub> PredicateTerm for ExistsPredicateAst<Sub> {
     type Term = ColumnTerm;
