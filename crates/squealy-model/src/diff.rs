@@ -441,14 +441,20 @@ fn diff_views(
         .iter()
         .map(|change| view_change_name(change).to_owned())
         .collect();
-    // Reverse edges: which live views select from each view.
+    // Reverse edges: which live views select from each view. Every view being dropped here lives in
+    // this schema, so only same-schema references can make a view its dependent — a source resolves to
+    // this schema when it is unqualified or names it explicitly. Filtering by that keeps a view that
+    // selects from `other.users` from being treated as a dependent of a same-named view in this schema.
+    let schema = actual.name.as_deref();
     let mut dependents_of: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for view in &actual.views {
         for source in view.referenced_sources() {
-            dependents_of
-                .entry(source.name.as_str())
-                .or_default()
-                .push(view.name.as_str());
+            if source.schema.as_deref().or(schema) == schema {
+                dependents_of
+                    .entry(source.name.as_str())
+                    .or_default()
+                    .push(view.name.as_str());
+            }
         }
     }
     let mut worklist: Vec<String> = dropped.iter().cloned().collect();

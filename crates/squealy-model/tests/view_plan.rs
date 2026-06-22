@@ -216,6 +216,43 @@ fn dropping_a_view_for_a_column_change_drops_and_recreates_its_dependents() {
 }
 
 #[test]
+fn cross_schema_dependent_is_not_promoted_by_a_same_named_view() {
+    // `report` (in `public`) selects from `auth.users`, while an unrelated `public.users` is removed.
+    // Keying dependencies by name alone would treat `report` as a dependent of `public.users` and drop
+    // it; it must be left untouched (a same-shape introspected view, so just a CREATE OR REPLACE).
+    let mut report = introspected_view(&["id"]);
+    report.name = "report".to_owned();
+    report.query.dependencies = vec![SourceRef {
+        schema: Some("auth".to_owned()),
+        name: "users".to_owned(),
+        alias: "users".to_owned(),
+    }];
+
+    let mut desired_report = view("(q0_0.\"id\" > 0)", &["id"]);
+    desired_report.name = "report".to_owned();
+    let desired = model(vec![desired_report]);
+    let actual = model(vec![introspected_view_named("users", &["id"], &[]), report]);
+
+    let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan");
+    let dropped: Vec<&str> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            DatabasePlanStep::DropView { view, .. } => Some(view.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        dropped.contains(&"users"),
+        "users should be dropped: {dropped:?}"
+    );
+    assert!(
+        !dropped.contains(&"report"),
+        "a cross-schema dependent must not be promoted: {dropped:?}"
+    );
+}
+
+#[test]
 fn introspected_interdependent_views_drop_dependents_first() {
     // Two live views where `child` selects from `parent`; both are removed (absent from desired). The
     // plan must DROP `child` before `parent`, or the database rejects dropping a view still in use.
