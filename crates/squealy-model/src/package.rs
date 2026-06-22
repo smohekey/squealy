@@ -548,6 +548,12 @@ fn view_query_to_node(query: &ViewQueryModel) -> KdlNode {
         push_child(&mut node, expr_to_node(&order.expr));
         body.nodes_mut().push(node);
     }
+    // Introspected views have no body but record their view-on-view dependencies; persist them so an
+    // exported introspection package keeps the edges that drive live drop ordering.
+    for dependency in &query.dependencies {
+        body.nodes_mut()
+            .push(view_source_to_node("dependency", dependency, None));
+    }
     node.set_children(body);
     node
 }
@@ -1248,6 +1254,9 @@ fn view_query_from_node(node: &KdlNode) -> Result<ViewQueryModel, PackageError> 
         order_by,
         limit: prop_usize(node, "limit")?,
         offset: prop_usize(node, "offset")?,
+        dependencies: child_nodes(node, "dependency")
+            .map(view_source_from_node)
+            .collect::<Result<Vec<_>, _>>()?,
     })
 }
 
@@ -2144,6 +2153,7 @@ mod tests {
                         },
                     ],
                     query: ViewQueryModel {
+                        dependencies: Vec::new(),
                         distinct: true,
                         projection: vec![
                             ProjectionItem {
@@ -2245,6 +2255,43 @@ mod tests {
         );
         let parsed = from_kdl(&kdl).expect("view model.kdl should parse");
         assert_eq!(parsed, model, "view KDL round-trip diverged:\n{kdl}");
+    }
+
+    #[test]
+    fn kdl_round_trips_introspected_view_dependencies() {
+        // `squealy introspect` exports a live model to a package; an introspected view has no body but
+        // records its view-on-view dependencies, which must survive the round-trip so the diff can
+        // still order live drops from the package.
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: Some("public".to_owned()),
+                tables: Vec::new(),
+                views: vec![ViewModel {
+                    name: "child".to_owned(),
+                    comment: None,
+                    columns: vec![ViewColumnModel {
+                        name: "id".to_owned(),
+                        ty: SqlType::I32,
+                        nullable: false,
+                    }],
+                    query: ViewQueryModel {
+                        dependencies: vec![SourceRef {
+                            schema: Some("public".to_owned()),
+                            name: "parent".to_owned(),
+                            alias: "parent".to_owned(),
+                        }],
+                        ..ViewQueryModel::default()
+                    },
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("introspected view package should parse");
+        assert_eq!(
+            parsed, model,
+            "introspected view dependencies lost on round-trip:\n{kdl}"
+        );
     }
 
     #[test]
