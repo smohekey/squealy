@@ -169,6 +169,19 @@ impl TableStruct {
                 quote::quote! { <#d as ::squealy::ColumnNullability>::Nullability }
             })
             .collect::<Vec<_>>();
+        // The column kind's searched-`CASE` nullability bool: a nullable column makes a `CASE` whose
+        // branch it is decode as `Option<T>` (see `squealy::KindNullability`).
+        let field_case_null_markers = self
+            .fields
+            .iter()
+            .map(|field| {
+                if field.nullable() {
+                    quote::quote! { ::squealy::CaseMaybeNull }
+                } else {
+                    quote::quote! { ::squealy::CaseNonNull }
+                }
+            })
+            .collect::<Vec<_>>();
         // For each `references(Table::column)` foreign key, assert at compile time that the local
         // column's inner value type matches the referenced column's.
         let fk_type_assertions = self
@@ -500,6 +513,11 @@ impl TableStruct {
                 // `ScalarNullable` (nullable past the partition edge).
                 impl ::squealy::IntoWindowNullable for #expr_kind_idents {
                     type Kind = ::squealy::ScalarNullable<#expr_kind_idents>;
+                }
+
+                // A nullable column as a searched-`CASE` branch makes the result nullable.
+                impl ::squealy::KindNullability for #expr_kind_idents {
+                    type Nullable = #field_case_null_markers;
                 }
 
                 impl ::squealy::ColumnKey for #expr_kind_idents {

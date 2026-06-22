@@ -861,33 +861,35 @@ where
 
 /// Builder for a searched [`CASE`](case) expression. Add arms with [`when`](Self::when), then finish
 /// with [`otherwise`](Self::otherwise) (non-null result) or [`end`](Self::end) (nullable, no `ELSE`).
-pub struct CaseBuilder<'scope, T, Arms> {
+pub struct CaseBuilder<'scope, T, Arms, Null = CaseNonNull> {
     arms: Arms,
-    _marker: PhantomData<(&'scope (), T)>,
+    _marker: PhantomData<(&'scope (), T, Null)>,
 }
 
 /// Start a searched `CASE WHEN <pred> THEN <val> … [ELSE <val>] END` value expression. Every arm's
 /// `THEN` value (and the `ELSE`) must share a value type `T`.
-pub fn case<'scope, T>() -> CaseBuilder<'scope, T, CaseNil> {
+pub fn case<'scope, T>() -> CaseBuilder<'scope, T, CaseNil, CaseNonNull> {
     CaseBuilder {
         arms: CaseNil,
         _marker: PhantomData,
     }
 }
 
-impl<'scope, T, Arms> CaseBuilder<'scope, T, Arms> {
+impl<'scope, T, Arms, Null> CaseBuilder<'scope, T, Arms, Null> {
     /// Add a `WHEN <condition> THEN <value>` arm. The condition is a predicate (as `where_` takes); the
-    /// value must have value type `T`.
+    /// value must have value type `T`. A nullable `THEN` value makes the whole `CASE` nullable (folded
+    /// into `Null`).
     pub fn when<P, PredAst, E>(
         self,
         condition: Predicate<'scope, P, PredAst>,
         value: E,
-    ) -> CaseBuilder<'scope, T, Arms::Output>
+    ) -> CaseBuilder<'scope, T, Arms::Output, Null::Output>
     where
         P: PredicateKind,
         PredAst: PredicateAst,
         E: IntoExpr<'scope>,
-        E::Kind: ExprKind<Value = T>,
+        E::Kind: ExprKind<Value = T> + KindNullability,
+        Null: CaseNullOr<<E::Kind as KindNullability>::Nullable>,
         Arms: AppendArm<PredAst, E::Ast>,
     {
         CaseBuilder {
@@ -900,14 +902,27 @@ impl<'scope, T, Arms> CaseBuilder<'scope, T, Arms> {
 // `otherwise`/`end` require at least one `WHEN` arm (`Arms: NonEmptyArms`), so an empty `CASE END`
 // (invalid SQL) cannot be built. The whole `CASE` is cast to `T`'s SQL type so all-parameter branches
 // still have a determinable type for the database.
-impl<'scope, T, Arms> CaseBuilder<'scope, T, Arms> {
-    /// Finish with an `ELSE <value>` branch. With an `ELSE`, the result is the non-null value type `T`.
-    pub fn otherwise<E>(self, value: E) -> Expr<'scope, T, CaseExprAst<Arms, E::Ast>>
+impl<'scope, T, Arms, Null> CaseBuilder<'scope, T, Arms, Null> {
+    /// Finish with an `ELSE <value>` branch. With an `ELSE` the `CASE` is total, so the result is the
+    /// non-null value type `T` — *unless* some branch (a `THEN` value or the `ELSE`) is itself nullable
+    /// (a `scalar_subquery`, `lag`, or nullable column), in which case the result is `Option<T>`.
+    #[allow(clippy::type_complexity)] // the result kind is a type-level nullability fold
+    pub fn otherwise<E>(
+        self,
+        value: E,
+    ) -> Expr<
+        'scope,
+        <<Null as CaseNullOr<<E::Kind as KindNullability>::Nullable>>::Output as CaseNull>::Result<
+            T,
+        >,
+        CaseExprAst<Arms, E::Ast>,
+    >
     where
         Arms: NonEmptyArms,
         T: ExprKind + crate::HasColumnType,
         E: IntoExpr<'scope>,
-        E::Kind: ExprKind<Value = T>,
+        E::Kind: ExprKind<Value = T> + KindNullability,
+        Null: CaseNullOr<<E::Kind as KindNullability>::Nullable>,
         CaseExprAst<Arms, E::Ast>: ExprAst,
     {
         Expr {
@@ -1939,16 +1954,13 @@ where
 {
     type Columns = <P as PredicateColumns>::Columns;
 }
-// A subquery condition is its own scope: `IN (subquery)` exposes its outer operand's columns;
-// `EXISTS (subquery)` references no outer bare column.
-impl<Operand, Sub> PredicateColumns for InSubqueryPredicateAst<Operand, Sub>
-where
-    Operand: ExprColumns,
-{
-    type Columns = <Operand as ExprColumns>::Columns;
+// Matching `PredicateTerm`: a subquery condition is treated as potentially correlated (outer-row
+// dependent), so it carries a bare column for HAVING/aggregate validity.
+impl<Operand, Sub> PredicateColumns for InSubqueryPredicateAst<Operand, Sub> {
+    type Columns = HasBareColumn;
 }
 impl<Sub> PredicateColumns for ExistsPredicateAst<Sub> {
-    type Columns = ColumnFree;
+    type Columns = HasBareColumn;
 }
 
 /// A predicate AST's [term](ConstantTerm) — its operand terms combined via [`CombineTerm`] (columns
@@ -2035,16 +2047,17 @@ where
 {
     type Term = <P as PredicateTerm>::Term;
 }
-// A subquery condition is its own scope: `IN (subquery)` contributes its outer operand's term (so an
-// outer bare column or aggregate is still accounted for), and `EXISTS (subquery)` has no outer operand.
-impl<Operand, Sub> PredicateTerm for InSubqueryPredicateAst<Operand, Sub>
-where
-    Operand: AstProjectionClass,
-{
-    type Term = <Operand as AstProjectionClass>::Class;
+// A subquery condition may be *correlated* (reference an outer row), so it is classified
+// conservatively as row-dependent (`ColumnTerm`): a `CASE` arm whose condition is `exists`/
+// `in_subquery` combined with an aggregate value is rejected (like a bare column + aggregate),
+// rather than type-checking as aggregate-only and rendering an ungrouped outer column the database
+// rejects. The subquery's own params/columns are its own scope; this only models the outer-row
+// dependency the correlation can introduce.
+impl<Operand, Sub> PredicateTerm for InSubqueryPredicateAst<Operand, Sub> {
+    type Term = ColumnTerm;
 }
 impl<Sub> PredicateTerm for ExistsPredicateAst<Sub> {
-    type Term = ConstantTerm;
+    type Term = ColumnTerm;
 }
 
 #[doc(hidden)]
@@ -2245,6 +2258,9 @@ macro_rules! impl_value_expr_kind {
         }
         impl IntoWindowNullable for $ty {
             type Kind = ScalarNullable<$ty>;
+        }
+        impl KindNullability for $ty {
+            type Nullable = CaseNonNull;
         })*
     };
 }
@@ -2289,6 +2305,9 @@ macro_rules! impl_into_window_nullable_for_expr_kind {
             $ty: ExprKind,
         {
             type Kind = ScalarNullable<$ty>;
+        }
+        impl<L, R> KindNullability for $ty {
+            type Nullable = CaseNonNull;
         })*
     };
 }
@@ -2304,12 +2323,20 @@ where
 {
     type Kind = ScalarNullable<RuntimeParam<K>>;
 }
+// A runtime parameter binds a non-null value (a nullable column uses a nullable kind, not a param).
+impl<K> KindNullability for RuntimeParam<K> {
+    type Nullable = CaseNonNull;
+}
 
 /// A `uuid::Uuid` value can be used as a literal predicate operand (`col.equals(id)`) or a
 /// write-builder setter (`.id(id)`), like the scalar value types above.
 #[cfg(feature = "uuid")]
 impl ExprKind for uuid::Uuid {
     type Value = uuid::Uuid;
+}
+#[cfg(feature = "uuid")]
+impl KindNullability for uuid::Uuid {
+    type Nullable = CaseNonNull;
 }
 
 // Native timestamp values can be used as literal predicate operands and write-builder setters.
@@ -2362,6 +2389,64 @@ where
 }
 
 impl<K> NullableExpr for ScalarNullable<K> {}
+
+/// Type-level boolean tracking whether a searched `CASE` branch (or the accumulated set of branches)
+/// can evaluate to SQL `NULL`. The builder folds it across branches to pick the result kind: a `CASE`
+/// is nullable if *any* branch is nullable — even with an `ELSE` — so a nullable branch
+/// (`scalar_subquery(…)`, `lag(…)`, a nullable column) decodes as `Option<T>` rather than misdecoding
+/// `NULL` as a non-null `T`. (It is a separate type-level bool because Rust can't branch on whether a
+/// kind implements [`NullableExpr`].)
+#[doc(hidden)]
+pub trait CaseNull {
+    /// The `CASE` result kind for value type `T`: [`CaseNonNull`] → `T`, [`CaseMaybeNull`] →
+    /// [`ScalarNullable<T>`].
+    type Result<T: ExprKind>: ExprKind;
+}
+/// No branch seen so far can be `NULL`.
+#[doc(hidden)]
+pub struct CaseNonNull;
+/// At least one branch can be `NULL`.
+#[doc(hidden)]
+pub struct CaseMaybeNull;
+impl CaseNull for CaseNonNull {
+    type Result<T: ExprKind> = T;
+}
+impl CaseNull for CaseMaybeNull {
+    type Result<T: ExprKind> = ScalarNullable<T>;
+}
+
+/// Type-level OR over [`CaseNull`]: folds a new branch's nullability into the accumulated one.
+#[doc(hidden)]
+pub trait CaseNullOr<Rhs: CaseNull>: CaseNull {
+    type Output: CaseNull;
+}
+impl CaseNullOr<CaseNonNull> for CaseNonNull {
+    type Output = CaseNonNull;
+}
+impl CaseNullOr<CaseMaybeNull> for CaseNonNull {
+    type Output = CaseMaybeNull;
+}
+impl CaseNullOr<CaseNonNull> for CaseMaybeNull {
+    type Output = CaseMaybeNull;
+}
+impl CaseNullOr<CaseMaybeNull> for CaseMaybeNull {
+    type Output = CaseMaybeNull;
+}
+
+/// Type-level nullability of an expression kind, as a [`CaseNull`] bool. Implemented for every kind
+/// that can be a `CASE` branch (value types, computed/aggregate kinds, runtime params, the nullable
+/// kinds, and — via the `Table` derive — each column kind), mirroring [`NullableExpr`]'s coverage so
+/// the searched-`CASE` builder can fold branch nullability into its result kind.
+#[doc(hidden)]
+pub trait KindNullability {
+    type Nullable: CaseNull;
+}
+impl<K> KindNullability for Nullable<K> {
+    type Nullable = CaseMaybeNull;
+}
+impl<K> KindNullability for ScalarNullable<K> {
+    type Nullable = CaseMaybeNull;
+}
 
 /// The runtime-parameter shape contributed by a projection's own expressions. An embedded subquery
 /// renders its `SELECT` list *before* its `FROM`/`WHERE`/…, so a runtime [`param`] appearing in the
@@ -2542,6 +2627,25 @@ where
     K::Value: AggregateScalar,
 {
     type Value = Option<<K::Value as AggregateScalar>::Scalar>;
+}
+
+// Aggregate kinds as `CASE` branches: `COUNT` is non-null `i64`; `SUM`/`AVG`/`MIN`/`MAX` already
+// carry their nullability in an `Option<…>` value type (so they can only be a branch when `T` is
+// itself `Option<…>`), and add no extra wrapper — both are `CaseNonNull` for the result fold.
+impl<K> KindNullability for CountExpr<K> {
+    type Nullable = CaseNonNull;
+}
+impl<K> KindNullability for SumExpr<K> {
+    type Nullable = CaseNonNull;
+}
+impl<K> KindNullability for AvgExpr<K> {
+    type Nullable = CaseNonNull;
+}
+impl<K> KindNullability for MinExpr<K> {
+    type Nullable = CaseNonNull;
+}
+impl<K> KindNullability for MaxExpr<K> {
+    type Nullable = CaseNonNull;
 }
 
 /// Type-level identity for a SQL predicate.

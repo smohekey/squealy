@@ -1803,3 +1803,22 @@ fn test_case_with_subquery_condition_classifies() {
         "{sql}"
     );
 }
+
+#[test]
+fn test_case_with_nullable_branch_is_nullable() {
+    // `event.label` is a nullable column, so a CASE with it as a branch is nullable *even with an
+    // ELSE* — its result decodes as `Option<String>`. `is_null` (only available on nullable
+    // expressions) is therefore callable on the result; a non-null-branch CASE rejects it (see the
+    // `case_nonnull_branches_are_not_nullable` compile-fail test).
+    let q = TestConnection
+        .from::<Event>()
+        .where_(|event| {
+            case()
+                .when(event.id.greater_than(0), event.label)
+                .otherwise("default".to_string())
+                .is_null()
+        })
+        .select(|(event,)| event.id);
+    let sql = q.to_sql();
+    assert!(sql.contains("IS NULL"), "{sql}");
+}
