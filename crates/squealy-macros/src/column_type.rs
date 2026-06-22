@@ -48,6 +48,12 @@ impl ColumnTypeStruct {
                 type Value = Self;
             }
 
+            // A `ColumnType` newtype is a non-null value, so it adds no nullability as a searched
+            // `CASE` branch (a nullable `Option<#ident>` column uses a nullable column kind instead).
+            impl ::squealy::KindNullability for #ident {
+                type Nullable = ::squealy::CaseNonNull;
+            }
+
             // `AggregateScalar` (which enables `MIN`/`MAX`) is intentionally NOT derived: the
             // wrapped type may be one PostgreSQL has no `min`/`max` aggregate for (`bool`, `uuid`,
             // JSON, bytes, raw `db_type`s), and a concrete `where #field_ty: AggregateScalar` bound

@@ -1822,3 +1822,23 @@ fn test_case_with_nullable_branch_is_nullable() {
     let sql = q.to_sql();
     assert!(sql.contains("IS NULL"), "{sql}");
 }
+
+#[test]
+fn test_case_with_columntype_newtype_branches() {
+    // A `#[derive(ColumnType)]` newtype value is a non-null value type, so it is usable as a CASE
+    // branch (regression: the nullability fold must not require a derived KindNullability impl that
+    // ColumnType newtypes lack). Compared against a column here, where newtype values already work —
+    // bare newtype values are not scalar-projectable on their own (a general ColumnType limitation).
+    let q = TestConnection
+        .from::<Event>()
+        .where_(|event| {
+            event.ledger_ref.equals(
+                case()
+                    .when(event.id.greater_than(0), LedgerRef(1))
+                    .otherwise(LedgerRef(0)),
+            )
+        })
+        .select(|(event,)| event.id);
+    let sql = q.to_sql();
+    assert!(sql.contains("CASE WHEN") && sql.contains("END"), "{sql}");
+}
