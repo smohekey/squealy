@@ -1,4 +1,4 @@
-error[E0271]: type mismatch resolving `<i32 as ExprKind>::Value == String`
+error[E0271]: type mismatch resolving `<i32 as KindNullability>::Value == String`
   --> tests/compile_fail/case_branch_type_mismatch.rs:23:64
    |
 23 |         .select(|(user,)| case().when(user.id.greater_than(1), 1).otherwise("nope"));
@@ -12,5 +12,5 @@ note: required by a bound in `CaseBuilder::<'scope, T, Arms, Null>::when`
    |     pub fn when<P, PredAst, E>(
    |            ---- required by a bound in this associated function
 ...
-   |         E::Kind: ExprKind<Value = T> + KindNullability,
-   |                           ^^^^^^^^^ required by this bound in `CaseBuilder::<'scope, T, Arms, Null>::when`
+   |         E::Kind: KindNullability<Value = T>,
+   |                                  ^^^^^^^^^ required by this bound in `CaseBuilder::<'scope, T, Arms, Null>::when`

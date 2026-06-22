@@ -888,7 +888,10 @@ impl<'scope, T, Arms, Null> CaseBuilder<'scope, T, Arms, Null> {
         P: PredicateKind,
         PredAst: PredicateAst,
         E: IntoExpr<'scope>,
-        E::Kind: ExprKind<Value = T> + KindNullability,
+        // The branch's value type `T` is its (non-null inner) `KindNullability::Value`, which unwraps an
+        // `Option<_>` kind so outer-join columns / `SUM` aggregates can be branches; its nullability is
+        // folded into `Null`.
+        E::Kind: KindNullability<Value = T>,
         Null: CaseNullOr<<E::Kind as KindNullability>::Nullable>,
         Arms: AppendArm<PredAst, E::Ast>,
     {
@@ -921,7 +924,7 @@ impl<'scope, T, Arms, Null> CaseBuilder<'scope, T, Arms, Null> {
         Arms: NonEmptyArms,
         T: ExprKind + crate::HasColumnType,
         E: IntoExpr<'scope>,
-        E::Kind: ExprKind<Value = T> + KindNullability,
+        E::Kind: KindNullability<Value = T>,
         Null: CaseNullOr<<E::Kind as KindNullability>::Nullable>,
         CaseExprAst<Arms, E::Ast>: ExprAst,
     {
@@ -2260,6 +2263,7 @@ macro_rules! impl_value_expr_kind {
             type Kind = ScalarNullable<$ty>;
         }
         impl KindNullability for $ty {
+            type Value = $ty;
             type Nullable = CaseNonNull;
         })*
     };
@@ -2306,7 +2310,11 @@ macro_rules! impl_into_window_nullable_for_expr_kind {
         {
             type Kind = ScalarNullable<$ty>;
         }
-        impl<L, R> KindNullability for $ty {
+        impl<L, R> KindNullability for $ty
+        where
+            $ty: ExprKind,
+        {
+            type Value = <$ty as ExprKind>::Value;
             type Nullable = CaseNonNull;
         })*
     };
@@ -2324,7 +2332,11 @@ where
     type Kind = ScalarNullable<RuntimeParam<K>>;
 }
 // A runtime parameter binds a non-null value (a nullable column uses a nullable kind, not a param).
-impl<K> KindNullability for RuntimeParam<K> {
+impl<K> KindNullability for RuntimeParam<K>
+where
+    RuntimeParam<K>: ExprKind,
+{
+    type Value = <RuntimeParam<K> as ExprKind>::Value;
     type Nullable = CaseNonNull;
 }
 
@@ -2336,6 +2348,7 @@ impl ExprKind for uuid::Uuid {
 }
 #[cfg(feature = "uuid")]
 impl KindNullability for uuid::Uuid {
+    type Value = uuid::Uuid;
     type Nullable = CaseNonNull;
 }
 
@@ -2433,18 +2446,34 @@ impl CaseNullOr<CaseMaybeNull> for CaseMaybeNull {
     type Output = CaseMaybeNull;
 }
 
-/// Type-level nullability of an expression kind, as a [`CaseNull`] bool. Implemented for every kind
-/// that can be a `CASE` branch (value types, computed/aggregate kinds, runtime params, the nullable
-/// kinds, and — via the `Table` derive — each column kind), mirroring [`NullableExpr`]'s coverage so
-/// the searched-`CASE` builder can fold branch nullability into its result kind.
+/// How an expression kind behaves as a searched-`CASE` branch. Implemented for every kind that can be
+/// a branch (value types, computed/aggregate kinds, runtime params, the nullable kinds, and — via the
+/// `Table` derive — each column kind).
+///
+/// [`Value`](Self::Value) is the non-null value type the branch contributes (the `CASE` result `T`):
+/// it unwraps an `Option<_>` value type so an outer-join `Nullable<K>` column or a `SUM`/`AVG`/`MIN`/
+/// `MAX` aggregate can be a branch (their `ExprKind::Value` is `Option<_>`), while [`Nullable`](Self::Nullable)
+/// captures whether the branch can be SQL `NULL` (folded into the result's nullability — mirrors
+/// [`NullableExpr`]).
 #[doc(hidden)]
 pub trait KindNullability {
+    type Value;
     type Nullable: CaseNull;
 }
-impl<K> KindNullability for Nullable<K> {
+impl<K> KindNullability for Nullable<K>
+where
+    K: ExprKind,
+{
+    // An outer-join column: its `ExprKind::Value` is `Option<K::Value>`; the branch value type is the
+    // inner `K::Value`, and it is nullable.
+    type Value = <K as ExprKind>::Value;
     type Nullable = CaseMaybeNull;
 }
-impl<K> KindNullability for ScalarNullable<K> {
+impl<K> KindNullability for ScalarNullable<K>
+where
+    K: ExprKind,
+{
+    type Value = <K as ExprKind>::Value;
     type Nullable = CaseMaybeNull;
 }
 
@@ -2629,23 +2658,46 @@ where
     type Value = Option<<K::Value as AggregateScalar>::Scalar>;
 }
 
-// Aggregate kinds as `CASE` branches: `COUNT` is non-null `i64`; `SUM`/`AVG`/`MIN`/`MAX` already
-// carry their nullability in an `Option<…>` value type (so they can only be a branch when `T` is
-// itself `Option<…>`), and add no extra wrapper — both are `CaseNonNull` for the result fold.
+// Aggregate kinds as `CASE` branches: `COUNT` is non-null `i64`; `SUM`/`AVG`/`MIN`/`MAX` are nullable
+// (NULL over empty input), and their branch value type is the inner type behind their `Option<…>`
+// `ExprKind::Value`, so `case().when(pred, x.sum()).otherwise(0)` yields `Option<…>`.
 impl<K> KindNullability for CountExpr<K> {
+    type Value = i64;
     type Nullable = CaseNonNull;
 }
-impl<K> KindNullability for SumExpr<K> {
-    type Nullable = CaseNonNull;
+impl<K> KindNullability for SumExpr<K>
+where
+    K: ExprKind,
+    K::Value: AggregateScalar,
+    <K::Value as AggregateScalar>::Scalar: SqlSum,
+{
+    type Value = <<K::Value as AggregateScalar>::Scalar as SqlSum>::Output;
+    type Nullable = CaseMaybeNull;
 }
-impl<K> KindNullability for AvgExpr<K> {
-    type Nullable = CaseNonNull;
+impl<K> KindNullability for AvgExpr<K>
+where
+    K: ExprKind,
+    K::Value: AggregateScalar,
+    <K::Value as AggregateScalar>::Scalar: SqlNumber,
+{
+    type Value = f64;
+    type Nullable = CaseMaybeNull;
 }
-impl<K> KindNullability for MinExpr<K> {
-    type Nullable = CaseNonNull;
+impl<K> KindNullability for MinExpr<K>
+where
+    K: ExprKind,
+    K::Value: AggregateScalar,
+{
+    type Value = <K::Value as AggregateScalar>::Scalar;
+    type Nullable = CaseMaybeNull;
 }
-impl<K> KindNullability for MaxExpr<K> {
-    type Nullable = CaseNonNull;
+impl<K> KindNullability for MaxExpr<K>
+where
+    K: ExprKind,
+    K::Value: AggregateScalar,
+{
+    type Value = <K::Value as AggregateScalar>::Scalar;
+    type Nullable = CaseMaybeNull;
 }
 
 /// Type-level identity for a SQL predicate.

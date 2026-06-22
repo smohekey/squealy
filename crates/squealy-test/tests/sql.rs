@@ -1825,20 +1825,59 @@ fn test_case_with_nullable_branch_is_nullable() {
 
 #[test]
 fn test_case_with_columntype_newtype_branches() {
-    // A `#[derive(ColumnType)]` newtype value is a non-null value type, so it is usable as a CASE
-    // branch (regression: the nullability fold must not require a derived KindNullability impl that
-    // ColumnType newtypes lack). Compared against a column here, where newtype values already work —
-    // bare newtype values are not scalar-projectable on their own (a general ColumnType limitation).
-    let q = TestConnection
-        .from::<Event>()
-        .where_(|event| {
-            event.ledger_ref.equals(
-                case()
-                    .when(event.id.greater_than(0), LedgerRef(1))
-                    .otherwise(LedgerRef(0)),
-            )
-        })
-        .select(|(event,)| event.id);
+    // A `#[derive(ColumnType)]` newtype value is a non-null value type usable as a CASE branch, and a
+    // newtype CASE result is projectable as a standalone scalar (it decodes back to the newtype).
+    let q = TestConnection.from::<Event>().select(|(event,)| {
+        case()
+            .when(event.id.greater_than(0), LedgerRef(1))
+            .otherwise(LedgerRef(0))
+    });
     let sql = q.to_sql();
-    assert!(sql.contains("CASE WHEN") && sql.contains("END"), "{sql}");
+    assert!(
+        sql.contains("CASE WHEN") && sql.contains("END AS expr"),
+        "{sql}"
+    );
+}
+
+#[test]
+fn test_case_with_sum_aggregate_branch_is_nullable() {
+    // A SUM/AVG/MIN/MAX aggregate has an `Option<_>` value type; as a CASE branch its value type is
+    // the inner type and the result is nullable, so the CASE finishes (regression: it used to set
+    // `T = Option<_>` and fail to finish). The COUNT condition keeps the whole CASE an aggregate (a
+    // bare-column condition + aggregate value would be rejected, like `COUNT(id) + id`).
+    let q = TestConnection.from::<Counter>().select(|(counter,)| {
+        case()
+            .when(
+                counter.count.count().greater_than(0i64),
+                counter.count.sum(),
+            )
+            .end()
+    });
+    let sql = q.to_sql();
+    assert!(
+        sql.contains("CASE WHEN") && sql.contains("SUM(") && sql.contains("END AS expr"),
+        "{sql}"
+    );
+}
+
+#[test]
+fn test_case_with_outer_join_column_branch_is_nullable() {
+    // A left-joined column is `Nullable<K>` (value type `Option<_>`); as a CASE branch its value type
+    // is the inner type and the result is nullable, so the CASE both finishes and `is_null`s.
+    let q = TestConnection
+        .from::<User>()
+        .left_join::<Post>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .where_(|(user, post)| {
+            case()
+                .when(user.id.greater_than(0), post.user_id)
+                .otherwise(0)
+                .is_null()
+        })
+        .select(|(user, _post)| user.id);
+    let sql = q.to_sql();
+    assert!(
+        sql.contains("CASE WHEN") && sql.contains("IS NULL"),
+        "{sql}"
+    );
 }

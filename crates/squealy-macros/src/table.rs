@@ -515,8 +515,10 @@ impl TableStruct {
                     type Kind = ::squealy::ScalarNullable<#expr_kind_idents>;
                 }
 
-                // A nullable column as a searched-`CASE` branch makes the result nullable.
+                // A nullable column as a searched-`CASE` branch makes the result nullable. The branch
+                // value type is the column's inner (non-null) value type.
                 impl ::squealy::KindNullability for #expr_kind_idents {
+                    type Value = #field_inner_tys;
                     type Nullable = #field_case_null_markers;
                 }
 
