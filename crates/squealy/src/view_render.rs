@@ -463,7 +463,71 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
             }
             writer.write_all(b" END")
         }
+        ExprNode::Nullif {
+            left,
+            right,
+            result,
+        } => {
+            // Cast only when both operands are inlined literals (no typed column to anchor the type);
+            // otherwise a column anchors the other and neither is cast, preserving its type/collation.
+            let cast = if is_literal(left) && is_literal(right) {
+                result.as_ref()
+            } else {
+                None
+            };
+            writer.write_all(b"NULLIF(")?;
+            render_case_value(left, cast, dialect, writer)?;
+            writer.write_all(b", ")?;
+            render_case_value(right, cast, dialect, writer)?;
+            writer.write_all(b")")
+        }
+        ExprNode::Coalesce { args, result } => {
+            // Cast only when every argument is an inlined literal (no typed column to anchor the result
+            // type); otherwise a column anchors them and none are cast, preserving its type/collation.
+            let cast = if args.iter().all(is_literal) {
+                result.as_ref()
+            } else {
+                None
+            };
+            writer.write_all(b"COALESCE(")?;
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 {
+                    writer.write_all(b", ")?;
+                }
+                render_case_value(arg, cast, dialect, writer)?;
+            }
+            writer.write_all(b")")
+        }
+        ExprNode::SimpleCase {
+            operand,
+            arms,
+            else_,
+            result,
+        } => {
+            writer.write_all(b"CASE ")?;
+            render_expr(operand, dialect, writer)?;
+            for arm in arms {
+                writer.write_all(b" WHEN ")?;
+                render_expr(&arm.when, dialect, writer)?;
+                writer.write_all(b" THEN ")?;
+                render_case_value(&arm.then, result.as_ref(), dialect, writer)?;
+            }
+            if let Some(else_) = else_ {
+                writer.write_all(b" ELSE ")?;
+                render_case_value(else_, result.as_ref(), dialect, writer)?;
+            }
+            writer.write_all(b" END")
+        }
     }
+}
+
+/// An inlined SQL literal — the only `NULLIF`/`COALESCE` operand kind that has no inherent type (a
+/// column/expression carries its own). When every operand of such a node is a literal there is no
+/// typed operand to anchor the type, so the literals are cast; otherwise a column anchors them and they
+/// keep their own type/collation (e.g. a `citext` column's case-insensitivity). View bodies inline
+/// literals, so a runtime param never appears here.
+fn is_literal(node: &ExprNode) -> bool {
+    matches!(node, ExprNode::Literal(_))
 }
 
 /// Renders a `CASE` branch value, wrapping it in `CAST(… AS <cast>)` when a result cast is set.

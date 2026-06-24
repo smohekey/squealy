@@ -272,3 +272,43 @@ fn lowers_case_expression_to_ir() {
         other => panic!("expected CASE node, got {other:?}"),
     }
 }
+
+#[test]
+fn lowers_coalesce_and_nullif_to_ir() {
+    let conn = ModelConn;
+    let coalesce_q = conn
+        .from::<User>()
+        .project(|(user,)| coalesce(user.id).or_else(0).end());
+    match &lower_view(&coalesce_q).projection[0].expr {
+        ExprNode::Coalesce { args, .. } => assert_eq!(args.len(), 2),
+        other => panic!("expected COALESCE node, got {other:?}"),
+    }
+
+    let nullif_q = conn.from::<User>().project(|(user,)| nullif(user.id, 0));
+    assert!(matches!(
+        &lower_view(&nullif_q).projection[0].expr,
+        ExprNode::Nullif { .. }
+    ));
+}
+
+#[test]
+fn lowers_simple_case_to_ir() {
+    let conn = ModelConn;
+    let query = conn
+        .from::<User>()
+        .project(|(user,)| case_of(user.id).when(1, 10).otherwise(0));
+    match &lower_view(&query).projection[0].expr {
+        ExprNode::SimpleCase {
+            operand,
+            arms,
+            else_,
+            ..
+        } => {
+            assert!(matches!(&**operand, ExprNode::Column { .. }));
+            assert_eq!(arms.len(), 1);
+            assert!(matches!(&*arms[0].when, ExprNode::Literal(_)));
+            assert!(else_.is_some());
+        }
+        other => panic!("expected simple CASE node, got {other:?}"),
+    }
+}
