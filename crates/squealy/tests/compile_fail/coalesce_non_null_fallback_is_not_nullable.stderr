@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/compile_fail/coalesce_non_null_fallback_is_not_nullable.rs:25:32
+   |
+25 |         assert_scalar_nullable(coalesce(event.label).or_else("default").end());
+   |         ---------------------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Expr<'_, ScalarNullable<_>, _>`, found `Expr<'_, String, CoalesceExprAst<...>>`
+   |         |
+   |         arguments to this function are incorrect
+   |
+   = note: expected struct `squealy::Expr<'_, squealy::ScalarNullable<_>, _>`
+              found struct `squealy::Expr<'_, std::string::String, squealy::CoalesceExprAst<squealy::CoalesceArg<squealy::ColumnExprAst<EventLabel>, squealy::CoalesceArg<squealy::LiteralExprAst<std::string::String>, squealy::CoalesceNil>>>>`
+note: function defined here
+  --> tests/compile_fail/coalesce_non_null_fallback_is_not_nullable.rs:19:4
+   |
+19 | fn assert_scalar_nullable<'scope, T, A: ExprAst>(_: Expr<'scope, ScalarNullable<T>, A>) {}
+   |    ^^^^^^^^^^^^^^^^^^^^^^                        -------------------------------------

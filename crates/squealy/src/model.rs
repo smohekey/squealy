@@ -697,6 +697,27 @@ pub enum ExprNode {
         else_: Option<Box<ExprNode>>,
         result: Option<SqlType>,
     },
+    /// `NULLIF(<left>, <right>)`. Each operand is cast to `result` (when set) so all-parameter operands
+    /// stay typeable; mirrors the per-branch CAST on [`ExprNode::Case`].
+    Nullif {
+        left: Box<ExprNode>,
+        right: Box<ExprNode>,
+        result: Option<SqlType>,
+    },
+    /// `COALESCE(<args>)`. Each argument is cast to `result` (when set) so an all-parameter `COALESCE`
+    /// stays typeable.
+    Coalesce {
+        args: Vec<ExprNode>,
+        result: Option<SqlType>,
+    },
+    /// Simple `CASE <operand> WHEN <value> THEN … [ELSE …] END` (each `CaseArm`'s `when` is the value
+    /// compared against `operand`). The `THEN`/`ELSE` values are cast to `result` (when set).
+    SimpleCase {
+        operand: Box<ExprNode>,
+        arms: Vec<CaseArm>,
+        else_: Option<Box<ExprNode>>,
+        result: Option<SqlType>,
+    },
 }
 
 /// One `ORDER BY` term inside a window function's `OVER (…)` clause.
@@ -836,6 +857,30 @@ fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>
             }
         }
         ExprNode::Case { arms, else_, .. } => {
+            for arm in arms {
+                collect_expr_sources(&arm.when, sources);
+                collect_expr_sources(&arm.then, sources);
+            }
+            if let Some(else_) = else_ {
+                collect_expr_sources(else_, sources);
+            }
+        }
+        ExprNode::Nullif { left, right, .. } => {
+            collect_expr_sources(left, sources);
+            collect_expr_sources(right, sources);
+        }
+        ExprNode::Coalesce { args, .. } => {
+            for arg in args {
+                collect_expr_sources(arg, sources);
+            }
+        }
+        ExprNode::SimpleCase {
+            operand,
+            arms,
+            else_,
+            ..
+        } => {
+            collect_expr_sources(operand, sources);
             for arm in arms {
                 collect_expr_sources(&arm.when, sources);
                 collect_expr_sources(&arm.then, sources);

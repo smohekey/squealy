@@ -20,9 +20,10 @@ use crate::{
     CompareOp, Dialect, Encode, Expr, ExprKind, ExprVisitor, InsertRow, InsertRowVisitor,
     InsertableTable, Order, OrderDirection, Predicate, PredicateAstVisitor, PredicateKind,
     PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAssignment,
-    RenderAst, RenderCaseArms, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst,
-    RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderUpdateAssignments, SchemaTable,
-    SelectSink, Selected, SourceAlias, SqlType, TableProjection, UpdateableTable,
+    RenderAst, RenderCaseArms, RenderCoalesceArgs, RenderInsertAssignments, RenderInsertRows,
+    RenderPredicateAst, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
+    RenderSimpleCaseArms, RenderUpdateAssignments, SchemaTable, SelectSink, Selected, SourceAlias,
+    SqlType, TableProjection, UpdateableTable,
 };
 use std::marker::PhantomData;
 
@@ -1338,6 +1339,56 @@ where
         self.writer.write_all(b")")
     }
 
+    fn visit_nullif<L, R>(
+        &mut self,
+        left: L,
+        left_needs_cast: bool,
+        right: R,
+        right_needs_cast: bool,
+        result: Option<&SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        // Cast the operands only when *both* are bare literals/params (no typed operand to anchor the
+        // type); otherwise the typed operand anchors the other and neither is cast, so `NULLIF`'s
+        // equality keeps the operand's own type/collation (e.g. a `citext`/`decimal` column).
+        let cast_both = left_needs_cast && right_needs_cast;
+        let left_cast = if cast_both { result } else { None };
+        let right_cast = if cast_both { result } else { None };
+        self.writer.write_all(b"NULLIF(")?;
+        self.visit_case_value_open(left_cast)?;
+        left(self)?;
+        self.visit_case_value_close(left_cast)?;
+        self.writer.write_all(b", ")?;
+        self.visit_case_value_open(right_cast)?;
+        right(self)?;
+        self.visit_case_value_close(right_cast)?;
+        self.writer.write_all(b")")
+    }
+
+    fn visit_coalesce<Args>(
+        &mut self,
+        args: &Args,
+        all_args_need_cast: bool,
+        result: Option<&SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        Args: RenderCoalesceArgs<B>,
+    {
+        // Cast the arguments only when every one is a bare literal/param (no typed operand to anchor
+        // the result type); otherwise a typed column/expression anchors them and none are cast.
+        let cast = if all_args_need_cast { result } else { None };
+        self.writer.write_all(b"COALESCE(")?;
+        args.render(self, cast, true)?;
+        self.writer.write_all(b")")
+    }
+
+    fn visit_coalesce_separator(&mut self) -> Result<(), Self::Error> {
+        self.writer.write_all(b", ")
+    }
+
     fn visit_aggregate<O>(
         &mut self,
         func: AggregateFunc,
@@ -1449,6 +1500,38 @@ where
         // Each branch value is wrapped in `CAST(… AS result)` (not the whole `CASE`): an outer cast
         // does not type the branch parameters, but casting each branch does.
         self.writer.write_all(b"CASE")?;
+        arms.render(self, result)?;
+        if let Some(else_) = else_ {
+            self.writer.write_all(b" ELSE ")?;
+            self.visit_case_value_open(result)?;
+            else_.visit(self)?;
+            self.visit_case_value_close(result)?;
+        }
+        self.writer.write_all(b" END")
+    }
+
+    fn visit_simple_case<Operand, Arms, Else>(
+        &mut self,
+        operand: Operand,
+        operand_needs_cast: bool,
+        cmp: Option<&SqlType>,
+        arms: &Arms,
+        else_: Option<&Else>,
+        result: Option<&SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        Operand: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Arms: RenderSimpleCaseArms<B>,
+        Else: RenderAst<B>,
+    {
+        // A bare literal/param operand is cast to the comparison type (so Postgres can prepare an
+        // all-parameter operand); a column operand keeps its own type. `WHEN` values are anchored by
+        // the operand's type, so they are not cast.
+        let operand_cast = if operand_needs_cast { cmp } else { None };
+        self.writer.write_all(b"CASE ")?;
+        self.visit_case_value_open(operand_cast)?;
+        operand(self)?;
+        self.visit_case_value_close(operand_cast)?;
         arms.render(self, result)?;
         if let Some(else_) = else_ {
             self.writer.write_all(b" ELSE ")?;

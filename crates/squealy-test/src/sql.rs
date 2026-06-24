@@ -6,10 +6,10 @@ use squealy::{
     ColumnRef, ColumnType, CompareOp, Encode, Expr, ExprKind, ExprVisitor, InsertRow,
     InsertRowVisitor, InsertableTable, Order, OrderDirection, Predicate, PredicateAstVisitor,
     PredicateKind, PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder,
-    RenderAssignment, RenderAst, RenderCaseArms, RenderInsertAssignments, RenderInsertRows,
-    RenderPredicateAst, RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderSubquery,
-    RenderUpdateAssignments, SchemaTable, SelectSink, Selected, SourceAlias, SqlType, Table,
-    TableProjection, UpdateableTable, WindowFunc,
+    RenderAssignment, RenderAst, RenderCaseArms, RenderCoalesceArgs, RenderInsertAssignments,
+    RenderInsertRows, RenderPredicateAst, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
+    RenderSimpleCaseArms, RenderSubquery, RenderUpdateAssignments, SchemaTable, SelectSink,
+    Selected, SourceAlias, SqlType, Table, TableProjection, UpdateableTable, WindowFunc,
 };
 
 use crate::query::{TestParam, TestParamWriter};
@@ -1024,6 +1024,45 @@ where
         self.writer.write_all(b")")
     }
 
+    fn visit_nullif<L, R>(
+        &mut self,
+        left: L,
+        _left_needs_cast: bool,
+        right: R,
+        _right_needs_cast: bool,
+        _result: Option<&SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        // The in-memory test backend renders the bare NULLIF (no dialect cast), like its aggregates.
+        self.writer.write_all(b"NULLIF(")?;
+        left(self)?;
+        self.writer.write_all(b", ")?;
+        right(self)?;
+        self.writer.write_all(b")")
+    }
+
+    fn visit_coalesce<Args>(
+        &mut self,
+        args: &Args,
+        _all_args_need_cast: bool,
+        result: Option<&SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        Args: RenderCoalesceArgs<Self::Backend>,
+    {
+        // Bare COALESCE (the test backend's cast hooks are no-ops).
+        self.writer.write_all(b"COALESCE(")?;
+        args.render(self, result, true)?;
+        self.writer.write_all(b")")
+    }
+
+    fn visit_coalesce_separator(&mut self) -> Result<(), Self::Error> {
+        self.writer.write_all(b", ")
+    }
+
     fn visit_aggregate<O>(
         &mut self,
         func: AggregateFunc,
@@ -1108,6 +1147,31 @@ where
     {
         // The in-memory test backend renders the bare CASE (no dialect cast), like its aggregates.
         self.writer.write_all(b"CASE")?;
+        arms.render(self, result)?;
+        if let Some(else_) = else_ {
+            self.writer.write_all(b" ELSE ")?;
+            else_.visit(self)?;
+        }
+        self.writer.write_all(b" END")
+    }
+
+    fn visit_simple_case<Operand, Arms, Else>(
+        &mut self,
+        operand: Operand,
+        _operand_needs_cast: bool,
+        _cmp: Option<&SqlType>,
+        arms: &Arms,
+        else_: Option<&Else>,
+        result: Option<&SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        Operand: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Arms: RenderSimpleCaseArms<Self::Backend>,
+        Else: RenderAst<Self::Backend>,
+    {
+        // Bare simple CASE (the test backend's cast hooks are no-ops).
+        self.writer.write_all(b"CASE ")?;
+        operand(self)?;
         arms.render(self, result)?;
         if let Some(else_) = else_ {
             self.writer.write_all(b" ELSE ")?;

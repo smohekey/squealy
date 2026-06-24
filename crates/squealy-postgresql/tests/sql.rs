@@ -2575,6 +2575,7 @@ fn postgres_renders_case_view_body() {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            dependencies: Vec::new(),
         },
     };
 
@@ -2971,5 +2972,66 @@ fn postgres_case_when_renders_with_numbered_placeholders() {
             PostgresParam::Int32(1),
             PostgresParam::Int32(0),
         ]
+    );
+}
+
+#[test]
+fn postgres_coalesce_nullif_simple_case_cast_each_branch() {
+    // A typed column anchors the type, so a literal/param sibling is NOT cast (the column keeps its
+    // own type/collation): `id` anchors the `0` fallback in both COALESCE and NULLIF.
+    let coalesce_q = Postgres
+        .from::<User>()
+        .select(|(user,)| coalesce(user.id).or_else(0).end());
+    assert_eq!(
+        coalesce_q.to_sql(),
+        "SELECT COALESCE(q0_0.\"id\", $1) AS \"expr\" FROM \"public\".\"users\" AS q0_0"
+    );
+
+    let nullif_q = Postgres.from::<User>().select(|(user,)| nullif(user.id, 0));
+    assert_eq!(
+        nullif_q.to_sql(),
+        "SELECT NULLIF(q0_0.\"id\", $1) AS \"expr\" FROM \"public\".\"users\" AS q0_0"
+    );
+
+    let simple_q = Postgres
+        .from::<User>()
+        .select(|(user,)| case_of(user.id).when(1, 10).otherwise(0));
+    assert_eq!(
+        simple_q.to_sql(),
+        "SELECT CASE q0_0.\"id\" WHEN $1 THEN CAST($2 AS integer) ELSE CAST($3 AS integer) END \
+         AS \"expr\" FROM \"public\".\"users\" AS q0_0"
+    );
+
+    // When EVERY operand is a bare literal/param there is no typed operand to anchor, so they ARE cast
+    // — keeping an all-parameter COALESCE / NULLIF / simple CASE preparable by Postgres.
+    let coalesce_lits = Postgres
+        .from::<User>()
+        .select(|(_user,)| coalesce(1).or_else(2).end());
+    assert!(
+        coalesce_lits
+            .to_sql()
+            .contains("COALESCE(CAST($1 AS integer), CAST($2 AS integer))"),
+        "{}",
+        coalesce_lits.to_sql()
+    );
+
+    let nullif_lits = Postgres.from::<User>().select(|(_user,)| nullif(1, 2));
+    assert!(
+        nullif_lits
+            .to_sql()
+            .contains("NULLIF(CAST($1 AS integer), CAST($2 AS integer))"),
+        "{}",
+        nullif_lits.to_sql()
+    );
+
+    let simple_lit_operand = Postgres
+        .from::<User>()
+        .select(|(_user,)| case_of(1).when(1, 10).otherwise(0));
+    assert!(
+        simple_lit_operand
+            .to_sql()
+            .contains("CASE CAST($1 AS integer) WHEN $2 THEN CAST($3 AS integer)"),
+        "{}",
+        simple_lit_operand.to_sql()
     );
 }

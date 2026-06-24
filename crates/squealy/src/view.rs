@@ -18,9 +18,9 @@ use crate::{
     ExprKind, ExprNode, ExprVisitor, InsertableTable, JoinItem, JoinKind, LogicalOp, Order,
     OrderDirection, OrderItem, ParamWriter, Predicate, PredicateAstVisitor, PredicateKind,
     Projectable, ProjectionItem, ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAst,
-    RenderCaseArms, RenderPredicateAst, RenderProjectable, RenderSelectAst, RenderSubquery,
-    RowReader, SelectAst, SelectSink, Selected, SourceAlias, SourceRef, SqlType, Table,
-    TableProjection, ViewQueryModel, WindowFunc, WindowOrderTerm,
+    RenderCaseArms, RenderCoalesceArgs, RenderPredicateAst, RenderProjectable, RenderSelectAst,
+    RenderSimpleCaseArms, RenderSubquery, RowReader, SelectAst, SelectSink, Selected, SourceAlias,
+    SourceRef, SqlType, Table, TableProjection, ViewQueryModel, WindowFunc, WindowOrderTerm,
 };
 
 // ---------------------------------------------------------------------------
@@ -249,6 +249,57 @@ impl ExprVisitor for IrBuilder {
         Ok(())
     }
 
+    fn visit_nullif<L, R>(
+        &mut self,
+        left: L,
+        _left_needs_cast: bool,
+        right: R,
+        _right_needs_cast: bool,
+        result: Option<&SqlType>,
+    ) -> io::Result<()>
+    where
+        L: FnOnce(&mut Self) -> io::Result<()>,
+        R: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        // View bodies inline literals (which are typed), so the per-operand cast decision is made
+        // structurally by the view renderer (cast only inlined literals, never columns); `result` is
+        // captured for that.
+        let left = self.child(left)?;
+        let right = self.child(right)?;
+        self.stack.push(ExprNode::Nullif {
+            left,
+            right,
+            result: result.cloned(),
+        });
+        Ok(())
+    }
+
+    fn visit_coalesce<Args>(
+        &mut self,
+        args: &Args,
+        _all_args_need_cast: bool,
+        result: Option<&SqlType>,
+    ) -> io::Result<()>
+    where
+        Args: RenderCoalesceArgs<ModelBackend>,
+    {
+        // Each argument pushes one node (the separator/cast hooks are no-ops here; the cast is captured
+        // in `result` and applied per argument by the view renderer); split them off the stack.
+        let args_start = self.stack.len();
+        args.render(self, result, true)?;
+        let nodes = self.stack.split_off(args_start);
+        self.stack.push(ExprNode::Coalesce {
+            args: nodes,
+            result: result.cloned(),
+        });
+        Ok(())
+    }
+
+    fn visit_coalesce_separator(&mut self) -> io::Result<()> {
+        // Arguments are already distinct nodes on the stack.
+        Ok(())
+    }
+
     fn visit_aggregate<O>(
         &mut self,
         func: AggregateFunc,
@@ -368,6 +419,45 @@ impl ExprVisitor for IrBuilder {
             None => None,
         };
         self.stack.push(ExprNode::Case {
+            arms: case_arms,
+            else_,
+            result: result.cloned(),
+        });
+        Ok(())
+    }
+
+    fn visit_simple_case<Operand, Arms, Else>(
+        &mut self,
+        operand: Operand,
+        _operand_needs_cast: bool,
+        _cmp: Option<&SqlType>,
+        arms: &Arms,
+        else_: Option<&Else>,
+        result: Option<&SqlType>,
+    ) -> io::Result<()>
+    where
+        Operand: FnOnce(&mut Self) -> io::Result<()>,
+        Arms: RenderSimpleCaseArms<ModelBackend>,
+        Else: RenderAst<ModelBackend>,
+    {
+        // View bodies inline the operand (a typed literal or a column), so it needs no cast anchor.
+        let operand = self.child(operand)?;
+        // Each arm pushes its WHEN-value node then its THEN-value node (2 * LEN nodes).
+        let arms_start = self.stack.len();
+        arms.render(self, result)?;
+        let mut nodes = self.stack.split_off(arms_start).into_iter();
+        let mut case_arms = Vec::with_capacity(Arms::LEN);
+        for _ in 0..Arms::LEN {
+            let when = Box::new(nodes.next().expect("simple CASE WHEN node"));
+            let then = Box::new(nodes.next().expect("simple CASE THEN node"));
+            case_arms.push(CaseArm { when, then });
+        }
+        let else_ = match else_ {
+            Some(else_) => Some(self.child(|builder| else_.visit(builder))?),
+            None => None,
+        };
+        self.stack.push(ExprNode::SimpleCase {
+            operand,
             arms: case_arms,
             else_,
             result: result.cloned(),
