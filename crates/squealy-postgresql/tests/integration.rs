@@ -1157,3 +1157,57 @@ async fn postgres_case_expression_round_trips() {
         .expect("fetch nullable case labels");
     assert_eq!(nullable, vec![Some(100), None]);
 }
+
+#[tokio::test]
+#[ignore]
+async fn postgres_coalesce_nullif_simple_case_round_trip() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS integration_users")
+        .await
+        .expect("drop old integration table");
+
+    let ddl_backend = Postgres;
+    create_table::<IntegrationUser>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+    for name in ["Ada", "Grace"] {
+        connection
+            .to::<IntegrationUser>()
+            .name(name)
+            .insert()
+            .await
+            .expect("insert user");
+    }
+
+    // NULLIF(id, 1): NULL for Ada (id 1), else id. The per-operand CAST makes the bound `1` typeable.
+    let nullif_vals: Vec<Option<i32>> = connection
+        .from::<IntegrationUser>()
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| nullif(user.id, 1))
+        .collect()
+        .await
+        .expect("fetch nullif");
+    assert_eq!(nullif_vals, vec![None, Some(2)]);
+
+    // COALESCE(id, 999): id is non-null, so the result is non-null and returns id.
+    let coalesce_vals: Vec<i32> = connection
+        .from::<IntegrationUser>()
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| coalesce(user.id).or_else(999).end())
+        .collect()
+        .await
+        .expect("fetch coalesce");
+    assert_eq!(coalesce_vals, vec![1, 2]);
+
+    // Simple CASE id WHEN 1 THEN 100 ELSE 0 END — all-parameter THEN/ELSE typed by the per-branch CAST.
+    let simple_vals: Vec<i32> = connection
+        .from::<IntegrationUser>()
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| case_of(user.id).when(1, 100).otherwise(0))
+        .collect()
+        .await
+        .expect("fetch simple case");
+    assert_eq!(simple_vals, vec![100, 0]);
+}

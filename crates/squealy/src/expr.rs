@@ -247,6 +247,13 @@ impl<T> SameValue<T> for T {}
 #[doc(hidden)]
 pub trait ExprAst: Clone {
     type Params: crate::HList;
+
+    /// Whether this node is a bare literal / runtime parameter that has no inherent SQL type, so it
+    /// needs an explicit `CAST` to be typeable when used as a *compared* operand (a `NULLIF` operand
+    /// or a simple-`CASE` operand). Columns and computed expressions already carry a type and default
+    /// to `false` — and must **not** be cast there, since casting a custom-typed column (e.g. a
+    /// PostgreSQL `citext` declared via `db_type`) would change the equality semantics.
+    const NEEDS_CAST_ANCHOR: bool = false;
 }
 
 /// Backend-parameterized rendering for an expression AST node.
@@ -348,6 +355,8 @@ where
     K::Value: Clone,
 {
     type Params = crate::HNil;
+    // A bare literal has no inherent SQL type as a compared operand, so it needs a cast anchor.
+    const NEEDS_CAST_ANCHOR: bool = true;
 }
 
 impl<K, B> RenderAst<B> for LiteralExprAst<K>
@@ -369,6 +378,8 @@ where
     K: ExprKind,
 {
     type Params = crate::HCons<K::Value, crate::HNil>;
+    // A runtime parameter has no inherent SQL type as a compared operand, so it needs a cast anchor.
+    const NEEDS_CAST_ANCHOR: bool = true;
 }
 
 impl<K, B> RenderAst<B> for ParamExprAst<K>
@@ -976,6 +987,879 @@ impl<'scope, T, Arms, Null> CaseBuilder<'scope, T, Arms, Null> {
             ast: CaseExprAst {
                 arms: self.arms,
                 else_ast: None,
+                result: Some(crate::SqlType::from(
+                    <T as crate::HasColumnType>::COLUMN_TYPE,
+                )),
+            },
+            project_alias: Cow::Borrowed("expr"),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+/// `NULLIF(<left>, <right>)` — `NULL` when the operands are equal, else `left`. Always nullable
+/// (value `Option<T>`). `result`, when set, casts each operand to `T`'s SQL type so all-parameter
+/// operands stay typeable for the database (the per-branch `CAST` lesson from `CASE`).
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct NullifExprAst<Left, Right> {
+    left: Left,
+    right: Right,
+    result: Option<crate::SqlType>,
+}
+
+impl<Left, Right> ExprAst for NullifExprAst<Left, Right>
+where
+    Left: ExprAst,
+    Right: ExprAst,
+    Left::Params: crate::HAppend<Right::Params>,
+{
+    type Params = <Left::Params as crate::HAppend<Right::Params>>::Output;
+}
+
+impl<Left, Right, B> RenderAst<B> for NullifExprAst<Left, Right>
+where
+    Left: RenderAst<B>,
+    Right: RenderAst<B>,
+    Left::Params: crate::HAppend<Right::Params>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_nullif(
+            |visitor| self.left.visit(visitor),
+            Left::NEEDS_CAST_ANCHOR,
+            |visitor| self.right.visit(visitor),
+            Right::NEEDS_CAST_ANCHOR,
+            self.result.as_ref(),
+        )
+    }
+}
+
+impl<Left, Right> NonAggregateAst for NullifExprAst<Left, Right>
+where
+    Left: NonAggregateAst,
+    Right: NonAggregateAst,
+{
+}
+
+impl<Left, Right> NonWindowAst for NullifExprAst<Left, Right>
+where
+    Left: NonWindowAst,
+    Right: NonWindowAst,
+{
+}
+
+impl<Left, Right> AstProjectionClass for NullifExprAst<Left, Right>
+where
+    Left: AstProjectionClass,
+    Right: AstProjectionClass,
+    <Left as AstProjectionClass>::Class: CombineTerm<<Right as AstProjectionClass>::Class>,
+{
+    type Class = <<Left as AstProjectionClass>::Class as CombineTerm<
+        <Right as AstProjectionClass>::Class,
+    >>::Output;
+}
+
+impl<Left, Right> ExprColumns for NullifExprAst<Left, Right>
+where
+    Left: ExprColumns,
+    Right: ExprColumns,
+    <Left as ExprColumns>::Columns: CombineColumns<<Right as ExprColumns>::Columns>,
+{
+    type Columns =
+        <<Left as ExprColumns>::Columns as CombineColumns<<Right as ExprColumns>::Columns>>::Output;
+}
+
+/// `NULLIF(a, b)` — `NULL` when `a == b`, else `a`. The result is always nullable
+/// ([`ScalarNullable<T>`], value `Option<T>`); `a` and `b` share value type `T` (each operand's
+/// non-null [`KindNullability::Value`], so a nullable column or `scalar_subquery` works as an operand).
+pub fn nullif<'scope, A, R, T>(
+    a: A,
+    b: R,
+) -> Expr<'scope, ScalarNullable<T>, NullifExprAst<A::Ast, R::Ast>>
+where
+    A: IntoExpr<'scope>,
+    R: IntoExpr<'scope>,
+    A::Kind: KindNullability<Value = T>,
+    R::Kind: KindNullability<Value = T>,
+    T: ExprKind + crate::HasColumnType,
+    NullifExprAst<A::Ast, R::Ast>: ExprAst,
+{
+    Expr {
+        ast: NullifExprAst {
+            left: a.into_expr().ast,
+            right: b.into_expr().ast,
+            result: Some(crate::SqlType::from(
+                <T as crate::HasColumnType>::COLUMN_TYPE,
+            )),
+        },
+        project_alias: Cow::Borrowed("expr"),
+        _phantom: PhantomData,
+    }
+}
+
+// ===== COALESCE =====
+
+/// Empty tail of a `COALESCE` argument cons-list.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CoalesceNil;
+/// One `COALESCE` argument (a value) plus the rest of the list.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct CoalesceArg<ValAst, Rest> {
+    value: ValAst,
+    rest: Rest,
+}
+
+/// Append an argument to the tail of a `COALESCE` list (so args render in the order added).
+#[doc(hidden)]
+pub trait AppendCoalesceArg<ValAst> {
+    type Output;
+    fn append_coalesce_arg(self, value: ValAst) -> Self::Output;
+}
+impl<ValAst> AppendCoalesceArg<ValAst> for CoalesceNil {
+    type Output = CoalesceArg<ValAst, CoalesceNil>;
+    fn append_coalesce_arg(self, value: ValAst) -> Self::Output {
+        CoalesceArg {
+            value,
+            rest: CoalesceNil,
+        }
+    }
+}
+impl<ValAst, HVal, Rest> AppendCoalesceArg<ValAst> for CoalesceArg<HVal, Rest>
+where
+    Rest: AppendCoalesceArg<ValAst>,
+{
+    type Output = CoalesceArg<HVal, Rest::Output>;
+    fn append_coalesce_arg(self, value: ValAst) -> Self::Output {
+        CoalesceArg {
+            value: self.value,
+            rest: self.rest.append_coalesce_arg(value),
+        }
+    }
+}
+
+/// Runtime params of the argument list, concatenated in order.
+#[doc(hidden)]
+pub trait CoalesceArgsParams {
+    type Params: crate::HList;
+}
+impl CoalesceArgsParams for CoalesceNil {
+    type Params = crate::HNil;
+}
+impl<ValAst, Rest> CoalesceArgsParams for CoalesceArg<ValAst, Rest>
+where
+    ValAst: ExprAst,
+    Rest: CoalesceArgsParams,
+    ValAst::Params: crate::HAppend<Rest::Params>,
+{
+    type Params = <ValAst::Params as crate::HAppend<Rest::Params>>::Output;
+}
+
+/// Whether *every* argument is a bare literal/param ([`ExprAst::NEEDS_CAST_ANCHOR`]). When true the
+/// `COALESCE` has no typed operand to anchor the result type, so the arguments are cast; when false a
+/// typed column/expression anchors them and they are left uncast (preserving its type/collation).
+#[doc(hidden)]
+pub trait CoalesceArgsAnchor {
+    const ALL_NEED_CAST_ANCHOR: bool;
+}
+impl CoalesceArgsAnchor for CoalesceNil {
+    const ALL_NEED_CAST_ANCHOR: bool = true;
+}
+impl<ValAst, Rest> CoalesceArgsAnchor for CoalesceArg<ValAst, Rest>
+where
+    ValAst: ExprAst,
+    Rest: CoalesceArgsAnchor,
+{
+    const ALL_NEED_CAST_ANCHOR: bool = ValAst::NEEDS_CAST_ANCHOR && Rest::ALL_NEED_CAST_ANCHOR;
+}
+
+/// Every argument is aggregate-free — so the `COALESCE` may be used in `WHERE`.
+#[doc(hidden)]
+pub trait CoalesceArgsNonAggregate {}
+impl CoalesceArgsNonAggregate for CoalesceNil {}
+impl<ValAst, Rest> CoalesceArgsNonAggregate for CoalesceArg<ValAst, Rest>
+where
+    ValAst: NonAggregateAst,
+    Rest: CoalesceArgsNonAggregate,
+{
+}
+
+/// Every argument is window-free — so the `COALESCE` may be used in `RETURNING`.
+#[doc(hidden)]
+pub trait CoalesceArgsNonWindow {}
+impl CoalesceArgsNonWindow for CoalesceNil {}
+impl<ValAst, Rest> CoalesceArgsNonWindow for CoalesceArg<ValAst, Rest>
+where
+    ValAst: NonWindowAst,
+    Rest: CoalesceArgsNonWindow,
+{
+}
+
+/// Folds the arguments' [terms](ConstantTerm) via [`CombineTerm`] (constant identity at the tail).
+#[doc(hidden)]
+pub trait CoalesceArgsTerm {
+    type Term;
+}
+impl CoalesceArgsTerm for CoalesceNil {
+    type Term = ConstantTerm;
+}
+impl<ValAst, Rest> CoalesceArgsTerm for CoalesceArg<ValAst, Rest>
+where
+    ValAst: AstProjectionClass,
+    Rest: CoalesceArgsTerm,
+    <ValAst as AstProjectionClass>::Class: CombineTerm<Rest::Term>,
+{
+    type Term = <<ValAst as AstProjectionClass>::Class as CombineTerm<Rest::Term>>::Output;
+}
+
+/// Folds the arguments' columns via [`CombineColumns`] (for `HAVING` validity).
+#[doc(hidden)]
+pub trait CoalesceArgsColumns {
+    type Columns;
+}
+impl CoalesceArgsColumns for CoalesceNil {
+    type Columns = ColumnFree;
+}
+impl<ValAst, Rest> CoalesceArgsColumns for CoalesceArg<ValAst, Rest>
+where
+    ValAst: ExprColumns,
+    Rest: CoalesceArgsColumns,
+    <ValAst as ExprColumns>::Columns: CombineColumns<Rest::Columns>,
+{
+    type Columns = <<ValAst as ExprColumns>::Columns as CombineColumns<Rest::Columns>>::Output;
+}
+
+/// Backend-parameterized rendering of the argument list: each argument is cast to the result type
+/// (so an all-parameter argument stays typeable) and separated by `, ` via
+/// [`ExprVisitor::visit_coalesce_separator`].
+#[doc(hidden)]
+pub trait RenderCoalesceArgs<B>: CoalesceArgsParams
+where
+    B: crate::Backend,
+{
+    /// Number of arguments (lets a structural visitor like the view IR collect the right node count).
+    const LEN: usize;
+
+    fn render<V>(
+        &self,
+        visitor: &mut V,
+        cast: Option<&crate::SqlType>,
+        first: bool,
+    ) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>;
+}
+impl<B> RenderCoalesceArgs<B> for CoalesceNil
+where
+    B: crate::Backend,
+{
+    const LEN: usize = 0;
+    fn render<V>(
+        &self,
+        _visitor: &mut V,
+        _cast: Option<&crate::SqlType>,
+        _first: bool,
+    ) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        Ok(())
+    }
+}
+impl<ValAst, Rest, B> RenderCoalesceArgs<B> for CoalesceArg<ValAst, Rest>
+where
+    ValAst: RenderAst<B>,
+    Rest: RenderCoalesceArgs<B>,
+    ValAst::Params: crate::HAppend<Rest::Params>,
+    B: crate::Backend,
+{
+    const LEN: usize = 1 + Rest::LEN;
+    fn render<V>(
+        &self,
+        visitor: &mut V,
+        cast: Option<&crate::SqlType>,
+        first: bool,
+    ) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        if !first {
+            visitor.visit_coalesce_separator()?;
+        }
+        // `cast` is `Some` only when *every* argument is a bare literal/param (decided in
+        // `visit_coalesce` via `CoalesceArgsAnchor`); otherwise a typed column/expression anchors the
+        // result type and nothing is cast, preserving its type/collation (e.g. a `citext`/`decimal`
+        // column).
+        visitor.visit_case_value_open(cast)?;
+        self.value.visit(visitor)?;
+        visitor.visit_case_value_close(cast)?;
+        self.rest.render(visitor, cast, false)
+    }
+}
+
+/// Type-level AND over [`CaseNull`]: folds a new argument's nullability into the accumulated one for
+/// `COALESCE`. `CaseMaybeNull` is the identity and `CaseNonNull` is absorbing — so the result is
+/// non-null once *any* argument is non-null (`COALESCE` returns the first non-`NULL` argument).
+#[doc(hidden)]
+pub trait CaseNullAnd<Rhs: CaseNull>: CaseNull {
+    type Output: CaseNull;
+}
+impl CaseNullAnd<CaseMaybeNull> for CaseMaybeNull {
+    type Output = CaseMaybeNull;
+}
+impl CaseNullAnd<CaseNonNull> for CaseMaybeNull {
+    type Output = CaseNonNull;
+}
+impl CaseNullAnd<CaseMaybeNull> for CaseNonNull {
+    type Output = CaseNonNull;
+}
+impl CaseNullAnd<CaseNonNull> for CaseNonNull {
+    type Output = CaseNonNull;
+}
+
+/// `COALESCE(a, b, …)` value expression. `result` casts each argument to `T`'s SQL type (per-argument,
+/// like `CASE` branches) so an all-parameter `COALESCE` stays typeable for the database.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct CoalesceExprAst<Args> {
+    args: Args,
+    result: Option<crate::SqlType>,
+}
+
+impl<Args> ExprAst for CoalesceExprAst<Args>
+where
+    Args: CoalesceArgsParams + Clone,
+{
+    type Params = Args::Params;
+}
+
+impl<Args, B> RenderAst<B> for CoalesceExprAst<Args>
+where
+    Args: RenderCoalesceArgs<B> + CoalesceArgsAnchor + Clone,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_coalesce(&self.args, Args::ALL_NEED_CAST_ANCHOR, self.result.as_ref())
+    }
+}
+
+impl<Args> NonAggregateAst for CoalesceExprAst<Args> where Args: CoalesceArgsNonAggregate {}
+impl<Args> NonWindowAst for CoalesceExprAst<Args> where Args: CoalesceArgsNonWindow {}
+impl<Args> AstProjectionClass for CoalesceExprAst<Args>
+where
+    Args: CoalesceArgsTerm,
+{
+    type Class = <Args as CoalesceArgsTerm>::Term;
+}
+impl<Args> ExprColumns for CoalesceExprAst<Args>
+where
+    Args: CoalesceArgsColumns,
+{
+    type Columns = <Args as CoalesceArgsColumns>::Columns;
+}
+
+/// Builder for a [`COALESCE`](coalesce) expression. Seeded with the first argument; add more with
+/// [`or_else`](Self::or_else); finish with [`end`](Self::end).
+pub struct CoalesceBuilder<'scope, T, Args, Null = CaseMaybeNull> {
+    args: Args,
+    _marker: PhantomData<(&'scope (), T, Null)>,
+}
+
+/// Start a `COALESCE(a, b, …)` expression with its first argument. `COALESCE` returns the first
+/// non-`NULL` argument, so the result is non-null once any argument is non-null (its nullability is
+/// the **AND** of the arguments' nullability — see [`CaseNullAnd`]). Every argument shares value type
+/// `T` (each argument's non-null [`KindNullability::Value`], so nullable columns / `scalar_subquery`
+/// work).
+pub fn coalesce<'scope, T, E>(
+    first: E,
+) -> CoalesceBuilder<
+    'scope,
+    T,
+    CoalesceArg<E::Ast, CoalesceNil>,
+    <E::Kind as KindNullability>::Nullable,
+>
+where
+    E: IntoExpr<'scope>,
+    E::Kind: KindNullability<Value = T>,
+{
+    CoalesceBuilder {
+        args: CoalesceArg {
+            value: first.into_expr().ast,
+            rest: CoalesceNil,
+        },
+        _marker: PhantomData,
+    }
+}
+
+impl<'scope, T, Args, Null> CoalesceBuilder<'scope, T, Args, Null> {
+    /// Add another fallback argument. Its (non-null inner) value type must be `T`; its nullability is
+    /// AND-folded into the result's (so the result is non-null once any argument is non-null).
+    pub fn or_else<E>(
+        self,
+        value: E,
+    ) -> CoalesceBuilder<
+        'scope,
+        T,
+        Args::Output,
+        <Null as CaseNullAnd<<E::Kind as KindNullability>::Nullable>>::Output,
+    >
+    where
+        E: IntoExpr<'scope>,
+        E::Kind: KindNullability<Value = T>,
+        Null: CaseNullAnd<<E::Kind as KindNullability>::Nullable>,
+        Args: AppendCoalesceArg<E::Ast>,
+    {
+        CoalesceBuilder {
+            args: self.args.append_coalesce_arg(value.into_expr().ast),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Finish the `COALESCE`. The result type is `T` when any argument is non-null, else `Option<T>`.
+    pub fn end(self) -> Expr<'scope, <Null as CaseNull>::Result<T>, CoalesceExprAst<Args>>
+    where
+        T: ExprKind + crate::HasColumnType,
+        Null: CaseNull,
+        CoalesceExprAst<Args>: ExprAst,
+    {
+        Expr {
+            ast: CoalesceExprAst {
+                args: self.args,
+                result: Some(crate::SqlType::from(
+                    <T as crate::HasColumnType>::COLUMN_TYPE,
+                )),
+            },
+            project_alias: Cow::Borrowed("expr"),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+// ===== simple CASE (`CASE <operand> WHEN <value> THEN <result> … END`) =====
+
+/// Empty tail of a simple-`CASE` arm cons-list.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SimpleCaseNil;
+/// One simple-`CASE` arm: a `WHEN <value>` (compared against the operand) and its `THEN <result>`,
+/// plus the rest of the list.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct SimpleCaseWhen<WhenAst, ThenAst, Rest> {
+    when: WhenAst,
+    then: ThenAst,
+    rest: Rest,
+}
+
+impl<WhenAst, ThenAst, Rest> NonEmptyArms for SimpleCaseWhen<WhenAst, ThenAst, Rest> {}
+
+/// Append an arm to the tail of a simple-`CASE` list (so arms render in the order added).
+#[doc(hidden)]
+pub trait AppendSimpleArm<WhenAst, ThenAst> {
+    type Output;
+    fn append_simple_arm(self, when: WhenAst, then: ThenAst) -> Self::Output;
+}
+impl<WhenAst, ThenAst> AppendSimpleArm<WhenAst, ThenAst> for SimpleCaseNil {
+    type Output = SimpleCaseWhen<WhenAst, ThenAst, SimpleCaseNil>;
+    fn append_simple_arm(self, when: WhenAst, then: ThenAst) -> Self::Output {
+        SimpleCaseWhen {
+            when,
+            then,
+            rest: SimpleCaseNil,
+        }
+    }
+}
+impl<WhenAst, ThenAst, HWhen, HThen, Rest> AppendSimpleArm<WhenAst, ThenAst>
+    for SimpleCaseWhen<HWhen, HThen, Rest>
+where
+    Rest: AppendSimpleArm<WhenAst, ThenAst>,
+{
+    type Output = SimpleCaseWhen<HWhen, HThen, Rest::Output>;
+    fn append_simple_arm(self, when: WhenAst, then: ThenAst) -> Self::Output {
+        SimpleCaseWhen {
+            when: self.when,
+            then: self.then,
+            rest: self.rest.append_simple_arm(when, then),
+        }
+    }
+}
+
+/// Runtime params of the simple-`CASE` arm list, `WHEN`-params ++ `THEN`-params per arm, in order.
+#[doc(hidden)]
+pub trait SimpleCaseArmsParams {
+    type Params: crate::HList;
+}
+impl SimpleCaseArmsParams for SimpleCaseNil {
+    type Params = crate::HNil;
+}
+impl<WhenAst, ThenAst, Rest> SimpleCaseArmsParams for SimpleCaseWhen<WhenAst, ThenAst, Rest>
+where
+    WhenAst: ExprAst,
+    ThenAst: ExprAst,
+    Rest: SimpleCaseArmsParams,
+    WhenAst::Params: crate::HAppend<ThenAst::Params>,
+    <WhenAst::Params as crate::HAppend<ThenAst::Params>>::Output: crate::HAppend<Rest::Params>,
+{
+    type Params =
+        <<WhenAst::Params as crate::HAppend<ThenAst::Params>>::Output as crate::HAppend<
+            Rest::Params,
+        >>::Output;
+}
+
+/// Whether every `WHEN` value is a bare literal/param ([`ExprAst::NEEDS_CAST_ANCHOR`]). Combined with
+/// the operand's own anchor flag, this decides whether to cast the operand: only when neither the
+/// operand nor any `WHEN` value is a typed column that could anchor the comparison type.
+#[doc(hidden)]
+pub trait SimpleCaseArmsAnchor {
+    const ALL_WHEN_NEED_CAST_ANCHOR: bool;
+}
+impl SimpleCaseArmsAnchor for SimpleCaseNil {
+    const ALL_WHEN_NEED_CAST_ANCHOR: bool = true;
+}
+impl<WhenAst, ThenAst, Rest> SimpleCaseArmsAnchor for SimpleCaseWhen<WhenAst, ThenAst, Rest>
+where
+    WhenAst: ExprAst,
+    Rest: SimpleCaseArmsAnchor,
+{
+    const ALL_WHEN_NEED_CAST_ANCHOR: bool =
+        WhenAst::NEEDS_CAST_ANCHOR && Rest::ALL_WHEN_NEED_CAST_ANCHOR;
+}
+
+/// All arm `WHEN` and `THEN` values are aggregate-free.
+#[doc(hidden)]
+pub trait SimpleCaseArmsNonAggregate {}
+impl SimpleCaseArmsNonAggregate for SimpleCaseNil {}
+impl<WhenAst, ThenAst, Rest> SimpleCaseArmsNonAggregate for SimpleCaseWhen<WhenAst, ThenAst, Rest>
+where
+    WhenAst: NonAggregateAst,
+    ThenAst: NonAggregateAst,
+    Rest: SimpleCaseArmsNonAggregate,
+{
+}
+
+/// All arm `WHEN` and `THEN` values are window-free.
+#[doc(hidden)]
+pub trait SimpleCaseArmsNonWindow {}
+impl SimpleCaseArmsNonWindow for SimpleCaseNil {}
+impl<WhenAst, ThenAst, Rest> SimpleCaseArmsNonWindow for SimpleCaseWhen<WhenAst, ThenAst, Rest>
+where
+    WhenAst: NonWindowAst,
+    ThenAst: NonWindowAst,
+    Rest: SimpleCaseArmsNonWindow,
+{
+}
+
+/// Folds each arm's `WHEN` and `THEN` [terms](ConstantTerm) via [`CombineTerm`].
+#[doc(hidden)]
+pub trait SimpleCaseArmsTerm {
+    type Term;
+}
+impl SimpleCaseArmsTerm for SimpleCaseNil {
+    type Term = ConstantTerm;
+}
+impl<WhenAst, ThenAst, Rest> SimpleCaseArmsTerm for SimpleCaseWhen<WhenAst, ThenAst, Rest>
+where
+    WhenAst: AstProjectionClass,
+    ThenAst: AstProjectionClass,
+    Rest: SimpleCaseArmsTerm,
+    <WhenAst as AstProjectionClass>::Class: CombineTerm<<ThenAst as AstProjectionClass>::Class>,
+    <<WhenAst as AstProjectionClass>::Class as CombineTerm<
+        <ThenAst as AstProjectionClass>::Class,
+    >>::Output: CombineTerm<Rest::Term>,
+{
+    type Term = <<<WhenAst as AstProjectionClass>::Class as CombineTerm<
+        <ThenAst as AstProjectionClass>::Class,
+    >>::Output as CombineTerm<Rest::Term>>::Output;
+}
+
+/// Folds each arm's `WHEN` and `THEN` columns via [`CombineColumns`].
+#[doc(hidden)]
+pub trait SimpleCaseArmsColumns {
+    type Columns;
+}
+impl SimpleCaseArmsColumns for SimpleCaseNil {
+    type Columns = ColumnFree;
+}
+impl<WhenAst, ThenAst, Rest> SimpleCaseArmsColumns for SimpleCaseWhen<WhenAst, ThenAst, Rest>
+where
+    WhenAst: ExprColumns,
+    ThenAst: ExprColumns,
+    Rest: SimpleCaseArmsColumns,
+    <WhenAst as ExprColumns>::Columns: CombineColumns<<ThenAst as ExprColumns>::Columns>,
+    <<WhenAst as ExprColumns>::Columns as CombineColumns<<ThenAst as ExprColumns>::Columns>>::Output:
+        CombineColumns<Rest::Columns>,
+{
+    type Columns = <<<WhenAst as ExprColumns>::Columns as CombineColumns<
+        <ThenAst as ExprColumns>::Columns,
+    >>::Output as CombineColumns<Rest::Columns>>::Output;
+}
+
+/// Backend-parameterized rendering of the simple-`CASE` arm list: emits each `WHEN <value> THEN
+/// <result>` (the `THEN` cast to the result type). The `WHEN` is a value (not a predicate), so this
+/// only needs an [`ExprVisitor`].
+#[doc(hidden)]
+pub trait RenderSimpleCaseArms<B>: SimpleCaseArmsParams
+where
+    B: crate::Backend,
+{
+    const LEN: usize;
+    fn render<V>(&self, visitor: &mut V, cast: Option<&crate::SqlType>) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>;
+}
+impl<B> RenderSimpleCaseArms<B> for SimpleCaseNil
+where
+    B: crate::Backend,
+{
+    const LEN: usize = 0;
+    fn render<V>(&self, _visitor: &mut V, _cast: Option<&crate::SqlType>) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        Ok(())
+    }
+}
+impl<WhenAst, ThenAst, Rest, B> RenderSimpleCaseArms<B> for SimpleCaseWhen<WhenAst, ThenAst, Rest>
+where
+    WhenAst: RenderAst<B>,
+    ThenAst: RenderAst<B>,
+    Rest: RenderSimpleCaseArms<B>,
+    WhenAst::Params: crate::HAppend<ThenAst::Params>,
+    <WhenAst::Params as crate::HAppend<ThenAst::Params>>::Output: crate::HAppend<Rest::Params>,
+    B: crate::Backend,
+{
+    const LEN: usize = 1 + Rest::LEN;
+    fn render<V>(&self, visitor: &mut V, cast: Option<&crate::SqlType>) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_case_when()?;
+        self.when.visit(visitor)?;
+        visitor.visit_case_then()?;
+        visitor.visit_case_value_open(cast)?;
+        self.then.visit(visitor)?;
+        visitor.visit_case_value_close(cast)?;
+        self.rest.render(visitor, cast)
+    }
+}
+
+/// A simple `CASE <operand> WHEN <value> THEN <result> … [ELSE …] END` value expression. `cmp` is the
+/// operand/`WHEN` comparison type (used to cast an all-parameter operand); `result` is the
+/// `THEN`/`ELSE` value type.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct SimpleCaseExprAst<Operand, Arms, Else> {
+    operand: Operand,
+    arms: Arms,
+    else_ast: Option<Else>,
+    cmp: Option<crate::SqlType>,
+    result: Option<crate::SqlType>,
+}
+
+impl<Operand, Arms, Else> ExprAst for SimpleCaseExprAst<Operand, Arms, Else>
+where
+    Operand: ExprAst,
+    Arms: SimpleCaseArmsParams + Clone,
+    Else: ExprAst,
+    Operand::Params: crate::HAppend<Arms::Params>,
+    <Operand::Params as crate::HAppend<Arms::Params>>::Output: crate::HAppend<Else::Params>,
+{
+    type Params = <<Operand::Params as crate::HAppend<Arms::Params>>::Output as crate::HAppend<
+        Else::Params,
+    >>::Output;
+}
+
+impl<Operand, Arms, Else, B> RenderAst<B> for SimpleCaseExprAst<Operand, Arms, Else>
+where
+    Operand: RenderAst<B>,
+    Arms: RenderSimpleCaseArms<B> + SimpleCaseArmsAnchor + Clone,
+    Else: RenderAst<B>,
+    Operand::Params: crate::HAppend<Arms::Params>,
+    <Operand::Params as crate::HAppend<Arms::Params>>::Output: crate::HAppend<Else::Params>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        // Cast the operand only when neither it nor any `WHEN` value is a typed column that could
+        // anchor the comparison type (i.e. all are bare literals/params).
+        let operand_needs_cast = Operand::NEEDS_CAST_ANCHOR && Arms::ALL_WHEN_NEED_CAST_ANCHOR;
+        visitor.visit_simple_case(
+            |visitor| self.operand.visit(visitor),
+            operand_needs_cast,
+            self.cmp.as_ref(),
+            &self.arms,
+            self.else_ast.as_ref(),
+            self.result.as_ref(),
+        )
+    }
+}
+
+impl<Operand, Arms, Else> NonAggregateAst for SimpleCaseExprAst<Operand, Arms, Else>
+where
+    Operand: NonAggregateAst,
+    Arms: SimpleCaseArmsNonAggregate,
+    Else: NonAggregateAst,
+{
+}
+
+impl<Operand, Arms, Else> NonWindowAst for SimpleCaseExprAst<Operand, Arms, Else>
+where
+    Operand: NonWindowAst,
+    Arms: SimpleCaseArmsNonWindow,
+    Else: NonWindowAst,
+{
+}
+
+impl<Operand, Arms, Else> AstProjectionClass for SimpleCaseExprAst<Operand, Arms, Else>
+where
+    Operand: AstProjectionClass,
+    Arms: SimpleCaseArmsTerm,
+    Else: AstProjectionClass,
+    <Operand as AstProjectionClass>::Class: CombineTerm<<Arms as SimpleCaseArmsTerm>::Term>,
+    <<Operand as AstProjectionClass>::Class as CombineTerm<<Arms as SimpleCaseArmsTerm>::Term>>::Output:
+        CombineTerm<<Else as AstProjectionClass>::Class>,
+{
+    type Class = <<<Operand as AstProjectionClass>::Class as CombineTerm<
+        <Arms as SimpleCaseArmsTerm>::Term,
+    >>::Output as CombineTerm<<Else as AstProjectionClass>::Class>>::Output;
+}
+
+impl<Operand, Arms, Else> ExprColumns for SimpleCaseExprAst<Operand, Arms, Else>
+where
+    Operand: ExprColumns,
+    Arms: SimpleCaseArmsColumns,
+    Else: ExprColumns,
+    <Operand as ExprColumns>::Columns: CombineColumns<<Arms as SimpleCaseArmsColumns>::Columns>,
+    <<Operand as ExprColumns>::Columns as CombineColumns<
+        <Arms as SimpleCaseArmsColumns>::Columns,
+    >>::Output: CombineColumns<<Else as ExprColumns>::Columns>,
+{
+    type Columns = <<<Operand as ExprColumns>::Columns as CombineColumns<
+        <Arms as SimpleCaseArmsColumns>::Columns,
+    >>::Output as CombineColumns<<Else as ExprColumns>::Columns>>::Output;
+}
+
+/// Builder for a simple [`CASE`](case_of) expression (`CASE <operand> WHEN <value> THEN <result> …`).
+/// `Cmp` is the operand/`WHEN`-value type; `T` is the result type.
+pub struct SimpleCaseBuilder<'scope, Cmp, T, OperandAst, Arms, Null = CaseNonNull> {
+    operand: OperandAst,
+    arms: Arms,
+    _marker: PhantomData<(&'scope (), Cmp, T, Null)>,
+}
+
+/// Start a simple `CASE <operand> WHEN <value> THEN <result> … [ELSE …] END`. Each `WHEN` value is
+/// compared against `operand` (they share value type `Cmp`); the `THEN`/`ELSE` results share `T`.
+pub fn case_of<'scope, Cmp, T, E>(
+    operand: E,
+) -> SimpleCaseBuilder<'scope, Cmp, T, E::Ast, SimpleCaseNil, CaseNonNull>
+where
+    E: IntoExpr<'scope>,
+    E::Kind: KindNullability<Value = Cmp>,
+{
+    SimpleCaseBuilder {
+        operand: operand.into_expr().ast,
+        arms: SimpleCaseNil,
+        _marker: PhantomData,
+    }
+}
+
+impl<'scope, Cmp, T, OperandAst, Arms, Null>
+    SimpleCaseBuilder<'scope, Cmp, T, OperandAst, Arms, Null>
+{
+    /// Add a `WHEN <value> THEN <result>` arm. `value` is compared against the operand (value type
+    /// `Cmp`); `result` has value type `T`. A nullable `THEN` result makes the `CASE` nullable.
+    pub fn when<V, E>(
+        self,
+        value: V,
+        result: E,
+    ) -> SimpleCaseBuilder<'scope, Cmp, T, OperandAst, Arms::Output, Null::Output>
+    where
+        V: IntoExpr<'scope>,
+        V::Kind: KindNullability<Value = Cmp>,
+        E: IntoExpr<'scope>,
+        E::Kind: KindNullability<Value = T>,
+        Null: CaseNullOr<<E::Kind as KindNullability>::Nullable>,
+        Arms: AppendSimpleArm<V::Ast, E::Ast>,
+    {
+        SimpleCaseBuilder {
+            operand: self.operand,
+            arms: self
+                .arms
+                .append_simple_arm(value.into_expr().ast, result.into_expr().ast),
+            _marker: PhantomData,
+        }
+    }
+}
+
+// `otherwise`/`end` require at least one `WHEN` arm (`Arms: NonEmptyArms`).
+impl<'scope, Cmp, T, OperandAst, Arms, Null>
+    SimpleCaseBuilder<'scope, Cmp, T, OperandAst, Arms, Null>
+{
+    /// Finish with an `ELSE <result>`. The result is `T` unless a branch (a `THEN` or the `ELSE`) is
+    /// nullable, in which case it is `Option<T>`.
+    #[allow(clippy::type_complexity)] // the result kind is a type-level nullability fold
+    pub fn otherwise<E>(
+        self,
+        value: E,
+    ) -> Expr<
+        'scope,
+        <<Null as CaseNullOr<<E::Kind as KindNullability>::Nullable>>::Output as CaseNull>::Result<
+            T,
+        >,
+        SimpleCaseExprAst<OperandAst, Arms, E::Ast>,
+    >
+    where
+        Arms: NonEmptyArms,
+        Cmp: crate::HasColumnType,
+        T: ExprKind + crate::HasColumnType,
+        E: IntoExpr<'scope>,
+        E::Kind: KindNullability<Value = T>,
+        Null: CaseNullOr<<E::Kind as KindNullability>::Nullable>,
+        SimpleCaseExprAst<OperandAst, Arms, E::Ast>: ExprAst,
+    {
+        Expr {
+            ast: SimpleCaseExprAst {
+                operand: self.operand,
+                arms: self.arms,
+                else_ast: Some(value.into_expr().ast),
+                cmp: Some(crate::SqlType::from(
+                    <Cmp as crate::HasColumnType>::COLUMN_TYPE,
+                )),
+                result: Some(crate::SqlType::from(
+                    <T as crate::HasColumnType>::COLUMN_TYPE,
+                )),
+            },
+            project_alias: Cow::Borrowed("expr"),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Finish without an `ELSE`. An unmatched row yields SQL `NULL`, so the result is nullable.
+    pub fn end(self) -> Expr<'scope, ScalarNullable<T>, SimpleCaseExprAst<OperandAst, Arms, NoElse>>
+    where
+        Arms: NonEmptyArms,
+        Cmp: crate::HasColumnType,
+        T: ExprKind + crate::HasColumnType,
+        SimpleCaseExprAst<OperandAst, Arms, NoElse>: ExprAst,
+    {
+        Expr {
+            ast: SimpleCaseExprAst {
+                operand: self.operand,
+                arms: self.arms,
+                else_ast: None,
+                cmp: Some(crate::SqlType::from(
+                    <Cmp as crate::HasColumnType>::COLUMN_TYPE,
+                )),
                 result: Some(crate::SqlType::from(
                     <T as crate::HasColumnType>::COLUMN_TYPE,
                 )),
@@ -2165,6 +3049,58 @@ pub trait ExprVisitor {
     where
         L: FnOnce(&mut Self) -> Result<(), Self::Error>,
         R: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render `NULLIF(<left>, <right>)`. An operand is cast to `result` only when its `*_needs_cast`
+    /// flag is set — true for a bare literal/param that has no inherent type, false for a column or
+    /// computed expression (casting those would change `NULLIF`'s equality semantics, e.g. a `citext`
+    /// column). A typed operand anchors the other side's type.
+    fn visit_nullif<L, R>(
+        &mut self,
+        left: L,
+        left_needs_cast: bool,
+        right: R,
+        right_needs_cast: bool,
+        result: Option<&crate::SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render `COALESCE(<a>, <b>, …)`. The arguments are cast to `result` only when
+    /// `all_args_need_cast` is set — i.e. every argument is a bare literal/param, so there is no typed
+    /// operand to anchor the result type. Otherwise a typed column/expression anchors them and none are
+    /// cast. `args` renders each argument (separated by
+    /// [`visit_coalesce_separator`](Self::visit_coalesce_separator)).
+    fn visit_coalesce<Args>(
+        &mut self,
+        args: &Args,
+        all_args_need_cast: bool,
+        result: Option<&crate::SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        Args: RenderCoalesceArgs<Self::Backend>;
+
+    /// Emit the `, ` between `COALESCE` arguments.
+    fn visit_coalesce_separator(&mut self) -> Result<(), Self::Error>;
+
+    /// Render a simple `CASE <operand> WHEN <value> THEN <result> … [ELSE …] END`. `operand` renders
+    /// the operand, cast to `cmp` (the comparison type) only when `operand_needs_cast` is set (a bare
+    /// literal/param — never a column). `arms` renders each `WHEN`/`THEN` pair (reusing
+    /// [`visit_case_when`](Self::visit_case_when)/[`visit_case_then`](Self::visit_case_then) and the
+    /// per-branch cast hooks for the `THEN` result); `else_` is the optional `ELSE` value.
+    fn visit_simple_case<Operand, Arms, Else>(
+        &mut self,
+        operand: Operand,
+        operand_needs_cast: bool,
+        cmp: Option<&crate::SqlType>,
+        arms: &Arms,
+        else_: Option<&Else>,
+        result: Option<&crate::SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        Operand: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Arms: RenderSimpleCaseArms<Self::Backend>,
+        Else: RenderAst<Self::Backend>;
 
     /// Render a SQL aggregate function call (`func(operand)`), optionally wrapped in a
     /// `CAST(... AS cast)` so the result type matches the advertised Rust type.

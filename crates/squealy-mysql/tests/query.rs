@@ -281,3 +281,45 @@ fn mysql_case_when_renders_in_its_dialect() {
         "{sql}"
     );
 }
+
+#[test]
+fn mysql_coalesce_nullif_simple_case_render_in_its_dialect() {
+    let coalesce_q = Mysql
+        .from::<Widget>()
+        .select(|(widget,)| coalesce(widget.id).or_else(0).end());
+    let sql = coalesce_q.to_sql();
+    // A typed column anchors the type, so the literal sibling is not cast.
+    assert!(sql.contains("COALESCE(q0_0.`id`, ?)"), "{sql}");
+
+    // An all-parameter COALESCE casts every argument so it stays typeable.
+    let coalesce_lits = Mysql
+        .from::<Widget>()
+        .select(|(_w,)| coalesce(1).or_else(2).end());
+    assert!(
+        coalesce_lits.to_sql().contains("COALESCE(CAST(? AS ")
+            && coalesce_lits.to_sql().contains("), CAST(?"),
+        "{}",
+        coalesce_lits.to_sql()
+    );
+
+    let nullif_q = Mysql
+        .from::<Widget>()
+        .select(|(widget,)| nullif(widget.id, 0));
+    // A typed column anchors the type, so the literal sibling is not cast.
+    assert!(
+        nullif_q.to_sql().contains("NULLIF(q0_0.`id`, ?)"),
+        "{}",
+        nullif_q.to_sql()
+    );
+
+    let simple_q = Mysql
+        .from::<Widget>()
+        .select(|(widget,)| case_of(widget.id).when(1, 10).otherwise(0));
+    assert!(
+        simple_q
+            .to_sql()
+            .contains("CASE q0_0.`id` WHEN ? THEN CAST(? AS "),
+        "{}",
+        simple_q.to_sql()
+    );
+}

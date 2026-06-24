@@ -763,6 +763,51 @@ fn expr_to_node(expr: &ExprNode) -> KdlNode {
             }
             node
         }
+        ExprNode::Nullif {
+            left,
+            right,
+            result,
+        } => {
+            let mut node = KdlNode::new("nullif");
+            if let Some(ty) = result {
+                write_sql_type(&mut node, ty);
+            }
+            push_child(&mut node, expr_to_node(left));
+            push_child(&mut node, expr_to_node(right));
+            node
+        }
+        ExprNode::Coalesce { args, result } => {
+            let mut node = KdlNode::new("coalesce");
+            if let Some(ty) = result {
+                write_sql_type(&mut node, ty);
+            }
+            for arg in args {
+                push_child(&mut node, expr_to_node(arg));
+            }
+            node
+        }
+        ExprNode::SimpleCase {
+            operand,
+            arms,
+            else_,
+            result,
+        } => {
+            let mut node = KdlNode::new("simple-case");
+            if let Some(ty) = result {
+                write_sql_type(&mut node, ty);
+            }
+            push_child(&mut node, wrap_expr("operand", operand));
+            for arm in arms {
+                let mut arm_node = KdlNode::new("arm");
+                push_child(&mut arm_node, wrap_expr("when", &arm.when));
+                push_child(&mut arm_node, wrap_expr("then", &arm.then));
+                push_child(&mut node, arm_node);
+            }
+            if let Some(else_) = else_ {
+                push_child(&mut node, wrap_expr("else", else_));
+            }
+            node
+        }
     }
 }
 
@@ -1358,6 +1403,18 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
             left: nth_expr(0)?,
             right: nth_expr(1)?,
         },
+        "nullif" => ExprNode::Nullif {
+            left: nth_expr(0)?,
+            right: nth_expr(1)?,
+            result: optional_sql_type_from_node(node)?,
+        },
+        "coalesce" => ExprNode::Coalesce {
+            args: children
+                .iter()
+                .map(|child| expr_from_node(child))
+                .collect::<Result<Vec<_>, _>>()?,
+            result: optional_sql_type_from_node(node)?,
+        },
         "cast" => ExprNode::Cast {
             operand: nth_expr(0)?,
             ty: sql_type_from_node(node)?,
@@ -1462,6 +1519,35 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
                 None => None,
             };
             ExprNode::Case {
+                arms,
+                else_,
+                result: optional_sql_type_from_node(node)?,
+            }
+        }
+        "simple-case" => {
+            let operand = child_nodes(node, "operand")
+                .next()
+                .ok_or_else(|| malformed("simple CASE is missing `operand`"))?;
+            let arms = child_nodes(node, "arm")
+                .map(|arm| {
+                    let when = child_nodes(arm, "when")
+                        .next()
+                        .ok_or_else(|| malformed("simple CASE arm is missing `when`"))?;
+                    let then = child_nodes(arm, "then")
+                        .next()
+                        .ok_or_else(|| malformed("simple CASE arm is missing `then`"))?;
+                    Ok::<_, PackageError>(CaseArm {
+                        when: Box::new(first_child_expr(when)?),
+                        then: Box::new(first_child_expr(then)?),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let else_ = match child_nodes(node, "else").next() {
+                Some(else_node) => Some(Box::new(first_child_expr(else_node)?)),
+                None => None,
+            };
+            ExprNode::SimpleCase {
+                operand: Box::new(first_child_expr(operand)?),
                 arms,
                 else_,
                 result: optional_sql_type_from_node(node)?,
@@ -2360,6 +2446,49 @@ mod tests {
         };
         let parsed = expr_from_node(&expr_to_node(&no_else)).expect("no-ELSE CASE round-trips");
         assert_eq!(parsed, no_else);
+    }
+
+    #[test]
+    fn expr_node_coalesce_nullif_simple_case_round_trip_through_kdl() {
+        let col = |c: &str| {
+            Box::new(ExprNode::Column {
+                alias: "q0_0".to_owned(),
+                column: c.to_owned(),
+            })
+        };
+
+        let coalesce = ExprNode::Coalesce {
+            args: vec![*col("a"), *col("b"), ExprNode::Literal("0".to_owned())],
+            result: Some(SqlType::I32),
+        };
+        assert_eq!(
+            expr_from_node(&expr_to_node(&coalesce)).expect("COALESCE round-trips"),
+            coalesce
+        );
+
+        let nullif = ExprNode::Nullif {
+            left: col("a"),
+            right: ExprNode::Literal("0".to_owned()).into(),
+            result: Some(SqlType::I32),
+        };
+        assert_eq!(
+            expr_from_node(&expr_to_node(&nullif)).expect("NULLIF round-trips"),
+            nullif
+        );
+
+        let simple = ExprNode::SimpleCase {
+            operand: col("id"),
+            arms: vec![CaseArm {
+                when: Box::new(ExprNode::Literal("1".to_owned())),
+                then: Box::new(ExprNode::Literal("10".to_owned())),
+            }],
+            else_: Some(Box::new(ExprNode::Literal("0".to_owned()))),
+            result: Some(SqlType::I32),
+        };
+        assert_eq!(
+            expr_from_node(&expr_to_node(&simple)).expect("simple CASE round-trips"),
+            simple
+        );
     }
 
     #[test]

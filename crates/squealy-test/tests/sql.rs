@@ -1944,3 +1944,115 @@ fn test_case_in_returning_clause() {
         "{sql}"
     );
 }
+
+#[test]
+fn test_nullif_renders() {
+    let q = TestConnection
+        .from::<User>()
+        .select(|(user,)| nullif(user.id, 0));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT NULLIF(q0_0.id, ?) AS expr FROM public.users AS q0_0"
+    );
+}
+
+#[test]
+fn test_nullif_result_is_nullable() {
+    // NULLIF can return NULL (when the operands are equal), so its result is nullable — `is_null`
+    // (only on nullable expressions) is callable.
+    let q = TestConnection
+        .from::<User>()
+        .where_(|user| nullif(user.id, 0).is_null())
+        .select(|(user,)| user.id);
+    assert!(
+        q.to_sql().contains("NULLIF(q0_0.id, ?) IS NULL"),
+        "{}",
+        q.to_sql()
+    );
+}
+
+#[test]
+fn test_coalesce_renders() {
+    let q = TestConnection
+        .from::<User>()
+        .select(|(user,)| coalesce(user.id).or_else(0).end());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT COALESCE(q0_0.id, ?) AS expr FROM public.users AS q0_0"
+    );
+}
+
+#[test]
+fn test_coalesce_all_nullable_is_nullable() {
+    // Every argument is nullable (the `label` column), so COALESCE can return NULL -> nullable result
+    // (`is_null` callable).
+    let q = TestConnection
+        .from::<Event>()
+        .where_(|event| coalesce(event.label).or_else(event.label).end().is_null())
+        .select(|(event,)| event.id);
+    assert!(
+        q.to_sql()
+            .contains("COALESCE(q0_0.label, q0_0.label) IS NULL"),
+        "{}",
+        q.to_sql()
+    );
+}
+
+#[test]
+fn test_coalesce_collapses_to_non_null() {
+    // A non-null fallback collapses the result to non-null (a nullable `label` + a non-null literal):
+    // the result is projectable as a non-null `String` (see the compile-fail test
+    // `coalesce_non_null_fallback_is_not_nullable` for the `is_null`-rejected guard).
+    let q = TestConnection
+        .from::<Event>()
+        .select(|(event,)| coalesce(event.label).or_else("default").end());
+    assert_eq!(
+        q.to_sql(),
+        "SELECT COALESCE(q0_0.label, ?) AS expr FROM events AS q0_0"
+    );
+}
+
+#[test]
+fn test_simple_case_renders() {
+    let q = TestConnection.from::<User>().select(|(user,)| {
+        case_of(user.id)
+            .when(1, "one")
+            .when(2, "two")
+            .otherwise("other")
+    });
+    assert_eq!(
+        q.to_sql(),
+        "SELECT CASE q0_0.id WHEN ? THEN ? WHEN ? THEN ? ELSE ? END AS expr \
+         FROM public.users AS q0_0"
+    );
+}
+
+#[test]
+fn test_simple_case_without_else_is_nullable() {
+    // No ELSE: an unmatched operand yields NULL, so the result is nullable (`is_null` callable).
+    let q = TestConnection
+        .from::<User>()
+        .where_(|user| case_of(user.id).when(1, "one").end().is_null())
+        .select(|(user,)| user.id);
+    assert!(
+        q.to_sql()
+            .contains("CASE q0_0.id WHEN ? THEN ? END IS NULL"),
+        "{}",
+        q.to_sql()
+    );
+}
+
+#[test]
+fn test_simple_case_with_nullable_branch_is_nullable() {
+    // A nullable THEN value (the `label` column) makes the simple CASE nullable even with an ELSE.
+    let q = TestConnection
+        .from::<Event>()
+        .where_(|event| {
+            case_of(event.id)
+                .when(1, event.label)
+                .otherwise("x".to_string())
+                .is_null()
+        })
+        .select(|(event,)| event.id);
+    assert!(q.to_sql().contains("IS NULL"), "{}", q.to_sql());
+}
