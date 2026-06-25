@@ -230,7 +230,15 @@ impl_aggregate_scalar!(chrono::DateTime<chrono::Utc>);
 /// Marker for value kinds that are SQL timestamps/dates — the operands `now`/`extract`/`date_trunc`
 /// accept. Implemented (behind the matching feature) for the timestamp value types, mirroring the
 /// `impl_aggregate_scalar!` registrations above.
+///
+/// The `#[diagnostic::on_unimplemented]` gives a stable, feature-independent error (the timestamp
+/// impls are feature-gated, so the default rustc "the following other types implement …" help would
+/// otherwise vary between the default and `--all-features` builds, breaking the compile-fail fixture).
 #[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a timestamp/date type",
+    label = "the operand of `now`/`extract`/`date_trunc` must be a timestamp value (enable the `systemtime`, `time`, or `chrono` feature)"
+)]
 pub trait TimestampKind {}
 #[cfg(feature = "systemtime")]
 impl TimestampKind for std::time::SystemTime {}
