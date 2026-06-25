@@ -1,5 +1,5 @@
 error[E0277]: the trait bound `bool: AggregateScalar` is not satisfied
-  --> tests/compile_fail/min_max_reject_boolean_columns.rs:16:39
+  --> tests/compile_fail/feature_gated/min_max_reject_boolean_columns.rs:16:39
    |
 16 |         .select(|(flag,)| flag.active.min());
    |                                       ^^^ the trait `AggregateScalar` is not implemented for `bool`
@@ -24,7 +24,7 @@ note: required by a bound in `ColumnRef::<'scope, K>::min`
    |                   ^^^^^^^^^^^^^^^ required by this bound in `ColumnRef::<'scope, K>::min`
 
 error[E0277]: the trait bound `Expr<'_, MinExpr<FlagActive>, squealy::AggregateExprAst<squealy::ColumnExprAst<FlagActive>>>: squealy::ReturningProjection<'_>` is not satisfied
-  --> tests/compile_fail/min_max_reject_boolean_columns.rs:16:10
+  --> tests/compile_fail/feature_gated/min_max_reject_boolean_columns.rs:16:10
    |
 16 |         .select(|(flag,)| flag.active.min());
    |          ^^^^^^ unsatisfied trait bound
