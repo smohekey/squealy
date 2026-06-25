@@ -337,3 +337,54 @@ fn lowers_string_functions_to_ir() {
         other => panic!("expected ScalarFn node, got {other:?}"),
     }
 }
+
+#[cfg(feature = "systemtime")]
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Public)]
+struct TimedEvent<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    created: C::Type<'scope, std::time::SystemTime>,
+}
+
+#[cfg(feature = "systemtime")]
+#[test]
+fn lowers_datetime_functions_to_ir() {
+    use std::time::SystemTime;
+    let conn = ModelConn;
+
+    let now_q = conn
+        .from::<TimedEvent>()
+        .project(|(_e,)| now::<SystemTime>());
+    assert!(matches!(
+        &lower_view(&now_q).projection[0].expr,
+        ExprNode::Now
+    ));
+
+    let extract_q = conn
+        .from::<TimedEvent>()
+        .project(|(e,)| extract(DateField::Year, e.created));
+    match &lower_view(&extract_q).projection[0].expr {
+        ExprNode::Extract {
+            field,
+            operand,
+            result,
+        } => {
+            assert_eq!(*field, DateField::Year);
+            assert_eq!(*result, Some(SqlType::I64));
+            assert!(matches!(**operand, ExprNode::Column { .. }));
+        }
+        other => panic!("expected Extract node, got {other:?}"),
+    }
+
+    let trunc_q = conn
+        .from::<TimedEvent>()
+        .project(|(e,)| date_trunc(DateField::Day, e.created));
+    match &lower_view(&trunc_q).projection[0].expr {
+        ExprNode::DateTrunc { unit, operand } => {
+            assert_eq!(*unit, DateField::Day);
+            assert!(matches!(**operand, ExprNode::Column { .. }));
+        }
+        other => panic!("expected DateTrunc node, got {other:?}"),
+    }
+}

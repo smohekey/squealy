@@ -52,6 +52,15 @@ impl_value_projection_shape!(u8, u16, u32, u64, u128, usize);
 impl_value_projection_shape!(f32, f64);
 impl_value_projection_shape!(String, bool);
 
+// Timestamp value kinds — so a bare timestamp expression (`now()`, `date_trunc(...)`) is projectable.
+// (Timestamp *columns* are projected via the table derive; these cover the value-as-kind path.)
+#[cfg(feature = "systemtime")]
+impl_value_projection_shape!(std::time::SystemTime);
+#[cfg(feature = "time")]
+impl_value_projection_shape!(time::OffsetDateTime);
+#[cfg(feature = "chrono")]
+impl_value_projection_shape!(chrono::DateTime<chrono::Utc>);
+
 macro_rules! impl_binary_projection_shape {
     ($($ty:ident),* $(,)?) => {
         $(impl<L, R> ProjectionShape for $ty<L, R>

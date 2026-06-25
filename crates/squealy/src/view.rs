@@ -14,8 +14,8 @@ use std::io::{self, Write};
 use std::marker::PhantomData;
 
 use crate::{
-    AggregateFunc, ArithmeticOp, Backend, CaseArm, ColumnRef, CompareOp, Decode, Encode, Expr,
-    ExprKind, ExprNode, ExprVisitor, InsertableTable, JoinItem, JoinKind, LogicalOp, Order,
+    AggregateFunc, ArithmeticOp, Backend, CaseArm, ColumnRef, CompareOp, DateField, Decode, Encode,
+    Expr, ExprKind, ExprNode, ExprVisitor, InsertableTable, JoinItem, JoinKind, LogicalOp, Order,
     OrderDirection, OrderItem, ParamWriter, Predicate, PredicateAstVisitor, PredicateKind,
     Projectable, ProjectionItem, ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAst,
     RenderCaseArms, RenderCoalesceArgs, RenderPredicateAst, RenderProjectable, RenderSelectAst,
@@ -105,6 +105,9 @@ impl Backend for ModelBackend {
 // against PostgreSQL; deploying it to MySQL — which has no `FULL JOIN` — fails at DDL exec, as noted on
 // `full_join`).
 impl crate::SupportsFullJoin for ModelBackend {}
+// Likewise `date_trunc`: a view carrying it is lowered against the model backend; rendering to MySQL
+// (which has no `date_trunc`) fails at DDL exec, as with a `full_join` view.
+impl crate::SupportsDateTrunc for ModelBackend {}
 
 // ---------------------------------------------------------------------------
 // Literal encoding: every value becomes its SQL-literal text
@@ -516,6 +519,33 @@ impl ExprVisitor for IrBuilder {
             func: ScalarFunc::Substring,
             args: vec![*string, *start, *len],
         });
+        Ok(())
+    }
+
+    fn visit_now(&mut self) -> io::Result<()> {
+        self.stack.push(ExprNode::Now);
+        Ok(())
+    }
+
+    fn visit_extract<O>(&mut self, field: DateField, operand: O, cast: &SqlType) -> io::Result<()>
+    where
+        O: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        let operand = self.child(operand)?;
+        self.stack.push(ExprNode::Extract {
+            field,
+            operand,
+            result: Some(cast.clone()),
+        });
+        Ok(())
+    }
+
+    fn visit_date_trunc<O>(&mut self, unit: DateField, operand: O) -> io::Result<()>
+    where
+        O: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        let operand = self.child(operand)?;
+        self.stack.push(ExprNode::DateTrunc { unit, operand });
         Ok(())
     }
 

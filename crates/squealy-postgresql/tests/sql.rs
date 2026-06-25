@@ -3077,3 +3077,67 @@ fn postgres_string_functions_render() {
         "SELECT (q0_0.\"name\" || $1) AS \"expr\" FROM \"public\".\"users\" AS q0_0"
     );
 }
+
+// ===== date/time functions (feature-gated on the timestamp type) =====
+
+#[cfg(feature = "systemtime")]
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Public)]
+struct TimedEvent<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    created: C::Type<'scope, std::time::SystemTime>,
+    ended: C::Type<'scope, Option<std::time::SystemTime>>,
+}
+
+#[cfg(feature = "systemtime")]
+#[test]
+fn postgres_datetime_functions_render() {
+    use std::time::SystemTime;
+
+    // `now()` -> the standard CURRENT_TIMESTAMP keyword.
+    let now_q = Postgres
+        .from::<TimedEvent>()
+        .select(|(_e,)| now::<SystemTime>());
+    assert_eq!(
+        now_q.to_sql(),
+        "SELECT CURRENT_TIMESTAMP AS \"expr\" FROM \"public\".\"timed_events\" AS q0_0"
+    );
+
+    // `extract` -> EXTRACT wrapped in a CAST to bigint (PG's native EXTRACT type is numeric).
+    let extract_q = Postgres
+        .from::<TimedEvent>()
+        .select(|(e,)| extract(DateField::Year, e.created));
+    assert_eq!(
+        extract_q.to_sql(),
+        "SELECT CAST(EXTRACT(YEAR FROM q0_0.\"created\") AS bigint) AS \"expr\" \
+         FROM \"public\".\"timed_events\" AS q0_0"
+    );
+
+    // `date_trunc` -> the PostgreSQL `date_trunc('unit', ts)` function.
+    let trunc_q = Postgres
+        .from::<TimedEvent>()
+        .select(|(e,)| date_trunc(DateField::Day, e.created));
+    assert_eq!(
+        trunc_q.to_sql(),
+        "SELECT date_trunc('day', q0_0.\"created\") AS \"expr\" \
+         FROM \"public\".\"timed_events\" AS q0_0"
+    );
+}
+
+#[cfg(feature = "systemtime")]
+#[test]
+fn postgres_extract_in_returning() {
+    // `extract` is window-free, so it is valid in a RETURNING projection.
+    let insert = Postgres
+        .to::<TimedEvent>()
+        .created(std::time::SystemTime::UNIX_EPOCH)
+        .insert_returning(|e| extract(DateField::Year, e.created));
+    assert!(
+        insert
+            .to_sql()
+            .contains("RETURNING CAST(EXTRACT(YEAR FROM \"created\") AS bigint) AS \"expr\""),
+        "{}",
+        insert.to_sql()
+    );
+}

@@ -1271,3 +1271,75 @@ async fn postgres_string_functions_round_trip() {
         .expect("fetch substring");
     assert_eq!(prefixes, vec!["Ad".to_owned(), "Gr".to_owned()]);
 }
+
+#[cfg(feature = "systemtime")]
+#[derive(Clone, Debug, PartialEq, Table)]
+struct IntegrationTimed<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    created: C::Type<'scope, std::time::SystemTime>,
+}
+
+#[cfg(feature = "systemtime")]
+#[tokio::test]
+#[ignore]
+async fn postgres_datetime_functions_round_trip() {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS integration_timeds")
+        .await
+        .expect("drop old integration table");
+
+    let ddl_backend = Postgres;
+    create_table::<IntegrationTimed>(&client, &ddl_backend).await;
+
+    // 2021-01-01 12:34:56 UTC and 2022-01-01 12:34:56 UTC (whole seconds round-trip exactly).
+    let t1 = UNIX_EPOCH + Duration::from_secs(1_609_504_496);
+    let t2 = UNIX_EPOCH + Duration::from_secs(1_641_040_496);
+    // The same instants truncated to the day (midnight UTC).
+    let day1 = UNIX_EPOCH + Duration::from_secs(1_609_459_200);
+    let day2 = UNIX_EPOCH + Duration::from_secs(1_640_995_200);
+
+    let connection = PostgresConnection::new(client);
+    for ts in [t1, t2] {
+        connection
+            .to::<IntegrationTimed>()
+            .created(ts)
+            .insert()
+            .await
+            .expect("insert timed row");
+    }
+
+    // `extract(YEAR, ...)` -> bigint.
+    let years: Vec<i64> = connection
+        .from::<IntegrationTimed>()
+        .order_by(|(e,)| e.id.asc())
+        .select(|(e,)| extract(DateField::Year, e.created))
+        .collect()
+        .await
+        .expect("fetch extract year");
+    assert_eq!(years, vec![2021, 2022]);
+
+    // `date_trunc('day', ...)` -> the same timestamp type, truncated to midnight.
+    let truncated: Vec<SystemTime> = connection
+        .from::<IntegrationTimed>()
+        .order_by(|(e,)| e.id.asc())
+        .select(|(e,)| date_trunc(DateField::Day, e.created))
+        .collect()
+        .await
+        .expect("fetch date_trunc day");
+    assert_eq!(truncated, vec![day1, day2]);
+
+    // `now()` -> the current transaction timestamp, which is after the inserted rows.
+    let nows: Vec<SystemTime> = connection
+        .from::<IntegrationTimed>()
+        .select(|(_e,)| now::<SystemTime>())
+        .collect()
+        .await
+        .expect("fetch now");
+    assert_eq!(nows.len(), 2);
+    assert!(nows.iter().all(|n| *n > t2), "now() should be after 2022");
+}

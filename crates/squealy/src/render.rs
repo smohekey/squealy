@@ -17,11 +17,11 @@ use std::io::{self, Write};
 
 use crate::{
     AggregateFunc, ArithmeticOp, AssignmentValueVisitor, AssignmentVisitor, Backend, ColumnRef,
-    CompareOp, Dialect, Encode, Expr, ExprKind, ExprVisitor, InsertRow, InsertRowVisitor,
-    InsertableTable, Order, OrderDirection, Predicate, PredicateAstVisitor, PredicateKind,
-    PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAssignment,
-    RenderAst, RenderCaseArms, RenderCoalesceArgs, RenderInsertAssignments, RenderInsertRows,
-    RenderPredicateAst, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
+    CompareOp, DateField, Dialect, Encode, Expr, ExprKind, ExprVisitor, InsertRow,
+    InsertRowVisitor, InsertableTable, Order, OrderDirection, Predicate, PredicateAstVisitor,
+    PredicateKind, PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder,
+    RenderAssignment, RenderAst, RenderCaseArms, RenderCoalesceArgs, RenderInsertAssignments,
+    RenderInsertRows, RenderPredicateAst, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
     RenderSimpleCaseArms, RenderUpdateAssignments, SchemaTable, SelectSink, Selected, SourceAlias,
     SqlType, TableProjection, UnaryStringFunc, UpdateableTable,
 };
@@ -1606,6 +1606,43 @@ where
         self.visit_case_value_open(bound_cast.as_ref())?;
         len(self)?;
         self.visit_case_value_close(bound_cast.as_ref())?;
+        self.writer.write_all(b")")
+    }
+
+    fn visit_now(&mut self) -> Result<(), Self::Error> {
+        self.writer.write_all(b"CURRENT_TIMESTAMP")
+    }
+
+    fn visit_extract<O>(
+        &mut self,
+        field: DateField,
+        operand: O,
+        cast: &SqlType,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        // The native EXTRACT type differs by dialect (PG numeric/double vs MySQL integer), so cast to
+        // a uniform result type.
+        self.writer.write_all(b"CAST(EXTRACT(")?;
+        self.writer.write_all(field.extract_keyword().as_bytes())?;
+        self.writer.write_all(b" FROM ")?;
+        operand(self)?;
+        self.writer.write_all(b") AS ")?;
+        self.renderer
+            .dialect
+            .write_cast_type(cast, &mut *self.writer)?;
+        self.writer.write_all(b")")
+    }
+
+    fn visit_date_trunc<O>(&mut self, unit: DateField, operand: O) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        self.writer.write_all(b"date_trunc('")?;
+        self.writer.write_all(unit.trunc_literal().as_bytes())?;
+        self.writer.write_all(b"', ")?;
+        operand(self)?;
         self.writer.write_all(b")")
     }
 

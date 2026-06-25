@@ -1,0 +1,16 @@
+error[E0277]: the trait bound `i32: squealy::TimestampKind` is not satisfied
+  --> tests/compile_fail/extract_requires_timestamp_operand.rs:23:52
+   |
+23 |         .select(|(user,)| extract(DateField::Year, user.id));
+   |                           -------                  ^^^^^^^ the trait `squealy::TimestampKind` is not implemented for `i32`
+   |                           |
+   |                           required by a bound introduced by this call
+   |
+note: required by a bound in `squealy::extract`
+  --> src/expr.rs
+   |
+   | pub fn extract<'scope, E>(
+   |        ------- required by a bound in this function
+...
+   |     <E::Kind as KindNullability>::Value: TimestampKind,
+   |                                          ^^^^^^^^^^^^^ required by this bound in `extract`

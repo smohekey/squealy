@@ -12,7 +12,7 @@
 
 use crate::{
     AggregateFunc, ArithmeticOp, Column, ColumnDefault, ColumnType, CompareOp, Database,
-    DatabaseSchema, ForeignKey, Index, OrderDirection, Table, WindowFunc,
+    DatabaseSchema, DateField, ForeignKey, Index, OrderDirection, Table, WindowFunc,
 };
 
 /// An owned, backend-neutral model of a whole database.
@@ -724,6 +724,21 @@ pub enum ExprNode {
         func: ScalarFunc,
         args: Vec<ExprNode>,
     },
+    /// `CURRENT_TIMESTAMP`.
+    Now,
+    /// `CAST(EXTRACT(<field> FROM <operand>) AS <result>)` — `result` pins the dialect-divergent
+    /// native `EXTRACT` type to a uniform type.
+    Extract {
+        field: DateField,
+        operand: Box<ExprNode>,
+        result: Option<SqlType>,
+    },
+    /// `date_trunc('<unit>', <operand>)` — PostgreSQL only; a MySQL view carrying it fails at DDL exec
+    /// (like a `full_join` view).
+    DateTrunc {
+        unit: DateField,
+        operand: Box<ExprNode>,
+    },
 }
 
 /// A scalar (string) function for [`ExprNode::ScalarFn`]. `Length` renders as `CHAR_LENGTH`.
@@ -910,6 +925,10 @@ fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>
             for arg in args {
                 collect_expr_sources(arg, sources);
             }
+        }
+        ExprNode::Now => {}
+        ExprNode::Extract { operand, .. } | ExprNode::DateTrunc { operand, .. } => {
+            collect_expr_sources(operand, sources);
         }
     }
 }
