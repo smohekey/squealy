@@ -9,6 +9,11 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+# Native timestamp column support (enables the core feature so `SystemTime` maps to a timestamp
+# column and can be used in the query builder). The in-memory backend needs no Encode/Decode.
+systemtime = ["squealy/systemtime"]
+
 [dependencies]
 futures-core.workspace = true
 squealy.workspace = true

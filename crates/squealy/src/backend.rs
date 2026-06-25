@@ -161,6 +161,12 @@ pub trait SupportsReturning: Backend {}
 /// `RIGHT JOIN` needs no marker — both backends support it.
 pub trait SupportsFullJoin: Backend {}
 
+/// Marker for backends whose dialect supports `date_trunc(unit, ts)` (PostgreSQL). The `date_trunc`
+/// expression's `RenderAst` requires it, so a backend that does not implement it (such as MySQL, which
+/// has no `date_trunc`) rejects `date_trunc` at compile time. (`now`/`extract` need no marker — both
+/// backends support them.)
+pub trait SupportsDateTrunc: Backend {}
+
 /// Backend schema-management capabilities that are supported for full DDL/introspection
 /// round-trips.
 ///

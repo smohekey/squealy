@@ -227,6 +227,26 @@ impl_aggregate_scalar!(time::OffsetDateTime);
 #[cfg(feature = "chrono")]
 impl_aggregate_scalar!(chrono::DateTime<chrono::Utc>);
 
+/// Marker for value kinds that are SQL timestamps/dates — the operands `now`/`extract`/`date_trunc`
+/// accept. Implemented (behind the matching feature) for the timestamp value types, mirroring the
+/// `impl_aggregate_scalar!` registrations above.
+///
+/// The `#[diagnostic::on_unimplemented]` gives a stable, feature-independent error (the timestamp
+/// impls are feature-gated, so the default rustc "the following other types implement …" help would
+/// otherwise vary between the default and `--all-features` builds, breaking the compile-fail fixture).
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a timestamp/date type",
+    label = "the operand of `now`/`extract`/`date_trunc` must be a timestamp value (enable the `systemtime`, `time`, or `chrono` feature)"
+)]
+pub trait TimestampKind {}
+#[cfg(feature = "systemtime")]
+impl TimestampKind for std::time::SystemTime {}
+#[cfg(feature = "time")]
+impl TimestampKind for time::OffsetDateTime {}
+#[cfg(feature = "chrono")]
+impl TimestampKind for chrono::DateTime<chrono::Utc> {}
+
 /// Type-level identity for a SQL expression.
 pub trait ExprKind {
     type Value;
@@ -806,6 +826,402 @@ where
             string: s.into_expr().ast,
             start: start.into_expr().ast,
             len: len.into_expr().ast,
+        },
+        project_alias: Cow::Borrowed("expr"),
+        _phantom: PhantomData,
+    }
+}
+
+// ===== date/time functions =====
+
+/// A date/time field for [`extract`] (rendered as the `EXTRACT` keyword, e.g. `YEAR`) and
+/// [`date_trunc`] (rendered as the quoted unit literal, e.g. `'year'`). Limited to fields that are
+/// integers in both PostgreSQL and MySQL, so the `i64` result is uniform. (`SECOND` is intentionally
+/// excluded: PostgreSQL's `EXTRACT(SECOND …)` is fractional while MySQL's is an integer — tracked for
+/// a later fractional-aware design.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DateField {
+    Year,
+    Month,
+    Day,
+    Hour,
+    Minute,
+}
+
+impl DateField {
+    /// The `EXTRACT(<keyword> FROM …)` field keyword.
+    pub fn extract_keyword(self) -> &'static str {
+        match self {
+            DateField::Year => "YEAR",
+            DateField::Month => "MONTH",
+            DateField::Day => "DAY",
+            DateField::Hour => "HOUR",
+            DateField::Minute => "MINUTE",
+        }
+    }
+
+    /// The `date_trunc('<literal>', …)` unit literal.
+    pub fn trunc_literal(self) -> &'static str {
+        match self {
+            DateField::Year => "year",
+            DateField::Month => "month",
+            DateField::Day => "day",
+            DateField::Hour => "hour",
+            DateField::Minute => "minute",
+        }
+    }
+}
+
+/// `CURRENT_TIMESTAMP` — the current transaction timestamp. Carries the result timestamp type `T` at
+/// the type level only (no operand, no parameters).
+#[doc(hidden)]
+pub struct NowExprAst<T> {
+    _marker: PhantomData<T>,
+}
+
+impl<T> Clone for NowExprAst<T> {
+    fn clone(&self) -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> ExprAst for NowExprAst<T> {
+    type Params = crate::HNil;
+}
+
+impl<T, B> RenderAst<B> for NowExprAst<T>
+where
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_now()
+    }
+}
+
+impl<T> NonAggregateAst for NowExprAst<T> {}
+impl<T> NonWindowAst for NowExprAst<T> {}
+impl<T> AstProjectionClass for NowExprAst<T> {
+    type Class = ConstantTerm;
+}
+impl<T> ExprColumns for NowExprAst<T> {
+    type Columns = ColumnFree;
+}
+
+/// SQL `CURRENT_TIMESTAMP` (both backends), typed as the timestamp value type `T`. Non-null.
+pub fn now<'scope, T>() -> Expr<'scope, T, NowExprAst<T>>
+where
+    T: ExprKind + TimestampKind,
+{
+    Expr {
+        ast: NowExprAst {
+            _marker: PhantomData,
+        },
+        project_alias: Cow::Borrowed("expr"),
+        _phantom: PhantomData,
+    }
+}
+
+/// The SQL type to cast an `extract`/`date_trunc` operand to when it is a bare literal/param (so an
+/// untyped placeholder resolves under PostgreSQL's overloaded `EXTRACT`/`date_trunc`); `None` for a
+/// column operand, which is already typed. Our timestamp value kinds all map to `timestamptz`. The
+/// cast is only *emitted* when the dialect needs it (see `Dialect::timestamp_operand_needs_cast`).
+fn timestamp_operand_cast<A: ExprAst>() -> Option<crate::SqlType> {
+    if A::NEEDS_CAST_ANCHOR {
+        Some(crate::SqlType::Timestamp { tz: true })
+    } else {
+        None
+    }
+}
+
+/// `CAST(EXTRACT(<field> FROM <operand>) AS <cast>)` — a date/time field of a timestamp, cast to a
+/// uniform result type (`bigint`/`SIGNED`) since the native `EXTRACT` type differs by dialect.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ExtractExprAst<Operand> {
+    field: DateField,
+    operand: Operand,
+    cast: crate::SqlType,
+    /// `Some(timestamptz)` when the operand is a bare literal/param (anchors the placeholder type).
+    operand_cast: Option<crate::SqlType>,
+}
+
+impl<Operand> ExprAst for ExtractExprAst<Operand>
+where
+    Operand: ExprAst,
+{
+    type Params = Operand::Params;
+}
+
+impl<Operand, B> RenderAst<B> for ExtractExprAst<Operand>
+where
+    Operand: RenderAst<B>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_extract(
+            self.field,
+            |visitor| self.operand.visit(visitor),
+            &self.cast,
+            None,
+            self.operand_cast.as_ref(),
+        )
+    }
+}
+
+impl<Operand> NonAggregateAst for ExtractExprAst<Operand> where Operand: NonAggregateAst {}
+impl<Operand> NonWindowAst for ExtractExprAst<Operand> where Operand: NonWindowAst {}
+impl<Operand> AstProjectionClass for ExtractExprAst<Operand>
+where
+    Operand: AstProjectionClass,
+{
+    type Class = <Operand as AstProjectionClass>::Class;
+}
+impl<Operand> ExprColumns for ExtractExprAst<Operand>
+where
+    Operand: ExprColumns,
+{
+    type Columns = <Operand as ExprColumns>::Columns;
+}
+
+/// SQL `EXTRACT(<field> FROM <ts>)` — a date/time field of a timestamp. The result is `i64` (the native
+/// type differs by dialect, so it is cast to `bigint`/`SIGNED`), nullable iff `ts` is.
+#[allow(clippy::type_complexity)] // the result kind is a type-level nullability fold
+pub fn extract<'scope, E>(
+    field: DateField,
+    ts: E,
+) -> Expr<
+    'scope,
+    <<E::Kind as KindNullability>::Nullable as CaseNull>::Result<i64>,
+    ExtractExprAst<E::Ast>,
+>
+where
+    E: IntoExpr<'scope>,
+    E::Kind: KindNullability,
+    <E::Kind as KindNullability>::Value: TimestampKind,
+    E::Ast: ExprAst,
+    ExtractExprAst<E::Ast>: ExprAst,
+{
+    Expr {
+        ast: ExtractExprAst {
+            field,
+            operand: ts.into_expr().ast,
+            cast: crate::SqlType::I64,
+            operand_cast: timestamp_operand_cast::<E::Ast>(),
+        },
+        project_alias: Cow::Borrowed("expr"),
+        _phantom: PhantomData,
+    }
+}
+
+/// `CAST(EXTRACT(<field> FROM (<operand> AT TIME ZONE '<tz>')) AS <cast>)` — like [`ExtractExprAst`] but
+/// first converts the operand to an explicit timezone, so the result is independent of the session's
+/// `TimeZone`. PostgreSQL-only (`AT TIME ZONE` syntax); its [`RenderAst`] requires
+/// [`SupportsDateTrunc`](crate::SupportsDateTrunc).
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ExtractAtExprAst<Operand> {
+    field: DateField,
+    operand: Operand,
+    cast: crate::SqlType,
+    timezone: String,
+    /// `Some(timestamptz)` when the operand is a bare literal/param (anchors the placeholder type).
+    operand_cast: Option<crate::SqlType>,
+}
+
+impl<Operand> ExprAst for ExtractAtExprAst<Operand>
+where
+    Operand: ExprAst,
+{
+    type Params = Operand::Params;
+}
+
+impl<Operand, B> RenderAst<B> for ExtractAtExprAst<Operand>
+where
+    Operand: RenderAst<B>,
+    B: crate::Backend + crate::SupportsDateTrunc,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_extract(
+            self.field,
+            |visitor| self.operand.visit(visitor),
+            &self.cast,
+            Some(&self.timezone),
+            self.operand_cast.as_ref(),
+        )
+    }
+}
+
+impl<Operand> NonAggregateAst for ExtractAtExprAst<Operand> where Operand: NonAggregateAst {}
+impl<Operand> NonWindowAst for ExtractAtExprAst<Operand> where Operand: NonWindowAst {}
+impl<Operand> AstProjectionClass for ExtractAtExprAst<Operand>
+where
+    Operand: AstProjectionClass,
+{
+    type Class = <Operand as AstProjectionClass>::Class;
+}
+impl<Operand> ExprColumns for ExtractAtExprAst<Operand>
+where
+    Operand: ExprColumns,
+{
+    type Columns = <Operand as ExprColumns>::Columns;
+}
+
+/// SQL `EXTRACT(<field> FROM (<ts> AT TIME ZONE '<timezone>'))` — like [`extract`] but converts `ts` to
+/// `timezone` first, so the field is independent of the connection's session `TimeZone`. **PostgreSQL
+/// only** (`AT TIME ZONE`; using it against a MySQL connection is a compile error). Pass an IANA zone
+/// name such as `"UTC"`.
+#[allow(clippy::type_complexity)] // the result kind is a type-level nullability fold
+pub fn extract_at<'scope, E>(
+    field: DateField,
+    ts: E,
+    timezone: impl Into<String>,
+) -> Expr<
+    'scope,
+    <<E::Kind as KindNullability>::Nullable as CaseNull>::Result<i64>,
+    ExtractAtExprAst<E::Ast>,
+>
+where
+    E: IntoExpr<'scope>,
+    E::Kind: KindNullability,
+    <E::Kind as KindNullability>::Value: TimestampKind,
+    E::Ast: ExprAst,
+    ExtractAtExprAst<E::Ast>: ExprAst,
+{
+    Expr {
+        ast: ExtractAtExprAst {
+            field,
+            operand: ts.into_expr().ast,
+            cast: crate::SqlType::I64,
+            timezone: timezone.into(),
+            operand_cast: timestamp_operand_cast::<E::Ast>(),
+        },
+        project_alias: Cow::Borrowed("expr"),
+        _phantom: PhantomData,
+    }
+}
+
+/// `date_trunc('<unit>', <operand>)` — truncate a timestamp to a unit. PostgreSQL-only (its
+/// [`RenderAst`] requires [`SupportsDateTrunc`](crate::SupportsDateTrunc)); MySQL has no `date_trunc`.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct DateTruncExprAst<Operand> {
+    unit: DateField,
+    operand: Operand,
+    /// `Some(tz)` truncates the operand at an explicit timezone (`… AT TIME ZONE 'tz'`) so the result
+    /// is independent of the session `TimeZone`; `None` truncates in the session zone.
+    timezone: Option<String>,
+    /// `Some(timestamptz)` when the operand is a bare literal/param (anchors the placeholder type).
+    operand_cast: Option<crate::SqlType>,
+}
+
+impl<Operand> ExprAst for DateTruncExprAst<Operand>
+where
+    Operand: ExprAst,
+{
+    type Params = Operand::Params;
+}
+
+impl<Operand, B> RenderAst<B> for DateTruncExprAst<Operand>
+where
+    Operand: RenderAst<B>,
+    B: crate::Backend + crate::SupportsDateTrunc,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_date_trunc(
+            self.unit,
+            |visitor| self.operand.visit(visitor),
+            self.timezone.as_deref(),
+            self.operand_cast.as_ref(),
+        )
+    }
+}
+
+impl<Operand> NonAggregateAst for DateTruncExprAst<Operand> where Operand: NonAggregateAst {}
+impl<Operand> NonWindowAst for DateTruncExprAst<Operand> where Operand: NonWindowAst {}
+impl<Operand> AstProjectionClass for DateTruncExprAst<Operand>
+where
+    Operand: AstProjectionClass,
+{
+    type Class = <Operand as AstProjectionClass>::Class;
+}
+impl<Operand> ExprColumns for DateTruncExprAst<Operand>
+where
+    Operand: ExprColumns,
+{
+    type Columns = <Operand as ExprColumns>::Columns;
+}
+
+/// SQL `date_trunc('<unit>', <ts>)` — truncate `ts` to `unit`. **PostgreSQL only** (MySQL has no
+/// `date_trunc`, so using this against a MySQL connection is a compile error). The result is the same
+/// timestamp type as `ts`, nullable iff `ts` is.
+#[allow(clippy::type_complexity)] // the result kind is a type-level nullability fold
+pub fn date_trunc<'scope, E, T>(
+    unit: DateField,
+    ts: E,
+) -> Expr<
+    'scope,
+    <<E::Kind as KindNullability>::Nullable as CaseNull>::Result<T>,
+    DateTruncExprAst<E::Ast>,
+>
+where
+    E: IntoExpr<'scope>,
+    E::Kind: KindNullability<Value = T>,
+    T: ExprKind + TimestampKind,
+    E::Ast: ExprAst,
+    DateTruncExprAst<E::Ast>: ExprAst,
+{
+    Expr {
+        ast: DateTruncExprAst {
+            unit,
+            operand: ts.into_expr().ast,
+            timezone: None,
+            operand_cast: timestamp_operand_cast::<E::Ast>(),
+        },
+        project_alias: Cow::Borrowed("expr"),
+        _phantom: PhantomData,
+    }
+}
+
+/// SQL `date_trunc('<unit>', <ts> AT TIME ZONE '<timezone>')` — like [`date_trunc`] but truncates `ts`
+/// at an explicit `timezone`, so the result is independent of the connection's session `TimeZone`.
+/// **PostgreSQL only** (`date_trunc` + `AT TIME ZONE`). Pass an IANA zone name such as `"UTC"`.
+#[allow(clippy::type_complexity)] // the result kind is a type-level nullability fold
+pub fn date_trunc_at<'scope, E, T>(
+    unit: DateField,
+    ts: E,
+    timezone: impl Into<String>,
+) -> Expr<
+    'scope,
+    <<E::Kind as KindNullability>::Nullable as CaseNull>::Result<T>,
+    DateTruncExprAst<E::Ast>,
+>
+where
+    E: IntoExpr<'scope>,
+    E::Kind: KindNullability<Value = T>,
+    T: ExprKind + TimestampKind,
+    E::Ast: ExprAst,
+    DateTruncExprAst<E::Ast>: ExprAst,
+{
+    Expr {
+        ast: DateTruncExprAst {
+            unit,
+            operand: ts.into_expr().ast,
+            timezone: Some(timezone.into()),
+            operand_cast: timestamp_operand_cast::<E::Ast>(),
         },
         project_alias: Cow::Borrowed("expr"),
         _phantom: PhantomData,
@@ -3479,6 +3895,39 @@ pub trait ExprVisitor {
         S: FnOnce(&mut Self) -> Result<(), Self::Error>,
         Start: FnOnce(&mut Self) -> Result<(), Self::Error>,
         Len: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render `CURRENT_TIMESTAMP`.
+    fn visit_now(&mut self) -> Result<(), Self::Error>;
+
+    /// Render `CAST(EXTRACT(<field> FROM <operand>) AS <cast>)` (the native `EXTRACT` type differs by
+    /// dialect, so it is cast to a uniform result type). When `timezone` is `Some(tz)`, the operand is
+    /// first converted with `AT TIME ZONE '<tz>'` (PostgreSQL only). `operand_cast` is `Some(ty)` when
+    /// the operand is a bare literal/param that needs a type anchor (applied per
+    /// [`Dialect::timestamp_operand_needs_cast`](crate::Dialect::timestamp_operand_needs_cast)).
+    fn visit_extract<O>(
+        &mut self,
+        field: DateField,
+        operand: O,
+        cast: &crate::SqlType,
+        timezone: Option<&str>,
+        operand_cast: Option<&crate::SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render `date_trunc('<unit>', <operand>)` (PostgreSQL only — gated by
+    /// [`SupportsDateTrunc`](crate::SupportsDateTrunc) on the expression's `RenderAst`). When `timezone`
+    /// is `Some(tz)`, the operand is first converted with `AT TIME ZONE '<tz>'`. `operand_cast` is
+    /// `Some(ty)` when the operand is a bare literal/param that needs a type anchor.
+    fn visit_date_trunc<O>(
+        &mut self,
+        unit: DateField,
+        operand: O,
+        timezone: Option<&str>,
+        operand_cast: Option<&crate::SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>;
 
     /// Render a SQL aggregate function call (`func(operand)`), optionally wrapped in a
     /// `CAST(... AS cast)` so the result type matches the advertised Rust type.

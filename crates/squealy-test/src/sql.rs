@@ -3,7 +3,7 @@ use std::io::{self, Write};
 
 use squealy::{
     AggregateFunc, ArithmeticOp, AssignmentValueVisitor, AssignmentVisitor, Column, ColumnDefault,
-    ColumnRef, ColumnType, CompareOp, Encode, Expr, ExprKind, ExprVisitor, InsertRow,
+    ColumnRef, ColumnType, CompareOp, DateField, Encode, Expr, ExprKind, ExprVisitor, InsertRow,
     InsertRowVisitor, InsertableTable, Order, OrderDirection, Predicate, PredicateAstVisitor,
     PredicateKind, PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder,
     RenderAssignment, RenderAst, RenderCaseArms, RenderCoalesceArgs, RenderInsertAssignments,
@@ -1220,6 +1220,52 @@ where
         start(self)?;
         self.writer.write_all(b" FOR ")?;
         len(self)?;
+        self.writer.write_all(b")")
+    }
+
+    fn visit_now(&mut self) -> Result<(), Self::Error> {
+        self.writer.write_all(b"CURRENT_TIMESTAMP")
+    }
+
+    fn visit_extract<O>(
+        &mut self,
+        field: DateField,
+        operand: O,
+        _cast: &SqlType,
+        timezone: Option<&str>,
+        _operand_cast: Option<&SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        // Bare EXTRACT (the in-memory test backend ignores the dialect cast, like its aggregates, and
+        // binds by value so it needs no operand type anchor). The timezone-explicit form is
+        // PostgreSQL-only (gated on `SupportsDateTrunc`, which this backend does not implement), so
+        // `timezone` is always `None` here.
+        debug_assert!(timezone.is_none());
+        self.writer.write_all(b"EXTRACT(")?;
+        self.writer.write_all(field.extract_keyword().as_bytes())?;
+        self.writer.write_all(b" FROM ")?;
+        operand(self)?;
+        self.writer.write_all(b")")
+    }
+
+    fn visit_date_trunc<O>(
+        &mut self,
+        unit: DateField,
+        operand: O,
+        _timezone: Option<&str>,
+        _operand_cast: Option<&SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        // The test backend stands in for a MySQL-like dialect (no `SupportsDateTrunc`), so this is
+        // never reached; provided to satisfy the visitor trait.
+        self.writer.write_all(b"date_trunc('")?;
+        self.writer.write_all(unit.trunc_literal().as_bytes())?;
+        self.writer.write_all(b"', ")?;
+        operand(self)?;
         self.writer.write_all(b")")
     }
 

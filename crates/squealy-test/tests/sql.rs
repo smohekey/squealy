@@ -2124,3 +2124,47 @@ fn test_string_function_in_returning() {
         insert.to_sql()
     );
 }
+
+// ===== date/time functions (feature-gated on the timestamp type) =====
+
+#[cfg(feature = "systemtime")]
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Public)]
+struct TimedEvent<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    created: C::Type<'scope, std::time::SystemTime>,
+    ended: C::Type<'scope, Option<std::time::SystemTime>>,
+}
+
+// The in-memory backend can neither bind nor decode a `SystemTime`, so it covers only `extract`
+// (which returns `i64`) over timestamp columns — no projecting/binding of bare timestamps. `now()`,
+// `date_trunc`, and RETURNING are covered on the PostgreSQL backend.
+#[cfg(feature = "systemtime")]
+#[test]
+fn test_extract_renders() {
+    // `extract` renders bare in the test backend (the dialect result cast is dropped, like aggregates).
+    let extract_q = TestConnection
+        .from::<TimedEvent>()
+        .select(|(e,)| extract(DateField::Year, e.created));
+    assert_eq!(
+        extract_q.to_sql(),
+        "SELECT EXTRACT(YEAR FROM q0_0.created) AS expr FROM public.timed_events AS q0_0"
+    );
+}
+
+#[cfg(feature = "systemtime")]
+#[test]
+fn test_extract_of_nullable_column_is_nullable() {
+    // `ended` is nullable, so `extract(... ended)` is nullable — `is_null` (only on nullable
+    // expressions) is callable on it.
+    let q = TestConnection
+        .from::<TimedEvent>()
+        .where_(|e| extract(DateField::Hour, e.ended).is_null())
+        .select(|(e,)| e.id);
+    assert!(
+        q.to_sql().contains("EXTRACT(HOUR FROM q0_0.ended) IS NULL"),
+        "{}",
+        q.to_sql()
+    );
+}

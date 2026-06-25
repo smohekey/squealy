@@ -358,3 +358,31 @@ fn mysql_string_functions_render() {
         cat.to_sql()
     );
 }
+
+// ===== date/time functions (feature-gated on the timestamp type) =====
+
+// MySQL has no SystemTime Encode/Decode, so (like the in-memory backend) it covers `extract` only
+// (returns `i64`); `now()`/`date_trunc` need a decodable bare timestamp. `date_trunc` is also
+// PostgreSQL-only (no `SupportsDateTrunc` for MySQL), so using it here would be a compile error.
+#[cfg(feature = "systemtime")]
+#[derive(Clone, Debug, PartialEq, Table)]
+struct TimedEvent<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    created: C::Type<'scope, std::time::SystemTime>,
+}
+
+#[cfg(feature = "systemtime")]
+#[test]
+fn mysql_extract_renders() {
+    // `extract` -> EXTRACT wrapped in a CAST to SIGNED (MySQL's CAST integer target).
+    let q = Mysql
+        .from::<TimedEvent>()
+        .select(|(e,)| extract(DateField::Year, e.created));
+    assert!(
+        q.to_sql()
+            .contains("CAST(EXTRACT(YEAR FROM q0_0.`created`) AS SIGNED)"),
+        "{}",
+        q.to_sql()
+    );
+}

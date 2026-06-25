@@ -3077,3 +3077,120 @@ fn postgres_string_functions_render() {
         "SELECT (q0_0.\"name\" || $1) AS \"expr\" FROM \"public\".\"users\" AS q0_0"
     );
 }
+
+// ===== date/time functions (feature-gated on the timestamp type) =====
+
+#[cfg(feature = "systemtime")]
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Public)]
+struct TimedEvent<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    created: C::Type<'scope, std::time::SystemTime>,
+    ended: C::Type<'scope, Option<std::time::SystemTime>>,
+}
+
+#[cfg(feature = "systemtime")]
+#[test]
+fn postgres_datetime_functions_render() {
+    use std::time::SystemTime;
+
+    // `now()` -> the standard CURRENT_TIMESTAMP keyword.
+    let now_q = Postgres
+        .from::<TimedEvent>()
+        .select(|(_e,)| now::<SystemTime>());
+    assert_eq!(
+        now_q.to_sql(),
+        "SELECT CURRENT_TIMESTAMP AS \"expr\" FROM \"public\".\"timed_events\" AS q0_0"
+    );
+
+    // `extract` -> EXTRACT wrapped in a CAST to bigint (PG's native EXTRACT type is numeric).
+    let extract_q = Postgres
+        .from::<TimedEvent>()
+        .select(|(e,)| extract(DateField::Year, e.created));
+    assert_eq!(
+        extract_q.to_sql(),
+        "SELECT CAST(EXTRACT(YEAR FROM q0_0.\"created\") AS bigint) AS \"expr\" \
+         FROM \"public\".\"timed_events\" AS q0_0"
+    );
+
+    // `date_trunc` -> the PostgreSQL `date_trunc('unit', ts)` function.
+    let trunc_q = Postgres
+        .from::<TimedEvent>()
+        .select(|(e,)| date_trunc(DateField::Day, e.created));
+    assert_eq!(
+        trunc_q.to_sql(),
+        "SELECT date_trunc('day', q0_0.\"created\") AS \"expr\" \
+         FROM \"public\".\"timed_events\" AS q0_0"
+    );
+
+    // The timezone-explicit variants convert the operand with `AT TIME ZONE` first, so the result is
+    // independent of the session `TimeZone`.
+    let extract_at_q = Postgres
+        .from::<TimedEvent>()
+        .select(|(e,)| extract_at(DateField::Hour, e.created, "UTC"));
+    assert_eq!(
+        extract_at_q.to_sql(),
+        "SELECT CAST(EXTRACT(HOUR FROM (q0_0.\"created\" AT TIME ZONE 'UTC')) AS bigint) AS \"expr\" \
+         FROM \"public\".\"timed_events\" AS q0_0"
+    );
+
+    // `date_trunc_at` uses PostgreSQL's 3-argument `date_trunc('unit', ts, 'tz')` (truncates in the
+    // zone, returns a timestamptz, DST-correct).
+    let trunc_at_q = Postgres
+        .from::<TimedEvent>()
+        .select(|(e,)| date_trunc_at(DateField::Day, e.created, "UTC"));
+    assert_eq!(
+        trunc_at_q.to_sql(),
+        "SELECT date_trunc('day', q0_0.\"created\", 'UTC') \
+         AS \"expr\" FROM \"public\".\"timed_events\" AS q0_0"
+    );
+}
+
+#[cfg(feature = "systemtime")]
+#[test]
+fn postgres_extract_in_returning() {
+    // `extract` is window-free, so it is valid in a RETURNING projection.
+    let insert = Postgres
+        .to::<TimedEvent>()
+        .created(std::time::SystemTime::UNIX_EPOCH)
+        .insert_returning(|e| extract(DateField::Year, e.created));
+    assert!(
+        insert
+            .to_sql()
+            .contains("RETURNING CAST(EXTRACT(YEAR FROM \"created\") AS bigint) AS \"expr\""),
+        "{}",
+        insert.to_sql()
+    );
+}
+
+#[cfg(feature = "systemtime")]
+#[test]
+fn postgres_datetime_literal_operand_is_cast() {
+    use std::time::SystemTime;
+
+    // A bare literal/param operand is an untyped placeholder; PostgreSQL can't resolve the overloaded
+    // EXTRACT/date_trunc without a type anchor, so the operand is cast to its timestamp type. (A column
+    // operand is already typed and is NOT cast — see `postgres_datetime_functions_render`.)
+    let extract_lit = Postgres
+        .from::<TimedEvent>()
+        .select(|(_e,)| extract(DateField::Year, SystemTime::UNIX_EPOCH));
+    assert!(
+        extract_lit
+            .to_sql()
+            .contains("EXTRACT(YEAR FROM CAST($1 AS timestamp with time zone))"),
+        "{}",
+        extract_lit.to_sql()
+    );
+
+    let trunc_lit = Postgres
+        .from::<TimedEvent>()
+        .select(|(_e,)| date_trunc(DateField::Day, SystemTime::UNIX_EPOCH));
+    assert!(
+        trunc_lit
+            .to_sql()
+            .contains("date_trunc('day', CAST($1 AS timestamp with time zone))"),
+        "{}",
+        trunc_lit.to_sql()
+    );
+}
