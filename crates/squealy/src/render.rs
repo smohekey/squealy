@@ -1637,9 +1637,17 @@ where
         // overloaded EXTRACT; a column is already typed (`operand_cast` is `None`).
         let operand_cast =
             operand_cast.filter(|_| self.renderer.dialect.timestamp_operand_needs_cast());
+        // `Second` is the whole-seconds component: PostgreSQL's `EXTRACT(SECOND …)` is fractional, so
+        // floor it to match MySQL's integer value (`FLOOR` is a no-op on MySQL's integer). Use
+        // `extract_second` for the fractional part.
+        let floor = field == DateField::Second;
         // The native EXTRACT type differs by dialect (PG numeric/double vs MySQL integer), so cast to
         // a uniform result type.
-        self.writer.write_all(b"CAST(EXTRACT(")?;
+        self.writer.write_all(b"CAST(")?;
+        if floor {
+            self.writer.write_all(b"FLOOR(")?;
+        }
+        self.writer.write_all(b"EXTRACT(")?;
         self.writer.write_all(field.extract_keyword().as_bytes())?;
         self.writer.write_all(b" FROM ")?;
         match timezone {
@@ -1658,7 +1666,11 @@ where
                 self.visit_case_value_close(operand_cast)?;
             }
         }
-        self.writer.write_all(b") AS ")?;
+        self.writer.write_all(b")")?; // close EXTRACT
+        if floor {
+            self.writer.write_all(b")")?; // close FLOOR
+        }
+        self.writer.write_all(b" AS ")?;
         self.renderer
             .dialect
             .write_cast_type(cast, &mut *self.writer)?;
@@ -1706,6 +1718,41 @@ where
             }
         }
         Ok(())
+    }
+
+    fn visit_extract_second<O>(
+        &mut self,
+        operand: O,
+        cast: &SqlType,
+        operand_cast: Option<&SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        let operand_cast =
+            operand_cast.filter(|_| self.renderer.dialect.timestamp_operand_needs_cast());
+        // PostgreSQL's `EXTRACT(SECOND …)` is fractional; MySQL's is integer-only, so it uses the
+        // composite `SECOND_MICROSECOND` unit (returns `SSffffff`) divided back to fractional seconds.
+        let micro = self.renderer.dialect.extract_second_uses_microsecond_unit();
+        self.writer.write_all(b"CAST(EXTRACT(")?;
+        self.writer.write_all(if micro {
+            b"SECOND_MICROSECOND".as_slice()
+        } else {
+            b"SECOND".as_slice()
+        })?;
+        self.writer.write_all(b" FROM ")?;
+        self.visit_case_value_open(operand_cast)?;
+        operand(self)?;
+        self.visit_case_value_close(operand_cast)?;
+        self.writer.write_all(b")")?; // close EXTRACT
+        if micro {
+            self.writer.write_all(b" / 1000000.0")?;
+        }
+        self.writer.write_all(b" AS ")?;
+        self.renderer
+            .dialect
+            .write_cast_type(cast, &mut *self.writer)?;
+        self.writer.write_all(b")")
     }
 
     fn visit_case_when(&mut self) -> Result<(), Self::Error> {

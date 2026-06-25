@@ -813,6 +813,12 @@ impl squealy::Dialect for MysqlDialect {
         // rather than emitting syntax MySQL rejects.
         Ok(())
     }
+
+    fn extract_second_uses_microsecond_unit(&self) -> bool {
+        // MySQL's `EXTRACT(SECOND …)` is integer-only; use the composite `SECOND_MICROSECOND` unit to
+        // recover the fractional part.
+        true
+    }
 }
 
 fn write_quoted_text(value: &str, writer: &mut impl Write) -> io::Result<()> {

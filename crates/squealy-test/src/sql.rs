@@ -1241,13 +1241,22 @@ where
         // Bare EXTRACT (the in-memory test backend ignores the dialect cast, like its aggregates, and
         // binds by value so it needs no operand type anchor). The timezone-explicit form is
         // PostgreSQL-only (gated on `SupportsDateTrunc`, which this backend does not implement), so
-        // `timezone` is always `None` here.
+        // `timezone` is always `None` here. `Second` is floored to the whole-seconds component (see
+        // the shared renderer).
         debug_assert!(timezone.is_none());
+        let floor = field == DateField::Second;
+        if floor {
+            self.writer.write_all(b"FLOOR(")?;
+        }
         self.writer.write_all(b"EXTRACT(")?;
         self.writer.write_all(field.extract_keyword().as_bytes())?;
         self.writer.write_all(b" FROM ")?;
         operand(self)?;
-        self.writer.write_all(b")")
+        self.writer.write_all(b")")?;
+        if floor {
+            self.writer.write_all(b")")?;
+        }
+        Ok(())
     }
 
     fn visit_date_trunc<O>(
@@ -1267,6 +1276,22 @@ where
         self.writer.write_all(b"', ")?;
         operand(self)?;
         self.writer.write_all(b")")
+    }
+
+    fn visit_extract_second<O>(
+        &mut self,
+        operand: O,
+        _cast: &SqlType,
+        _operand_cast: Option<&SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        // MySQL-like: fractional seconds via the composite `SECOND_MICROSECOND` unit (bare, no cast —
+        // the in-memory backend ignores the dialect cast and binds by value).
+        self.writer.write_all(b"EXTRACT(SECOND_MICROSECOND FROM ")?;
+        operand(self)?;
+        self.writer.write_all(b") / 1000000.0")
     }
 
     fn visit_case_when(&mut self) -> Result<(), Self::Error> {

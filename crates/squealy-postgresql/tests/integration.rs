@@ -1373,4 +1373,30 @@ async fn postgres_datetime_functions_round_trip() {
         .expect("fetch now");
     assert_eq!(nows.len(), 2);
     assert!(nows.iter().all(|n| *n > t2), "now() should be after 2022");
+
+    // Second / sub-second over a fractional instant (2021-01-01 00:00:56.789Z): `extract(Second)` is
+    // the whole-seconds component (`56`), `extract_second` keeps the fraction (`56.789`).
+    let frac = UNIX_EPOCH + Duration::from_secs(1_609_459_256) + Duration::from_millis(789);
+    let whole_seconds: Vec<i64> = connection
+        .from::<IntegrationTimed>()
+        .where_(|e| e.id.equals(1))
+        .select(|(_e,)| extract(DateField::Second, frac))
+        .collect()
+        .await
+        .expect("fetch extract second");
+    assert_eq!(whole_seconds, vec![56]);
+
+    let frac_seconds: Vec<f64> = connection
+        .from::<IntegrationTimed>()
+        .where_(|e| e.id.equals(1))
+        .select(|(_e,)| extract_second(frac))
+        .collect()
+        .await
+        .expect("fetch extract_second");
+    assert_eq!(frac_seconds.len(), 1);
+    assert!(
+        (frac_seconds[0] - 56.789).abs() < 1e-6,
+        "extract_second = {}",
+        frac_seconds[0]
+    );
 }
