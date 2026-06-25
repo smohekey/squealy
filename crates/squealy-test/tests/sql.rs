@@ -2056,3 +2056,71 @@ fn test_simple_case_with_nullable_branch_is_nullable() {
         .select(|(event,)| event.id);
     assert!(q.to_sql().contains("IS NULL"), "{}", q.to_sql());
 }
+
+#[test]
+fn test_string_functions_render() {
+    let lower_q = TestConnection
+        .from::<User>()
+        .select(|(user,)| lower(user.name));
+    assert_eq!(
+        lower_q.to_sql(),
+        "SELECT LOWER(q0_0.name) AS expr FROM public.users AS q0_0"
+    );
+
+    let length_q = TestConnection
+        .from::<User>()
+        .select(|(user,)| length(user.name));
+    assert_eq!(
+        length_q.to_sql(),
+        "SELECT CHAR_LENGTH(q0_0.name) AS expr FROM public.users AS q0_0"
+    );
+
+    // concat chains to nested CONCAT.
+    let concat_q = TestConnection
+        .from::<User>()
+        .select(|(user,)| user.name.concat(" ").concat(user.name));
+    assert_eq!(
+        concat_q.to_sql(),
+        "SELECT CONCAT(CONCAT(q0_0.name, ?), q0_0.name) AS expr FROM public.users AS q0_0"
+    );
+
+    let substring_q = TestConnection
+        .from::<User>()
+        .select(|(user,)| substring(user.name, 1, 3));
+    assert_eq!(
+        substring_q.to_sql(),
+        "SELECT SUBSTRING(q0_0.name FROM ? FOR ?) AS expr FROM public.users AS q0_0"
+    );
+}
+
+#[test]
+fn test_string_function_of_nullable_column_is_nullable() {
+    // `event.label` is nullable, so `lower(label)` is nullable — `is_null` (only on nullable
+    // expressions) is callable on it. (A non-null operand rejects it — see the compile-fail test
+    // `string_fn_result_non_null_when_operand_non_null`.)
+    let q = TestConnection
+        .from::<Event>()
+        .where_(|event| lower(event.label).is_null())
+        .select(|(event,)| event.id);
+    assert!(
+        q.to_sql().contains("LOWER(q0_0.label) IS NULL"),
+        "{}",
+        q.to_sql()
+    );
+}
+
+#[test]
+fn test_string_function_in_returning() {
+    // A string function is window-free, so it is valid in a RETURNING projection.
+    let insert = TestConnection
+        .to::<User>()
+        .name("Ada")
+        .insert_returning(|user| upper(user.name));
+    assert!(
+        insert
+            .to_sql()
+            .contains("RETURNING UPPER(q0_0.name) AS expr"),
+        "{}",
+        insert.to_sql()
+    );
+}

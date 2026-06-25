@@ -477,8 +477,8 @@ pub use expr::{
     BoolTestPredicateAst, CaseArmsParams, CaseBuilder, CaseExprAst, CaseMaybeNull, CaseNil,
     CaseNonNull, CaseNull, CaseNullAnd, CaseNullOr, CaseWhen, CoalesceArg, CoalesceArgsParams,
     CoalesceBuilder, CoalesceExprAst, CoalesceNil, ColumnBetween, ColumnCaseNull, ColumnComparison,
-    ColumnExprAst, ColumnLike, ColumnRef, CompareOp, ComparePredicateAst, CountExpr, DdlExprAst,
-    DdlPredicateAst, DdlSqlLiteral, DivideExpr, EqualsPredicate, ExistsPredicate,
+    ColumnExprAst, ColumnLike, ColumnRef, CompareOp, ComparePredicateAst, ConcatExprAst, CountExpr,
+    DdlExprAst, DdlPredicateAst, DdlSqlLiteral, DivideExpr, EqualsPredicate, ExistsPredicate,
     ExistsPredicateAst, Expr, ExprAst, ExprKind, ExprVisitor, GreaterThanOrEqualsPredicate,
     GreaterThanPredicate, InPredicate, InPredicateAst, InSubqueryPredicateAst, IntoExpr,
     IntoWindowNullable, IsNotNullPredicate, IsNullPredicate, KindNullability, LagArgsAst,
@@ -491,10 +491,11 @@ pub use expr::{
     ReturnableProjection, RuntimeParam, SameValue, ScalarNullable, ScalarProjection,
     ScalarSubqueryExprAst, SimpleCaseArmsParams, SimpleCaseBuilder, SimpleCaseExprAst,
     SimpleCaseNil, SimpleCaseWhen, SourceAlias, SqlDivide, SqlNumber, SqlSum, SqlText,
-    SubtractExpr, SumExpr, Window, WindowExprAst, WindowFunc, WindowListParams, WindowNil,
-    WindowNoArg, WindowOperand, WindowOrder, WindowPartition, case, case_of, coalesce, dense_rank,
-    exists, lag, lead, not_exists, ntile, nullif, param, rank, render_ddl_predicate, row_number,
-    scalar_subquery,
+    SubstringExprAst, SubtractExpr, SumExpr, UnaryFnExprAst, UnaryStringFunc, Window,
+    WindowExprAst, WindowFunc, WindowListParams, WindowNil, WindowNoArg, WindowOperand,
+    WindowOrder, WindowPartition, case, case_of, coalesce, dense_rank, exists, lag, lead, length,
+    lower, not_exists, ntile, nullif, param, rank, render_ddl_predicate, row_number,
+    scalar_subquery, substring, trim, upper,
 };
 pub use expr::{
     AggregateNeedsGroupBy, AggregateProjection, AggregateTerm, Aggregated, AstProjectionClass,
@@ -514,8 +515,9 @@ pub use model::{
     ConstraintValidation, DatabaseModel, DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch,
     ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
     IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
-    JoinItem, JoinKind, LogicalOp, OrderItem, OrderNulls, ProjectionItem, SchemaModel, SourceRef,
-    SqlType, TableModel, ViewColumnModel, ViewDef, ViewModel, ViewQueryModel, WindowOrderTerm,
+    JoinItem, JoinKind, LogicalOp, OrderItem, OrderNulls, ProjectionItem, ScalarFunc, SchemaModel,
+    SourceRef, SqlType, TableModel, ViewColumnModel, ViewDef, ViewModel, ViewQueryModel,
+    WindowOrderTerm,
 };
 pub use plan::{DatabasePlan, DatabasePlanStep, TablePlanStep};
 pub use projection::{

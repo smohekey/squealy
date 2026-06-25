@@ -22,9 +22,9 @@ use squealy::{
     DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
     IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, JoinItem,
-    JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem, SchemaModel,
-    SourceRef, SqlType, TableModel, ViewColumnModel, ViewModel, ViewQueryModel, WindowFunc,
-    WindowOrderTerm,
+    JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem, ScalarFunc,
+    SchemaModel, SourceRef, SqlType, TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
+    WindowFunc, WindowOrderTerm,
 };
 
 use crate::{CastColumn, RefactorLog, RefactorOperation, RenameColumn, RenameTable};
@@ -808,7 +808,38 @@ fn expr_to_node(expr: &ExprNode) -> KdlNode {
             }
             node
         }
+        ExprNode::ScalarFn { func, args } => {
+            let mut node = KdlNode::new("scalar-fn");
+            node.push(KdlEntry::new_prop("func", scalar_func_str(*func)));
+            for arg in args {
+                push_child(&mut node, expr_to_node(arg));
+            }
+            node
+        }
     }
+}
+
+fn scalar_func_str(func: ScalarFunc) -> &'static str {
+    match func {
+        ScalarFunc::Lower => "lower",
+        ScalarFunc::Upper => "upper",
+        ScalarFunc::Length => "length",
+        ScalarFunc::Trim => "trim",
+        ScalarFunc::Concat => "concat",
+        ScalarFunc::Substring => "substring",
+    }
+}
+
+fn scalar_func_from_str(value: &str) -> Result<ScalarFunc, PackageError> {
+    Ok(match value {
+        "lower" => ScalarFunc::Lower,
+        "upper" => ScalarFunc::Upper,
+        "length" => ScalarFunc::Length,
+        "trim" => ScalarFunc::Trim,
+        "concat" => ScalarFunc::Concat,
+        "substring" => ScalarFunc::Substring,
+        other => return Err(malformed(format!("unknown scalar function `{other}`"))),
+    })
 }
 
 fn window_func_str(func: WindowFunc) -> &'static str {
@@ -1553,6 +1584,13 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
                 result: optional_sql_type_from_node(node)?,
             }
         }
+        "scalar-fn" => ExprNode::ScalarFn {
+            func: scalar_func_from_str(&required_prop(node, "func")?)?,
+            args: children
+                .iter()
+                .map(|child| expr_from_node(child))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
         other => return Err(malformed(format!("unknown view expression node `{other}`"))),
     })
 }
@@ -2489,6 +2527,41 @@ mod tests {
             expr_from_node(&expr_to_node(&simple)).expect("simple CASE round-trips"),
             simple
         );
+    }
+
+    #[test]
+    fn expr_node_scalar_fn_round_trips_through_kdl() {
+        let col = |c: &str| ExprNode::Column {
+            alias: "q0_0".to_owned(),
+            column: c.to_owned(),
+        };
+        for node in [
+            ExprNode::ScalarFn {
+                func: ScalarFunc::Lower,
+                args: vec![col("name")],
+            },
+            ExprNode::ScalarFn {
+                func: ScalarFunc::Length,
+                args: vec![col("name")],
+            },
+            ExprNode::ScalarFn {
+                func: ScalarFunc::Concat,
+                args: vec![col("a"), col("b")],
+            },
+            ExprNode::ScalarFn {
+                func: ScalarFunc::Substring,
+                args: vec![
+                    col("name"),
+                    ExprNode::Literal("1".to_owned()),
+                    ExprNode::Literal("3".to_owned()),
+                ],
+            },
+        ] {
+            assert_eq!(
+                expr_from_node(&expr_to_node(&node)).expect("scalar fn round-trips"),
+                node
+            );
+        }
     }
 
     #[test]

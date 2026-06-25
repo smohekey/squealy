@@ -19,8 +19,9 @@ use crate::{
     OrderDirection, OrderItem, ParamWriter, Predicate, PredicateAstVisitor, PredicateKind,
     Projectable, ProjectionItem, ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAst,
     RenderCaseArms, RenderCoalesceArgs, RenderPredicateAst, RenderProjectable, RenderSelectAst,
-    RenderSimpleCaseArms, RenderSubquery, RowReader, SelectAst, SelectSink, Selected, SourceAlias,
-    SourceRef, SqlType, Table, TableProjection, ViewQueryModel, WindowFunc, WindowOrderTerm,
+    RenderSimpleCaseArms, RenderSubquery, RowReader, ScalarFunc, SelectAst, SelectSink, Selected,
+    SourceAlias, SourceRef, SqlType, Table, TableProjection, UnaryStringFunc, ViewQueryModel,
+    WindowFunc, WindowOrderTerm,
 };
 
 // ---------------------------------------------------------------------------
@@ -461,6 +462,59 @@ impl ExprVisitor for IrBuilder {
             arms: case_arms,
             else_,
             result: result.cloned(),
+        });
+        Ok(())
+    }
+
+    fn visit_unary_fn<O>(&mut self, func: UnaryStringFunc, operand: O) -> io::Result<()>
+    where
+        O: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        let func = match func {
+            UnaryStringFunc::Lower => ScalarFunc::Lower,
+            UnaryStringFunc::Upper => ScalarFunc::Upper,
+            UnaryStringFunc::Length => ScalarFunc::Length,
+            UnaryStringFunc::Trim => ScalarFunc::Trim,
+        };
+        let arg = self.child(operand)?;
+        self.stack.push(ExprNode::ScalarFn {
+            func,
+            args: vec![*arg],
+        });
+        Ok(())
+    }
+
+    fn visit_concat<L, R>(&mut self, left: L, right: R) -> io::Result<()>
+    where
+        L: FnOnce(&mut Self) -> io::Result<()>,
+        R: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        let left = self.child(left)?;
+        let right = self.child(right)?;
+        self.stack.push(ExprNode::ScalarFn {
+            func: ScalarFunc::Concat,
+            args: vec![*left, *right],
+        });
+        Ok(())
+    }
+
+    fn visit_substring<S, Start, Len>(
+        &mut self,
+        string: S,
+        start: Start,
+        len: Len,
+    ) -> io::Result<()>
+    where
+        S: FnOnce(&mut Self) -> io::Result<()>,
+        Start: FnOnce(&mut Self) -> io::Result<()>,
+        Len: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        let string = self.child(string)?;
+        let start = self.child(start)?;
+        let len = self.child(len)?;
+        self.stack.push(ExprNode::ScalarFn {
+            func: ScalarFunc::Substring,
+            args: vec![*string, *start, *len],
         });
         Ok(())
     }
