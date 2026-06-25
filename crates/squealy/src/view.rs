@@ -889,7 +889,7 @@ impl SelectSink for ModelSink {
         self.query.joins.push(JoinItem {
             kind: JoinKind::Inner,
             source: source_ref::<S>(alias),
-            on,
+            on: Some(on),
         });
         Ok(())
     }
@@ -908,7 +908,7 @@ impl SelectSink for ModelSink {
         self.query.joins.push(JoinItem {
             kind: JoinKind::Left,
             source: source_ref::<S>(alias),
-            on,
+            on: Some(on),
         });
         Ok(())
     }
@@ -927,7 +927,7 @@ impl SelectSink for ModelSink {
         self.query.joins.push(JoinItem {
             kind: JoinKind::Right,
             source: source_ref::<S>(alias),
-            on,
+            on: Some(on),
         });
         Ok(())
     }
@@ -946,7 +946,19 @@ impl SelectSink for ModelSink {
         self.query.joins.push(JoinItem {
             kind: JoinKind::Full,
             source: source_ref::<S>(alias),
-            on,
+            on: Some(on),
+        });
+        Ok(())
+    }
+
+    fn push_cross_join<S>(&mut self, alias: SourceAlias) -> Result<(), Self::Error>
+    where
+        S: TableProjection,
+    {
+        self.query.joins.push(JoinItem {
+            kind: JoinKind::Cross,
+            source: source_ref::<S>(alias),
+            on: None,
         });
         Ok(())
     }

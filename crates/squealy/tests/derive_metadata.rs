@@ -30,6 +30,11 @@ enum LoweringEvent {
         table: String,
         alias: SourceAlias,
     },
+    #[allow(dead_code)]
+    CrossJoin {
+        table: String,
+        alias: SourceAlias,
+    },
     Filter,
     Group,
     Having,
@@ -133,6 +138,17 @@ impl SelectSink for RecordingSelectSink {
         Ast: RenderPredicateAst<TestBackend>,
     {
         self.events.push(LoweringEvent::FullJoin {
+            table: S::qualified_name().into_owned(),
+            alias,
+        });
+        Ok(())
+    }
+
+    fn push_cross_join<S>(&mut self, alias: SourceAlias) -> Result<(), Self::Error>
+    where
+        S: TableProjection,
+    {
+        self.events.push(LoweringEvent::CrossJoin {
             table: S::qualified_name().into_owned(),
             alias,
         });

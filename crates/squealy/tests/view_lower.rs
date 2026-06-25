@@ -159,6 +159,16 @@ fn lowers_right_and_full_joins() {
         .project(|(user, post)| (user.id, post.id));
     let full_model = lower_view(&full);
     assert_eq!(full_model.joins[0].kind, JoinKind::Full);
+
+    // `cross_join` lowers to a `Cross` join with no `ON` condition.
+    let cross = conn
+        .from::<User>()
+        .cross_join::<Post>()
+        .project(|(user, post)| (user.id, post.id));
+    let cross_model = lower_view(&cross);
+    assert_eq!(cross_model.joins.len(), 1);
+    assert_eq!(cross_model.joins[0].kind, JoinKind::Cross);
+    assert_eq!(cross_model.joins[0].on, None);
 }
 
 // A hand-written `ViewDefinition` (what `#[derive(View)]` will generate) walks through the object-safe

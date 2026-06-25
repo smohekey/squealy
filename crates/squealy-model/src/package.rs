@@ -510,10 +510,13 @@ fn view_query_to_node(query: &ViewQueryModel) -> KdlNode {
             JoinKind::Left => "left",
             JoinKind::Right => "right",
             JoinKind::Full => "full",
+            JoinKind::Cross => "cross",
         };
         let mut node = view_source_to_node("join", &join.source, Some(kind));
-        // The join's single child is the `ON` predicate.
-        push_child(&mut node, expr_to_node(&join.on));
+        // The join's single child is the `ON` predicate, absent for a `CROSS JOIN`.
+        if let Some(on) = &join.on {
+            push_child(&mut node, expr_to_node(on));
+        }
         body.nodes_mut().push(node);
     }
     if let Some(filter) = &query.filter {
@@ -1413,12 +1416,18 @@ fn view_join_from_node(node: &KdlNode) -> Result<JoinItem, PackageError> {
         Some("left") => JoinKind::Left,
         Some("right") => JoinKind::Right,
         Some("full") => JoinKind::Full,
+        Some("cross") => JoinKind::Cross,
         _ => JoinKind::Inner,
+    };
+    // A `CROSS JOIN` has no `ON` child; every other kind carries its condition.
+    let on = match kind {
+        JoinKind::Cross => None,
+        _ => Some(first_child_expr(node)?),
     };
     Ok(JoinItem {
         kind,
         source: view_source_from_node(node)?,
-        on: first_child_expr(node)?,
+        on,
     })
 }
 
@@ -2384,11 +2393,11 @@ mod tests {
                                     name: "orgs".to_owned(),
                                     alias: "q0_1".to_owned(),
                                 },
-                                on: ExprNode::Compare {
+                                on: Some(ExprNode::Compare {
                                     op: CompareOp::Equals,
                                     left: Box::new(col("q0_0", "org_id")),
                                     right: Box::new(col("q0_1", "id")),
-                                },
+                                }),
                             },
                             JoinItem {
                                 kind: JoinKind::Right,
@@ -2397,11 +2406,11 @@ mod tests {
                                     name: "teams".to_owned(),
                                     alias: "q0_2".to_owned(),
                                 },
-                                on: ExprNode::Compare {
+                                on: Some(ExprNode::Compare {
                                     op: CompareOp::Equals,
                                     left: Box::new(col("q0_0", "team_id")),
                                     right: Box::new(col("q0_2", "id")),
-                                },
+                                }),
                             },
                             JoinItem {
                                 kind: JoinKind::Full,
@@ -2410,11 +2419,21 @@ mod tests {
                                     name: "regions".to_owned(),
                                     alias: "q0_3".to_owned(),
                                 },
-                                on: ExprNode::Compare {
+                                on: Some(ExprNode::Compare {
                                     op: CompareOp::Equals,
                                     left: Box::new(col("q0_0", "region_id")),
                                     right: Box::new(col("q0_3", "id")),
+                                }),
+                            },
+                            // CROSS JOIN has no `ON` condition.
+                            JoinItem {
+                                kind: JoinKind::Cross,
+                                source: SourceRef {
+                                    schema: Some("public".to_owned()),
+                                    name: "tenants".to_owned(),
+                                    alias: "q0_4".to_owned(),
                                 },
+                                on: None,
                             },
                         ],
                         // `(deleted_at IS NOT NULL) AND active` exercises Logical + IsNull.

@@ -508,6 +508,77 @@ async fn postgres_inner_joins_across_tables() {
 
 #[tokio::test]
 #[ignore]
+async fn postgres_cross_and_self_joins() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS join_posts; DROP TABLE IF EXISTS join_users")
+        .await
+        .expect("drop old join tables");
+
+    let ddl_backend = Postgres;
+    create_table::<JoinUser>(&client, &ddl_backend).await;
+    create_table::<JoinPost>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+
+    // 2 users, 3 posts.
+    let ada = connection
+        .to::<JoinUser>()
+        .name("Ada")
+        .insert_returning(|user| user)
+        .fetch_one()
+        .await
+        .expect("insert Ada");
+    connection
+        .to::<JoinUser>()
+        .name("Grace")
+        .insert()
+        .await
+        .expect("insert Grace");
+    for title in ["p1", "p2", "p3"] {
+        connection
+            .to::<JoinPost>()
+            .user_id(ada.id)
+            .title(title)
+            .insert()
+            .await
+            .expect("insert post");
+    }
+
+    // CROSS JOIN: the Cartesian product has |users| * |posts| = 2 * 3 = 6 rows.
+    let crossed = connection
+        .from::<JoinUser>()
+        .cross_join::<JoinPost>()
+        .select(|(user, post)| (user.id, post.id))
+        .collect()
+        .await
+        .expect("fetch cross-joined rows");
+    assert_eq!(crossed.len(), 6);
+
+    // Self-join: the same table aliased twice. Joining posts to themselves on `id` yields one row per
+    // post, each pairing a post with itself (verifying the two aliases resolve to the same row).
+    let self_pairs = connection
+        .from::<JoinPost>()
+        .join::<JoinPost>()
+        .on(|(post,), other| post.id.equals(other.id))
+        .order_by(|(post, _other)| post.id.asc())
+        .select(|(post, other)| (post.title, other.title))
+        .collect()
+        .await
+        .expect("fetch self-joined rows");
+    assert_eq!(
+        self_pairs,
+        vec![
+            ("p1".to_owned(), "p1".to_owned()),
+            ("p2".to_owned(), "p2".to_owned()),
+            ("p3".to_owned(), "p3".to_owned()),
+        ]
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn postgres_right_and_full_join_nullability() {
     let _db_guard = db_lock().lock().await;
     let client = connect().await;
