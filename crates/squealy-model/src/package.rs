@@ -18,7 +18,7 @@ use std::path::Path;
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
     AggregateFunc, ArithmeticOp, CaseArm, CheckModel, ColumnModel, CompareOp, Constraint,
-    ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, DatabaseModel,
+    ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, DatabaseModel, DateField,
     DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
     IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, JoinItem,
@@ -816,7 +816,59 @@ fn expr_to_node(expr: &ExprNode) -> KdlNode {
             }
             node
         }
+        ExprNode::Now => KdlNode::new("now"),
+        ExprNode::Extract {
+            field,
+            operand,
+            result,
+            timezone,
+        } => {
+            let mut node = KdlNode::new("extract");
+            node.push(KdlEntry::new_prop("field", date_field_str(*field)));
+            if let Some(ty) = result {
+                write_sql_type(&mut node, ty);
+            }
+            if let Some(tz) = timezone {
+                node.push(KdlEntry::new_prop("tz", tz.clone()));
+            }
+            push_child(&mut node, expr_to_node(operand));
+            node
+        }
+        ExprNode::DateTrunc {
+            unit,
+            operand,
+            timezone,
+        } => {
+            let mut node = KdlNode::new("date-trunc");
+            node.push(KdlEntry::new_prop("unit", date_field_str(*unit)));
+            if let Some(tz) = timezone {
+                node.push(KdlEntry::new_prop("tz", tz.clone()));
+            }
+            push_child(&mut node, expr_to_node(operand));
+            node
+        }
     }
+}
+
+fn date_field_str(field: DateField) -> &'static str {
+    match field {
+        DateField::Year => "year",
+        DateField::Month => "month",
+        DateField::Day => "day",
+        DateField::Hour => "hour",
+        DateField::Minute => "minute",
+    }
+}
+
+fn date_field_from_str(value: &str) -> Result<DateField, PackageError> {
+    Ok(match value {
+        "year" => DateField::Year,
+        "month" => DateField::Month,
+        "day" => DateField::Day,
+        "hour" => DateField::Hour,
+        "minute" => DateField::Minute,
+        other => return Err(malformed(format!("unknown date field `{other}`"))),
+    })
 }
 
 fn scalar_func_str(func: ScalarFunc) -> &'static str {
@@ -1590,6 +1642,18 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
                 .iter()
                 .map(|child| expr_from_node(child))
                 .collect::<Result<Vec<_>, _>>()?,
+        },
+        "now" => ExprNode::Now,
+        "extract" => ExprNode::Extract {
+            field: date_field_from_str(&required_prop(node, "field")?)?,
+            operand: nth_expr(0)?,
+            result: optional_sql_type_from_node(node)?,
+            timezone: prop(node, "tz").map(str::to_owned),
+        },
+        "date-trunc" => ExprNode::DateTrunc {
+            unit: date_field_from_str(&required_prop(node, "unit")?)?,
+            operand: nth_expr(0)?,
+            timezone: prop(node, "tz").map(str::to_owned),
         },
         other => return Err(malformed(format!("unknown view expression node `{other}`"))),
     })
@@ -2559,6 +2623,46 @@ mod tests {
         ] {
             assert_eq!(
                 expr_from_node(&expr_to_node(&node)).expect("scalar fn round-trips"),
+                node
+            );
+        }
+    }
+
+    #[test]
+    fn expr_node_datetime_round_trips_through_kdl() {
+        let col = || {
+            Box::new(ExprNode::Column {
+                alias: "q0_0".to_owned(),
+                column: "created".to_owned(),
+            })
+        };
+        for node in [
+            ExprNode::Now,
+            ExprNode::Extract {
+                field: DateField::Year,
+                operand: col(),
+                result: Some(SqlType::I64),
+                timezone: None,
+            },
+            ExprNode::Extract {
+                field: DateField::Hour,
+                operand: col(),
+                result: Some(SqlType::I64),
+                timezone: Some("UTC".to_owned()),
+            },
+            ExprNode::DateTrunc {
+                unit: DateField::Day,
+                operand: col(),
+                timezone: None,
+            },
+            ExprNode::DateTrunc {
+                unit: DateField::Day,
+                operand: col(),
+                timezone: Some("America/New_York".to_owned()),
+            },
+        ] {
+            assert_eq!(
+                expr_from_node(&expr_to_node(&node)).expect("date/time node round-trips"),
                 node
             );
         }

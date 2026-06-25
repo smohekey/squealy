@@ -1271,3 +1271,106 @@ async fn postgres_string_functions_round_trip() {
         .expect("fetch substring");
     assert_eq!(prefixes, vec!["Ad".to_owned(), "Gr".to_owned()]);
 }
+
+#[cfg(feature = "systemtime")]
+#[derive(Clone, Debug, PartialEq, Table)]
+struct IntegrationTimed<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    created: C::Type<'scope, std::time::SystemTime>,
+}
+
+#[cfg(feature = "systemtime")]
+#[tokio::test]
+#[ignore]
+async fn postgres_datetime_functions_round_trip() {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS integration_timeds")
+        .await
+        .expect("drop old integration table");
+
+    let ddl_backend = Postgres;
+    create_table::<IntegrationTimed>(&client, &ddl_backend).await;
+
+    // 2021-01-01 12:34:56 UTC and 2022-01-01 12:34:56 UTC (whole seconds round-trip exactly).
+    let t1 = UNIX_EPOCH + Duration::from_secs(1_609_504_496);
+    let t2 = UNIX_EPOCH + Duration::from_secs(1_641_040_496);
+    // The same instants truncated to the day (midnight UTC).
+    let day1 = UNIX_EPOCH + Duration::from_secs(1_609_459_200);
+    let day2 = UNIX_EPOCH + Duration::from_secs(1_640_995_200);
+
+    let connection = PostgresConnection::new(client);
+    for ts in [t1, t2] {
+        connection
+            .to::<IntegrationTimed>()
+            .created(ts)
+            .insert()
+            .await
+            .expect("insert timed row");
+    }
+
+    // `extract_at(YEAR, ..., "UTC")` -> bigint, pinned to UTC so the assertion holds regardless of the
+    // connection's session `TimeZone`.
+    let years: Vec<i64> = connection
+        .from::<IntegrationTimed>()
+        .order_by(|(e,)| e.id.asc())
+        .select(|(e,)| extract_at(DateField::Year, e.created, "UTC"))
+        .collect()
+        .await
+        .expect("fetch extract year");
+    assert_eq!(years, vec![2021, 2022]);
+
+    // `date_trunc_at('day', ..., "UTC")` -> the same timestamp type, truncated to UTC midnight (the
+    // session-zone-dependent bare `date_trunc` would truncate to local midnight).
+    let truncated: Vec<SystemTime> = connection
+        .from::<IntegrationTimed>()
+        .order_by(|(e,)| e.id.asc())
+        .select(|(e,)| date_trunc_at(DateField::Day, e.created, "UTC"))
+        .collect()
+        .await
+        .expect("fetch date_trunc day");
+    assert_eq!(truncated, vec![day1, day2]);
+
+    // Non-UTC zone: truncating `2021-01-01 12:34:56Z` at `America/New_York` (UTC-5 in January) is
+    // `2021-01-01 00:00 EST` = `2021-01-01 05:00:00Z` — the New York midnight *instant*, not UTC
+    // midnight. This is the case the UTC-only assertions above mask (the `AT TIME ZONE` round-trip
+    // returns a `timestamptz`, so the decoded instant is correct).
+    let ny_midnight = UNIX_EPOCH + Duration::from_secs(1_609_459_200 + 5 * 3600);
+    let ny_truncated: Vec<SystemTime> = connection
+        .from::<IntegrationTimed>()
+        .where_(|e| e.id.equals(1))
+        .select(|(e,)| date_trunc_at(DateField::Day, e.created, "America/New_York"))
+        .collect()
+        .await
+        .expect("fetch date_trunc day at America/New_York");
+    assert_eq!(ny_truncated, vec![ny_midnight]);
+
+    // DST fall-back ambiguity: 2021-11-07 05:30:00Z is 01:30 EDT (the *first* occurrence of the
+    // repeated 1 a.m. hour in New York). Truncating to the hour must yield 01:00 EDT = 05:00:00Z, not
+    // 01:00 EST = 06:00:00Z. PostgreSQL's 3-arg `date_trunc` resolves this correctly; an `AT TIME ZONE`
+    // round-trip would not.
+    let dst_instant = UNIX_EPOCH + Duration::from_secs(1_636_263_000); // 2021-11-07 05:30:00Z
+    let dst_hour = UNIX_EPOCH + Duration::from_secs(1_636_261_200); // 2021-11-07 05:00:00Z
+    let dst_truncated: Vec<SystemTime> = connection
+        .from::<IntegrationTimed>()
+        .where_(|e| e.id.equals(1))
+        .select(|(_e,)| date_trunc_at(DateField::Hour, dst_instant, "America/New_York"))
+        .collect()
+        .await
+        .expect("fetch date_trunc hour across DST fall-back");
+    assert_eq!(dst_truncated, vec![dst_hour]);
+
+    // `now()` -> the current transaction timestamp, which is after the inserted rows.
+    let nows: Vec<SystemTime> = connection
+        .from::<IntegrationTimed>()
+        .select(|(_e,)| now::<SystemTime>())
+        .collect()
+        .await
+        .expect("fetch now");
+    assert_eq!(nows.len(), 2);
+    assert!(nows.iter().all(|n| *n > t2), "now() should be after 2022");
+}

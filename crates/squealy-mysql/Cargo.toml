@@ -9,6 +9,11 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+# Native timestamp column support: enables the core feature so `SystemTime` maps to a timestamp
+# column and can be used in the query builder (render-only; no MySQL Encode/Decode yet).
+systemtime = ["squealy/systemtime"]
+
 [dependencies]
 futures-core.workspace = true
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls"] }

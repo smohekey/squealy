@@ -48,6 +48,12 @@ impl squealy::Dialect for PostgresDialect {
         // `substring(text FROM pattern FOR escape)` overload.
         true
     }
+
+    fn timestamp_operand_needs_cast(&self) -> bool {
+        // Cast a bare literal/param operand of EXTRACT/date_trunc to its timestamp type — both are
+        // overloaded, so an untyped placeholder can't be resolved when preparing the statement.
+        true
+    }
 }
 
 pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -> io::Result<()> {

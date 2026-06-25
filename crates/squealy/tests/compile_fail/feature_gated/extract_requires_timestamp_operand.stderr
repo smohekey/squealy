@@ -1,0 +1,17 @@
+error[E0277]: `i32` is not a timestamp/date type
+  --> tests/compile_fail/feature_gated/extract_requires_timestamp_operand.rs:23:52
+   |
+23 |         .select(|(user,)| extract(DateField::Year, user.id));
+   |                           -------                  ^^^^^^^ the operand of `now`/`extract`/`date_trunc` must be a timestamp value (enable the `systemtime`, `time`, or `chrono` feature)
+   |                           |
+   |                           required by a bound introduced by this call
+   |
+   = help: the trait `squealy::TimestampKind` is not implemented for `i32`
+note: required by a bound in `squealy::extract`
+  --> src/expr.rs
+   |
+   | pub fn extract<'scope, E>(
+   |        ------- required by a bound in this function
+...
+   |     <E::Kind as KindNullability>::Value: TimestampKind,
+   |                                          ^^^^^^^^^^^^^ required by this bound in `extract`

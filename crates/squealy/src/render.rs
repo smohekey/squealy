@@ -17,15 +17,24 @@ use std::io::{self, Write};
 
 use crate::{
     AggregateFunc, ArithmeticOp, AssignmentValueVisitor, AssignmentVisitor, Backend, ColumnRef,
-    CompareOp, Dialect, Encode, Expr, ExprKind, ExprVisitor, InsertRow, InsertRowVisitor,
-    InsertableTable, Order, OrderDirection, Predicate, PredicateAstVisitor, PredicateKind,
-    PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAssignment,
-    RenderAst, RenderCaseArms, RenderCoalesceArgs, RenderInsertAssignments, RenderInsertRows,
-    RenderPredicateAst, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
+    CompareOp, DateField, Dialect, Encode, Expr, ExprKind, ExprVisitor, InsertRow,
+    InsertRowVisitor, InsertableTable, Order, OrderDirection, Predicate, PredicateAstVisitor,
+    PredicateKind, PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder,
+    RenderAssignment, RenderAst, RenderCaseArms, RenderCoalesceArgs, RenderInsertAssignments,
+    RenderInsertRows, RenderPredicateAst, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
     RenderSimpleCaseArms, RenderUpdateAssignments, SchemaTable, SelectSink, Selected, SourceAlias,
     SqlType, TableProjection, UnaryStringFunc, UpdateableTable,
 };
 use std::marker::PhantomData;
+
+/// Write a single-quoted SQL string literal with embedded single quotes doubled. Used for the
+/// `AT TIME ZONE '<tz>'` operator argument (a developer-supplied zone name); doubling is correctness,
+/// not injection defense.
+fn write_sql_string_literal(writer: &mut dyn Write, value: &str) -> io::Result<()> {
+    writer.write_all(b"'")?;
+    writer.write_all(value.replace('\'', "''").as_bytes())?;
+    writer.write_all(b"'")
+}
 
 /// Threads the active [`Dialect`](crate::Dialect) and the running parameter counters through the
 /// renderer. The dialect is `&'static` (backend dialects are zero-sized unit values), so carrying it
@@ -1607,6 +1616,96 @@ where
         len(self)?;
         self.visit_case_value_close(bound_cast.as_ref())?;
         self.writer.write_all(b")")
+    }
+
+    fn visit_now(&mut self) -> Result<(), Self::Error> {
+        self.writer.write_all(b"CURRENT_TIMESTAMP")
+    }
+
+    fn visit_extract<O>(
+        &mut self,
+        field: DateField,
+        operand: O,
+        cast: &SqlType,
+        timezone: Option<&str>,
+        operand_cast: Option<&SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        // A bare literal/param operand is cast to its timestamp type so PostgreSQL can resolve the
+        // overloaded EXTRACT; a column is already typed (`operand_cast` is `None`).
+        let operand_cast =
+            operand_cast.filter(|_| self.renderer.dialect.timestamp_operand_needs_cast());
+        // The native EXTRACT type differs by dialect (PG numeric/double vs MySQL integer), so cast to
+        // a uniform result type.
+        self.writer.write_all(b"CAST(EXTRACT(")?;
+        self.writer.write_all(field.extract_keyword().as_bytes())?;
+        self.writer.write_all(b" FROM ")?;
+        match timezone {
+            Some(tz) => {
+                self.writer.write_all(b"(")?;
+                self.visit_case_value_open(operand_cast)?;
+                operand(self)?;
+                self.visit_case_value_close(operand_cast)?;
+                self.writer.write_all(b" AT TIME ZONE ")?;
+                write_sql_string_literal(&mut *self.writer, tz)?;
+                self.writer.write_all(b")")?;
+            }
+            None => {
+                self.visit_case_value_open(operand_cast)?;
+                operand(self)?;
+                self.visit_case_value_close(operand_cast)?;
+            }
+        }
+        self.writer.write_all(b") AS ")?;
+        self.renderer
+            .dialect
+            .write_cast_type(cast, &mut *self.writer)?;
+        self.writer.write_all(b")")
+    }
+
+    fn visit_date_trunc<O>(
+        &mut self,
+        unit: DateField,
+        operand: O,
+        timezone: Option<&str>,
+        operand_cast: Option<&SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        // A bare literal/param operand is cast to its timestamp type so PostgreSQL can resolve the
+        // overloaded date_trunc; a column is already typed (`operand_cast` is `None`).
+        let operand_cast =
+            operand_cast.filter(|_| self.renderer.dialect.timestamp_operand_needs_cast());
+        match timezone {
+            // PostgreSQL's 3-argument `date_trunc('unit', ts, 'tz')` (PG 12+) truncates `ts` in `tz`
+            // and returns a `timestamptz` directly. This avoids reinterpreting an ambiguous local wall
+            // time — a `… AT TIME ZONE 'tz'` round-trip would resolve a DST fall-back repeated hour to
+            // the wrong offset; PostgreSQL handles the zone math (including DST) internally.
+            Some(tz) => {
+                self.writer.write_all(b"date_trunc('")?;
+                self.writer.write_all(unit.trunc_literal().as_bytes())?;
+                self.writer.write_all(b"', ")?;
+                self.visit_case_value_open(operand_cast)?;
+                operand(self)?;
+                self.visit_case_value_close(operand_cast)?;
+                self.writer.write_all(b", ")?;
+                write_sql_string_literal(&mut *self.writer, tz)?;
+                self.writer.write_all(b")")?;
+            }
+            None => {
+                self.writer.write_all(b"date_trunc('")?;
+                self.writer.write_all(unit.trunc_literal().as_bytes())?;
+                self.writer.write_all(b"', ")?;
+                self.visit_case_value_open(operand_cast)?;
+                operand(self)?;
+                self.visit_case_value_close(operand_cast)?;
+                self.writer.write_all(b")")?;
+            }
+        }
+        Ok(())
     }
 
     fn visit_case_when(&mut self) -> Result<(), Self::Error> {

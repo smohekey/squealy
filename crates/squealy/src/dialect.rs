@@ -106,4 +106,16 @@ pub trait Dialect {
     fn substring_bounds_need_cast(&self) -> bool {
         false
     }
+
+    /// Whether a bare literal/parameter operand of `EXTRACT`/`date_trunc` must be cast to its timestamp
+    /// type.
+    ///
+    /// PostgreSQL overrides this to `true`: a bare parameter is untyped, and both `EXTRACT` and
+    /// `date_trunc` are overloaded across `timestamp`/`timestamptz`/`interval`, so the server cannot
+    /// resolve the placeholder when preparing the statement. The default is `false` — MySQL binds `?`
+    /// by value (no inference). A *column* operand is already typed, so only bare literals/params
+    /// (`ExprAst::NEEDS_CAST_ANCHOR`) are cast.
+    fn timestamp_operand_needs_cast(&self) -> bool {
+        false
+    }
 }
