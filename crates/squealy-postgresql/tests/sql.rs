@@ -3114,6 +3114,26 @@ fn postgres_datetime_functions_render() {
          FROM \"public\".\"timed_events\" AS q0_0"
     );
 
+    // `extract(Second)` -> floored to the whole-seconds component (PG's EXTRACT(SECOND) is fractional).
+    let second_q = Postgres
+        .from::<TimedEvent>()
+        .select(|(e,)| extract(DateField::Second, e.created));
+    assert_eq!(
+        second_q.to_sql(),
+        "SELECT CAST(FLOOR(EXTRACT(SECOND FROM q0_0.\"created\")) AS bigint) AS \"expr\" \
+         FROM \"public\".\"timed_events\" AS q0_0"
+    );
+
+    // `extract_second` -> fractional seconds as double precision.
+    let frac_q = Postgres
+        .from::<TimedEvent>()
+        .select(|(e,)| extract_second(e.created));
+    assert_eq!(
+        frac_q.to_sql(),
+        "SELECT CAST(EXTRACT(SECOND FROM q0_0.\"created\") AS double precision) AS \"expr\" \
+         FROM \"public\".\"timed_events\" AS q0_0"
+    );
+
     // `date_trunc` -> the PostgreSQL `date_trunc('unit', ts)` function.
     let trunc_q = Postgres
         .from::<TimedEvent>()

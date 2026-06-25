@@ -419,4 +419,25 @@ fn lowers_datetime_functions_to_ir() {
         }
         other => panic!("expected DateTrunc node, got {other:?}"),
     }
+
+    // `extract(Second)` flows through the existing Extract node (field = Second).
+    let second_q = conn
+        .from::<TimedEvent>()
+        .project(|(e,)| extract(DateField::Second, e.created));
+    match &lower_view(&second_q).projection[0].expr {
+        ExprNode::Extract { field, .. } => assert_eq!(*field, DateField::Second),
+        other => panic!("expected Extract node, got {other:?}"),
+    }
+
+    // `extract_second` lowers to the dedicated ExtractSecond node (f64 result).
+    let frac_q = conn
+        .from::<TimedEvent>()
+        .project(|(e,)| extract_second(e.created));
+    match &lower_view(&frac_q).projection[0].expr {
+        ExprNode::ExtractSecond { operand, result } => {
+            assert_eq!(*result, Some(SqlType::F64));
+            assert!(matches!(**operand, ExprNode::Column { .. }));
+        }
+        other => panic!("expected ExtractSecond node, got {other:?}"),
+    }
 }
