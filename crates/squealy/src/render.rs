@@ -1628,10 +1628,15 @@ where
         operand: O,
         cast: &SqlType,
         timezone: Option<&str>,
+        operand_cast: Option<&SqlType>,
     ) -> Result<(), Self::Error>
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>,
     {
+        // A bare literal/param operand is cast to its timestamp type so PostgreSQL can resolve the
+        // overloaded EXTRACT; a column is already typed (`operand_cast` is `None`).
+        let operand_cast =
+            operand_cast.filter(|_| self.renderer.dialect.timestamp_operand_needs_cast());
         // The native EXTRACT type differs by dialect (PG numeric/double vs MySQL integer), so cast to
         // a uniform result type.
         self.writer.write_all(b"CAST(EXTRACT(")?;
@@ -1640,12 +1645,18 @@ where
         match timezone {
             Some(tz) => {
                 self.writer.write_all(b"(")?;
+                self.visit_case_value_open(operand_cast)?;
                 operand(self)?;
+                self.visit_case_value_close(operand_cast)?;
                 self.writer.write_all(b" AT TIME ZONE ")?;
                 write_sql_string_literal(&mut *self.writer, tz)?;
                 self.writer.write_all(b")")?;
             }
-            None => operand(self)?,
+            None => {
+                self.visit_case_value_open(operand_cast)?;
+                operand(self)?;
+                self.visit_case_value_close(operand_cast)?;
+            }
         }
         self.writer.write_all(b") AS ")?;
         self.renderer
@@ -1659,10 +1670,15 @@ where
         unit: DateField,
         operand: O,
         timezone: Option<&str>,
+        operand_cast: Option<&SqlType>,
     ) -> Result<(), Self::Error>
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>,
     {
+        // A bare literal/param operand is cast to its timestamp type so PostgreSQL can resolve the
+        // overloaded date_trunc; a column is already typed (`operand_cast` is `None`).
+        let operand_cast =
+            operand_cast.filter(|_| self.renderer.dialect.timestamp_operand_needs_cast());
         match timezone {
             // `(date_trunc('unit', op AT TIME ZONE 'tz') AT TIME ZONE 'tz')`: the inner `AT TIME ZONE`
             // demotes the `timestamptz` to a `timestamp` (wall-clock in `tz`) so truncation happens in
@@ -1673,7 +1689,9 @@ where
                 self.writer.write_all(unit.trunc_literal().as_bytes())?;
                 self.writer.write_all(b"', ")?;
                 self.writer.write_all(b"(")?;
+                self.visit_case_value_open(operand_cast)?;
                 operand(self)?;
+                self.visit_case_value_close(operand_cast)?;
                 self.writer.write_all(b" AT TIME ZONE ")?;
                 write_sql_string_literal(&mut *self.writer, tz)?;
                 self.writer.write_all(b")) AT TIME ZONE ")?;
@@ -1684,7 +1702,9 @@ where
                 self.writer.write_all(b"date_trunc('")?;
                 self.writer.write_all(unit.trunc_literal().as_bytes())?;
                 self.writer.write_all(b"', ")?;
+                self.visit_case_value_open(operand_cast)?;
                 operand(self)?;
+                self.visit_case_value_close(operand_cast)?;
                 self.writer.write_all(b")")?;
             }
         }

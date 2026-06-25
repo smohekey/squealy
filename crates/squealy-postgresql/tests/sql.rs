@@ -3163,3 +3163,34 @@ fn postgres_extract_in_returning() {
         insert.to_sql()
     );
 }
+
+#[cfg(feature = "systemtime")]
+#[test]
+fn postgres_datetime_literal_operand_is_cast() {
+    use std::time::SystemTime;
+
+    // A bare literal/param operand is an untyped placeholder; PostgreSQL can't resolve the overloaded
+    // EXTRACT/date_trunc without a type anchor, so the operand is cast to its timestamp type. (A column
+    // operand is already typed and is NOT cast — see `postgres_datetime_functions_render`.)
+    let extract_lit = Postgres
+        .from::<TimedEvent>()
+        .select(|(_e,)| extract(DateField::Year, SystemTime::UNIX_EPOCH));
+    assert!(
+        extract_lit
+            .to_sql()
+            .contains("EXTRACT(YEAR FROM CAST($1 AS timestamp with time zone))"),
+        "{}",
+        extract_lit.to_sql()
+    );
+
+    let trunc_lit = Postgres
+        .from::<TimedEvent>()
+        .select(|(_e,)| date_trunc(DateField::Day, SystemTime::UNIX_EPOCH));
+    assert!(
+        trunc_lit
+            .to_sql()
+            .contains("date_trunc('day', CAST($1 AS timestamp with time zone))"),
+        "{}",
+        trunc_lit.to_sql()
+    );
+}

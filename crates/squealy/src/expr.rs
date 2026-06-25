@@ -926,6 +926,18 @@ where
     }
 }
 
+/// The SQL type to cast an `extract`/`date_trunc` operand to when it is a bare literal/param (so an
+/// untyped placeholder resolves under PostgreSQL's overloaded `EXTRACT`/`date_trunc`); `None` for a
+/// column operand, which is already typed. Our timestamp value kinds all map to `timestamptz`. The
+/// cast is only *emitted* when the dialect needs it (see `Dialect::timestamp_operand_needs_cast`).
+fn timestamp_operand_cast<A: ExprAst>() -> Option<crate::SqlType> {
+    if A::NEEDS_CAST_ANCHOR {
+        Some(crate::SqlType::Timestamp { tz: true })
+    } else {
+        None
+    }
+}
+
 /// `CAST(EXTRACT(<field> FROM <operand>) AS <cast>)` — a date/time field of a timestamp, cast to a
 /// uniform result type (`bigint`/`SIGNED`) since the native `EXTRACT` type differs by dialect.
 #[doc(hidden)]
@@ -934,6 +946,8 @@ pub struct ExtractExprAst<Operand> {
     field: DateField,
     operand: Operand,
     cast: crate::SqlType,
+    /// `Some(timestamptz)` when the operand is a bare literal/param (anchors the placeholder type).
+    operand_cast: Option<crate::SqlType>,
 }
 
 impl<Operand> ExprAst for ExtractExprAst<Operand>
@@ -957,6 +971,7 @@ where
             |visitor| self.operand.visit(visitor),
             &self.cast,
             None,
+            self.operand_cast.as_ref(),
         )
     }
 }
@@ -991,6 +1006,7 @@ where
     E: IntoExpr<'scope>,
     E::Kind: KindNullability,
     <E::Kind as KindNullability>::Value: TimestampKind,
+    E::Ast: ExprAst,
     ExtractExprAst<E::Ast>: ExprAst,
 {
     Expr {
@@ -998,6 +1014,7 @@ where
             field,
             operand: ts.into_expr().ast,
             cast: crate::SqlType::I64,
+            operand_cast: timestamp_operand_cast::<E::Ast>(),
         },
         project_alias: Cow::Borrowed("expr"),
         _phantom: PhantomData,
@@ -1015,6 +1032,8 @@ pub struct ExtractAtExprAst<Operand> {
     operand: Operand,
     cast: crate::SqlType,
     timezone: String,
+    /// `Some(timestamptz)` when the operand is a bare literal/param (anchors the placeholder type).
+    operand_cast: Option<crate::SqlType>,
 }
 
 impl<Operand> ExprAst for ExtractAtExprAst<Operand>
@@ -1038,6 +1057,7 @@ where
             |visitor| self.operand.visit(visitor),
             &self.cast,
             Some(&self.timezone),
+            self.operand_cast.as_ref(),
         )
     }
 }
@@ -1075,6 +1095,7 @@ where
     E: IntoExpr<'scope>,
     E::Kind: KindNullability,
     <E::Kind as KindNullability>::Value: TimestampKind,
+    E::Ast: ExprAst,
     ExtractAtExprAst<E::Ast>: ExprAst,
 {
     Expr {
@@ -1083,6 +1104,7 @@ where
             operand: ts.into_expr().ast,
             cast: crate::SqlType::I64,
             timezone: timezone.into(),
+            operand_cast: timestamp_operand_cast::<E::Ast>(),
         },
         project_alias: Cow::Borrowed("expr"),
         _phantom: PhantomData,
@@ -1099,6 +1121,8 @@ pub struct DateTruncExprAst<Operand> {
     /// `Some(tz)` truncates the operand at an explicit timezone (`… AT TIME ZONE 'tz'`) so the result
     /// is independent of the session `TimeZone`; `None` truncates in the session zone.
     timezone: Option<String>,
+    /// `Some(timestamptz)` when the operand is a bare literal/param (anchors the placeholder type).
+    operand_cast: Option<crate::SqlType>,
 }
 
 impl<Operand> ExprAst for DateTruncExprAst<Operand>
@@ -1121,6 +1145,7 @@ where
             self.unit,
             |visitor| self.operand.visit(visitor),
             self.timezone.as_deref(),
+            self.operand_cast.as_ref(),
         )
     }
 }
@@ -1156,6 +1181,7 @@ where
     E: IntoExpr<'scope>,
     E::Kind: KindNullability<Value = T>,
     T: ExprKind + TimestampKind,
+    E::Ast: ExprAst,
     DateTruncExprAst<E::Ast>: ExprAst,
 {
     Expr {
@@ -1163,6 +1189,7 @@ where
             unit,
             operand: ts.into_expr().ast,
             timezone: None,
+            operand_cast: timestamp_operand_cast::<E::Ast>(),
         },
         project_alias: Cow::Borrowed("expr"),
         _phantom: PhantomData,
@@ -1186,6 +1213,7 @@ where
     E: IntoExpr<'scope>,
     E::Kind: KindNullability<Value = T>,
     T: ExprKind + TimestampKind,
+    E::Ast: ExprAst,
     DateTruncExprAst<E::Ast>: ExprAst,
 {
     Expr {
@@ -1193,6 +1221,7 @@ where
             unit,
             operand: ts.into_expr().ast,
             timezone: Some(timezone.into()),
+            operand_cast: timestamp_operand_cast::<E::Ast>(),
         },
         project_alias: Cow::Borrowed("expr"),
         _phantom: PhantomData,
@@ -3872,25 +3901,30 @@ pub trait ExprVisitor {
 
     /// Render `CAST(EXTRACT(<field> FROM <operand>) AS <cast>)` (the native `EXTRACT` type differs by
     /// dialect, so it is cast to a uniform result type). When `timezone` is `Some(tz)`, the operand is
-    /// first converted with `AT TIME ZONE '<tz>'` (PostgreSQL only).
+    /// first converted with `AT TIME ZONE '<tz>'` (PostgreSQL only). `operand_cast` is `Some(ty)` when
+    /// the operand is a bare literal/param that needs a type anchor (applied per
+    /// [`Dialect::timestamp_operand_needs_cast`](crate::Dialect::timestamp_operand_needs_cast)).
     fn visit_extract<O>(
         &mut self,
         field: DateField,
         operand: O,
         cast: &crate::SqlType,
         timezone: Option<&str>,
+        operand_cast: Option<&crate::SqlType>,
     ) -> Result<(), Self::Error>
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>;
 
     /// Render `date_trunc('<unit>', <operand>)` (PostgreSQL only — gated by
     /// [`SupportsDateTrunc`](crate::SupportsDateTrunc) on the expression's `RenderAst`). When `timezone`
-    /// is `Some(tz)`, the operand is first converted with `AT TIME ZONE '<tz>'`.
+    /// is `Some(tz)`, the operand is first converted with `AT TIME ZONE '<tz>'`. `operand_cast` is
+    /// `Some(ty)` when the operand is a bare literal/param that needs a type anchor.
     fn visit_date_trunc<O>(
         &mut self,
         unit: DateField,
         operand: O,
         timezone: Option<&str>,
+        operand_cast: Option<&crate::SqlType>,
     ) -> Result<(), Self::Error>
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>;

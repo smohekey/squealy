@@ -533,10 +533,12 @@ impl ExprVisitor for IrBuilder {
         operand: O,
         cast: &SqlType,
         timezone: Option<&str>,
+        _operand_cast: Option<&SqlType>,
     ) -> io::Result<()>
     where
         O: FnOnce(&mut Self) -> io::Result<()>,
     {
+        // A view body inlines literals (no placeholders), so the operand type anchor is unneeded here.
         let operand = self.child(operand)?;
         self.stack.push(ExprNode::Extract {
             field,
@@ -552,6 +554,7 @@ impl ExprVisitor for IrBuilder {
         unit: DateField,
         operand: O,
         timezone: Option<&str>,
+        _operand_cast: Option<&SqlType>,
     ) -> io::Result<()>
     where
         O: FnOnce(&mut Self) -> io::Result<()>,
