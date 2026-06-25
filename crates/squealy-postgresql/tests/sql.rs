@@ -3135,13 +3135,15 @@ fn postgres_datetime_functions_render() {
          FROM \"public\".\"timed_events\" AS q0_0"
     );
 
+    // `date_trunc_at` round-trips through `AT TIME ZONE` so the truncated value is a `timestamptz`
+    // again (correct decoded instant for any zone, not just UTC).
     let trunc_at_q = Postgres
         .from::<TimedEvent>()
         .select(|(e,)| date_trunc_at(DateField::Day, e.created, "UTC"));
     assert_eq!(
         trunc_at_q.to_sql(),
-        "SELECT date_trunc('day', (q0_0.\"created\" AT TIME ZONE 'UTC')) AS \"expr\" \
-         FROM \"public\".\"timed_events\" AS q0_0"
+        "SELECT (date_trunc('day', (q0_0.\"created\" AT TIME ZONE 'UTC')) AT TIME ZONE 'UTC') \
+         AS \"expr\" FROM \"public\".\"timed_events\" AS q0_0"
     );
 }
 

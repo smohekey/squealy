@@ -583,11 +583,26 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
             timezone,
         } => {
             // PostgreSQL only; a MySQL view carrying this fails at DDL exec (like a `full_join` view).
-            writer.write_all(b"date_trunc('")?;
-            writer.write_all(unit.trunc_literal().as_bytes())?;
-            writer.write_all(b"', ")?;
-            render_operand_at_time_zone(operand, timezone.as_deref(), dialect, writer)?;
-            writer.write_all(b")")
+            match timezone {
+                // Round-trip through `AT TIME ZONE 'tz'` so the truncated value is a `timestamptz`
+                // again (see the matching note in `render.rs`); correct for any zone, not just UTC.
+                Some(tz) => {
+                    writer.write_all(b"(date_trunc('")?;
+                    writer.write_all(unit.trunc_literal().as_bytes())?;
+                    writer.write_all(b"', ")?;
+                    render_operand_at_time_zone(operand, Some(tz), dialect, writer)?;
+                    writer.write_all(b") AT TIME ZONE '")?;
+                    writer.write_all(tz.replace('\'', "''").as_bytes())?;
+                    writer.write_all(b"')")
+                }
+                None => {
+                    writer.write_all(b"date_trunc('")?;
+                    writer.write_all(unit.trunc_literal().as_bytes())?;
+                    writer.write_all(b"', ")?;
+                    render_expr(operand, dialect, writer)?;
+                    writer.write_all(b")")
+                }
+            }
         }
     }
 }

@@ -1335,6 +1335,20 @@ async fn postgres_datetime_functions_round_trip() {
         .expect("fetch date_trunc day");
     assert_eq!(truncated, vec![day1, day2]);
 
+    // Non-UTC zone: truncating `2021-01-01 12:34:56Z` at `America/New_York` (UTC-5 in January) is
+    // `2021-01-01 00:00 EST` = `2021-01-01 05:00:00Z` — the New York midnight *instant*, not UTC
+    // midnight. This is the case the UTC-only assertions above mask (the `AT TIME ZONE` round-trip
+    // returns a `timestamptz`, so the decoded instant is correct).
+    let ny_midnight = UNIX_EPOCH + Duration::from_secs(1_609_459_200 + 5 * 3600);
+    let ny_truncated: Vec<SystemTime> = connection
+        .from::<IntegrationTimed>()
+        .where_(|e| e.id.equals(1))
+        .select(|(e,)| date_trunc_at(DateField::Day, e.created, "America/New_York"))
+        .collect()
+        .await
+        .expect("fetch date_trunc day at America/New_York");
+    assert_eq!(ny_truncated, vec![ny_midnight]);
+
     // `now()` -> the current transaction timestamp, which is after the inserted rows.
     let nows: Vec<SystemTime> = connection
         .from::<IntegrationTimed>()

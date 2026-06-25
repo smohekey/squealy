@@ -1663,18 +1663,27 @@ where
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>,
     {
-        self.writer.write_all(b"date_trunc('")?;
-        self.writer.write_all(unit.trunc_literal().as_bytes())?;
-        self.writer.write_all(b"', ")?;
         match timezone {
+            // `(date_trunc('unit', op AT TIME ZONE 'tz') AT TIME ZONE 'tz')`: the inner `AT TIME ZONE`
+            // demotes the `timestamptz` to a `timestamp` (wall-clock in `tz`) so truncation happens in
+            // that zone; the outer `AT TIME ZONE 'tz'` promotes the truncated `timestamp` back to a
+            // `timestamptz`, so the decoded instant is correct for any zone (not just UTC).
             Some(tz) => {
+                self.writer.write_all(b"(date_trunc('")?;
+                self.writer.write_all(unit.trunc_literal().as_bytes())?;
+                self.writer.write_all(b"', ")?;
                 self.writer.write_all(b"(")?;
                 operand(self)?;
                 self.writer.write_all(b" AT TIME ZONE ")?;
                 write_sql_string_literal(&mut *self.writer, tz)?;
-                self.writer.write_all(b"))")?;
+                self.writer.write_all(b")) AT TIME ZONE ")?;
+                write_sql_string_literal(&mut *self.writer, tz)?;
+                self.writer.write_all(b")")?;
             }
             None => {
+                self.writer.write_all(b"date_trunc('")?;
+                self.writer.write_all(unit.trunc_literal().as_bytes())?;
+                self.writer.write_all(b"', ")?;
                 operand(self)?;
                 self.writer.write_all(b")")?;
             }
