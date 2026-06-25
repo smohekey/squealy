@@ -9,7 +9,7 @@ use std::io::{self, Write};
 
 use crate::{
     AggregateFunc, ArithmeticOp, DatabaseModel, Dialect, ExprNode, JoinKind, LogicalOp,
-    OrderDirection, SourceRef, SqlType, ViewModel, ViewQueryModel, WindowFunc,
+    OrderDirection, ScalarFunc, SourceRef, SqlType, ViewModel, ViewQueryModel, WindowFunc,
 };
 
 /// Renders `CREATE [OR REPLACE] VIEW <qualified> [(<cols>)] AS <select>` for the given dialect.
@@ -518,6 +518,54 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
             }
             writer.write_all(b" END")
         }
+        ExprNode::ScalarFn { func, args } => match func {
+            // `CONCAT` ignores NULL on PostgreSQL, so render concat there as `||` (NULL-propagating),
+            // matching the builder's nullability model.
+            ScalarFunc::Concat if dialect.concat_uses_pipe_operator() => {
+                writer.write_all(b"(")?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        writer.write_all(b" || ")?;
+                    }
+                    render_expr(arg, dialect, writer)?;
+                }
+                writer.write_all(b")")
+            }
+            // The SQL-standard `SUBSTRING(s FROM start FOR len)` form (unambiguous; the comma form can
+            // resolve to PostgreSQL's regex overload).
+            ScalarFunc::Substring if args.len() == 3 => {
+                writer.write_all(b"SUBSTRING(")?;
+                render_expr(&args[0], dialect, writer)?;
+                writer.write_all(b" FROM ")?;
+                render_expr(&args[1], dialect, writer)?;
+                writer.write_all(b" FOR ")?;
+                render_expr(&args[2], dialect, writer)?;
+                writer.write_all(b")")
+            }
+            _ => {
+                writer.write_all(scalar_func_name(*func).as_bytes())?;
+                writer.write_all(b"(")?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        writer.write_all(b", ")?;
+                    }
+                    render_expr(arg, dialect, writer)?;
+                }
+                writer.write_all(b")")
+            }
+        },
+    }
+}
+
+/// SQL name for a [`ScalarFunc`] (identical across backends; `Length` -> `CHAR_LENGTH`).
+fn scalar_func_name(func: ScalarFunc) -> &'static str {
+    match func {
+        ScalarFunc::Lower => "LOWER",
+        ScalarFunc::Upper => "UPPER",
+        ScalarFunc::Length => "CHAR_LENGTH",
+        ScalarFunc::Trim => "TRIM",
+        ScalarFunc::Concat => "CONCAT",
+        ScalarFunc::Substring => "SUBSTRING",
     }
 }
 

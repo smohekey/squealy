@@ -23,7 +23,7 @@ use crate::{
     RenderAst, RenderCaseArms, RenderCoalesceArgs, RenderInsertAssignments, RenderInsertRows,
     RenderPredicateAst, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
     RenderSimpleCaseArms, RenderUpdateAssignments, SchemaTable, SelectSink, Selected, SourceAlias,
-    SqlType, TableProjection, UpdateableTable,
+    SqlType, TableProjection, UnaryStringFunc, UpdateableTable,
 };
 use std::marker::PhantomData;
 
@@ -1540,6 +1540,73 @@ where
             self.visit_case_value_close(result)?;
         }
         self.writer.write_all(b" END")
+    }
+
+    fn visit_unary_fn<O>(&mut self, func: UnaryStringFunc, operand: O) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        self.writer.write_all(func.sql_name().as_bytes())?;
+        self.writer.write_all(b"(")?;
+        operand(self)?;
+        self.writer.write_all(b")")
+    }
+
+    fn visit_concat<L, R>(&mut self, left: L, right: R) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        // `||` (PostgreSQL) propagates NULL and infers a bare parameter's type; `CONCAT` (MySQL) also
+        // propagates NULL. Both match the builder's "nullable iff either operand is" model.
+        if self.renderer.dialect.concat_uses_pipe_operator() {
+            self.writer.write_all(b"(")?;
+            left(self)?;
+            self.writer.write_all(b" || ")?;
+            right(self)?;
+            self.writer.write_all(b")")
+        } else {
+            self.writer.write_all(b"CONCAT(")?;
+            left(self)?;
+            self.writer.write_all(b", ")?;
+            right(self)?;
+            self.writer.write_all(b")")
+        }
+    }
+
+    fn visit_substring<S, Start, Len>(
+        &mut self,
+        string: S,
+        start: Start,
+        len: Len,
+    ) -> Result<(), Self::Error>
+    where
+        S: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Start: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Len: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        // The SQL-standard `SUBSTRING(s FROM start FOR len)` form (supported by PostgreSQL and MySQL).
+        // PostgreSQL needs the `start`/`len` bounds cast to `integer` so a bare parameter is the
+        // positional count — otherwise it resolves `SUBSTRING(text FROM unknown FOR unknown)` to its
+        // regex `substring(text FROM pattern FOR escape)` overload. MySQL binds `?` by value (no
+        // inference, no regex overload), so it needs no cast. The text operand is anchored by the
+        // function and is never cast.
+        let bound_cast = if self.renderer.dialect.substring_bounds_need_cast() {
+            Some(SqlType::I32)
+        } else {
+            None
+        };
+        self.writer.write_all(b"SUBSTRING(")?;
+        string(self)?;
+        self.writer.write_all(b" FROM ")?;
+        self.visit_case_value_open(bound_cast.as_ref())?;
+        start(self)?;
+        self.visit_case_value_close(bound_cast.as_ref())?;
+        self.writer.write_all(b" FOR ")?;
+        self.visit_case_value_open(bound_cast.as_ref())?;
+        len(self)?;
+        self.visit_case_value_close(bound_cast.as_ref())?;
+        self.writer.write_all(b")")
     }
 
     fn visit_case_when(&mut self) -> Result<(), Self::Error> {

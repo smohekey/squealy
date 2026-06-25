@@ -3035,3 +3035,45 @@ fn postgres_coalesce_nullif_simple_case_cast_each_branch() {
         simple_lit_operand.to_sql()
     );
 }
+
+#[test]
+fn postgres_string_functions_render() {
+    let q = Postgres.from::<User>().select(|(user,)| lower(user.name));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT LOWER(q0_0.\"name\") AS \"expr\" FROM \"public\".\"users\" AS q0_0"
+    );
+
+    let len = Postgres.from::<User>().select(|(user,)| length(user.name));
+    assert_eq!(
+        len.to_sql(),
+        "SELECT CHAR_LENGTH(q0_0.\"name\") AS \"expr\" FROM \"public\".\"users\" AS q0_0"
+    );
+
+    let sub = Postgres
+        .from::<User>()
+        .select(|(user,)| substring(user.name, 1, 3));
+    assert_eq!(
+        sub.to_sql(),
+        "SELECT SUBSTRING(q0_0.\"name\" FROM CAST($1 AS integer) FOR CAST($2 AS integer)) AS \"expr\" FROM \"public\".\"users\" AS q0_0"
+    );
+
+    // PostgreSQL renders concat as the NULL-propagating `||` operator (its `CONCAT` ignores NULL and
+    // can't infer a bare parameter's type).
+    let cat = Postgres
+        .from::<User>()
+        .select(|(user,)| user.name.concat(user.name));
+    assert_eq!(
+        cat.to_sql(),
+        "SELECT (q0_0.\"name\" || q0_0.\"name\") AS \"expr\" FROM \"public\".\"users\" AS q0_0"
+    );
+
+    // A bare-parameter concat operand is anchored by `||`.
+    let cat_param = Postgres
+        .from::<User>()
+        .select(|(user,)| user.name.concat("!"));
+    assert_eq!(
+        cat_param.to_sql(),
+        "SELECT (q0_0.\"name\" || $1) AS \"expr\" FROM \"public\".\"users\" AS q0_0"
+    );
+}

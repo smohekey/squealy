@@ -718,6 +718,23 @@ pub enum ExprNode {
         else_: Option<Box<ExprNode>>,
         result: Option<SqlType>,
     },
+    /// A scalar string function call — `FUNC(<args>)` (the function names are identical across
+    /// backends; no cast is needed since a function call self-types its result).
+    ScalarFn {
+        func: ScalarFunc,
+        args: Vec<ExprNode>,
+    },
+}
+
+/// A scalar (string) function for [`ExprNode::ScalarFn`]. `Length` renders as `CHAR_LENGTH`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalarFunc {
+    Lower,
+    Upper,
+    Length,
+    Trim,
+    Concat,
+    Substring,
 }
 
 /// One `ORDER BY` term inside a window function's `OVER (…)` clause.
@@ -887,6 +904,11 @@ fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>
             }
             if let Some(else_) = else_ {
                 collect_expr_sources(else_, sources);
+            }
+        }
+        ExprNode::ScalarFn { args, .. } => {
+            for arg in args {
+                collect_expr_sources(arg, sources);
             }
         }
     }

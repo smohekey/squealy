@@ -36,6 +36,18 @@ impl squealy::Dialect for PostgresDialect {
             (true, true) => b" NOT ILIKE ",
         })
     }
+
+    fn concat_uses_pipe_operator(&self) -> bool {
+        // `a || b` propagates NULL (matching the builder's nullability model) and lets a bare
+        // parameter's type be inferred, unlike PostgreSQL's NULL-ignoring `CONCAT("any", …)`.
+        true
+    }
+
+    fn substring_bounds_need_cast(&self) -> bool {
+        // Cast `start`/`len` to integer so a bare parameter is the positional count, not the regex
+        // `substring(text FROM pattern FOR escape)` overload.
+        true
+    }
 }
 
 pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -> io::Result<()> {
