@@ -1680,21 +1680,18 @@ where
         let operand_cast =
             operand_cast.filter(|_| self.renderer.dialect.timestamp_operand_needs_cast());
         match timezone {
-            // `(date_trunc('unit', op AT TIME ZONE 'tz') AT TIME ZONE 'tz')`: the inner `AT TIME ZONE`
-            // demotes the `timestamptz` to a `timestamp` (wall-clock in `tz`) so truncation happens in
-            // that zone; the outer `AT TIME ZONE 'tz'` promotes the truncated `timestamp` back to a
-            // `timestamptz`, so the decoded instant is correct for any zone (not just UTC).
+            // PostgreSQL's 3-argument `date_trunc('unit', ts, 'tz')` (PG 12+) truncates `ts` in `tz`
+            // and returns a `timestamptz` directly. This avoids reinterpreting an ambiguous local wall
+            // time — a `… AT TIME ZONE 'tz'` round-trip would resolve a DST fall-back repeated hour to
+            // the wrong offset; PostgreSQL handles the zone math (including DST) internally.
             Some(tz) => {
-                self.writer.write_all(b"(date_trunc('")?;
+                self.writer.write_all(b"date_trunc('")?;
                 self.writer.write_all(unit.trunc_literal().as_bytes())?;
                 self.writer.write_all(b"', ")?;
-                self.writer.write_all(b"(")?;
                 self.visit_case_value_open(operand_cast)?;
                 operand(self)?;
                 self.visit_case_value_close(operand_cast)?;
-                self.writer.write_all(b" AT TIME ZONE ")?;
-                write_sql_string_literal(&mut *self.writer, tz)?;
-                self.writer.write_all(b")) AT TIME ZONE ")?;
+                self.writer.write_all(b", ")?;
                 write_sql_string_literal(&mut *self.writer, tz)?;
                 self.writer.write_all(b")")?;
             }

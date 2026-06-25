@@ -1349,6 +1349,21 @@ async fn postgres_datetime_functions_round_trip() {
         .expect("fetch date_trunc day at America/New_York");
     assert_eq!(ny_truncated, vec![ny_midnight]);
 
+    // DST fall-back ambiguity: 2021-11-07 05:30:00Z is 01:30 EDT (the *first* occurrence of the
+    // repeated 1 a.m. hour in New York). Truncating to the hour must yield 01:00 EDT = 05:00:00Z, not
+    // 01:00 EST = 06:00:00Z. PostgreSQL's 3-arg `date_trunc` resolves this correctly; an `AT TIME ZONE`
+    // round-trip would not.
+    let dst_instant = UNIX_EPOCH + Duration::from_secs(1_636_263_000); // 2021-11-07 05:30:00Z
+    let dst_hour = UNIX_EPOCH + Duration::from_secs(1_636_261_200); // 2021-11-07 05:00:00Z
+    let dst_truncated: Vec<SystemTime> = connection
+        .from::<IntegrationTimed>()
+        .where_(|e| e.id.equals(1))
+        .select(|(_e,)| date_trunc_at(DateField::Hour, dst_instant, "America/New_York"))
+        .collect()
+        .await
+        .expect("fetch date_trunc hour across DST fall-back");
+    assert_eq!(dst_truncated, vec![dst_hour]);
+
     // `now()` -> the current transaction timestamp, which is after the inserted rows.
     let nows: Vec<SystemTime> = connection
         .from::<IntegrationTimed>()
