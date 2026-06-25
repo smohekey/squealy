@@ -1,5 +1,5 @@
 error[E0277]: `i32` is not a timestamp/date type
-  --> tests/compile_fail/extract_requires_timestamp_operand.rs:23:52
+  --> tests/compile_fail/feature_gated/extract_requires_timestamp_operand.rs:23:52
    |
 23 |         .select(|(user,)| extract(DateField::Year, user.id));
    |                           -------                  ^^^^^^^ the operand of `now`/`extract`/`date_trunc` must be a timestamp value (enable the `systemtime`, `time`, or `chrono` feature)
