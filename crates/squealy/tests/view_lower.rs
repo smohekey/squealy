@@ -312,3 +312,28 @@ fn lowers_simple_case_to_ir() {
         other => panic!("expected simple CASE node, got {other:?}"),
     }
 }
+
+#[test]
+fn lowers_string_functions_to_ir() {
+    let conn = ModelConn;
+    let lower_q = conn.from::<User>().project(|(user,)| lower(user.name));
+    match &lower_view(&lower_q).projection[0].expr {
+        ExprNode::ScalarFn { func, args } => {
+            assert_eq!(*func, ScalarFunc::Lower);
+            assert_eq!(args.len(), 1);
+            assert!(matches!(&args[0], ExprNode::Column { .. }));
+        }
+        other => panic!("expected ScalarFn node, got {other:?}"),
+    }
+
+    let sub_q = conn
+        .from::<User>()
+        .project(|(user,)| substring(user.name, 1, 3));
+    match &lower_view(&sub_q).projection[0].expr {
+        ExprNode::ScalarFn { func, args } => {
+            assert_eq!(*func, ScalarFunc::Substring);
+            assert_eq!(args.len(), 3);
+        }
+        other => panic!("expected ScalarFn node, got {other:?}"),
+    }
+}

@@ -1211,3 +1211,63 @@ async fn postgres_coalesce_nullif_simple_case_round_trip() {
         .expect("fetch simple case");
     assert_eq!(simple_vals, vec![100, 0]);
 }
+
+#[tokio::test]
+#[ignore]
+async fn postgres_string_functions_round_trip() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS integration_users")
+        .await
+        .expect("drop old integration table");
+
+    let ddl_backend = Postgres;
+    create_table::<IntegrationUser>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+    for name in ["Ada", "Grace"] {
+        connection
+            .to::<IntegrationUser>()
+            .name(name)
+            .insert()
+            .await
+            .expect("insert user");
+    }
+
+    let lowered: Vec<String> = connection
+        .from::<IntegrationUser>()
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| lower(user.name))
+        .collect()
+        .await
+        .expect("fetch lower");
+    assert_eq!(lowered, vec!["ada".to_owned(), "grace".to_owned()]);
+
+    let lengths: Vec<i32> = connection
+        .from::<IntegrationUser>()
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| length(user.name))
+        .collect()
+        .await
+        .expect("fetch length");
+    assert_eq!(lengths, vec![3, 5]);
+
+    let greetings: Vec<String> = connection
+        .from::<IntegrationUser>()
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| user.name.concat("!"))
+        .collect()
+        .await
+        .expect("fetch concat");
+    assert_eq!(greetings, vec!["Ada!".to_owned(), "Grace!".to_owned()]);
+
+    let prefixes: Vec<String> = connection
+        .from::<IntegrationUser>()
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| substring(user.name, 1, 2))
+        .collect()
+        .await
+        .expect("fetch substring");
+    assert_eq!(prefixes, vec!["Ad".to_owned(), "Gr".to_owned()]);
+}

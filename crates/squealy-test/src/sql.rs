@@ -9,7 +9,8 @@ use squealy::{
     RenderAssignment, RenderAst, RenderCaseArms, RenderCoalesceArgs, RenderInsertAssignments,
     RenderInsertRows, RenderPredicateAst, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
     RenderSimpleCaseArms, RenderSubquery, RenderUpdateAssignments, SchemaTable, SelectSink,
-    Selected, SourceAlias, SqlType, Table, TableProjection, UpdateableTable, WindowFunc,
+    Selected, SourceAlias, SqlType, Table, TableProjection, UnaryStringFunc, UpdateableTable,
+    WindowFunc,
 };
 
 use crate::query::{TestParam, TestParamWriter};
@@ -1178,6 +1179,48 @@ where
             else_.visit(self)?;
         }
         self.writer.write_all(b" END")
+    }
+
+    fn visit_unary_fn<O>(&mut self, func: UnaryStringFunc, operand: O) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        self.writer.write_all(func.sql_name().as_bytes())?;
+        self.writer.write_all(b"(")?;
+        operand(self)?;
+        self.writer.write_all(b")")
+    }
+
+    fn visit_concat<L, R>(&mut self, left: L, right: R) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        self.writer.write_all(b"CONCAT(")?;
+        left(self)?;
+        self.writer.write_all(b", ")?;
+        right(self)?;
+        self.writer.write_all(b")")
+    }
+
+    fn visit_substring<S, Start, Len>(
+        &mut self,
+        string: S,
+        start: Start,
+        len: Len,
+    ) -> Result<(), Self::Error>
+    where
+        S: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Start: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Len: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        self.writer.write_all(b"SUBSTRING(")?;
+        string(self)?;
+        self.writer.write_all(b" FROM ")?;
+        start(self)?;
+        self.writer.write_all(b" FOR ")?;
+        len(self)?;
+        self.writer.write_all(b")")
     }
 
     fn visit_case_when(&mut self) -> Result<(), Self::Error> {

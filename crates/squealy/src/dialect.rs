@@ -83,4 +83,27 @@ pub trait Dialect {
             OrderNulls::Last => b" NULLS LAST",
         })
     }
+
+    /// Whether string concatenation renders as the `||` operator (`a || b`) rather than `CONCAT(a, b)`.
+    ///
+    /// The two are not interchangeable: `||` propagates `NULL` (the result is `NULL` if any operand
+    /// is), matching the builder's "nullable iff any operand is nullable" model, whereas PostgreSQL's
+    /// `CONCAT` *ignores* `NULL` operands. The default is `false` (`CONCAT`), which is correct for
+    /// MySQL (whose `CONCAT` propagates `NULL`, and whose `||` is logical OR). PostgreSQL overrides
+    /// this to `true` so `||` is used — which also lets it infer a bare parameter's type (its `CONCAT`
+    /// signature is `"any"` and cannot).
+    fn concat_uses_pipe_operator(&self) -> bool {
+        false
+    }
+
+    /// Whether `SUBSTRING(s FROM start FOR len)` needs its `start`/`len` bounds cast to `integer`.
+    ///
+    /// PostgreSQL overrides this to `true`: a bare parameter there is untyped, and
+    /// `SUBSTRING(text FROM unknown FOR unknown)` resolves to the regex `substring(text FROM pattern
+    /// FOR escape)` overload rather than the positional form, so the bounds must be cast to integer.
+    /// The default is `false` — MySQL binds `?` by value (no inference) and has no regex overload, so
+    /// it needs no cast (and its `CAST` vocabulary has no `INT` target anyway).
+    fn substring_bounds_need_cast(&self) -> bool {
+        false
+    }
 }

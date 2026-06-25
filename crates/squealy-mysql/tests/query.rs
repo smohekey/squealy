@@ -323,3 +323,38 @@ fn mysql_coalesce_nullif_simple_case_render_in_its_dialect() {
         simple_q.to_sql()
     );
 }
+
+#[test]
+fn mysql_string_functions_render() {
+    let q = Mysql
+        .from::<Widget>()
+        .select(|(widget,)| lower(widget.name));
+    assert!(q.to_sql().contains("LOWER(q0_0.`name`)"), "{}", q.to_sql());
+
+    let len = Mysql
+        .from::<Widget>()
+        .select(|(widget,)| length(widget.name));
+    assert!(
+        len.to_sql().contains("CHAR_LENGTH(q0_0.`name`)"),
+        "{}",
+        len.to_sql()
+    );
+
+    let sub = Mysql
+        .from::<Widget>()
+        .select(|(widget,)| substring(widget.name, 1, 3));
+    assert!(
+        sub.to_sql().contains("SUBSTRING(q0_0.`name` FROM ? FOR ?)"),
+        "{}",
+        sub.to_sql()
+    );
+
+    let cat = Mysql
+        .from::<Widget>()
+        .select(|(widget,)| widget.name.concat(widget.name));
+    assert!(
+        cat.to_sql().contains("CONCAT(q0_0.`name`, q0_0.`name`)"),
+        "{}",
+        cat.to_sql()
+    );
+}

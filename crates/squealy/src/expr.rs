@@ -457,6 +457,361 @@ where
     }
 }
 
+// ===== string functions =====
+
+/// A unary string function applied to one `String`-valued operand.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnaryStringFunc {
+    /// `LOWER(x)`.
+    Lower,
+    /// `UPPER(x)`.
+    Upper,
+    /// `CHAR_LENGTH(x)` — character count (result `i32`).
+    Length,
+    /// `TRIM(x)`.
+    Trim,
+}
+
+impl UnaryStringFunc {
+    /// The SQL function name (identical across PostgreSQL and MySQL). `Length` uses `CHAR_LENGTH`
+    /// (character count) in both, rather than the byte-vs-char-divergent `LENGTH`.
+    pub fn sql_name(self) -> &'static str {
+        match self {
+            UnaryStringFunc::Lower => "LOWER",
+            UnaryStringFunc::Upper => "UPPER",
+            UnaryStringFunc::Length => "CHAR_LENGTH",
+            UnaryStringFunc::Trim => "TRIM",
+        }
+    }
+}
+
+/// `FUNC(<operand>)` for a unary string function ([`lower`]/[`upper`]/[`length`]/[`trim`]).
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct UnaryFnExprAst<Operand> {
+    func: UnaryStringFunc,
+    operand: Operand,
+}
+
+impl<Operand> ExprAst for UnaryFnExprAst<Operand>
+where
+    Operand: ExprAst,
+{
+    type Params = Operand::Params;
+}
+
+impl<Operand, B> RenderAst<B> for UnaryFnExprAst<Operand>
+where
+    Operand: RenderAst<B>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_unary_fn(self.func, |visitor| self.operand.visit(visitor))
+    }
+}
+
+impl<Operand> NonAggregateAst for UnaryFnExprAst<Operand> where Operand: NonAggregateAst {}
+impl<Operand> NonWindowAst for UnaryFnExprAst<Operand> where Operand: NonWindowAst {}
+impl<Operand> AstProjectionClass for UnaryFnExprAst<Operand>
+where
+    Operand: AstProjectionClass,
+{
+    type Class = <Operand as AstProjectionClass>::Class;
+}
+impl<Operand> ExprColumns for UnaryFnExprAst<Operand>
+where
+    Operand: ExprColumns,
+{
+    type Columns = <Operand as ExprColumns>::Columns;
+}
+
+/// Result kind of a string function over operands whose combined nullability is `Null`: value type
+/// `T`, made nullable (`ScalarNullable<T>`) iff any operand is nullable. (A function call self-types
+/// its result, so no `CAST` is needed — unlike `CASE`/`COALESCE`.)
+type StringFnResult<Null, T> = <Null as CaseNull>::Result<T>;
+
+/// SQL `LOWER(s)` — lowercase a string. Result type `String`, nullable iff `s` is.
+#[allow(clippy::type_complexity)] // type-level nullability fold
+pub fn lower<'scope, E>(
+    s: E,
+) -> Expr<
+    'scope,
+    StringFnResult<<E::Kind as KindNullability>::Nullable, String>,
+    UnaryFnExprAst<E::Ast>,
+>
+where
+    E: IntoExpr<'scope>,
+    E::Kind: KindNullability<Value = String>,
+    UnaryFnExprAst<E::Ast>: ExprAst,
+{
+    unary_string_fn(UnaryStringFunc::Lower, s)
+}
+
+/// SQL `UPPER(s)` — uppercase a string. Result type `String`, nullable iff `s` is.
+#[allow(clippy::type_complexity)] // type-level nullability fold
+pub fn upper<'scope, E>(
+    s: E,
+) -> Expr<
+    'scope,
+    StringFnResult<<E::Kind as KindNullability>::Nullable, String>,
+    UnaryFnExprAst<E::Ast>,
+>
+where
+    E: IntoExpr<'scope>,
+    E::Kind: KindNullability<Value = String>,
+    UnaryFnExprAst<E::Ast>: ExprAst,
+{
+    unary_string_fn(UnaryStringFunc::Upper, s)
+}
+
+/// SQL `TRIM(s)` — strip leading/trailing whitespace. Result type `String`, nullable iff `s` is.
+#[allow(clippy::type_complexity)] // type-level nullability fold
+pub fn trim<'scope, E>(
+    s: E,
+) -> Expr<
+    'scope,
+    StringFnResult<<E::Kind as KindNullability>::Nullable, String>,
+    UnaryFnExprAst<E::Ast>,
+>
+where
+    E: IntoExpr<'scope>,
+    E::Kind: KindNullability<Value = String>,
+    UnaryFnExprAst<E::Ast>: ExprAst,
+{
+    unary_string_fn(UnaryStringFunc::Trim, s)
+}
+
+/// SQL `CHAR_LENGTH(s)` — character count. Result type `i32`, nullable iff `s` is.
+#[allow(clippy::type_complexity)] // type-level nullability fold
+pub fn length<'scope, E>(
+    s: E,
+) -> Expr<'scope, StringFnResult<<E::Kind as KindNullability>::Nullable, i32>, UnaryFnExprAst<E::Ast>>
+where
+    E: IntoExpr<'scope>,
+    E::Kind: KindNullability<Value = String>,
+    UnaryFnExprAst<E::Ast>: ExprAst,
+{
+    unary_string_fn(UnaryStringFunc::Length, s)
+}
+
+#[allow(clippy::type_complexity)] // type-level nullability fold
+fn unary_string_fn<'scope, E, T>(
+    func: UnaryStringFunc,
+    s: E,
+) -> Expr<'scope, StringFnResult<<E::Kind as KindNullability>::Nullable, T>, UnaryFnExprAst<E::Ast>>
+where
+    E: IntoExpr<'scope>,
+    E::Kind: KindNullability<Value = String>,
+    T: ExprKind,
+    UnaryFnExprAst<E::Ast>: ExprAst,
+{
+    Expr {
+        ast: UnaryFnExprAst {
+            func,
+            operand: s.into_expr().ast,
+        },
+        project_alias: Cow::Borrowed("expr"),
+        _phantom: PhantomData,
+    }
+}
+
+/// `CONCAT(<left>, <right>)` — string concatenation. Chains (`a.concat(b).concat(c)`) to nested
+/// `CONCAT`s. The result is nullable iff either operand is.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ConcatExprAst<Left, Right> {
+    left: Left,
+    right: Right,
+}
+
+impl<Left, Right> ExprAst for ConcatExprAst<Left, Right>
+where
+    Left: ExprAst,
+    Right: ExprAst,
+    Left::Params: crate::HAppend<Right::Params>,
+{
+    type Params = <Left::Params as crate::HAppend<Right::Params>>::Output;
+}
+
+impl<Left, Right, B> RenderAst<B> for ConcatExprAst<Left, Right>
+where
+    Left: RenderAst<B>,
+    Right: RenderAst<B>,
+    Left::Params: crate::HAppend<Right::Params>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_concat(
+            |visitor| self.left.visit(visitor),
+            |visitor| self.right.visit(visitor),
+        )
+    }
+}
+
+impl<Left, Right> NonAggregateAst for ConcatExprAst<Left, Right>
+where
+    Left: NonAggregateAst,
+    Right: NonAggregateAst,
+{
+}
+impl<Left, Right> NonWindowAst for ConcatExprAst<Left, Right>
+where
+    Left: NonWindowAst,
+    Right: NonWindowAst,
+{
+}
+impl<Left, Right> AstProjectionClass for ConcatExprAst<Left, Right>
+where
+    Left: AstProjectionClass,
+    Right: AstProjectionClass,
+    <Left as AstProjectionClass>::Class: CombineTerm<<Right as AstProjectionClass>::Class>,
+{
+    type Class = <<Left as AstProjectionClass>::Class as CombineTerm<
+        <Right as AstProjectionClass>::Class,
+    >>::Output;
+}
+impl<Left, Right> ExprColumns for ConcatExprAst<Left, Right>
+where
+    Left: ExprColumns,
+    Right: ExprColumns,
+    <Left as ExprColumns>::Columns: CombineColumns<<Right as ExprColumns>::Columns>,
+{
+    type Columns =
+        <<Left as ExprColumns>::Columns as CombineColumns<<Right as ExprColumns>::Columns>>::Output;
+}
+
+/// `SUBSTRING(<string>, <start>, <len>)`. Result type `String`, nullable iff any argument is.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct SubstringExprAst<S, Start, Len> {
+    string: S,
+    start: Start,
+    len: Len,
+}
+
+impl<S, Start, Len> ExprAst for SubstringExprAst<S, Start, Len>
+where
+    S: ExprAst,
+    Start: ExprAst,
+    Len: ExprAst,
+    S::Params: crate::HAppend<Start::Params>,
+    <S::Params as crate::HAppend<Start::Params>>::Output: crate::HAppend<Len::Params>,
+{
+    type Params = <<S::Params as crate::HAppend<Start::Params>>::Output as crate::HAppend<
+        Len::Params,
+    >>::Output;
+}
+
+impl<S, Start, Len, B> RenderAst<B> for SubstringExprAst<S, Start, Len>
+where
+    S: RenderAst<B>,
+    Start: RenderAst<B>,
+    Len: RenderAst<B>,
+    S::Params: crate::HAppend<Start::Params>,
+    <S::Params as crate::HAppend<Start::Params>>::Output: crate::HAppend<Len::Params>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_substring(
+            |visitor| self.string.visit(visitor),
+            |visitor| self.start.visit(visitor),
+            |visitor| self.len.visit(visitor),
+        )
+    }
+}
+
+impl<S, Start, Len> NonAggregateAst for SubstringExprAst<S, Start, Len>
+where
+    S: NonAggregateAst,
+    Start: NonAggregateAst,
+    Len: NonAggregateAst,
+{
+}
+impl<S, Start, Len> NonWindowAst for SubstringExprAst<S, Start, Len>
+where
+    S: NonWindowAst,
+    Start: NonWindowAst,
+    Len: NonWindowAst,
+{
+}
+impl<S, Start, Len> AstProjectionClass for SubstringExprAst<S, Start, Len>
+where
+    S: AstProjectionClass,
+    Start: AstProjectionClass,
+    Len: AstProjectionClass,
+    <S as AstProjectionClass>::Class: CombineTerm<<Start as AstProjectionClass>::Class>,
+    <<S as AstProjectionClass>::Class as CombineTerm<<Start as AstProjectionClass>::Class>>::Output:
+        CombineTerm<<Len as AstProjectionClass>::Class>,
+{
+    type Class = <<<S as AstProjectionClass>::Class as CombineTerm<
+        <Start as AstProjectionClass>::Class,
+    >>::Output as CombineTerm<<Len as AstProjectionClass>::Class>>::Output;
+}
+impl<S, Start, Len> ExprColumns for SubstringExprAst<S, Start, Len>
+where
+    S: ExprColumns,
+    Start: ExprColumns,
+    Len: ExprColumns,
+    <S as ExprColumns>::Columns: CombineColumns<<Start as ExprColumns>::Columns>,
+    <<S as ExprColumns>::Columns as CombineColumns<<Start as ExprColumns>::Columns>>::Output:
+        CombineColumns<<Len as ExprColumns>::Columns>,
+{
+    type Columns = <<<S as ExprColumns>::Columns as CombineColumns<
+        <Start as ExprColumns>::Columns,
+    >>::Output as CombineColumns<<Len as ExprColumns>::Columns>>::Output;
+}
+
+/// SQL `SUBSTRING(s, start, len)` — the `len`-character substring of `s` starting at 1-based `start`.
+/// `start`/`len` are `i32`-valued; the result is `String`, nullable iff any argument is.
+#[allow(clippy::type_complexity)] // the result kind is a type-level nullability fold
+pub fn substring<'scope, S, Start, Len>(
+    s: S,
+    start: Start,
+    len: Len,
+) -> Expr<
+    'scope,
+    StringFnResult<
+        <<<S::Kind as KindNullability>::Nullable as CaseNullOr<
+            <Start::Kind as KindNullability>::Nullable,
+        >>::Output as CaseNullOr<<Len::Kind as KindNullability>::Nullable>>::Output,
+        String,
+    >,
+    SubstringExprAst<S::Ast, Start::Ast, Len::Ast>,
+>
+where
+    S: IntoExpr<'scope>,
+    S::Kind: KindNullability<Value = String>,
+    Start: IntoExpr<'scope>,
+    Start::Kind: KindNullability<Value = i32>,
+    Len: IntoExpr<'scope>,
+    Len::Kind: KindNullability<Value = i32>,
+    <S::Kind as KindNullability>::Nullable: CaseNullOr<<Start::Kind as KindNullability>::Nullable>,
+    <<S::Kind as KindNullability>::Nullable as CaseNullOr<
+        <Start::Kind as KindNullability>::Nullable,
+    >>::Output: CaseNullOr<<Len::Kind as KindNullability>::Nullable>,
+    SubstringExprAst<S::Ast, Start::Ast, Len::Ast>: ExprAst,
+{
+    Expr {
+        ast: SubstringExprAst {
+            string: s.into_expr().ast,
+            start: start.into_expr().ast,
+            len: len.into_expr().ast,
+        },
+        project_alias: Cow::Borrowed("expr"),
+        _phantom: PhantomData,
+    }
+}
+
 // ===== Window functions =====
 
 /// The function part of a window expression (`func(args) OVER (…)`): a SQL aggregate used as a
@@ -3102,6 +3457,29 @@ pub trait ExprVisitor {
         Arms: RenderSimpleCaseArms<Self::Backend>,
         Else: RenderAst<Self::Backend>;
 
+    /// Render a unary string function call — `LOWER(x)`, `UPPER(x)`, `CHAR_LENGTH(x)`, `TRIM(x)`.
+    fn visit_unary_fn<O>(&mut self, func: UnaryStringFunc, operand: O) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render `CONCAT(<left>, <right>)`.
+    fn visit_concat<L, R>(&mut self, left: L, right: R) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render `SUBSTRING(<string>, <start>, <len>)`.
+    fn visit_substring<S, Start, Len>(
+        &mut self,
+        string: S,
+        start: Start,
+        len: Len,
+    ) -> Result<(), Self::Error>
+    where
+        S: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Start: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Len: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
     /// Render a SQL aggregate function call (`func(operand)`), optionally wrapped in a
     /// `CAST(... AS cast)` so the result type matches the advertised Rust type.
     fn visit_aggregate<O>(
@@ -4879,6 +5257,36 @@ where
     }
 }
 
+impl<'scope, K> ColumnRef<'scope, K>
+where
+    K: ExprKind,
+{
+    /// SQL `CONCAT(self, other)` on a `String`-valued column. See [`Expr::concat`].
+    #[allow(clippy::type_complexity)] // the result kind is a type-level nullability fold
+    pub fn concat<R>(
+        self,
+        other: R,
+    ) -> Expr<
+        'scope,
+        StringFnResult<
+            <<K as KindNullability>::Nullable as CaseNullOr<
+                <R::Kind as KindNullability>::Nullable,
+            >>::Output,
+            String,
+        >,
+        ConcatExprAst<ColumnExprAst<K>, R::Ast>,
+    >
+    where
+        K: KindNullability<Value = String>,
+        R: IntoExpr<'scope>,
+        R::Kind: KindNullability<Value = String>,
+        <K as KindNullability>::Nullable: CaseNullOr<<R::Kind as KindNullability>::Nullable>,
+        ConcatExprAst<ColumnExprAst<K>, R::Ast>: ExprAst,
+    {
+        self.into_expr().concat(other)
+    }
+}
+
 // Numeric arithmetic on a `ColumnRef` is provided by the `Add`/`Sub`/`Mul`/`Div` operator impls
 // below (`column + other`, etc.); the equivalent inherent helpers were redundant with them.
 
@@ -4980,6 +5388,39 @@ where
     /// The default output alias when this expression is selected directly.
     pub fn project_alias(&self) -> &str {
         &self.project_alias
+    }
+
+    /// SQL `CONCAT(self, other)` — string concatenation, available on `String`-valued expressions.
+    /// Chainable (`a.concat(b).concat(c)`); the result is nullable iff `self` or `other` is.
+    #[allow(clippy::type_complexity)] // the result kind is a type-level nullability fold
+    pub fn concat<R>(
+        self,
+        other: R,
+    ) -> Expr<
+        'scope,
+        StringFnResult<
+            <<K as KindNullability>::Nullable as CaseNullOr<
+                <R::Kind as KindNullability>::Nullable,
+            >>::Output,
+            String,
+        >,
+        ConcatExprAst<Ast, R::Ast>,
+    >
+    where
+        K: KindNullability<Value = String>,
+        R: IntoExpr<'scope>,
+        R::Kind: KindNullability<Value = String>,
+        <K as KindNullability>::Nullable: CaseNullOr<<R::Kind as KindNullability>::Nullable>,
+        ConcatExprAst<Ast, R::Ast>: ExprAst,
+    {
+        Expr {
+            ast: ConcatExprAst {
+                left: self.ast,
+                right: other.into_expr().ast,
+            },
+            project_alias: Cow::Borrowed("expr"),
+            _phantom: PhantomData,
+        }
     }
 
     /// SQL equality.
