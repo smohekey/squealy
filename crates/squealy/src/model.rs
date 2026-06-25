@@ -743,6 +743,12 @@ pub enum ExprNode {
         operand: Box<ExprNode>,
         timezone: Option<String>,
     },
+    /// Fractional seconds of a timestamp as `result` (`f64`). Dialect-divergent: PostgreSQL
+    /// `EXTRACT(SECOND …)` vs MySQL `EXTRACT(SECOND_MICROSECOND …) / 1000000.0`.
+    ExtractSecond {
+        operand: Box<ExprNode>,
+        result: Option<SqlType>,
+    },
 }
 
 /// A scalar (string) function for [`ExprNode::ScalarFn`]. `Length` renders as `CHAR_LENGTH`.
@@ -931,7 +937,9 @@ fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>
             }
         }
         ExprNode::Now => {}
-        ExprNode::Extract { operand, .. } | ExprNode::DateTrunc { operand, .. } => {
+        ExprNode::Extract { operand, .. }
+        | ExprNode::DateTrunc { operand, .. }
+        | ExprNode::ExtractSecond { operand, .. } => {
             collect_expr_sources(operand, sources);
         }
     }

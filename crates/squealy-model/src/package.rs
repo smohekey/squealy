@@ -847,6 +847,14 @@ fn expr_to_node(expr: &ExprNode) -> KdlNode {
             push_child(&mut node, expr_to_node(operand));
             node
         }
+        ExprNode::ExtractSecond { operand, result } => {
+            let mut node = KdlNode::new("extract-second");
+            if let Some(ty) = result {
+                write_sql_type(&mut node, ty);
+            }
+            push_child(&mut node, expr_to_node(operand));
+            node
+        }
     }
 }
 
@@ -857,6 +865,7 @@ fn date_field_str(field: DateField) -> &'static str {
         DateField::Day => "day",
         DateField::Hour => "hour",
         DateField::Minute => "minute",
+        DateField::Second => "second",
     }
 }
 
@@ -867,6 +876,7 @@ fn date_field_from_str(value: &str) -> Result<DateField, PackageError> {
         "day" => DateField::Day,
         "hour" => DateField::Hour,
         "minute" => DateField::Minute,
+        "second" => DateField::Second,
         other => return Err(malformed(format!("unknown date field `{other}`"))),
     })
 }
@@ -1654,6 +1664,10 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
             unit: date_field_from_str(&required_prop(node, "unit")?)?,
             operand: nth_expr(0)?,
             timezone: prop(node, "tz").map(str::to_owned),
+        },
+        "extract-second" => ExprNode::ExtractSecond {
+            operand: nth_expr(0)?,
+            result: optional_sql_type_from_node(node)?,
         },
         other => return Err(malformed(format!("unknown view expression node `{other}`"))),
     })
@@ -2659,6 +2673,16 @@ mod tests {
                 unit: DateField::Day,
                 operand: col(),
                 timezone: Some("America/New_York".to_owned()),
+            },
+            ExprNode::Extract {
+                field: DateField::Second,
+                operand: col(),
+                result: Some(SqlType::I64),
+                timezone: None,
+            },
+            ExprNode::ExtractSecond {
+                operand: col(),
+                result: Some(SqlType::F64),
             },
         ] {
             assert_eq!(

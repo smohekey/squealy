@@ -385,4 +385,28 @@ fn mysql_extract_renders() {
         "{}",
         q.to_sql()
     );
+
+    // `extract(Second)` -> floored whole seconds (FLOOR is a no-op on MySQL's integer SECOND).
+    let second_q = Mysql
+        .from::<TimedEvent>()
+        .select(|(e,)| extract(DateField::Second, e.created));
+    assert!(
+        second_q
+            .to_sql()
+            .contains("CAST(FLOOR(EXTRACT(SECOND FROM q0_0.`created`)) AS SIGNED)"),
+        "{}",
+        second_q.to_sql()
+    );
+
+    // `extract_second` -> fractional seconds via the composite SECOND_MICROSECOND unit, cast to DOUBLE.
+    let frac_q = Mysql
+        .from::<TimedEvent>()
+        .select(|(e,)| extract_second(e.created));
+    assert!(
+        frac_q.to_sql().contains(
+            "CAST(EXTRACT(SECOND_MICROSECOND FROM q0_0.`created`) / 1000000.0 AS DOUBLE)"
+        ),
+        "{}",
+        frac_q.to_sql()
+    );
 }

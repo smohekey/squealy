@@ -568,6 +568,23 @@ impl ExprVisitor for IrBuilder {
         Ok(())
     }
 
+    fn visit_extract_second<O>(
+        &mut self,
+        operand: O,
+        cast: &SqlType,
+        _operand_cast: Option<&SqlType>,
+    ) -> io::Result<()>
+    where
+        O: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        let operand = self.child(operand)?;
+        self.stack.push(ExprNode::ExtractSecond {
+            operand,
+            result: Some(cast.clone()),
+        });
+        Ok(())
+    }
+
     fn visit_case_when(&mut self) -> io::Result<()> {
         // Arm boundaries are recovered structurally from the node stack (see `visit_case`).
         Ok(())

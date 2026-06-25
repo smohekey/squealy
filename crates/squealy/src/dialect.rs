@@ -118,4 +118,14 @@ pub trait Dialect {
     fn timestamp_operand_needs_cast(&self) -> bool {
         false
     }
+
+    /// Whether fractional-seconds `extract_second` must use the composite `SECOND_MICROSECOND` unit.
+    ///
+    /// PostgreSQL's `EXTRACT(SECOND FROM ts)` is already fractional, so the default (`false`) renders
+    /// `EXTRACT(SECOND FROM ts)`. MySQL's `EXTRACT(SECOND …)` is integer-only, so it overrides this to
+    /// `true` and the renderer uses `EXTRACT(SECOND_MICROSECOND FROM ts) / 1000000.0` (which references
+    /// the operand once, returning `SSffffff`), matching PostgreSQL's fractional value.
+    fn extract_second_uses_microsecond_unit(&self) -> bool {
+        false
+    }
 }

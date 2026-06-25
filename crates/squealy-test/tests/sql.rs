@@ -2168,3 +2168,40 @@ fn test_extract_of_nullable_column_is_nullable() {
         q.to_sql()
     );
 }
+
+#[cfg(feature = "systemtime")]
+#[test]
+fn test_extract_second_renders() {
+    // `extract(Second)` floors to the whole-seconds component (i64).
+    let whole = TestConnection
+        .from::<TimedEvent>()
+        .select(|(e,)| extract(DateField::Second, e.created));
+    assert_eq!(
+        whole.to_sql(),
+        "SELECT FLOOR(EXTRACT(SECOND FROM q0_0.created)) AS expr FROM public.timed_events AS q0_0"
+    );
+
+    // `extract_second` returns fractional seconds (f64); the MySQL-like test backend uses the
+    // composite `SECOND_MICROSECOND` unit.
+    let frac = TestConnection
+        .from::<TimedEvent>()
+        .select(|(e,)| extract_second(e.created));
+    assert_eq!(
+        frac.to_sql(),
+        "SELECT EXTRACT(SECOND_MICROSECOND FROM q0_0.created) / 1000000.0 AS expr \
+         FROM public.timed_events AS q0_0"
+    );
+
+    // `extract_second` over a nullable column is nullable.
+    let nullable = TestConnection
+        .from::<TimedEvent>()
+        .where_(|e| extract_second(e.ended).is_null())
+        .select(|(e,)| e.id);
+    assert!(
+        nullable
+            .to_sql()
+            .contains("EXTRACT(SECOND_MICROSECOND FROM q0_0.ended) / 1000000.0 IS NULL"),
+        "{}",
+        nullable.to_sql()
+    );
+}

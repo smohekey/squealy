@@ -835,10 +835,10 @@ where
 // ===== date/time functions =====
 
 /// A date/time field for [`extract`] (rendered as the `EXTRACT` keyword, e.g. `YEAR`) and
-/// [`date_trunc`] (rendered as the quoted unit literal, e.g. `'year'`). Limited to fields that are
-/// integers in both PostgreSQL and MySQL, so the `i64` result is uniform. (`SECOND` is intentionally
-/// excluded: PostgreSQL's `EXTRACT(SECOND …)` is fractional while MySQL's is an integer — tracked for
-/// a later fractional-aware design.)
+/// [`date_trunc`] (rendered as the quoted unit literal, e.g. `'year'`). Each field's `i64` result is
+/// uniform across PostgreSQL and MySQL. `Second` is the whole-seconds component (`0`–`59`): PostgreSQL's
+/// `EXTRACT(SECOND …)` is fractional, so [`extract`] floors it to match MySQL's integer value — use
+/// [`extract_second`] for the fractional part.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DateField {
     Year,
@@ -846,6 +846,7 @@ pub enum DateField {
     Day,
     Hour,
     Minute,
+    Second,
 }
 
 impl DateField {
@@ -857,6 +858,7 @@ impl DateField {
             DateField::Day => "DAY",
             DateField::Hour => "HOUR",
             DateField::Minute => "MINUTE",
+            DateField::Second => "SECOND",
         }
     }
 
@@ -868,6 +870,7 @@ impl DateField {
             DateField::Day => "day",
             DateField::Hour => "hour",
             DateField::Minute => "minute",
+            DateField::Second => "second",
         }
     }
 }
@@ -1104,6 +1107,88 @@ where
             operand: ts.into_expr().ast,
             cast: crate::SqlType::I64,
             timezone: timezone.into(),
+            operand_cast: timestamp_operand_cast::<E::Ast>(),
+        },
+        project_alias: Cow::Borrowed("expr"),
+        _phantom: PhantomData,
+    }
+}
+
+/// Fractional seconds of a timestamp as `f64`. The rendered SQL is dialect-divergent (PostgreSQL's
+/// `EXTRACT(SECOND …)` is fractional; MySQL's is integer-only and needs the composite
+/// `SECOND_MICROSECOND` unit), so this is a dedicated node rather than a [`DateField`].
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ExtractSecondExprAst<Operand> {
+    operand: Operand,
+    cast: crate::SqlType,
+    /// `Some(timestamptz)` when the operand is a bare literal/param (anchors the placeholder type).
+    operand_cast: Option<crate::SqlType>,
+}
+
+impl<Operand> ExprAst for ExtractSecondExprAst<Operand>
+where
+    Operand: ExprAst,
+{
+    type Params = Operand::Params;
+}
+
+impl<Operand, B> RenderAst<B> for ExtractSecondExprAst<Operand>
+where
+    Operand: RenderAst<B>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_extract_second(
+            |visitor| self.operand.visit(visitor),
+            &self.cast,
+            self.operand_cast.as_ref(),
+        )
+    }
+}
+
+impl<Operand> NonAggregateAst for ExtractSecondExprAst<Operand> where Operand: NonAggregateAst {}
+impl<Operand> NonWindowAst for ExtractSecondExprAst<Operand> where Operand: NonWindowAst {}
+impl<Operand> AstProjectionClass for ExtractSecondExprAst<Operand>
+where
+    Operand: AstProjectionClass,
+{
+    type Class = <Operand as AstProjectionClass>::Class;
+}
+impl<Operand> ExprColumns for ExtractSecondExprAst<Operand>
+where
+    Operand: ExprColumns,
+{
+    type Columns = <Operand as ExprColumns>::Columns;
+}
+
+/// SQL fractional seconds of a timestamp (e.g. `56.789`) as `f64`, nullable iff `ts` is. PostgreSQL
+/// renders `CAST(EXTRACT(SECOND FROM ts) AS double precision)`; MySQL renders
+/// `CAST(EXTRACT(SECOND_MICROSECOND FROM ts) / 1000000.0 AS DOUBLE)`. For the whole-seconds component as
+/// `i64`, use [`extract`] with [`DateField::Second`]. (Seconds are timezone-invariant, so there is no
+/// timezone variant.)
+#[allow(clippy::type_complexity)] // the result kind is a type-level nullability fold
+pub fn extract_second<'scope, E>(
+    ts: E,
+) -> Expr<
+    'scope,
+    <<E::Kind as KindNullability>::Nullable as CaseNull>::Result<f64>,
+    ExtractSecondExprAst<E::Ast>,
+>
+where
+    E: IntoExpr<'scope>,
+    E::Kind: KindNullability,
+    <E::Kind as KindNullability>::Value: TimestampKind,
+    E::Ast: ExprAst,
+    ExtractSecondExprAst<E::Ast>: ExprAst,
+{
+    Expr {
+        ast: ExtractSecondExprAst {
+            operand: ts.into_expr().ast,
+            cast: crate::SqlType::F64,
             operand_cast: timestamp_operand_cast::<E::Ast>(),
         },
         project_alias: Cow::Borrowed("expr"),
@@ -3924,6 +4009,20 @@ pub trait ExprVisitor {
         unit: DateField,
         operand: O,
         timezone: Option<&str>,
+        operand_cast: Option<&crate::SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render fractional seconds of a timestamp as `cast` (`f64`). PostgreSQL renders
+    /// `CAST(EXTRACT(SECOND FROM <operand>) AS double precision)`; a dialect whose
+    /// [`extract_second_uses_microsecond_unit`](crate::Dialect::extract_second_uses_microsecond_unit)
+    /// is set (MySQL) renders `CAST(EXTRACT(SECOND_MICROSECOND FROM <operand>) / 1000000.0 AS DOUBLE)`.
+    /// `operand_cast` anchors a bare literal/param operand's type (as in `visit_extract`).
+    fn visit_extract_second<O>(
+        &mut self,
+        operand: O,
+        cast: &crate::SqlType,
         operand_cast: Option<&crate::SqlType>,
     ) -> Result<(), Self::Error>
     where

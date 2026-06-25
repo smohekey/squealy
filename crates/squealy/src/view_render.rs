@@ -8,7 +8,7 @@
 use std::io::{self, Write};
 
 use crate::{
-    AggregateFunc, ArithmeticOp, DatabaseModel, Dialect, ExprNode, JoinKind, LogicalOp,
+    AggregateFunc, ArithmeticOp, DatabaseModel, DateField, Dialect, ExprNode, JoinKind, LogicalOp,
     OrderDirection, ScalarFunc, SourceRef, SqlType, ViewModel, ViewQueryModel, WindowFunc,
 };
 
@@ -562,14 +562,23 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
             timezone,
         } => {
             // The native EXTRACT type differs by dialect, so it is cast to `result` (when set).
+            // `Second` is floored to the whole-seconds component (PostgreSQL's is fractional; see
+            // `render.rs`).
+            let floor = *field == DateField::Second;
             if result.is_some() {
                 writer.write_all(b"CAST(")?;
+            }
+            if floor {
+                writer.write_all(b"FLOOR(")?;
             }
             writer.write_all(b"EXTRACT(")?;
             writer.write_all(field.extract_keyword().as_bytes())?;
             writer.write_all(b" FROM ")?;
             render_operand_at_time_zone(operand, timezone.as_deref(), dialect, writer)?;
             writer.write_all(b")")?;
+            if floor {
+                writer.write_all(b")")?;
+            }
             if let Some(ty) = result {
                 writer.write_all(b" AS ")?;
                 dialect.write_cast_type(ty, writer)?;
@@ -595,6 +604,32 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
                 writer.write_all(b"'")?;
             }
             writer.write_all(b")")
+        }
+        ExprNode::ExtractSecond { operand, result } => {
+            // Fractional seconds: PostgreSQL `EXTRACT(SECOND …)` vs MySQL composite
+            // `EXTRACT(SECOND_MICROSECOND …) / 1000000.0` (see `render.rs`).
+            let micro = dialect.extract_second_uses_microsecond_unit();
+            if result.is_some() {
+                writer.write_all(b"CAST(")?;
+            }
+            writer.write_all(b"EXTRACT(")?;
+            writer.write_all(if micro {
+                b"SECOND_MICROSECOND".as_slice()
+            } else {
+                b"SECOND".as_slice()
+            })?;
+            writer.write_all(b" FROM ")?;
+            render_expr(operand, dialect, writer)?;
+            writer.write_all(b")")?;
+            if micro {
+                writer.write_all(b" / 1000000.0")?;
+            }
+            if let Some(ty) = result {
+                writer.write_all(b" AS ")?;
+                dialect.write_cast_type(ty, writer)?;
+                writer.write_all(b")")?;
+            }
+            Ok(())
         }
     }
 }
