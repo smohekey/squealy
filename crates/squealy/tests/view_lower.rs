@@ -369,9 +369,11 @@ fn lowers_datetime_functions_to_ir() {
             field,
             operand,
             result,
+            timezone,
         } => {
             assert_eq!(*field, DateField::Year);
             assert_eq!(*result, Some(SqlType::I64));
+            assert_eq!(*timezone, None);
             assert!(matches!(**operand, ExprNode::Column { .. }));
         }
         other => panic!("expected Extract node, got {other:?}"),
@@ -381,9 +383,39 @@ fn lowers_datetime_functions_to_ir() {
         .from::<TimedEvent>()
         .project(|(e,)| date_trunc(DateField::Day, e.created));
     match &lower_view(&trunc_q).projection[0].expr {
-        ExprNode::DateTrunc { unit, operand } => {
+        ExprNode::DateTrunc {
+            unit,
+            operand,
+            timezone,
+        } => {
             assert_eq!(*unit, DateField::Day);
+            assert_eq!(*timezone, None);
             assert!(matches!(**operand, ExprNode::Column { .. }));
+        }
+        other => panic!("expected DateTrunc node, got {other:?}"),
+    }
+
+    // The timezone-explicit variants carry the zone into the IR.
+    let extract_at_q = conn
+        .from::<TimedEvent>()
+        .project(|(e,)| extract_at(DateField::Hour, e.created, "UTC"));
+    match &lower_view(&extract_at_q).projection[0].expr {
+        ExprNode::Extract {
+            field, timezone, ..
+        } => {
+            assert_eq!(*field, DateField::Hour);
+            assert_eq!(timezone.as_deref(), Some("UTC"));
+        }
+        other => panic!("expected Extract node, got {other:?}"),
+    }
+
+    let trunc_at_q = conn
+        .from::<TimedEvent>()
+        .project(|(e,)| date_trunc_at(DateField::Day, e.created, "UTC"));
+    match &lower_view(&trunc_at_q).projection[0].expr {
+        ExprNode::DateTrunc { unit, timezone, .. } => {
+            assert_eq!(*unit, DateField::Day);
+            assert_eq!(timezone.as_deref(), Some("UTC"));
         }
         other => panic!("expected DateTrunc node, got {other:?}"),
     }

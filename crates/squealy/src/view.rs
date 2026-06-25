@@ -527,7 +527,13 @@ impl ExprVisitor for IrBuilder {
         Ok(())
     }
 
-    fn visit_extract<O>(&mut self, field: DateField, operand: O, cast: &SqlType) -> io::Result<()>
+    fn visit_extract<O>(
+        &mut self,
+        field: DateField,
+        operand: O,
+        cast: &SqlType,
+        timezone: Option<&str>,
+    ) -> io::Result<()>
     where
         O: FnOnce(&mut Self) -> io::Result<()>,
     {
@@ -536,16 +542,26 @@ impl ExprVisitor for IrBuilder {
             field,
             operand,
             result: Some(cast.clone()),
+            timezone: timezone.map(str::to_owned),
         });
         Ok(())
     }
 
-    fn visit_date_trunc<O>(&mut self, unit: DateField, operand: O) -> io::Result<()>
+    fn visit_date_trunc<O>(
+        &mut self,
+        unit: DateField,
+        operand: O,
+        timezone: Option<&str>,
+    ) -> io::Result<()>
     where
         O: FnOnce(&mut Self) -> io::Result<()>,
     {
         let operand = self.child(operand)?;
-        self.stack.push(ExprNode::DateTrunc { unit, operand });
+        self.stack.push(ExprNode::DateTrunc {
+            unit,
+            operand,
+            timezone: timezone.map(str::to_owned),
+        });
         Ok(())
     }
 

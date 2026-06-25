@@ -727,17 +727,21 @@ pub enum ExprNode {
     /// `CURRENT_TIMESTAMP`.
     Now,
     /// `CAST(EXTRACT(<field> FROM <operand>) AS <result>)` — `result` pins the dialect-divergent
-    /// native `EXTRACT` type to a uniform type.
+    /// native `EXTRACT` type to a uniform type. `timezone` is `Some(tz)` for the timezone-explicit form
+    /// (`<operand> AT TIME ZONE '<tz>'`, PostgreSQL only).
     Extract {
         field: DateField,
         operand: Box<ExprNode>,
         result: Option<SqlType>,
+        timezone: Option<String>,
     },
     /// `date_trunc('<unit>', <operand>)` — PostgreSQL only; a MySQL view carrying it fails at DDL exec
-    /// (like a `full_join` view).
+    /// (like a `full_join` view). `timezone` is `Some(tz)` for the timezone-explicit form
+    /// (`<operand> AT TIME ZONE '<tz>'`).
     DateTrunc {
         unit: DateField,
         operand: Box<ExprNode>,
+        timezone: Option<String>,
     },
 }
 

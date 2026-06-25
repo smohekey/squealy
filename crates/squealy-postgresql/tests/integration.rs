@@ -1313,21 +1313,23 @@ async fn postgres_datetime_functions_round_trip() {
             .expect("insert timed row");
     }
 
-    // `extract(YEAR, ...)` -> bigint.
+    // `extract_at(YEAR, ..., "UTC")` -> bigint, pinned to UTC so the assertion holds regardless of the
+    // connection's session `TimeZone`.
     let years: Vec<i64> = connection
         .from::<IntegrationTimed>()
         .order_by(|(e,)| e.id.asc())
-        .select(|(e,)| extract(DateField::Year, e.created))
+        .select(|(e,)| extract_at(DateField::Year, e.created, "UTC"))
         .collect()
         .await
         .expect("fetch extract year");
     assert_eq!(years, vec![2021, 2022]);
 
-    // `date_trunc('day', ...)` -> the same timestamp type, truncated to midnight.
+    // `date_trunc_at('day', ..., "UTC")` -> the same timestamp type, truncated to UTC midnight (the
+    // session-zone-dependent bare `date_trunc` would truncate to local midnight).
     let truncated: Vec<SystemTime> = connection
         .from::<IntegrationTimed>()
         .order_by(|(e,)| e.id.asc())
-        .select(|(e,)| date_trunc(DateField::Day, e.created))
+        .select(|(e,)| date_trunc_at(DateField::Day, e.created, "UTC"))
         .collect()
         .await
         .expect("fetch date_trunc day");

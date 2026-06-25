@@ -559,6 +559,7 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
             field,
             operand,
             result,
+            timezone,
         } => {
             // The native EXTRACT type differs by dialect, so it is cast to `result` (when set).
             if result.is_some() {
@@ -567,7 +568,7 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
             writer.write_all(b"EXTRACT(")?;
             writer.write_all(field.extract_keyword().as_bytes())?;
             writer.write_all(b" FROM ")?;
-            render_expr(operand, dialect, writer)?;
+            render_operand_at_time_zone(operand, timezone.as_deref(), dialect, writer)?;
             writer.write_all(b")")?;
             if let Some(ty) = result {
                 writer.write_all(b" AS ")?;
@@ -576,14 +577,38 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
             }
             Ok(())
         }
-        ExprNode::DateTrunc { unit, operand } => {
+        ExprNode::DateTrunc {
+            unit,
+            operand,
+            timezone,
+        } => {
             // PostgreSQL only; a MySQL view carrying this fails at DDL exec (like a `full_join` view).
             writer.write_all(b"date_trunc('")?;
             writer.write_all(unit.trunc_literal().as_bytes())?;
             writer.write_all(b"', ")?;
-            render_expr(operand, dialect, writer)?;
+            render_operand_at_time_zone(operand, timezone.as_deref(), dialect, writer)?;
             writer.write_all(b")")
         }
+    }
+}
+
+/// Render an `extract`/`date_trunc` operand, wrapped in `(<operand> AT TIME ZONE '<tz>')` when a
+/// timezone is set (embedded single quotes doubled). PostgreSQL only.
+fn render_operand_at_time_zone(
+    operand: &ExprNode,
+    timezone: Option<&str>,
+    dialect: &dyn Dialect,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
+    match timezone {
+        Some(tz) => {
+            writer.write_all(b"(")?;
+            render_expr(operand, dialect, writer)?;
+            writer.write_all(b" AT TIME ZONE '")?;
+            writer.write_all(tz.replace('\'', "''").as_bytes())?;
+            writer.write_all(b"')")
+        }
+        None => render_expr(operand, dialect, writer),
     }
 }
 

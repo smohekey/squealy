@@ -27,6 +27,15 @@ use crate::{
 };
 use std::marker::PhantomData;
 
+/// Write a single-quoted SQL string literal with embedded single quotes doubled. Used for the
+/// `AT TIME ZONE '<tz>'` operator argument (a developer-supplied zone name); doubling is correctness,
+/// not injection defense.
+fn write_sql_string_literal(writer: &mut dyn Write, value: &str) -> io::Result<()> {
+    writer.write_all(b"'")?;
+    writer.write_all(value.replace('\'', "''").as_bytes())?;
+    writer.write_all(b"'")
+}
+
 /// Threads the active [`Dialect`](crate::Dialect) and the running parameter counters through the
 /// renderer. The dialect is `&'static` (backend dialects are zero-sized unit values), so carrying it
 /// adds no lifetime to the renderer or the rendering structs.
@@ -1618,6 +1627,7 @@ where
         field: DateField,
         operand: O,
         cast: &SqlType,
+        timezone: Option<&str>,
     ) -> Result<(), Self::Error>
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>,
@@ -1627,7 +1637,16 @@ where
         self.writer.write_all(b"CAST(EXTRACT(")?;
         self.writer.write_all(field.extract_keyword().as_bytes())?;
         self.writer.write_all(b" FROM ")?;
-        operand(self)?;
+        match timezone {
+            Some(tz) => {
+                self.writer.write_all(b"(")?;
+                operand(self)?;
+                self.writer.write_all(b" AT TIME ZONE ")?;
+                write_sql_string_literal(&mut *self.writer, tz)?;
+                self.writer.write_all(b")")?;
+            }
+            None => operand(self)?,
+        }
         self.writer.write_all(b") AS ")?;
         self.renderer
             .dialect
@@ -1635,15 +1654,32 @@ where
         self.writer.write_all(b")")
     }
 
-    fn visit_date_trunc<O>(&mut self, unit: DateField, operand: O) -> Result<(), Self::Error>
+    fn visit_date_trunc<O>(
+        &mut self,
+        unit: DateField,
+        operand: O,
+        timezone: Option<&str>,
+    ) -> Result<(), Self::Error>
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>,
     {
         self.writer.write_all(b"date_trunc('")?;
         self.writer.write_all(unit.trunc_literal().as_bytes())?;
         self.writer.write_all(b"', ")?;
-        operand(self)?;
-        self.writer.write_all(b")")
+        match timezone {
+            Some(tz) => {
+                self.writer.write_all(b"(")?;
+                operand(self)?;
+                self.writer.write_all(b" AT TIME ZONE ")?;
+                write_sql_string_literal(&mut *self.writer, tz)?;
+                self.writer.write_all(b"))")?;
+            }
+            None => {
+                operand(self)?;
+                self.writer.write_all(b")")?;
+            }
+        }
+        Ok(())
     }
 
     fn visit_case_when(&mut self) -> Result<(), Self::Error> {

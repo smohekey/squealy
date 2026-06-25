@@ -1232,11 +1232,15 @@ where
         field: DateField,
         operand: O,
         _cast: &SqlType,
+        timezone: Option<&str>,
     ) -> Result<(), Self::Error>
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>,
     {
-        // Bare EXTRACT (the in-memory test backend ignores the dialect cast, like its aggregates).
+        // Bare EXTRACT (the in-memory test backend ignores the dialect cast, like its aggregates). The
+        // timezone-explicit form is PostgreSQL-only (gated on `SupportsDateTrunc`, which this backend
+        // does not implement), so `timezone` is always `None` here.
+        debug_assert!(timezone.is_none());
         self.writer.write_all(b"EXTRACT(")?;
         self.writer.write_all(field.extract_keyword().as_bytes())?;
         self.writer.write_all(b" FROM ")?;
@@ -1244,7 +1248,12 @@ where
         self.writer.write_all(b")")
     }
 
-    fn visit_date_trunc<O>(&mut self, unit: DateField, operand: O) -> Result<(), Self::Error>
+    fn visit_date_trunc<O>(
+        &mut self,
+        unit: DateField,
+        operand: O,
+        _timezone: Option<&str>,
+    ) -> Result<(), Self::Error>
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>,
     {

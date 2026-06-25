@@ -3123,6 +3123,26 @@ fn postgres_datetime_functions_render() {
         "SELECT date_trunc('day', q0_0.\"created\") AS \"expr\" \
          FROM \"public\".\"timed_events\" AS q0_0"
     );
+
+    // The timezone-explicit variants convert the operand with `AT TIME ZONE` first, so the result is
+    // independent of the session `TimeZone`.
+    let extract_at_q = Postgres
+        .from::<TimedEvent>()
+        .select(|(e,)| extract_at(DateField::Hour, e.created, "UTC"));
+    assert_eq!(
+        extract_at_q.to_sql(),
+        "SELECT CAST(EXTRACT(HOUR FROM (q0_0.\"created\" AT TIME ZONE 'UTC')) AS bigint) AS \"expr\" \
+         FROM \"public\".\"timed_events\" AS q0_0"
+    );
+
+    let trunc_at_q = Postgres
+        .from::<TimedEvent>()
+        .select(|(e,)| date_trunc_at(DateField::Day, e.created, "UTC"));
+    assert_eq!(
+        trunc_at_q.to_sql(),
+        "SELECT date_trunc('day', (q0_0.\"created\" AT TIME ZONE 'UTC')) AS \"expr\" \
+         FROM \"public\".\"timed_events\" AS q0_0"
+    );
 }
 
 #[cfg(feature = "systemtime")]

@@ -821,18 +821,29 @@ fn expr_to_node(expr: &ExprNode) -> KdlNode {
             field,
             operand,
             result,
+            timezone,
         } => {
             let mut node = KdlNode::new("extract");
             node.push(KdlEntry::new_prop("field", date_field_str(*field)));
             if let Some(ty) = result {
                 write_sql_type(&mut node, ty);
             }
+            if let Some(tz) = timezone {
+                node.push(KdlEntry::new_prop("tz", tz.clone()));
+            }
             push_child(&mut node, expr_to_node(operand));
             node
         }
-        ExprNode::DateTrunc { unit, operand } => {
+        ExprNode::DateTrunc {
+            unit,
+            operand,
+            timezone,
+        } => {
             let mut node = KdlNode::new("date-trunc");
             node.push(KdlEntry::new_prop("unit", date_field_str(*unit)));
+            if let Some(tz) = timezone {
+                node.push(KdlEntry::new_prop("tz", tz.clone()));
+            }
             push_child(&mut node, expr_to_node(operand));
             node
         }
@@ -846,7 +857,6 @@ fn date_field_str(field: DateField) -> &'static str {
         DateField::Day => "day",
         DateField::Hour => "hour",
         DateField::Minute => "minute",
-        DateField::Second => "second",
     }
 }
 
@@ -857,7 +867,6 @@ fn date_field_from_str(value: &str) -> Result<DateField, PackageError> {
         "day" => DateField::Day,
         "hour" => DateField::Hour,
         "minute" => DateField::Minute,
-        "second" => DateField::Second,
         other => return Err(malformed(format!("unknown date field `{other}`"))),
     })
 }
@@ -1639,10 +1648,12 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
             field: date_field_from_str(&required_prop(node, "field")?)?,
             operand: nth_expr(0)?,
             result: optional_sql_type_from_node(node)?,
+            timezone: prop(node, "tz").map(str::to_owned),
         },
         "date-trunc" => ExprNode::DateTrunc {
             unit: date_field_from_str(&required_prop(node, "unit")?)?,
             operand: nth_expr(0)?,
+            timezone: prop(node, "tz").map(str::to_owned),
         },
         other => return Err(malformed(format!("unknown view expression node `{other}`"))),
     })
@@ -2631,10 +2642,23 @@ mod tests {
                 field: DateField::Year,
                 operand: col(),
                 result: Some(SqlType::I64),
+                timezone: None,
+            },
+            ExprNode::Extract {
+                field: DateField::Hour,
+                operand: col(),
+                result: Some(SqlType::I64),
+                timezone: Some("UTC".to_owned()),
             },
             ExprNode::DateTrunc {
                 unit: DateField::Day,
                 operand: col(),
+                timezone: None,
+            },
+            ExprNode::DateTrunc {
+                unit: DateField::Day,
+                operand: col(),
+                timezone: Some("America/New_York".to_owned()),
             },
         ] {
             assert_eq!(
