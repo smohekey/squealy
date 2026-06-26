@@ -1262,10 +1262,12 @@ async fn postgres_fixed_bytes_width_is_enforced() {
 
     // Drop the generated check, store a wrong-width value directly, then confirm the typed decode
     // rejects it (the length check is enforced on read as well as by the DDL constraint).
+    // Scope to the `key` column's check: `nonce` is also fixed-width, so the table has two checks.
     let conname: String = client
         .query_one(
             "SELECT conname FROM pg_constraint \
-             WHERE conrelid = 'integration_fixed_bytess'::regclass AND contype = 'c'",
+             WHERE conrelid = 'integration_fixed_bytess'::regclass AND contype = 'c' \
+             AND pg_get_constraintdef(oid) LIKE '%octet_length(key)%'",
             &[],
         )
         .await
