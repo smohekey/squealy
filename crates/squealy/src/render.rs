@@ -17,13 +17,13 @@ use std::io::{self, Write};
 
 use crate::{
     AggregateFunc, ArithmeticOp, AssignmentValueVisitor, AssignmentVisitor, Backend, ColumnRef,
-    CompareOp, DateField, Dialect, Encode, Expr, ExprKind, ExprVisitor, InsertRow,
-    InsertRowVisitor, InsertableTable, Order, OrderDirection, Predicate, PredicateAstVisitor,
-    PredicateKind, PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder,
-    RenderAssignment, RenderAst, RenderCaseArms, RenderCoalesceArgs, RenderInsertAssignments,
-    RenderInsertRows, RenderPredicateAst, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
-    RenderSimpleCaseArms, RenderUpdateAssignments, SchemaTable, SelectSink, Selected, SourceAlias,
-    SqlType, TableProjection, UnaryStringFunc, UpdateableTable,
+    CompareOp, ConflictAction, ConflictClause, DateField, Dialect, Encode, Expr, ExprKind,
+    ExprVisitor, InsertRow, InsertRowVisitor, InsertableTable, Order, OrderDirection, Predicate,
+    PredicateAstVisitor, PredicateKind, PredicateVisitor, ProjectionShape, ProjectionVisitor,
+    QueryBuilder, RenderAssignment, RenderAst, RenderCaseArms, RenderCoalesceArgs,
+    RenderInsertAssignments, RenderInsertRows, RenderPredicateAst, RenderPredicateNodes,
+    RenderProjectable, RenderSelectAst, RenderSimpleCaseArms, RenderUpdateAssignments, SchemaTable,
+    SelectSink, Selected, SourceAlias, SqlType, TableProjection, UnaryStringFunc, UpdateableTable,
 };
 use std::marker::PhantomData;
 
@@ -678,6 +678,7 @@ pub fn write_insert<S, B, Rows, Returning>(
     dialect: &'static dyn Dialect,
     rows: &Rows,
     returning: &Returning,
+    conflict: Option<&ConflictClause>,
     writer: &mut impl Write,
 ) -> io::Result<()>
 where
@@ -687,13 +688,14 @@ where
     Returning: RenderProjectable<B>,
 {
     let mut writer = SqlOnly(writer);
-    write_insert_with_params::<S, B, _, _, _>(dialect, rows, returning, &mut writer)
+    write_insert_with_params::<S, B, _, _, _>(dialect, rows, returning, conflict, &mut writer)
 }
 
 fn write_insert_with_params<S, B, Rows, Returning, Writer>(
     dialect: &'static dyn Dialect,
     rows: &Rows,
     returning: &Returning,
+    conflict: Option<&ConflictClause>,
     writer: &mut Writer,
 ) -> io::Result<()>
 where
@@ -722,7 +724,51 @@ where
         writer.write_all(b") VALUES ")?;
         write_insert_rows::<B, _, _>(rows, writer, &mut renderer)?;
     }
+    if let Some(clause) = conflict {
+        write_conflict_clause::<B, _, _>(clause, rows, dialect, writer)?;
+    }
     write_insert_returning::<B, _>(returning, writer, &mut renderer)?;
+    Ok(())
+}
+
+/// Renders an upsert's `ON CONFLICT (<target>) DO NOTHING | DO UPDATE SET …` clause. The replace-all
+/// `DO UPDATE` sets every inserted column to its `EXCLUDED` value (no bind parameters).
+fn write_conflict_clause<B, Rows, Writer>(
+    clause: &ConflictClause,
+    rows: &Rows,
+    dialect: &'static dyn Dialect,
+    writer: &mut Writer,
+) -> io::Result<()>
+where
+    B: Backend,
+    Rows: RenderInsertRows<B>,
+    Writer: SqlWriter<B>,
+{
+    writer.write_all(b" ON CONFLICT (")?;
+    for (i, column) in clause.target.iter().enumerate() {
+        if i > 0 {
+            writer.write_all(b", ")?;
+        }
+        dialect.write_quoted_ident(column, writer)?;
+    }
+    writer.write_all(b") ")?;
+    match clause.action {
+        ConflictAction::DoNothing => writer.write_all(b"DO NOTHING")?,
+        ConflictAction::DoUpdateExcluded => {
+            writer.write_all(b"DO UPDATE SET ")?;
+            let mut index = 0;
+            rows.try_for_each_column(|column| {
+                if index > 0 {
+                    writer.write_all(b", ")?;
+                }
+                index += 1;
+                dialect.write_quoted_ident(column, writer)?;
+                writer.write_all(b" = ")?;
+                dialect.write_excluded_column(column, writer)?;
+                Ok::<(), io::Error>(())
+            })?;
+        }
+    }
     Ok(())
 }
 
@@ -2040,6 +2086,7 @@ pub fn render_insert_prepared<S, B, Rows, Returning>(
     dialect: &'static dyn Dialect,
     rows: &Rows,
     returning: &Returning,
+    conflict: Option<&ConflictClause>,
     buffer: &mut PreparedSql<B>,
 ) where
     S: InsertableTable,
@@ -2048,13 +2095,14 @@ pub fn render_insert_prepared<S, B, Rows, Returning>(
     Returning: RenderProjectable<B>,
 {
     buffer.clear();
-    write_insert_with_params::<S, B, _, _, _>(dialect, rows, returning, buffer).unwrap();
+    write_insert_with_params::<S, B, _, _, _>(dialect, rows, returning, conflict, buffer).unwrap();
 }
 
 pub fn write_insert_params<S, B, Rows, Returning>(
     dialect: &'static dyn Dialect,
     rows: &Rows,
     returning: &Returning,
+    conflict: Option<&ConflictClause>,
     params: &mut Vec<B::Param>,
 ) -> Result<(), B::Error>
 where
@@ -2064,7 +2112,8 @@ where
     Returning: RenderProjectable<B>,
 {
     let mut writer = ParamCollector::<B>::new(params);
-    write_insert_with_params::<S, B, _, _, _>(dialect, rows, returning, &mut writer).unwrap();
+    write_insert_with_params::<S, B, _, _, _>(dialect, rows, returning, conflict, &mut writer)
+        .unwrap();
     writer.finish()
 }
 

@@ -128,4 +128,13 @@ pub trait Dialect {
     fn extract_second_uses_microsecond_unit(&self) -> bool {
         false
     }
+
+    /// Writes a reference to the conflicting (proposed) row's column inside an upsert's `DO UPDATE SET`.
+    ///
+    /// PostgreSQL exposes it as `EXCLUDED."col"` (the default here). MySQL's `ON DUPLICATE KEY UPDATE`
+    /// uses `VALUES(\`col\`)` / `new.col` instead and will override this when its upsert lands.
+    fn write_excluded_column(&self, column: &str, writer: &mut dyn Write) -> io::Result<()> {
+        writer.write_all(b"EXCLUDED.")?;
+        self.write_quoted_ident(column, writer)
+    }
 }
