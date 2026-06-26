@@ -598,6 +598,10 @@ fn postgres_drops_fixed_bytes_check_before_changing_type() {
         drop_pos < type_pos,
         "the width check must be dropped before the type change: {sql}"
     );
+    assert!(
+        sql[drop_pos..type_pos].contains(';'),
+        "the drop and the type change must be separate statements: {sql}"
+    );
 }
 
 #[test]
@@ -626,6 +630,10 @@ fn postgres_fixed_bytes_width_change_drops_then_adds_check() {
         .find("ADD CONSTRAINT")
         .expect("expected an ADD CONSTRAINT");
     assert!(drop_pos < add_pos, "drop must precede add: {sql}");
+    assert!(
+        sql[drop_pos..add_pos].contains(';'),
+        "the drop, type change, and add must be separate statements: {sql}"
+    );
     assert!(sql.contains("octet_length(\"secret\") = 8)"), "{sql}");
 }
 

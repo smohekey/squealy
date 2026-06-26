@@ -756,6 +756,10 @@ pub(crate) mod ddl {
             wrote = true;
         }
         if before.ty != after.ty || before.collation != after.collation {
+            // The check drop above may have already written a statement, so separate from it.
+            if wrote {
+                statement(writer, first)?;
+            }
             writer.write_all(b"ALTER TABLE ")?;
             write_qualified_name(schema, table, writer)?;
             writer.write_all(b" ALTER COLUMN ")?;
