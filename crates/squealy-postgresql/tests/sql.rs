@@ -1083,6 +1083,21 @@ fn postgres_bytes_crate_column_binds_in_queries() {
         ]
     );
 
+    // The nullable column also accepts a *bare* `Bytes` value (not just `Some(..)`/`None`), via
+    // `IntoNullableAssignmentValue`.
+    let bare_nullable = Postgres
+        .to::<Packet>()
+        .payload(bytes::Bytes::from_static(&[0x00]))
+        .maybe(bytes::Bytes::from_static(&[0x09]))
+        .insert_returning(|packet| packet.id);
+    assert_eq!(
+        bare_nullable.collect_params().unwrap(),
+        vec![
+            PostgresParam::Bytes(vec![0x00]),
+            PostgresParam::Bytes(vec![0x09])
+        ]
+    );
+
     // Predicate operand + projection of both the non-null and nullable columns.
     let q = Postgres
         .from::<Packet>()
