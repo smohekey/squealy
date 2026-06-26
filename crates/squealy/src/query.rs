@@ -1751,6 +1751,210 @@ where
 }
 
 /// A backend-specific insert query object built from typed insert state.
+/// The `ON CONFLICT` clause of an upsert (PostgreSQL). Carried as a runtime value on the insert query
+/// — `do_nothing`/`do_update`(replace-all) add no bind parameters, so no type-level plumbing is needed.
+#[derive(Clone, Debug)]
+pub struct ConflictClause {
+    /// The conflict-target columns, rendered as `ON CONFLICT (<cols>)`.
+    pub target: Vec<&'static str>,
+    pub action: ConflictAction,
+}
+
+/// What to do on an `ON CONFLICT` match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConflictAction {
+    /// `DO NOTHING`.
+    DoNothing,
+    /// `DO UPDATE SET <col> = EXCLUDED.<col>` for every inserted column (replace with the proposed row).
+    DoUpdateExcluded,
+}
+
+/// The conflict target of an upsert — the column(s) in `ON CONFLICT (<cols>)`. Implemented for a single
+/// column reference and tuples of column references, so `on_conflict(|t| t.email)` and
+/// `on_conflict(|t| (t.a, t.b))` both type-check against the table's columns.
+pub trait ConflictTarget {
+    /// The conflict-target column names, in order.
+    fn column_names(self) -> Vec<&'static str>;
+}
+
+impl<'scope, K> ConflictTarget for crate::ColumnRef<'scope, K>
+where
+    K: ExprKind,
+{
+    fn column_names(self) -> Vec<&'static str> {
+        vec![self.column_name()]
+    }
+}
+
+macro_rules! impl_conflict_target_tuple {
+    ($($name:ident),+) => {
+        impl<$($name: ConflictTarget),+> ConflictTarget for ($($name,)+) {
+            fn column_names(self) -> Vec<&'static str> {
+                #[allow(non_snake_case)]
+                let ($($name,)+) = self;
+                let mut names = Vec::new();
+                $(names.extend($name.column_names());)+
+                names
+            }
+        }
+    };
+}
+impl_conflict_target_tuple!(A);
+impl_conflict_target_tuple!(A, B);
+impl_conflict_target_tuple!(A, B, C);
+impl_conflict_target_tuple!(A, B, C, D);
+
+/// A query builder whose backend supports `INSERT … ON CONFLICT` (PostgreSQL). Gating `on_conflict` on
+/// this keeps upsert off backends that don't render it (e.g. MySQL's `ON DUPLICATE KEY UPDATE` is a
+/// later follow-up). The upsert reuses the existing `Insert` query object (the conflict clause is a
+/// runtime field), so this just constructs it with the clause attached.
+pub trait OnConflictQueryBuilder: QueryBuilder {
+    fn build_upsert<'conn, S, Shape, Rows, Returning>(
+        &'conn self,
+        rows: Rows,
+        returning: Returning,
+        conflict: ConflictClause,
+    ) -> Self::Insert<'conn, S, Shape, Rows, Returning>
+    where
+        Self: 'conn,
+        S: InsertableTable,
+        Shape: ProjectionShape,
+        Shape::Row: Decode<Self::Backend>,
+        Rows: InsertRows,
+        Returning: Projectable;
+}
+
+/// Upsert builder produced by `on_conflict(target)` — choose `do_nothing()` or `do_update()`.
+#[doc(hidden)]
+pub struct OnConflict<'conn, Conn, S, InsertColumns> {
+    connection: &'conn Conn,
+    insert_columns: InsertColumns,
+    target: Vec<&'static str>,
+    _table: PhantomData<S>,
+}
+
+impl<'conn, Conn, S, InsertColumns> OnConflict<'conn, Conn, S, InsertColumns> {
+    #[doc(hidden)]
+    pub fn new(
+        connection: &'conn Conn,
+        insert_columns: InsertColumns,
+        target: Vec<&'static str>,
+    ) -> Self {
+        Self {
+            connection,
+            insert_columns,
+            target,
+            _table: PhantomData,
+        }
+    }
+
+    /// `ON CONFLICT (<target>) DO NOTHING`.
+    pub fn do_nothing(self) -> Upsert<'conn, Conn, S, InsertColumns> {
+        Upsert::new(
+            self.connection,
+            self.insert_columns,
+            ConflictClause {
+                target: self.target,
+                action: ConflictAction::DoNothing,
+            },
+        )
+    }
+
+    /// `ON CONFLICT (<target>) DO UPDATE SET <col> = EXCLUDED.<col>` for every inserted column (replace
+    /// the existing row with the values being inserted).
+    pub fn do_update(self) -> Upsert<'conn, Conn, S, InsertColumns> {
+        Upsert::new(
+            self.connection,
+            self.insert_columns,
+            ConflictClause {
+                target: self.target,
+                action: ConflictAction::DoUpdateExcluded,
+            },
+        )
+    }
+}
+
+/// A finalized upsert — call `insert()` or `insert_returning(|row| …)`.
+#[doc(hidden)]
+pub struct Upsert<'conn, Conn, S, InsertColumns> {
+    connection: &'conn Conn,
+    insert_columns: InsertColumns,
+    conflict: ConflictClause,
+    _table: PhantomData<S>,
+}
+
+impl<'conn, Conn, S, InsertColumns> Upsert<'conn, Conn, S, InsertColumns> {
+    fn new(
+        connection: &'conn Conn,
+        insert_columns: InsertColumns,
+        conflict: ConflictClause,
+    ) -> Self {
+        Self {
+            connection,
+            insert_columns,
+            conflict,
+            _table: PhantomData,
+        }
+    }
+
+    pub fn insert(self) -> impl Future<Output = Result<u64, ErrorOf<Conn>>> + Send + 'conn
+    where
+        Conn: Connection + OnConflictQueryBuilder + 'conn,
+        S: InsertableTable + 'conn,
+        InsertColumns: InsertAssignments + 'conn,
+        HCons<InsertRow<InsertColumns>, HNil>: InsertRows,
+        <HCons<InsertRow<InsertColumns>, HNil> as InsertRows>::Params: NoRuntimeParams,
+        Conn::Insert<'conn, S, (), HCons<InsertRow<InsertColumns>, HNil>, ()>:
+            ExecutableInsertQuery<'conn, HCons<InsertRow<InsertColumns>, HNil>, ()> + Send,
+    {
+        let rows = HCons {
+            head: InsertRow::new(self.insert_columns),
+            tail: HNil,
+        };
+        let query = self
+            .connection
+            .build_upsert::<S, (), _, ()>(rows, (), self.conflict);
+        async move { ExecutableInsertQuery::execute(&query).await }
+    }
+
+    pub fn insert_returning<P>(
+        self,
+        projection: impl FnOnce(<S as ProjectionShape>::Exprs<'static>) -> P,
+    ) -> Conn::Insert<
+        'conn,
+        S,
+        <P as ReturningProjection<'static>>::Shape,
+        HCons<InsertRow<InsertColumns>, HNil>,
+        P,
+    >
+    where
+        Conn: OnConflictQueryBuilder + 'conn,
+        S: InsertableTable + ProjectionShape + 'conn,
+        InsertColumns: InsertAssignments + 'conn,
+        HCons<InsertRow<InsertColumns>, HNil>: InsertRows,
+        P: ReturningProjection<'static>
+            + Projectable
+            + crate::ProjectionClass<Class = crate::ScalarProjection>
+            + crate::ReturnableProjection
+            + crate::ProjectionParams<Params = HNil>,
+        <P::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
+        Conn::Backend: SupportsReturning,
+    {
+        let rows = HCons {
+            head: InsertRow::new(self.insert_columns),
+            tail: HNil,
+        };
+        let table = <S as ProjectionShape>::exprs(SourceAlias::new(0, 0));
+        let projection = projection(table);
+        self.connection
+            .build_upsert::<S, <P as ReturningProjection<'static>>::Shape, _, P>(
+                rows,
+                projection,
+                self.conflict,
+            )
+    }
+}
+
 pub trait InsertQuery<'builder, Rows, Returning>
 where
     Rows: InsertRows,

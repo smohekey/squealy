@@ -181,6 +181,7 @@ where
                 &MysqlDialect,
                 &self.columns,
                 &self.returning,
+                None,
                 writer,
             )
         });
@@ -190,6 +191,7 @@ where
                     &MysqlDialect,
                     &self.columns,
                     &self.returning,
+                    None,
                     params,
                 )
             })?;
@@ -207,6 +209,7 @@ where
                 &MysqlDialect,
                 &self.columns,
                 &self.returning,
+                None,
                 writer,
             )
         })
