@@ -248,6 +248,15 @@ impl HasColumnType for uuid::Uuid {
 #[cfg(feature = "uuid")]
 crate::impl_non_null_column!(uuid::Uuid);
 
+/// A `bytes::Bytes` field maps to a `bytea`/`BLOB` column (the same `ColumnType::Bytes` as `Vec<u8>`),
+/// behind the opt-in `bytes` feature. The matching `Encode`/`Decode` lives in each backend crate.
+#[cfg(feature = "bytes")]
+impl HasColumnType for bytes::Bytes {
+    const COLUMN_TYPE: ColumnType = ColumnType::Bytes;
+}
+#[cfg(feature = "bytes")]
+crate::impl_non_null_column!(bytes::Bytes);
+
 /// Native timestamp columns. Each maps to a timezone-aware `timestamptz` column, so no
 /// `#[column(db_type = "...")]` override is needed. The matching `Encode`/`Decode` lives in each
 /// backend crate behind the same feature.

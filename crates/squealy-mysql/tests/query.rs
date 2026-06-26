@@ -282,6 +282,32 @@ fn mysql_case_when_renders_in_its_dialect() {
     );
 }
 
+/// A `bytes::Bytes` column binds as a `BLOB`/bytes parameter on MySQL, behind the opt-in `bytes`
+/// feature (the codec goes through `Vec<u8>`).
+#[cfg(feature = "bytes")]
+#[test]
+fn mysql_bytes_crate_column_binds_in_queries() {
+    #[derive(Clone, Debug, PartialEq, Table)]
+    struct Packet<'scope, C: ColumnMode = ColumnExpr> {
+        #[column(primary_key, auto_increment)]
+        id: C::Type<'scope, i32>,
+        payload: C::Type<'scope, bytes::Bytes>,
+    }
+
+    let query = Mysql
+        .from::<Packet>()
+        .where_(|packet| {
+            packet
+                .payload
+                .equals(bytes::Bytes::from_static(&[0xCA, 0xFE]))
+        })
+        .select(|(packet,)| packet.payload);
+    assert_eq!(
+        query.collect_params().unwrap(),
+        vec![mysql_async::Value::Bytes(vec![0xCA, 0xFE])]
+    );
+}
+
 #[test]
 fn mysql_casts_fixed_bytes_expression_as_binary() {
     // A `[u8; N]` expression forces a cast in an all-parameter CASE; it must stay binary (`BINARY`),

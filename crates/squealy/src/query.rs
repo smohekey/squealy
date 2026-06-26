@@ -651,6 +651,11 @@ impl_nullable_assignment_value! {
 #[cfg(feature = "uuid")]
 impl_nullable_assignment_value! { uuid::Uuid }
 
+// `bytes::Bytes` column support: a bare `bytes::Bytes` value can be assigned to a nullable column
+// (`.col(bytes)`); `Some`/`None` route through the generic `Option<T>` impls below.
+#[cfg(feature = "bytes")]
+impl_nullable_assignment_value! { bytes::Bytes }
+
 // Native timestamp values can be assigned to a nullable timestamp column (`.col(ts)`); `Some`/`None`
 // route through the generic `Option<T>` impls below.
 #[cfg(feature = "systemtime")]

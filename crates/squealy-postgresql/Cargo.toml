@@ -19,6 +19,9 @@ schema = ["dep:tokio", "dep:tracing"]
 # the core `uuid` feature so a bare `uuid::Uuid` field maps to a `uuid` column and a `Uuid` value can
 # be used in the query builder.
 uuid = ["dep:uuid", "tokio-postgres/with-uuid-1", "squealy/uuid"]
+# Native `bytes::Bytes` column support: Encode/Decode for `bytes::Bytes` against a `bytea` column
+# (via `Vec<u8>`, so no extra tokio-postgres feature). The `bytes` crate is already a dependency here.
+bytes = ["squealy/bytes"]
 # serde-backed `Json<T>`: any T: Serialize/DeserializeOwned encodes to / decodes from a jsonb column.
 serde = ["dep:serde", "dep:serde_json", "tokio-postgres/with-serde_json-1"]
 # Native timestamp columns mapped to `timestamptz`. Each enables the matching core feature and the

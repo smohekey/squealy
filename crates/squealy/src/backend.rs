@@ -86,6 +86,11 @@ where
 #[cfg(feature = "uuid")]
 impl_decode_nullable_via_option! { uuid::Uuid }
 
+// A `bytes::Bytes` column may be nullable or left-joined; resolves on backends that provide
+// `Decode<B> for Option<bytes::Bytes>` (both backends do, behind their own `bytes` feature).
+#[cfg(feature = "bytes")]
+impl_decode_nullable_via_option! { bytes::Bytes }
+
 // Native timestamp columns are commonly nullable (`deleted_at`, `expires_at`), which makes the
 // table derive emit a `DecodeNullable` bound. Resolves only on backends that provide
 // `Decode<B> for Option<T>` for the type, behind the same feature.

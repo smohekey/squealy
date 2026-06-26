@@ -1045,6 +1045,74 @@ async fn postgres_round_trips_native_uuid() {
     assert_eq!(names, vec!["with-uuid".to_owned()]);
 }
 
+#[cfg(feature = "bytes")]
+#[derive(Clone, Debug, PartialEq, Table)]
+struct IntegrationBytesCrate<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    payload: C::Type<'scope, bytes::Bytes>,
+    maybe: C::Type<'scope, Option<bytes::Bytes>>,
+}
+
+#[cfg(feature = "bytes")]
+#[tokio::test]
+#[ignore]
+async fn postgres_round_trips_bytes_crate_column() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS integration_bytes_crates")
+        .await
+        .expect("drop old bytes-crate table");
+
+    let ddl_backend = Postgres;
+    create_table::<IntegrationBytesCrate>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+    let payload = bytes::Bytes::from_static(&[0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF]);
+
+    let inserted = connection
+        .to::<IntegrationBytesCrate>()
+        .payload(payload.clone())
+        .maybe(Some(bytes::Bytes::from_static(&[0x01, 0x02, 0x03])))
+        .insert_returning(|row| row)
+        .fetch_one()
+        .await
+        .expect("insert bytes-crate row");
+    assert_eq!(inserted.payload, payload);
+    assert_eq!(
+        inserted.maybe,
+        Some(bytes::Bytes::from_static(&[0x01, 0x02, 0x03]))
+    );
+
+    // A NULL for the nullable column, then read both rows back as `bytes::Bytes`.
+    connection
+        .to::<IntegrationBytesCrate>()
+        .payload(bytes::Bytes::new())
+        .maybe(None)
+        .insert()
+        .await
+        .expect("insert null-maybe row");
+
+    let rows: Vec<(bytes::Bytes, Option<bytes::Bytes>)> = connection
+        .from::<IntegrationBytesCrate>()
+        .order_by(|(row,)| row.id.asc())
+        .select(|(row,)| (row.payload, row.maybe))
+        .collect()
+        .await
+        .expect("select bytes-crate rows");
+    assert_eq!(
+        rows,
+        vec![
+            (
+                payload,
+                Some(bytes::Bytes::from_static(&[0x01, 0x02, 0x03]))
+            ),
+            (bytes::Bytes::new(), None),
+        ]
+    );
+}
+
 async fn create_table<S>(client: &tokio_postgres::Client, ddl_backend: &Postgres)
 where
     S: SchemaTable,
