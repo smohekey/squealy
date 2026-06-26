@@ -246,6 +246,16 @@ impl squealy::SchemaIntrospect for PostgresConnection {
         }
     }
 
+    /// A PostgreSQL view column declared `FixedBytes(N)` introspects as plain `bytea` (`Bytes`) — there
+    /// is no generated length `CHECK` on a view column to fold back into `FixedBytes`. Canonicalize it
+    /// to `Bytes` so a view with a fixed-byte output column does not churn a drop+recreate every run.
+    fn canonical_view_column_type(&self, ty: &squealy::SqlType) -> squealy::SqlType {
+        match self.canonical_sql_type(ty) {
+            squealy::SqlType::FixedBytes(_) => squealy::SqlType::Bytes,
+            other => other,
+        }
+    }
+
     /// PostgreSQL introspection reports a plain index's access method as `btree`; map an unset
     /// method to that so a crate-declared index does not churn against the live schema.
     fn default_index_method(&self) -> Option<squealy::IndexMethod> {

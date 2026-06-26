@@ -311,6 +311,19 @@ pub trait SchemaIntrospect {
         ty.clone()
     }
 
+    /// Canonicalizes a logical [`SqlType`] for a *view* output column.
+    ///
+    /// A view column has no backing storage and no constraints, so a backend may introspect it as a
+    /// different physical type than the same type on a table column. PostgreSQL enforces
+    /// [`SqlType::FixedBytes`] on a table column with a generated `CHECK` that introspection folds back
+    /// into `FixedBytes`, but a view column is just `bytea` with no check to fold — so a desired view
+    /// column declared `FixedBytes(N)` must canonicalize to [`SqlType::Bytes`] to match. The default
+    /// delegates to [`Self::canonical_sql_type`], which suits backends whose view columns keep the same
+    /// physical type as table columns (e.g. MySQL `BINARY(N)`).
+    fn canonical_view_column_type(&self, ty: &SqlType) -> SqlType {
+        self.canonical_sql_type(ty)
+    }
+
     /// Canonicalizes a logical [`IdentityMode`] to the form this backend's introspection produces.
     ///
     /// A crate-declared `auto_increment` column enters the desired model as

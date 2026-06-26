@@ -784,7 +784,9 @@ impl squealy::Dialect for MysqlDialect {
             SqlType::Date => "DATE",
             SqlType::Time { .. } => "TIME",
             SqlType::Timestamp { .. } => "DATETIME",
-            SqlType::Bytes => "BINARY",
+            // Both variable and fixed-width binary cast to `BINARY` so a binary expression operand in
+            // `CASE`/`NULLIF`/`COALESCE` stays binary instead of being coerced through the text charset.
+            SqlType::Bytes | SqlType::FixedBytes(_) => "BINARY",
             _ => "CHAR",
         };
         writer.write_all(name.as_bytes())
