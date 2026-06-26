@@ -752,7 +752,13 @@ where
         dialect.write_quoted_ident(column, writer)?;
     }
     writer.write_all(b") ")?;
-    match clause.action {
+    // A `DEFAULT VALUES` insert assigns no columns, so there is nothing to replace — `DO UPDATE SET`
+    // with an empty list is invalid SQL. Treat a column-less `do_update` as `DO NOTHING`.
+    let action = match clause.action {
+        ConflictAction::DoUpdateExcluded if rows.first_row_len() == 0 => ConflictAction::DoNothing,
+        other => other,
+    };
+    match action {
         ConflictAction::DoNothing => writer.write_all(b"DO NOTHING")?,
         ConflictAction::DoUpdateExcluded => {
             writer.write_all(b"DO UPDATE SET ")?;
