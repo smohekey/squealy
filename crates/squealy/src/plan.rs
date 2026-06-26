@@ -1,5 +1,6 @@
 use crate::{
-    CheckModel, ColumnModel, Constraint, ForeignKeyModel, IndexModel, TableModel, ViewModel,
+    CheckModel, ColumnModel, Constraint, ForeignKeyModel, IndexModel, SqlType, TableModel,
+    ViewModel,
 };
 
 /// An ordered backend-neutral schema deployment plan.
@@ -73,6 +74,10 @@ pub enum TablePlanStep {
         refactor_id: Option<String>,
         from: String,
         to: String,
+        /// The renamed column's type. A backend may need it to rename a type-specific generated
+        /// constraint alongside the column — PostgreSQL renames the generated `FixedBytes` length
+        /// check (named from the column), which it does not rename automatically.
+        column_type: SqlType,
     },
     AlterColumn {
         before: ColumnModel,

@@ -136,6 +136,9 @@ pub enum SqlType {
     Json,
     Jsonb,
     Bytes,
+    /// A fixed-width binary column of `N` bytes (`[u8; N]`): PostgreSQL `bytea` + a generated
+    /// `CHECK (octet_length(col) = N)`; MySQL `BINARY(N)`.
+    FixedBytes(u32),
     /// A backend-specific type name, emitted verbatim into DDL.
     Raw(String),
 }
@@ -170,6 +173,7 @@ impl From<ColumnType> for SqlType {
             ColumnType::Json => SqlType::Json,
             ColumnType::Jsonb => SqlType::Jsonb,
             ColumnType::Bytes => SqlType::Bytes,
+            ColumnType::FixedBytes(width) => SqlType::FixedBytes(width),
             ColumnType::Raw(raw) => SqlType::Raw(raw.to_owned()),
         }
     }

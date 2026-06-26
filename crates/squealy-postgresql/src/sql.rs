@@ -2,6 +2,45 @@ use std::io::{self, Write};
 
 use squealy::{Column, ColumnDefault, Index, SqlType, Table};
 
+/// Constraint-name prefix for the generated fixed-width-binary length check. Placed at the *start* so
+/// introspection can recognize the generated check and distinguish it from a user-authored
+/// `octet_length` check.
+pub(crate) const FIXED_BYTES_CHECK_PREFIX: &str = "sqfb_";
+
+/// Deterministic constraint name for a `FixedBytes` column's length check, so create, alter-column,
+/// and introspection all agree on the same name (and a width change can drop/re-add it).
+///
+/// The name is `sqfb_` plus a stable 64-bit hash of the *column* name:
+/// - fixed length (21 bytes), so it never hits PostgreSQL's 63-byte identifier truncation — and two
+///   columns can't truncate to the same name (the round-2 collision finding);
+/// - derived from the column only (not the table), so it survives a table rename. A column *rename*
+///   does change it, so the `RenameColumn` step renames the constraint too (PostgreSQL does not do so
+///   automatically), keeping create/alter/introspection agreed on the name.
+pub(crate) fn fixed_bytes_check_name(column: &str) -> String {
+    format!("{FIXED_BYTES_CHECK_PREFIX}{:016x}", fnv1a64(column))
+}
+
+/// FNV-1a (64-bit). A small, dependency-free hash that is stable across runs and compiler versions —
+/// required because the generated constraint name must match between the create and a later alter.
+fn fnv1a64(value: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Renders a `FixedBytes` column's inline width check: `CONSTRAINT "sqfb_<hash>" CHECK
+/// (octet_length("col") = N)`.
+fn write_fixed_bytes_check(column: &str, width: u32, writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(b" CONSTRAINT ")?;
+    write_quoted_ident(&fixed_bytes_check_name(column), writer)?;
+    writer.write_all(b" CHECK (octet_length(")?;
+    write_quoted_ident(column, writer)?;
+    write!(writer, ") = {width})")
+}
+
 /// PostgreSQL's [`Dialect`]: positional `$n` placeholders, `"`-quoted identifiers, and `double
 /// precision` casts. The query renderer routes its dialect-specific output through this so the sink
 /// logic can be shared (see [`squealy::Dialect`]).
@@ -92,6 +131,12 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
             if let Some(on_update) = reference.on_update() {
                 write!(writer, " ON UPDATE {on_update}")?;
             }
+        }
+        // Fixed-width binary: enforce the byte width with a named inline `octet_length` CHECK
+        // (PostgreSQL has no native fixed-length binary type). Introspection folds the named check
+        // back to `FixedBytes(N)`.
+        if let squealy::ColumnType::FixedBytes(width) = column.column_type() {
+            write_fixed_bytes_check(column.name(), width, writer)?;
         }
     }
     // A table-level `#[primary_key(columns = [..])]` is not hung off any single column, so render it
@@ -542,6 +587,7 @@ pub(crate) mod ddl {
                 refactor_id,
                 from,
                 to,
+                column_type,
             } => {
                 writer.write_all(b"ALTER TABLE ")?;
                 write_qualified_name(schema, table, writer)?;
@@ -549,6 +595,18 @@ pub(crate) mod ddl {
                 write_quoted_ident(from, writer)?;
                 writer.write_all(b" TO ")?;
                 write_quoted_ident(to, writer)?;
+                // The generated `FixedBytes` length check is named from the column, and PostgreSQL does
+                // not rename it with the column. Rename it too so it keeps matching the deterministic
+                // name (the introspection fold and a later width-change `DROP` both rely on it).
+                if matches!(column_type, squealy::SqlType::FixedBytes(_)) {
+                    statement(writer, first)?;
+                    writer.write_all(b"ALTER TABLE ")?;
+                    write_qualified_name(schema, table, writer)?;
+                    writer.write_all(b" RENAME CONSTRAINT ")?;
+                    write_quoted_ident(&super::fixed_bytes_check_name(from), writer)?;
+                    writer.write_all(b" TO ")?;
+                    write_quoted_ident(&super::fixed_bytes_check_name(to), writer)?;
+                }
                 if let Some(refactor_id) = refactor_id {
                     statement(writer, first)?;
                     write_record_refactor(refactor_id, writer)?;
@@ -677,8 +735,31 @@ pub(crate) mod ddl {
             ));
         }
 
+        // Fixed-width binary length check. The byte width lives entirely in the generated named
+        // `octet_length` check (the `TYPE bytea` alter below is a no-op for a width change). The stale
+        // check must be dropped *before* the `TYPE` change: changing to a non-`bytea` type while
+        // `octet_length(col) = N` still exists fails validation. The replacement check is added at the
+        // end, after the new type is in place.
+        let before_width = matches!(before.ty, squealy::SqlType::FixedBytes(_));
+        let after_width = matches!(after.ty, squealy::SqlType::FixedBytes(_));
+        let drop_fixed_bytes_check = before_width && before.ty != after.ty;
+        let add_fixed_bytes_check = after_width && before.ty != after.ty;
+
         let mut wrote = false;
+        if drop_fixed_bytes_check {
+            write_drop_constraint(
+                schema,
+                table,
+                &super::fixed_bytes_check_name(&after.name),
+                writer,
+            )?;
+            wrote = true;
+        }
         if before.ty != after.ty || before.collation != after.collation {
+            // The check drop above may have already written a statement, so separate from it.
+            if wrote {
+                statement(writer, first)?;
+            }
             writer.write_all(b"ALTER TABLE ")?;
             write_qualified_name(schema, table, writer)?;
             writer.write_all(b" ALTER COLUMN ")?;
@@ -781,6 +862,19 @@ pub(crate) mod ddl {
                 statement(writer, first)?;
             }
             write_comment_on_column(schema, table, &after.name, after.comment.as_ref(), writer)?;
+            wrote = true;
+        }
+
+        // Add the replacement width check now that the new `bytea` type is in place (the stale check
+        // was dropped before the `TYPE` change above).
+        if add_fixed_bytes_check && let squealy::SqlType::FixedBytes(width) = after.ty {
+            if wrote {
+                statement(writer, first)?;
+            }
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ADD")?;
+            super::write_fixed_bytes_check(&after.name, width, writer)?;
             wrote = true;
         }
 
@@ -953,6 +1047,13 @@ pub(crate) mod ddl {
         if let Some(default) = &column.default {
             writer.write_all(b" DEFAULT ")?;
             write_default_value(default, writer)?;
+        }
+        // Fixed-width binary has no native PostgreSQL type, so enforce the width with a named inline
+        // CHECK on `octet_length`. Introspection folds this named check back into `FixedBytes(N)` (see
+        // `introspect`), so it never appears as a standalone check in the model — keeping publish/status
+        // idempotent.
+        if let squealy::SqlType::FixedBytes(width) = &column.ty {
+            super::write_fixed_bytes_check(&column.name, *width, writer)?;
         }
         Ok(())
     }
@@ -1250,6 +1351,9 @@ fn write_pg_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()> {
         SqlType::Json => "json",
         SqlType::Jsonb => "jsonb",
         SqlType::Bytes => "bytea",
+        // PostgreSQL has no fixed-length binary type; the width is enforced by a generated
+        // `CHECK (octet_length(col) = N)` constraint (see the column-check lowering).
+        SqlType::FixedBytes(_) => "bytea",
         SqlType::Raw(raw) => raw.as_str(),
     };
     writer.write_all(name.as_bytes())
@@ -1336,6 +1440,27 @@ mod tests {
         let mut out = Vec::new();
         write_pg_sql_type(&ty, &mut out).unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn fixed_bytes_check_names_are_stable_unique_and_bounded() {
+        // Deterministic.
+        assert_eq!(fixed_bytes_check_name("key"), fixed_bytes_check_name("key"));
+        // Distinct columns get distinct names.
+        assert_ne!(
+            fixed_bytes_check_name("key"),
+            fixed_bytes_check_name("nonce")
+        );
+        // Carries the recognizable prefix and never exceeds PostgreSQL's 63-byte identifier limit,
+        // even for very long column names (so two columns can't truncate to the same name).
+        let long = "a".repeat(200);
+        let name = fixed_bytes_check_name(&long);
+        assert!(name.starts_with(FIXED_BYTES_CHECK_PREFIX));
+        assert!(name.len() <= 63, "name too long: {name}");
+        assert_ne!(
+            fixed_bytes_check_name(&long),
+            fixed_bytes_check_name(&"a".repeat(199))
+        );
     }
 
     #[test]

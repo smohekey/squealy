@@ -389,6 +389,7 @@ fn mysql_renders_rename_steps_in_schema_plan() {
                     refactor_id: None,
                     from: "display_name".to_owned(),
                     to: "name".to_owned(),
+                    column_type: SqlType::String,
                 }),
             },
         ],
@@ -422,6 +423,7 @@ fn mysql_records_refactor_ids_for_rename_steps() {
                     refactor_id: Some("rename-display-name".to_owned()),
                     from: "display_name".to_owned(),
                     to: "name".to_owned(),
+                    column_type: SqlType::String,
                 }),
             },
         ],
@@ -1420,6 +1422,8 @@ struct Secret<'scope, C: ColumnMode = ColumnExpr> {
     id: C::Type<'scope, i32>,
     ciphertext: C::Type<'scope, Vec<u8>>,
     wrapped_dek: C::Type<'scope, Option<Vec<u8>>>,
+    key: C::Type<'scope, [u8; 32]>,
+    nonce: C::Type<'scope, Option<[u8; 12]>>,
 }
 
 #[allow(dead_code)]
@@ -1442,6 +1446,46 @@ fn mysql_writes_blob_column_ddl() {
         !sql.contains("`wrapped_dek` BLOB NOT NULL"),
         "nullable BLOB must not be NOT NULL: {sql}"
     );
+}
+
+#[test]
+fn mysql_writes_fixed_bytes_column_ddl() {
+    let mut sql = Vec::new();
+    let tables = <Vault as Schema>::tables().collect::<Vec<_>>();
+    Mysql.write_table(tables[0], &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // A `[u8; N]` column renders as `BINARY(N)` (the width is native, no CHECK needed).
+    assert!(sql.contains("`key` BINARY(32) NOT NULL"), "{sql}");
+    assert!(sql.contains("`nonce` BINARY(12)"), "{sql}");
+    assert!(
+        !sql.contains("`nonce` BINARY(12) NOT NULL"),
+        "nullable fixed-bytes must not be NOT NULL: {sql}"
+    );
+}
+
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(BigVault)]
+struct BigSecret<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, i32>,
+    huge: C::Type<'scope, [u8; 256]>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct BigVault {
+    big_secrets: BigSecret<'static, ColumnName>,
+}
+
+#[test]
+fn mysql_rejects_fixed_bytes_wider_than_binary_limit() {
+    // MySQL `BINARY(M)` caps at 255 bytes, so a wider `[u8; N]` must fail to render rather than emit
+    // DDL the server rejects.
+    let mut sql = Vec::new();
+    let tables = <BigVault as Schema>::tables().collect::<Vec<_>>();
+    let error = Mysql.write_table(tables[0], &mut sql).unwrap_err();
+    assert!(error.to_string().contains("255"), "{error}");
 }
 
 // The same structural expression IR renders in MySQL's dialect: `/` is already fractional (no float

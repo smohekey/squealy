@@ -169,6 +169,7 @@ fn plan_models_with_refactors_turns_column_drop_add_into_rename() {
                 refactor_id: Some("rename-user-name".to_owned()),
                 from: "display_name".to_owned(),
                 to: "name".to_owned(),
+                column_type: SqlType::Text,
             }),
         }]
     );
@@ -213,6 +214,7 @@ fn plan_models_with_refactors_keeps_column_changes_after_rename() {
                     refactor_id: Some("rename-user-name".to_owned()),
                     from: "display_name".to_owned(),
                     to: "name".to_owned(),
+                    column_type: SqlType::Text,
                 }),
             },
             DatabasePlanStep::AlterTable {

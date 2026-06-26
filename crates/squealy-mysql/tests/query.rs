@@ -283,6 +283,19 @@ fn mysql_case_when_renders_in_its_dialect() {
 }
 
 #[test]
+fn mysql_casts_fixed_bytes_expression_as_binary() {
+    // A `[u8; N]` expression forces a cast in an all-parameter CASE; it must stay binary (`BINARY`),
+    // not fall through to `CHAR` and be coerced through the connection text charset.
+    let query = Mysql.from::<Widget>().select(|(widget,)| {
+        case()
+            .when(widget.id.greater_than(10), [0u8; 4])
+            .otherwise([1u8; 4])
+    });
+    let sql = query.to_sql();
+    assert!(sql.contains("CAST(? AS BINARY)"), "{sql}");
+}
+
+#[test]
 fn mysql_coalesce_nullif_simple_case_render_in_its_dialect() {
     let coalesce_q = Mysql
         .from::<Widget>()
