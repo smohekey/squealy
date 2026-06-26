@@ -215,11 +215,14 @@ async fn table(client: &Client, table_ref: &TableRef) -> Result<TableModel, Post
     })
 }
 
-/// Folds a generated `octet_length(col) = N` check (the fixed-width-binary marker) into the column's
-/// `FixedBytes(N)` type and removes it from the check list.
+/// Folds the *generated* `octet_length(col) = N` check (the fixed-width-binary marker, recognized by
+/// its `sqfb_` constraint-name prefix) into the column's `FixedBytes(N)` type and removes it from the
+/// check list. A user-authored `octet_length` check on a `bytea` column has a different name and is
+/// left untouched, so it round-trips as `Bytes` + an explicit check.
 fn fold_fixed_bytes_checks(columns: &mut [ColumnModel], checks: &mut Vec<CheckModel>) {
     checks.retain(|check| {
-        if let Some((column_name, width)) = parse_octet_length_check(&check.expression)
+        if check.name.starts_with(crate::sql::FIXED_BYTES_CHECK_PREFIX)
+            && let Some((column_name, width)) = parse_octet_length_check(&check.expression)
             && let Some(column) = columns
                 .iter_mut()
                 .find(|column| column.name == column_name && column.ty == SqlType::Bytes)
@@ -873,17 +876,44 @@ mod tests {
 
         let mut columns = vec![bytea_column("key"), bytea_column("blob")];
         let mut checks = vec![
-            check("secrets_key_check", "(octet_length(key) = 32)"),
+            check("sqfb_secrets_key", "(octet_length(key) = 32)"),
             check("secrets_blob_check", "(octet_length(blob) > 0)"),
         ];
         fold_fixed_bytes_checks(&mut columns, &mut checks);
 
-        // The matching column becomes `FixedBytes(32)` and its check is removed; the unrelated bytea
-        // column and its check are untouched.
+        // The generated (`sqfb_`-named) check folds into `FixedBytes(32)` and is removed; the unrelated
+        // bytea column and its check are untouched.
         assert_eq!(columns[0].ty, SqlType::FixedBytes(32));
         assert_eq!(columns[1].ty, SqlType::Bytes);
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].name, "secrets_blob_check");
+    }
+
+    #[test]
+    fn does_not_fold_user_authored_octet_length_checks() {
+        // A user who modeled `Bytes` + their own `octet_length` check (before `FixedBytes` existed)
+        // must keep that exact shape: the check is not `sqfb_`-named, so it is left as-is.
+        let mut columns = vec![ColumnModel {
+            name: "key".to_owned(),
+            comment: None,
+            ty: SqlType::Bytes,
+            collation: None,
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+        }];
+        let mut checks = vec![CheckModel {
+            name: "my_key_len".to_owned(),
+            expression: "(octet_length(key) = 32)".to_owned(),
+            validation: None,
+            enforcement: None,
+        }];
+        fold_fixed_bytes_checks(&mut columns, &mut checks);
+
+        assert_eq!(columns[0].ty, SqlType::Bytes);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "my_key_len");
     }
 
     #[test]

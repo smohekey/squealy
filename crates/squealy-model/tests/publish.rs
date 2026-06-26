@@ -317,6 +317,87 @@ async fn incremental_publish_applies_changed_column_definitions() {
     assert_eq!(actual_schema, desired.schemas[0]);
 }
 
+#[tokio::test]
+#[ignore]
+async fn incremental_publish_changes_fixed_bytes_width() {
+    let (mut connection, _guard) = connect().await;
+    let baseline = fixed_bytes_width_model(32);
+    let desired = fixed_bytes_width_model(64);
+
+    squealy_model::publish(&baseline, &Postgres, &mut connection)
+        .await
+        .expect("publish baseline fixed-bytes schema");
+
+    let plan = squealy_model::plan_from_database(
+        &desired,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("plan fixed-bytes width change");
+    assert!(
+        !plan.steps.is_empty(),
+        "a fixed-bytes width change should produce a plan"
+    );
+
+    squealy_model::apply_plan(&plan, &Postgres, &mut connection)
+        .await
+        .expect("apply fixed-bytes width change");
+
+    // The applied width is enforced and round-trips: introspection equals the desired model...
+    let actual = squealy_model::introspect(&mut connection)
+        .await
+        .expect("introspect altered fixed-bytes schema");
+    let actual_schema = actual
+        .schemas
+        .into_iter()
+        .find(|schema| schema.name.as_deref() == Some("publish_demo_fixedbytes"))
+        .expect("fixed-bytes schema should be introspected");
+    assert_eq!(actual_schema, desired.schemas[0]);
+
+    // ...and re-planning is a no-op (the generated CHECK was actually updated, so the plan converges).
+    let replan = squealy_model::plan_from_database(
+        &desired,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan after width change");
+    assert!(
+        replan.steps.is_empty(),
+        "re-plan after a fixed-bytes width change must be empty (idempotent), got {:?}",
+        replan.steps
+    );
+}
+
+fn fixed_bytes_width_model(width: u32) -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("publish_demo_fixedbytes".to_owned()),
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "keys".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "secret".to_owned(),
+                    comment: None,
+                    ty: SqlType::FixedBytes(width),
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    }
+}
+
 fn alter_column_baseline_model() -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {

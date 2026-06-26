@@ -1192,14 +1192,18 @@ fn postgres_writes_fixed_bytes_column_ddl() {
     Postgres.write_table(tables[0], &mut sql).unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
-    // A `[u8; N]` column renders as `bytea` with a generated width CHECK; the nullable variant keeps
-    // the CHECK but no NOT NULL (a NULL passes `octet_length(NULL) = N`).
+    // A `[u8; N]` column renders as `bytea` with a generated, named width CHECK; the nullable variant
+    // keeps the CHECK but no NOT NULL (a NULL passes `octet_length(NULL) = N`).
     assert!(
-        sql.contains("\"key\" bytea NOT NULL CHECK (octet_length(\"key\") = 32)"),
+        sql.contains(
+            "\"key\" bytea NOT NULL CONSTRAINT \"sqfb_secrets_key\" CHECK (octet_length(\"key\") = 32)"
+        ),
         "{sql}"
     );
     assert!(
-        sql.contains("\"nonce\" bytea CHECK (octet_length(\"nonce\") = 12)"),
+        sql.contains(
+            "\"nonce\" bytea CONSTRAINT \"sqfb_secrets_nonce\" CHECK (octet_length(\"nonce\") = 12)"
+        ),
         "{sql}"
     );
     assert!(

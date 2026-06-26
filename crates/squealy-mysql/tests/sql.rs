@@ -1462,6 +1462,30 @@ fn mysql_writes_fixed_bytes_column_ddl() {
     );
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(BigVault)]
+struct BigSecret<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key)]
+    id: C::Type<'scope, i32>,
+    huge: C::Type<'scope, [u8; 256]>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct BigVault {
+    big_secrets: BigSecret<'static, ColumnName>,
+}
+
+#[test]
+fn mysql_rejects_fixed_bytes_wider_than_binary_limit() {
+    // MySQL `BINARY(M)` caps at 255 bytes, so a wider `[u8; N]` must fail to render rather than emit
+    // DDL the server rejects.
+    let mut sql = Vec::new();
+    let tables = <BigVault as Schema>::tables().collect::<Vec<_>>();
+    let error = Mysql.write_table(tables[0], &mut sql).unwrap_err();
+    assert!(error.to_string().contains("255"), "{error}");
+}
+
 // The same structural expression IR renders in MySQL's dialect: `/` is already fractional (no float
 // cast), identifiers use backticks, and aggregate casts use MySQL's `SIGNED`.
 #[test]

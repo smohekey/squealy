@@ -2,6 +2,41 @@ use std::io::{self, Write};
 
 use squealy::{Column, ColumnDefault, Index, SqlType, Table};
 
+/// Constraint-name prefix for the generated fixed-width-binary length check. Placed at the *start*
+/// (not as a suffix) so it survives PostgreSQL's 63-byte identifier truncation, letting introspection
+/// recognize the generated check and distinguish it from a user-authored `octet_length` check.
+pub(crate) const FIXED_BYTES_CHECK_PREFIX: &str = "sqfb_";
+
+/// Deterministic constraint name for a `FixedBytes` column's length check, so create, alter-column,
+/// and introspection all agree on the same name (and a width change can drop/re-add it).
+pub(crate) fn fixed_bytes_check_name(table: &str, column: &str) -> String {
+    let mut name = format!("{FIXED_BYTES_CHECK_PREFIX}{table}_{column}");
+    // PostgreSQL truncates identifiers to 63 bytes; truncate the same way here on a char boundary.
+    if name.len() > 63 {
+        let mut end = 63;
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        name.truncate(end);
+    }
+    name
+}
+
+/// Renders a `FixedBytes` column's inline width check: `CONSTRAINT "sqfb_<table>_<col>" CHECK
+/// (octet_length("col") = N)`.
+fn write_fixed_bytes_check(
+    table: &str,
+    column: &str,
+    width: u32,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    writer.write_all(b" CONSTRAINT ")?;
+    write_quoted_ident(&fixed_bytes_check_name(table, column), writer)?;
+    writer.write_all(b" CHECK (octet_length(")?;
+    write_quoted_ident(column, writer)?;
+    write!(writer, ") = {width})")
+}
+
 /// PostgreSQL's [`Dialect`]: positional `$n` placeholders, `"`-quoted identifiers, and `double
 /// precision` casts. The query renderer routes its dialect-specific output through this so the sink
 /// logic can be shared (see [`squealy::Dialect`]).
@@ -93,12 +128,11 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
                 write!(writer, " ON UPDATE {on_update}")?;
             }
         }
-        // Fixed-width binary: enforce the byte width with an inline `octet_length` CHECK (PostgreSQL
-        // has no native fixed-length binary type). Introspection folds it back to `FixedBytes(N)`.
+        // Fixed-width binary: enforce the byte width with a named inline `octet_length` CHECK
+        // (PostgreSQL has no native fixed-length binary type). Introspection folds the named check
+        // back to `FixedBytes(N)`.
         if let squealy::ColumnType::FixedBytes(width) = column.column_type() {
-            write!(writer, " CHECK (octet_length(")?;
-            write_quoted_ident(column.name(), writer)?;
-            write!(writer, ") = {width})")?;
+            write_fixed_bytes_check(table.name(), column.name(), width, writer)?;
         }
     }
     // A table-level `#[primary_key(columns = [..])]` is not hung off any single column, so render it
@@ -533,7 +567,7 @@ pub(crate) mod ddl {
                 writer.write_all(b"ALTER TABLE ")?;
                 write_qualified_name(schema, table, writer)?;
                 writer.write_all(b" ADD COLUMN ")?;
-                write_model_column(column, writer)?;
+                write_model_column(table, column, writer)?;
                 if let Some(comment) = &column.comment {
                     statement(writer, first)?;
                     write_comment_on_column(schema, table, &column.name, Some(comment), writer)?;
@@ -791,6 +825,40 @@ pub(crate) mod ddl {
             wrote = true;
         }
 
+        // Fixed-width binary length check. The `TYPE bytea` alter above is a no-op for a width change
+        // (both sides render `bytea`), so the byte width lives entirely in the generated named
+        // `octet_length` check. Drop the stale check and/or add the new one whenever the width — or a
+        // `Bytes` <-> `FixedBytes` transition — changes, so a width change actually takes effect and
+        // the plan converges.
+        let before_width = match before.ty {
+            squealy::SqlType::FixedBytes(width) => Some(width),
+            _ => None,
+        };
+        let after_width = match after.ty {
+            squealy::SqlType::FixedBytes(width) => Some(width),
+            _ => None,
+        };
+        if before_width != after_width {
+            let check_name = super::fixed_bytes_check_name(table, &after.name);
+            if before_width.is_some() {
+                if wrote {
+                    statement(writer, first)?;
+                }
+                write_drop_constraint(schema, table, &check_name, writer)?;
+                wrote = true;
+            }
+            if let Some(width) = after_width {
+                if wrote {
+                    statement(writer, first)?;
+                }
+                writer.write_all(b"ALTER TABLE ")?;
+                write_qualified_name(schema, table, writer)?;
+                writer.write_all(b" ADD")?;
+                super::write_fixed_bytes_check(table, &after.name, width, writer)?;
+                wrote = true;
+            }
+        }
+
         if !wrote {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -866,7 +934,7 @@ pub(crate) mod ddl {
         let mut first_entry = true;
         for column in &table.columns {
             entry(writer, &mut first_entry)?;
-            write_model_column(column, writer)?;
+            write_model_column(&table.name, column, writer)?;
         }
         if let Some(primary_key) = &table.primary_key {
             entry(writer, &mut first_entry)?;
@@ -932,7 +1000,11 @@ pub(crate) mod ddl {
         }
     }
 
-    fn write_model_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()> {
+    fn write_model_column(
+        table: &str,
+        column: &ColumnModel,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
         write_quoted_ident(&column.name, writer)?;
         writer.write_all(b" ")?;
         write_pg_sql_type(&column.ty, writer)?;
@@ -961,13 +1033,12 @@ pub(crate) mod ddl {
             writer.write_all(b" DEFAULT ")?;
             write_default_value(default, writer)?;
         }
-        // Fixed-width binary has no native PostgreSQL type, so enforce the width with an inline CHECK
-        // on `octet_length`. Introspection folds this back into `FixedBytes(N)` (see `introspect`), so
-        // it never appears as a standalone check in the model — keeping publish/status idempotent.
+        // Fixed-width binary has no native PostgreSQL type, so enforce the width with a named inline
+        // CHECK on `octet_length`. Introspection folds this named check back into `FixedBytes(N)` (see
+        // `introspect`), so it never appears as a standalone check in the model — keeping publish/status
+        // idempotent.
         if let squealy::SqlType::FixedBytes(width) = &column.ty {
-            writer.write_all(b" CHECK (octet_length(")?;
-            write_quoted_ident(&column.name, writer)?;
-            write!(writer, ") = {width})")?;
+            super::write_fixed_bytes_check(table, &column.name, *width, writer)?;
         }
         Ok(())
     }
