@@ -18,6 +18,11 @@ default = []
 # derive gates on `DecodeNullable` / `IntoNullableAssignmentValue`. The matching `Encode`/`Decode`
 # lives in each backend crate behind its own `uuid` feature.
 uuid = ["dep:uuid"]
+# Native `bytes::Bytes` column support: maps a `bytes::Bytes` field to a `bytea`/`BLOB` column
+# (`HasColumnType` -> `ColumnType::Bytes`) and lets a `Bytes` value be used as a literal operand or
+# write-builder setter (`ExprKind`). Also covers nullable / left-joined columns (`DecodeNullable`).
+# The matching `Encode`/`Decode` lives in each backend crate behind its own `bytes` feature.
+bytes = ["dep:bytes"]
 # Native timestamp column support. Each feature maps its Rust type to a `timestamptz` column
 # (`HasColumnType`), lets a value be used in the query builder (`ExprKind`), and covers nullable
 # columns (`DecodeNullable` / nullable assignment). The matching `Encode`/`Decode` lives in each
@@ -31,6 +36,7 @@ chrono = ["dep:chrono"]
 futures-core.workspace = true
 squealy-macros.workspace = true
 uuid = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
 time = { version = "0.3", optional = true, default-features = false }
 chrono = { version = "0.4", optional = true, default-features = false }
 

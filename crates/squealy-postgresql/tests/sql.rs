@@ -1057,6 +1057,58 @@ fn postgres_custom_encode_type_is_usable_as_prepared_param() {
     assert_eq!(params, vec![PostgresParam::Uuid(id)]);
 }
 
+/// A `bytes::Bytes` column (and its nullable form) binds in insert/where/select and encodes as a
+/// `bytea` param, behind the opt-in `bytes` feature.
+#[cfg(feature = "bytes")]
+#[test]
+fn postgres_bytes_crate_column_binds_in_queries() {
+    #[derive(Clone, Debug, PartialEq, Table)]
+    struct Packet<'scope, C: ColumnMode = ColumnExpr> {
+        #[column(primary_key, auto_increment)]
+        id: C::Type<'scope, i32>,
+        payload: C::Type<'scope, bytes::Bytes>,
+        maybe: C::Type<'scope, Option<bytes::Bytes>>,
+    }
+
+    let insert = Postgres
+        .to::<Packet>()
+        .payload(bytes::Bytes::from_static(&[0xDE, 0xAD, 0xBE, 0xEF]))
+        .maybe(Some(bytes::Bytes::from_static(&[0x01, 0x02])))
+        .insert_returning(|packet| packet.id);
+    assert_eq!(
+        insert.collect_params().unwrap(),
+        vec![
+            PostgresParam::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            PostgresParam::Bytes(vec![0x01, 0x02]),
+        ]
+    );
+
+    // The nullable column also accepts a *bare* `Bytes` value (not just `Some(..)`/`None`), via
+    // `IntoNullableAssignmentValue`.
+    let bare_nullable = Postgres
+        .to::<Packet>()
+        .payload(bytes::Bytes::from_static(&[0x00]))
+        .maybe(bytes::Bytes::from_static(&[0x09]))
+        .insert_returning(|packet| packet.id);
+    assert_eq!(
+        bare_nullable.collect_params().unwrap(),
+        vec![
+            PostgresParam::Bytes(vec![0x00]),
+            PostgresParam::Bytes(vec![0x09])
+        ]
+    );
+
+    // Predicate operand + projection of both the non-null and nullable columns.
+    let q = Postgres
+        .from::<Packet>()
+        .where_(|p| p.payload.equals(bytes::Bytes::from_static(&[1, 2, 3])))
+        .select(|(p,)| (p.payload, p.maybe));
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![PostgresParam::Bytes(vec![1, 2, 3])]
+    );
+}
+
 #[test]
 fn postgres_update_renders_explicit_defaults() {
     let update = Postgres

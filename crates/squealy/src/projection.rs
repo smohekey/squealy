@@ -68,6 +68,11 @@ impl<const N: usize> ProjectionShape for [u8; N] {
     }
 }
 
+// A `bytes::Bytes` column is projectable (e.g. a single-column `select(|(row,)| (row.blob,))`),
+// mirroring the `Vec<u8>`/`[u8; N]` binary value kinds, behind the opt-in `bytes` feature.
+#[cfg(feature = "bytes")]
+impl_value_projection_shape!(bytes::Bytes);
+
 // Timestamp value kinds — so a bare timestamp expression (`now()`, `date_trunc(...)`) is projectable.
 // (Timestamp *columns* are projected via the table derive; these cover the value-as-kind path.)
 #[cfg(feature = "systemtime")]
