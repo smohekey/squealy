@@ -1471,3 +1471,77 @@ async fn postgres_datetime_functions_round_trip() {
         frac_seconds[0]
     );
 }
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct IntegrationUpsert<'scope, C: ColumnMode = ColumnExpr> {
+    // A non-auto primary key, so the conflict target can be set explicitly.
+    #[column(primary_key)]
+    id: C::Type<'scope, i32>,
+    name: C::Type<'scope, String>,
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_upsert_on_conflict_round_trip() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS integration_upserts")
+        .await
+        .expect("drop old upsert table");
+
+    let ddl_backend = Postgres;
+    create_table::<IntegrationUpsert>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+
+    // Seed (id=1, "Ada").
+    connection
+        .to::<IntegrationUpsert>()
+        .id(1)
+        .name("Ada")
+        .insert()
+        .await
+        .expect("seed insert");
+
+    // DO NOTHING on the same key leaves the existing row unchanged.
+    connection
+        .to::<IntegrationUpsert>()
+        .id(1)
+        .name("Grace")
+        .on_conflict(|u| u.id)
+        .do_nothing()
+        .insert()
+        .await
+        .expect("upsert do_nothing");
+    let after_nothing: Vec<String> = connection
+        .from::<IntegrationUpsert>()
+        .where_(|u| u.id.equals(1))
+        .select(|(u,)| u.name)
+        .collect()
+        .await
+        .expect("fetch after do_nothing");
+    assert_eq!(after_nothing, vec!["Ada".to_owned()]);
+
+    // DO UPDATE replaces the row with the proposed (EXCLUDED) values, and RETURNING yields it.
+    let returned = connection
+        .to::<IntegrationUpsert>()
+        .id(1)
+        .name("Grace")
+        .on_conflict(|u| u.id)
+        .do_update()
+        .insert_returning(|u| u.name)
+        .fetch_one()
+        .await
+        .expect("upsert do_update");
+    assert_eq!(returned, "Grace");
+
+    let after_update: Vec<String> = connection
+        .from::<IntegrationUpsert>()
+        .where_(|u| u.id.equals(1))
+        .select(|(u,)| u.name)
+        .collect()
+        .await
+        .expect("fetch after do_update");
+    assert_eq!(after_update, vec!["Grace".to_owned()]);
+}

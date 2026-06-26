@@ -231,6 +231,16 @@ error[E0277]: expected a `FnOnce(__SquealyEventExprsProjection<'static>)` closur
              found a closure with signature `fn(<Event<'static> as ProjectionShape>::Exprs<'static>)`
   = note: this error originates in the derive macro `Table` (in Nightly builds, run with -Z macro-backtrace for more info)
 
+error[E0277]: expected a `FnOnce(__SquealyEventExprsProjection<'static>)` closure, found `impl ::std::ops::FnOnce(<Event<'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>) -> __SquealyTarget`
+ --> tests/compile_fail/feature_gated/unmapped_column_type_requires_db_type.rs:6:35
+  |
+6 | #[derive(Clone, Debug, PartialEq, Table)]
+  |                                   ^^^^^ expected an `FnOnce(__SquealyEventExprsProjection<'static>)` closure, found `impl ::std::ops::FnOnce(<Event<'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>) -> __SquealyTarget`
+  |
+  = note: expected a closure with signature `fn(__SquealyEventExprsProjection<'static>)`
+             found a closure with signature `fn(<Event<'static> as ProjectionShape>::Exprs<'static>)`
+  = note: this error originates in the derive macro `Table` (in Nightly builds, run with -Z macro-backtrace for more info)
+
 error[E0277]: this column must be set before `.insert()` (it is not nullable and has no default)
  --> tests/compile_fail/feature_gated/unmapped_column_type_requires_db_type.rs:6:35
   |

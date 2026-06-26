@@ -1172,6 +1172,8 @@ pub struct PostgresInsert<
     connection: &'conn Conn,
     columns: Rows,
     returning: Returning,
+    /// `Some` for an upsert (`ON CONFLICT …`); `None` for a plain insert. Carries no bind params.
+    conflict: Option<squealy::ConflictClause>,
     _table: PhantomData<S>,
     _shape: PhantomData<Shape>,
 }
@@ -1356,6 +1358,23 @@ where
             connection,
             columns,
             returning,
+            conflict: None,
+            _table: PhantomData,
+            _shape: PhantomData,
+        }
+    }
+
+    pub(crate) fn new_upsert(
+        connection: &'conn Conn,
+        columns: Rows,
+        returning: Returning,
+        conflict: squealy::ConflictClause,
+    ) -> Self {
+        Self {
+            connection,
+            columns,
+            returning,
+            conflict: Some(conflict),
             _table: PhantomData,
             _shape: PhantomData,
         }
@@ -1371,6 +1390,7 @@ where
             &PostgresDialect,
             &self.columns,
             &self.returning,
+            self.conflict.as_ref(),
             &mut buffer,
         );
         buffer
@@ -1386,6 +1406,7 @@ where
                 &PostgresDialect,
                 &self.columns,
                 &self.returning,
+                self.conflict.as_ref(),
                 writer,
             )
         });
@@ -1396,6 +1417,7 @@ where
                     &PostgresDialect,
                     &self.columns,
                     &self.returning,
+                    self.conflict.as_ref(),
                     params,
                 )
             },
@@ -2112,6 +2134,7 @@ where
             &PostgresDialect,
             &self.columns,
             &self.returning,
+            self.conflict.as_ref(),
             writer,
         )
     }
@@ -2122,6 +2145,7 @@ where
             &PostgresDialect,
             &self.columns,
             &self.returning,
+            self.conflict.as_ref(),
             params,
         )
     }

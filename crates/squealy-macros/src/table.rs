@@ -1547,6 +1547,24 @@ impl TableStruct {
                         projection,
                     )
                 }
+
+                /// `INSERT … ON CONFLICT (<target>) …` — PostgreSQL upsert. `target` selects the
+                /// conflict column(s); follow with `do_nothing()` / `do_update()`. Gated to backends
+                /// that support `ON CONFLICT` (PostgreSQL).
+                pub fn on_conflict<__SquealyTarget>(
+                    self,
+                    target: impl ::std::ops::FnOnce(
+                        <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
+                    ) -> __SquealyTarget,
+                ) -> ::squealy::OnConflict<'conn, Conn, #table_ident <'static, ::squealy::ColumnExpr>, InsertColumns>
+                where
+                    Conn: ::squealy::OnConflictQueryBuilder,
+                    __SquealyTarget: ::squealy::ConflictTarget,
+                {
+                    let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
+                    let target = ::squealy::ConflictTarget::column_names(target(table));
+                    ::squealy::OnConflict::new(self.connection, self.insert_columns, target)
+                }
             }
 
             #update_finalizers

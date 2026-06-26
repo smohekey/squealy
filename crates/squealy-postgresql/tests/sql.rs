@@ -3245,3 +3245,66 @@ fn postgres_self_join_renders_distinct_aliases() {
     );
     assert_join_row::<_, _, _, (i32, i32)>(&q);
 }
+
+#[test]
+fn postgres_upsert_do_nothing_renders() {
+    let q = Postgres
+        .to::<User>()
+        .name("Ada")
+        .on_conflict(|user| user.id)
+        .do_nothing()
+        .insert_returning(|user| user.id);
+    assert_eq!(
+        q.to_sql(),
+        "INSERT INTO \"public\".\"users\" (\"name\") VALUES ($1) \
+         ON CONFLICT (\"id\") DO NOTHING RETURNING \"id\" AS \"id\""
+    );
+}
+
+#[test]
+fn postgres_upsert_do_update_replaces_inserted_columns() {
+    // DO UPDATE sets every inserted column to its EXCLUDED value.
+    let q = Postgres
+        .to::<User>()
+        .name("Ada")
+        .on_conflict(|user| user.id)
+        .do_update()
+        .insert_returning(|user| user.id);
+    assert_eq!(
+        q.to_sql(),
+        "INSERT INTO \"public\".\"users\" (\"name\") VALUES ($1) \
+         ON CONFLICT (\"id\") DO UPDATE SET \"name\" = EXCLUDED.\"name\" RETURNING \"id\" AS \"id\""
+    );
+}
+
+#[test]
+fn postgres_upsert_composite_conflict_target_renders() {
+    let q = Postgres
+        .to::<User>()
+        .name("Ada")
+        .on_conflict(|user| (user.id, user.name))
+        .do_nothing()
+        .insert_returning(|user| user.id);
+    assert!(
+        q.to_sql()
+            .contains("ON CONFLICT (\"id\", \"name\") DO NOTHING"),
+        "{}",
+        q.to_sql()
+    );
+}
+
+#[test]
+fn postgres_upsert_do_update_with_default_values_falls_back_to_do_nothing() {
+    // A DEFAULT VALUES insert assigns no columns, so `do_update` has nothing to SET — it must render
+    // `DO NOTHING` rather than the invalid `DO UPDATE SET` with an empty list.
+    let q = Postgres
+        .to::<DefaultedRecord>()
+        .on_conflict(|record| record.id)
+        .do_update()
+        .insert_returning(|record| record.id);
+    assert_eq!(
+        q.to_sql(),
+        "INSERT INTO \"defaulted_records\" DEFAULT VALUES \
+         ON CONFLICT (\"id\") DO NOTHING RETURNING \"id\" AS \"id\""
+    );
+}

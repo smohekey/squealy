@@ -5461,6 +5461,12 @@ where
         Self::column_with_project_alias(alias, column, column)
     }
 
+    /// The underlying column name (used by upsert conflict targets).
+    #[doc(hidden)]
+    pub fn column_name(&self) -> &'static str {
+        self.column
+    }
+
     #[doc(hidden)]
     pub fn column_with_project_alias(
         alias: SourceAlias,

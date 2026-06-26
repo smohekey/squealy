@@ -605,6 +605,34 @@ impl QueryBuilder for PostgresTransaction<'_> {
         Returning: Projectable;
 }
 
+// Upsert (`INSERT … ON CONFLICT`) is PostgreSQL-only; the conflict clause is a runtime field on the
+// existing `PostgresInsert` query object, so `build_upsert` just constructs it with the clause.
+macro_rules! impl_on_conflict_query_builder {
+    ($ty:ty) => {
+        impl squealy::OnConflictQueryBuilder for $ty {
+            fn build_upsert<'conn, S, Shape, Rows, Returning>(
+                &'conn self,
+                rows: Rows,
+                returning: Returning,
+                conflict: squealy::ConflictClause,
+            ) -> Self::Insert<'conn, S, Shape, Rows, Returning>
+            where
+                Self: 'conn,
+                S: InsertableTable,
+                Shape: ProjectionShape,
+                Shape::Row: squealy::Decode<Self::Backend>,
+                Rows: squealy::InsertRows,
+                Returning: Projectable,
+            {
+                crate::query::PostgresInsert::new_upsert(self, rows, returning, conflict)
+            }
+        }
+    };
+}
+impl_on_conflict_query_builder!(Postgres);
+impl_on_conflict_query_builder!(PostgresConnection);
+impl_on_conflict_query_builder!(PostgresTransaction<'_>);
+
 impl Connection for PostgresConnection {}
 
 impl Connection for PostgresTransaction<'_> {}
