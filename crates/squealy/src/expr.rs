@@ -4305,6 +4305,23 @@ impl KindNullability for uuid::Uuid {
     type Nullable = CaseNonNull;
 }
 
+/// A `bytes::Bytes` value is a `bytea`/`BLOB` column value (binary payloads), usable as a literal
+/// predicate operand and a write-builder setter — the `bytes`-feature sibling of the `Vec<u8>` /
+/// `[u8; N]` value kinds (not min/max-aggregable, so excluded from the aggregate-scalar set).
+#[cfg(feature = "bytes")]
+impl ExprKind for bytes::Bytes {
+    type Value = bytes::Bytes;
+}
+#[cfg(feature = "bytes")]
+impl IntoWindowNullable for bytes::Bytes {
+    type Kind = ScalarNullable<bytes::Bytes>;
+}
+#[cfg(feature = "bytes")]
+impl KindNullability for bytes::Bytes {
+    type Value = bytes::Bytes;
+    type Nullable = CaseNonNull;
+}
+
 // Native timestamp values can be used as literal predicate operands and write-builder setters.
 #[cfg(feature = "systemtime")]
 impl_value_expr_kind!(std::time::SystemTime);

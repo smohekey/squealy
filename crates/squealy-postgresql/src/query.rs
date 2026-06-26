@@ -633,6 +633,23 @@ impl<const N: usize> Decode<Postgres> for [u8; N] {
     }
 }
 
+// `bytes::Bytes` binds to a `bytea` column, going through `Vec<u8>` so no extra tokio-postgres
+// feature is needed (behind the opt-in `bytes` feature).
+#[cfg(feature = "bytes")]
+impl Encode<Postgres> for bytes::Bytes {
+    fn encode(&self, out: &mut PostgresParamWriter<'_>) -> Result<(), PostgresError> {
+        out.push(PostgresParam::Bytes(self.to_vec()));
+        Ok(())
+    }
+}
+
+#[cfg(feature = "bytes")]
+impl Decode<Postgres> for bytes::Bytes {
+    fn decode(row: &mut <Postgres as Backend>::RowReader<'_>) -> Result<Self, PostgresError> {
+        Ok(bytes::Bytes::from(row.take_sql::<Vec<u8>>()?))
+    }
+}
+
 impl<T> Encode<Postgres> for Option<T>
 where
     T: Encode<Postgres>,

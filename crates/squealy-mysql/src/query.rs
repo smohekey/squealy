@@ -289,6 +289,22 @@ impl<const N: usize> Decode<Mysql> for [u8; N] {
     }
 }
 
+// `bytes::Bytes` binds to a `BLOB` column via `Vec<u8>` (behind the opt-in `bytes` feature).
+#[cfg(feature = "bytes")]
+impl Encode<Mysql> for bytes::Bytes {
+    fn encode(&self, out: &mut MysqlParamWriter<'_>) -> Result<(), MysqlError> {
+        out.push(Value::Bytes(self.to_vec()));
+        Ok(())
+    }
+}
+
+#[cfg(feature = "bytes")]
+impl Decode<Mysql> for bytes::Bytes {
+    fn decode(row: &mut <Mysql as Backend>::RowReader<'_>) -> Result<Self, MysqlError> {
+        Ok(bytes::Bytes::from(row.take::<Vec<u8>>()?))
+    }
+}
+
 impl<T> Encode<Mysql> for Option<T>
 where
     T: Encode<Mysql>,
