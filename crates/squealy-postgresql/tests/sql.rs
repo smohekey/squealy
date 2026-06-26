@@ -525,6 +525,110 @@ fn postgres_rejects_adding_a_generated_column_in_place() {
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
 }
 
+fn fixed_bytes_column(name: &str, width: u32) -> ColumnModel {
+    ColumnModel {
+        name: name.to_owned(),
+        comment: None,
+        ty: SqlType::FixedBytes(width),
+        collation: None,
+        nullable: false,
+        default: None,
+        identity: None,
+        generated: None,
+    }
+}
+
+#[test]
+fn postgres_renames_fixed_bytes_check_with_the_column() {
+    // Renaming a `FixedBytes` column must also rename its generated length check, which PostgreSQL
+    // does not rename automatically — otherwise the deterministic name goes stale.
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterTable {
+            schema: Some("public".to_owned()),
+            table: "keys".to_owned(),
+            change: Box::new(TablePlanStep::RenameColumn {
+                refactor_id: None,
+                from: "old_key".to_owned(),
+                to: "new_key".to_owned(),
+                column_type: SqlType::FixedBytes(32),
+            }),
+        }],
+    };
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+    assert!(
+        sql.contains("RENAME COLUMN \"old_key\" TO \"new_key\""),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("RENAME CONSTRAINT \"sqfb_") && sql.contains(" TO \"sqfb_"),
+        "the generated check should be renamed alongside the column: {sql}"
+    );
+}
+
+#[test]
+fn postgres_drops_fixed_bytes_check_before_changing_type() {
+    // Changing away from `FixedBytes` to a non-`bytea` type must drop the `octet_length` check first,
+    // or PostgreSQL validates the new type against it and fails.
+    let before = fixed_bytes_column("secret", 4);
+    let after = ColumnModel {
+        ty: SqlType::I32,
+        ..before.clone()
+    };
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterTable {
+            schema: Some("public".to_owned()),
+            table: "keys".to_owned(),
+            change: Box::new(TablePlanStep::AlterColumn {
+                before,
+                after,
+                type_cast: None,
+            }),
+        }],
+    };
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+    let drop_pos = sql
+        .find("DROP CONSTRAINT")
+        .expect("expected a DROP CONSTRAINT");
+    let type_pos = sql.find("TYPE integer").expect("expected a TYPE change");
+    assert!(
+        drop_pos < type_pos,
+        "the width check must be dropped before the type change: {sql}"
+    );
+}
+
+#[test]
+fn postgres_fixed_bytes_width_change_drops_then_adds_check() {
+    let before = fixed_bytes_column("secret", 4);
+    let after = fixed_bytes_column("secret", 8);
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterTable {
+            schema: Some("public".to_owned()),
+            table: "keys".to_owned(),
+            change: Box::new(TablePlanStep::AlterColumn {
+                before,
+                after,
+                type_cast: None,
+            }),
+        }],
+    };
+    let mut sql = Vec::new();
+    Postgres.render_plan(&plan, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+    // The old check is dropped, then the new width is added (`octet_length(...) = 8`).
+    let drop_pos = sql
+        .find("DROP CONSTRAINT")
+        .expect("expected a DROP CONSTRAINT");
+    let add_pos = sql
+        .find("ADD CONSTRAINT")
+        .expect("expected an ADD CONSTRAINT");
+    assert!(drop_pos < add_pos, "drop must precede add: {sql}");
+    assert!(sql.contains("octet_length(\"secret\") = 8)"), "{sql}");
+}
+
 #[test]
 fn postgres_drops_identity_before_setting_a_default() {
     // Identity and default are mutually exclusive, so DROP IDENTITY must come before SET DEFAULT.
@@ -585,6 +689,7 @@ fn postgres_renders_rename_steps_in_schema_plan() {
                     refactor_id: None,
                     from: "display_name".to_owned(),
                     to: "name".to_owned(),
+                    column_type: SqlType::String,
                 }),
             },
         ],
@@ -618,6 +723,7 @@ fn postgres_records_refactor_ids_for_rename_steps() {
                     refactor_id: Some("rename-display-name".to_owned()),
                     from: "display_name".to_owned(),
                     to: "name".to_owned(),
+                    column_type: SqlType::String,
                 }),
             },
         ],

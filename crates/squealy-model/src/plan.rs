@@ -460,6 +460,9 @@ fn apply_column_rename(steps: &mut Vec<DatabasePlanStep>, operation: &RenameColu
             refactor_id: Some(operation.id.clone()),
             from: operation.from.clone(),
             to: operation.to.clone(),
+            // The pre-rename column type: the backend needs it to rename a type-specific generated
+            // constraint (PostgreSQL's `FixedBytes` length check is named from the column).
+            column_type: before_column.ty.clone(),
         }),
     }];
     if before_column != after_column {

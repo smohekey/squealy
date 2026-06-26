@@ -241,6 +241,8 @@ fn write_table_plan_step(
             refactor_id,
             from,
             to,
+            // MySQL `BINARY(N)` is a native type with no generated constraint to rename alongside.
+            column_type: _,
         } => {
             writer.write_all(b"ALTER TABLE ")?;
             write_qualified_name(schema, table, writer)?;

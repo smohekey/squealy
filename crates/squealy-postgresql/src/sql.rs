@@ -13,9 +13,9 @@ pub(crate) const FIXED_BYTES_CHECK_PREFIX: &str = "sqfb_";
 /// The name is `sqfb_` plus a stable 64-bit hash of the *column* name:
 /// - fixed length (21 bytes), so it never hits PostgreSQL's 63-byte identifier truncation — and two
 ///   columns can't truncate to the same name (the round-2 collision finding);
-/// - derived from the column only (not the table), so it survives a table rename — the alter-column
-///   path recomputes the same name and its `DROP CONSTRAINT` still hits (column renames are already
-///   rejected by the renderer, so the column name is stable here).
+/// - derived from the column only (not the table), so it survives a table rename. A column *rename*
+///   does change it, so the `RenameColumn` step renames the constraint too (PostgreSQL does not do so
+///   automatically), keeping create/alter/introspection agreed on the name.
 pub(crate) fn fixed_bytes_check_name(column: &str) -> String {
     format!("{FIXED_BYTES_CHECK_PREFIX}{:016x}", fnv1a64(column))
 }
@@ -587,6 +587,7 @@ pub(crate) mod ddl {
                 refactor_id,
                 from,
                 to,
+                column_type,
             } => {
                 writer.write_all(b"ALTER TABLE ")?;
                 write_qualified_name(schema, table, writer)?;
@@ -594,6 +595,18 @@ pub(crate) mod ddl {
                 write_quoted_ident(from, writer)?;
                 writer.write_all(b" TO ")?;
                 write_quoted_ident(to, writer)?;
+                // The generated `FixedBytes` length check is named from the column, and PostgreSQL does
+                // not rename it with the column. Rename it too so it keeps matching the deterministic
+                // name (the introspection fold and a later width-change `DROP` both rely on it).
+                if matches!(column_type, squealy::SqlType::FixedBytes(_)) {
+                    statement(writer, first)?;
+                    writer.write_all(b"ALTER TABLE ")?;
+                    write_qualified_name(schema, table, writer)?;
+                    writer.write_all(b" RENAME CONSTRAINT ")?;
+                    write_quoted_ident(&super::fixed_bytes_check_name(from), writer)?;
+                    writer.write_all(b" TO ")?;
+                    write_quoted_ident(&super::fixed_bytes_check_name(to), writer)?;
+                }
                 if let Some(refactor_id) = refactor_id {
                     statement(writer, first)?;
                     write_record_refactor(refactor_id, writer)?;
@@ -722,7 +735,26 @@ pub(crate) mod ddl {
             ));
         }
 
+        // Fixed-width binary length check. The byte width lives entirely in the generated named
+        // `octet_length` check (the `TYPE bytea` alter below is a no-op for a width change). The stale
+        // check must be dropped *before* the `TYPE` change: changing to a non-`bytea` type while
+        // `octet_length(col) = N` still exists fails validation. The replacement check is added at the
+        // end, after the new type is in place.
+        let before_width = matches!(before.ty, squealy::SqlType::FixedBytes(_));
+        let after_width = matches!(after.ty, squealy::SqlType::FixedBytes(_));
+        let drop_fixed_bytes_check = before_width && before.ty != after.ty;
+        let add_fixed_bytes_check = after_width && before.ty != after.ty;
+
         let mut wrote = false;
+        if drop_fixed_bytes_check {
+            write_drop_constraint(
+                schema,
+                table,
+                &super::fixed_bytes_check_name(&after.name),
+                writer,
+            )?;
+            wrote = true;
+        }
         if before.ty != after.ty || before.collation != after.collation {
             writer.write_all(b"ALTER TABLE ")?;
             write_qualified_name(schema, table, writer)?;
@@ -829,38 +861,17 @@ pub(crate) mod ddl {
             wrote = true;
         }
 
-        // Fixed-width binary length check. The `TYPE bytea` alter above is a no-op for a width change
-        // (both sides render `bytea`), so the byte width lives entirely in the generated named
-        // `octet_length` check. Drop the stale check and/or add the new one whenever the width — or a
-        // `Bytes` <-> `FixedBytes` transition — changes, so a width change actually takes effect and
-        // the plan converges.
-        let before_width = match before.ty {
-            squealy::SqlType::FixedBytes(width) => Some(width),
-            _ => None,
-        };
-        let after_width = match after.ty {
-            squealy::SqlType::FixedBytes(width) => Some(width),
-            _ => None,
-        };
-        if before_width != after_width {
-            let check_name = super::fixed_bytes_check_name(&after.name);
-            if before_width.is_some() {
-                if wrote {
-                    statement(writer, first)?;
-                }
-                write_drop_constraint(schema, table, &check_name, writer)?;
-                wrote = true;
+        // Add the replacement width check now that the new `bytea` type is in place (the stale check
+        // was dropped before the `TYPE` change above).
+        if add_fixed_bytes_check && let squealy::SqlType::FixedBytes(width) = after.ty {
+            if wrote {
+                statement(writer, first)?;
             }
-            if let Some(width) = after_width {
-                if wrote {
-                    statement(writer, first)?;
-                }
-                writer.write_all(b"ALTER TABLE ")?;
-                write_qualified_name(schema, table, writer)?;
-                writer.write_all(b" ADD")?;
-                super::write_fixed_bytes_check(&after.name, width, writer)?;
-                wrote = true;
-            }
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table, writer)?;
+            writer.write_all(b" ADD")?;
+            super::write_fixed_bytes_check(&after.name, width, writer)?;
+            wrote = true;
         }
 
         if !wrote {
