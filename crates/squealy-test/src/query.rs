@@ -168,6 +168,15 @@ impl Encode<TestBackend> for Vec<u8> {
     }
 }
 
+// Fixed-size byte arrays bind like `Vec<u8>` so `[u8; N]` columns work with the test backend's
+// query-rendering / parameter assertions (matching the PostgreSQL/MySQL `Encode` impls).
+impl<const N: usize> Encode<TestBackend> for [u8; N] {
+    fn encode(&self, out: &mut TestParamWriter<'_>) -> Result<(), TestError> {
+        out.push(TestParam::Bytes(self.to_vec()));
+        Ok(())
+    }
+}
+
 impl<T> Encode<TestBackend> for Option<T>
 where
     T: Encode<TestBackend>,
@@ -200,6 +209,13 @@ impl_test_decode_no_rows!(u8, u16, u32, u64, u128, usize);
 impl_test_decode_no_rows!(f32, f64);
 impl_test_decode_no_rows!(String, bool);
 impl_test_decode_no_rows!(Vec<u8>);
+
+// The test backend never yields rows, so decode is a stub; const generics can't go through the macro.
+impl<const N: usize> Decode<TestBackend> for [u8; N] {
+    fn decode(_row: &mut <TestBackend as Backend>::RowReader<'_>) -> Result<Self, TestError> {
+        Err(TestError::NoRows)
+    }
+}
 
 impl<T> Decode<TestBackend> for Option<T>
 where

@@ -524,6 +524,7 @@ fn write_test_column_type(column_type: ColumnType, writer: &mut impl Write) -> i
         ColumnType::Json => "json",
         ColumnType::Jsonb => "jsonb",
         ColumnType::Bytes => "bytea",
+        ColumnType::FixedBytes(length) => return write!(writer, "binary({length})"),
     };
     writer.write_all(name.as_bytes())
 }

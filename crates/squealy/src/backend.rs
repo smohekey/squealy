@@ -68,6 +68,18 @@ impl_decode_nullable_via_option! {
     Vec<u8>,
 }
 
+// Fixed-size byte arrays may appear in nullable / left-joined columns; const-generic mirror of the
+// macro above. Resolves on backends that provide `Decode<B> for Option<[u8; N]>`.
+impl<B, const N: usize> DecodeNullable<B> for [u8; N]
+where
+    B: Backend,
+    Option<[u8; N]>: Decode<B>,
+{
+    fn decode_nullable(row: &mut B::RowReader<'_>) -> Result<Option<Self>, B::Error> {
+        row.read::<Option<[u8; N]>>()
+    }
+}
+
 // Native `uuid` column support: a `uuid::Uuid` field can appear in a nullable column or in a
 // left-joined row, both of which require `DecodeNullable`. Resolves only on backends that provide
 // `Decode<B> for Option<uuid::Uuid>` (the PostgreSQL backend does, behind its own `uuid` feature).
@@ -297,6 +309,19 @@ pub trait SchemaIntrospect {
     /// identity, which suits backends that keep the logical types distinct (e.g. MySQL).
     fn canonical_sql_type(&self, ty: &SqlType) -> SqlType {
         ty.clone()
+    }
+
+    /// Canonicalizes a logical [`SqlType`] for a *view* output column.
+    ///
+    /// A view column has no backing storage and no constraints, so a backend may introspect it as a
+    /// different physical type than the same type on a table column. PostgreSQL enforces
+    /// [`SqlType::FixedBytes`] on a table column with a generated `CHECK` that introspection folds back
+    /// into `FixedBytes`, but a view column is just `bytea` with no check to fold — so a desired view
+    /// column declared `FixedBytes(N)` must canonicalize to [`SqlType::Bytes`] to match. The default
+    /// delegates to [`Self::canonical_sql_type`], which suits backends whose view columns keep the same
+    /// physical type as table columns (e.g. MySQL `BINARY(N)`).
+    fn canonical_view_column_type(&self, ty: &SqlType) -> SqlType {
+        self.canonical_sql_type(ty)
     }
 
     /// Canonicalizes a logical [`IdentityMode`] to the form this backend's introspection produces.

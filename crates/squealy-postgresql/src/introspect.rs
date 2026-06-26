@@ -194,8 +194,14 @@ ORDER BY n.nspname, c.relname",
 }
 
 async fn table(client: &Client, table_ref: &TableRef) -> Result<TableModel, PostgresError> {
-    let columns = columns(client, table_ref).await?;
+    let mut columns = columns(client, table_ref).await?;
     let (primary_key, uniques) = key_constraints(client, table_ref).await?;
+    let mut checks = checks(client, table_ref).await?;
+
+    // A fixed-width binary column (`[u8; N]`) is rendered as `bytea` + a generated
+    // `CHECK (octet_length(col) = N)`. Fold that check back into `FixedBytes(N)` and drop it, so the
+    // introspected model matches the declared one (idempotent publish).
+    fold_fixed_bytes_checks(&mut columns, &mut checks);
 
     Ok(TableModel {
         name: table_ref.name.clone(),
@@ -204,9 +210,42 @@ async fn table(client: &Client, table_ref: &TableRef) -> Result<TableModel, Post
         primary_key,
         foreign_keys: foreign_keys(client, table_ref).await?,
         uniques,
-        checks: checks(client, table_ref).await?,
+        checks,
         indexes: indexes(client, table_ref).await?,
     })
+}
+
+/// Folds the *generated* fixed-width-binary length check into the column's `FixedBytes(N)` type and
+/// removes it from the check list. The check is identified by matching its constraint name against the
+/// deterministic `sqfb_<hash(column)>` name we generate (see [`crate::sql::fixed_bytes_check_name`]),
+/// not by parsing the column name out of the expression — so it is robust to however PostgreSQL quotes
+/// an exotic column identifier inside `octet_length(...)`. A user-authored `octet_length` check has a
+/// different name and is left untouched, so it round-trips as `Bytes` + an explicit check.
+fn fold_fixed_bytes_checks(columns: &mut [ColumnModel], checks: &mut Vec<CheckModel>) {
+    checks.retain(|check| {
+        if check.name.starts_with(crate::sql::FIXED_BYTES_CHECK_PREFIX)
+            && let Some(width) = parse_octet_length_width(&check.expression)
+            && let Some(column) = columns.iter_mut().find(|column| {
+                column.ty == SqlType::Bytes
+                    && crate::sql::fixed_bytes_check_name(&column.name) == check.name
+            })
+        {
+            column.ty = SqlType::FixedBytes(width);
+            return false;
+        }
+        true
+    });
+}
+
+/// Extracts `N` from a generated `octet_length(<col>) = N` check expression. Only the trailing
+/// integer is parsed (after the final `=`), so it does not matter how PostgreSQL quotes the column
+/// identifier inside the call.
+fn parse_octet_length_width(expression: &str) -> Option<u32> {
+    if !expression.contains("octet_length(") {
+        return None;
+    }
+    let (_, rhs) = expression.rsplit_once('=')?;
+    rhs.trim().trim_end_matches(')').trim().parse().ok()
 }
 
 async fn columns(client: &Client, table_ref: &TableRef) -> Result<Vec<ColumnModel>, PostgresError> {
@@ -789,6 +828,97 @@ mod tests {
         assert_eq!(sql_type("jsonb"), SqlType::Jsonb);
         assert_eq!(sql_type("bytea"), SqlType::Bytes);
         assert_eq!(sql_type("citext"), SqlType::Raw("citext".to_owned()));
+    }
+
+    #[test]
+    fn parses_generated_octet_length_width() {
+        // Only the trailing integer is parsed, so quoting of the identifier is irrelevant — including
+        // exotic names containing `)` or `=` inside the quotes.
+        assert_eq!(parse_octet_length_width("octet_length(key) = 32"), Some(32));
+        assert_eq!(
+            parse_octet_length_width("(octet_length(key) = 32)"),
+            Some(32)
+        );
+        assert_eq!(
+            parse_octet_length_width("(octet_length(\"Key\") = 12)"),
+            Some(12)
+        );
+        assert_eq!(
+            parse_octet_length_width("(octet_length(\"we)ird=name\") = 16)"),
+            Some(16)
+        );
+        // Unrelated checks are not width markers.
+        assert_eq!(parse_octet_length_width("length(key) = 32"), None);
+        assert_eq!(parse_octet_length_width("(octet_length(key) > 0)"), None);
+    }
+
+    #[test]
+    fn folds_octet_length_check_into_fixed_bytes() {
+        fn bytea_column(name: &str) -> ColumnModel {
+            ColumnModel {
+                name: name.to_owned(),
+                comment: None,
+                ty: SqlType::Bytes,
+                collation: None,
+                nullable: false,
+                default: None,
+                identity: None,
+                generated: None,
+            }
+        }
+        fn check(name: &str, expression: &str) -> CheckModel {
+            CheckModel {
+                name: name.to_owned(),
+                expression: expression.to_owned(),
+                validation: None,
+                enforcement: None,
+            }
+        }
+
+        let mut columns = vec![bytea_column("key"), bytea_column("blob")];
+        let mut checks = vec![
+            // The generated check carries the deterministic `sqfb_<hash(column)>` name.
+            check(
+                &crate::sql::fixed_bytes_check_name("key"),
+                "(octet_length(key) = 32)",
+            ),
+            check("secrets_blob_check", "(octet_length(blob) > 0)"),
+        ];
+        fold_fixed_bytes_checks(&mut columns, &mut checks);
+
+        // The generated check folds into `FixedBytes(32)` and is removed; the unrelated bytea column
+        // and its check are untouched.
+        assert_eq!(columns[0].ty, SqlType::FixedBytes(32));
+        assert_eq!(columns[1].ty, SqlType::Bytes);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "secrets_blob_check");
+    }
+
+    #[test]
+    fn does_not_fold_user_authored_octet_length_checks() {
+        // A user who modeled `Bytes` + their own `octet_length` check (before `FixedBytes` existed)
+        // must keep that exact shape: the check is not `sqfb_`-named, so it is left as-is.
+        let mut columns = vec![ColumnModel {
+            name: "key".to_owned(),
+            comment: None,
+            ty: SqlType::Bytes,
+            collation: None,
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+        }];
+        let mut checks = vec![CheckModel {
+            name: "my_key_len".to_owned(),
+            expression: "(octet_length(key) = 32)".to_owned(),
+            validation: None,
+            enforcement: None,
+        }];
+        fold_fixed_bytes_checks(&mut columns, &mut checks);
+
+        assert_eq!(columns[0].ty, SqlType::Bytes);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "my_key_len");
     }
 
     #[test]

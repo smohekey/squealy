@@ -617,6 +617,22 @@ impl Encode<Postgres> for Vec<u8> {
     }
 }
 
+// Fixed-size byte arrays bind as `bytea` (the fixed width is enforced by the column's CHECK and on
+// decode here). Encode sends the bytes; decode reads the `bytea` and errors unless it is exactly `N`.
+impl<const N: usize> Encode<Postgres> for [u8; N] {
+    fn encode(&self, out: &mut PostgresParamWriter<'_>) -> Result<(), PostgresError> {
+        out.push(PostgresParam::Bytes(self.to_vec()));
+        Ok(())
+    }
+}
+
+impl<const N: usize> Decode<Postgres> for [u8; N] {
+    fn decode(row: &mut <Postgres as Backend>::RowReader<'_>) -> Result<Self, PostgresError> {
+        let bytes = row.take_sql::<Vec<u8>>()?;
+        <[u8; N]>::try_from(bytes).map_err(|_| PostgresError::Conversion("fixed-size byte array"))
+    }
+}
+
 impl<T> Encode<Postgres> for Option<T>
 where
     T: Encode<Postgres>,

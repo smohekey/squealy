@@ -550,6 +550,12 @@ fn sql_type(data_type: &str, column_type: &str) -> SqlType {
         "timestamp" => SqlType::Timestamp { tz: true },
         "json" => SqlType::Json,
         "blob" => SqlType::Bytes,
+        // Fixed-width binary `BINARY(N)` -> `[u8; N]` (the width is in the type, so it round-trips
+        // directly; variable-length `varbinary` is left as a raw type).
+        "binary" => single_arg_type(&column_type, "binary").map_or_else(
+            || SqlType::Raw(column_type.to_uppercase()),
+            SqlType::FixedBytes,
+        ),
         _ => SqlType::Raw(column_type.to_uppercase()),
     }
 }
@@ -708,6 +714,12 @@ mod tests {
         assert_eq!(
             sql_type("decimal", "decimal(10,2) unsigned"),
             SqlType::Raw("DECIMAL(10,2) UNSIGNED".to_owned())
+        );
+        // Fixed-width binary `BINARY(N)` round-trips to `FixedBytes(N)`; variable `varbinary` does not.
+        assert_eq!(sql_type("binary", "binary(32)"), SqlType::FixedBytes(32));
+        assert_eq!(
+            sql_type("varbinary", "varbinary(32)"),
+            SqlType::Raw("VARBINARY(32)".to_owned())
         );
     }
 

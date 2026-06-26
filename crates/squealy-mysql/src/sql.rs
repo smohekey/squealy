@@ -241,6 +241,8 @@ fn write_table_plan_step(
             refactor_id,
             from,
             to,
+            // MySQL `BINARY(N)` is a native type with no generated constraint to rename alongside.
+            column_type: _,
         } => {
             writer.write_all(b"ALTER TABLE ")?;
             write_qualified_name(schema, table, writer)?;
@@ -530,6 +532,18 @@ fn write_mysql_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()>
         SqlType::Uuid => "CHAR(36)",
         SqlType::Json | SqlType::Jsonb => "JSON",
         SqlType::Bytes => "BLOB",
+        // Fixed-width binary: MySQL has a native `BINARY(N)` type (the width round-trips directly),
+        // but it caps at 255 bytes — a larger `[u8; N]` has no fixed-width representation, so fail
+        // rather than emit DDL the server rejects.
+        SqlType::FixedBytes(length) => {
+            if *length > 255 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("MySQL BINARY supports at most 255 bytes, but the column is {length}"),
+                ));
+            }
+            return write!(writer, "BINARY({length})");
+        }
         SqlType::Raw(raw) => raw.as_str(),
     };
     writer.write_all(name.as_bytes())
@@ -772,7 +786,9 @@ impl squealy::Dialect for MysqlDialect {
             SqlType::Date => "DATE",
             SqlType::Time { .. } => "TIME",
             SqlType::Timestamp { .. } => "DATETIME",
-            SqlType::Bytes => "BINARY",
+            // Both variable and fixed-width binary cast to `BINARY` so a binary expression operand in
+            // `CASE`/`NULLIF`/`COALESCE` stays binary instead of being coerced through the text charset.
+            SqlType::Bytes | SqlType::FixedBytes(_) => "BINARY",
             _ => "CHAR",
         };
         writer.write_all(name.as_bytes())

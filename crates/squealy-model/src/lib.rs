@@ -285,7 +285,7 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
         // `String`/`Varchar(255)`, PostgreSQL `Text`/`String`) would churn a drop+recreate every run.
         for view in &mut schema.views {
             for column in &mut view.columns {
-                column.ty = connection.canonical_sql_type(&column.ty);
+                column.ty = connection.canonical_view_column_type(&column.ty);
             }
         }
     }
@@ -694,6 +694,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn canonicalize_model_uses_view_column_hook_for_views_only() {
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![TableModel {
+                    name: "keys".to_owned(),
+                    comment: None,
+                    columns: vec![ColumnModel {
+                        name: "secret".to_owned(),
+                        comment: None,
+                        ty: SqlType::FixedBytes(16),
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                    }],
+                    primary_key: None,
+                    foreign_keys: vec![],
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![],
+                }],
+                views: vec![ViewModel {
+                    name: "key_view".to_owned(),
+                    comment: None,
+                    columns: vec![ViewColumnModel {
+                        name: "secret".to_owned(),
+                        ty: SqlType::FixedBytes(16),
+                        nullable: false,
+                    }],
+                    query: ViewQueryModel::default(),
+                }],
+            }],
+        };
+
+        let canonical = canonicalize_model(&CanonBackend, &model);
+        // A table column keeps `FixedBytes` (introspection folds the generated CHECK back into it)...
+        assert_eq!(
+            canonical.schemas[0].tables[0].columns[0].ty,
+            SqlType::FixedBytes(16)
+        );
+        // ...but a view column canonicalizes to `Bytes` (a view column has no check to fold).
+        assert_eq!(canonical.schemas[0].views[0].columns[0].ty, SqlType::Bytes);
+    }
+
     /// A backend whose introspection canonical form mirrors MySQL: bare `String` reads back as
     /// `Varchar(255)`, any identity is `AUTO_INCREMENT`, and a plain index has an explicit `BTREE`
     /// method with ASC directions.
@@ -710,6 +757,13 @@ mod tests {
             match ty {
                 SqlType::String => SqlType::Varchar(255),
                 other => other.clone(),
+            }
+        }
+
+        fn canonical_view_column_type(&self, ty: &SqlType) -> SqlType {
+            match ty {
+                SqlType::FixedBytes(_) => SqlType::Bytes,
+                other => self.canonical_sql_type(other),
             }
         }
 

@@ -66,6 +66,15 @@ struct Blob<'scope, C: ColumnMode = ColumnExpr> {
     maybe: C::Type<'scope, Option<Vec<u8>>>,
 }
 
+// A fixed-size `[u8; N]` column plus its nullable form — coverage for d10dcc0 on the test backend.
+#[derive(Clone, Debug, PartialEq, Table)]
+struct FixedBlob<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    key: C::Type<'scope, [u8; 4]>,
+    nonce: C::Type<'scope, Option<[u8; 2]>>,
+}
+
 #[allow(dead_code)]
 #[derive(Schema)]
 struct Public {
@@ -1626,6 +1635,45 @@ fn test_bytea_vec_u8_column_binds_in_queries() {
     );
     // `data` decodes `Vec<u8>`, the nullable column decodes `Option<Vec<u8>>`.
     assert_row::<_, _, _, (Vec<u8>, Option<Vec<u8>>)>(&q);
+}
+
+#[test]
+fn test_fixed_bytes_column_binds_in_queries() {
+    // Coverage for d10dcc0 on the test backend: a `[u8; N]` column (and `Option<[u8; N]>`) must work
+    // in insert/where/select and bind as bytes, like `Vec<u8>`.
+    let insert = TestConnection
+        .to::<FixedBlob>()
+        .key([0xDE, 0xAD, 0xBE, 0xEF])
+        .nonce(Some([0x01, 0x02]))
+        .insert_returning(|blob| blob.id);
+    assert_eq!(
+        insert.collect_params().unwrap(),
+        vec![
+            TestParam::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            TestParam::Bytes(vec![0x01, 0x02]),
+        ]
+    );
+
+    let null_nonce = TestConnection
+        .to::<FixedBlob>()
+        .key([0, 0, 0, 0])
+        .nonce(None)
+        .insert_returning(|blob| blob.id);
+    assert_eq!(
+        null_nonce.collect_params().unwrap(),
+        vec![TestParam::Bytes(vec![0, 0, 0, 0]), TestParam::Null]
+    );
+
+    let q = TestConnection
+        .from::<FixedBlob>()
+        .where_(|b| b.key.equals([1u8, 2, 3, 4]))
+        .select(|(b,)| (b.key, b.nonce));
+    assert_eq!(
+        q.collect_params().unwrap(),
+        vec![TestParam::Bytes(vec![1, 2, 3, 4])]
+    );
+    // `key` decodes `[u8; 4]`, the nullable column decodes `Option<[u8; 2]>`.
+    assert_row::<_, _, _, ([u8; 4], Option<[u8; 2]>)>(&q);
 }
 
 #[test]
