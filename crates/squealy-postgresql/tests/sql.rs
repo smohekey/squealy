@@ -3214,3 +3214,34 @@ fn postgres_datetime_literal_operand_is_cast() {
         trunc_lit.to_sql()
     );
 }
+
+#[test]
+fn postgres_cross_join_renders_cross_join() {
+    // CROSS JOIN: Cartesian product, no ON; both tables' columns stay non-null.
+    let q = Postgres
+        .from::<User>()
+        .cross_join::<Post>()
+        .select(|(user, post)| (user.id, post.id));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.\"id\" AS \"t0_id\", q0_1.\"id\" AS \"t1_id\" FROM \"public\".\"users\" AS q0_0 \
+         CROSS JOIN \"public\".\"posts\" AS q0_1"
+    );
+    assert!(!q.to_sql().contains(" ON "), "{}", q.to_sql());
+    assert_join_row::<_, _, _, (i32, i32)>(&q);
+}
+
+#[test]
+fn postgres_self_join_renders_distinct_aliases() {
+    let q = Postgres
+        .from::<Post>()
+        .join::<Post>()
+        .on(|(post,), other| post.user_id.equals(other.id))
+        .select(|(post, other)| (post.id, other.id));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.\"id\" AS \"t0_id\", q0_1.\"id\" AS \"t1_id\" FROM \"public\".\"posts\" AS q0_0 \
+         INNER JOIN \"public\".\"posts\" AS q0_1 ON (q0_0.\"user_id\" = q0_1.\"id\")"
+    );
+    assert_join_row::<_, _, _, (i32, i32)>(&q);
+}

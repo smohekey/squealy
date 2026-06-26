@@ -169,10 +169,14 @@ fn render_select(
             JoinKind::Left => b" LEFT JOIN ".as_slice(),
             JoinKind::Right => b" RIGHT JOIN ".as_slice(),
             JoinKind::Full => b" FULL JOIN ".as_slice(),
+            JoinKind::Cross => b" CROSS JOIN ".as_slice(),
         })?;
         render_source(&join.source, dialect, writer)?;
-        writer.write_all(b" ON ")?;
-        render_expr(&join.on, dialect, writer)?;
+        // `CROSS JOIN` has no condition; the others carry an `ON`.
+        if let Some(on) = &join.on {
+            writer.write_all(b" ON ")?;
+            render_expr(on, dialect, writer)?;
+        }
     }
 
     if let Some(filter) = &query.filter {

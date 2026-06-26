@@ -526,8 +526,8 @@ pub use projection::{
 };
 pub use query::{
     AllRows, AssignmentNode, AssignmentValueNode, AssignmentValueVisitor, AssignmentVisitor,
-    ColumnKey, DefaultAssignmentValue, DefaultValueNode, DeleteQuery, DeleteSourceAst,
-    DeleteSourceQuery, Distinct, ExecutableDeleteQuery, ExecutableInsertQuery,
+    ColumnKey, CrossJoinSource, DefaultAssignmentValue, DefaultValueNode, DeleteQuery,
+    DeleteSourceAst, DeleteSourceQuery, Distinct, ExecutableDeleteQuery, ExecutableInsertQuery,
     ExecutableSelectQuery, ExecutableUpdateQuery, ExplicitUpdateBuilder, ExprAssignmentValue, From,
     FullJoinSource, FullJoinTarget, InnerJoinSource, InsertAssignment, InsertAssignmentNode,
     InsertAssignments, InsertColumnKey, InsertColumnNullability, InsertColumnValues, InsertQuery,
