@@ -12,12 +12,12 @@ help: the trait `ColumnNullability` is not implemented for `JsonPayload`
   = help: the following other types implement trait `ColumnNullability`:
             Option<T>
             Vec<u8>
+            [u8; N]
             bool
             f32
             f64
             i128
             i16
-            i32
           and $N others
 note: required by a bound in `squealy::ColumnMode::Type`
  --> src/column.rs
@@ -42,12 +42,12 @@ help: the trait `ColumnNullability` is not implemented for `JsonPayload`
   = help: the following other types implement trait `ColumnNullability`:
             Option<T>
             Vec<u8>
+            [u8; N]
             bool
             f32
             f64
             i128
             i16
-            i32
           and $N others
 note: required by a bound in `squealy::ColumnMode::Type`
  --> src/column.rs
@@ -72,12 +72,12 @@ help: the trait `ColumnNullability` is not implemented for `JsonPayload`
   = help: the following other types implement trait `ColumnNullability`:
             Option<T>
             Vec<u8>
+            [u8; N]
             bool
             f32
             f64
             i128
             i16
-            i32
           and $N others
 note: required by a bound in `squealy::ColumnMode::Type`
  --> src/column.rs
@@ -102,12 +102,12 @@ help: the trait `ColumnNullability` is not implemented for `JsonPayload`
   = help: the following other types implement trait `ColumnNullability`:
             Option<T>
             Vec<u8>
+            [u8; N]
             bool
             f32
             f64
             i128
             i16
-            i32
           and $N others
 note: required by a bound in `squealy::ColumnMode::Type`
  --> src/column.rs
@@ -132,12 +132,12 @@ help: the trait `ColumnNullability` is not implemented for `JsonPayload`
   = help: the following other types implement trait `ColumnNullability`:
             Option<T>
             Vec<u8>
+            [u8; N]
             bool
             f32
             f64
             i128
             i16
-            i32
           and $N others
 note: required by a bound in `squealy::ColumnMode::Type`
  --> src/column.rs
@@ -163,12 +163,12 @@ help: the trait `ColumnNullability` is not implemented for `JsonPayload`
   = help: the following other types implement trait `ColumnNullability`:
             Option<T>
             Vec<u8>
+            [u8; N]
             bool
             f32
             f64
             i128
             i16
-            i32
           and $N others
   = note: this error originates in the derive macro `Table` (in Nightly builds, run with -Z macro-backtrace for more info)
 
@@ -271,12 +271,12 @@ help: the trait `ColumnNullability` is not implemented for `JsonPayload`
   = help: the following other types implement trait `ColumnNullability`:
             Option<T>
             Vec<u8>
+            [u8; N]
             bool
             f32
             f64
             i128
             i16
-            i32
           and $N others
 note: required by a bound in `squealy::ColumnMode::Type`
  --> src/column.rs
@@ -304,12 +304,12 @@ help: the trait `ColumnNullability` is not implemented for `JsonPayload`
   = help: the following other types implement trait `ColumnNullability`:
             Option<T>
             Vec<u8>
+            [u8; N]
             bool
             f32
             f64
             i128
             i16
-            i32
           and $N others
 note: required by a bound in `squealy::ColumnMode::Type`
  --> src/column.rs
@@ -334,12 +334,12 @@ help: the trait `ColumnNullability` is not implemented for `JsonPayload`
   = help: the following other types implement trait `ColumnNullability`:
             Option<T>
             Vec<u8>
+            [u8; N]
             bool
             f32
             f64
             i128
             i16
-            i32
           and $N others
 
 error[E0277]: the trait bound `JsonPayload: HasColumnType` is not satisfied
@@ -356,12 +356,12 @@ help: the trait `HasColumnType` is not implemented for `JsonPayload`
   = help: the following other types implement trait `HasColumnType`:
             Option<T>
             Vec<u8>
+            [u8; N]
             bool
             f32
             f64
             i128
             i16
-            i32
           and $N others
 
 error[E0277]: expected a `FnOnce(&__SquealyEventExprsProjection<'static>)` closure, found `impl ::std::ops::FnOnce(&<Event<'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>) -> ::squealy::Predicate<'static, P, PredicateAst>`
@@ -434,12 +434,12 @@ help: the trait `ColumnNullability` is not implemented for `JsonPayload`
   = help: the following other types implement trait `ColumnNullability`:
             Option<T>
             Vec<u8>
+            [u8; N]
             bool
             f32
             f64
             i128
             i16
-            i32
           and $N others
 note: required by a bound in `squealy::ColumnMode::Type`
  --> src/column.rs
@@ -466,12 +466,12 @@ help: the trait `ColumnNullability` is not implemented for `JsonPayload`
   = help: the following other types implement trait `ColumnNullability`:
             Option<T>
             Vec<u8>
+            [u8; N]
             bool
             f32
             f64
             i128
             i16
-            i32
           and $N others
 note: required by a bound in `squealy::ColumnMode::Type`
  --> src/column.rs

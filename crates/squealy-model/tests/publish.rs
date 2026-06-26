@@ -540,6 +540,19 @@ fn rich_model() -> DatabaseModel {
                             identity: None,
                             generated: None,
                         },
+                        // Fixed-width binary: published as `bytea` + a generated `octet_length` CHECK,
+                        // which introspection folds back to `FixedBytes(32)` (the check must not survive
+                        // as a standalone constraint, or this round-trip assertion fails).
+                        ColumnModel {
+                            name: "api_key".to_owned(),
+                            comment: None,
+                            ty: SqlType::FixedBytes(32),
+                            collation: None,
+                            nullable: false,
+                            default: None,
+                            identity: None,
+                            generated: None,
+                        },
                     ],
                     primary_key: Some(Constraint {
                         name: "pk_tenants".to_owned(),

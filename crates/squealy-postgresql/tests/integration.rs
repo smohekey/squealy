@@ -57,6 +57,14 @@ struct IntegrationBytes<'scope, C: ColumnMode = ColumnExpr> {
 }
 
 #[derive(Clone, Debug, PartialEq, Table)]
+struct IntegrationFixedBytes<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    key: C::Type<'scope, [u8; 4]>,
+    nonce: C::Type<'scope, Option<[u8; 2]>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Table)]
 struct JoinUser<'scope, C: ColumnMode = ColumnExpr> {
     #[column(primary_key, auto_increment)]
     id: C::Type<'scope, i32>,
@@ -1182,6 +1190,107 @@ async fn postgres_bytea_column_round_trips() {
     assert_eq!(
         rows,
         vec![(payload, Some(vec![0x01, 0x02, 0x03])), (Vec::new(), None),]
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_fixed_bytes_column_round_trips() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS integration_fixed_bytess")
+        .await
+        .expect("drop old fixed-bytes table");
+
+    let ddl_backend = Postgres;
+    create_table::<IntegrationFixedBytes>(&client, &ddl_backend).await;
+
+    let connection = PostgresConnection::new(client);
+
+    let key = [0xDEu8, 0xAD, 0xBE, 0xEF];
+    let inserted = connection
+        .to::<IntegrationFixedBytes>()
+        .key(key)
+        .nonce(Some([0x01, 0x02]))
+        .insert_returning(|row| row)
+        .fetch_one()
+        .await
+        .expect("insert fixed-bytes row");
+    assert_eq!(inserted.key, key);
+    assert_eq!(inserted.nonce, Some([0x01, 0x02]));
+
+    // A NULL for the nullable fixed-bytes column.
+    connection
+        .to::<IntegrationFixedBytes>()
+        .key([0, 0, 0, 0])
+        .nonce(None)
+        .insert()
+        .await
+        .expect("insert null-nonce row");
+
+    let rows: Vec<([u8; 4], Option<[u8; 2]>)> = connection
+        .from::<IntegrationFixedBytes>()
+        .order_by(|(row,)| row.id.asc())
+        .select(|(row,)| (row.key, row.nonce))
+        .collect()
+        .await
+        .expect("select fixed-bytes rows");
+    assert_eq!(rows, vec![(key, Some([0x01, 0x02])), ([0, 0, 0, 0], None)]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_fixed_bytes_width_is_enforced() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS integration_fixed_bytess")
+        .await
+        .expect("drop old fixed-bytes table");
+
+    create_table::<IntegrationFixedBytes>(&client, &Postgres).await;
+
+    // The generated `octet_length` CHECK rejects a wrong-width insert at the database.
+    let rejected = client
+        .batch_execute("INSERT INTO integration_fixed_bytess (key) VALUES ('\\x0102')")
+        .await;
+    assert!(
+        rejected.is_err(),
+        "a 2-byte value must violate the octet_length(key) = 4 CHECK"
+    );
+
+    // Drop the generated check, store a wrong-width value directly, then confirm the typed decode
+    // rejects it (the length check is enforced on read as well as by the DDL constraint).
+    let conname: String = client
+        .query_one(
+            "SELECT conname FROM pg_constraint \
+             WHERE conrelid = 'integration_fixed_bytess'::regclass AND contype = 'c'",
+            &[],
+        )
+        .await
+        .expect("find generated check constraint")
+        .get(0);
+    client
+        .batch_execute(&format!(
+            "ALTER TABLE integration_fixed_bytess DROP CONSTRAINT \"{conname}\""
+        ))
+        .await
+        .expect("drop generated check");
+    client
+        .batch_execute("INSERT INTO integration_fixed_bytess (key) VALUES ('\\x0102')")
+        .await
+        .expect("insert wrong-width value after dropping the check");
+
+    let connection = PostgresConnection::new(client);
+    let result: Result<Vec<(i32, [u8; 4])>, _> = connection
+        .from::<IntegrationFixedBytes>()
+        .select(|(row,)| (row.id, row.key))
+        .collect()
+        .await;
+    assert!(
+        result.is_err(),
+        "decoding a 2-byte value into [u8; 4] must error"
     );
 }
 

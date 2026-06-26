@@ -52,6 +52,22 @@ impl_value_projection_shape!(u8, u16, u32, u64, u128, usize);
 impl_value_projection_shape!(f32, f64);
 impl_value_projection_shape!(String, bool);
 
+// Fixed-size byte arrays are projectable (e.g. a single-column `select(|(row,)| (row.key,))`), the
+// const-generic mirror of the macro above.
+impl<const N: usize> ProjectionShape for [u8; N] {
+    type Exprs<'scope> = Expr<'scope, [u8; N]>;
+    type ReboundExprs<'scope> = Expr<'scope, [u8; N]>;
+    type Row = [u8; N];
+
+    fn exprs<'scope>(alias: SourceAlias) -> Self::Exprs<'scope> {
+        Expr::column(alias, "expr")
+    }
+
+    fn rebound_exprs<'scope>(alias: SourceAlias) -> Self::ReboundExprs<'scope> {
+        Expr::column(alias, "expr")
+    }
+}
+
 // Timestamp value kinds — so a bare timestamp expression (`now()`, `date_trunc(...)`) is projectable.
 // (Timestamp *columns* are projected via the table derive; these cover the value-as-kind path.)
 #[cfg(feature = "systemtime")]

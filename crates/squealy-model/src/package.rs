@@ -2287,16 +2287,29 @@ mod tests {
                     TableModel {
                         name: "members".to_owned(),
                         comment: None,
-                        columns: vec![ColumnModel {
-                            name: "org_id".to_owned(),
-                            comment: None,
-                            ty: SqlType::I32,
-                            collation: None,
-                            nullable: false,
-                            default: None,
-                            identity: None,
-                            generated: None,
-                        }],
+                        columns: vec![
+                            ColumnModel {
+                                name: "org_id".to_owned(),
+                                comment: None,
+                                ty: SqlType::I32,
+                                collation: None,
+                                nullable: false,
+                                default: None,
+                                identity: None,
+                                generated: None,
+                            },
+                            // A fixed-width binary column exercises the `FixedBytes(N)` KDL round-trip.
+                            ColumnModel {
+                                name: "api_key".to_owned(),
+                                comment: None,
+                                ty: SqlType::FixedBytes(32),
+                                collation: None,
+                                nullable: false,
+                                default: None,
+                                identity: None,
+                                generated: None,
+                            },
+                        ],
                         primary_key: None,
                         foreign_keys: vec![ForeignKeyModel {
                             name: "fk_members_org_id".to_owned(),

@@ -1159,6 +1159,8 @@ struct Secret<'scope, C: ColumnMode = ColumnExpr> {
     id: C::Type<'scope, i32>,
     ciphertext: C::Type<'scope, Vec<u8>>,
     wrapped_dek: C::Type<'scope, Option<Vec<u8>>>,
+    key: C::Type<'scope, [u8; 32]>,
+    nonce: C::Type<'scope, Option<[u8; 12]>>,
 }
 
 #[allow(dead_code)]
@@ -1180,6 +1182,29 @@ fn postgres_writes_bytea_column_ddl() {
     assert!(
         !sql.contains("\"wrapped_dek\" bytea NOT NULL"),
         "nullable bytea must not be NOT NULL: {sql}"
+    );
+}
+
+#[test]
+fn postgres_writes_fixed_bytes_column_ddl() {
+    let mut sql = Vec::new();
+    let tables = <Vault as Schema>::tables().collect::<Vec<_>>();
+    Postgres.write_table(tables[0], &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // A `[u8; N]` column renders as `bytea` with a generated width CHECK; the nullable variant keeps
+    // the CHECK but no NOT NULL (a NULL passes `octet_length(NULL) = N`).
+    assert!(
+        sql.contains("\"key\" bytea NOT NULL CHECK (octet_length(\"key\") = 32)"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("\"nonce\" bytea CHECK (octet_length(\"nonce\") = 12)"),
+        "{sql}"
+    );
+    assert!(
+        !sql.contains("\"nonce\" bytea NOT NULL"),
+        "nullable fixed-bytes must not be NOT NULL: {sql}"
     );
 }
 

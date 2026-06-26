@@ -194,8 +194,14 @@ ORDER BY n.nspname, c.relname",
 }
 
 async fn table(client: &Client, table_ref: &TableRef) -> Result<TableModel, PostgresError> {
-    let columns = columns(client, table_ref).await?;
+    let mut columns = columns(client, table_ref).await?;
     let (primary_key, uniques) = key_constraints(client, table_ref).await?;
+    let mut checks = checks(client, table_ref).await?;
+
+    // A fixed-width binary column (`[u8; N]`) is rendered as `bytea` + a generated
+    // `CHECK (octet_length(col) = N)`. Fold that check back into `FixedBytes(N)` and drop it, so the
+    // introspected model matches the declared one (idempotent publish).
+    fold_fixed_bytes_checks(&mut columns, &mut checks);
 
     Ok(TableModel {
         name: table_ref.name.clone(),
@@ -204,9 +210,40 @@ async fn table(client: &Client, table_ref: &TableRef) -> Result<TableModel, Post
         primary_key,
         foreign_keys: foreign_keys(client, table_ref).await?,
         uniques,
-        checks: checks(client, table_ref).await?,
+        checks,
         indexes: indexes(client, table_ref).await?,
     })
+}
+
+/// Folds a generated `octet_length(col) = N` check (the fixed-width-binary marker) into the column's
+/// `FixedBytes(N)` type and removes it from the check list.
+fn fold_fixed_bytes_checks(columns: &mut [ColumnModel], checks: &mut Vec<CheckModel>) {
+    checks.retain(|check| {
+        if let Some((column_name, width)) = parse_octet_length_check(&check.expression)
+            && let Some(column) = columns
+                .iter_mut()
+                .find(|column| column.name == column_name && column.ty == SqlType::Bytes)
+        {
+            column.ty = SqlType::FixedBytes(width);
+            return false;
+        }
+        true
+    });
+}
+
+/// Parses a PostgreSQL-normalized `octet_length(<col>) = <N>` check expression (with optional outer
+/// parentheses and quoting), returning the column name and byte width.
+fn parse_octet_length_check(expression: &str) -> Option<(String, u32)> {
+    let trimmed = expression.trim();
+    let inner = trimmed
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or(trimmed)
+        .trim();
+    let after_fn = inner.strip_prefix("octet_length(")?;
+    let (column, rest) = after_fn.split_once(')')?;
+    let width: u32 = rest.trim().strip_prefix('=')?.trim().parse().ok()?;
+    Some((column.trim().trim_matches('"').to_string(), width))
 }
 
 async fn columns(client: &Client, table_ref: &TableRef) -> Result<Vec<ColumnModel>, PostgresError> {
@@ -789,6 +826,64 @@ mod tests {
         assert_eq!(sql_type("jsonb"), SqlType::Jsonb);
         assert_eq!(sql_type("bytea"), SqlType::Bytes);
         assert_eq!(sql_type("citext"), SqlType::Raw("citext".to_owned()));
+    }
+
+    #[test]
+    fn parses_generated_octet_length_checks() {
+        // PostgreSQL normalizes the generated check to (optionally parenthesized) `octet_length(col) = N`.
+        assert_eq!(
+            parse_octet_length_check("octet_length(key) = 32"),
+            Some(("key".to_owned(), 32))
+        );
+        assert_eq!(
+            parse_octet_length_check("(octet_length(key) = 32)"),
+            Some(("key".to_owned(), 32))
+        );
+        assert_eq!(
+            parse_octet_length_check("(octet_length(\"Key\") = 12)"),
+            Some(("Key".to_owned(), 12))
+        );
+        // Unrelated checks must not be mistaken for the width marker.
+        assert_eq!(parse_octet_length_check("length(key) = 32"), None);
+        assert_eq!(parse_octet_length_check("(octet_length(key) > 0)"), None);
+    }
+
+    #[test]
+    fn folds_octet_length_check_into_fixed_bytes() {
+        fn bytea_column(name: &str) -> ColumnModel {
+            ColumnModel {
+                name: name.to_owned(),
+                comment: None,
+                ty: SqlType::Bytes,
+                collation: None,
+                nullable: false,
+                default: None,
+                identity: None,
+                generated: None,
+            }
+        }
+        fn check(name: &str, expression: &str) -> CheckModel {
+            CheckModel {
+                name: name.to_owned(),
+                expression: expression.to_owned(),
+                validation: None,
+                enforcement: None,
+            }
+        }
+
+        let mut columns = vec![bytea_column("key"), bytea_column("blob")];
+        let mut checks = vec![
+            check("secrets_key_check", "(octet_length(key) = 32)"),
+            check("secrets_blob_check", "(octet_length(blob) > 0)"),
+        ];
+        fold_fixed_bytes_checks(&mut columns, &mut checks);
+
+        // The matching column becomes `FixedBytes(32)` and its check is removed; the unrelated bytea
+        // column and its check are untouched.
+        assert_eq!(columns[0].ty, SqlType::FixedBytes(32));
+        assert_eq!(columns[1].ty, SqlType::Bytes);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "secrets_blob_check");
     }
 
     #[test]

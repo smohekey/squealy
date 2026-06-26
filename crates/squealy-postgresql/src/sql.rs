@@ -93,6 +93,13 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
                 write!(writer, " ON UPDATE {on_update}")?;
             }
         }
+        // Fixed-width binary: enforce the byte width with an inline `octet_length` CHECK (PostgreSQL
+        // has no native fixed-length binary type). Introspection folds it back to `FixedBytes(N)`.
+        if let squealy::ColumnType::FixedBytes(width) = column.column_type() {
+            write!(writer, " CHECK (octet_length(")?;
+            write_quoted_ident(column.name(), writer)?;
+            write!(writer, ") = {width})")?;
+        }
     }
     // A table-level `#[primary_key(columns = [..])]` is not hung off any single column, so render it
     // as a trailing constraint here (the per-column `primary_key` form above covers single columns).
@@ -953,6 +960,14 @@ pub(crate) mod ddl {
         if let Some(default) = &column.default {
             writer.write_all(b" DEFAULT ")?;
             write_default_value(default, writer)?;
+        }
+        // Fixed-width binary has no native PostgreSQL type, so enforce the width with an inline CHECK
+        // on `octet_length`. Introspection folds this back into `FixedBytes(N)` (see `introspect`), so
+        // it never appears as a standalone check in the model — keeping publish/status idempotent.
+        if let squealy::SqlType::FixedBytes(width) = &column.ty {
+            writer.write_all(b" CHECK (octet_length(")?;
+            write_quoted_ident(&column.name, writer)?;
+            write!(writer, ") = {width})")?;
         }
         Ok(())
     }
