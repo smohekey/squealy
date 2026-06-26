@@ -576,7 +576,8 @@ pub struct SourceRef {
 pub struct JoinItem {
     pub kind: JoinKind,
     pub source: SourceRef,
-    pub on: ExprNode,
+    /// The `ON` condition, or `None` for a `CROSS JOIN` (Cartesian product, no condition).
+    pub on: Option<ExprNode>,
 }
 
 /// The kind of join in a view body.
@@ -586,6 +587,8 @@ pub enum JoinKind {
     Left,
     Right,
     Full,
+    /// `CROSS JOIN` — Cartesian product, no `ON` condition.
+    Cross,
 }
 
 /// One `ORDER BY` term in a view body.
@@ -819,7 +822,9 @@ fn collect_query_sources<'a>(query: &'a ViewQueryModel, sources: &mut Vec<&'a So
     sources.extend(query.from.iter());
     for join in &query.joins {
         sources.push(&join.source);
-        collect_expr_sources(&join.on, sources);
+        if let Some(on) = &join.on {
+            collect_expr_sources(on, sources);
+        }
     }
     for item in &query.projection {
         collect_expr_sources(&item.expr, sources);

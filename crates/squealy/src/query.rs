@@ -2759,6 +2759,11 @@ pub trait SelectSink {
         P: PredicateKind,
         PredicateAst: crate::RenderPredicateAst<Self::Backend>;
 
+    /// A `CROSS JOIN` (Cartesian product) — no `ON` condition.
+    fn push_cross_join<S>(&mut self, alias: SourceAlias) -> Result<(), Self::Error>
+    where
+        S: TableProjection;
+
     fn push_filter<P, PredicateAst>(
         &mut self,
         predicate: Predicate<'_, P, PredicateAst>,
@@ -2926,6 +2931,43 @@ where
         Sink: SelectSink<Backend = B>,
     {
         sink.push_full_join::<S, P, PredicateAst>(self.alias, self.on.clone())
+    }
+}
+
+/// `CROSS JOIN` source — a Cartesian product, with no `ON` condition (so no predicate params).
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CrossJoinSource<S> {
+    alias: SourceAlias,
+    _phantom: PhantomData<S>,
+}
+
+impl<S> CrossJoinSource<S> {
+    fn new(alias: SourceAlias) -> Self {
+        Self {
+            alias,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<S> SourceSpec for CrossJoinSource<S>
+where
+    S: TableProjection,
+{
+    type Params = crate::HNil;
+}
+
+impl<S, B> RenderSourceSpec<B> for CrossJoinSource<S>
+where
+    S: TableProjection,
+    B: Backend,
+{
+    fn push_source<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        sink.push_cross_join::<S>(self.alias)
     }
 }
 
@@ -5308,6 +5350,23 @@ where
         FullJoinTarget {
             base: self,
             _source: PhantomData,
+        }
+    }
+
+    /// `CROSS JOIN`: the Cartesian product of the current sources with `S`. There is no `ON` condition,
+    /// and the joined table's columns stay non-null (a Cartesian product introduces no NULLs). Both
+    /// backends support `CROSS JOIN`, so this needs no capability gate and — unlike the predicated joins
+    /// — returns the joined query directly (no `.on()` step).
+    fn cross_join<S>(self) -> Join<Self, <S as ProjectionShape>::Exprs<'scope>, CrossJoinSource<S>>
+    where
+        S: TableProjection,
+    {
+        let alias = SourceAlias::new(self.depth(), Self::Exprs::LEN);
+        let right = S::exprs(alias);
+        Join {
+            base: self,
+            expr: right,
+            source: CrossJoinSource::new(alias),
         }
     }
 

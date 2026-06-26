@@ -2205,3 +2205,34 @@ fn test_extract_second_renders() {
         nullable.to_sql()
     );
 }
+
+#[test]
+fn test_cross_join_renders() {
+    // CROSS JOIN: Cartesian product, no ON. Both tables' columns stay non-null.
+    let q = TestConnection
+        .from::<User>()
+        .cross_join::<Post>()
+        .select(|(user, post)| (user.id, post.id));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS t0_id, q0_1.id AS t1_id FROM public.users AS q0_0 CROSS JOIN posts AS q0_1"
+    );
+    assert!(!q.to_sql().contains(" ON "), "{}", q.to_sql());
+    assert_row::<_, _, _, (i32, i32)>(&q);
+}
+
+#[test]
+fn test_self_join_renders_distinct_aliases() {
+    // Self-join: the same table joined to itself gets distinct positional aliases (q0_0, q0_1).
+    let q = TestConnection
+        .from::<Post>()
+        .join::<Post>()
+        .on(|(post,), other| post.user_id.equals(other.id))
+        .select(|(post, other)| (post.id, other.id));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS t0_id, q0_1.id AS t1_id FROM posts AS q0_0 \
+         INNER JOIN posts AS q0_1 ON (q0_0.user_id = q0_1.id)"
+    );
+    assert_row::<_, _, _, (i32, i32)>(&q);
+}

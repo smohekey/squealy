@@ -410,3 +410,33 @@ fn mysql_extract_renders() {
         frac_q.to_sql()
     );
 }
+
+#[test]
+fn mysql_cross_join_renders_cross_join() {
+    let q = Mysql
+        .from::<Widget>()
+        .cross_join::<Gadget>()
+        .select(|(widget, gadget)| (widget.id, gadget.id));
+    let sql = q.to_sql();
+    assert!(
+        sql.contains("FROM `widgets` AS q0_0 CROSS JOIN `gadgets` AS q0_1"),
+        "{sql}"
+    );
+    assert!(!sql.contains(" ON "), "{sql}");
+}
+
+#[test]
+fn mysql_self_join_renders_distinct_aliases() {
+    let q = Mysql
+        .from::<Gadget>()
+        .join::<Gadget>()
+        .on(|(gadget,), other| gadget.widget_id.equals(other.id))
+        .select(|(gadget, other)| (gadget.id, other.id));
+    let sql = q.to_sql();
+    assert!(
+        sql.contains(
+            "FROM `gadgets` AS q0_0 INNER JOIN `gadgets` AS q0_1 ON (q0_0.`widget_id` = q0_1.`id`)"
+        ),
+        "{sql}"
+    );
+}

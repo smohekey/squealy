@@ -468,6 +468,23 @@ where
         self.push_join::<S, P, Ast>(alias, on, "FULL JOIN")
     }
 
+    fn push_cross_join<S>(&mut self, alias: SourceAlias) -> io::Result<()>
+    where
+        S: TableProjection,
+    {
+        // `CROSS JOIN <table> AS <alias>` — a Cartesian product, no `ON` clause. (A cross join is
+        // never the first source in practice, but the `FROM` branch keeps the helper total.)
+        let first_source = self.sources == 0;
+        self.push_source_separator()?;
+        if first_source {
+            self.writer.write_all(b"FROM ")?;
+        } else {
+            self.writer.write_all(b"CROSS JOIN ")?;
+        }
+        write_table_ref::<S>(self.renderer.dialect, self.writer)?;
+        write!(self.writer, " AS {alias}")
+    }
+
     fn push_filter<P, Ast>(&mut self, predicate: Predicate<'_, P, Ast>) -> io::Result<()>
     where
         P: PredicateKind,
