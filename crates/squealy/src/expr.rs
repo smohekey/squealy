@@ -4217,6 +4217,19 @@ impl_value_expr_kind!(String, bool);
 // operand and a write-builder setter like the scalar value types above.
 impl_value_expr_kind!(Vec<u8>);
 
+// Fixed-size byte arrays `[u8; N]` are a value kind (a fixed-width binary column / literal), mirroring
+// the `impl_value_expr_kind!` expansion but const-generic over the array length.
+impl<const N: usize> ExprKind for [u8; N] {
+    type Value = [u8; N];
+}
+impl<const N: usize> IntoWindowNullable for [u8; N] {
+    type Kind = ScalarNullable<[u8; N]>;
+}
+impl<const N: usize> KindNullability for [u8; N] {
+    type Value = [u8; N];
+    type Nullable = CaseNonNull;
+}
+
 /// Maps a window operand's kind to its `LAG`/`LEAD` result kind, which is always nullable (`NULL`
 /// past the partition edge). The mapping is idempotent over nullability: an already-nullable
 /// left-join projection (`Nullable<K>`) stays `Nullable<K>` so the result decodes as a single

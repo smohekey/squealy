@@ -68,6 +68,18 @@ impl_decode_nullable_via_option! {
     Vec<u8>,
 }
 
+// Fixed-size byte arrays may appear in nullable / left-joined columns; const-generic mirror of the
+// macro above. Resolves on backends that provide `Decode<B> for Option<[u8; N]>`.
+impl<B, const N: usize> DecodeNullable<B> for [u8; N]
+where
+    B: Backend,
+    Option<[u8; N]>: Decode<B>,
+{
+    fn decode_nullable(row: &mut B::RowReader<'_>) -> Result<Option<Self>, B::Error> {
+        row.read::<Option<[u8; N]>>()
+    }
+}
+
 // Native `uuid` column support: a `uuid::Uuid` field can appear in a nullable column or in a
 // left-joined row, both of which require `DecodeNullable`. Resolves only on backends that provide
 // `Decode<B> for Option<uuid::Uuid>` (the PostgreSQL backend does, behind its own `uuid` feature).

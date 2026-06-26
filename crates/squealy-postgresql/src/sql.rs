@@ -1250,6 +1250,9 @@ fn write_pg_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()> {
         SqlType::Json => "json",
         SqlType::Jsonb => "jsonb",
         SqlType::Bytes => "bytea",
+        // PostgreSQL has no fixed-length binary type; the width is enforced by a generated
+        // `CHECK (octet_length(col) = N)` constraint (see the column-check lowering).
+        SqlType::FixedBytes(_) => "bytea",
         SqlType::Raw(raw) => raw.as_str(),
     };
     writer.write_all(name.as_bytes())

@@ -274,6 +274,21 @@ impl Encode<Mysql> for Vec<u8> {
     }
 }
 
+// Fixed-size byte arrays bind as a `BINARY(N)` value; decode errors unless exactly `N` bytes.
+impl<const N: usize> Encode<Mysql> for [u8; N] {
+    fn encode(&self, out: &mut MysqlParamWriter<'_>) -> Result<(), MysqlError> {
+        out.push(Value::Bytes(self.to_vec()));
+        Ok(())
+    }
+}
+
+impl<const N: usize> Decode<Mysql> for [u8; N] {
+    fn decode(row: &mut <Mysql as Backend>::RowReader<'_>) -> Result<Self, MysqlError> {
+        let bytes = row.take::<Vec<u8>>()?;
+        <[u8; N]>::try_from(bytes).map_err(|_| MysqlError::Conversion("fixed-size byte array"))
+    }
+}
+
 impl<T> Encode<Mysql> for Option<T>
 where
     T: Encode<Mysql>,

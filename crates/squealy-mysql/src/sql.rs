@@ -530,6 +530,8 @@ fn write_mysql_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()>
         SqlType::Uuid => "CHAR(36)",
         SqlType::Json | SqlType::Jsonb => "JSON",
         SqlType::Bytes => "BLOB",
+        // Fixed-width binary: MySQL has a native `BINARY(N)` type (the width round-trips directly).
+        SqlType::FixedBytes(length) => return write!(writer, "BINARY({length})"),
         SqlType::Raw(raw) => raw.as_str(),
     };
     writer.write_all(name.as_bytes())

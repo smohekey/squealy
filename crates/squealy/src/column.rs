@@ -111,14 +111,24 @@ pub enum ColumnType {
     Varchar(u32),
     Char(u32),
     Text,
-    Decimal { precision: u32, scale: u32 },
+    Decimal {
+        precision: u32,
+        scale: u32,
+    },
     Date,
-    Time { tz: bool },
-    Timestamp { tz: bool },
+    Time {
+        tz: bool,
+    },
+    Timestamp {
+        tz: bool,
+    },
     Uuid,
     Json,
     Jsonb,
     Bytes,
+    /// A fixed-width binary column of `N` bytes (`[u8; N]`). PostgreSQL renders `bytea` with a
+    /// generated `CHECK (octet_length(col) = N)`; MySQL renders `BINARY(N)`.
+    FixedBytes(u32),
     Raw(&'static str),
 }
 
@@ -214,6 +224,18 @@ impl_column_type! {
     String => String,
     bool => Bool,
     Vec<u8> => Bytes,
+}
+
+/// Fixed-size byte arrays map to a fixed-width binary column (`bytea` + a length CHECK on PostgreSQL,
+/// `BINARY(N)` on MySQL). The matching `Encode`/`Decode` (which length-checks on read) lives in each
+/// backend crate.
+impl<const N: usize> HasColumnType for [u8; N] {
+    const COLUMN_TYPE: ColumnType = ColumnType::FixedBytes(N as u32);
+}
+impl<const N: usize> ColumnNullability for [u8; N] {
+    type Inner = [u8; N];
+    type Nullability = crate::NonNullableColumn;
+    const NULLABLE: bool = false;
 }
 
 /// A bare `uuid::Uuid` field maps to a `uuid` column, so no `#[column(db_type = "uuid")]`

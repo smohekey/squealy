@@ -1209,13 +1209,14 @@ fn write_sql_type(node: &mut KdlNode, ty: &SqlType) {
         SqlType::Json => "json",
         SqlType::Jsonb => "jsonb",
         SqlType::Bytes => "bytes",
+        SqlType::FixedBytes(_) => "fixed_bytes",
         SqlType::Raw(_) => "raw",
     };
     node.push(KdlEntry::new_prop("type", name));
 
     // Structured extras (purely-default `tz=#false` is omitted).
     match ty {
-        SqlType::Varchar(length) | SqlType::Char(length) => {
+        SqlType::Varchar(length) | SqlType::Char(length) | SqlType::FixedBytes(length) => {
             node.push(KdlEntry::new_prop(
                 "length",
                 KdlValue::Integer(*length as i128),
@@ -1860,6 +1861,7 @@ fn sql_type_from_node(node: &KdlNode) -> Result<SqlType, PackageError> {
         "json" => SqlType::Json,
         "jsonb" => SqlType::Jsonb,
         "bytes" => SqlType::Bytes,
+        "fixed_bytes" => SqlType::FixedBytes(required_u32(node, "length")?),
         "raw" => SqlType::Raw(required_prop(node, "raw")?),
         other => return Err(malformed(format!("unknown column type `{other}`"))),
     })
