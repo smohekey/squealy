@@ -469,7 +469,9 @@ pub use column::{
     ColumnNullableValue, ColumnType, ColumnValue, HasColumnType,
 };
 pub use connection::{Connection, ConnectionWithTransaction, QueryBuilder};
-pub use cte::{CteDef, CteDefinition, SchemaCte, cte_definition_model};
+pub use cte::{
+    CteDef, CteDefinition, SchemaCte, cte_definition_dependencies, cte_definition_model,
+};
 pub use database::Database;
 pub use dialect::Dialect;
 pub use expr::{

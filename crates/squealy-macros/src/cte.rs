@@ -54,6 +54,10 @@ fn expand(cte: &TableStruct) -> TokenStream {
             fn body_model(&self) -> ::squealy::ViewQueryModel {
                 ::squealy::cte_definition_model::<#ident <'static, ::squealy::ColumnExpr>>()
             }
+
+            fn cte_dependencies(&self) -> ::std::vec::Vec<&'static dyn ::squealy::CteDef> {
+                ::squealy::cte_definition_dependencies::<#ident <'static, ::squealy::ColumnExpr>>()
+            }
         }
 
         #[doc(hidden)]

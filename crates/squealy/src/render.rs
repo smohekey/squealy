@@ -607,7 +607,12 @@ pub fn render_selected_prepared<'conn, 'scope, Conn, Base, Shape, Projection>(
 {
     buffer.clear();
     let mut renderer = Renderer::new(dialect);
-    write_cte_prefix(dialect, &selected.collect_ctes::<Conn>(), buffer).unwrap();
+    write_cte_prefix(
+        dialect,
+        &selected.collect_ctes::<Conn, Conn::Backend>(),
+        buffer,
+    )
+    .unwrap();
     let mut sink = SelectRenderSink::<Conn::Backend, _>::new(buffer, &mut renderer).unwrap();
     selected.lower_into::<Conn, _>(&mut sink).unwrap();
     sink.finish().unwrap();
@@ -627,7 +632,11 @@ where
 {
     let mut writer = SqlOnly(writer);
     let mut renderer = Renderer::new(dialect);
-    write_cte_prefix(dialect, &selected.collect_ctes::<Conn>(), &mut writer)?;
+    write_cte_prefix(
+        dialect,
+        &selected.collect_ctes::<Conn, Conn::Backend>(),
+        &mut writer,
+    )?;
     let mut sink = SelectRenderSink::<Conn::Backend, _>::new(&mut writer, &mut renderer)?;
     selected.lower_into::<Conn, _>(&mut sink)?;
     sink.finish()
@@ -648,7 +657,12 @@ where
     let mut renderer = Renderer::new(dialect);
     // CTE bodies are parameter-free, so the `WITH` prefix contributes no bind params; this keeps the
     // path uniform with the SQL-text renderers (the collector ignores the emitted bytes).
-    write_cte_prefix(dialect, &selected.collect_ctes::<Conn>(), &mut writer).unwrap();
+    write_cte_prefix(
+        dialect,
+        &selected.collect_ctes::<Conn, Conn::Backend>(),
+        &mut writer,
+    )
+    .unwrap();
     let mut select_sink =
         SelectRenderSink::<Conn::Backend, _>::new(&mut writer, &mut renderer).unwrap();
     selected.lower_into::<Conn, _>(&mut select_sink).unwrap();
