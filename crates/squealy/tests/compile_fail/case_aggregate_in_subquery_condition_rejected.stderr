@@ -17,7 +17,7 @@ help: the trait `squealy::ProjectionClass` is implemented for `Expr<'_, K, Ast>`
 note: required by a bound in `select_correlated`
   --> src/query.rs
    |
-   |     fn select_correlated<P>(
+   |     fn select_correlated<P, Indices>(
    |        ----------------- required by a bound in this associated function
 ...
    |             crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,

@@ -9,7 +9,7 @@ error[E0271]: type mismatch resolving `<Expr<'_, ScalarNullable<LedgerAmount>, S
 note: required by a bound in `select_correlated`
   --> src/query.rs
    |
-   |     fn select_correlated<P>(
+   |     fn select_correlated<P, Indices>(
    |        ----------------- required by a bound in this associated function
 ...
    |         P: ReturningProjection<'scope> + Projectable + crate::ProjectionParams<Params = HNil>,

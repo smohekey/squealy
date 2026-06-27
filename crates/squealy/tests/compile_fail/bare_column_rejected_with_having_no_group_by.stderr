@@ -8,7 +8,7 @@ error[E0271]: type mismatch resolving `<ColumnRef<'_, UserId> as ProjectionColum
 note: required by a bound in `squealy::SourceQuery::select`
   --> src/query.rs
    |
-   |     fn select<P>(
+   |     fn select<P, Indices>(
    |        ------ required by a bound in this associated function
 ...
    |             crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
