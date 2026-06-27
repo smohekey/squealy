@@ -1693,3 +1693,26 @@ fn mysql_upsert_do_nothing_emulated_by_self_assigning_first_column() {
          ON DUPLICATE KEY UPDATE `slug` = `slug`"
     );
 }
+
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Shop)]
+struct Counter<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+}
+
+#[test]
+fn mysql_upsert_do_nothing_with_default_values_self_assigns_target() {
+    // A column-less (`DEFAULT VALUES`) insert has no inserted column to self-assign, so the no-op
+    // falls back to the conflict-target column — the clause is never silently dropped.
+    let sql = Mysql
+        .to::<Counter>()
+        .on_conflict(|counter| counter.id)
+        .do_nothing()
+        .build()
+        .to_sql();
+    assert_eq!(
+        sql,
+        "INSERT INTO `shop`.`counters` () VALUES () ON DUPLICATE KEY UPDATE `id` = `id`"
+    );
+}

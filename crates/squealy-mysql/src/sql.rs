@@ -782,16 +782,17 @@ impl squealy::Dialect for MysqlDialect {
         writer.write_all(b" ON DUPLICATE KEY UPDATE ")
     }
 
-    /// MySQL has no `DO NOTHING`; emulate it by self-assigning the first inserted column (a no-op
-    /// update). A column-less (`DEFAULT VALUES`) insert has nothing to self-assign, which MySQL cannot
-    /// express as a no-op upsert — a documented v1 limitation; the bare `INSERT` is emitted unchanged.
+    /// MySQL has no `DO NOTHING`; emulate it by self-assigning a column (a no-op update). Prefer an
+    /// inserted column; fall back to a conflict-target column for a column-less (`DEFAULT VALUES`)
+    /// insert, which has no inserted column to assign. The conflict target always has at least one
+    /// column (it comes from `on_conflict(|t| …)`), so the no-op clause is never silently dropped.
     fn write_upsert_do_nothing(
         &self,
-        _target: &[&str],
+        target: &[&str],
         first_column: Option<&str>,
         writer: &mut dyn Write,
     ) -> io::Result<()> {
-        if let Some(column) = first_column {
+        if let Some(column) = first_column.or_else(|| target.first().copied()) {
             writer.write_all(b" ON DUPLICATE KEY UPDATE ")?;
             self.write_quoted_ident(column, writer)?;
             writer.write_all(b" = ")?;
