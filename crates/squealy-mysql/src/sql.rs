@@ -765,6 +765,41 @@ impl squealy::Dialect for MysqlDialect {
         write_quoted_ident(ident, &mut writer)
     }
 
+    // --- Upsert (`INSERT … ON DUPLICATE KEY UPDATE`) ---
+
+    /// MySQL references the proposed row as `VALUES(\`col\`)` (vs PostgreSQL's `EXCLUDED."col"`). The
+    /// 8.0.19+ row-alias form (`AS new … new.col`) is a follow-up; `VALUES()` is the widely-compatible
+    /// spelling.
+    fn write_excluded_column(&self, column: &str, writer: &mut dyn Write) -> io::Result<()> {
+        writer.write_all(b"VALUES(")?;
+        self.write_quoted_ident(column, writer)?;
+        writer.write_all(b")")
+    }
+
+    /// MySQL has no conflict target — `ON DUPLICATE KEY UPDATE` matches on every PK/UNIQUE key — so the
+    /// target is ignored and this is just the keyword that introduces the assignment list.
+    fn write_upsert_set_prefix(&self, _target: &[&str], writer: &mut dyn Write) -> io::Result<()> {
+        writer.write_all(b" ON DUPLICATE KEY UPDATE ")
+    }
+
+    /// MySQL has no `DO NOTHING`; emulate it by self-assigning the first inserted column (a no-op
+    /// update). A column-less (`DEFAULT VALUES`) insert has nothing to self-assign, which MySQL cannot
+    /// express as a no-op upsert — a documented v1 limitation; the bare `INSERT` is emitted unchanged.
+    fn write_upsert_do_nothing(
+        &self,
+        _target: &[&str],
+        first_column: Option<&str>,
+        writer: &mut dyn Write,
+    ) -> io::Result<()> {
+        if let Some(column) = first_column {
+            writer.write_all(b" ON DUPLICATE KEY UPDATE ")?;
+            self.write_quoted_ident(column, writer)?;
+            writer.write_all(b" = ")?;
+            self.write_quoted_ident(column, writer)?;
+        }
+        Ok(())
+    }
+
     fn write_cast_type(&self, ty: &SqlType, writer: &mut dyn Write) -> io::Result<()> {
         // `CAST(expr AS <type>)` accepts a restricted vocabulary in MySQL, distinct from column types
         // (e.g. `SIGNED`/`UNSIGNED`/`CHAR`, not `INT`/`VARCHAR`).

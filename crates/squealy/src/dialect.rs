@@ -132,9 +132,49 @@ pub trait Dialect {
     /// Writes a reference to the conflicting (proposed) row's column inside an upsert's `DO UPDATE SET`.
     ///
     /// PostgreSQL exposes it as `EXCLUDED."col"` (the default here). MySQL's `ON DUPLICATE KEY UPDATE`
-    /// uses `VALUES(\`col\`)` / `new.col` instead and will override this when its upsert lands.
+    /// uses `VALUES(\`col\`)` / `new.col` instead and overrides this.
     fn write_excluded_column(&self, column: &str, writer: &mut dyn Write) -> io::Result<()> {
         writer.write_all(b"EXCLUDED.")?;
         self.write_quoted_ident(column, writer)
+    }
+
+    /// Writes the prefix of an upsert's replace-all update, up to and including the keyword that
+    /// introduces the `col = <excluded>` assignment list. The renderer then emits that list (shared
+    /// across dialects) using [`write_excluded_column`](Self::write_excluded_column).
+    ///
+    /// PostgreSQL: ` ON CONFLICT (<target>) DO UPDATE SET ` (the default here). MySQL overrides it with
+    /// ` ON DUPLICATE KEY UPDATE ` and ignores the target (it matches on every PK/UNIQUE key).
+    fn write_upsert_set_prefix(&self, target: &[&str], writer: &mut dyn Write) -> io::Result<()> {
+        writer.write_all(b" ON CONFLICT (")?;
+        for (i, column) in target.iter().enumerate() {
+            if i > 0 {
+                writer.write_all(b", ")?;
+            }
+            self.write_quoted_ident(column, writer)?;
+        }
+        writer.write_all(b") DO UPDATE SET ")
+    }
+
+    /// Writes an upsert's "do nothing on conflict" clause.
+    ///
+    /// PostgreSQL has a first-class ` ON CONFLICT (<target>) DO NOTHING` (the default here). MySQL has
+    /// no `DO NOTHING`, so it emulates one by self-assigning the first inserted column
+    /// (` ON DUPLICATE KEY UPDATE \`c\` = \`c\``); `first_column` is `None` only for a column-less
+    /// (`DEFAULT VALUES`) insert, which MySQL cannot express as a no-op upsert.
+    fn write_upsert_do_nothing(
+        &self,
+        target: &[&str],
+        first_column: Option<&str>,
+        writer: &mut dyn Write,
+    ) -> io::Result<()> {
+        let _ = first_column;
+        writer.write_all(b" ON CONFLICT (")?;
+        for (i, column) in target.iter().enumerate() {
+            if i > 0 {
+                writer.write_all(b", ")?;
+            }
+            self.write_quoted_ident(column, writer)?;
+        }
+        writer.write_all(b") DO NOTHING")
     }
 }

@@ -2289,6 +2289,25 @@ impl<'conn, Conn, S, InsertColumns> Upsert<'conn, Conn, S, InsertColumns> {
         }
     }
 
+    /// Builds the backend query object for this upsert (without `RETURNING`) instead of executing it —
+    /// the upsert counterpart of the regular insert builder's [`build`](crate::InsertQuery::build). Use
+    /// it to render the SQL (`.build().to_sql()`) — the only way to inspect an upsert on a backend
+    /// without `RETURNING` (e.g. MySQL) — or to execute later.
+    pub fn build(self) -> Conn::Insert<'conn, S, (), HCons<InsertRow<InsertColumns>, HNil>, ()>
+    where
+        Conn: OnConflictQueryBuilder + 'conn,
+        S: InsertableTable + 'conn,
+        InsertColumns: InsertAssignments + 'conn,
+        HCons<InsertRow<InsertColumns>, HNil>: InsertRows,
+    {
+        let rows = HCons {
+            head: InsertRow::new(self.insert_columns),
+            tail: HNil,
+        };
+        self.connection
+            .build_upsert::<S, (), _, ()>(rows, (), self.conflict)
+    }
+
     pub fn insert(self) -> impl Future<Output = Result<u64, ErrorOf<Conn>>> + Send + 'conn
     where
         Conn: Connection + OnConflictQueryBuilder + 'conn,

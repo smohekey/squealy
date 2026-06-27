@@ -1028,8 +1028,10 @@ where
     Ok(())
 }
 
-/// Renders an upsert's `ON CONFLICT (<target>) DO NOTHING | DO UPDATE SET …` clause. The replace-all
-/// `DO UPDATE` sets every inserted column to its `EXCLUDED` value (no bind parameters).
+/// Renders an upsert's conflict clause. The dialect-divergent structure (PostgreSQL `ON CONFLICT
+/// (<target>) DO NOTHING | DO UPDATE SET …` vs MySQL `ON DUPLICATE KEY UPDATE …`) goes through the
+/// [`Dialect`] seams; the replace-all `DO UPDATE` SET list (every inserted column to its excluded value,
+/// no bind parameters) is shared here.
 fn write_conflict_clause<B, Rows, Writer>(
     clause: &ConflictClause,
     rows: &Rows,
@@ -1041,14 +1043,6 @@ where
     Rows: RenderInsertRows<B>,
     Writer: SqlWriter<B>,
 {
-    writer.write_all(b" ON CONFLICT (")?;
-    for (i, column) in clause.target.iter().enumerate() {
-        if i > 0 {
-            writer.write_all(b", ")?;
-        }
-        dialect.write_quoted_ident(column, writer)?;
-    }
-    writer.write_all(b") ")?;
     // A `DEFAULT VALUES` insert assigns no columns, so there is nothing to replace — `DO UPDATE SET`
     // with an empty list is invalid SQL. Treat a column-less `do_update` as `DO NOTHING`.
     let action = match clause.action {
@@ -1056,9 +1050,18 @@ where
         other => other,
     };
     match action {
-        ConflictAction::DoNothing => writer.write_all(b"DO NOTHING")?,
+        ConflictAction::DoNothing => {
+            // The first inserted column, for dialects (MySQL) that emulate `DO NOTHING` by
+            // self-assigning a column.
+            let mut first_column = None;
+            rows.try_for_each_column(|column| {
+                first_column.get_or_insert(column);
+                Ok::<(), io::Error>(())
+            })?;
+            dialect.write_upsert_do_nothing(&clause.target, first_column, writer)?;
+        }
         ConflictAction::DoUpdateExcluded => {
-            writer.write_all(b"DO UPDATE SET ")?;
+            dialect.write_upsert_set_prefix(&clause.target, writer)?;
             let mut index = 0;
             rows.try_for_each_column(|column| {
                 if index > 0 {

@@ -81,3 +81,84 @@ async fn mysql_round_trips_insert_and_select() {
         .await
         .expect("cleanup");
 }
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct RuntimeAccount<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    #[column(unique)]
+    slug: C::Type<'scope, String>,
+    label: C::Type<'scope, String>,
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_round_trips_upsert_on_duplicate_key() {
+    let mut connection = Mysql
+        .connect(&database_url())
+        .await
+        .expect("connect to MySQL");
+
+    connection
+        .execute_ddl("DROP TABLE IF EXISTS runtime_accounts")
+        .await
+        .expect("drop table");
+    connection
+        .execute_ddl(
+            "CREATE TABLE runtime_accounts (\
+`id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY, \
+`slug` VARCHAR(255) NOT NULL UNIQUE, \
+`label` VARCHAR(255) NOT NULL)",
+        )
+        .await
+        .expect("create table");
+
+    async fn label(connection: &squealy_mysql::MysqlConnection) -> Vec<String> {
+        connection
+            .from::<RuntimeAccount>()
+            .where_(|account| account.slug.equals("acme"))
+            .select(|(account,)| account.label)
+            .collect()
+            .await
+            .expect("select label")
+    }
+
+    // First insert.
+    connection
+        .to::<RuntimeAccount>()
+        .slug("acme")
+        .label("first")
+        .insert()
+        .await
+        .expect("initial insert");
+    assert_eq!(label(&connection).await, vec!["first".to_owned()]);
+
+    // `do_update` on the duplicate `slug` key replaces every inserted column with the proposed values.
+    connection
+        .to::<RuntimeAccount>()
+        .slug("acme")
+        .label("second")
+        .on_conflict(|account| account.id)
+        .do_update()
+        .insert()
+        .await
+        .expect("upsert do_update");
+    assert_eq!(label(&connection).await, vec!["second".to_owned()]);
+
+    // `do_nothing` on the duplicate key leaves the existing row unchanged.
+    connection
+        .to::<RuntimeAccount>()
+        .slug("acme")
+        .label("third")
+        .on_conflict(|account| account.id)
+        .do_nothing()
+        .insert()
+        .await
+        .expect("upsert do_nothing");
+    assert_eq!(label(&connection).await, vec!["second".to_owned()]);
+
+    connection
+        .execute_ddl("DROP TABLE IF EXISTS runtime_accounts")
+        .await
+        .expect("cleanup");
+}

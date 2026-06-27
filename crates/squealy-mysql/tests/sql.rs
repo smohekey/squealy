@@ -1639,3 +1639,57 @@ fn mysql_view_order_by_drops_nulls_modifier() {
         "MySQL must not emit a NULLS modifier: {sql}"
     );
 }
+
+// --- Upsert: `INSERT … ON DUPLICATE KEY UPDATE` ---
+
+#[test]
+fn mysql_upsert_do_update_renders_on_duplicate_key_update() {
+    // Replace-all `do_update`: every inserted column is set to `VALUES(col)`. MySQL has no conflict
+    // target, so the `on_conflict(|t| t.id)` target is omitted; `build()` renders without RETURNING.
+    let sql = Mysql
+        .to::<Tenant>()
+        .slug("acme")
+        .on_conflict(|tenant| tenant.id)
+        .do_update()
+        .build()
+        .to_sql();
+    assert_eq!(
+        sql,
+        "INSERT INTO `shop`.`tenants` (`slug`) VALUES (?) \
+         ON DUPLICATE KEY UPDATE `slug` = VALUES(`slug`)"
+    );
+}
+
+#[test]
+fn mysql_upsert_multi_column_do_update_renders() {
+    let sql = Mysql
+        .to::<Membership>()
+        .tenant_id(1)
+        .seats(5u16)
+        .on_conflict(|membership| membership.id)
+        .do_update()
+        .build()
+        .to_sql();
+    assert_eq!(
+        sql,
+        "INSERT INTO `shop`.`memberships` (`tenant_id`, `seats`) VALUES (?, ?) \
+         ON DUPLICATE KEY UPDATE `tenant_id` = VALUES(`tenant_id`), `seats` = VALUES(`seats`)"
+    );
+}
+
+#[test]
+fn mysql_upsert_do_nothing_emulated_by_self_assigning_first_column() {
+    // MySQL has no `DO NOTHING`; it self-assigns the first inserted column as a no-op update.
+    let sql = Mysql
+        .to::<Tenant>()
+        .slug("acme")
+        .on_conflict(|tenant| tenant.id)
+        .do_nothing()
+        .build()
+        .to_sql();
+    assert_eq!(
+        sql,
+        "INSERT INTO `shop`.`tenants` (`slug`) VALUES (?) \
+         ON DUPLICATE KEY UPDATE `slug` = `slug`"
+    );
+}
