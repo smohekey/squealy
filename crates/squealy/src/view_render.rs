@@ -72,6 +72,25 @@ pub fn render_cte_body(
     render_select(query, false, dialect, writer)
 }
 
+/// Renders a recursive CTE body — `<anchor> UNION [ALL] <recursive>` — for use inside
+/// `WITH RECURSIVE "name" ("cols") AS ( … )`. Both arms render as bare (un-aliased) `SELECT`s like
+/// [`render_cte_body`]; the recursive arm's self-reference renders as the bare CTE name.
+pub fn render_recursive_cte_body(
+    anchor: &ViewQueryModel,
+    union_all: bool,
+    recursive: &ViewQueryModel,
+    dialect: &dyn Dialect,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
+    render_select(anchor, false, dialect, writer)?;
+    writer.write_all(if union_all {
+        b" UNION ALL " as &[u8]
+    } else {
+        b" UNION "
+    })?;
+    render_select(recursive, false, dialect, writer)
+}
+
 /// Renders `DROP VIEW <qualified>`.
 pub fn render_drop_view(
     schema: Option<&str>,

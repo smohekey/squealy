@@ -9,6 +9,17 @@ use crate::table::{SourceMode, TableStruct, table_struct};
 /// `#[derive(View)]`. The CTE body is supplied separately via `CteDefinition::definition`, and the
 /// CTE is inlined as a `WITH` clause when referenced.
 pub(crate) fn derive(input: TokenStream) -> TokenStream {
+    expand_derive(input, false)
+}
+
+/// Derives a **recursive** CTE — its body is `<anchor> UNION [ALL] <recursive>` supplied via
+/// `RecursiveCteDefinition`. Identical to `#[derive(CTE)]` except the emitted `CteDef` marker reports
+/// itself recursive and lowers a recursive body.
+pub(crate) fn derive_recursive(input: TokenStream) -> TokenStream {
+    expand_derive(input, true)
+}
+
+fn expand_derive(input: TokenStream, recursive: bool) -> TokenStream {
     match table_struct(input) {
         Ok(mut cte) => {
             // A CTE is referenced by its bare `WITH` name, never schema-qualified: drop any schema so
@@ -18,14 +29,14 @@ pub(crate) fn derive(input: TokenStream) -> TokenStream {
             // so the table macro does *not* emit a `QuerySource` impl — the CTE supplies its own below
             // (carrying its `CteDef`). Plus the CTE's `SchemaCte` metadata.
             let projection: proc_macro2::TokenStream = cte.expand(SourceMode::Cte).into();
-            let schema_cte: proc_macro2::TokenStream = expand(&cte).into();
+            let schema_cte: proc_macro2::TokenStream = expand(&cte, recursive).into();
             quote::quote! { #projection #schema_cte }.into()
         }
         Err(error) => error.into_compile_error(),
     }
 }
 
-fn expand(cte: &TableStruct) -> TokenStream {
+fn expand(cte: &TableStruct, recursive: bool) -> TokenStream {
     let ident = proc_macro2::Ident::new(&cte.ident.to_string(), Span::call_site());
     let cte_name = Literal::string(&to_snake_plural(&ident.to_string()));
 
@@ -34,6 +45,43 @@ fn expand(cte: &TableStruct) -> TokenStream {
     // ColumnExpr>`), the same instantiation the `SchemaCte`/`CteDefinition` impls are written against.
     let cte_def_ty = generated_ident(&ident, "", "CteDef");
     let cte_def_static = generated_ident(&ident, "", "CteDefStatic");
+    // The body + dependency lowering differ for a recursive CTE (whose body is `<anchor> UNION [ALL]
+    // <recursive>` supplied via `RecursiveCteDefinition`, with the self-reference filtered out).
+    let (is_recursive_method, body_method, dependencies_method) = if recursive {
+        (
+            quote::quote! {
+                fn is_recursive(&self) -> bool {
+                    true
+                }
+            },
+            quote::quote! {
+                fn body(&self) -> ::squealy::CteBody {
+                    ::squealy::recursive_cte_definition_body::<#ident <'static, ::squealy::ColumnExpr>>()
+                }
+            },
+            quote::quote! {
+                fn cte_dependencies(&self) -> ::std::vec::Vec<&'static dyn ::squealy::CteDef> {
+                    ::squealy::recursive_cte_definition_dependencies::<#ident <'static, ::squealy::ColumnExpr>>()
+                }
+            },
+        )
+    } else {
+        (
+            proc_macro2::TokenStream::new(),
+            quote::quote! {
+                fn body(&self) -> ::squealy::CteBody {
+                    ::squealy::CteBody::Plain(
+                        ::squealy::cte_definition_model::<#ident <'static, ::squealy::ColumnExpr>>(),
+                    )
+                }
+            },
+            quote::quote! {
+                fn cte_dependencies(&self) -> ::std::vec::Vec<&'static dyn ::squealy::CteDef> {
+                    ::squealy::cte_definition_dependencies::<#ident <'static, ::squealy::ColumnExpr>>()
+                }
+            },
+        )
+    };
     let cte_def_impl = quote::quote! {
         #[doc(hidden)]
         pub struct #cte_def_ty;
@@ -51,13 +99,9 @@ fn expand(cte: &TableStruct) -> TokenStream {
                 <#ident <'static, ::squealy::ColumnExpr> as ::squealy::SchemaCte>::cte_columns()
             }
 
-            fn body_model(&self) -> ::squealy::ViewQueryModel {
-                ::squealy::cte_definition_model::<#ident <'static, ::squealy::ColumnExpr>>()
-            }
-
-            fn cte_dependencies(&self) -> ::std::vec::Vec<&'static dyn ::squealy::CteDef> {
-                ::squealy::cte_definition_dependencies::<#ident <'static, ::squealy::ColumnExpr>>()
-            }
+            #is_recursive_method
+            #body_method
+            #dependencies_method
         }
 
         #[doc(hidden)]

@@ -4556,6 +4556,47 @@ where
     }
 }
 
+/// The self-reference handle passed to [`RecursiveCteDefinition::definition`](crate::RecursiveCteDefinition::definition).
+/// [`from`](Self::from) starts the recursive term's query from the CTE itself (rendered as the bare
+/// `WITH` name); it reuses the ordinary `from::<Self>()` source, so the recursion needs no special
+/// source kind. (The resulting self-dependency edge is filtered out of the CTE's dependency set — see
+/// [`recursive_cte_definition_dependencies`](crate::recursive_cte_definition_dependencies).)
+type RecursiveSelfMarker<'scope, S> = PhantomData<(&'scope (), fn() -> S)>;
+
+pub struct RecursiveSelf<'scope, S> {
+    db: &'static crate::ModelConn,
+    _marker: RecursiveSelfMarker<'scope, S>,
+}
+
+impl<'scope, S> RecursiveSelf<'scope, S> {
+    #[doc(hidden)]
+    pub fn new(db: &'static crate::ModelConn) -> Self {
+        Self {
+            db,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Start the recursive term from the CTE itself.
+    // The return type is the same `From<..>` the ordinary `from::<S>()` yields; it must be named in
+    // full so the recursive term can chain joins/filters/`project` on it.
+    #[allow(clippy::type_complexity)]
+    pub fn from(
+        &self,
+    ) -> From<
+        'static,
+        'static,
+        crate::ModelConn,
+        HCons<<S as ProjectionShape>::Exprs<'static>, HNil>,
+        RootSource<S>,
+    >
+    where
+        S: QuerySource,
+    {
+        self.db.from::<S>()
+    }
+}
+
 /// Combines a select chain's per-clause runtime params into render order
 /// (`sources ++ filters ++ groups ++ havings ++ orders`), so a chain's [`Params`](SelectAst::Params)
 /// shape matches how placeholders are numbered at render time regardless of the order the builder
