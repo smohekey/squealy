@@ -82,13 +82,17 @@ pub fn render_recursive_cte_body(
     dialect: &dyn Dialect,
     writer: &mut dyn Write,
 ) -> io::Result<()> {
+    // Each arm is parenthesized so a term-local `ORDER BY`/`LIMIT`/`OFFSET` scopes to that arm rather
+    // than binding to the whole union (matching how the set renderer wraps its leaves).
+    writer.write_all(b"(")?;
     render_select(anchor, false, dialect, writer)?;
     writer.write_all(if union_all {
-        b" UNION ALL " as &[u8]
+        b") UNION ALL (" as &[u8]
     } else {
-        b" UNION "
+        b") UNION ("
     })?;
-    render_select(recursive, false, dialect, writer)
+    render_select(recursive, false, dialect, writer)?;
+    writer.write_all(b")")
 }
 
 /// Renders `DROP VIEW <qualified>`.

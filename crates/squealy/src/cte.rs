@@ -209,16 +209,18 @@ where
 }
 
 /// The CTEs a recursive CTE's body references directly, **excluding its own self-reference** (that edge
-/// is the recursion, not a dependency — it is identified by the CTE's own name). Mirrors
+/// is the recursion, not a dependency). The self-reference is identified by **definition identity** (the
+/// CTE's own `CteDef` marker), not by name — so a *different* CTE that merely derives the same bare name
+/// is kept and still reaches the collector's normal name-collision check. Mirrors
 /// [`cte_definition_dependencies`].
 pub fn recursive_cte_definition_dependencies<T>() -> Vec<&'static dyn CteDef>
 where
-    T: RecursiveCteDefinition,
+    T: RecursiveCteDefinition + crate::QuerySource,
 {
     static MODEL_CONN: ModelConn = ModelConn;
-    let own_name = <T as SchemaCte>::cte_name();
+    let own_key = <T as crate::QuerySource>::cte_def().map(|def| def.type_key());
     let mut deps =
         T::definition(&MODEL_CONN, crate::RecursiveSelf::new(&MODEL_CONN)).dependencies();
-    deps.retain(|dep| dep.name() != own_name);
+    deps.retain(|dep| Some(dep.type_key()) != own_key);
     deps
 }
