@@ -166,6 +166,13 @@ impl TableStruct {
                 )
             })
             .collect::<Vec<_>>();
+        // The whole-row projection's kinds as an `HList`, so a `SELECT DISTINCT … ORDER BY col` whose
+        // projection is the bare row (`select(|(u,)| u)`) can check the ordering key against the row's
+        // columns. Mirrors the per-column kinds of the exprs struct (`ColumnRef<K>` for each field).
+        let row_kind_list = expr_kind_idents.iter().rev().fold(
+            quote::quote! { ::squealy::HNil },
+            |tail, kind| quote::quote! { ::squealy::HCons<#kind, #tail> },
+        );
         // The *declared* field value type `D` (e.g. `Option<SystemTime>` or `SystemTime`). Nullability
         // is resolved from it at the type level via `ColumnNullability`.
         let field_value_tys = self
@@ -717,6 +724,11 @@ impl TableStruct {
                         alias,
                     )
                 }
+            }
+
+            // The whole-row projection's kinds, for the `SELECT DISTINCT` + `ORDER BY` guard.
+            impl ::squealy::IntoKindList for #row_shape_ident {
+                type Kinds = #row_kind_list;
             }
 
             impl<Backend> ::squealy::Decode<Backend> for #ident <'static, ::squealy::ColumnValue>

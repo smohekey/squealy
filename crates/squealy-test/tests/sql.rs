@@ -1497,6 +1497,51 @@ fn test_distinct_multi_key_order_all_selected() {
 }
 
 #[test]
+fn test_distinct_whole_row_select_no_order() {
+    // A whole-row projection's shape is not a single `ExprKind`/tuple; the guard must still accept a
+    // distinct query with no ordering over it.
+    let q = TestConnection.from::<User>().distinct().select(|(u,)| u);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT DISTINCT q0_0.id AS id, q0_0.name AS name FROM public.users AS q0_0"
+    );
+}
+
+#[test]
+fn test_distinct_order_by_column_with_whole_row_select() {
+    // Ordering by a column whose whole-row projection includes it is accepted (the row shape expands to
+    // its column kinds for the membership check).
+    let q = TestConnection
+        .from::<User>()
+        .distinct()
+        .order_by(|(u,)| u.id.asc())
+        .select(|(u,)| u);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT DISTINCT q0_0.id AS id, q0_0.name AS name FROM public.users AS q0_0 ORDER BY q0_0.id ASC"
+    );
+}
+
+#[test]
+fn test_distinct_order_key_captured_before_right_join_is_nullable_normalized() {
+    // `order_by` runs before a RIGHT JOIN, so the key is the bare `UserId` while the projection's base
+    // column is nullable-wrapped (`Nullable<UserId>`); the guard matches a key against a projected
+    // `Nullable<key>`.
+    let q = TestConnection
+        .from::<User>()
+        .order_by(|(u,)| u.id.asc())
+        .right_join::<Post>()
+        .on(|(user,), post| post.user_id.equals(user.id))
+        .distinct()
+        .select(|(user, _post)| user.id);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT DISTINCT q0_0.id AS id FROM public.users AS q0_0 \
+         RIGHT JOIN posts AS q0_1 ON (q0_1.user_id = q0_0.id) ORDER BY q0_0.id ASC"
+    );
+}
+
+#[test]
 fn test_count_distinct_renders_distinct_inside_call() {
     let q = TestConnection
         .from::<User>()

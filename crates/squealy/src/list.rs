@@ -80,9 +80,9 @@ pub trait ToTuple {
 // === Type-level set membership ===
 //
 // Frunk-style, index-disambiguated membership over an `HList`: the `Index` (`Here`/`There<…>`) is an
-// auxiliary type the compiler infers, so the two `Contains` impls never overlap (no specialization
-// needed). Used to enforce that a `SELECT DISTINCT` chain's `ORDER BY` keys all appear in the
-// projection — see [`AllContained`].
+// auxiliary type the compiler infers, so the `Contains` impls never overlap (no specialization needed).
+// Used to enforce that a `SELECT DISTINCT` chain's `ORDER BY` keys all appear in the projection — see
+// [`OrderKeysInProjection`](crate::OrderKeysInProjection).
 
 /// Membership witness: the searched element is at the head of the list.
 #[doc(hidden)]
@@ -103,23 +103,13 @@ pub trait Contains<T, Index> {}
 
 impl<T, Tail> Contains<T, Here> for HCons<T, Tail> {}
 
+// A key `K` is also satisfied by a projected `Nullable<K>`: a `RIGHT`/`FULL JOIN` nullable-wraps the
+// base columns in the projection, but an `ORDER BY` key captured *before* the join is still the bare
+// `K`. (No overlap with the bare-head impl above: `K = Nullable<K>` has no solution.)
+impl<T, Tail> Contains<T, Here> for HCons<crate::Nullable<T>, Tail> {}
+
 impl<T, Head, Tail, Index> Contains<T, There<Index>> for HCons<Head, Tail> where
     Tail: Contains<T, Index>
-{
-}
-
-/// Every element of `Self` is contained in `Set` (each at its own inferred `Index`). The trailing
-/// `Indices` list is the per-element position witnesses, inferred by the compiler.
-#[doc(hidden)]
-pub trait AllContained<Set, Indices> {}
-
-impl<Set> AllContained<Set, HNil> for HNil {}
-
-impl<Set, Head, Tail, Index, RestIndices> AllContained<Set, HCons<Index, RestIndices>>
-    for HCons<Head, Tail>
-where
-    Set: Contains<Head, Index>,
-    Tail: AllContained<Set, RestIndices>,
 {
 }
 

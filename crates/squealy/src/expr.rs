@@ -3576,10 +3576,29 @@ pub trait DistinctOrderGate<OrderKeys, Shape, Indices> {}
 
 impl<OrderKeys, Shape> DistinctOrderGate<OrderKeys, Shape, crate::HNil> for NotDistinct {}
 
-impl<OrderKeys, Shape, Indices> DistinctOrderGate<OrderKeys, Shape, Indices> for IsDistinct
+impl<OrderKeys, Shape, Indices> DistinctOrderGate<OrderKeys, Shape, Indices> for IsDistinct where
+    OrderKeys: OrderKeysInProjection<Shape, Indices>
+{
+}
+
+/// Every `ORDER BY` key (the `HList` `Self`) appears among projection `Shape`'s kinds. An **empty** list
+/// is trivially satisfied and does not even require the projection to be kind-listable — so a distinct
+/// query with no ordering (`distinct().select(|(u,)| u)`, a whole-row projection that is not an
+/// [`IntoKindList`] shape) still compiles. A non-empty list resolves the projection's kinds via
+/// [`IntoKindList`] and checks each key for membership ([`Contains`](crate::Contains)), which also
+/// matches a key `K` against a projected `Nullable<K>` (a right/full join nullable-wraps base columns in
+/// the projection but not the keys captured before the join). `Indices` are the per-key positions.
+#[doc(hidden)]
+pub trait OrderKeysInProjection<Shape, Indices> {}
+
+impl<Shape> OrderKeysInProjection<Shape, crate::HNil> for crate::HNil {}
+
+impl<Shape, Head, Tail, Index, RestIndices>
+    OrderKeysInProjection<Shape, crate::HCons<Index, RestIndices>> for crate::HCons<Head, Tail>
 where
     Shape: IntoKindList,
-    OrderKeys: crate::AllContained<<Shape as IntoKindList>::Kinds, Indices>,
+    <Shape as IntoKindList>::Kinds: crate::Contains<Head, Index>,
+    Tail: OrderKeysInProjection<Shape, RestIndices>,
 {
 }
 

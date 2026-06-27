@@ -6725,11 +6725,17 @@ where
     /// clauses regardless of where in the chain it is called.
     ///
     /// SQL requires every `ORDER BY` key to also appear in the projection under `DISTINCT`, and this is
-    /// enforced at compile time: ordering a distinct query by an unselected column
+    /// enforced at compile time for **column** keys: ordering a distinct query by an unselected column
     /// (`distinct().order_by(|(u,)| u.id.asc()).select(|(u,)| u.name)`) fails to build (see
-    /// [`DistinctOrderGate`](crate::DistinctOrderGate)). The check matches by kind-type identity, so an
-    /// `ORDER BY` term whose expression is identical to a projected one is accepted; ordering by an
-    /// arbitrary unprojected expression is conservatively rejected.
+    /// [`DistinctOrderGate`](crate::DistinctOrderGate)). It composes in either chain order and matches a
+    /// key against a nullable-wrapped projected column (e.g. across a `RIGHT`/`FULL JOIN`).
+    ///
+    /// The check matches by *kind-type identity*. For a bare column this is exact. For a derived
+    /// expression it is structural and cannot see literal values — two expressions of the same shape are
+    /// treated as equal, so e.g. `distinct().order_by(|(u,)| (u.id + 1).asc()).select(|(u,)| u.id + 2)`
+    /// is accepted at compile time even though PostgreSQL rejects it (the same-shape `id + ?` differs
+    /// only in a literal the type system does not carry). Expression-equality is out of scope; such a
+    /// query is still rejected by the database at execution time.
     fn distinct(self) -> Distinct<Self> {
         Distinct { base: self }
     }

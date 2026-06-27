@@ -10,12 +10,15 @@ help: the following other types implement trait `squealy::Contains<T, Index>`
    |
    |   impl<T, Tail> Contains<T, Here> for HCons<T, Tail> {}
    |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `HCons<T, Tail>` implements `squealy::Contains<T, squealy::Here>`
+...
+   |   impl<T, Tail> Contains<T, Here> for HCons<crate::Nullable<T>, Tail> {}
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `HCons<Nullable<T>, Tail>` implements `squealy::Contains<T, squealy::Here>`
    |
    | / impl<T, Head, Tail, Index> Contains<T, There<Index>> for HCons<Head, Tail> where
    | |     Tail: Contains<T, Index>
    | |____________________________^ `HCons<Head, Tail>` implements `squealy::Contains<T, squealy::There<Index>>`
    = note: required for `HCons<UserName, HNil>` to implement `squealy::Contains<UserId, squealy::There<_>>`
-   = note: required for `HCons<UserId, HNil>` to implement `squealy::AllContained<HCons<UserName, HNil>, HCons<squealy::There<_>, HNil>>`
+   = note: required for `HCons<UserId, HNil>` to implement `squealy::OrderKeysInProjection<UserName, HCons<squealy::There<_>, HNil>>`
    = note: required for `IsDistinct` to implement `squealy::DistinctOrderGate<HCons<UserId, HNil>, UserName, HCons<squealy::There<_>, HNil>>`
 note: required by a bound in `squealy::SourceQuery::select`
   --> src/query.rs
