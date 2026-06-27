@@ -1116,7 +1116,7 @@ where
     }
 
     fn cte_dependencies(&self) -> Vec<&'static dyn crate::CteDef> {
-        self.direct_ctes::<ModelConn>()
+        self.direct_ctes::<ModelConn, ModelBackend>()
     }
 }
 

@@ -30,9 +30,10 @@ struct Public {
     orders: Order<'static, ColumnName>,
 }
 
-// A CTE selecting the active users.
+// A CTE selecting the active users. (Derives `Clone` like a table so it can also be used as a
+// subquery source.)
 #[allow(dead_code)]
-#[derive(CTE)]
+#[derive(Clone, Debug, PartialEq, CTE)]
 struct ActiveUser<'scope, C: ColumnMode = ColumnExpr> {
     id: C::Type<'scope, i32>,
     name: C::Type<'scope, String>,
@@ -130,6 +131,45 @@ fn cte_referenced_twice_emits_one_with_entry() {
 SELECT q0_0.id, q0_0.name FROM public.users AS q0_0 WHERE (q0_0.active = TRUE)) \
 SELECT q0_0.id AS t0_id, q0_1.name AS t1_name \
 FROM active_users AS q0_0 INNER JOIN active_users AS q0_1 ON (q0_1.id = q0_0.id)"
+    );
+}
+
+// A CTE whose body references another CTE *only through a subquery* (here an `IN (subquery)` over
+// `ActiveUser`), not its top-level FROM/JOIN. The dependency must still be collected and emitted.
+#[allow(dead_code)]
+#[derive(CTE)]
+struct VipUser<'scope, C: ColumnMode = ColumnExpr> {
+    id: C::Type<'scope, i32>,
+    name: C::Type<'scope, String>,
+}
+
+impl<'scope, C: ColumnMode> CteDefinition for VipUser<'scope, C> {
+    fn definition(db: &'static ModelConn) -> impl ViewSelect<Row = <Self as SchemaCte>::Row> {
+        db.from::<User>()
+            .where_correlated(|(user,), sub| {
+                user.id.in_subquery(
+                    sub.from::<ActiveUser>()
+                        .select_subquery(|(active,)| active.id),
+                )
+            })
+            .project(|(user,)| (user.id, user.name))
+    }
+}
+
+#[test]
+fn nested_cte_dependency_through_subquery_is_collected() {
+    let query = TestConnection
+        .from::<VipUser>()
+        .select(|(vip,)| (vip.id, vip.name));
+
+    assert_eq!(
+        query.to_sql(),
+        "WITH active_users (id, name) AS (\
+SELECT q0_0.id, q0_0.name FROM public.users AS q0_0 WHERE (q0_0.active = TRUE)), \
+vip_users (id, name) AS (\
+SELECT q0_0.id, q0_0.name FROM public.users AS q0_0 \
+WHERE (q0_0.id IN (SELECT q1_0.id AS id FROM active_users AS q1_0))) \
+SELECT q0_0.id AS t0_id, q0_0.name AS t1_name FROM vip_users AS q0_0"
     );
 }
 
