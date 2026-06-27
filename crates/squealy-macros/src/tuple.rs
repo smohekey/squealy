@@ -13,11 +13,30 @@ pub(crate) fn projection_shapes(input: TokenStream) -> TokenStream {
     };
 
     let impls = (2..=max_arity).map(tuple_projection_shape);
+    let kind_lists = (2..=max_arity).map(into_kind_list);
 
     quote::quote! {
         #(#impls)*
+        #(#kind_lists)*
     }
     .into()
+}
+
+/// `IntoKindList` for a tuple projection shape: `(K0, K1, …)` → `HCons<K0, HCons<K1, … HNil>>`, the
+/// list of projected kinds a `SELECT DISTINCT`'s `ORDER BY` keys are checked against.
+fn into_kind_list(arity: usize) -> proc_macro2::TokenStream {
+    let types = (0..arity)
+        .map(|index| Ident::new(&format!("K{index}"), Span::call_site()))
+        .collect::<Vec<_>>();
+    let mut kinds = quote::quote! { crate::HNil };
+    for ty in types.iter().rev() {
+        kinds = quote::quote! { crate::HCons<#ty, #kinds> };
+    }
+    quote::quote! {
+        impl<#(#types),*> crate::IntoKindList for (#(#types,)*) {
+            type Kinds = #kinds;
+        }
+    }
 }
 
 pub(crate) fn fixed_lists(input: TokenStream) -> TokenStream {

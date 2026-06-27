@@ -1466,6 +1466,37 @@ fn test_distinct_composes_with_where_order_limit() {
 }
 
 #[test]
+fn test_distinct_order_by_selected_reverse_chain_order() {
+    // The DISTINCT + ORDER BY guard is independent of chain order: here `order_by` precedes `distinct`,
+    // and the ordering key (`name`) is in the projection, so it compiles and renders.
+    let q = TestConnection
+        .from::<User>()
+        .order_by(|(user,)| user.name.asc())
+        .distinct()
+        .select(|(user,)| user.name);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT DISTINCT q0_0.name AS name FROM public.users AS q0_0 ORDER BY q0_0.name ASC"
+    );
+}
+
+#[test]
+fn test_distinct_multi_key_order_all_selected() {
+    // Every ORDER BY key (`id`, `name`) appears in the projection, so the multi-key distinct ordering
+    // is accepted.
+    let q = TestConnection
+        .from::<User>()
+        .distinct()
+        .order_by(|(user,)| (user.id.asc(), user.name.desc()))
+        .select(|(user,)| (user.id, user.name));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT DISTINCT q0_0.id AS t0_id, q0_0.name AS t1_name FROM public.users AS q0_0 \
+         ORDER BY q0_0.id ASC, q0_0.name DESC"
+    );
+}
+
+#[test]
 fn test_count_distinct_renders_distinct_inside_call() {
     let q = TestConnection
         .from::<User>()

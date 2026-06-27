@@ -3534,6 +3534,55 @@ where
 {
 }
 
+// === DISTINCT + ORDER BY guard ===
+
+/// Distinctness of a select chain (carried as [`SelectAst::Distinctness`](crate::SelectAst::Distinctness)):
+/// the chain has no `DISTINCT`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotDistinct {}
+/// Distinctness of a select chain: the chain has `DISTINCT`. `SELECT DISTINCT` requires every
+/// `ORDER BY` key to also be projected (see [`DistinctOrderGate`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IsDistinct {}
+
+/// Maps a projection's [`Shape`](crate::ReturningProjection::Shape) (a single kind, the unit shape, or a
+/// tuple of kinds) to the `HList` of its projected kinds, so a `DISTINCT` chain's `ORDER BY` keys can be
+/// checked for membership. Only consulted on the `DISTINCT` path; a non-distinct select never needs it.
+pub trait IntoKindList {
+    type Kinds: crate::HList;
+}
+
+// A single projected kind (a one-column projection, e.g. `select(|(u,)| u.id)`).
+impl<K> IntoKindList for K
+where
+    K: ExprKind,
+{
+    type Kinds = crate::HCons<K, crate::HNil>;
+}
+
+// The empty projection.
+impl IntoKindList for () {
+    type Kinds = crate::HNil;
+}
+
+/// Compile-time guard for `SELECT DISTINCT … ORDER BY …`, dispatched on the chain's
+/// [`Distinctness`](crate::SelectAst::Distinctness). A non-distinct chain ([`NotDistinct`]) is always
+/// valid (and does not even consult [`IntoKindList`]). A distinct chain ([`IsDistinct`]) requires every
+/// `ORDER BY` key (`OrderKeys`) to appear among the projection's kinds — by kind-type identity — which
+/// is exactly what PostgreSQL enforces ("for SELECT DISTINCT, ORDER BY expressions must appear in
+/// select list"). `Indices` are the inferred per-key membership positions.
+#[doc(hidden)]
+pub trait DistinctOrderGate<OrderKeys, Shape, Indices> {}
+
+impl<OrderKeys, Shape> DistinctOrderGate<OrderKeys, Shape, crate::HNil> for NotDistinct {}
+
+impl<OrderKeys, Shape, Indices> DistinctOrderGate<OrderKeys, Shape, Indices> for IsDistinct
+where
+    Shape: IntoKindList,
+    OrderKeys: crate::AllContained<<Shape as IntoKindList>::Kinds, Indices>,
+{
+}
+
 impl<Projection, OrderClass> ValidSelect<Projection, OrderClass> for Aggregated
 where
     // Column-free projection (aggregates and constants), not necessarily *all* aggregate — a
