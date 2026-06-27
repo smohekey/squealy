@@ -450,6 +450,7 @@ mod projection;
 mod query;
 // The shared SQL query renderer. Public so backend crates can call its entry points, but hidden from
 // the documented API — it is an implementation detail backends drive via their `Dialect`.
+mod cte;
 #[doc(hidden)]
 pub mod render;
 mod schema;
@@ -468,6 +469,7 @@ pub use column::{
     ColumnNullableValue, ColumnType, ColumnValue, HasColumnType,
 };
 pub use connection::{Connection, ConnectionWithTransaction, QueryBuilder};
+pub use cte::{CteDef, CteDefinition, SchemaCte, cte_definition_model};
 pub use database::Database;
 pub use dialect::Dialect;
 pub use expr::{
@@ -548,7 +550,7 @@ pub use query::{
     Upsert, Where, default,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
-pub use squealy_macros::{ColumnType, Database, Schema, Table, View};
+pub use squealy_macros::{CTE, ColumnType, Database, Schema, Table, View};
 pub use table::{
     InsertableTable, SchemaTable, Table, TablePrimaryKey, TableUnique, UpdateableTable,
     WriteableTable,

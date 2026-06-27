@@ -6,6 +6,7 @@ use proc_macro::TokenStream;
 
 mod column_type;
 mod common;
+mod cte;
 mod database;
 mod schema;
 mod table;
@@ -62,6 +63,14 @@ pub fn derive_view(input: TokenStream) -> TokenStream {
 }
 
 /// Derives squealy database metadata from fields containing schema types.
+/// Derives [`SchemaCte`](squealy::SchemaCte) for a CTE struct: its declared output columns, name, and
+/// the read-only queryable projection. The CTE body is supplied separately via
+/// `CteDefinition::definition`, and the CTE is inlined as a `WITH` clause when referenced.
+#[proc_macro_derive(CTE, attributes(column, column_name, schema))]
+pub fn derive_cte(input: TokenStream) -> TokenStream {
+    cte::derive(input)
+}
+
 #[proc_macro_derive(Database)]
 pub fn derive_database(input: TokenStream) -> TokenStream {
     database::derive(input)
