@@ -244,6 +244,23 @@ where
     }
 }
 
+/// A relation usable as a query `FROM`/`JOIN` source: a table, a view, or a CTE. It refines
+/// [`TableProjection`] (the name + projected columns) with the one fact the query builder needs to
+/// dispatch on — whether the relation is a CTE, and if so the [`CteDef`](crate::CteDef) it contributes
+/// to the query's `WITH` clause.
+///
+/// Implemented per relation by the derives (no blanket: a CTE is itself a `TableProjection`, so a
+/// blanket would conflict with the CTE's own impl). `#[derive(Table)]`/`#[derive(View)]` emit the
+/// default ([`cte_def`](Self::cte_def) returns `None`); `#[derive(CTE)]` emits an override returning
+/// its `CteDef`.
+pub trait QuerySource: TableProjection {
+    /// The CTE definition this relation contributes to a query's `WITH` clause, or `None` for a table
+    /// or view (which render as ordinary `FROM` sources).
+    fn cte_def() -> Option<&'static dyn crate::CteDef> {
+        None
+    }
+}
+
 /// A table-shaped value whose expression columns can be projected or rebound to a SQL alias.
 pub trait Projectable: Clone {
     type Rebound<'scope>;

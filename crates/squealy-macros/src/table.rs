@@ -9,8 +9,31 @@ use crate::common::{
 
 pub(crate) fn derive(input: TokenStream) -> TokenStream {
     match table_struct(input) {
-        Ok(table) => table.expand(false),
+        Ok(table) => table.expand(SourceMode::Table),
         Err(error) => error.into_compile_error(),
+    }
+}
+
+/// Which kind of queryable relation the projection machinery is being expanded for. A table is
+/// read-write; a view and a CTE are read-only (no insert/update surface). A table and a view also get
+/// a [`QuerySource`](squealy::QuerySource) impl marking them as non-CTE `FROM` sources, while a CTE
+/// gets its `QuerySource` impl (carrying its [`CteDef`](squealy::CteDef)) from the `CTE` derive itself.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceMode {
+    Table,
+    View,
+    Cte,
+}
+
+impl SourceMode {
+    /// Read-only relations (views and CTEs) omit the write-side impls.
+    fn read_only(self) -> bool {
+        matches!(self, SourceMode::View | SourceMode::Cte)
+    }
+
+    /// Tables and views get a no-CTE [`QuerySource`] impl here; a CTE supplies its own.
+    fn emits_query_source(self) -> bool {
+        matches!(self, SourceMode::Table | SourceMode::View)
     }
 }
 
@@ -105,10 +128,11 @@ struct ForeignKeyAttrs {
 }
 
 impl TableStruct {
-    /// Expands the projection/metadata machinery. When `is_view` is set, the write-side impls
-    /// (`InsertableTable`/`UpdateableTable` and the write builder) are omitted: a view is a read-only
-    /// `FROM` source, so it gets queryable projections without an insert/update surface.
-    pub(crate) fn expand(&self, is_view: bool) -> TokenStream {
+    /// Expands the projection/metadata machinery. For a read-only [`SourceMode`] (view/CTE) the
+    /// write-side impls (`InsertableTable`/`UpdateableTable` and the write builder) are omitted: such
+    /// a relation is a read-only `FROM` source, so it gets queryable projections without an
+    /// insert/update surface.
+    pub(crate) fn expand(&self, mode: SourceMode) -> TokenStream {
         let ident = proc_macro2::Ident::new(&self.ident.to_string(), Span::call_site());
         let name = Literal::string(&to_snake_plural(&ident.to_string()));
         let fields = self
@@ -428,8 +452,8 @@ impl TableStruct {
             .unwrap_or_else(|| quote::quote! { ::squealy::DefaultSchema });
         let write_builder = self.write_builder_tokens(&ident, &expr_kind_idents);
         let visibility = &self.visibility;
-        // A view is read-only: skip the write builder and the insertable/updateable markers.
-        let (write_builder_defs, write_table_impl, write_marker_impls) = if is_view {
+        // A view/CTE is read-only: skip the write builder and the insertable/updateable markers.
+        let (write_builder_defs, write_table_impl, write_marker_impls) = if mode.read_only() {
             (
                 proc_macro2::TokenStream::new(),
                 proc_macro2::TokenStream::new(),
@@ -445,6 +469,19 @@ impl TableStruct {
                     impl<'scope> ::squealy::UpdateableTable for #ident <'scope, ::squealy::ColumnExpr> {}
                 },
             )
+        };
+        // A table or view is a non-CTE `FROM` source: mark it `QuerySource` so the query builder
+        // accepts it (and contributes no `WITH` entry). A CTE's `QuerySource` impl is emitted by the
+        // `CTE` derive instead, carrying its `CteDef`.
+        let query_source_impl = if mode.emits_query_source() {
+            quote::quote! {
+                impl<'scope, C: ::squealy::ColumnMode> ::squealy::QuerySource for #ident <'scope, C>
+                where
+                    #ident <'scope, C>: ::squealy::TableProjection,
+                {}
+            }
+        } else {
+            proc_macro2::TokenStream::new()
         };
         let insert_column_key_impls = self
             .fields
@@ -534,6 +571,8 @@ impl TableStruct {
                     }
                 }
             )*
+
+            #query_source_impl
 
             #(#insert_column_key_impls)*
             #(#update_column_key_impls)*

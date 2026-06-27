@@ -524,7 +524,8 @@ pub use model::{
 };
 pub use plan::{DatabasePlan, DatabasePlanStep, TablePlanStep};
 pub use projection::{
-    Maybe, Projectable, ProjectionShape, ProjectionVisitor, RenderProjectable, TableProjection,
+    Maybe, Projectable, ProjectionShape, ProjectionVisitor, QuerySource, RenderProjectable,
+    TableProjection,
 };
 pub use query::{
     AllRows, AssignmentNode, AssignmentValueNode, AssignmentValueVisitor, AssignmentVisitor,
@@ -558,4 +559,4 @@ pub use table::{
 pub use view::{ModelBackend, ModelConn, SchemaView, ViewDefinition, ViewSelect};
 #[doc(hidden)]
 pub use view::{lower_view, view_definition_model};
-pub use view_render::{ordered_views, render_create_view, render_drop_view};
+pub use view_render::{ordered_views, render_create_view, render_cte_body, render_drop_view};

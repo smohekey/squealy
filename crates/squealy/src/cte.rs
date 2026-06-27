@@ -42,6 +42,11 @@ pub trait CteDefinition: SchemaCte {
 pub trait CteDef: Sync {
     fn name(&self) -> &'static str;
 
+    /// The CTE's declared output columns, rendered as the explicit `WITH name (col, …) AS (…)` column
+    /// list. Naming the columns explicitly decouples the body's projection aliases from the names the
+    /// referencing query uses, so a tuple-projected body still exposes the declared column names.
+    fn columns(&self) -> Vec<ViewColumnModel>;
+
     fn body_model(&self) -> ViewQueryModel;
 }
 
@@ -53,6 +58,10 @@ where
 {
     fn name(&self) -> &'static str {
         <T as SchemaCte>::cte_name()
+    }
+
+    fn columns(&self) -> Vec<ViewColumnModel> {
+        <T as SchemaCte>::cte_columns()
     }
 
     fn body_model(&self) -> ViewQueryModel {
