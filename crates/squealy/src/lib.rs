@@ -548,8 +548,8 @@ pub use query::{
     RenderSelectAst, RenderSourceSpec, RenderSubquery, RenderUpdateAssignments,
     ReturningProjection, RightJoinSource, RightJoinTarget, RootSource, RowsAffected,
     RuntimeAssignmentValue, ScalarSubquery, SelectAst, SelectQuery, SelectSink, Selected, SetArm,
-    SetLeaf, SetNode, SetOp, SetOperand, SetOperations, SetOrder, SetSelectModifiers, SetTail,
-    SourceQuery, SourceSpec, StaticAssignmentValue, Subqueries, Subquery, SubquerySelect,
+    SetGroup, SetLeaf, SetNode, SetOp, SetOperand, SetOperations, SetOrder, SetSelectModifiers,
+    SetTail, SourceQuery, SourceSpec, StaticAssignmentValue, Subqueries, Subquery, SubquerySelect,
     ToColumns, UpdateAssignment, UpdateAssignmentNode, UpdateAssignments, UpdateColumnKey,
     UpdateColumnValues, UpdateQuery, Upsert, Where, default,
 };

@@ -1469,6 +1469,9 @@ where
     Conn: PostgresExecutor + 'conn,
     Tree: render::RenderSetArm<'conn, 'scope, Conn, Postgres>,
     <Tree as SetArm<'conn, 'scope, Conn>>::Row: Decode<Postgres> + Send,
+    // As for a plain select, executing requires the query carry no runtime params: the one-shot
+    // execution path inlines literals, so a `param()` in any arm would emit an unbindable placeholder.
+    <Tree as SetArm<'conn, 'scope, Conn>>::Params: NoRuntimeParams,
 {
     type Builder = Conn;
     type Row = <Tree as SetArm<'conn, 'scope, Conn>>::Row;
@@ -1567,10 +1570,13 @@ where
     Conn: QueryBuilder<Backend = Postgres> + 'conn,
 {
     type Row = <Tree as SetArm<'conn, 'scope, Conn>>::Row;
-    type Arm = Tree;
+    type Arm = squealy::SetGroup<Tree>;
 
     fn into_set_parts(self) -> (&'conn Conn, Self::Arm) {
-        (self.connection, self.tree)
+        (
+            self.connection,
+            squealy::SetGroup::new(self.tree, self.tail),
+        )
     }
 }
 

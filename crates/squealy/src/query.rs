@@ -1753,6 +1753,34 @@ where
     >>::Output;
 }
 
+/// A set sub-tree together with its trailing `ORDER BY`/`LIMIT`/`OFFSET`, used when a *modified*
+/// set-select is nested as an operand of another set op (`a.union(b).limit(1).union(c)`): the inner
+/// modifiers must render as part of the parenthesized left operand (`((…) UNION (…) LIMIT 1) UNION (…)`)
+/// rather than being dropped. An unmodified nested set carries an empty [`SetTail`] and renders the
+/// same as its bare tree.
+#[doc(hidden)]
+pub struct SetGroup<Tree> {
+    pub(crate) tree: Tree,
+    pub(crate) tail: SetTail,
+}
+
+impl<Tree> SetGroup<Tree> {
+    #[doc(hidden)]
+    pub fn new(tree: Tree, tail: SetTail) -> Self {
+        Self { tree, tail }
+    }
+}
+
+impl<'conn, 'scope, Conn, Tree> SetArm<'conn, 'scope, Conn> for SetGroup<Tree>
+where
+    Conn: QueryBuilder,
+    Tree: SetArm<'conn, 'scope, Conn>,
+{
+    type Row = <Tree as SetArm<'conn, 'scope, Conn>>::Row;
+    type Shape = <Tree as SetArm<'conn, 'scope, Conn>>::Shape;
+    type Params = <Tree as SetArm<'conn, 'scope, Conn>>::Params;
+}
+
 /// A value usable as a set-operation operand — a finished select query object or a set-select query
 /// object. Yields its connection and the [`SetArm`] tree it contributes, so [`SetOperations`] can
 /// combine two operands (and nesting falls out: a set-select yields its own tree).

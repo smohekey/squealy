@@ -1035,10 +1035,13 @@ where
     Tree: SetArm<'conn, 'scope, TestConnection>,
 {
     type Row = <Tree as SetArm<'conn, 'scope, TestConnection>>::Row;
-    type Arm = Tree;
+    type Arm = squealy::SetGroup<Tree>;
 
     fn into_set_parts(self) -> (&'conn TestConnection, Self::Arm) {
-        (self.connection, self.tree)
+        (
+            self.connection,
+            squealy::SetGroup::new(self.tree, self.tail),
+        )
     }
 }
 

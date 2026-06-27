@@ -439,6 +439,8 @@ where
     Conn: MysqlExecutor + 'conn,
     Tree: render::RenderSetArm<'conn, 'scope, Conn, Mysql>,
     <Tree as SetArm<'conn, 'scope, Conn>>::Row: Decode<Mysql> + Send,
+    // Executing inlines literals (no prepared path on MySQL), so reject runtime params in any arm.
+    <Tree as SetArm<'conn, 'scope, Conn>>::Params: NoRuntimeParams,
 {
     type Builder = Conn;
     type Row = <Tree as SetArm<'conn, 'scope, Conn>>::Row;
@@ -500,10 +502,10 @@ where
     Conn: QueryBuilder<Backend = Mysql> + 'conn,
 {
     type Row = <Tree as SetArm<'conn, 'scope, Conn>>::Row;
-    type Arm = Tree;
+    type Arm = squealy::SetGroup<Tree>;
 
     fn into_set_parts(self) -> (&'conn Conn, Self::Arm) {
-        (self.connection, self.tree)
+        (self.connection, squealy::SetGroup::new(self.tree, self.tail))
     }
 }
 

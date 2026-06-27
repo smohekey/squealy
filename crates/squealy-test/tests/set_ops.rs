@@ -139,6 +139,84 @@ ORDER BY t0_id DESC LIMIT 10 OFFSET 5"
 }
 
 #[test]
+fn nesting_preserves_inner_modifiers() {
+    // `a.union(b).limit(1).union(c)` — the inner LIMIT must render parenthesized as part of the left
+    // operand, not be dropped.
+    let query = TestConnection
+        .from::<User>()
+        .select(|(u,)| (u.id, u.name))
+        .union(TestConnection.from::<Admin>().select(|(a,)| (a.id, a.name)))
+        .limit(1)
+        .union(TestConnection.from::<User>().select(|(u,)| (u.id, u.name)));
+
+    assert_eq!(
+        query.to_sql(),
+        "((SELECT q0_0.id AS t0_id, q0_0.name AS t1_name FROM public.users AS q0_0) \
+UNION \
+(SELECT q0_0.id AS t0_id, q0_0.name AS t1_name FROM public.admins AS q0_0) LIMIT 1) \
+UNION \
+(SELECT q0_0.id AS t0_id, q0_0.name AS t1_name FROM public.users AS q0_0)"
+    );
+}
+
+// Two distinct CTE types with the same derived name, one per arm — valid alone, colliding once merged.
+mod collision {
+    use super::*;
+
+    pub mod left {
+        use super::*;
+        #[allow(dead_code)]
+        #[derive(Clone, Debug, PartialEq, CTE)]
+        pub struct Summary<'scope, C: ColumnMode = ColumnExpr> {
+            pub id: C::Type<'scope, i32>,
+            pub name: C::Type<'scope, String>,
+        }
+        impl<'scope, C: ColumnMode> CteDefinition for Summary<'scope, C> {
+            fn definition(
+                db: &'static ModelConn,
+            ) -> impl ViewSelect<Row = <Self as SchemaCte>::Row> {
+                db.from::<User>()
+                    .where_(|u| u.active.equals(true))
+                    .project(|(u,)| (u.id, u.name))
+            }
+        }
+    }
+
+    pub mod right {
+        use super::*;
+        #[allow(dead_code)]
+        #[derive(Clone, Debug, PartialEq, CTE)]
+        pub struct Summary<'scope, C: ColumnMode = ColumnExpr> {
+            pub id: C::Type<'scope, i32>,
+            pub name: C::Type<'scope, String>,
+        }
+        impl<'scope, C: ColumnMode> CteDefinition for Summary<'scope, C> {
+            fn definition(
+                db: &'static ModelConn,
+            ) -> impl ViewSelect<Row = <Self as SchemaCte>::Row> {
+                db.from::<User>()
+                    .where_(|u| u.active.equals(false))
+                    .project(|(u,)| (u.id, u.name))
+            }
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "colliding names")]
+fn cte_name_collision_across_arms_is_rejected() {
+    let query = TestConnection
+        .from::<collision::left::Summary>()
+        .select(|(s,)| (s.id, s.name))
+        .union(
+            TestConnection
+                .from::<collision::right::Summary>()
+                .select(|(s,)| (s.id, s.name)),
+        );
+    let _ = query.to_sql();
+}
+
+#[test]
 fn param_order_across_arms() {
     let query = TestConnection
         .from::<User>()

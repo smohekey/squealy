@@ -770,17 +770,49 @@ where
     }
 }
 
+impl<'conn, 'scope, Conn, Tree, B> RenderSetArm<'conn, 'scope, Conn, B> for crate::SetGroup<Tree>
+where
+    Conn: QueryBuilder + 'conn,
+    B: Backend,
+    Tree: RenderSetArm<'conn, 'scope, Conn, B>,
+{
+    fn render_operand<Writer>(&self, writer: &mut Writer, renderer: &mut Renderer) -> io::Result<()>
+    where
+        Writer: SqlWriter<B>,
+    {
+        // A nested set renders its trailing modifiers inside its own parentheses, so they bind to this
+        // operand and not the enclosing set.
+        writer.write_all(b"(")?;
+        self.tree.render_root(writer, renderer)?;
+        write_set_tail(renderer.dialect, &self.tail, writer)?;
+        writer.write_all(b")")
+    }
+
+    fn collect_set_ctes(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        self.tree.collect_set_ctes(ctes);
+    }
+}
+
 /// De-duplicate a set's collected CTEs by definition identity (each arm's list is already topo-ordered;
-/// a CTE used in several arms is kept once, at first occurrence).
+/// a CTE used in several arms is kept once, at first occurrence). Two *distinct* CTEs that derive the
+/// same bare name — each valid in its own arm, but colliding once merged — are rejected, mirroring the
+/// single-select check in [`Selected::collect_ctes`](crate::Selected::collect_ctes).
 fn dedup_set_ctes(ctes: Vec<&'static dyn crate::CteDef>) -> Vec<&'static dyn crate::CteDef> {
     let mut kept: Vec<&'static dyn crate::CteDef> = Vec::new();
     for def in ctes {
-        if !kept
+        if kept
             .iter()
             .any(|existing| existing.type_key() == def.type_key())
         {
-            kept.push(def);
+            continue;
         }
+        assert!(
+            !kept.iter().any(|existing| existing.name() == def.name()),
+            "two distinct CTEs are both named {:?}; a set operation cannot combine arms whose CTEs \
+             have colliding names (the CTE derive names by struct name, ignoring module/schema)",
+            def.name(),
+        );
+        kept.push(def);
     }
     kept
 }
