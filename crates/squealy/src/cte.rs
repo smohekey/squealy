@@ -54,6 +54,12 @@ pub trait CteDef: Sync {
     fn columns(&self) -> Vec<ViewColumnModel>;
 
     fn body_model(&self) -> ViewQueryModel;
+
+    /// The CTEs this CTE's body references *directly* (a nested CTE: a `WITH` body that selects from
+    /// another CTE). The query's `WITH` collector recurses through these to the transitive closure and
+    /// emits every CTE in dependency order (a referenced CTE before the one that uses it). A flat CTE
+    /// (body over base tables/views only) returns an empty list.
+    fn cte_dependencies(&self) -> Vec<&'static dyn CteDef>;
 }
 
 /// Any [`CteDefinition`] is an object-safe [`CteDef`] the `WITH` collector can consume from its type
@@ -77,6 +83,10 @@ where
     fn body_model(&self) -> ViewQueryModel {
         cte_definition_model::<T>()
     }
+
+    fn cte_dependencies(&self) -> Vec<&'static dyn CteDef> {
+        cte_definition_dependencies::<T>()
+    }
 }
 
 /// Lowers a [`CteDefinition`] type's body into the neutral model without needing an instance. Mirrors
@@ -87,4 +97,14 @@ where
 {
     static MODEL_CONN: ModelConn = ModelConn;
     T::definition(&MODEL_CONN).lower()
+}
+
+/// The CTEs a [`CteDefinition`] type's body references directly, from its type alone — the
+/// dependency edges the `WITH` collector follows for nested CTEs. Mirrors [`cte_definition_model`].
+pub fn cte_definition_dependencies<T>() -> Vec<&'static dyn CteDef>
+where
+    T: CteDefinition,
+{
+    static MODEL_CONN: ModelConn = ModelConn;
+    T::definition(&MODEL_CONN).cte_dependencies()
 }

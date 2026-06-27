@@ -397,7 +397,10 @@ where
     Writer: Write,
 {
     let mut writer = SqlOnly(writer);
-    write_cte_prefix(&selected.collect_ctes::<Conn>(), &mut writer)?;
+    write_cte_prefix(
+        &selected.collect_ctes::<Conn, crate::TestBackend>(),
+        &mut writer,
+    )?;
     let mut sink = TestSelectSink::new(&mut writer)?;
     selected.lower_into::<Conn, _>(&mut sink)?;
     sink.finish()
@@ -416,7 +419,11 @@ where
     let mut writer = ParamCollector::new(params);
     // CTE bodies are parameter-free, so the `WITH` prefix contributes no bind params (the collector
     // ignores the emitted bytes); keeping it uniform with the SQL-text path.
-    write_cte_prefix(&selected.collect_ctes::<Conn>(), &mut writer).unwrap();
+    write_cte_prefix(
+        &selected.collect_ctes::<Conn, crate::TestBackend>(),
+        &mut writer,
+    )
+    .unwrap();
     let mut select_sink = TestSelectSink::new(&mut writer).unwrap();
     selected.lower_into::<Conn, _>(&mut select_sink).unwrap();
     select_sink.finish().unwrap();

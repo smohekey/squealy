@@ -3338,43 +3338,86 @@ where
         self.base.connection()
     }
 
-    /// The de-duplicated CTE definitions this select references through its `FROM`/`JOIN` sources, in
-    /// first-seen order. The renderer emits these as the `WITH` prefix before the main `SELECT`.
-    ///
-    /// De-duplication is by **definition identity** (each CTE type has a unique `'static` `CteDef`), so
-    /// the same CTE referenced from several sources yields one `WITH` entry. Two *distinct* CTEs that
-    /// derive the **same** bare name (the `CTE` derive names by struct name, ignoring module/schema)
-    /// would both bind that one `WITH` name, silently dropping one body — so that is rejected with a
-    /// panic rather than rendered as wrong SQL.
+    /// The CTEs this select references *directly* through its own `FROM`/`JOIN` sources, with
+    /// duplicates (a CTE referenced from several sources appears several times) and no ordering. The
+    /// raw chain walk underlying both [`collect_ctes`](Self::collect_ctes) (the query's full `WITH`
+    /// set) and [`ViewSelect::cte_dependencies`](crate::ViewSelect::cte_dependencies) (a CTE body's
+    /// dependency edges).
     #[doc(hidden)]
-    pub fn collect_ctes<'conn, Conn>(&self) -> Vec<&'static dyn crate::CteDef>
+    pub fn direct_ctes<'conn, Conn, B>(&self) -> Vec<&'static dyn crate::CteDef>
     where
         Conn: QueryBuilder + 'conn,
-        Base: SelectAst<'conn, 'scope, Conn>,
+        B: Backend,
+        Base: RenderSelectAst<'conn, 'scope, Conn, B>,
+        Projection: RenderProjectable<B>,
     {
         let mut ctes = Vec::new();
+        // CTEs referenced directly in the `FROM`/`JOIN` source chain.
         self.base.collect_ctes_into(&mut ctes);
+        // Plus CTEs reached only through subqueries embedded in predicates/grouping/ordering/projection,
+        // gathered by driving the normal lowering traversal through a collect-only sink.
+        let mut sink = SubqueryCteSink::<B>::new(&mut ctes);
+        let Ok(()) = self.lower_into::<Conn, _>(&mut sink);
+        ctes
+    }
 
-        let mut kept: Vec<&'static dyn crate::CteDef> = Vec::new();
-        for def in ctes {
-            let mut already_kept = false;
-            for existing in &kept {
-                if existing.type_key() == def.type_key() {
-                    already_kept = true;
-                    break;
-                }
-                assert!(
-                    existing.name() != def.name(),
-                    "two distinct CTEs are both named {:?}; a query cannot reference colliding CTE \
-                     names (the CTE derive names by struct name, ignoring module/schema)",
-                    def.name(),
-                );
+    /// Every CTE this select needs in its `WITH` clause — the transitive closure of the directly
+    /// referenced CTEs (following each CTE body's [`cte_dependencies`](crate::CteDef::cte_dependencies))
+    /// — in dependency order: a referenced CTE before the one that uses it. The renderer emits these as
+    /// the `WITH` prefix before the main `SELECT`.
+    ///
+    /// De-duplication is by **definition identity** ([`CteDef::type_key`](crate::CteDef::type_key)), so
+    /// a CTE reached by several paths yields one `WITH` entry. Two *distinct* CTEs that derive the
+    /// **same** bare name (the `CTE` derive names by struct name, ignoring module/schema) would both
+    /// bind that one name, silently dropping one body, so that is rejected with a panic. A dependency
+    /// **cycle** (only reachable via a CTE that selects from itself — i.e. recursion, which is out of
+    /// scope) is likewise rejected rather than looping forever.
+    #[doc(hidden)]
+    pub fn collect_ctes<'conn, Conn, B>(&self) -> Vec<&'static dyn crate::CteDef>
+    where
+        Conn: QueryBuilder + 'conn,
+        B: Backend,
+        Base: RenderSelectAst<'conn, 'scope, Conn, B>,
+        Projection: RenderProjectable<B>,
+    {
+        // Post-order DFS over the dependency graph: a CTE is pushed only after its dependencies, so
+        // `ordered` ends up deps-before-users. `ordered` doubles as the visited set (by `type_key`),
+        // and `on_path` detects a back-edge (cycle).
+        fn visit(
+            def: &'static dyn crate::CteDef,
+            ordered: &mut Vec<&'static dyn crate::CteDef>,
+            on_path: &mut Vec<std::any::TypeId>,
+        ) {
+            let key = def.type_key();
+            if ordered.iter().any(|kept| kept.type_key() == key) {
+                return;
             }
-            if !already_kept {
-                kept.push(def);
+            assert!(
+                !on_path.contains(&key),
+                "CTE {:?} is part of a dependency cycle; recursive CTEs (a CTE that selects from \
+                 itself) are not supported",
+                def.name(),
+            );
+            on_path.push(key);
+            for dependency in def.cte_dependencies() {
+                visit(dependency, ordered, on_path);
             }
+            on_path.pop();
+            assert!(
+                !ordered.iter().any(|kept| kept.name() == def.name()),
+                "two distinct CTEs are both named {:?}; a query cannot reference colliding CTE \
+                 names (the CTE derive names by struct name, ignoring module/schema)",
+                def.name(),
+            );
+            ordered.push(def);
         }
-        kept
+
+        let mut ordered = Vec::new();
+        let mut on_path = Vec::new();
+        for def in self.direct_ctes::<Conn, B>() {
+            visit(def, &mut ordered, &mut on_path);
+        }
+        ordered
     }
 
     #[doc(hidden)]
@@ -3457,6 +3500,11 @@ where
     fn lower_subquery<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
         Sink: SelectSink<Backend = B>;
+
+    /// Push the CTEs this subquery references directly (through its own sources and nested subqueries)
+    /// onto `ctes`. Lets the outer query's `WITH` collector see CTEs reached only via a subquery in a
+    /// predicate or projection (e.g. `exists(sub.from::<Cte>())`).
+    fn collect_ctes(&self, ctes: &mut Vec<&'static dyn crate::CteDef>);
 }
 
 impl<'conn, 'scope, Conn, Base, Shape, Projection> Subquery
@@ -3507,6 +3555,572 @@ where
         Sink: SelectSink<Backend = B>,
     {
         self.selected.lower_into::<Conn, Sink>(sink)
+    }
+
+    fn collect_ctes(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        ctes.extend(self.selected.direct_ctes::<Conn, B>());
+    }
+}
+
+/// A no-op [`SelectSink`]/AST visitor whose only job is to find CTEs reached through **subqueries**
+/// embedded in a query's predicates (`WHERE`/`HAVING`/`JOIN ON`), grouping/ordering expressions, or
+/// projection — positions the `FROM`/`JOIN` source-chain walk ([`SourceSpec::collect_ctes`]) never
+/// visits. It is driven by the normal [`lower_into`](Selected::lower_into) traversal: every clause is
+/// pushed/visited as usual, but instead of emitting SQL it recurses into each embedded subquery
+/// ([`RenderSubquery::collect_ctes`]) and ignores everything else. Sources are *not* collected here
+/// (the chain walk already does that), so there is no double counting.
+struct SubqueryCteSink<'a, B> {
+    ctes: &'a mut Vec<&'static dyn crate::CteDef>,
+    _backend: PhantomData<B>,
+}
+
+impl<'a, B> SubqueryCteSink<'a, B> {
+    fn new(ctes: &'a mut Vec<&'static dyn crate::CteDef>) -> Self {
+        Self {
+            ctes,
+            _backend: PhantomData,
+        }
+    }
+}
+
+impl<B> SelectSink for SubqueryCteSink<'_, B>
+where
+    B: Backend,
+{
+    type Error = std::convert::Infallible;
+    type Backend = B;
+
+    fn push_projection<Shape, P>(&mut self, projection: P) -> Result<(), Self::Error>
+    where
+        Shape: ProjectionShape,
+        P: RenderProjectable<B>,
+    {
+        projection.visit_projection(self)
+    }
+
+    // Sources are collected by the source-chain walk, not here.
+    fn push_table_source<S>(&mut self, _alias: SourceAlias) -> Result<(), Self::Error>
+    where
+        S: TableProjection,
+    {
+        Ok(())
+    }
+
+    fn push_inner_join<S, P, Ast>(
+        &mut self,
+        _alias: SourceAlias,
+        on: Predicate<'_, P, Ast>,
+    ) -> Result<(), Self::Error>
+    where
+        S: TableProjection,
+        P: PredicateKind,
+        Ast: crate::RenderPredicateAst<B>,
+    {
+        on.visit(self)
+    }
+
+    fn push_left_join<S, P, Ast>(
+        &mut self,
+        _alias: SourceAlias,
+        on: Predicate<'_, P, Ast>,
+    ) -> Result<(), Self::Error>
+    where
+        S: TableProjection,
+        P: PredicateKind,
+        Ast: crate::RenderPredicateAst<B>,
+    {
+        on.visit(self)
+    }
+
+    fn push_right_join<S, P, Ast>(
+        &mut self,
+        _alias: SourceAlias,
+        on: Predicate<'_, P, Ast>,
+    ) -> Result<(), Self::Error>
+    where
+        S: TableProjection,
+        P: PredicateKind,
+        Ast: crate::RenderPredicateAst<B>,
+    {
+        on.visit(self)
+    }
+
+    fn push_full_join<S, P, Ast>(
+        &mut self,
+        _alias: SourceAlias,
+        on: Predicate<'_, P, Ast>,
+    ) -> Result<(), Self::Error>
+    where
+        S: TableProjection,
+        P: PredicateKind,
+        Ast: crate::RenderPredicateAst<B>,
+    {
+        on.visit(self)
+    }
+
+    fn push_cross_join<S>(&mut self, _alias: SourceAlias) -> Result<(), Self::Error>
+    where
+        S: TableProjection,
+    {
+        Ok(())
+    }
+
+    fn push_filter<P, Ast>(&mut self, predicate: Predicate<'_, P, Ast>) -> Result<(), Self::Error>
+    where
+        P: PredicateKind,
+        Ast: crate::RenderPredicateAst<B>,
+    {
+        predicate.visit(self)
+    }
+
+    fn push_group<K, Ast>(&mut self, key: &Expr<'_, K, Ast>) -> Result<(), Self::Error>
+    where
+        K: ExprKind,
+        Ast: RenderAst<B>,
+    {
+        key.visit(self)
+    }
+
+    fn push_having<P, Ast>(&mut self, predicate: Predicate<'_, P, Ast>) -> Result<(), Self::Error>
+    where
+        P: PredicateKind,
+        Ast: crate::RenderPredicateAst<B>,
+    {
+        predicate.visit(self)
+    }
+
+    fn push_order<K, Ast>(&mut self, order: Order<'_, K, Ast>) -> Result<(), Self::Error>
+    where
+        K: ExprKind,
+        Ast: RenderAst<B>,
+    {
+        order.visit_expr(self)
+    }
+
+    fn set_limit(&mut self, _rows: usize) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn set_offset(&mut self, _rows: usize) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+impl<B> crate::ProjectionVisitor for SubqueryCteSink<'_, B>
+where
+    B: Backend,
+{
+    type Error = std::convert::Infallible;
+    type Backend = B;
+
+    fn visit_expr<K, Ast>(
+        &mut self,
+        expr: &Expr<'_, K, Ast>,
+        _alias: std::borrow::Cow<'static, str>,
+    ) -> Result<(), Self::Error>
+    where
+        K: ExprKind,
+        Ast: RenderAst<B>,
+    {
+        expr.visit(self)
+    }
+
+    fn visit_column<K>(
+        &mut self,
+        _column: ColumnRef<'_, K>,
+        _alias: std::borrow::Cow<'static, str>,
+    ) -> Result<(), Self::Error>
+    where
+        K: ExprKind,
+    {
+        Ok(())
+    }
+}
+
+// Expression traversal: recurse into every operand (any of which may contain a subquery), collect at
+// each subquery, and ignore leaves.
+impl<B> crate::ExprVisitor for SubqueryCteSink<'_, B>
+where
+    B: Backend,
+{
+    type Error = std::convert::Infallible;
+    type Backend = B;
+
+    fn visit_column(&mut self, _alias: SourceAlias, _column: &str) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn visit_literal<T>(&mut self, _value: &T) -> Result<(), Self::Error>
+    where
+        T: crate::Encode<Self::Backend>,
+    {
+        Ok(())
+    }
+
+    fn visit_param(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn visit_binary<L, R>(
+        &mut self,
+        _op: crate::ArithmeticOp,
+        left: L,
+        right: R,
+    ) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        left(self)?;
+        right(self)
+    }
+
+    fn visit_nullif<L, R>(
+        &mut self,
+        left: L,
+        _left_needs_cast: bool,
+        right: R,
+        _right_needs_cast: bool,
+        _result: Option<&crate::SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        left(self)?;
+        right(self)
+    }
+
+    fn visit_coalesce<Args>(
+        &mut self,
+        args: &Args,
+        _all_args_need_cast: bool,
+        _result: Option<&crate::SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        Args: crate::RenderCoalesceArgs<Self::Backend>,
+    {
+        args.render(self, None, true)
+    }
+
+    fn visit_coalesce_separator(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn visit_simple_case<Operand, Arms, Else>(
+        &mut self,
+        operand: Operand,
+        _operand_needs_cast: bool,
+        _cmp: Option<&crate::SqlType>,
+        arms: &Arms,
+        else_: Option<&Else>,
+        _result: Option<&crate::SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        Operand: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Arms: crate::RenderSimpleCaseArms<Self::Backend>,
+        Else: RenderAst<Self::Backend>,
+    {
+        operand(self)?;
+        arms.render(self, None)?;
+        if let Some(else_) = else_ {
+            else_.visit(self)?;
+        }
+        Ok(())
+    }
+
+    fn visit_unary_fn<O>(
+        &mut self,
+        _func: crate::UnaryStringFunc,
+        operand: O,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        operand(self)
+    }
+
+    fn visit_concat<L, R>(&mut self, left: L, right: R) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        left(self)?;
+        right(self)
+    }
+
+    fn visit_substring<S, Start, Len>(
+        &mut self,
+        string: S,
+        start: Start,
+        len: Len,
+    ) -> Result<(), Self::Error>
+    where
+        S: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Start: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Len: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        string(self)?;
+        start(self)?;
+        len(self)
+    }
+
+    fn visit_now(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn visit_extract<O>(
+        &mut self,
+        _field: crate::DateField,
+        operand: O,
+        _cast: &crate::SqlType,
+        _timezone: Option<&str>,
+        _operand_cast: Option<&crate::SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        operand(self)
+    }
+
+    fn visit_date_trunc<O>(
+        &mut self,
+        _unit: crate::DateField,
+        operand: O,
+        _timezone: Option<&str>,
+        _operand_cast: Option<&crate::SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        operand(self)
+    }
+
+    fn visit_extract_second<O>(
+        &mut self,
+        operand: O,
+        _cast: &crate::SqlType,
+        _operand_cast: Option<&crate::SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        operand(self)
+    }
+
+    fn visit_aggregate<O>(
+        &mut self,
+        _func: crate::AggregateFunc,
+        _distinct: bool,
+        _cast: Option<&crate::SqlType>,
+        operand: O,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        operand(self)
+    }
+
+    fn visit_scalar_subquery<Sub>(&mut self, subquery: &Sub) -> Result<(), Self::Error>
+    where
+        Sub: RenderSubquery<Self::Backend>,
+    {
+        subquery.collect_ctes(self.ctes);
+        Ok(())
+    }
+
+    fn visit_window<Operand, Partitions, Orders>(
+        &mut self,
+        _func: crate::WindowFunc,
+        _cast: Option<&crate::SqlType>,
+        operand: Operand,
+        _has_partitions: bool,
+        partitions: Partitions,
+        _has_orders: bool,
+        orders: Orders,
+    ) -> Result<(), Self::Error>
+    where
+        Operand: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Partitions: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Orders: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        operand(self)?;
+        partitions(self)?;
+        orders(self)
+    }
+
+    fn visit_window_separator(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn visit_window_order_direction(
+        &mut self,
+        _direction: crate::OrderDirection,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn visit_case<Arms, Else>(
+        &mut self,
+        arms: &Arms,
+        else_: Option<&Else>,
+        _result: Option<&crate::SqlType>,
+    ) -> Result<(), Self::Error>
+    where
+        Arms: crate::RenderCaseArms<Self::Backend>,
+        Else: RenderAst<Self::Backend>,
+    {
+        arms.render(self, None)?;
+        if let Some(else_) = else_ {
+            else_.visit(self)?;
+        }
+        Ok(())
+    }
+
+    fn visit_case_when(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn visit_case_then(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn visit_case_value_open(&mut self, _cast: Option<&crate::SqlType>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn visit_case_value_close(
+        &mut self,
+        _cast: Option<&crate::SqlType>,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+// Predicate traversal: recurse into operands and collect at `IN (subquery)` / `EXISTS (subquery)`.
+impl<B> crate::PredicateAstVisitor for SubqueryCteSink<'_, B>
+where
+    B: Backend,
+{
+    fn visit_compare<L, R>(
+        &mut self,
+        _op: crate::CompareOp,
+        left: L,
+        right: R,
+    ) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        left(self)?;
+        right(self)
+    }
+
+    fn visit_and<L, R>(&mut self, left: L, right: R) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        left(self)?;
+        right(self)
+    }
+
+    fn visit_or<L, R>(&mut self, left: L, right: R) -> Result<(), Self::Error>
+    where
+        L: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        R: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        left(self)?;
+        right(self)
+    }
+
+    fn visit_not<P>(&mut self, predicate: P) -> Result<(), Self::Error>
+    where
+        P: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        predicate(self)
+    }
+
+    fn visit_is_null<O>(&mut self, _negated: bool, operand: O) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        operand(self)
+    }
+
+    fn visit_like<O, P>(
+        &mut self,
+        _case_insensitive: bool,
+        _negated: bool,
+        operand: O,
+        pattern: P,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        P: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        operand(self)?;
+        pattern(self)
+    }
+
+    fn visit_in<O, T>(
+        &mut self,
+        _negated: bool,
+        operand: O,
+        _values: &[T],
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        T: crate::Encode<Self::Backend>,
+    {
+        operand(self)
+    }
+
+    fn visit_between<O, Lo, Hi>(
+        &mut self,
+        _negated: bool,
+        operand: O,
+        lo: Lo,
+        hi: Hi,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Lo: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Hi: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        operand(self)?;
+        lo(self)?;
+        hi(self)
+    }
+
+    fn visit_bool_test<O>(&mut self, _negated: bool, operand: O) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        operand(self)
+    }
+
+    fn visit_in_subquery<O, Sub>(
+        &mut self,
+        _negated: bool,
+        operand: O,
+        subquery: &Sub,
+    ) -> Result<(), Self::Error>
+    where
+        O: FnOnce(&mut Self) -> Result<(), Self::Error>,
+        Sub: RenderSubquery<Self::Backend>,
+    {
+        operand(self)?;
+        subquery.collect_ctes(self.ctes);
+        Ok(())
+    }
+
+    fn visit_exists<Sub>(&mut self, _negated: bool, subquery: &Sub) -> Result<(), Self::Error>
+    where
+        Sub: RenderSubquery<Self::Backend>,
+    {
+        subquery.collect_ctes(self.ctes);
+        Ok(())
     }
 }
 

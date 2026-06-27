@@ -59,6 +59,38 @@ impl<'scope, C: ColumnMode> CteDefinition for BigOrder<'scope, C> {
     }
 }
 
+// A nested CTE whose body selects from another CTE (`ActiveUser`).
+#[allow(dead_code)]
+#[derive(CTE)]
+struct TopUser<'scope, C: ColumnMode = ColumnExpr> {
+    id: C::Type<'scope, i32>,
+    name: C::Type<'scope, String>,
+}
+
+impl<'scope, C: ColumnMode> CteDefinition for TopUser<'scope, C> {
+    fn definition(db: &'static ModelConn) -> impl ViewSelect<Row = <Self as SchemaCte>::Row> {
+        db.from::<ActiveUser>()
+            .where_(|active| active.id.greater_than(0))
+            .project(|(active,)| (active.id, active.name))
+    }
+}
+
+#[test]
+fn postgres_nested_cte_pulls_dependency_in_first() {
+    let query = Postgres
+        .from::<TopUser>()
+        .select(|(top,)| (top.id, top.name));
+
+    assert_eq!(
+        query.to_sql(),
+        "WITH \"active_users\" (\"id\", \"name\") AS (\
+SELECT q0_0.\"id\", q0_0.\"name\" FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"active\" = TRUE)), \
+\"top_users\" (\"id\", \"name\") AS (\
+SELECT q0_0.\"id\", q0_0.\"name\" FROM \"active_users\" AS q0_0 WHERE (q0_0.\"id\" > 0)) \
+SELECT q0_0.\"id\" AS \"t0_id\", q0_0.\"name\" AS \"t1_name\" FROM \"top_users\" AS q0_0"
+    );
+}
+
 #[test]
 fn postgres_single_cte_in_from() {
     let query = Postgres

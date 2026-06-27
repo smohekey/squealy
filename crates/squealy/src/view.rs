@@ -1091,6 +1091,12 @@ pub trait ViewSelect {
 
     /// Lower the query body into the neutral model.
     fn lower(&self) -> ViewQueryModel;
+
+    /// The CTEs this body references *directly* through its own `FROM`/`JOIN` sources. A CTE body that
+    /// references another CTE reports it here, which is how the `WITH` collector discovers a CTE's
+    /// transitive dependencies (see [`CteDef::cte_dependencies`](crate::CteDef::cte_dependencies)). A
+    /// plain view body (no CTE sources) returns an empty list.
+    fn cte_dependencies(&self) -> Vec<&'static dyn crate::CteDef>;
 }
 
 impl<'scope, Base, Shape, Projection> ViewSelect for Selected<'scope, Base, Shape, Projection>
@@ -1107,6 +1113,10 @@ where
 
     fn lower(&self) -> ViewQueryModel {
         lower_view(self)
+    }
+
+    fn cte_dependencies(&self) -> Vec<&'static dyn crate::CteDef> {
+        self.direct_ctes::<ModelConn, ModelBackend>()
     }
 }
 
