@@ -3355,17 +3355,11 @@ where
         let mut ctes = Vec::new();
         self.base.collect_ctes_into(&mut ctes);
 
-        // Identity of a `CteDef` is the address of its (zero-sized) `'static` marker — a thin data
-        // pointer, so this avoids any trait-object vtable-address comparison.
-        fn identity(def: &'static dyn crate::CteDef) -> *const () {
-            def as *const dyn crate::CteDef as *const ()
-        }
-
         let mut kept: Vec<&'static dyn crate::CteDef> = Vec::new();
         for def in ctes {
             let mut already_kept = false;
             for existing in &kept {
-                if std::ptr::eq(identity(*existing), identity(def)) {
+                if existing.type_key() == def.type_key() {
                     already_kept = true;
                     break;
                 }

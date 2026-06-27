@@ -43,6 +43,10 @@ fn expand(cte: &TableStruct) -> TokenStream {
                 #cte_name
             }
 
+            fn type_key(&self) -> ::std::any::TypeId {
+                ::std::any::TypeId::of::<#cte_def_ty>()
+            }
+
             fn columns(&self) -> ::std::vec::Vec<::squealy::ViewColumnModel> {
                 <#ident <'static, ::squealy::ColumnExpr> as ::squealy::SchemaCte>::cte_columns()
             }

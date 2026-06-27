@@ -42,6 +42,12 @@ pub trait CteDefinition: SchemaCte {
 pub trait CteDef: Sync {
     fn name(&self) -> &'static str;
 
+    /// A stable per-CTE-type identity, used to de-duplicate a CTE referenced from several sources into
+    /// one `WITH` entry and to distinguish that from a genuine name collision between two *distinct*
+    /// CTEs. A [`TypeId`](std::any::TypeId) rather than the marker's address: the markers are
+    /// zero-sized, and distinct ZST statics are *not* guaranteed distinct addresses.
+    fn type_key(&self) -> std::any::TypeId;
+
     /// The CTE's declared output columns, rendered as the explicit `WITH name (col, …) AS (…)` column
     /// list. Naming the columns explicitly decouples the body's projection aliases from the names the
     /// referencing query uses, so a tuple-projected body still exposes the declared column names.
@@ -54,10 +60,14 @@ pub trait CteDef: Sync {
 /// alone. Mirrors the `ViewDef` shim for views.
 impl<T> CteDef for T
 where
-    T: CteDefinition + Sync,
+    T: CteDefinition + Sync + 'static,
 {
     fn name(&self) -> &'static str {
         <T as SchemaCte>::cte_name()
+    }
+
+    fn type_key(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<T>()
     }
 
     fn columns(&self) -> Vec<ViewColumnModel> {
