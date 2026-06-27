@@ -8,9 +8,9 @@ use futures_core::Stream;
 use crate::{
     Backend, ColumnExprAst, ColumnRef, Connection, Decode, Expr, ExprAst, ExprKind, HCons, HList,
     HNil, InsertableTable, IntoNullableExprs, Maybe, NoRuntimeParams, Order, ParamExprAst,
-    Predicate, PredicateKind, Projectable, ProjectionShape, PushBack, QueryBuilder, RenderAst,
-    RenderProjectable, RuntimeParam, SourceAlias, SupportsReturning, TableProjection, ToTuple,
-    UpdateableTable,
+    Predicate, PredicateKind, Projectable, ProjectionShape, PushBack, QueryBuilder, QuerySource,
+    RenderAst, RenderProjectable, RuntimeParam, SourceAlias, SupportsReturning, TableProjection,
+    ToTuple, UpdateableTable,
 };
 
 type ErrorOf<Builder> = <<Builder as QueryBuilder>::Backend as Backend>::Error;
@@ -3014,6 +3014,24 @@ pub trait SelectSink {
 #[doc(hidden)]
 pub trait SourceSpec {
     type Params: HList;
+
+    /// Push any CTE definitions this source contributes to the query's `WITH` clause. A table or view
+    /// source contributes none (the default); a CTE source contributes its [`CteDef`]. The collected
+    /// defs are de-duplicated and rendered as the `WITH` prefix before the main `SELECT`.
+    fn collect_ctes(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        let _ = ctes;
+    }
+}
+
+/// Pushes `S`'s [`CteDef`](crate::CteDef) onto the collected `WITH` set when `S` is a CTE. Shared by
+/// every source kind's [`SourceSpec::collect_ctes`].
+fn collect_source_cte<S>(ctes: &mut Vec<&'static dyn crate::CteDef>)
+where
+    S: QuerySource,
+{
+    if let Some(def) = S::cte_def() {
+        ctes.push(def);
+    }
 }
 
 /// Backend-parameterized source rendering (mirror of [`RenderAst`]).
@@ -3029,14 +3047,18 @@ where
 
 impl<S> SourceSpec for RootSource<S>
 where
-    S: TableProjection,
+    S: QuerySource,
 {
     type Params = HNil;
+
+    fn collect_ctes(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        collect_source_cte::<S>(ctes);
+    }
 }
 
 impl<S, B> RenderSourceSpec<B> for RootSource<S>
 where
-    S: TableProjection,
+    S: QuerySource,
     B: Backend,
 {
     fn push_source<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3049,16 +3071,20 @@ where
 
 impl<S, P, PredicateAst> SourceSpec for InnerJoinSource<'_, S, P, PredicateAst>
 where
-    S: TableProjection,
+    S: QuerySource,
     P: PredicateKind,
     PredicateAst: crate::PredicateAst,
 {
     type Params = PredicateAst::Params;
+
+    fn collect_ctes(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        collect_source_cte::<S>(ctes);
+    }
 }
 
 impl<S, P, PredicateAst, B> RenderSourceSpec<B> for InnerJoinSource<'_, S, P, PredicateAst>
 where
-    S: TableProjection,
+    S: QuerySource,
     P: PredicateKind,
     PredicateAst: crate::RenderPredicateAst<B>,
     B: Backend,
@@ -3073,16 +3099,20 @@ where
 
 impl<S, P, PredicateAst> SourceSpec for LeftJoinSource<'_, S, P, PredicateAst>
 where
-    S: TableProjection,
+    S: QuerySource,
     P: PredicateKind,
     PredicateAst: crate::PredicateAst,
 {
     type Params = PredicateAst::Params;
+
+    fn collect_ctes(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        collect_source_cte::<S>(ctes);
+    }
 }
 
 impl<S, P, PredicateAst, B> RenderSourceSpec<B> for LeftJoinSource<'_, S, P, PredicateAst>
 where
-    S: TableProjection,
+    S: QuerySource,
     P: PredicateKind,
     PredicateAst: crate::RenderPredicateAst<B>,
     B: Backend,
@@ -3097,16 +3127,20 @@ where
 
 impl<S, P, PredicateAst> SourceSpec for RightJoinSource<'_, S, P, PredicateAst>
 where
-    S: TableProjection,
+    S: QuerySource,
     P: PredicateKind,
     PredicateAst: crate::PredicateAst,
 {
     type Params = PredicateAst::Params;
+
+    fn collect_ctes(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        collect_source_cte::<S>(ctes);
+    }
 }
 
 impl<S, P, PredicateAst, B> RenderSourceSpec<B> for RightJoinSource<'_, S, P, PredicateAst>
 where
-    S: TableProjection,
+    S: QuerySource,
     P: PredicateKind,
     PredicateAst: crate::RenderPredicateAst<B>,
     B: Backend,
@@ -3121,16 +3155,20 @@ where
 
 impl<S, P, PredicateAst> SourceSpec for FullJoinSource<'_, S, P, PredicateAst>
 where
-    S: TableProjection,
+    S: QuerySource,
     P: PredicateKind,
     PredicateAst: crate::PredicateAst,
 {
     type Params = PredicateAst::Params;
+
+    fn collect_ctes(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        collect_source_cte::<S>(ctes);
+    }
 }
 
 impl<S, P, PredicateAst, B> RenderSourceSpec<B> for FullJoinSource<'_, S, P, PredicateAst>
 where
-    S: TableProjection,
+    S: QuerySource,
     P: PredicateKind,
     PredicateAst: crate::RenderPredicateAst<B>,
     B: Backend,
@@ -3162,14 +3200,18 @@ impl<S> CrossJoinSource<S> {
 
 impl<S> SourceSpec for CrossJoinSource<S>
 where
-    S: TableProjection,
+    S: QuerySource,
 {
     type Params = crate::HNil;
+
+    fn collect_ctes(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        collect_source_cte::<S>(ctes);
+    }
 }
 
 impl<S, B> RenderSourceSpec<B> for CrossJoinSource<S>
 where
-    S: TableProjection,
+    S: QuerySource,
     B: Backend,
 {
     fn push_source<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -3294,6 +3336,45 @@ where
         Base: SelectAst<'conn, 'scope, Conn>,
     {
         self.base.connection()
+    }
+
+    /// The de-duplicated CTE definitions this select references through its `FROM`/`JOIN` sources, in
+    /// first-seen order. The renderer emits these as the `WITH` prefix before the main `SELECT`.
+    ///
+    /// De-duplication is by **definition identity** (each CTE type has a unique `'static` `CteDef`), so
+    /// the same CTE referenced from several sources yields one `WITH` entry. Two *distinct* CTEs that
+    /// derive the **same** bare name (the `CTE` derive names by struct name, ignoring module/schema)
+    /// would both bind that one `WITH` name, silently dropping one body — so that is rejected with a
+    /// panic rather than rendered as wrong SQL.
+    #[doc(hidden)]
+    pub fn collect_ctes<'conn, Conn>(&self) -> Vec<&'static dyn crate::CteDef>
+    where
+        Conn: QueryBuilder + 'conn,
+        Base: SelectAst<'conn, 'scope, Conn>,
+    {
+        let mut ctes = Vec::new();
+        self.base.collect_ctes_into(&mut ctes);
+
+        let mut kept: Vec<&'static dyn crate::CteDef> = Vec::new();
+        for def in ctes {
+            let mut already_kept = false;
+            for existing in &kept {
+                if existing.type_key() == def.type_key() {
+                    already_kept = true;
+                    break;
+                }
+                assert!(
+                    existing.name() != def.name(),
+                    "two distinct CTEs are both named {:?}; a query cannot reference colliding CTE \
+                     names (the CTE derive names by struct name, ignoring module/schema)",
+                    def.name(),
+                );
+            }
+            if !already_kept {
+                kept.push(def);
+            }
+        }
+        kept
     }
 
     #[doc(hidden)]
@@ -3466,7 +3547,7 @@ where
         &self,
     ) -> From<'conn, 'scope, Conn, HCons<<S as ProjectionShape>::Exprs<'scope>, HNil>, RootSource<S>>
     where
-        S: TableProjection,
+        S: QuerySource,
     {
         let depth = self.next_depth.get();
         self.next_depth.set(depth + 1);
@@ -3542,6 +3623,11 @@ where
     fn connection(&self) -> &'conn Conn;
 
     fn exprs(&self) -> Self::Exprs;
+
+    /// Walk this chain's `FROM`/`JOIN` sources, pushing each CTE source's [`CteDef`] so the renderer
+    /// can emit the `WITH` prefix. Backend-independent (a `CteDef` is collected from the source type
+    /// alone); wrapper nodes forward to their base, source nodes add their own source's contribution.
+    fn collect_ctes_into(&self, ctes: &mut Vec<&'static dyn crate::CteDef>);
 }
 
 /// Backend-parameterized select lowering (mirror of [`RenderAst`]).
@@ -3624,6 +3710,8 @@ where
     fn exprs(&self) -> Self::Exprs {
         HNil
     }
+
+    fn collect_ctes_into(&self, _ctes: &mut Vec<&'static dyn crate::CteDef>) {}
 }
 
 impl<'conn, 'scope, Conn, B> RenderSelectAst<'conn, 'scope, Conn, B> for NoSources<'conn, Conn>
@@ -3692,7 +3780,7 @@ impl<'conn, 'scope, Conn, S>
     From<'conn, 'scope, Conn, HCons<<S as ProjectionShape>::Exprs<'scope>, HNil>, RootSource<S>>
 where
     Conn: QueryBuilder + 'conn,
-    S: TableProjection,
+    S: QuerySource,
 {
     pub(crate) fn new(connection: &'conn Conn, depth: usize) -> Self {
         let alias = SourceAlias::new(depth, 0);
@@ -3759,6 +3847,10 @@ where
 
     fn exprs(&self) -> Self::Exprs {
         self.exprs.clone()
+    }
+
+    fn collect_ctes_into(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        self.source.collect_ctes(ctes);
     }
 }
 
@@ -4353,6 +4445,10 @@ where
     fn exprs(&self) -> Self::Exprs {
         self.base.exprs()
     }
+
+    fn collect_ctes_into(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        self.base.collect_ctes_into(ctes);
+    }
 }
 
 impl<'conn, 'scope, Conn, Base, P, PredicateAst, B> RenderSelectAst<'conn, 'scope, Conn, B>
@@ -4469,6 +4565,10 @@ where
     fn exprs(&self) -> Self::Exprs {
         self.base.exprs()
     }
+
+    fn collect_ctes_into(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        self.base.collect_ctes_into(ctes);
+    }
 }
 
 impl<'conn, 'scope, Conn, Base, K, Ast, B> RenderSelectAst<'conn, 'scope, Conn, B>
@@ -4582,6 +4682,10 @@ where
 
     fn exprs(&self) -> Self::Exprs {
         self.base.exprs()
+    }
+
+    fn collect_ctes_into(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        self.base.collect_ctes_into(ctes);
     }
 }
 
@@ -4703,6 +4807,10 @@ where
     fn exprs(&self) -> Self::Exprs {
         self.base.exprs()
     }
+
+    fn collect_ctes_into(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        self.base.collect_ctes_into(ctes);
+    }
 }
 
 impl<'conn, 'scope, Conn, Base, P, PredicateAst, B> RenderSelectAst<'conn, 'scope, Conn, B>
@@ -4801,6 +4909,10 @@ where
     fn exprs(&self) -> Self::Exprs {
         self.base.exprs()
     }
+
+    fn collect_ctes_into(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        self.base.collect_ctes_into(ctes);
+    }
 }
 
 impl<'conn, 'scope, Conn, Base, B> RenderSelectAst<'conn, 'scope, Conn, B> for Limited<Base>
@@ -4886,6 +4998,10 @@ where
     fn exprs(&self) -> Self::Exprs {
         self.base.exprs()
     }
+
+    fn collect_ctes_into(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        self.base.collect_ctes_into(ctes);
+    }
 }
 
 impl<'conn, 'scope, Conn, Base, B> RenderSelectAst<'conn, 'scope, Conn, B> for Offset<Base>
@@ -4970,6 +5086,10 @@ where
 
     fn exprs(&self) -> Self::Exprs {
         self.base.exprs()
+    }
+
+    fn collect_ctes_into(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        self.base.collect_ctes_into(ctes);
     }
 }
 
@@ -5075,6 +5195,11 @@ where
 
     fn exprs(&self) -> Self::Exprs {
         self.base.exprs().push_back(self.expr.clone())
+    }
+
+    fn collect_ctes_into(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        self.base.collect_ctes_into(ctes);
+        self.source.collect_ctes(ctes);
     }
 }
 
@@ -5192,6 +5317,11 @@ where
 
     fn exprs(&self) -> Self::Exprs {
         self.base.exprs().push_back(self.expr.clone())
+    }
+
+    fn collect_ctes_into(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        self.base.collect_ctes_into(ctes);
+        self.source.collect_ctes(ctes);
     }
 }
 
@@ -5315,6 +5445,11 @@ where
             .exprs()
             .into_nullable_exprs()
             .push_back(self.expr.clone())
+    }
+
+    fn collect_ctes_into(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        self.base.collect_ctes_into(ctes);
+        self.source.collect_ctes(ctes);
     }
 }
 
@@ -5517,7 +5652,7 @@ where
 
     fn join<S>(self) -> JoinTarget<Self, S>
     where
-        S: TableProjection,
+        S: QuerySource,
     {
         JoinTarget {
             base: self,
@@ -5527,7 +5662,7 @@ where
 
     fn left_join<S>(self) -> LeftJoinTarget<Self, S>
     where
-        S: TableProjection,
+        S: QuerySource,
     {
         LeftJoinTarget {
             base: self,
@@ -5540,7 +5675,7 @@ where
     /// support it.
     fn right_join<S>(self) -> RightJoinTarget<Self, S>
     where
-        S: TableProjection,
+        S: QuerySource,
     {
         RightJoinTarget {
             base: self,
@@ -5553,7 +5688,7 @@ where
     /// model backend); MySQL has no `FULL JOIN`, so this does not compile against it.
     fn full_join<S>(self) -> FullJoinTarget<Self, S>
     where
-        S: TableProjection,
+        S: QuerySource,
         Conn::Backend: crate::SupportsFullJoin,
     {
         FullJoinTarget {
@@ -5568,7 +5703,7 @@ where
     /// — returns the joined query directly (no `.on()` step).
     fn cross_join<S>(self) -> Join<Self, <S as ProjectionShape>::Exprs<'scope>, CrossJoinSource<S>>
     where
-        S: TableProjection,
+        S: QuerySource,
     {
         let alias = SourceAlias::new(self.depth(), Self::Exprs::LEN);
         let right = S::exprs(alias);
@@ -5676,7 +5811,7 @@ where
 
 impl<Base, S> JoinTarget<Base, S>
 where
-    S: TableProjection,
+    S: QuerySource,
 {
     pub fn on<'conn, 'scope, Conn, P, PredicateAst>(
         self,
@@ -5709,7 +5844,7 @@ where
 
 impl<Base, S> LeftJoinTarget<Base, S>
 where
-    S: TableProjection,
+    S: QuerySource,
     Maybe<S>: ProjectionShape,
 {
     pub fn on<'conn, 'scope, Conn, P, PredicateAst>(
@@ -5743,7 +5878,7 @@ where
 
 impl<Base, S> RightJoinTarget<Base, S>
 where
-    S: TableProjection,
+    S: QuerySource,
 {
     pub fn on<'conn, 'scope, Conn, P, PredicateAst>(
         self,
@@ -5779,7 +5914,7 @@ where
 
 impl<Base, S> FullJoinTarget<Base, S>
 where
-    S: TableProjection,
+    S: QuerySource,
     Maybe<S>: ProjectionShape,
 {
     pub fn on<'conn, 'scope, Conn, P, PredicateAst>(
@@ -5828,7 +5963,7 @@ impl<'conn, 'scope, Conn, S> DeleteSourceAst<'conn, 'scope, Conn>
     for From<'conn, 'scope, Conn, HCons<<S as ProjectionShape>::Exprs<'scope>, HNil>, RootSource<S>>
 where
     Conn: QueryBuilder + 'conn,
-    S: TableProjection,
+    S: QuerySource,
 {
     type Table = S;
     type Filters = HNil;
@@ -6021,7 +6156,7 @@ pub(crate) fn build_from_builder<'conn, Conn, S>(
 ) -> From<'conn, 'conn, Conn, HCons<<S as ProjectionShape>::Exprs<'conn>, HNil>, RootSource<S>>
 where
     Conn: QueryBuilder + 'conn,
-    S: TableProjection,
+    S: QuerySource,
 {
     with_next_query_depth(|current_depth| From::new(connection, current_depth))
 }

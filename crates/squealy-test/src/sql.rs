@@ -3,14 +3,14 @@ use std::io::{self, Write};
 
 use squealy::{
     AggregateFunc, ArithmeticOp, AssignmentValueVisitor, AssignmentVisitor, Column, ColumnDefault,
-    ColumnRef, ColumnType, CompareOp, DateField, Encode, Expr, ExprKind, ExprVisitor, InsertRow,
-    InsertRowVisitor, InsertableTable, Order, OrderDirection, Predicate, PredicateAstVisitor,
-    PredicateKind, PredicateVisitor, ProjectionShape, ProjectionVisitor, QueryBuilder,
-    RenderAssignment, RenderAst, RenderCaseArms, RenderCoalesceArgs, RenderInsertAssignments,
-    RenderInsertRows, RenderPredicateAst, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
-    RenderSimpleCaseArms, RenderSubquery, RenderUpdateAssignments, SchemaTable, SelectSink,
-    Selected, SourceAlias, SqlType, Table, TableProjection, UnaryStringFunc, UpdateableTable,
-    WindowFunc,
+    ColumnRef, ColumnType, CompareOp, CteDef, DateField, Dialect, Encode, Expr, ExprKind,
+    ExprVisitor, InsertRow, InsertRowVisitor, InsertableTable, Order, OrderDirection, OrderNulls,
+    Predicate, PredicateAstVisitor, PredicateKind, PredicateVisitor, ProjectionShape,
+    ProjectionVisitor, QueryBuilder, RenderAssignment, RenderAst, RenderCaseArms,
+    RenderCoalesceArgs, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst,
+    RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderSimpleCaseArms, RenderSubquery,
+    RenderUpdateAssignments, SchemaTable, SelectSink, Selected, SourceAlias, SqlType, Table,
+    TableProjection, UnaryStringFunc, UpdateableTable, WindowFunc,
 };
 
 use crate::query::{TestParam, TestParamWriter};
@@ -333,6 +333,58 @@ where
     }
 }
 
+/// The test backend's SQL dialect: bare (unquoted) identifiers and `?` placeholders, matching the
+/// hand-rolled rendering in [`TestSelectSink`]. Only used to render CTE bodies (which go through the
+/// shared [`squealy::view_render`]); the main query is rendered directly by the sink.
+struct TestDialect;
+
+impl Dialect for TestDialect {
+    fn write_placeholder(&self, _index: usize, writer: &mut dyn Write) -> io::Result<()> {
+        writer.write_all(b"?")
+    }
+
+    fn write_quoted_ident(&self, ident: &str, writer: &mut dyn Write) -> io::Result<()> {
+        writer.write_all(ident.as_bytes())
+    }
+
+    fn write_cast_type(&self, ty: &SqlType, writer: &mut dyn Write) -> io::Result<()> {
+        write_test_cast_type(ty, writer)
+    }
+
+    fn write_order_nulls(&self, nulls: OrderNulls, writer: &mut dyn Write) -> io::Result<()> {
+        writer.write_all(match nulls {
+            OrderNulls::First => b" NULLS FIRST",
+            OrderNulls::Last => b" NULLS LAST",
+        })
+    }
+}
+
+/// Writes a query's `WITH` prefix — `WITH n1 AS (<body>), n2 AS (<body>) ` — when the select
+/// references any CTEs. The defs are de-duplicated/ordered by `Selected::collect_ctes`; each body is
+/// parameter-free, so it adds no bind params and is rendered via the shared view renderer.
+fn write_cte_prefix(ctes: &[&'static dyn CteDef], writer: &mut dyn Write) -> io::Result<()> {
+    if ctes.is_empty() {
+        return Ok(());
+    }
+    writer.write_all(b"WITH ")?;
+    for (index, def) in ctes.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        write!(writer, "{} (", def.name())?;
+        for (column_index, column) in def.columns().iter().enumerate() {
+            if column_index > 0 {
+                writer.write_all(b", ")?;
+            }
+            writer.write_all(column.name.as_bytes())?;
+        }
+        writer.write_all(b") AS (")?;
+        squealy::view_render::render_cte_body(&def.body_model(), &TestDialect, writer)?;
+        writer.write_all(b")")?;
+    }
+    writer.write_all(b" ")
+}
+
 pub(crate) fn write_selected_into<'conn, 'scope, Conn, Base, Shape, Projection, Writer>(
     selected: &Selected<'scope, Base, Shape, Projection>,
     writer: &mut Writer,
@@ -345,6 +397,7 @@ where
     Writer: Write,
 {
     let mut writer = SqlOnly(writer);
+    write_cte_prefix(&selected.collect_ctes::<Conn>(), &mut writer)?;
     let mut sink = TestSelectSink::new(&mut writer)?;
     selected.lower_into::<Conn, _>(&mut sink)?;
     sink.finish()
@@ -361,6 +414,9 @@ where
     Projection: RenderProjectable<crate::TestBackend>,
 {
     let mut writer = ParamCollector::new(params);
+    // CTE bodies are parameter-free, so the `WITH` prefix contributes no bind params (the collector
+    // ignores the emitted bytes); keeping it uniform with the SQL-text path.
+    write_cte_prefix(&selected.collect_ctes::<Conn>(), &mut writer).unwrap();
     let mut select_sink = TestSelectSink::new(&mut writer).unwrap();
     selected.lower_into::<Conn, _>(&mut select_sink).unwrap();
     select_sink.finish().unwrap();
@@ -483,6 +539,52 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
 
 fn write_column_type(column: &dyn Column, writer: &mut impl Write) -> io::Result<()> {
     write_test_column_type(column.column_type(), writer)
+}
+
+/// Writes a `CAST(… AS <type>)` target type for the test dialect, mirroring the DDL names in
+/// [`write_test_column_type`]. Used only when a CTE body contains a cast (e.g. float division).
+fn write_test_cast_type(ty: &SqlType, writer: &mut dyn Write) -> io::Result<()> {
+    let name = match ty {
+        SqlType::Raw(db_type) => return writer.write_all(db_type.as_bytes()),
+        SqlType::Bool => "boolean",
+        SqlType::I8 | SqlType::I16 => "smallint",
+        SqlType::I32 => "integer",
+        SqlType::I64 | SqlType::Isize => "bigint",
+        SqlType::I128 => "numeric",
+        SqlType::U8 => "smallint",
+        SqlType::U16 => "integer",
+        SqlType::U32 | SqlType::Usize => "bigint",
+        SqlType::U64 | SqlType::U128 => "numeric",
+        SqlType::F32 => "real",
+        SqlType::F64 => "double precision",
+        SqlType::String | SqlType::Text => "text",
+        SqlType::Varchar(length) => return write!(writer, "varchar({length})"),
+        SqlType::Char(length) => return write!(writer, "char({length})"),
+        SqlType::Decimal { precision, scale } => {
+            return write!(writer, "numeric({precision},{scale})");
+        }
+        SqlType::Date => "date",
+        SqlType::Time { tz } => {
+            if *tz {
+                "time with time zone"
+            } else {
+                "time"
+            }
+        }
+        SqlType::Timestamp { tz } => {
+            if *tz {
+                "timestamp with time zone"
+            } else {
+                "timestamp"
+            }
+        }
+        SqlType::Uuid => "uuid",
+        SqlType::Json => "json",
+        SqlType::Jsonb => "jsonb",
+        SqlType::Bytes => "bytea",
+        SqlType::FixedBytes(length) => return write!(writer, "binary({length})"),
+    };
+    writer.write_all(name.as_bytes())
 }
 
 fn write_test_column_type(column_type: ColumnType, writer: &mut impl Write) -> io::Result<()> {

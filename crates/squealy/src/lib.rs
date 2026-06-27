@@ -450,6 +450,7 @@ mod projection;
 mod query;
 // The shared SQL query renderer. Public so backend crates can call its entry points, but hidden from
 // the documented API — it is an implementation detail backends drive via their `Dialect`.
+mod cte;
 #[doc(hidden)]
 pub mod render;
 mod schema;
@@ -468,6 +469,7 @@ pub use column::{
     ColumnNullableValue, ColumnType, ColumnValue, HasColumnType,
 };
 pub use connection::{Connection, ConnectionWithTransaction, QueryBuilder};
+pub use cte::{CteDef, CteDefinition, SchemaCte, cte_definition_model};
 pub use database::Database;
 pub use dialect::Dialect;
 pub use expr::{
@@ -522,7 +524,8 @@ pub use model::{
 };
 pub use plan::{DatabasePlan, DatabasePlanStep, TablePlanStep};
 pub use projection::{
-    Maybe, Projectable, ProjectionShape, ProjectionVisitor, RenderProjectable, TableProjection,
+    Maybe, Projectable, ProjectionShape, ProjectionVisitor, QuerySource, RenderProjectable,
+    TableProjection,
 };
 pub use query::{
     AllRows, AssignmentNode, AssignmentValueNode, AssignmentValueVisitor, AssignmentVisitor,
@@ -548,7 +551,7 @@ pub use query::{
     Upsert, Where, default,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
-pub use squealy_macros::{ColumnType, Database, Schema, Table, View};
+pub use squealy_macros::{CTE, ColumnType, Database, Schema, Table, View};
 pub use table::{
     InsertableTable, SchemaTable, Table, TablePrimaryKey, TableUnique, UpdateableTable,
     WriteableTable,
@@ -556,4 +559,4 @@ pub use table::{
 pub use view::{ModelBackend, ModelConn, SchemaView, ViewDefinition, ViewSelect};
 #[doc(hidden)]
 pub use view::{lower_view, view_definition_model};
-pub use view_render::{ordered_views, render_create_view, render_drop_view};
+pub use view_render::{ordered_views, render_create_view, render_cte_body, render_drop_view};

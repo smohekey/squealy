@@ -59,6 +59,19 @@ pub fn render_create_view(
     render_select(&view.query, view.columns.is_empty(), dialect, writer)
 }
 
+/// Renders a CTE body `SELECT …` for use inside `WITH "name" ("cols"…) AS ( … )`. The projection is
+/// *not* aliased: the enclosing `WITH` column list (rendered from the CTE's declared columns) names
+/// the outputs, exactly like a column-listed `CREATE VIEW (cols) AS …`. This decouples the body's
+/// projection aliases from the names the referencing query uses. CTE bodies are parameter-free
+/// (literals only), like view bodies.
+pub fn render_cte_body(
+    query: &ViewQueryModel,
+    dialect: &dyn Dialect,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
+    render_select(query, false, dialect, writer)
+}
+
 /// Renders `DROP VIEW <qualified>`.
 pub fn render_drop_view(
     schema: Option<&str>,
