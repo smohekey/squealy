@@ -607,6 +607,7 @@ pub fn render_selected_prepared<'conn, 'scope, Conn, Base, Shape, Projection>(
 {
     buffer.clear();
     let mut renderer = Renderer::new(dialect);
+    write_cte_prefix(dialect, &selected.collect_ctes::<Conn>(), buffer).unwrap();
     let mut sink = SelectRenderSink::<Conn::Backend, _>::new(buffer, &mut renderer).unwrap();
     selected.lower_into::<Conn, _>(&mut sink).unwrap();
     sink.finish().unwrap();
@@ -626,6 +627,7 @@ where
 {
     let mut writer = SqlOnly(writer);
     let mut renderer = Renderer::new(dialect);
+    write_cte_prefix(dialect, &selected.collect_ctes::<Conn>(), &mut writer)?;
     let mut sink = SelectRenderSink::<Conn::Backend, _>::new(&mut writer, &mut renderer)?;
     selected.lower_into::<Conn, _>(&mut sink)?;
     sink.finish()
@@ -644,11 +646,46 @@ where
 {
     let mut writer = ParamCollector::<Conn::Backend>::new(params);
     let mut renderer = Renderer::new(dialect);
+    // CTE bodies are parameter-free, so the `WITH` prefix contributes no bind params; this keeps the
+    // path uniform with the SQL-text renderers (the collector ignores the emitted bytes).
+    write_cte_prefix(dialect, &selected.collect_ctes::<Conn>(), &mut writer).unwrap();
     let mut select_sink =
         SelectRenderSink::<Conn::Backend, _>::new(&mut writer, &mut renderer).unwrap();
     selected.lower_into::<Conn, _>(&mut select_sink).unwrap();
     select_sink.finish().unwrap();
     writer.finish()
+}
+
+/// Writes a query's `WITH` prefix — `WITH "n1" AS (<body>), "n2" AS (<body>) ` (with a trailing space
+/// before the main `SELECT`) — when the select references any CTEs. The defs are already de-duplicated
+/// and ordered by [`Selected::collect_ctes`]; each body is parameter-free (literals only), so it
+/// neither perturbs the main query's placeholder numbering nor contributes bind params.
+fn write_cte_prefix(
+    dialect: &dyn Dialect,
+    ctes: &[&'static dyn crate::CteDef],
+    writer: &mut dyn Write,
+) -> io::Result<()> {
+    if ctes.is_empty() {
+        return Ok(());
+    }
+    writer.write_all(b"WITH ")?;
+    for (index, def) in ctes.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        dialect.write_quoted_ident(def.name(), writer)?;
+        writer.write_all(b" (")?;
+        for (column_index, column) in def.columns().iter().enumerate() {
+            if column_index > 0 {
+                writer.write_all(b", ")?;
+            }
+            dialect.write_quoted_ident(&column.name, writer)?;
+        }
+        writer.write_all(b") AS (")?;
+        crate::view_render::render_cte_body(&def.body_model(), dialect, writer)?;
+        writer.write_all(b")")?;
+    }
+    writer.write_all(b" ")
 }
 
 fn write_table_ref<S>(dialect: &dyn Dialect, writer: &mut impl Write) -> io::Result<()>

@@ -2,8 +2,8 @@ use std::future::Future;
 
 use crate::{
     Backend, Decode, DeleteQuery, From, HCons, HNil, InsertQuery, InsertableTable, Projectable,
-    ProjectionShape, ReturningProjection, RootSource, SelectAst, SelectQuery, TableProjection,
-    ToColumns, UpdateQuery, UpdateableTable, WriteableTable,
+    ProjectionShape, QuerySource, ReturningProjection, RootSource, SelectAst, SelectQuery,
+    TableProjection, ToColumns, UpdateQuery, UpdateableTable, WriteableTable,
 };
 
 /// A backend-specific handle that constructs query objects.
@@ -72,7 +72,7 @@ pub trait QueryBuilder: Sized {
         &self,
     ) -> From<'_, '_, Self, HCons<<S as ProjectionShape>::Exprs<'_>, HNil>, RootSource<S>>
     where
-        S: TableProjection,
+        S: QuerySource,
     {
         crate::query::build_from_builder(self)
     }

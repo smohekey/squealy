@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use proc_macro2::{Literal, Span};
 
 use crate::common::to_snake_plural;
-use crate::table::{TableStruct, table_struct};
+use crate::table::{SourceMode, TableStruct, table_struct};
 
 /// Derives [`SchemaView`](squealy::SchemaView) for a view struct: its declared output columns, name,
 /// and namespace, mirroring how `#[derive(Table)]` derives a table's metadata. The user supplies the
@@ -12,7 +12,7 @@ pub(crate) fn derive(input: TokenStream) -> TokenStream {
         Ok(view) => {
             // The read-only projection machinery (so the view is queryable as a `FROM` source) plus
             // the view's own `SchemaView` metadata.
-            let projection: proc_macro2::TokenStream = view.expand(true).into();
+            let projection: proc_macro2::TokenStream = view.expand(SourceMode::View).into();
             let schema_view: proc_macro2::TokenStream = expand(&view).into();
             quote::quote! { #projection #schema_view }.into()
         }
