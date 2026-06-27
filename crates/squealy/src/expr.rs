@@ -3534,6 +3534,74 @@ where
 {
 }
 
+// === DISTINCT + ORDER BY guard ===
+
+/// Distinctness of a select chain (carried as [`SelectAst::Distinctness`](crate::SelectAst::Distinctness)):
+/// the chain has no `DISTINCT`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotDistinct {}
+/// Distinctness of a select chain: the chain has `DISTINCT`. `SELECT DISTINCT` requires every
+/// `ORDER BY` key to also be projected (see [`DistinctOrderGate`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IsDistinct {}
+
+/// Maps a projection's [`Shape`](crate::ReturningProjection::Shape) (a single kind, the unit shape, or a
+/// tuple of kinds) to the `HList` of its projected kinds, so a `DISTINCT` chain's `ORDER BY` keys can be
+/// checked for membership. Only consulted on the `DISTINCT` path; a non-distinct select never needs it.
+pub trait IntoKindList {
+    type Kinds: crate::HList;
+}
+
+// A single projected kind (a one-column projection, e.g. `select(|(u,)| u.id)`).
+impl<K> IntoKindList for K
+where
+    K: ExprKind,
+{
+    type Kinds = crate::HCons<K, crate::HNil>;
+}
+
+// The empty projection.
+impl IntoKindList for () {
+    type Kinds = crate::HNil;
+}
+
+/// Compile-time guard for `SELECT DISTINCT … ORDER BY …`, dispatched on the chain's
+/// [`Distinctness`](crate::SelectAst::Distinctness). A non-distinct chain ([`NotDistinct`]) is always
+/// valid (and does not even consult [`IntoKindList`]). A distinct chain ([`IsDistinct`]) requires every
+/// `ORDER BY` key (`OrderKeys`) to appear among the projection's kinds — by kind-type identity — which
+/// is exactly what PostgreSQL enforces ("for SELECT DISTINCT, ORDER BY expressions must appear in
+/// select list"). `Indices` are the inferred per-key membership positions.
+#[doc(hidden)]
+pub trait DistinctOrderGate<OrderKeys, Shape, Indices> {}
+
+impl<OrderKeys, Shape> DistinctOrderGate<OrderKeys, Shape, crate::HNil> for NotDistinct {}
+
+impl<OrderKeys, Shape, Indices> DistinctOrderGate<OrderKeys, Shape, Indices> for IsDistinct where
+    OrderKeys: OrderKeysInProjection<Shape, Indices>
+{
+}
+
+/// Every `ORDER BY` key (the `HList` `Self`) appears among projection `Shape`'s kinds. An **empty** list
+/// is trivially satisfied and does not even require the projection to be kind-listable — so a distinct
+/// query with no ordering (`distinct().select(|(u,)| u)`, a whole-row projection that is not an
+/// [`IntoKindList`] shape) still compiles. A non-empty list resolves the projection's kinds via
+/// [`IntoKindList`] and checks each key for membership ([`Contains`](crate::Contains)), which also
+/// matches a key `K` against a projected `Nullable<K>` (a right/full join nullable-wraps base columns in
+/// the projection but not the keys captured before the join). `Indices` are the per-key positions.
+#[doc(hidden)]
+pub trait OrderKeysInProjection<Shape, Indices> {}
+
+impl<Shape> OrderKeysInProjection<Shape, crate::HNil> for crate::HNil {}
+
+impl<Shape, Head, Tail, Index, RestIndices>
+    OrderKeysInProjection<Shape, crate::HCons<Index, RestIndices>> for crate::HCons<Head, Tail>
+where
+    Shape: IntoKindList,
+    <Shape as IntoKindList>::Kinds: crate::Contains<Head, Index>,
+    Tail: OrderKeysInProjection<Shape, RestIndices>,
+{
+}
+
 impl<Projection, OrderClass> ValidSelect<Projection, OrderClass> for Aggregated
 where
     // Column-free projection (aggregates and constants), not necessarily *all* aggregate — a

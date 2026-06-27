@@ -4660,6 +4660,15 @@ where
     /// order-compatibility rules `select` otherwise enforces (see [`ValidSelect`](crate::ValidSelect)).
     type Grouped;
 
+    /// Whether this chain has `DISTINCT` ([`IsDistinct`](crate::IsDistinct) /
+    /// [`NotDistinct`](crate::NotDistinct)). When distinct, `select` requires every `ORDER BY` key to be
+    /// projected (see [`DistinctOrderGate`](crate::DistinctOrderGate)).
+    type Distinctness;
+
+    /// The kinds of this chain's accumulated `ORDER BY` keys, innermost-last. Checked against the
+    /// projection under `DISTINCT`.
+    type OrderKeys: HList;
+
     fn depth(&self) -> usize;
 
     fn connection(&self) -> &'conn Conn;
@@ -4740,6 +4749,8 @@ where
     type OrderParams = HNil;
     type OrderClass = crate::OrderNone;
     type Grouped = crate::Ungrouped;
+    type Distinctness = crate::NotDistinct;
+    type OrderKeys = crate::HNil;
 
     fn depth(&self) -> usize {
         self.depth
@@ -4878,6 +4889,8 @@ where
     type OrderParams = HNil;
     type OrderClass = crate::OrderNone;
     type Grouped = crate::Ungrouped;
+    type Distinctness = crate::NotDistinct;
+    type OrderKeys = crate::HNil;
 
     fn depth(&self) -> usize {
         self.depth
@@ -5475,6 +5488,8 @@ where
     type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
     type Grouped = Base::Grouped;
+    type Distinctness = Base::Distinctness;
+    type OrderKeys = Base::OrderKeys;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -5595,6 +5610,8 @@ where
         <Ast as crate::AstProjectionClass>::Class,
     >>::Output;
     type Grouped = Base::Grouped;
+    type Distinctness = Base::Distinctness;
+    type OrderKeys = crate::HCons<K, Base::OrderKeys>;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -5713,6 +5730,8 @@ where
     type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
     type Grouped = crate::Grouped;
+    type Distinctness = Base::Distinctness;
+    type OrderKeys = Base::OrderKeys;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -5837,6 +5856,8 @@ where
     type Grouped = <Base::Grouped as crate::HavingTransition<
         <PredicateAst as crate::PredicateColumns>::Columns,
     >>::Output;
+    type Distinctness = Base::Distinctness;
+    type OrderKeys = Base::OrderKeys;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -5939,6 +5960,8 @@ where
     type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
     type Grouped = Base::Grouped;
+    type Distinctness = Base::Distinctness;
+    type OrderKeys = Base::OrderKeys;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6028,6 +6051,8 @@ where
     type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
     type Grouped = Base::Grouped;
+    type Distinctness = Base::Distinctness;
+    type OrderKeys = Base::OrderKeys;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6117,6 +6142,8 @@ where
     type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
     type Grouped = Base::Grouped;
+    type Distinctness = crate::IsDistinct;
+    type OrderKeys = Base::OrderKeys;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6226,6 +6253,8 @@ where
     type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
     type Grouped = Base::Grouped;
+    type Distinctness = Base::Distinctness;
+    type OrderKeys = Base::OrderKeys;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6348,6 +6377,8 @@ where
     type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
     type Grouped = Base::Grouped;
+    type Distinctness = Base::Distinctness;
+    type OrderKeys = Base::OrderKeys;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6473,6 +6504,8 @@ where
     type OrderParams = Base::OrderParams;
     type OrderClass = Base::OrderClass;
     type Grouped = Base::Grouped;
+    type Distinctness = Base::Distinctness;
+    type OrderKeys = Base::OrderKeys;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6652,7 +6685,7 @@ where
     /// Finish this chain as an embeddable subquery rather than an executable query. The projection
     /// must select exactly one column; the resulting [`SubquerySelect`] carries that column's type as
     /// its [`Subquery::Output`] so an `IN (subquery)` or scalar use can be type-checked.
-    fn select_subquery<P>(
+    fn select_subquery<P, Indices>(
         self,
         projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
     ) -> SubquerySelect<'conn, 'scope, Conn, Self, <P as ReturningProjection<'scope>>::Shape, P>
@@ -6660,6 +6693,13 @@ where
         P: ReturningProjection<'scope> + Projectable,
         <Self as SelectAst<'conn, 'scope, Conn>>::Grouped:
             crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
+        // Under `DISTINCT`, every `ORDER BY` key must appear in the projection; non-distinct chains are
+        // unaffected (`Indices` are the inferred per-key membership positions).
+        <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness: crate::DistinctOrderGate<
+                <Self as SelectAst<'conn, 'scope, Conn>>::OrderKeys,
+                <P as ReturningProjection<'scope>>::Shape,
+                Indices,
+            >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
     {
         let exprs = self.exprs();
@@ -6684,10 +6724,18 @@ where
     /// Render the select as `SELECT DISTINCT …` (deduplicate whole rows). Composes with the other
     /// clauses regardless of where in the chain it is called.
     ///
-    /// Note: SQL requires every `ORDER BY` expression to also appear in the projection when
-    /// `DISTINCT` is used. Ordering a distinct query by a column that is not selected
-    /// (`distinct().order_by(|(u,)| u.id.asc()).select(|(u,)| u.name)`) is rejected by the database at
-    /// execution time. This is not yet enforced at compile time (tracked as a follow-up).
+    /// SQL requires every `ORDER BY` key to also appear in the projection under `DISTINCT`, and this is
+    /// enforced at compile time for **column** keys: ordering a distinct query by an unselected column
+    /// (`distinct().order_by(|(u,)| u.id.asc()).select(|(u,)| u.name)`) fails to build (see
+    /// [`DistinctOrderGate`](crate::DistinctOrderGate)). It composes in either chain order and matches a
+    /// key against a nullable-wrapped projected column (e.g. across a `RIGHT`/`FULL JOIN`).
+    ///
+    /// The check matches by *kind-type identity*. For a bare column this is exact. For a derived
+    /// expression it is structural and cannot see literal values — two expressions of the same shape are
+    /// treated as equal, so e.g. `distinct().order_by(|(u,)| (u.id + 1).asc()).select(|(u,)| u.id + 2)`
+    /// is accepted at compile time even though PostgreSQL rejects it (the same-shape `id + ?` differs
+    /// only in a literal the type system does not carry). Expression-equality is out of scope; such a
+    /// query is still rejected by the database at execution time.
     fn distinct(self) -> Distinct<Self> {
         Distinct { base: self }
     }
@@ -6756,7 +6804,7 @@ where
         }
     }
 
-    fn select<P>(
+    fn select<P, Indices>(
         self,
         projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
     ) -> Conn::Select<'conn, 'scope, Self, <P as ReturningProjection<'scope>>::Shape, P>
@@ -6771,6 +6819,13 @@ where
         // bare column and an aggregate) with compatible ordering; a `GROUP BY` lifts that.
         <Self as SelectAst<'conn, 'scope, Conn>>::Grouped:
             crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
+        // Under `DISTINCT`, every `ORDER BY` key must appear in the projection; non-distinct chains are
+        // unaffected (`Indices` are the inferred per-key membership positions).
+        <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness: crate::DistinctOrderGate<
+                <Self as SelectAst<'conn, 'scope, Conn>>::OrderKeys,
+                <P as ReturningProjection<'scope>>::Shape,
+                Indices,
+            >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
         <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
     {
@@ -6793,7 +6848,7 @@ where
     /// wrapping it in the backend's executable query type. View definitions use this so their body can
     /// be lowered into the schema model without a real backend; it enforces the same projection
     /// validity rules as `select`.
-    fn project<P>(
+    fn project<P, Indices>(
         self,
         projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
     ) -> Selected<'scope, Self, <P as ReturningProjection<'scope>>::Shape, P>
@@ -6801,6 +6856,13 @@ where
         P: ReturningProjection<'scope> + Projectable,
         <Self as SelectAst<'conn, 'scope, Conn>>::Grouped:
             crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
+        // Under `DISTINCT`, every `ORDER BY` key must appear in the projection; non-distinct chains are
+        // unaffected (`Indices` are the inferred per-key membership positions).
+        <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness: crate::DistinctOrderGate<
+                <Self as SelectAst<'conn, 'scope, Conn>>::OrderKeys,
+                <P as ReturningProjection<'scope>>::Shape,
+                Indices,
+            >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
     {
         let exprs = self.exprs();
@@ -6816,7 +6878,7 @@ where
     /// is the source chain's). To stop that from silently producing an unbound placeholder, the
     /// projection must be free of runtime params (`P: ProjectionParams<Params = HNil>`). A correlated
     /// scalar subquery referencing outer *columns* — the common case — carries none.
-    fn select_correlated<P>(
+    fn select_correlated<P, Indices>(
         self,
         projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple, Subqueries<'conn, 'scope, Conn>) -> P,
     ) -> Conn::Select<'conn, 'scope, Self, <P as ReturningProjection<'scope>>::Shape, P>
@@ -6824,6 +6886,13 @@ where
         P: ReturningProjection<'scope> + Projectable + crate::ProjectionParams<Params = HNil>,
         <Self as SelectAst<'conn, 'scope, Conn>>::Grouped:
             crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
+        // Under `DISTINCT`, every `ORDER BY` key must appear in the projection; non-distinct chains are
+        // unaffected (`Indices` are the inferred per-key membership positions).
+        <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness: crate::DistinctOrderGate<
+                <Self as SelectAst<'conn, 'scope, Conn>>::OrderKeys,
+                <P as ReturningProjection<'scope>>::Shape,
+                Indices,
+            >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
         <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
     {
