@@ -29,6 +29,8 @@ where
     connection: &'conn Conn,
     columns: Rows,
     returning: Returning,
+    // `Some` for an upsert (`INSERT … ON DUPLICATE KEY UPDATE`); `None` for a plain insert.
+    conflict: Option<squealy::ConflictClause>,
     _table: PhantomData<S>,
     _shape: PhantomData<Shape>,
 }
@@ -166,6 +168,23 @@ where
             connection,
             columns,
             returning,
+            conflict: None,
+            _table: PhantomData,
+            _shape: PhantomData,
+        }
+    }
+
+    pub(crate) fn new_upsert(
+        connection: &'conn Conn,
+        columns: Rows,
+        returning: Returning,
+        conflict: squealy::ConflictClause,
+    ) -> Self {
+        Self {
+            connection,
+            columns,
+            returning,
+            conflict: Some(conflict),
             _table: PhantomData,
             _shape: PhantomData,
         }
@@ -181,7 +200,7 @@ where
                 &MysqlDialect,
                 &self.columns,
                 &self.returning,
-                None,
+                self.conflict.as_ref(),
                 writer,
             )
         });
@@ -191,7 +210,7 @@ where
                     &MysqlDialect,
                     &self.columns,
                     &self.returning,
-                    None,
+                    self.conflict.as_ref(),
                     params,
                 )
             })?;
@@ -209,7 +228,7 @@ where
                 &MysqlDialect,
                 &self.columns,
                 &self.returning,
-                None,
+                self.conflict.as_ref(),
                 writer,
             )
         })
@@ -772,5 +791,33 @@ macro_rules! impl_query_builder_for {
 
 impl_query_builder_for!(Mysql);
 impl_query_builder_for!(MysqlConnection);
+
+// Upsert (`INSERT … ON DUPLICATE KEY UPDATE`): the conflict clause is a runtime field on the existing
+// `MysqlInsert` query object, so `build_upsert` just constructs it with the clause attached. MySQL has no
+// `RETURNING`, so only the non-returning `Upsert::insert()` path reaches this.
+macro_rules! impl_on_conflict_query_builder_for {
+    ($ty:ty) => {
+        impl squealy::OnConflictQueryBuilder for $ty {
+            fn build_upsert<'conn, S, Shape, Rows, Returning>(
+                &'conn self,
+                rows: Rows,
+                returning: Returning,
+                conflict: squealy::ConflictClause,
+            ) -> Self::Insert<'conn, S, Shape, Rows, Returning>
+            where
+                Self: 'conn,
+                S: InsertableTable,
+                Shape: ProjectionShape,
+                Shape::Row: Decode<Self::Backend>,
+                Rows: InsertRows,
+                Returning: Projectable,
+            {
+                MysqlInsert::new_upsert(self, rows, returning, conflict)
+            }
+        }
+    };
+}
+impl_on_conflict_query_builder_for!(Mysql);
+impl_on_conflict_query_builder_for!(MysqlConnection);
 
 impl Connection for MysqlConnection {}
