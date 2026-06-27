@@ -430,6 +430,33 @@ where
     writer.finish()
 }
 
+/// Render a set-operation query for the test backend, reusing the shared core set renderer with the
+/// test dialect (bare identifiers, `?` placeholders) so it matches the test backend's SQL style.
+pub(crate) fn write_set_into<'conn, 'scope, Tree, Writer>(
+    tree: &Tree,
+    tail: &squealy::SetTail,
+    writer: &mut Writer,
+) -> io::Result<()>
+where
+    Tree: squealy::render::RenderSetArm<'conn, 'scope, crate::TestConnection, crate::TestBackend>,
+    Writer: Write,
+{
+    static DIALECT: TestDialect = TestDialect;
+    squealy::render::write_set_into::<crate::TestConnection, Tree, _>(&DIALECT, tree, tail, writer)
+}
+
+pub(crate) fn write_set_params<'conn, 'scope, Tree>(
+    tree: &Tree,
+    tail: &squealy::SetTail,
+    params: &mut Vec<TestParam>,
+) -> Result<(), crate::TestError>
+where
+    Tree: squealy::render::RenderSetArm<'conn, 'scope, crate::TestConnection, crate::TestBackend>,
+{
+    static DIALECT: TestDialect = TestDialect;
+    squealy::render::write_set_params::<crate::TestConnection, Tree>(&DIALECT, tree, tail, params)
+}
+
 impl<Writer> TestSelectSink<'_, Writer>
 where
     Writer: SqlWriter,

@@ -14,9 +14,11 @@ use squealy::{
     PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery, PreparedMutationQuery,
     PreparedParamValues, PreparedSelectQuery, Projectable, ProjectionShape, QueryBuilder,
     RenderInsertRows, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
-    RenderUpdateAssignments, RowsAffected, SelectAst, SelectQuery, Selected, SourceAlias,
-    TableProjection, UpdateQuery, UpdateableTable,
+    RenderUpdateAssignments, RowsAffected, SelectAst, SelectQuery, Selected, SetArm, SetLeaf,
+    SetOperand, SetOperations, SetSelectModifiers, SetTail, SourceAlias, TableProjection,
+    UpdateQuery, UpdateableTable,
 };
+use squealy::{ExecutableSetSelectQuery, PreparableSetSelectQuery};
 use tokio_postgres::{
     GenericClient,
     types::{FromSql, FromSqlOwned, IsNull, ToSql, Type, to_sql_checked},
@@ -1375,6 +1377,238 @@ where
             )
         })?;
         Ok((sql, params))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Set operations
+// ---------------------------------------------------------------------------
+
+/// A set-operation query object (`(<left>) UNION (<right>) …`) over a [`SetArm`] tree.
+pub struct PostgresSetSelect<'conn, 'scope, Tree, Conn = PostgresConnection>
+where
+    Conn: QueryBuilder<Backend = Postgres>,
+{
+    connection: &'conn Conn,
+    tree: Tree,
+    tail: SetTail,
+    _scope: PhantomData<&'scope ()>,
+}
+
+impl<'conn, 'scope, Tree, Conn> PostgresSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Conn: QueryBuilder<Backend = Postgres>,
+{
+    fn new(connection: &'conn Conn, tree: Tree) -> Self {
+        Self {
+            connection,
+            tree,
+            tail: SetTail::default(),
+            _scope: PhantomData,
+        }
+    }
+}
+
+impl<'conn, 'scope, Tree, Conn> PostgresSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Conn: QueryBuilder<Backend = Postgres>,
+    Tree: render::RenderSetArm<'conn, 'scope, Conn, Postgres>,
+{
+    fn prepared_sql(&self) -> render::PreparedSql<Postgres> {
+        let mut buffer = render::PreparedSql::default();
+        render::render_set_prepared::<Conn, Tree>(
+            &PostgresDialect,
+            &self.tree,
+            &self.tail,
+            &mut buffer,
+        );
+        buffer
+    }
+
+    fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
+        let sql = rendered_sql(|writer| {
+            render::write_set_into::<Conn, Tree, _>(
+                &PostgresDialect,
+                &self.tree,
+                &self.tail,
+                writer,
+            )
+        });
+        let params = collect_postgres_params(0, |params| {
+            render::write_set_params::<Conn, Tree>(&PostgresDialect, &self.tree, &self.tail, params)
+        })?;
+        Ok((sql, params))
+    }
+
+    /// Render this set query into a newly allocated SQL string.
+    pub fn to_sql(&self) -> String {
+        rendered_sql(|writer| self.write_sql(writer))
+    }
+
+    /// Stream SQL into caller-provided storage without allocating a SQL string.
+    pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+        render::write_set_into::<Conn, Tree, _>(&PostgresDialect, &self.tree, &self.tail, writer)
+    }
+
+    /// Collect bind parameters (left-to-right across the whole tree) into a newly allocated vector.
+    pub fn collect_params(&self) -> Result<Vec<PostgresParam>, PostgresError> {
+        let mut params = Vec::new();
+        render::write_set_params::<Conn, Tree>(
+            &PostgresDialect,
+            &self.tree,
+            &self.tail,
+            &mut params,
+        )?;
+        Ok(params)
+    }
+}
+
+impl<'conn, 'scope, Tree, Conn> ExecutableSetSelectQuery<'conn>
+    for PostgresSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Conn: PostgresExecutor + 'conn,
+    Tree: render::RenderSetArm<'conn, 'scope, Conn, Postgres>,
+    <Tree as SetArm<'conn, 'scope, Conn>>::Row: Decode<Postgres> + Send,
+    // As for a plain select, executing requires the query carry no runtime params: the one-shot
+    // execution path inlines literals, so a `param()` in any arm would emit an unbindable placeholder.
+    <Tree as SetArm<'conn, 'scope, Conn>>::Params: NoRuntimeParams,
+{
+    type Builder = Conn;
+    type Row = <Tree as SetArm<'conn, 'scope, Conn>>::Row;
+
+    type RowStream<'query>
+        = PostgresRows<'query, Self::Row, Conn>
+    where
+        Self: 'query;
+
+    fn fetch(&self) -> Self::RowStream<'_> {
+        match self.execution_parts() {
+            Ok((sql, params)) => PostgresRows::query_with_params(self.connection, sql, params),
+            Err(error) => PostgresRows::error(error),
+        }
+    }
+}
+
+impl<'conn, 'scope, Tree, Conn> PreparableSetSelectQuery<'conn>
+    for PostgresSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Conn: PostgresExecutor + 'conn,
+    Tree: render::RenderSetArm<'conn, 'scope, Conn, Postgres>,
+    <Tree as SetArm<'conn, 'scope, Conn>>::Row: Decode<Postgres> + Send,
+    <Tree as SetArm<'conn, 'scope, Conn>>::Params: HList,
+{
+    type Builder = Conn;
+    type Params = <Tree as SetArm<'conn, 'scope, Conn>>::Params;
+    type Row = <Tree as SetArm<'conn, 'scope, Conn>>::Row;
+
+    type Prepared<'prepared>
+        = PostgresPreparedSelect<'prepared, Self::Row, Conn, Self::Params>
+    where
+        Self: 'prepared,
+        'conn: 'prepared;
+
+    fn prepare<'prepared>(
+        &'prepared self,
+    ) -> impl Future<Output = Result<Self::Prepared<'prepared>, PostgresError>> + 'prepared
+    where
+        'conn: 'prepared,
+    {
+        let prepared = self.prepared_sql().into_parts();
+        async move {
+            let (sql, params) = prepared?;
+            let statement = self.connection.prepare_sql(sql).await?;
+            Ok(PostgresPreparedSelect::new(
+                self.connection,
+                statement,
+                params,
+            ))
+        }
+    }
+}
+
+impl<'conn, 'scope, Shape, Base, Projection, Conn> SetOperand<'conn, 'scope, Conn>
+    for PostgresSelect<'conn, 'scope, Shape, Base, Projection, Conn>
+where
+    Shape: ProjectionShape,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Projection: Projectable,
+    Conn: QueryBuilder<Backend = Postgres> + 'conn,
+{
+    type Row = Shape::Row;
+    type Arm = SetLeaf<'conn, 'scope, Conn, Base, Shape, Projection>;
+
+    fn into_set_parts(self) -> (&'conn Conn, Self::Arm) {
+        (self.connection, SetLeaf::new(self.selected))
+    }
+}
+
+impl<'conn, 'scope, Shape, Base, Projection, Conn> SetOperations<'conn, 'scope, Conn>
+    for PostgresSelect<'conn, 'scope, Shape, Base, Projection, Conn>
+where
+    Shape: ProjectionShape,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Projection: Projectable,
+    Conn: QueryBuilder<Backend = Postgres> + 'conn,
+{
+    type SetSelect<Tree>
+        = PostgresSetSelect<'conn, 'scope, Tree, Conn>
+    where
+        Tree: SetArm<'conn, 'scope, Conn>;
+
+    fn make_set_select<Tree>(connection: &'conn Conn, tree: Tree) -> Self::SetSelect<Tree>
+    where
+        Tree: SetArm<'conn, 'scope, Conn>,
+    {
+        PostgresSetSelect::new(connection, tree)
+    }
+}
+
+impl<'conn, 'scope, Tree, Conn> SetOperand<'conn, 'scope, Conn>
+    for PostgresSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Tree: SetArm<'conn, 'scope, Conn>,
+    Conn: QueryBuilder<Backend = Postgres> + 'conn,
+{
+    type Row = <Tree as SetArm<'conn, 'scope, Conn>>::Row;
+    type Arm = squealy::SetGroup<Tree>;
+
+    fn into_set_parts(self) -> (&'conn Conn, Self::Arm) {
+        (
+            self.connection,
+            squealy::SetGroup::new(self.tree, self.tail),
+        )
+    }
+}
+
+impl<'conn, 'scope, Tree, Conn> SetOperations<'conn, 'scope, Conn>
+    for PostgresSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Tree: SetArm<'conn, 'scope, Conn>,
+    Conn: QueryBuilder<Backend = Postgres> + 'conn,
+{
+    type SetSelect<NewTree>
+        = PostgresSetSelect<'conn, 'scope, NewTree, Conn>
+    where
+        NewTree: SetArm<'conn, 'scope, Conn>;
+
+    fn make_set_select<NewTree>(connection: &'conn Conn, tree: NewTree) -> Self::SetSelect<NewTree>
+    where
+        NewTree: SetArm<'conn, 'scope, Conn>,
+    {
+        PostgresSetSelect::new(connection, tree)
+    }
+}
+
+impl<'conn, 'scope, Tree, Conn> SetSelectModifiers<'scope>
+    for PostgresSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Tree: SetArm<'conn, 'scope, Conn>,
+    Conn: QueryBuilder<Backend = Postgres>,
+{
+    type Shape = <Tree as SetArm<'conn, 'scope, Conn>>::Shape;
+
+    fn set_tail_mut(&mut self) -> &mut SetTail {
+        &mut self.tail
     }
 }
 

@@ -1646,6 +1646,393 @@ pub trait PreparedMutationQuery<'conn> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Set operations (UNION / INTERSECT / EXCEPT)
+// ---------------------------------------------------------------------------
+
+/// A SQL set operator combining two selects of the same row type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetOp {
+    Union,
+    UnionAll,
+    Intersect,
+    IntersectAll,
+    Except,
+    ExceptAll,
+}
+
+impl SetOp {
+    /// The SQL keyword(s) for this operator.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            SetOp::Union => "UNION",
+            SetOp::UnionAll => "UNION ALL",
+            SetOp::Intersect => "INTERSECT",
+            SetOp::IntersectAll => "INTERSECT ALL",
+            SetOp::Except => "EXCEPT",
+            SetOp::ExceptAll => "EXCEPT ALL",
+        }
+    }
+}
+
+/// One operand of a set operation: either a finished select ([`SetLeaf`]) or a nested set
+/// ([`SetNode`]). Every operand in the tree shares one decoded [`Row`](Self::Row); the left arm fixes
+/// the output column names (as in SQL). [`Params`](Self::Params) is the operand's bind-parameter shape
+/// in render order; [`Shape`](Self::Shape) is the output projection shape (used to type a trailing
+/// `ORDER BY` over the whole set).
+pub trait SetArm<'conn, 'scope, Conn>
+where
+    Conn: QueryBuilder,
+{
+    type Row;
+    type Shape: ProjectionShape;
+    type Params: HList;
+}
+
+/// A set-operation leaf: a single finished [`Selected`].
+#[doc(hidden)]
+pub struct SetLeaf<'conn, 'scope, Conn, Base, Shape, Projection>
+where
+    Conn: QueryBuilder,
+    Shape: ProjectionShape,
+    Projection: Projectable,
+{
+    pub(crate) selected: Selected<'scope, Base, Shape, Projection>,
+    _conn: PhantomData<fn() -> &'conn Conn>,
+}
+
+impl<'conn, 'scope, Conn, Base, Shape, Projection>
+    SetLeaf<'conn, 'scope, Conn, Base, Shape, Projection>
+where
+    Conn: QueryBuilder,
+    Shape: ProjectionShape,
+    Projection: Projectable,
+{
+    #[doc(hidden)]
+    pub fn new(selected: Selected<'scope, Base, Shape, Projection>) -> Self {
+        Self {
+            selected,
+            _conn: PhantomData,
+        }
+    }
+}
+
+impl<'conn, 'scope, Conn, Base, Shape, Projection> SetArm<'conn, 'scope, Conn>
+    for SetLeaf<'conn, 'scope, Conn, Base, Shape, Projection>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Shape: ProjectionShape,
+    Projection: Projectable,
+{
+    type Row = Shape::Row;
+    type Shape = Shape;
+    type Params = <Base as SelectAst<'conn, 'scope, Conn>>::Params;
+}
+
+/// A set-operation node: `<left> <op> <right>`, where the right arm's row type must match the left's.
+#[doc(hidden)]
+pub struct SetNode<L, R> {
+    pub(crate) left: L,
+    pub(crate) right: R,
+    pub(crate) op: SetOp,
+}
+
+impl<'conn, 'scope, Conn, L, R> SetArm<'conn, 'scope, Conn> for SetNode<L, R>
+where
+    Conn: QueryBuilder,
+    L: SetArm<'conn, 'scope, Conn>,
+    R: SetArm<'conn, 'scope, Conn, Row = <L as SetArm<'conn, 'scope, Conn>>::Row>,
+    <L as SetArm<'conn, 'scope, Conn>>::Params:
+        crate::HAppend<<R as SetArm<'conn, 'scope, Conn>>::Params>,
+{
+    type Row = <L as SetArm<'conn, 'scope, Conn>>::Row;
+    type Shape = <L as SetArm<'conn, 'scope, Conn>>::Shape;
+    type Params = <<L as SetArm<'conn, 'scope, Conn>>::Params as crate::HAppend<
+        <R as SetArm<'conn, 'scope, Conn>>::Params,
+    >>::Output;
+}
+
+/// A set sub-tree together with its trailing `ORDER BY`/`LIMIT`/`OFFSET`, used when a *modified*
+/// set-select is nested as an operand of another set op (`a.union(b).limit(1).union(c)`): the inner
+/// modifiers must render as part of the parenthesized left operand (`((…) UNION (…) LIMIT 1) UNION (…)`)
+/// rather than being dropped. An unmodified nested set carries an empty [`SetTail`] and renders the
+/// same as its bare tree.
+#[doc(hidden)]
+pub struct SetGroup<Tree> {
+    pub(crate) tree: Tree,
+    pub(crate) tail: SetTail,
+}
+
+impl<Tree> SetGroup<Tree> {
+    #[doc(hidden)]
+    pub fn new(tree: Tree, tail: SetTail) -> Self {
+        Self { tree, tail }
+    }
+}
+
+impl<'conn, 'scope, Conn, Tree> SetArm<'conn, 'scope, Conn> for SetGroup<Tree>
+where
+    Conn: QueryBuilder,
+    Tree: SetArm<'conn, 'scope, Conn>,
+{
+    type Row = <Tree as SetArm<'conn, 'scope, Conn>>::Row;
+    type Shape = <Tree as SetArm<'conn, 'scope, Conn>>::Shape;
+    type Params = <Tree as SetArm<'conn, 'scope, Conn>>::Params;
+}
+
+/// A value usable as a set-operation operand — a finished select query object or a set-select query
+/// object. Yields its connection and the [`SetArm`] tree it contributes, so [`SetOperations`] can
+/// combine two operands (and nesting falls out: a set-select yields its own tree).
+#[doc(hidden)]
+pub trait SetOperand<'conn, 'scope, Conn>
+where
+    Conn: QueryBuilder + 'conn,
+{
+    type Row;
+    type Arm: SetArm<'conn, 'scope, Conn, Row = Self::Row>;
+
+    fn into_set_parts(self) -> (&'conn Conn, Self::Arm);
+}
+
+/// The set-operation builder methods (`union`/`union_all`/`intersect`/`intersect_all`/`except`/
+/// `except_all`), shared across backends. Implemented per-backend on both the select and set-select
+/// query objects via the single [`make_set_select`](Self::make_set_select) hook; the six methods are
+/// defaulted. Each combines `self` with a row-compatible `other` into a new set-select query object.
+pub trait SetOperations<'conn, 'scope, Conn>: SetOperand<'conn, 'scope, Conn> + Sized
+where
+    Conn: QueryBuilder + 'conn,
+{
+    /// The backend's set-select query object wrapping a given operand tree.
+    type SetSelect<Tree>
+    where
+        Tree: SetArm<'conn, 'scope, Conn>;
+
+    /// Wrap a built operand tree in the backend's set-select query object (the only per-backend hook).
+    fn make_set_select<Tree>(connection: &'conn Conn, tree: Tree) -> Self::SetSelect<Tree>
+    where
+        Tree: SetArm<'conn, 'scope, Conn>;
+
+    fn union<O>(self, other: O) -> Self::SetSelect<SetNode<Self::Arm, O::Arm>>
+    where
+        O: SetOperand<'conn, 'scope, Conn, Row = Self::Row>,
+        SetNode<Self::Arm, O::Arm>: SetArm<'conn, 'scope, Conn>,
+    {
+        self.set_op(other, SetOp::Union)
+    }
+
+    fn union_all<O>(self, other: O) -> Self::SetSelect<SetNode<Self::Arm, O::Arm>>
+    where
+        O: SetOperand<'conn, 'scope, Conn, Row = Self::Row>,
+        SetNode<Self::Arm, O::Arm>: SetArm<'conn, 'scope, Conn>,
+    {
+        self.set_op(other, SetOp::UnionAll)
+    }
+
+    fn intersect<O>(self, other: O) -> Self::SetSelect<SetNode<Self::Arm, O::Arm>>
+    where
+        O: SetOperand<'conn, 'scope, Conn, Row = Self::Row>,
+        SetNode<Self::Arm, O::Arm>: SetArm<'conn, 'scope, Conn>,
+    {
+        self.set_op(other, SetOp::Intersect)
+    }
+
+    fn intersect_all<O>(self, other: O) -> Self::SetSelect<SetNode<Self::Arm, O::Arm>>
+    where
+        O: SetOperand<'conn, 'scope, Conn, Row = Self::Row>,
+        SetNode<Self::Arm, O::Arm>: SetArm<'conn, 'scope, Conn>,
+    {
+        self.set_op(other, SetOp::IntersectAll)
+    }
+
+    fn except<O>(self, other: O) -> Self::SetSelect<SetNode<Self::Arm, O::Arm>>
+    where
+        O: SetOperand<'conn, 'scope, Conn, Row = Self::Row>,
+        SetNode<Self::Arm, O::Arm>: SetArm<'conn, 'scope, Conn>,
+    {
+        self.set_op(other, SetOp::Except)
+    }
+
+    fn except_all<O>(self, other: O) -> Self::SetSelect<SetNode<Self::Arm, O::Arm>>
+    where
+        O: SetOperand<'conn, 'scope, Conn, Row = Self::Row>,
+        SetNode<Self::Arm, O::Arm>: SetArm<'conn, 'scope, Conn>,
+    {
+        self.set_op(other, SetOp::ExceptAll)
+    }
+
+    #[doc(hidden)]
+    fn set_op<O>(self, other: O, op: SetOp) -> Self::SetSelect<SetNode<Self::Arm, O::Arm>>
+    where
+        O: SetOperand<'conn, 'scope, Conn, Row = Self::Row>,
+        SetNode<Self::Arm, O::Arm>: SetArm<'conn, 'scope, Conn>,
+    {
+        let (connection, left) = self.into_set_parts();
+        let (_, right) = other.into_set_parts();
+        Self::make_set_select(connection, SetNode { left, right, op })
+    }
+}
+
+/// One `ORDER BY` term of a set's trailing clause: an output column name + direction. (Set `ORDER BY`
+/// references the output column names produced by the left arm's projection, not source aliases.)
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct SetOrder {
+    pub column: std::borrow::Cow<'static, str>,
+    pub direction: crate::OrderDirection,
+}
+
+/// The trailing `ORDER BY` / `LIMIT` / `OFFSET` applied to a whole set, carried on a set-select query
+/// object. Empty by default; built up by [`SetSelectModifiers`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct SetTail {
+    pub orders: Vec<SetOrder>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+/// Trailing-clause builder methods (`order_by_asc`/`order_by_desc`/`limit`/`offset`) for a set-select
+/// query object. Shared across backends: the backend exposes its mutable [`SetTail`] and output
+/// [`Shape`](Self::Shape) (the set's output columns — the left arm's projection), and the methods are
+/// defaulted. `order_by_*` closures pick an **output** column (rendered by its output name).
+pub trait SetSelectModifiers<'scope>: Sized {
+    /// The set's output projection shape (the left arm's), whose rebound exprs carry the output column
+    /// names a trailing `ORDER BY` references.
+    type Shape: ProjectionShape;
+
+    #[doc(hidden)]
+    fn set_tail_mut(&mut self) -> &mut SetTail;
+
+    /// Order the whole set ascending by an output column.
+    fn order_by_asc<K>(
+        self,
+        column: impl FnOnce(
+            <Self::Shape as ProjectionShape>::ReboundExprs<'scope>,
+        ) -> Expr<'scope, K, ColumnExprAst<K>>,
+    ) -> Self
+    where
+        K: ExprKind,
+    {
+        self.push_set_order(column, crate::OrderDirection::Asc)
+    }
+
+    /// Order the whole set descending by an output column.
+    fn order_by_desc<K>(
+        self,
+        column: impl FnOnce(
+            <Self::Shape as ProjectionShape>::ReboundExprs<'scope>,
+        ) -> Expr<'scope, K, ColumnExprAst<K>>,
+    ) -> Self
+    where
+        K: ExprKind,
+    {
+        self.push_set_order(column, crate::OrderDirection::Desc)
+    }
+
+    #[doc(hidden)]
+    fn push_set_order<K>(
+        mut self,
+        column: impl FnOnce(
+            <Self::Shape as ProjectionShape>::ReboundExprs<'scope>,
+        ) -> Expr<'scope, K, ColumnExprAst<K>>,
+        direction: crate::OrderDirection,
+    ) -> Self
+    where
+        K: ExprKind,
+    {
+        // A set's `ORDER BY` references the *output* column names (the left arm's projection aliases,
+        // e.g. `t0_id`). Those are carried as the rebound column reference, independent of the source
+        // alias, so a placeholder alias is fine here.
+        let exprs = <Self::Shape as ProjectionShape>::rebound_exprs(SourceAlias::new(0, 0));
+        self.set_tail_mut().orders.push(SetOrder {
+            column: column(exprs).referenced_column(),
+            direction,
+        });
+        self
+    }
+
+    fn limit(mut self, rows: usize) -> Self {
+        self.set_tail_mut().limit = Some(rows);
+        self
+    }
+
+    fn offset(mut self, rows: usize) -> Self {
+        self.set_tail_mut().offset = Some(rows);
+        self
+    }
+}
+
+/// A set-select query object that can fetch rows through an executable connection (mirror of
+/// [`ExecutableSelectQuery`], without the single-select `Base`/`Projection`). The arms are
+/// parameter-free in this path (literals inlined); backends implement [`fetch`](Self::fetch).
+pub trait ExecutableSetSelectQuery<'conn> {
+    type Builder: Connection + 'conn;
+    type Row: Decode<<Self::Builder as QueryBuilder>::Backend> + Send;
+
+    type RowStream<'query>: Stream<Item = Result<Self::Row, ErrorOf<Self::Builder>>> + Send + 'query
+    where
+        Self: 'query;
+
+    fn fetch<'query>(&'query self) -> Self::RowStream<'query>;
+
+    fn collect<'query>(
+        &'query self,
+    ) -> impl Future<Output = Result<Vec<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
+    where
+        'conn: 'query,
+    {
+        let rows = self.fetch();
+        collect_rows::<Self::Builder, Self::Row, _>(rows)
+    }
+
+    fn fetch_one<'query>(
+        &'query self,
+    ) -> impl Future<Output = Result<Self::Row, ErrorOf<Self::Builder>>> + Send + 'query
+    where
+        'conn: 'query,
+    {
+        let row = fetch_optional_row::<Self::Builder, Self::Row, _>(self.fetch());
+        async move {
+            row.await?
+                .ok_or_else(<<Self::Builder as QueryBuilder>::Backend as Backend>::no_rows_error)
+        }
+    }
+
+    fn fetch_optional<'query>(
+        &'query self,
+    ) -> impl Future<Output = Result<Option<Self::Row>, ErrorOf<Self::Builder>>> + Send + 'query
+    where
+        'conn: 'query,
+    {
+        fetch_optional_row::<Self::Builder, Self::Row, _>(self.fetch())
+    }
+}
+
+/// A set-select query object that can be compiled into a backend-owned prepared statement (mirror of
+/// [`PreparableSelectQuery`]). Reuses the backend's [`PreparedSelectQuery`] type for the prepared form.
+pub trait PreparableSetSelectQuery<'conn> {
+    type Builder: Connection + 'conn;
+    type Params: HList;
+    type Row: Decode<<Self::Builder as QueryBuilder>::Backend> + Send;
+
+    type Prepared<'prepared>: PreparedSelectQuery<
+            'prepared,
+            Builder = Self::Builder,
+            Params = Self::Params,
+            Row = Self::Row,
+        > + 'prepared
+    where
+        Self: 'prepared,
+        'conn: 'prepared;
+
+    fn prepare<'prepared>(
+        &'prepared self,
+    ) -> impl Future<Output = Result<Self::Prepared<'prepared>, ErrorOf<Self::Builder>>> + 'prepared
+    where
+        'conn: 'prepared;
+}
+
 /// A backend-specific select query object backed by core-owned select typestates.
 pub trait SelectQuery<'builder, 'scope, Base, Projection>
 where

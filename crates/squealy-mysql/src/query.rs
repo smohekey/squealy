@@ -14,10 +14,11 @@ use mysql_async::Value;
 use mysql_async::prelude::{FromValue, Queryable};
 use squealy::{
     Backend, Connection, Decode, DeleteQuery, Encode, ExecutableDeleteQuery, ExecutableInsertQuery,
-    ExecutableSelectQuery, ExecutableUpdateQuery, HNil, InsertQuery, InsertRows, InsertableTable,
-    NoRuntimeParams, ParamWriter, PredicateNodes, PreparedParamValues, Projectable,
-    ProjectionShape, QueryBuilder, RenderInsertRows, RenderPredicateNodes, RenderProjectable,
-    RenderSelectAst, RenderUpdateAssignments, RowsAffected, SelectAst, SelectQuery, Selected,
+    ExecutableSelectQuery, ExecutableSetSelectQuery, ExecutableUpdateQuery, HNil, InsertQuery,
+    InsertRows, InsertableTable, NoRuntimeParams, ParamWriter, PredicateNodes, PreparedParamValues,
+    Projectable, ProjectionShape, QueryBuilder, RenderInsertRows, RenderPredicateNodes,
+    RenderProjectable, RenderSelectAst, RenderUpdateAssignments, RowsAffected, SelectAst,
+    SelectQuery, Selected, SetArm, SetLeaf, SetOperand, SetOperations, SetSelectModifiers, SetTail,
     SourceAlias, Table, TableProjection, UpdateAssignments, UpdateQuery, UpdateableTable, render,
 };
 

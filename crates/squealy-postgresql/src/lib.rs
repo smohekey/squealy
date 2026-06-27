@@ -19,7 +19,7 @@ mod sql;
 pub use query::Json;
 pub use query::{
     EmptyRows, PostgresDelete, PostgresInsert, PostgresParam, PostgresPreparedMutation,
-    PostgresPreparedSelect, PostgresRowReader, PostgresSelect, PostgresUpdate,
+    PostgresPreparedSelect, PostgresRowReader, PostgresSelect, PostgresSetSelect, PostgresUpdate,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

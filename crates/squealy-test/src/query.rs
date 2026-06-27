@@ -12,8 +12,9 @@ use squealy::{
     PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery, PreparedMutationQuery,
     PreparedParamValues, PreparedSelectQuery, Projectable, ProjectionShape, QueryBuilder,
     RenderInsertRows, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
-    RenderUpdateAssignments, RowsAffected, SelectAst, SelectQuery, Selected, SourceAlias,
-    TableProjection, UpdateQuery, UpdateableTable,
+    RenderUpdateAssignments, RowsAffected, SelectAst, SelectQuery, Selected, SetArm, SetLeaf,
+    SetOperand, SetOperations, SetSelectModifiers, SetTail, SourceAlias, TableProjection,
+    UpdateQuery, UpdateableTable,
 };
 
 use crate::{TestBackend, TestConnection, TestError, sql};
@@ -929,6 +930,139 @@ where
         let mut params = Vec::new();
         self.write_params(&mut params)?;
         Ok(params)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Set operations
+// ---------------------------------------------------------------------------
+
+/// A set-operation query object (`(<left>) UNION (<right>) …`) over a [`SetArm`] tree.
+pub struct TestSetSelect<'conn, 'scope, Tree> {
+    connection: &'conn TestConnection,
+    tree: Tree,
+    tail: SetTail,
+    _scope: PhantomData<&'scope ()>,
+}
+
+impl<'conn, 'scope, Tree> TestSetSelect<'conn, 'scope, Tree> {
+    fn new(connection: &'conn TestConnection, tree: Tree) -> Self {
+        Self {
+            connection,
+            tree,
+            tail: SetTail::default(),
+            _scope: PhantomData,
+        }
+    }
+}
+
+impl<'conn, 'scope, Tree> TestSetSelect<'conn, 'scope, Tree>
+where
+    Tree: squealy::render::RenderSetArm<'conn, 'scope, TestConnection, TestBackend>,
+{
+    /// Render this set query into a newly allocated SQL string.
+    pub fn to_sql(&self) -> String {
+        render_sql(|writer| self.write_sql(writer))
+    }
+
+    /// Stream SQL into caller-provided storage without allocating a SQL string.
+    pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+        sql::write_set_into::<Tree, _>(&self.tree, &self.tail, writer)
+    }
+
+    /// Write bind parameters (left-to-right across the whole tree) into a native param vector.
+    pub fn write_params(&self, params: &mut Vec<crate::TestParam>) -> Result<(), TestError> {
+        sql::write_set_params::<Tree>(&self.tree, &self.tail, params)
+    }
+
+    /// Collect bind parameters into a newly allocated vector.
+    pub fn collect_params(&self) -> Result<Vec<crate::TestParam>, TestError> {
+        let mut params = Vec::new();
+        self.write_params(&mut params)?;
+        Ok(params)
+    }
+}
+
+impl<'conn, 'scope, Tree> SetSelectModifiers<'scope> for TestSetSelect<'conn, 'scope, Tree>
+where
+    Tree: SetArm<'conn, 'scope, TestConnection>,
+{
+    type Shape = <Tree as SetArm<'conn, 'scope, TestConnection>>::Shape;
+
+    fn set_tail_mut(&mut self) -> &mut SetTail {
+        &mut self.tail
+    }
+}
+
+impl<'conn, 'scope, Shape, Base, Projection> SetOperand<'conn, 'scope, TestConnection>
+    for TestSelect<'conn, 'scope, Shape, Base, Projection>
+where
+    Shape: ProjectionShape,
+    Base: SelectAst<'conn, 'scope, TestConnection>,
+    Projection: Projectable,
+{
+    type Row = Shape::Row;
+    type Arm = SetLeaf<'conn, 'scope, TestConnection, Base, Shape, Projection>;
+
+    fn into_set_parts(self) -> (&'conn TestConnection, Self::Arm) {
+        (self.connection, SetLeaf::new(self.selected))
+    }
+}
+
+impl<'conn, 'scope, Shape, Base, Projection> SetOperations<'conn, 'scope, TestConnection>
+    for TestSelect<'conn, 'scope, Shape, Base, Projection>
+where
+    Shape: ProjectionShape,
+    Base: SelectAst<'conn, 'scope, TestConnection>,
+    Projection: Projectable,
+{
+    type SetSelect<Tree>
+        = TestSetSelect<'conn, 'scope, Tree>
+    where
+        Tree: SetArm<'conn, 'scope, TestConnection>;
+
+    fn make_set_select<Tree>(connection: &'conn TestConnection, tree: Tree) -> Self::SetSelect<Tree>
+    where
+        Tree: SetArm<'conn, 'scope, TestConnection>,
+    {
+        TestSetSelect::new(connection, tree)
+    }
+}
+
+impl<'conn, 'scope, Tree> SetOperand<'conn, 'scope, TestConnection>
+    for TestSetSelect<'conn, 'scope, Tree>
+where
+    Tree: SetArm<'conn, 'scope, TestConnection>,
+{
+    type Row = <Tree as SetArm<'conn, 'scope, TestConnection>>::Row;
+    type Arm = squealy::SetGroup<Tree>;
+
+    fn into_set_parts(self) -> (&'conn TestConnection, Self::Arm) {
+        (
+            self.connection,
+            squealy::SetGroup::new(self.tree, self.tail),
+        )
+    }
+}
+
+impl<'conn, 'scope, Tree> SetOperations<'conn, 'scope, TestConnection>
+    for TestSetSelect<'conn, 'scope, Tree>
+where
+    Tree: SetArm<'conn, 'scope, TestConnection>,
+{
+    type SetSelect<NewTree>
+        = TestSetSelect<'conn, 'scope, NewTree>
+    where
+        NewTree: SetArm<'conn, 'scope, TestConnection>;
+
+    fn make_set_select<NewTree>(
+        connection: &'conn TestConnection,
+        tree: NewTree,
+    ) -> Self::SetSelect<NewTree>
+    where
+        NewTree: SetArm<'conn, 'scope, TestConnection>,
+    {
+        TestSetSelect::new(connection, tree)
     }
 }
 
