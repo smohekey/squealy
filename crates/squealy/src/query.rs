@@ -3338,43 +3338,77 @@ where
         self.base.connection()
     }
 
-    /// The de-duplicated CTE definitions this select references through its `FROM`/`JOIN` sources, in
-    /// first-seen order. The renderer emits these as the `WITH` prefix before the main `SELECT`.
-    ///
-    /// De-duplication is by **definition identity** (each CTE type has a unique `'static` `CteDef`), so
-    /// the same CTE referenced from several sources yields one `WITH` entry. Two *distinct* CTEs that
-    /// derive the **same** bare name (the `CTE` derive names by struct name, ignoring module/schema)
-    /// would both bind that one `WITH` name, silently dropping one body — so that is rejected with a
-    /// panic rather than rendered as wrong SQL.
+    /// The CTEs this select references *directly* through its own `FROM`/`JOIN` sources, with
+    /// duplicates (a CTE referenced from several sources appears several times) and no ordering. The
+    /// raw chain walk underlying both [`collect_ctes`](Self::collect_ctes) (the query's full `WITH`
+    /// set) and [`ViewSelect::cte_dependencies`](crate::ViewSelect::cte_dependencies) (a CTE body's
+    /// dependency edges).
     #[doc(hidden)]
-    pub fn collect_ctes<'conn, Conn>(&self) -> Vec<&'static dyn crate::CteDef>
+    pub fn direct_ctes<'conn, Conn>(&self) -> Vec<&'static dyn crate::CteDef>
     where
         Conn: QueryBuilder + 'conn,
         Base: SelectAst<'conn, 'scope, Conn>,
     {
         let mut ctes = Vec::new();
         self.base.collect_ctes_into(&mut ctes);
+        ctes
+    }
 
-        let mut kept: Vec<&'static dyn crate::CteDef> = Vec::new();
-        for def in ctes {
-            let mut already_kept = false;
-            for existing in &kept {
-                if existing.type_key() == def.type_key() {
-                    already_kept = true;
-                    break;
-                }
-                assert!(
-                    existing.name() != def.name(),
-                    "two distinct CTEs are both named {:?}; a query cannot reference colliding CTE \
-                     names (the CTE derive names by struct name, ignoring module/schema)",
-                    def.name(),
-                );
+    /// Every CTE this select needs in its `WITH` clause — the transitive closure of the directly
+    /// referenced CTEs (following each CTE body's [`cte_dependencies`](crate::CteDef::cte_dependencies))
+    /// — in dependency order: a referenced CTE before the one that uses it. The renderer emits these as
+    /// the `WITH` prefix before the main `SELECT`.
+    ///
+    /// De-duplication is by **definition identity** ([`CteDef::type_key`](crate::CteDef::type_key)), so
+    /// a CTE reached by several paths yields one `WITH` entry. Two *distinct* CTEs that derive the
+    /// **same** bare name (the `CTE` derive names by struct name, ignoring module/schema) would both
+    /// bind that one name, silently dropping one body, so that is rejected with a panic. A dependency
+    /// **cycle** (only reachable via a CTE that selects from itself — i.e. recursion, which is out of
+    /// scope) is likewise rejected rather than looping forever.
+    #[doc(hidden)]
+    pub fn collect_ctes<'conn, Conn>(&self) -> Vec<&'static dyn crate::CteDef>
+    where
+        Conn: QueryBuilder + 'conn,
+        Base: SelectAst<'conn, 'scope, Conn>,
+    {
+        // Post-order DFS over the dependency graph: a CTE is pushed only after its dependencies, so
+        // `ordered` ends up deps-before-users. `ordered` doubles as the visited set (by `type_key`),
+        // and `on_path` detects a back-edge (cycle).
+        fn visit(
+            def: &'static dyn crate::CteDef,
+            ordered: &mut Vec<&'static dyn crate::CteDef>,
+            on_path: &mut Vec<std::any::TypeId>,
+        ) {
+            let key = def.type_key();
+            if ordered.iter().any(|kept| kept.type_key() == key) {
+                return;
             }
-            if !already_kept {
-                kept.push(def);
+            assert!(
+                !on_path.contains(&key),
+                "CTE {:?} is part of a dependency cycle; recursive CTEs (a CTE that selects from \
+                 itself) are not supported",
+                def.name(),
+            );
+            on_path.push(key);
+            for dependency in def.cte_dependencies() {
+                visit(dependency, ordered, on_path);
             }
+            on_path.pop();
+            assert!(
+                !ordered.iter().any(|kept| kept.name() == def.name()),
+                "two distinct CTEs are both named {:?}; a query cannot reference colliding CTE \
+                 names (the CTE derive names by struct name, ignoring module/schema)",
+                def.name(),
+            );
+            ordered.push(def);
         }
-        kept
+
+        let mut ordered = Vec::new();
+        let mut on_path = Vec::new();
+        for def in self.direct_ctes::<Conn>() {
+            visit(def, &mut ordered, &mut on_path);
+        }
+        ordered
     }
 
     #[doc(hidden)]
