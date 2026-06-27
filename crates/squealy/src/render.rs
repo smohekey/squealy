@@ -40,7 +40,8 @@ fn write_sql_string_literal(writer: &mut dyn Write, value: &str) -> io::Result<(
 /// renderer. The dialect is `&'static` (backend dialects are zero-sized unit values), so carrying it
 /// adds no lifetime to the renderer or the rendering structs.
 #[derive(Clone, Copy)]
-pub(crate) struct Renderer {
+#[doc(hidden)]
+pub struct Renderer {
     dialect: &'static dyn Dialect,
     next_param: usize,
     next_runtime_param: usize,
@@ -184,7 +185,8 @@ where
 
 /// Encode-side render sink: produces SQL text and records each placeholder's bind, either a literal
 /// (encoded now via [`Encode`]) or a runtime-parameter slot resolved later.
-pub(crate) trait SqlWriter<B: Backend>: Write {
+#[doc(hidden)]
+pub trait SqlWriter<B: Backend>: Write {
     fn push_bind<T>(&mut self, value: &T)
     where
         T: Encode<B>;
@@ -667,6 +669,200 @@ where
         SelectRenderSink::<Conn::Backend, _>::new(&mut writer, &mut renderer).unwrap();
     selected.lower_into::<Conn, _>(&mut select_sink).unwrap();
     select_sink.finish().unwrap();
+    writer.finish()
+}
+
+// ---------------------------------------------------------------------------
+// Set operations (UNION / INTERSECT / EXCEPT)
+// ---------------------------------------------------------------------------
+
+/// Renders one operand of a set operation — a leaf select (parenthesized `(SELECT …)`) or a nested set
+/// — into a sink that **shares** the caller's [`Renderer`], so prepared placeholders stay continuous
+/// across every arm of the tree. Implemented for [`SetLeaf`](crate::SetLeaf) /
+/// [`SetNode`](crate::SetNode) here (rather than in `query.rs`) because leaf rendering needs the
+/// private [`SelectRenderSink`].
+#[doc(hidden)]
+pub trait RenderSetArm<'conn, 'scope, Conn, B>: crate::SetArm<'conn, 'scope, Conn>
+where
+    Conn: QueryBuilder + 'conn,
+    B: Backend,
+{
+    /// Render this arm as a parenthesized set operand.
+    fn render_operand<Writer>(
+        &self,
+        writer: &mut Writer,
+        renderer: &mut Renderer,
+    ) -> io::Result<()>
+    where
+        Writer: SqlWriter<B>;
+
+    /// Render this arm as the outermost set (no enclosing parentheses, so a trailing `ORDER BY`/`LIMIT`
+    /// binds to the whole set). Defaults to [`render_operand`](Self::render_operand); set nodes drop the
+    /// outer parens.
+    fn render_root<Writer>(&self, writer: &mut Writer, renderer: &mut Renderer) -> io::Result<()>
+    where
+        Writer: SqlWriter<B>,
+    {
+        self.render_operand(writer, renderer)
+    }
+
+    /// Collect the CTEs referenced by this arm (and nested arms), for hoisting into one leading `WITH`.
+    fn collect_set_ctes(&self, ctes: &mut Vec<&'static dyn crate::CteDef>);
+}
+
+impl<'conn, 'scope, Conn, Base, Shape, Projection, B> RenderSetArm<'conn, 'scope, Conn, B>
+    for crate::SetLeaf<'conn, 'scope, Conn, Base, Shape, Projection>
+where
+    Conn: QueryBuilder + 'conn,
+    B: Backend,
+    Base: RenderSelectAst<'conn, 'scope, Conn, B>,
+    Shape: ProjectionShape,
+    Projection: RenderProjectable<B>,
+{
+    fn render_operand<Writer>(&self, writer: &mut Writer, renderer: &mut Renderer) -> io::Result<()>
+    where
+        Writer: SqlWriter<B>,
+    {
+        writer.write_all(b"(")?;
+        {
+            let mut sink = SelectRenderSink::<B, Writer>::new(writer, renderer)?;
+            self.selected.lower_into::<Conn, _>(&mut sink)?;
+            sink.finish()?;
+        }
+        writer.write_all(b")")
+    }
+
+    fn collect_set_ctes(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        ctes.extend(self.selected.collect_ctes::<Conn, B>());
+    }
+}
+
+impl<'conn, 'scope, Conn, L, R, B> RenderSetArm<'conn, 'scope, Conn, B> for crate::SetNode<L, R>
+where
+    Conn: QueryBuilder + 'conn,
+    B: Backend,
+    L: RenderSetArm<'conn, 'scope, Conn, B>,
+    R: RenderSetArm<'conn, 'scope, Conn, B, Row = <L as crate::SetArm<'conn, 'scope, Conn>>::Row>,
+    <L as crate::SetArm<'conn, 'scope, Conn>>::Params:
+        crate::HAppend<<R as crate::SetArm<'conn, 'scope, Conn>>::Params>,
+{
+    fn render_operand<Writer>(&self, writer: &mut Writer, renderer: &mut Renderer) -> io::Result<()>
+    where
+        Writer: SqlWriter<B>,
+    {
+        writer.write_all(b"(")?;
+        self.render_root(writer, renderer)?;
+        writer.write_all(b")")
+    }
+
+    fn render_root<Writer>(&self, writer: &mut Writer, renderer: &mut Renderer) -> io::Result<()>
+    where
+        Writer: SqlWriter<B>,
+    {
+        self.left.render_operand(writer, renderer)?;
+        write!(writer, " {} ", self.op.keyword())?;
+        self.right.render_operand(writer, renderer)
+    }
+
+    fn collect_set_ctes(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        self.left.collect_set_ctes(ctes);
+        self.right.collect_set_ctes(ctes);
+    }
+}
+
+/// De-duplicate a set's collected CTEs by definition identity (each arm's list is already topo-ordered;
+/// a CTE used in several arms is kept once, at first occurrence).
+fn dedup_set_ctes(ctes: Vec<&'static dyn crate::CteDef>) -> Vec<&'static dyn crate::CteDef> {
+    let mut kept: Vec<&'static dyn crate::CteDef> = Vec::new();
+    for def in ctes {
+        if !kept
+            .iter()
+            .any(|existing| existing.type_key() == def.type_key())
+        {
+            kept.push(def);
+        }
+    }
+    kept
+}
+
+/// Writes a set's trailing `ORDER BY <output col> [ASC|DESC], … [LIMIT n] [OFFSET n]` (referencing the
+/// set's output column names, not source aliases).
+fn write_set_tail(
+    dialect: &dyn Dialect,
+    tail: &crate::SetTail,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
+    if !tail.orders.is_empty() {
+        writer.write_all(b" ORDER BY ")?;
+        for (index, order) in tail.orders.iter().enumerate() {
+            if index > 0 {
+                writer.write_all(b", ")?;
+            }
+            dialect.write_quoted_ident(&order.column, writer)?;
+            writer.write_all(match order.direction {
+                OrderDirection::Asc => b" ASC" as &[u8],
+                OrderDirection::Desc => b" DESC",
+            })?;
+        }
+    }
+    dialect.write_limit_offset(tail.limit, tail.offset, writer)
+}
+
+pub fn render_set_prepared<'conn, 'scope, Conn, Tree>(
+    dialect: &'static dyn Dialect,
+    tree: &Tree,
+    tail: &crate::SetTail,
+    buffer: &mut PreparedSql<Conn::Backend>,
+) where
+    Conn: QueryBuilder + 'conn,
+    Tree: RenderSetArm<'conn, 'scope, Conn, Conn::Backend>,
+{
+    buffer.clear();
+    let mut renderer = Renderer::new(dialect);
+    let mut ctes = Vec::new();
+    tree.collect_set_ctes(&mut ctes);
+    write_cte_prefix(dialect, &dedup_set_ctes(ctes), buffer).unwrap();
+    tree.render_root(buffer, &mut renderer).unwrap();
+    write_set_tail(dialect, tail, buffer).unwrap();
+}
+
+pub fn write_set_into<'conn, 'scope, Conn, Tree, Writer>(
+    dialect: &'static dyn Dialect,
+    tree: &Tree,
+    tail: &crate::SetTail,
+    writer: &mut Writer,
+) -> io::Result<()>
+where
+    Conn: QueryBuilder + 'conn,
+    Tree: RenderSetArm<'conn, 'scope, Conn, Conn::Backend>,
+    Writer: Write,
+{
+    let mut writer = SqlOnly(writer);
+    let mut renderer = Renderer::new(dialect);
+    let mut ctes = Vec::new();
+    tree.collect_set_ctes(&mut ctes);
+    write_cte_prefix(dialect, &dedup_set_ctes(ctes), &mut writer)?;
+    tree.render_root(&mut writer, &mut renderer)?;
+    write_set_tail(dialect, tail, &mut writer)
+}
+
+pub fn write_set_params<'conn, 'scope, Conn, Tree>(
+    dialect: &'static dyn Dialect,
+    tree: &Tree,
+    tail: &crate::SetTail,
+    params: &mut Vec<<Conn::Backend as Backend>::Param>,
+) -> Result<(), <Conn::Backend as Backend>::Error>
+where
+    Conn: QueryBuilder + 'conn,
+    Tree: RenderSetArm<'conn, 'scope, Conn, Conn::Backend>,
+{
+    let mut writer = ParamCollector::<Conn::Backend>::new(params);
+    let mut renderer = Renderer::new(dialect);
+    let mut ctes = Vec::new();
+    tree.collect_set_ctes(&mut ctes);
+    write_cte_prefix(dialect, &dedup_set_ctes(ctes), &mut writer).unwrap();
+    tree.render_root(&mut writer, &mut renderer).unwrap();
+    write_set_tail(dialect, tail, &mut writer).unwrap();
     writer.finish()
 }
 

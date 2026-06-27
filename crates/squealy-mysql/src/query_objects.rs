@@ -370,6 +370,175 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// Set operations
+// ---------------------------------------------------------------------------
+
+/// A set-operation query object (`(<left>) UNION (<right>) …`) over a [`SetArm`] tree. MySQL has no
+/// prepared-statement path here, so only the executable form is provided.
+pub struct MysqlSetSelect<'conn, 'scope, Tree, Conn = MysqlConnection>
+where
+    Conn: QueryBuilder<Backend = Mysql>,
+{
+    connection: &'conn Conn,
+    tree: Tree,
+    tail: SetTail,
+    _scope: PhantomData<&'scope ()>,
+}
+
+impl<'conn, 'scope, Tree, Conn> MysqlSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Conn: QueryBuilder<Backend = Mysql>,
+{
+    fn new(connection: &'conn Conn, tree: Tree) -> Self {
+        Self {
+            connection,
+            tree,
+            tail: SetTail::default(),
+            _scope: PhantomData,
+        }
+    }
+}
+
+impl<'conn, 'scope, Tree, Conn> MysqlSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Conn: QueryBuilder<Backend = Mysql>,
+    Tree: render::RenderSetArm<'conn, 'scope, Conn, Mysql>,
+{
+    fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError> {
+        let sql = rendered_sql(|writer| {
+            render::write_set_into::<Conn, Tree, _>(&MysqlDialect, &self.tree, &self.tail, writer)
+        });
+        let params = collect_mysql_params(0, |params| {
+            render::write_set_params::<Conn, Tree>(&MysqlDialect, &self.tree, &self.tail, params)
+        })?;
+        Ok((sql, params))
+    }
+
+    /// Renders this set query into a newly allocated SQL string.
+    pub fn to_sql(&self) -> String {
+        rendered_sql(|writer| self.write_sql(writer))
+    }
+
+    /// Streams SQL into caller-provided storage.
+    pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+        render::write_set_into::<Conn, Tree, _>(&MysqlDialect, &self.tree, &self.tail, writer)
+    }
+
+    /// Collects bind parameters (left-to-right across the whole tree) into a newly allocated vector.
+    pub fn collect_params(&self) -> Result<Vec<Value>, MysqlError> {
+        let mut params = Vec::new();
+        render::write_set_params::<Conn, Tree>(&MysqlDialect, &self.tree, &self.tail, &mut params)?;
+        Ok(params)
+    }
+}
+
+impl<'conn, 'scope, Tree, Conn> ExecutableSetSelectQuery<'conn>
+    for MysqlSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Conn: MysqlExecutor + 'conn,
+    Tree: render::RenderSetArm<'conn, 'scope, Conn, Mysql>,
+    <Tree as SetArm<'conn, 'scope, Conn>>::Row: Decode<Mysql> + Send,
+{
+    type Builder = Conn;
+    type Row = <Tree as SetArm<'conn, 'scope, Conn>>::Row;
+
+    type RowStream<'query>
+        = MysqlRows<'query, Self::Row, Conn>
+    where
+        Self: 'query;
+
+    fn fetch(&self) -> Self::RowStream<'_> {
+        match self.execution_parts() {
+            Ok((sql, params)) => MysqlRows::query(self.connection, sql, params),
+            Err(error) => MysqlRows::error(error),
+        }
+    }
+}
+
+impl<'conn, 'scope, Shape, Base, Projection, Conn> SetOperand<'conn, 'scope, Conn>
+    for MysqlSelect<'conn, 'scope, Shape, Base, Projection, Conn>
+where
+    Shape: ProjectionShape,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Projection: Projectable,
+    Conn: QueryBuilder<Backend = Mysql> + 'conn,
+{
+    type Row = Shape::Row;
+    type Arm = SetLeaf<'conn, 'scope, Conn, Base, Shape, Projection>;
+
+    fn into_set_parts(self) -> (&'conn Conn, Self::Arm) {
+        (self.connection, SetLeaf::new(self.selected))
+    }
+}
+
+impl<'conn, 'scope, Shape, Base, Projection, Conn> SetOperations<'conn, 'scope, Conn>
+    for MysqlSelect<'conn, 'scope, Shape, Base, Projection, Conn>
+where
+    Shape: ProjectionShape,
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Projection: Projectable,
+    Conn: QueryBuilder<Backend = Mysql> + 'conn,
+{
+    type SetSelect<Tree>
+        = MysqlSetSelect<'conn, 'scope, Tree, Conn>
+    where
+        Tree: SetArm<'conn, 'scope, Conn>;
+
+    fn make_set_select<Tree>(connection: &'conn Conn, tree: Tree) -> Self::SetSelect<Tree>
+    where
+        Tree: SetArm<'conn, 'scope, Conn>,
+    {
+        MysqlSetSelect::new(connection, tree)
+    }
+}
+
+impl<'conn, 'scope, Tree, Conn> SetOperand<'conn, 'scope, Conn>
+    for MysqlSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Tree: SetArm<'conn, 'scope, Conn>,
+    Conn: QueryBuilder<Backend = Mysql> + 'conn,
+{
+    type Row = <Tree as SetArm<'conn, 'scope, Conn>>::Row;
+    type Arm = Tree;
+
+    fn into_set_parts(self) -> (&'conn Conn, Self::Arm) {
+        (self.connection, self.tree)
+    }
+}
+
+impl<'conn, 'scope, Tree, Conn> SetOperations<'conn, 'scope, Conn>
+    for MysqlSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Tree: SetArm<'conn, 'scope, Conn>,
+    Conn: QueryBuilder<Backend = Mysql> + 'conn,
+{
+    type SetSelect<NewTree>
+        = MysqlSetSelect<'conn, 'scope, NewTree, Conn>
+    where
+        NewTree: SetArm<'conn, 'scope, Conn>;
+
+    fn make_set_select<NewTree>(connection: &'conn Conn, tree: NewTree) -> Self::SetSelect<NewTree>
+    where
+        NewTree: SetArm<'conn, 'scope, Conn>,
+    {
+        MysqlSetSelect::new(connection, tree)
+    }
+}
+
+impl<'conn, 'scope, Tree, Conn> SetSelectModifiers<'scope>
+    for MysqlSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Tree: SetArm<'conn, 'scope, Conn>,
+    Conn: QueryBuilder<Backend = Mysql>,
+{
+    type Shape = <Tree as SetArm<'conn, 'scope, Conn>>::Shape;
+
+    fn set_tail_mut(&mut self) -> &mut SetTail {
+        &mut self.tail
+    }
+}
+
 impl<'conn, S, Shape, Rows, Returning, Conn> InsertQuery<'conn, Rows, Returning>
     for MysqlInsert<'conn, S, Shape, Rows, Returning, Conn>
 where
