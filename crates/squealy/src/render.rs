@@ -910,7 +910,12 @@ fn write_cte_prefix(
     if ctes.is_empty() {
         return Ok(());
     }
-    writer.write_all(b"WITH ")?;
+    // SQL requires `WITH RECURSIVE` on the whole clause if any entry is recursive.
+    if ctes.iter().any(|def| def.is_recursive()) {
+        writer.write_all(b"WITH RECURSIVE ")?;
+    } else {
+        writer.write_all(b"WITH ")?;
+    }
     for (index, def) in ctes.iter().enumerate() {
         if index > 0 {
             writer.write_all(b", ")?;
@@ -924,7 +929,20 @@ fn write_cte_prefix(
             dialect.write_quoted_ident(&column.name, writer)?;
         }
         writer.write_all(b") AS (")?;
-        crate::view_render::render_cte_body(&def.body_model(), dialect, writer)?;
+        match def.body() {
+            crate::CteBody::Plain(model) => {
+                crate::view_render::render_cte_body(&model, dialect, writer)?;
+            }
+            crate::CteBody::Recursive {
+                anchor,
+                union_all,
+                recursive,
+            } => {
+                crate::view_render::render_recursive_cte_body(
+                    &anchor, union_all, &recursive, dialect, writer,
+                )?;
+            }
+        }
         writer.write_all(b")")?;
     }
     writer.write_all(b" ")

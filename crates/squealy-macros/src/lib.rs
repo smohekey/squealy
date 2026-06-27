@@ -71,6 +71,13 @@ pub fn derive_cte(input: TokenStream) -> TokenStream {
     cte::derive(input)
 }
 
+/// Derives a recursive CTE (`WITH RECURSIVE`): same projection/metadata as `#[derive(CTE)]`, but the
+/// body is `<anchor> UNION [ALL] <recursive>` supplied via `RecursiveCteDefinition::definition`.
+#[proc_macro_derive(RecursiveCTE, attributes(column, column_name, schema))]
+pub fn derive_recursive_cte(input: TokenStream) -> TokenStream {
+    cte::derive_recursive(input)
+}
+
 #[proc_macro_derive(Database)]
 pub fn derive_database(input: TokenStream) -> TokenStream {
     database::derive(input)

@@ -1097,6 +1097,19 @@ pub trait ViewSelect {
     /// transitive dependencies (see [`CteDef::cte_dependencies`](crate::CteDef::cte_dependencies)). A
     /// plain view body (no CTE sources) returns an empty list.
     fn cte_dependencies(&self) -> Vec<&'static dyn crate::CteDef>;
+
+    /// Pair this (anchor) body with a recursive term of the same row type to form a recursive CTE body
+    /// (`<anchor> UNION [ALL] <recursive>`). Used in [`RecursiveCteDefinition::definition`].
+    fn union_with<Recursive>(self, recursive: Recursive) -> crate::RecursiveUnion<Self, Recursive>
+    where
+        Self: Sized,
+        Recursive: ViewSelect<Row = Self::Row>,
+    {
+        crate::RecursiveUnion {
+            anchor: self,
+            recursive,
+        }
+    }
 }
 
 impl<'scope, Base, Shape, Projection> ViewSelect for Selected<'scope, Base, Shape, Projection>
