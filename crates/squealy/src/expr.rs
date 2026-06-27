@@ -5893,6 +5893,14 @@ where
         }
     }
 
+    /// The name of the column this expression references. For a set's output column (a rebound
+    /// projection element), this is the output column name (e.g. `t0_id`) that a trailing `ORDER BY`
+    /// over the whole set should reference.
+    #[doc(hidden)]
+    pub fn referenced_column(&self) -> Cow<'static, str> {
+        self.ast.column.clone()
+    }
+
     #[doc(hidden)]
     pub fn column_with_project_alias(
         alias: SourceAlias,
