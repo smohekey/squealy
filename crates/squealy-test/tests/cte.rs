@@ -115,3 +115,65 @@ SELECT q0_0.id AS t0_id, q0_1.name AS t1_name \
 FROM active_users AS q0_0 INNER JOIN active_users AS q0_1 ON (q0_1.id = q0_0.id)"
     );
 }
+
+// Two *distinct* CTE types that derive the same bare name (`#[derive(CTE)]` names by struct name,
+// ignoring the module) would both bind a single `WITH` entry, silently dropping one body. That is
+// rejected rather than rendered as wrong SQL.
+mod collision {
+    use super::*;
+
+    pub mod left {
+        use super::*;
+
+        #[allow(dead_code)]
+        #[derive(CTE)]
+        pub struct Summary<'scope, C: ColumnMode = ColumnExpr> {
+            pub id: C::Type<'scope, i32>,
+            pub name: C::Type<'scope, String>,
+        }
+
+        impl<'scope, C: ColumnMode> CteDefinition for Summary<'scope, C> {
+            fn definition(
+                db: &'static ModelConn,
+            ) -> impl ViewSelect<Row = <Self as SchemaCte>::Row> {
+                db.from::<User>()
+                    .where_(|user| user.active.equals(true))
+                    .project(|(user,)| (user.id, user.name))
+            }
+        }
+    }
+
+    pub mod right {
+        use super::*;
+
+        #[allow(dead_code)]
+        #[derive(CTE)]
+        pub struct Summary<'scope, C: ColumnMode = ColumnExpr> {
+            pub id: C::Type<'scope, i32>,
+            pub name: C::Type<'scope, String>,
+        }
+
+        impl<'scope, C: ColumnMode> CteDefinition for Summary<'scope, C> {
+            fn definition(
+                db: &'static ModelConn,
+            ) -> impl ViewSelect<Row = <Self as SchemaCte>::Row> {
+                db.from::<User>()
+                    .where_(|user| user.active.equals(false))
+                    .project(|(user,)| (user.id, user.name))
+            }
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "two distinct CTEs are both named")]
+fn distinct_ctes_with_colliding_names_are_rejected() {
+    let query = TestConnection
+        .from::<collision::left::Summary>()
+        .join::<collision::right::Summary>()
+        .on(|(left,), right| right.id.equals(left.id))
+        .select(|(left, right)| (left.name, right.name));
+
+    // Both CTEs derive the bare name "summaries"; rendering must fail loudly rather than emit one body.
+    let _ = query.to_sql();
+}

@@ -3340,6 +3340,12 @@ where
 
     /// The de-duplicated CTE definitions this select references through its `FROM`/`JOIN` sources, in
     /// first-seen order. The renderer emits these as the `WITH` prefix before the main `SELECT`.
+    ///
+    /// De-duplication is by **definition identity** (each CTE type has a unique `'static` `CteDef`), so
+    /// the same CTE referenced from several sources yields one `WITH` entry. Two *distinct* CTEs that
+    /// derive the **same** bare name (the `CTE` derive names by struct name, ignoring module/schema)
+    /// would both bind that one `WITH` name, silently dropping one body — so that is rejected with a
+    /// panic rather than rendered as wrong SQL.
     #[doc(hidden)]
     pub fn collect_ctes<'conn, Conn>(&self) -> Vec<&'static dyn crate::CteDef>
     where
@@ -3348,10 +3354,33 @@ where
     {
         let mut ctes = Vec::new();
         self.base.collect_ctes_into(&mut ctes);
-        // A CTE referenced from several sources is collected once: keep the first occurrence.
-        let mut seen = std::collections::HashSet::new();
-        ctes.retain(|def| seen.insert(def.name()));
-        ctes
+
+        // Identity of a `CteDef` is the address of its (zero-sized) `'static` marker — a thin data
+        // pointer, so this avoids any trait-object vtable-address comparison.
+        fn identity(def: &'static dyn crate::CteDef) -> *const () {
+            def as *const dyn crate::CteDef as *const ()
+        }
+
+        let mut kept: Vec<&'static dyn crate::CteDef> = Vec::new();
+        for def in ctes {
+            let mut already_kept = false;
+            for existing in &kept {
+                if std::ptr::eq(identity(*existing), identity(def)) {
+                    already_kept = true;
+                    break;
+                }
+                assert!(
+                    existing.name() != def.name(),
+                    "two distinct CTEs are both named {:?}; a query cannot reference colliding CTE \
+                     names (the CTE derive names by struct name, ignoring module/schema)",
+                    def.name(),
+                );
+            }
+            if !already_kept {
+                kept.push(def);
+            }
+        }
+        kept
     }
 
     #[doc(hidden)]
