@@ -470,7 +470,9 @@ pub use column::{
 };
 pub use connection::{Connection, ConnectionWithTransaction, QueryBuilder};
 pub use cte::{
-    CteDef, CteDefinition, SchemaCte, cte_definition_dependencies, cte_definition_model,
+    CteBody, CteDef, CteDefinition, RecursiveBody, RecursiveCteDefinition, RecursiveUnion,
+    SchemaCte, cte_definition_dependencies, cte_definition_model, recursive_cte_definition_body,
+    recursive_cte_definition_dependencies,
 };
 pub use database::Database;
 pub use dialect::Dialect;
@@ -543,18 +545,18 @@ pub use query::{
     MutationUnfiltered, NoSources, NonEmptyInsertRows, NonNullableColumn, NullableColumn, Offset,
     OnConflict, OnConflictQueryBuilder, OrderBy, OuterJoin, PredicateNodes, PredicateVisitor,
     PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery, PreparableSetSelectQuery,
-    PreparableUpdateQuery, PreparedMutationQuery, PreparedSelectQuery, RenderAssignment,
-    RenderAssignmentValue, RenderInsertAssignments, RenderInsertRows, RenderPredicateNodes,
-    RenderSelectAst, RenderSourceSpec, RenderSubquery, RenderUpdateAssignments,
-    ReturningProjection, RightJoinSource, RightJoinTarget, RootSource, RowsAffected,
-    RuntimeAssignmentValue, ScalarSubquery, SelectAst, SelectQuery, SelectSink, Selected, SetArm,
-    SetGroup, SetLeaf, SetNode, SetOp, SetOperand, SetOperations, SetOrder, SetSelectModifiers,
-    SetTail, SourceQuery, SourceSpec, StaticAssignmentValue, Subqueries, Subquery, SubquerySelect,
-    ToColumns, UpdateAssignment, UpdateAssignmentNode, UpdateAssignments, UpdateColumnKey,
-    UpdateColumnValues, UpdateQuery, Upsert, Where, default,
+    PreparableUpdateQuery, PreparedMutationQuery, PreparedSelectQuery, RecursiveSelf,
+    RenderAssignment, RenderAssignmentValue, RenderInsertAssignments, RenderInsertRows,
+    RenderPredicateNodes, RenderSelectAst, RenderSourceSpec, RenderSubquery,
+    RenderUpdateAssignments, ReturningProjection, RightJoinSource, RightJoinTarget, RootSource,
+    RowsAffected, RuntimeAssignmentValue, ScalarSubquery, SelectAst, SelectQuery, SelectSink,
+    Selected, SetArm, SetGroup, SetLeaf, SetNode, SetOp, SetOperand, SetOperations, SetOrder,
+    SetSelectModifiers, SetTail, SourceQuery, SourceSpec, StaticAssignmentValue, Subqueries,
+    Subquery, SubquerySelect, ToColumns, UpdateAssignment, UpdateAssignmentNode, UpdateAssignments,
+    UpdateColumnKey, UpdateColumnValues, UpdateQuery, Upsert, Where, default,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
-pub use squealy_macros::{CTE, ColumnType, Database, Schema, Table, View};
+pub use squealy_macros::{CTE, ColumnType, Database, RecursiveCTE, Schema, Table, View};
 pub use table::{
     InsertableTable, SchemaTable, Table, TablePrimaryKey, TableUnique, UpdateableTable,
     WriteableTable,
@@ -562,4 +564,6 @@ pub use table::{
 pub use view::{ModelBackend, ModelConn, SchemaView, ViewDefinition, ViewSelect};
 #[doc(hidden)]
 pub use view::{lower_view, view_definition_model};
-pub use view_render::{ordered_views, render_create_view, render_cte_body, render_drop_view};
+pub use view_render::{
+    ordered_views, render_create_view, render_cte_body, render_drop_view, render_recursive_cte_body,
+};

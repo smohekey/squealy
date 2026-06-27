@@ -366,7 +366,11 @@ fn write_cte_prefix(ctes: &[&'static dyn CteDef], writer: &mut dyn Write) -> io:
     if ctes.is_empty() {
         return Ok(());
     }
-    writer.write_all(b"WITH ")?;
+    if ctes.iter().any(|def| def.is_recursive()) {
+        writer.write_all(b"WITH RECURSIVE ")?;
+    } else {
+        writer.write_all(b"WITH ")?;
+    }
     for (index, def) in ctes.iter().enumerate() {
         if index > 0 {
             writer.write_all(b", ")?;
@@ -379,7 +383,24 @@ fn write_cte_prefix(ctes: &[&'static dyn CteDef], writer: &mut dyn Write) -> io:
             writer.write_all(column.name.as_bytes())?;
         }
         writer.write_all(b") AS (")?;
-        squealy::view_render::render_cte_body(&def.body_model(), &TestDialect, writer)?;
+        match def.body() {
+            squealy::CteBody::Plain(model) => {
+                squealy::view_render::render_cte_body(&model, &TestDialect, writer)?;
+            }
+            squealy::CteBody::Recursive {
+                anchor,
+                union_all,
+                recursive,
+            } => {
+                squealy::view_render::render_recursive_cte_body(
+                    &anchor,
+                    union_all,
+                    &recursive,
+                    &TestDialect,
+                    writer,
+                )?;
+            }
+        }
         writer.write_all(b")")?;
     }
     writer.write_all(b" ")

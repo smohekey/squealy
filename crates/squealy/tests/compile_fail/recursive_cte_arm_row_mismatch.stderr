@@ -1,0 +1,8 @@
+error[E0271]: type mismatch resolving `<RecursiveUnion<Selected<'_, Where<'_, From<'_, '_, ModelConn, HCons<__SquealyNodeExprsProjection<'_>, HNil>, RootSource<Node<'_>>>, IsNullPredicate<NodeParentId>, NullCheckPredicateAst<ColumnExprAst<NodeParentId>>>, (NodeId, {integer}), (ColumnRef<'_, NodeId>, {integer})>, Selected<'_, Join<From<'_, '_, ModelConn, HCons<__SquealyAncestorExprsProjection<'_>, HNil>, RootSource<Ancestor<'scope, C>>>, __SquealyNodeExprsProjection<'_>, InnerJoinSource<'_, Node<'_>, EqualsPredicate<NodeParentId, AncestorId>, ComparePredicateAst<ColumnExprAst<NodeParentId>, ColumnExprAst<AncestorId>>>>, (NodeId, NodeName), (ColumnRef<'_, NodeId>, ColumnRef<'_, NodeName>)>> as RecursiveBody>::Row == (i32, i32)`
+  --> tests/compile_fail/recursive_cte_arm_row_mismatch.rs:32:10
+   |
+32 |     ) -> impl RecursiveBody<Row = <Self as SchemaCte>::Row> {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `(i32, i32)`, found `(i32, String)`
+   |
+   = note: expected tuple `(i32, i32)`
+              found tuple `(i32, std::string::String)`
