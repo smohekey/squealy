@@ -481,7 +481,9 @@ impl<'conn, 'scope, Shape, Base, Projection, Conn> SetOperand<'conn, 'scope, Con
     for MysqlSelect<'conn, 'scope, Shape, Base, Projection, Conn>
 where
     Shape: ProjectionShape,
-    Base: SelectAst<'conn, 'scope, Conn>,
+    // A row-locked select cannot be a set operand (a locking clause is invalid in a UNION/INTERSECT/
+    // EXCEPT input). `SetOperations` requires `SetOperand`, so this also blocks the left operand.
+    Base: SelectAst<'conn, 'scope, Conn, RowLockState = squealy::RowUnlocked>,
     Projection: Projectable,
     Conn: QueryBuilder<Backend = Mysql> + 'conn,
 {
@@ -497,7 +499,8 @@ impl<'conn, 'scope, Shape, Base, Projection, Conn> SetOperations<'conn, 'scope, 
     for MysqlSelect<'conn, 'scope, Shape, Base, Projection, Conn>
 where
     Shape: ProjectionShape,
-    Base: SelectAst<'conn, 'scope, Conn>,
+    // Matches the `SetOperand` supertrait bound: a row-locked select cannot start a set operation.
+    Base: SelectAst<'conn, 'scope, Conn, RowLockState = squealy::RowUnlocked>,
     Projection: Projectable,
     Conn: QueryBuilder<Backend = Mysql> + 'conn,
 {
