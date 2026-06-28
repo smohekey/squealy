@@ -543,7 +543,7 @@ pub use query::{
     InsertAssignments, InsertColumnKey, InsertColumnNullability, InsertColumnValues, InsertQuery,
     InsertReady, InsertRow, InsertRowVisitor, InsertRows, InsertRowsBuilder, IntoAssignmentValue,
     IntoInsertColumnValue, IntoNullableAssignmentValue, IntoUpdateColumnValue, IsNullable, Join,
-    JoinTarget, LeftJoin, LeftJoinSource, LeftJoinTarget, Limited, MutationFiltered,
+    JoinTarget, LeftJoin, LeftJoinSource, LeftJoinTarget, Limited, Locked, MutationFiltered,
     MutationUnfiltered, NoSources, NonEmptyInsertRows, NonNullableColumn, NullableColumn, Offset,
     OnConflict, OnConflictQueryBuilder, OrderBy, OuterJoin, PredicateNodes, PredicateVisitor,
     PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery, PreparableSetSelectQuery,
@@ -551,11 +551,11 @@ pub use query::{
     RenderAssignment, RenderAssignmentValue, RenderInsertAssignments, RenderInsertRows,
     RenderPredicateNodes, RenderSelectAst, RenderSourceSpec, RenderSubquery,
     RenderUpdateAssignments, ReturningProjection, RightJoinSource, RightJoinTarget, RootSource,
-    RowsAffected, RuntimeAssignmentValue, ScalarSubquery, SelectAst, SelectQuery, SelectSink,
-    Selected, SetArm, SetGroup, SetLeaf, SetNode, SetOp, SetOperand, SetOperations, SetOrder,
-    SetSelectModifiers, SetTail, SourceQuery, SourceSpec, StaticAssignmentValue, Subqueries,
-    Subquery, SubquerySelect, ToColumns, UpdateAssignment, UpdateAssignmentNode, UpdateAssignments,
-    UpdateColumnKey, UpdateColumnValues, UpdateQuery, Upsert, Where, default,
+    RowLock, RowsAffected, RuntimeAssignmentValue, ScalarSubquery, SelectAst, SelectQuery,
+    SelectSink, Selected, SetArm, SetGroup, SetLeaf, SetNode, SetOp, SetOperand, SetOperations,
+    SetOrder, SetSelectModifiers, SetTail, SourceQuery, SourceSpec, StaticAssignmentValue,
+    Subqueries, Subquery, SubquerySelect, ToColumns, UpdateAssignment, UpdateAssignmentNode,
+    UpdateAssignments, UpdateColumnKey, UpdateColumnValues, UpdateQuery, Upsert, Where, default,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{CTE, ColumnType, Database, RecursiveCTE, Schema, Table, View};

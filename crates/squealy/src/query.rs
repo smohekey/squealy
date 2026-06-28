@@ -3415,6 +3415,13 @@ pub trait SelectSink {
     fn set_distinct(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
+
+    /// Record a `FOR UPDATE` / `FOR SHARE` row lock, rendered as a trailing clause after
+    /// `LIMIT`/`OFFSET`. Defaulted to a no-op so sinks that don't render it need no change.
+    fn set_row_lock(&mut self, lock: RowLock) -> Result<(), Self::Error> {
+        let _ = lock;
+        Ok(())
+    }
 }
 
 #[doc(hidden)]
@@ -5246,6 +5253,24 @@ pub struct Distinct<Base> {
     base: Base,
 }
 
+/// The kind of row lock requested by `for_update()` / `for_share()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowLock {
+    /// `FOR UPDATE` — exclusive lock on the selected rows.
+    Update,
+    /// `FOR SHARE` (MySQL: `LOCK IN SHARE MODE`) — shared lock on the selected rows.
+    Share,
+}
+
+/// Adds a `FOR UPDATE` / `FOR SHARE` row-locking clause. Wraps the chain and forwards everything to
+/// `Base`; the only effect is recording the lock on the sink during lowering (rendered after
+/// `LIMIT`/`OFFSET`).
+#[doc(hidden)]
+pub struct Locked<Base> {
+    base: Base,
+    lock: RowLock,
+}
+
 /// Typestate marker used by generated mutation builders before a filter or all-rows intent exists.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5404,6 +5429,18 @@ where
         Self {
             base: self.base.clone(),
             rows: self.rows,
+        }
+    }
+}
+
+impl<Base> Clone for Locked<Base>
+where
+    Base: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            lock: self.lock,
         }
     }
 }
@@ -6046,6 +6083,97 @@ where
     {
         self.base.lower_bounds_into(sink)?;
         sink.set_limit(self.rows)
+    }
+
+    fn lower_distinct_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_distinct_into(sink)
+    }
+}
+
+impl<'conn, 'scope, Conn, Base> SelectAst<'conn, 'scope, Conn> for Locked<Base>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+{
+    type Exprs = Base::Exprs;
+    type Params = Base::Params;
+    type SourceParams = Base::SourceParams;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
+    type OrderClass = Base::OrderClass;
+    type Grouped = Base::Grouped;
+    type Distinctness = Base::Distinctness;
+    type OrderKeys = Base::OrderKeys;
+
+    fn depth(&self) -> usize {
+        self.base.depth()
+    }
+
+    fn connection(&self) -> &'conn Conn {
+        self.base.connection()
+    }
+
+    fn exprs(&self) -> Self::Exprs {
+        self.base.exprs()
+    }
+
+    fn collect_ctes_into(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        self.base.collect_ctes_into(ctes);
+    }
+}
+
+impl<'conn, 'scope, Conn, Base, B> RenderSelectAst<'conn, 'scope, Conn, B> for Locked<Base>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: RenderSelectAst<'conn, 'scope, Conn, B>,
+    B: Backend,
+{
+    fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_sources_into(sink)
+    }
+
+    fn lower_filters_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_filters_into(sink)
+    }
+
+    fn lower_groups_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_groups_into(sink)
+    }
+
+    fn lower_havings_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_havings_into(sink)
+    }
+
+    fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_orders_into(sink)
+    }
+
+    fn lower_bounds_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_bounds_into(sink)?;
+        sink.set_row_lock(self.lock)
     }
 
     fn lower_distinct_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
@@ -6738,6 +6866,23 @@ where
 
     fn offset(self, rows: usize) -> Offset<Self> {
         Offset { base: self, rows }
+    }
+
+    /// Lock the selected rows for update (`SELECT … FOR UPDATE`). Composes regardless of chain position;
+    /// the clause renders after `LIMIT`/`OFFSET`.
+    fn for_update(self) -> Locked<Self> {
+        Locked {
+            base: self,
+            lock: RowLock::Update,
+        }
+    }
+
+    /// Take a shared lock on the selected rows (`SELECT … FOR SHARE`; MySQL `LOCK IN SHARE MODE`).
+    fn for_share(self) -> Locked<Self> {
+        Locked {
+            base: self,
+            lock: RowLock::Share,
+        }
     }
 
     /// Render the select as `SELECT DISTINCT …` (deduplicate whole rows). Composes with the other

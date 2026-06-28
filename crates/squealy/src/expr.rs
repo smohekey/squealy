@@ -7232,6 +7232,7 @@ where
 {
     ast: Ast,
     direction: OrderDirection,
+    nulls: Option<crate::OrderNulls>,
     _phantom: PhantomData<(&'scope (), K)>,
 }
 
@@ -7243,8 +7244,23 @@ where
         Self {
             ast,
             direction,
+            nulls: None,
             _phantom: PhantomData,
         }
+    }
+
+    /// Place `NULL`s first in this term's ordering (`NULLS FIRST`). On a backend without the syntax
+    /// (MySQL) it is emulated with a leading `(<expr> IS NULL)` sort key.
+    pub fn nulls_first(mut self) -> Self {
+        self.nulls = Some(crate::OrderNulls::First);
+        self
+    }
+
+    /// Place `NULL`s last in this term's ordering (`NULLS LAST`). On a backend without the syntax
+    /// (MySQL) it is emulated with a leading `(<expr> IS NULL)` sort key.
+    pub fn nulls_last(mut self) -> Self {
+        self.nulls = Some(crate::OrderNulls::Last);
+        self
     }
 
     #[doc(hidden)]
@@ -7260,6 +7276,11 @@ where
     pub fn direction(&self) -> OrderDirection {
         self.direction
     }
+
+    #[doc(hidden)]
+    pub fn nulls(&self) -> Option<crate::OrderNulls> {
+        self.nulls
+    }
 }
 
 impl<'scope, K, Ast> Clone for Order<'scope, K, Ast>
@@ -7270,6 +7291,7 @@ where
         Self {
             ast: self.ast.clone(),
             direction: self.direction,
+            nulls: self.nulls,
             _phantom: PhantomData,
         }
     }

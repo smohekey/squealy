@@ -862,8 +862,22 @@ impl squealy::Dialect for MysqlDialect {
         _writer: &mut dyn Write,
     ) -> io::Result<()> {
         // MySQL has no `NULLS FIRST`/`NULLS LAST` modifier, so a view carrying one drops it here
-        // rather than emitting syntax MySQL rejects.
+        // rather than emitting syntax MySQL rejects. (Query-builder `ORDER BY` instead emulates it via
+        // `emulates_order_nulls` below, which the view-DDL path does not use.)
         Ok(())
+    }
+
+    fn emulates_order_nulls(&self) -> bool {
+        // MySQL lacks `NULLS FIRST/LAST`; the renderer emits a leading `(<expr> IS NULL)` sort key.
+        true
+    }
+
+    fn write_row_lock(&self, lock: squealy::RowLock, writer: &mut dyn Write) -> io::Result<()> {
+        // MySQL spells the shared lock `LOCK IN SHARE MODE` (no `FOR SHARE` keyword).
+        writer.write_all(match lock {
+            squealy::RowLock::Update => b" FOR UPDATE",
+            squealy::RowLock::Share => b" LOCK IN SHARE MODE",
+        })
     }
 
     fn extract_second_uses_microsecond_unit(&self) -> bool {
