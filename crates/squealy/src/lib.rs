@@ -510,7 +510,8 @@ pub use expr::{
     ExprColumns, ExtendOrderClass, Grouped, HasBareColumn, HavingTransition, IntoKindList,
     IsDistinct, NotDistinct, OrderAggregate, OrderCompatibleWith, OrderKeysInProjection,
     OrderMixed, OrderNone, OrderNullsTerm, OrderScalar, PredicateColumns, ProjectionClass,
-    ProjectionColumns, TermProjectionClass, Ungrouped, ValidSelect,
+    ProjectionColumns, RowLockSelectValid, RowLocked, RowUnlocked, TermProjectionClass, Ungrouped,
+    ValidSelect,
 };
 pub use foreign_key::ForeignKey;
 pub use index::Index;

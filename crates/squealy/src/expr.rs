@@ -3545,6 +3545,35 @@ pub enum NotDistinct {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IsDistinct {}
 
+/// Row-lock state of a select chain (carried as [`SelectAst::RowLockState`](crate::SelectAst::RowLockState)):
+/// the chain has no `FOR UPDATE`/`FOR SHARE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowUnlocked {}
+/// Row-lock state of a select chain: the chain has a `FOR UPDATE`/`FOR SHARE`. A locked select must
+/// identify individual table rows, so `select` requires it be non-distinct, ungrouped, and scalar
+/// (non-aggregate) — see [`RowLockSelectValid`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowLocked {}
+
+/// Compile-time guard for a row-locked (`FOR UPDATE`/`FOR SHARE`) select, dispatched on the chain's
+/// [`RowLockState`](crate::SelectAst::RowLockState). An unlocked chain ([`RowUnlocked`]) is always valid
+/// (and never consults [`ProjectionClass`]). A locked chain ([`RowLocked`]) requires the select to
+/// identify individual table rows: non-`DISTINCT`, no `GROUP BY`, and a scalar (non-aggregate)
+/// projection — the databases reject `FOR UPDATE` otherwise. (A window function in the projection
+/// classifies as scalar and is *not* caught here; the database rejects that combination at runtime.)
+#[doc(hidden)]
+pub trait RowLockSelectValid<Distinctness, Grouped, Projection> {}
+
+impl<Distinctness, Grouped, Projection> RowLockSelectValid<Distinctness, Grouped, Projection>
+    for RowUnlocked
+{
+}
+
+impl<Projection> RowLockSelectValid<NotDistinct, Ungrouped, Projection> for RowLocked where
+    Projection: ProjectionClass<Class = ScalarProjection>
+{
+}
+
 /// Maps a projection's [`Shape`](crate::ReturningProjection::Shape) (a single kind, the unit shape, or a
 /// tuple of kinds) to the `HList` of its projected kinds, so a `DISTINCT` chain's `ORDER BY` keys can be
 /// checked for membership. Only consulted on the `DISTINCT` path; a non-distinct select never needs it.

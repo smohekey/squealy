@@ -4695,6 +4695,12 @@ where
     /// projection under `DISTINCT`.
     type OrderKeys: HList;
 
+    /// Whether this chain has a `FOR UPDATE`/`FOR SHARE` row lock ([`RowLocked`](crate::RowLocked) /
+    /// [`RowUnlocked`](crate::RowUnlocked)). A locked chain must be a plain row select — `select`
+    /// rejects it when combined with `DISTINCT`, `GROUP BY`, or an aggregate projection (see
+    /// [`RowLockSelectValid`](crate::RowLockSelectValid)).
+    type RowLockState;
+
     fn depth(&self) -> usize;
 
     fn connection(&self) -> &'conn Conn;
@@ -4777,6 +4783,7 @@ where
     type Grouped = crate::Ungrouped;
     type Distinctness = crate::NotDistinct;
     type OrderKeys = crate::HNil;
+    type RowLockState = crate::RowUnlocked;
 
     fn depth(&self) -> usize {
         self.depth
@@ -4917,6 +4924,7 @@ where
     type Grouped = crate::Ungrouped;
     type Distinctness = crate::NotDistinct;
     type OrderKeys = crate::HNil;
+    type RowLockState = crate::RowUnlocked;
 
     fn depth(&self) -> usize {
         self.depth
@@ -5569,6 +5577,7 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -5691,6 +5700,7 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = crate::HCons<K, Base::OrderKeys>;
+    type RowLockState = Base::RowLockState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -5811,6 +5821,7 @@ where
     type Grouped = crate::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -5937,6 +5948,7 @@ where
     >>::Output;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6041,6 +6053,7 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6132,6 +6145,7 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = crate::RowLocked;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6223,6 +6237,7 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6314,6 +6329,7 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = crate::IsDistinct;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6425,6 +6441,7 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6549,6 +6566,7 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6676,6 +6694,7 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6870,6 +6889,13 @@ where
                 <P as ReturningProjection<'scope>>::Shape,
                 Indices,
             >,
+        // A row-locked (`FOR UPDATE`/`FOR SHARE`) select must identify individual table rows: not
+        // distinct, not grouped, and a scalar (non-aggregate) projection.
+        <Self as SelectAst<'conn, 'scope, Conn>>::RowLockState: crate::RowLockSelectValid<
+                <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness,
+                <Self as SelectAst<'conn, 'scope, Conn>>::Grouped,
+                P,
+            >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
     {
         let exprs = self.exprs();
@@ -6893,6 +6919,13 @@ where
 
     /// Lock the selected rows for update (`SELECT … FOR UPDATE`). Composes regardless of chain position;
     /// the clause renders after `LIMIT`/`OFFSET`.
+    ///
+    /// A locked select must identify individual table rows, so `select` rejects it (in either chain
+    /// order) when combined with `DISTINCT`, `GROUP BY`, or an aggregate projection — the databases
+    /// reject `FOR UPDATE` there. It is also unavailable when defining a view/CTE (a row lock is invalid
+    /// in a view and disallowed in a CTE). One combination is *not* caught at compile time: a window
+    /// function in the projection classifies as scalar, so `for_update()` + a window function builds but
+    /// is rejected by the database.
     fn for_update(self) -> Locked<Self>
     where
         Conn::Backend: RendersRowLock,
@@ -7023,6 +7056,13 @@ where
                 <P as ReturningProjection<'scope>>::Shape,
                 Indices,
             >,
+        // A row-locked (`FOR UPDATE`/`FOR SHARE`) select must identify individual table rows: not
+        // distinct, not grouped, and a scalar (non-aggregate) projection.
+        <Self as SelectAst<'conn, 'scope, Conn>>::RowLockState: crate::RowLockSelectValid<
+                <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness,
+                <Self as SelectAst<'conn, 'scope, Conn>>::Grouped,
+                P,
+            >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
         <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
     {
@@ -7060,6 +7100,13 @@ where
                 <P as ReturningProjection<'scope>>::Shape,
                 Indices,
             >,
+        // A row-locked (`FOR UPDATE`/`FOR SHARE`) select must identify individual table rows: not
+        // distinct, not grouped, and a scalar (non-aggregate) projection.
+        <Self as SelectAst<'conn, 'scope, Conn>>::RowLockState: crate::RowLockSelectValid<
+                <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness,
+                <Self as SelectAst<'conn, 'scope, Conn>>::Grouped,
+                P,
+            >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
     {
         let exprs = self.exprs();
@@ -7089,6 +7136,13 @@ where
                 <Self as SelectAst<'conn, 'scope, Conn>>::OrderKeys,
                 <P as ReturningProjection<'scope>>::Shape,
                 Indices,
+            >,
+        // A row-locked (`FOR UPDATE`/`FOR SHARE`) select must identify individual table rows: not
+        // distinct, not grouped, and a scalar (non-aggregate) projection.
+        <Self as SelectAst<'conn, 'scope, Conn>>::RowLockState: crate::RowLockSelectValid<
+                <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness,
+                <Self as SelectAst<'conn, 'scope, Conn>>::Grouped,
+                P,
             >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
         <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
