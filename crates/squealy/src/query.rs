@@ -3415,6 +3415,13 @@ pub trait SelectSink {
     fn set_distinct(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
+
+    /// Record a `FOR UPDATE` / `FOR SHARE` row lock, rendered as a trailing clause after
+    /// `LIMIT`/`OFFSET`. Defaulted to a no-op so sinks that don't render it need no change.
+    fn set_row_lock(&mut self, lock: RowLock) -> Result<(), Self::Error> {
+        let _ = lock;
+        Ok(())
+    }
 }
 
 #[doc(hidden)]
@@ -4688,6 +4695,17 @@ where
     /// projection under `DISTINCT`.
     type OrderKeys: HList;
 
+    /// Whether this chain has a `FOR UPDATE`/`FOR SHARE` row lock ([`RowLocked`](crate::RowLocked) /
+    /// [`RowUnlocked`](crate::RowUnlocked)). A locked chain must be a plain row select — `select`
+    /// rejects it when combined with `DISTINCT`, `GROUP BY`, an aggregate projection, or an outer join
+    /// (see [`RowLockSelectValid`](crate::RowLockSelectValid)).
+    type RowLockState;
+
+    /// Whether this chain has an outer (`LEFT`/`RIGHT`/`FULL`) join
+    /// ([`OuterJoined`](crate::OuterJoined) / [`NotOuterJoined`](crate::NotOuterJoined)). An untargeted
+    /// `FOR UPDATE` cannot lock the nullable side of an outer join, so `select` rejects the combination.
+    type OuterJoinState;
+
     fn depth(&self) -> usize;
 
     fn connection(&self) -> &'conn Conn;
@@ -4770,6 +4788,8 @@ where
     type Grouped = crate::Ungrouped;
     type Distinctness = crate::NotDistinct;
     type OrderKeys = crate::HNil;
+    type RowLockState = crate::RowUnlocked;
+    type OuterJoinState = crate::NotOuterJoined;
 
     fn depth(&self) -> usize {
         self.depth
@@ -4910,6 +4930,8 @@ where
     type Grouped = crate::Ungrouped;
     type Distinctness = crate::NotDistinct;
     type OrderKeys = crate::HNil;
+    type RowLockState = crate::RowUnlocked;
+    type OuterJoinState = crate::NotOuterJoined;
 
     fn depth(&self) -> usize {
         self.depth
@@ -5199,6 +5221,23 @@ where
     }
 }
 
+// A column order term carrying a `NULLS FIRST/LAST` placement — feeds the same `OrderBy` node as a plain
+// column order (its inner `Order` already records the placement). Accepting it here (but not in a
+// window's `order_by`) is what keeps top-level null ordering working while rejecting it in `OVER (…)`.
+impl<'scope, Base, K> OrderByTerms<'scope, Base> for crate::OrderNullsTerm<'scope, K>
+where
+    K: ExprKind,
+{
+    type Output = OrderBy<'scope, Base, K, crate::ColumnExprAst<K>>;
+
+    fn apply(self, base: Base) -> Self::Output {
+        OrderBy {
+            base,
+            order: self.0,
+        }
+    }
+}
+
 macro_rules! impl_order_by_terms_tuple {
     () => {};
     ($head:ident $(, $tail:ident)*) => {
@@ -5244,6 +5283,30 @@ pub struct Offset<Base> {
 #[doc(hidden)]
 pub struct Distinct<Base> {
     base: Base,
+}
+
+/// The kind of row lock requested by `for_update()` / `for_share()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowLock {
+    /// `FOR UPDATE` — exclusive lock on the selected rows.
+    Update,
+    /// `FOR SHARE` (MySQL: `LOCK IN SHARE MODE`) — shared lock on the selected rows.
+    Share,
+}
+
+/// Marker for backends that render a `FOR UPDATE` / `FOR SHARE` row lock. Implemented by the executable
+/// backends; **not** by the view/CTE-model backend (`ModelBackend`), which gates `for_update()` /
+/// `for_share()` out of a view/CTE definition — a row lock is invalid in a view and disallowed in a CTE,
+/// and the neutral `ViewQueryModel` has no place to carry one.
+pub trait RendersRowLock {}
+
+/// Adds a `FOR UPDATE` / `FOR SHARE` row-locking clause. Wraps the chain and forwards everything to
+/// `Base`; the only effect is recording the lock on the sink during lowering (rendered after
+/// `LIMIT`/`OFFSET`).
+#[doc(hidden)]
+pub struct Locked<Base> {
+    base: Base,
+    lock: RowLock,
 }
 
 /// Typestate marker used by generated mutation builders before a filter or all-rows intent exists.
@@ -5408,6 +5471,18 @@ where
     }
 }
 
+impl<Base> Clone for Locked<Base>
+where
+    Base: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            lock: self.lock,
+        }
+    }
+}
+
 impl<Base> Clone for Offset<Base>
 where
     Base: Clone,
@@ -5509,6 +5584,8 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -5631,6 +5708,8 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = crate::HCons<K, Base::OrderKeys>;
+    type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -5751,6 +5830,8 @@ where
     type Grouped = crate::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -5877,6 +5958,8 @@ where
     >>::Output;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -5981,6 +6064,8 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6056,6 +6141,99 @@ where
     }
 }
 
+impl<'conn, 'scope, Conn, Base> SelectAst<'conn, 'scope, Conn> for Locked<Base>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+{
+    type Exprs = Base::Exprs;
+    type Params = Base::Params;
+    type SourceParams = Base::SourceParams;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
+    type OrderClass = Base::OrderClass;
+    type Grouped = Base::Grouped;
+    type Distinctness = Base::Distinctness;
+    type OrderKeys = Base::OrderKeys;
+    type RowLockState = crate::RowLocked;
+    type OuterJoinState = Base::OuterJoinState;
+
+    fn depth(&self) -> usize {
+        self.base.depth()
+    }
+
+    fn connection(&self) -> &'conn Conn {
+        self.base.connection()
+    }
+
+    fn exprs(&self) -> Self::Exprs {
+        self.base.exprs()
+    }
+
+    fn collect_ctes_into(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        self.base.collect_ctes_into(ctes);
+    }
+}
+
+impl<'conn, 'scope, Conn, Base, B> RenderSelectAst<'conn, 'scope, Conn, B> for Locked<Base>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: RenderSelectAst<'conn, 'scope, Conn, B>,
+    B: Backend,
+{
+    fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_sources_into(sink)
+    }
+
+    fn lower_filters_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_filters_into(sink)
+    }
+
+    fn lower_groups_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_groups_into(sink)
+    }
+
+    fn lower_havings_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_havings_into(sink)
+    }
+
+    fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_orders_into(sink)
+    }
+
+    fn lower_bounds_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_bounds_into(sink)?;
+        sink.set_row_lock(self.lock)
+    }
+
+    fn lower_distinct_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_distinct_into(sink)
+    }
+}
+
 impl<'conn, 'scope, Conn, Base> SelectAst<'conn, 'scope, Conn> for Offset<Base>
 where
     Conn: QueryBuilder + 'conn,
@@ -6072,6 +6250,8 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6163,6 +6343,8 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = crate::IsDistinct;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6274,6 +6456,8 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6398,6 +6582,8 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
+    type OuterJoinState = crate::OuterJoined;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6525,6 +6711,8 @@ where
     type Grouped = Base::Grouped;
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
+    type OuterJoinState = crate::OuterJoined;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6719,6 +6907,14 @@ where
                 <P as ReturningProjection<'scope>>::Shape,
                 Indices,
             >,
+        // A row-locked (`FOR UPDATE`/`FOR SHARE`) select must identify individual table rows: not
+        // distinct, not grouped, and a scalar (non-aggregate) projection.
+        <Self as SelectAst<'conn, 'scope, Conn>>::RowLockState: crate::RowLockSelectValid<
+                <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness,
+                <Self as SelectAst<'conn, 'scope, Conn>>::Grouped,
+                <Self as SelectAst<'conn, 'scope, Conn>>::OuterJoinState,
+                P,
+            >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
     {
         let exprs = self.exprs();
@@ -6738,6 +6934,40 @@ where
 
     fn offset(self, rows: usize) -> Offset<Self> {
         Offset { base: self, rows }
+    }
+
+    /// Lock the selected rows for update (`SELECT … FOR UPDATE`). Composes regardless of chain position;
+    /// the clause renders after `LIMIT`/`OFFSET`.
+    ///
+    /// A locked select must identify individual table rows, so `select` rejects it (in either chain
+    /// order) when combined with `DISTINCT`, `GROUP BY`, an aggregate projection, or an outer
+    /// (`LEFT`/`RIGHT`/`FULL`) join — the databases reject `FOR UPDATE` there. It is also unavailable
+    /// when defining a view/CTE (a row lock is invalid in a view and disallowed in a CTE). One
+    /// combination is *not* caught at compile time: a window function in the projection classifies as
+    /// scalar, so `for_update()` + a window function builds but is rejected by the database.
+    fn for_update(self) -> Locked<Self>
+    where
+        Conn::Backend: RendersRowLock,
+    {
+        Locked {
+            base: self,
+            lock: RowLock::Update,
+        }
+    }
+
+    /// Take a shared lock on the selected rows (`SELECT … FOR SHARE`; MySQL `LOCK IN SHARE MODE`).
+    ///
+    /// Gated to backends that render row locks (`Conn::Backend: RendersRowLock`), so it is unavailable
+    /// when building a view/CTE definition (whose `ModelConn` lowers to a `ViewQueryModel` that cannot
+    /// carry a lock — `FOR UPDATE` is invalid in a view and disallowed in a CTE).
+    fn for_share(self) -> Locked<Self>
+    where
+        Conn::Backend: RendersRowLock,
+    {
+        Locked {
+            base: self,
+            lock: RowLock::Share,
+        }
     }
 
     /// Render the select as `SELECT DISTINCT …` (deduplicate whole rows). Composes with the other
@@ -6845,6 +7075,14 @@ where
                 <P as ReturningProjection<'scope>>::Shape,
                 Indices,
             >,
+        // A row-locked (`FOR UPDATE`/`FOR SHARE`) select must identify individual table rows: not
+        // distinct, not grouped, and a scalar (non-aggregate) projection.
+        <Self as SelectAst<'conn, 'scope, Conn>>::RowLockState: crate::RowLockSelectValid<
+                <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness,
+                <Self as SelectAst<'conn, 'scope, Conn>>::Grouped,
+                <Self as SelectAst<'conn, 'scope, Conn>>::OuterJoinState,
+                P,
+            >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
         <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
     {
@@ -6882,6 +7120,14 @@ where
                 <P as ReturningProjection<'scope>>::Shape,
                 Indices,
             >,
+        // A row-locked (`FOR UPDATE`/`FOR SHARE`) select must identify individual table rows: not
+        // distinct, not grouped, and a scalar (non-aggregate) projection.
+        <Self as SelectAst<'conn, 'scope, Conn>>::RowLockState: crate::RowLockSelectValid<
+                <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness,
+                <Self as SelectAst<'conn, 'scope, Conn>>::Grouped,
+                <Self as SelectAst<'conn, 'scope, Conn>>::OuterJoinState,
+                P,
+            >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
     {
         let exprs = self.exprs();
@@ -6911,6 +7157,14 @@ where
                 <Self as SelectAst<'conn, 'scope, Conn>>::OrderKeys,
                 <P as ReturningProjection<'scope>>::Shape,
                 Indices,
+            >,
+        // A row-locked (`FOR UPDATE`/`FOR SHARE`) select must identify individual table rows: not
+        // distinct, not grouped, and a scalar (non-aggregate) projection.
+        <Self as SelectAst<'conn, 'scope, Conn>>::RowLockState: crate::RowLockSelectValid<
+                <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness,
+                <Self as SelectAst<'conn, 'scope, Conn>>::Grouped,
+                <Self as SelectAst<'conn, 'scope, Conn>>::OuterJoinState,
+                P,
             >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
         <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,

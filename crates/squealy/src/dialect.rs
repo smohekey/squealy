@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use crate::{OrderNulls, SqlType};
+use crate::{OrderNulls, RowLock, SqlType};
 
 /// The SQL-dialect differences the query renderer needs from a backend.
 ///
@@ -81,6 +81,25 @@ pub trait Dialect {
         writer.write_all(match nulls {
             OrderNulls::First => b" NULLS FIRST",
             OrderNulls::Last => b" NULLS LAST",
+        })
+    }
+
+    /// Whether a query-builder `ORDER BY … NULLS FIRST/LAST` term must be emulated rather than rendered
+    /// with native syntax. The default is `false` (PostgreSQL renders ` NULLS FIRST/LAST`). MySQL has no
+    /// such syntax and overrides this to `true`; the renderer then emits a leading `(<expr> IS NULL)`
+    /// sort key instead.
+    fn emulates_order_nulls(&self) -> bool {
+        false
+    }
+
+    /// Writes a `SELECT … FOR UPDATE` / `FOR SHARE` row-locking clause (with a leading space).
+    ///
+    /// The default is the standard SQL spelling (PostgreSQL). MySQL has no `FOR SHARE` keyword and
+    /// overrides the shared mode to `LOCK IN SHARE MODE`.
+    fn write_row_lock(&self, lock: RowLock, writer: &mut dyn Write) -> io::Result<()> {
+        writer.write_all(match lock {
+            RowLock::Update => b" FOR UPDATE",
+            RowLock::Share => b" FOR SHARE",
         })
     }
 

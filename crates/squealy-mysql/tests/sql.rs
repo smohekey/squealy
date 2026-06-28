@@ -1716,3 +1716,59 @@ fn mysql_upsert_do_nothing_with_default_values_self_assigns_target() {
         "INSERT INTO `shop`.`counters` () VALUES () ON DUPLICATE KEY UPDATE `id` = `id`"
     );
 }
+
+#[test]
+fn mysql_order_by_nulls_last_emulated_with_is_null_key() {
+    // MySQL has no NULLS syntax; a leading `(<expr> IS NULL)` key emulates it. NULLS LAST => the key
+    // sorts ASC (non-nulls before nulls).
+    let sql = Mysql
+        .from::<Tenant>()
+        .order_by(|(tenant,)| tenant.slug.desc().nulls_last())
+        .select(|(tenant,)| tenant.id)
+        .to_sql();
+    assert_eq!(
+        sql,
+        "SELECT q0_0.`id` AS `id` FROM `shop`.`tenants` AS q0_0 \
+         ORDER BY (q0_0.`slug` IS NULL) ASC, q0_0.`slug` DESC"
+    );
+}
+
+#[test]
+fn mysql_order_by_nulls_first_emulated_with_is_null_key() {
+    let sql = Mysql
+        .from::<Tenant>()
+        .order_by(|(tenant,)| tenant.slug.asc().nulls_first())
+        .select(|(tenant,)| tenant.id)
+        .to_sql();
+    assert_eq!(
+        sql,
+        "SELECT q0_0.`id` AS `id` FROM `shop`.`tenants` AS q0_0 \
+         ORDER BY (q0_0.`slug` IS NULL) DESC, q0_0.`slug` ASC"
+    );
+}
+
+#[test]
+fn mysql_for_update_renders() {
+    let sql = Mysql
+        .from::<Tenant>()
+        .for_update()
+        .select(|(tenant,)| tenant.id)
+        .to_sql();
+    assert_eq!(
+        sql,
+        "SELECT q0_0.`id` AS `id` FROM `shop`.`tenants` AS q0_0 FOR UPDATE"
+    );
+}
+
+#[test]
+fn mysql_for_share_renders_lock_in_share_mode() {
+    let sql = Mysql
+        .from::<Tenant>()
+        .for_share()
+        .select(|(tenant,)| tenant.id)
+        .to_sql();
+    assert_eq!(
+        sql,
+        "SELECT q0_0.`id` AS `id` FROM `shop`.`tenants` AS q0_0 LOCK IN SHARE MODE"
+    );
+}

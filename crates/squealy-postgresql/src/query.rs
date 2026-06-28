@@ -1530,7 +1530,10 @@ impl<'conn, 'scope, Shape, Base, Projection, Conn> SetOperand<'conn, 'scope, Con
     for PostgresSelect<'conn, 'scope, Shape, Base, Projection, Conn>
 where
     Shape: ProjectionShape,
-    Base: SelectAst<'conn, 'scope, Conn>,
+    // A row-locked select cannot be a set operand — PostgreSQL rejects a locking clause in any
+    // `UNION`/`INTERSECT`/`EXCEPT` input. (`SetOperations` requires `SetOperand`, so this also blocks a
+    // locked select as the left operand.)
+    Base: SelectAst<'conn, 'scope, Conn, RowLockState = squealy::RowUnlocked>,
     Projection: Projectable,
     Conn: QueryBuilder<Backend = Postgres> + 'conn,
 {
@@ -1546,7 +1549,8 @@ impl<'conn, 'scope, Shape, Base, Projection, Conn> SetOperations<'conn, 'scope, 
     for PostgresSelect<'conn, 'scope, Shape, Base, Projection, Conn>
 where
     Shape: ProjectionShape,
-    Base: SelectAst<'conn, 'scope, Conn>,
+    // Matches the `SetOperand` supertrait bound: a row-locked select cannot start a set operation.
+    Base: SelectAst<'conn, 'scope, Conn, RowLockState = squealy::RowUnlocked>,
     Projection: Projectable,
     Conn: QueryBuilder<Backend = Postgres> + 'conn,
 {

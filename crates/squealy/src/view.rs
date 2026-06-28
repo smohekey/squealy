@@ -1002,7 +1002,7 @@ impl SelectSink for ModelSink {
         self.query.order_by.push(OrderItem {
             expr,
             direction: Some(order.direction()),
-            nulls: None,
+            nulls: order.nulls(),
         });
         Ok(())
     }
