@@ -5206,6 +5206,23 @@ where
     }
 }
 
+// A column order term carrying a `NULLS FIRST/LAST` placement — feeds the same `OrderBy` node as a plain
+// column order (its inner `Order` already records the placement). Accepting it here (but not in a
+// window's `order_by`) is what keeps top-level null ordering working while rejecting it in `OVER (…)`.
+impl<'scope, Base, K> OrderByTerms<'scope, Base> for crate::OrderNullsTerm<'scope, K>
+where
+    K: ExprKind,
+{
+    type Output = OrderBy<'scope, Base, K, crate::ColumnExprAst<K>>;
+
+    fn apply(self, base: Base) -> Self::Output {
+        OrderBy {
+            base,
+            order: self.0,
+        }
+    }
+}
+
 macro_rules! impl_order_by_terms_tuple {
     () => {};
     ($head:ident $(, $tail:ident)*) => {
@@ -5261,6 +5278,12 @@ pub enum RowLock {
     /// `FOR SHARE` (MySQL: `LOCK IN SHARE MODE`) — shared lock on the selected rows.
     Share,
 }
+
+/// Marker for backends that render a `FOR UPDATE` / `FOR SHARE` row lock. Implemented by the executable
+/// backends; **not** by the view/CTE-model backend (`ModelBackend`), which gates `for_update()` /
+/// `for_share()` out of a view/CTE definition — a row lock is invalid in a view and disallowed in a CTE,
+/// and the neutral `ViewQueryModel` has no place to carry one.
+pub trait RendersRowLock {}
 
 /// Adds a `FOR UPDATE` / `FOR SHARE` row-locking clause. Wraps the chain and forwards everything to
 /// `Base`; the only effect is recording the lock on the sink during lowering (rendered after
@@ -6870,7 +6893,10 @@ where
 
     /// Lock the selected rows for update (`SELECT … FOR UPDATE`). Composes regardless of chain position;
     /// the clause renders after `LIMIT`/`OFFSET`.
-    fn for_update(self) -> Locked<Self> {
+    fn for_update(self) -> Locked<Self>
+    where
+        Conn::Backend: RendersRowLock,
+    {
         Locked {
             base: self,
             lock: RowLock::Update,
@@ -6878,7 +6904,14 @@ where
     }
 
     /// Take a shared lock on the selected rows (`SELECT … FOR SHARE`; MySQL `LOCK IN SHARE MODE`).
-    fn for_share(self) -> Locked<Self> {
+    ///
+    /// Gated to backends that render row locks (`Conn::Backend: RendersRowLock`), so it is unavailable
+    /// when building a view/CTE definition (whose `ModelConn` lowers to a `ViewQueryModel` that cannot
+    /// carry a lock — `FOR UPDATE` is invalid in a view and disallowed in a CTE).
+    fn for_share(self) -> Locked<Self>
+    where
+        Conn::Backend: RendersRowLock,
+    {
         Locked {
             base: self,
             lock: RowLock::Share,

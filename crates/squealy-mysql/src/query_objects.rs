@@ -820,4 +820,7 @@ macro_rules! impl_on_conflict_query_builder_for {
 impl_on_conflict_query_builder_for!(Mysql);
 impl_on_conflict_query_builder_for!(MysqlConnection);
 
+// MySQL renders `FOR UPDATE` / `LOCK IN SHARE MODE`, so `for_update()` / `for_share()` are available.
+impl squealy::RendersRowLock for Mysql {}
+
 impl Connection for MysqlConnection {}

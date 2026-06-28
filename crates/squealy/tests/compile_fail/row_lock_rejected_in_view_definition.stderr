@@ -1,0 +1,14 @@
+error[E0277]: the trait bound `ModelBackend: RendersRowLock` is not satisfied
+  --> tests/compile_fail/row_lock_rejected_in_view_definition.rs:16:10
+   |
+16 |         .for_update()
+   |          ^^^^^^^^^^ the trait `RendersRowLock` is not implemented for `ModelBackend`
+   |
+note: required by a bound in `for_update`
+  --> src/query.rs
+   |
+   |     fn for_update(self) -> Locked<Self>
+   |        ---------- required by a bound in this associated function
+   |     where
+   |         Conn::Backend: RendersRowLock,
+   |                        ^^^^^^^^^^^^^^ required by this bound in `SourceQuery::for_update`

@@ -20,6 +20,9 @@ pub struct TestConnection;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TestBackend;
 
+// The test backend renders `FOR UPDATE` / `FOR SHARE`, so the row-lock builders are available.
+impl squealy::RendersRowLock for TestBackend {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TestError {
     NoRows,

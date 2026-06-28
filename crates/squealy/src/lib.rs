@@ -509,8 +509,8 @@ pub use expr::{
     ColumnFree, ColumnTerm, CombineColumns, CombineTerm, ConstantTerm, DistinctOrderGate,
     ExprColumns, ExtendOrderClass, Grouped, HasBareColumn, HavingTransition, IntoKindList,
     IsDistinct, NotDistinct, OrderAggregate, OrderCompatibleWith, OrderKeysInProjection,
-    OrderMixed, OrderNone, OrderScalar, PredicateColumns, ProjectionClass, ProjectionColumns,
-    TermProjectionClass, Ungrouped, ValidSelect,
+    OrderMixed, OrderNone, OrderNullsTerm, OrderScalar, PredicateColumns, ProjectionClass,
+    ProjectionColumns, TermProjectionClass, Ungrouped, ValidSelect,
 };
 pub use foreign_key::ForeignKey;
 pub use index::Index;
@@ -550,12 +550,13 @@ pub use query::{
     PreparableUpdateQuery, PreparedMutationQuery, PreparedSelectQuery, RecursiveSelf,
     RenderAssignment, RenderAssignmentValue, RenderInsertAssignments, RenderInsertRows,
     RenderPredicateNodes, RenderSelectAst, RenderSourceSpec, RenderSubquery,
-    RenderUpdateAssignments, ReturningProjection, RightJoinSource, RightJoinTarget, RootSource,
-    RowLock, RowsAffected, RuntimeAssignmentValue, ScalarSubquery, SelectAst, SelectQuery,
-    SelectSink, Selected, SetArm, SetGroup, SetLeaf, SetNode, SetOp, SetOperand, SetOperations,
-    SetOrder, SetSelectModifiers, SetTail, SourceQuery, SourceSpec, StaticAssignmentValue,
-    Subqueries, Subquery, SubquerySelect, ToColumns, UpdateAssignment, UpdateAssignmentNode,
-    UpdateAssignments, UpdateColumnKey, UpdateColumnValues, UpdateQuery, Upsert, Where, default,
+    RenderUpdateAssignments, RendersRowLock, ReturningProjection, RightJoinSource, RightJoinTarget,
+    RootSource, RowLock, RowsAffected, RuntimeAssignmentValue, ScalarSubquery, SelectAst,
+    SelectQuery, SelectSink, Selected, SetArm, SetGroup, SetLeaf, SetNode, SetOp, SetOperand,
+    SetOperations, SetOrder, SetSelectModifiers, SetTail, SourceQuery, SourceSpec,
+    StaticAssignmentValue, Subqueries, Subquery, SubquerySelect, ToColumns, UpdateAssignment,
+    UpdateAssignmentNode, UpdateAssignments, UpdateColumnKey, UpdateColumnValues, UpdateQuery,
+    Upsert, Where, default,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{CTE, ColumnType, Database, RecursiveCTE, Schema, Table, View};

@@ -7280,18 +7280,27 @@ where
 {
     /// Place `NULL`s first in this column's ordering (`NULLS FIRST`). On a backend without the syntax
     /// (MySQL) it is emulated with a leading `(<column> IS NULL)` sort key.
-    pub fn nulls_first(mut self) -> Self {
+    pub fn nulls_first(mut self) -> OrderNullsTerm<'scope, K> {
         self.nulls = Some(crate::OrderNulls::First);
-        self
+        OrderNullsTerm(self)
     }
 
     /// Place `NULL`s last in this column's ordering (`NULLS LAST`). On a backend without the syntax
     /// (MySQL) it is emulated with a leading `(<column> IS NULL)` sort key.
-    pub fn nulls_last(mut self) -> Self {
+    pub fn nulls_last(mut self) -> OrderNullsTerm<'scope, K> {
         self.nulls = Some(crate::OrderNulls::Last);
-        self
+        OrderNullsTerm(self)
     }
 }
+
+/// A column `ORDER BY` term with an explicit `NULLS FIRST`/`LAST` placement, produced by
+/// [`Order::nulls_first`] / [`Order::nulls_last`].
+///
+/// It is a distinct type from [`Order`] on purpose: a top-level `order_by` accepts it (via
+/// `OrderByTerms`), but a window's `order_by` — which takes an [`Order`] — does not, so
+/// `over(|w| w.order_by(col.asc().nulls_last()))` is a compile error. Null placement inside a window
+/// `ORDER BY` is out of scope (its MySQL emulation would have to rewrite the `OVER (…)` ordering).
+pub struct OrderNullsTerm<'scope, K>(pub(crate) Order<'scope, K, ColumnExprAst<K>>);
 
 impl<'scope, K, Ast> Clone for Order<'scope, K, Ast>
 where

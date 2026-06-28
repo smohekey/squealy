@@ -643,6 +643,9 @@ impl_on_conflict_query_builder!(Postgres);
 impl_on_conflict_query_builder!(PostgresConnection);
 impl_on_conflict_query_builder!(PostgresTransaction<'_>);
 
+// PostgreSQL renders `FOR UPDATE` / `FOR SHARE`, so `for_update()` / `for_share()` are available.
+impl squealy::RendersRowLock for Postgres {}
+
 impl Connection for PostgresConnection {}
 
 impl Connection for PostgresTransaction<'_> {}
