@@ -4,7 +4,7 @@ error[E0271]: type mismatch resolving `<Expr<'_, CountExpr<JobId>, AggregateExpr
 16 |         .select(|(job,)| job.id.count());
    |          ^^^^^^ expected `ScalarProjection`, found `AggregateProjection`
    |
-   = note: required for `RowLocked` to implement `squealy::RowLockSelectValid<NotDistinct, Ungrouped, Expr<'_, CountExpr<JobId>, squealy::AggregateExprAst<squealy::ColumnExprAst<JobId>>>>`
+   = note: required for `RowLocked` to implement `squealy::RowLockSelectValid<NotDistinct, Ungrouped, NotOuterJoined, Expr<'_, CountExpr<JobId>, squealy::AggregateExprAst<squealy::ColumnExprAst<JobId>>>>`
 note: required by a bound in `squealy::SourceQuery::select`
   --> src/query.rs
    |
@@ -15,6 +15,7 @@ note: required by a bound in `squealy::SourceQuery::select`
    |  _________________________________________________________________^
    | |                 <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness,
    | |                 <Self as SelectAst<'conn, 'scope, Conn>>::Grouped,
+   | |                 <Self as SelectAst<'conn, 'scope, Conn>>::OuterJoinState,
    | |                 P,
    | |             >,
    | |_____________^ required by this bound in `SourceQuery::select`

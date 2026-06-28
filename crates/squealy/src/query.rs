@@ -4697,9 +4697,14 @@ where
 
     /// Whether this chain has a `FOR UPDATE`/`FOR SHARE` row lock ([`RowLocked`](crate::RowLocked) /
     /// [`RowUnlocked`](crate::RowUnlocked)). A locked chain must be a plain row select — `select`
-    /// rejects it when combined with `DISTINCT`, `GROUP BY`, or an aggregate projection (see
-    /// [`RowLockSelectValid`](crate::RowLockSelectValid)).
+    /// rejects it when combined with `DISTINCT`, `GROUP BY`, an aggregate projection, or an outer join
+    /// (see [`RowLockSelectValid`](crate::RowLockSelectValid)).
     type RowLockState;
+
+    /// Whether this chain has an outer (`LEFT`/`RIGHT`/`FULL`) join
+    /// ([`OuterJoined`](crate::OuterJoined) / [`NotOuterJoined`](crate::NotOuterJoined)). An untargeted
+    /// `FOR UPDATE` cannot lock the nullable side of an outer join, so `select` rejects the combination.
+    type OuterJoinState;
 
     fn depth(&self) -> usize;
 
@@ -4784,6 +4789,7 @@ where
     type Distinctness = crate::NotDistinct;
     type OrderKeys = crate::HNil;
     type RowLockState = crate::RowUnlocked;
+    type OuterJoinState = crate::NotOuterJoined;
 
     fn depth(&self) -> usize {
         self.depth
@@ -4925,6 +4931,7 @@ where
     type Distinctness = crate::NotDistinct;
     type OrderKeys = crate::HNil;
     type RowLockState = crate::RowUnlocked;
+    type OuterJoinState = crate::NotOuterJoined;
 
     fn depth(&self) -> usize {
         self.depth
@@ -5578,6 +5585,7 @@ where
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
     type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -5701,6 +5709,7 @@ where
     type Distinctness = Base::Distinctness;
     type OrderKeys = crate::HCons<K, Base::OrderKeys>;
     type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -5822,6 +5831,7 @@ where
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
     type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -5949,6 +5959,7 @@ where
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
     type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6054,6 +6065,7 @@ where
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
     type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6146,6 +6158,7 @@ where
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
     type RowLockState = crate::RowLocked;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6238,6 +6251,7 @@ where
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
     type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6330,6 +6344,7 @@ where
     type Distinctness = crate::IsDistinct;
     type OrderKeys = Base::OrderKeys;
     type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6442,6 +6457,7 @@ where
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
     type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6567,6 +6583,7 @@ where
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
     type RowLockState = Base::RowLockState;
+    type OuterJoinState = crate::OuterJoined;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6695,6 +6712,7 @@ where
     type Distinctness = Base::Distinctness;
     type OrderKeys = Base::OrderKeys;
     type RowLockState = Base::RowLockState;
+    type OuterJoinState = crate::OuterJoined;
 
     fn depth(&self) -> usize {
         self.base.depth()
@@ -6894,6 +6912,7 @@ where
         <Self as SelectAst<'conn, 'scope, Conn>>::RowLockState: crate::RowLockSelectValid<
                 <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness,
                 <Self as SelectAst<'conn, 'scope, Conn>>::Grouped,
+                <Self as SelectAst<'conn, 'scope, Conn>>::OuterJoinState,
                 P,
             >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
@@ -6921,11 +6940,11 @@ where
     /// the clause renders after `LIMIT`/`OFFSET`.
     ///
     /// A locked select must identify individual table rows, so `select` rejects it (in either chain
-    /// order) when combined with `DISTINCT`, `GROUP BY`, or an aggregate projection — the databases
-    /// reject `FOR UPDATE` there. It is also unavailable when defining a view/CTE (a row lock is invalid
-    /// in a view and disallowed in a CTE). One combination is *not* caught at compile time: a window
-    /// function in the projection classifies as scalar, so `for_update()` + a window function builds but
-    /// is rejected by the database.
+    /// order) when combined with `DISTINCT`, `GROUP BY`, an aggregate projection, or an outer
+    /// (`LEFT`/`RIGHT`/`FULL`) join — the databases reject `FOR UPDATE` there. It is also unavailable
+    /// when defining a view/CTE (a row lock is invalid in a view and disallowed in a CTE). One
+    /// combination is *not* caught at compile time: a window function in the projection classifies as
+    /// scalar, so `for_update()` + a window function builds but is rejected by the database.
     fn for_update(self) -> Locked<Self>
     where
         Conn::Backend: RendersRowLock,
@@ -7061,6 +7080,7 @@ where
         <Self as SelectAst<'conn, 'scope, Conn>>::RowLockState: crate::RowLockSelectValid<
                 <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness,
                 <Self as SelectAst<'conn, 'scope, Conn>>::Grouped,
+                <Self as SelectAst<'conn, 'scope, Conn>>::OuterJoinState,
                 P,
             >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
@@ -7105,6 +7125,7 @@ where
         <Self as SelectAst<'conn, 'scope, Conn>>::RowLockState: crate::RowLockSelectValid<
                 <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness,
                 <Self as SelectAst<'conn, 'scope, Conn>>::Grouped,
+                <Self as SelectAst<'conn, 'scope, Conn>>::OuterJoinState,
                 P,
             >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
@@ -7142,6 +7163,7 @@ where
         <Self as SelectAst<'conn, 'scope, Conn>>::RowLockState: crate::RowLockSelectValid<
                 <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness,
                 <Self as SelectAst<'conn, 'scope, Conn>>::Grouped,
+                <Self as SelectAst<'conn, 'scope, Conn>>::OuterJoinState,
                 P,
             >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,

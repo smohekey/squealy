@@ -3550,27 +3550,39 @@ pub enum IsDistinct {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowUnlocked {}
 /// Row-lock state of a select chain: the chain has a `FOR UPDATE`/`FOR SHARE`. A locked select must
-/// identify individual table rows, so `select` requires it be non-distinct, ungrouped, and scalar
-/// (non-aggregate) — see [`RowLockSelectValid`].
+/// identify individual table rows, so `select` requires it be non-distinct, ungrouped, scalar
+/// (non-aggregate), and free of outer joins — see [`RowLockSelectValid`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowLocked {}
+
+/// Outer-join state of a select chain (carried as [`SelectAst::OuterJoinState`](crate::SelectAst::OuterJoinState)):
+/// the chain has only inner/cross joins (or none).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotOuterJoined {}
+/// Outer-join state of a select chain: the chain has a `LEFT`/`RIGHT`/`FULL JOIN`, putting some relation
+/// on the nullable side. An untargeted `FOR UPDATE` cannot lock such a relation, so `select` rejects a
+/// row lock here (see [`RowLockSelectValid`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OuterJoined {}
 
 /// Compile-time guard for a row-locked (`FOR UPDATE`/`FOR SHARE`) select, dispatched on the chain's
 /// [`RowLockState`](crate::SelectAst::RowLockState). An unlocked chain ([`RowUnlocked`]) is always valid
 /// (and never consults [`ProjectionClass`]). A locked chain ([`RowLocked`]) requires the select to
-/// identify individual table rows: non-`DISTINCT`, no `GROUP BY`, and a scalar (non-aggregate)
-/// projection — the databases reject `FOR UPDATE` otherwise. (A window function in the projection
-/// classifies as scalar and is *not* caught here; the database rejects that combination at runtime.)
+/// identify individual table rows: non-`DISTINCT`, no `GROUP BY`, no outer join, and a scalar
+/// (non-aggregate) projection — the databases reject `FOR UPDATE` otherwise. (A window function in the
+/// projection classifies as scalar and is *not* caught here; the database rejects it at runtime.)
 #[doc(hidden)]
-pub trait RowLockSelectValid<Distinctness, Grouped, Projection> {}
+pub trait RowLockSelectValid<Distinctness, Grouped, OuterJoin, Projection> {}
 
-impl<Distinctness, Grouped, Projection> RowLockSelectValid<Distinctness, Grouped, Projection>
-    for RowUnlocked
+impl<Distinctness, Grouped, OuterJoin, Projection>
+    RowLockSelectValid<Distinctness, Grouped, OuterJoin, Projection> for RowUnlocked
 {
 }
 
-impl<Projection> RowLockSelectValid<NotDistinct, Ungrouped, Projection> for RowLocked where
-    Projection: ProjectionClass<Class = ScalarProjection>
+impl<Projection> RowLockSelectValid<NotDistinct, Ungrouped, NotOuterJoined, Projection>
+    for RowLocked
+where
+    Projection: ProjectionClass<Class = ScalarProjection>,
 {
 }
 
