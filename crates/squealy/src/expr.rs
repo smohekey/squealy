@@ -7249,20 +7249,6 @@ where
         }
     }
 
-    /// Place `NULL`s first in this term's ordering (`NULLS FIRST`). On a backend without the syntax
-    /// (MySQL) it is emulated with a leading `(<expr> IS NULL)` sort key.
-    pub fn nulls_first(mut self) -> Self {
-        self.nulls = Some(crate::OrderNulls::First);
-        self
-    }
-
-    /// Place `NULL`s last in this term's ordering (`NULLS LAST`). On a backend without the syntax
-    /// (MySQL) it is emulated with a leading `(<expr> IS NULL)` sort key.
-    pub fn nulls_last(mut self) -> Self {
-        self.nulls = Some(crate::OrderNulls::Last);
-        self
-    }
-
     #[doc(hidden)]
     pub fn visit_expr<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
@@ -7280,6 +7266,30 @@ where
     #[doc(hidden)]
     pub fn nulls(&self) -> Option<crate::OrderNulls> {
         self.nulls
+    }
+}
+
+/// Null placement is only offered on a **bare column** order term. The MySQL emulation expands
+/// `NULLS FIRST/LAST` into a leading `(<expr> IS NULL)` sort key; restricting it to a column keeps that
+/// emulation valid under `SELECT DISTINCT` (the [`DistinctOrderGate`] guarantees the column is in the
+/// projection, so the `IS NULL` key references only a selected column). Ordering a derived expression
+/// with explicit null placement is out of scope.
+impl<'scope, K> Order<'scope, K, ColumnExprAst<K>>
+where
+    K: ExprKind,
+{
+    /// Place `NULL`s first in this column's ordering (`NULLS FIRST`). On a backend without the syntax
+    /// (MySQL) it is emulated with a leading `(<column> IS NULL)` sort key.
+    pub fn nulls_first(mut self) -> Self {
+        self.nulls = Some(crate::OrderNulls::First);
+        self
+    }
+
+    /// Place `NULL`s last in this column's ordering (`NULLS LAST`). On a backend without the syntax
+    /// (MySQL) it is emulated with a leading `(<column> IS NULL)` sort key.
+    pub fn nulls_last(mut self) -> Self {
+        self.nulls = Some(crate::OrderNulls::Last);
+        self
     }
 }
 

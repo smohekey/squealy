@@ -1748,24 +1748,6 @@ fn mysql_order_by_nulls_first_emulated_with_is_null_key() {
 }
 
 #[test]
-fn mysql_nulls_emulation_doubles_order_expr_binds_in_sync() {
-    // The emulation renders the order expression twice; the param pass runs the same render path, so a
-    // literal bind in the order expr is collected twice — matching the two placeholders.
-    let q = Mysql
-        .from::<Tenant>()
-        .order_by(|(tenant,)| (tenant.id + 5).asc().nulls_last())
-        .select(|(tenant,)| tenant.id);
-    let sql = q.to_sql();
-    assert_eq!(
-        sql,
-        "SELECT q0_0.`id` AS `id` FROM `shop`.`tenants` AS q0_0 \
-         ORDER BY ((q0_0.`id` + ?) IS NULL) ASC, (q0_0.`id` + ?) ASC"
-    );
-    assert_eq!(sql.matches('?').count(), 2);
-    assert_eq!(q.collect_params().unwrap().len(), 2);
-}
-
-#[test]
 fn mysql_for_update_renders() {
     let sql = Mysql
         .from::<Tenant>()
