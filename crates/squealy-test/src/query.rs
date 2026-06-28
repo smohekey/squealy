@@ -998,7 +998,9 @@ impl<'conn, 'scope, Shape, Base, Projection> SetOperand<'conn, 'scope, TestConne
     for TestSelect<'conn, 'scope, Shape, Base, Projection>
 where
     Shape: ProjectionShape,
-    Base: SelectAst<'conn, 'scope, TestConnection>,
+    // A row-locked select cannot be a set operand (a locking clause is invalid in a UNION/INTERSECT/
+    // EXCEPT input). `SetOperations` requires `SetOperand`, so this also blocks the left operand.
+    Base: SelectAst<'conn, 'scope, TestConnection, RowLockState = squealy::RowUnlocked>,
     Projection: Projectable,
 {
     type Row = Shape::Row;
@@ -1013,7 +1015,8 @@ impl<'conn, 'scope, Shape, Base, Projection> SetOperations<'conn, 'scope, TestCo
     for TestSelect<'conn, 'scope, Shape, Base, Projection>
 where
     Shape: ProjectionShape,
-    Base: SelectAst<'conn, 'scope, TestConnection>,
+    // Matches the `SetOperand` supertrait bound: a row-locked select cannot start a set operation.
+    Base: SelectAst<'conn, 'scope, TestConnection, RowLockState = squealy::RowUnlocked>,
     Projection: Projectable,
 {
     type SetSelect<Tree>

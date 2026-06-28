@@ -307,6 +307,7 @@ struct SelectRenderSink<'writer, 'renderer, B, Writer> {
     orders: usize,
     limit: Option<usize>,
     offset: Option<usize>,
+    row_lock: Option<crate::RowLock>,
     _backend: PhantomData<B>,
 }
 
@@ -332,6 +333,7 @@ where
             orders: 0,
             limit: None,
             offset: None,
+            row_lock: None,
             _backend: PhantomData,
         })
     }
@@ -339,7 +341,11 @@ where
     fn finish(self) -> io::Result<()> {
         self.renderer
             .dialect
-            .write_limit_offset(self.limit, self.offset, self.writer)
+            .write_limit_offset(self.limit, self.offset, self.writer)?;
+        if let Some(lock) = self.row_lock {
+            self.renderer.dialect.write_row_lock(lock, self.writer)?;
+        }
+        Ok(())
     }
 
     fn push_source_separator(&mut self) -> io::Result<()> {
@@ -550,6 +556,11 @@ where
 
     fn set_offset(&mut self, rows: usize) -> io::Result<()> {
         self.offset = Some(rows);
+        Ok(())
+    }
+
+    fn set_row_lock(&mut self, lock: crate::RowLock) -> io::Result<()> {
+        self.row_lock = Some(lock);
         Ok(())
     }
 }
@@ -1567,8 +1578,34 @@ where
     B: Backend,
     Writer: SqlWriter<B>,
 {
-    write_ast::<B, _>(writer, renderer, false, |visitor| order.visit_expr(visitor))?;
-    write!(writer, " {}", render_order_direction(order.direction()))
+    let dialect = renderer.dialect;
+    let direction = render_order_direction(order.direction());
+    match order.nulls() {
+        // MySQL has no `NULLS FIRST/LAST`; emulate it with a leading `(<expr> IS NULL)` sort key. The
+        // expr is rendered twice — the param-collection pass runs this same path over a `ParamCollector`
+        // writer, so SQL placeholders and binds stay in lock-step.
+        Some(nulls) if dialect.emulates_order_nulls() => {
+            // `NULLS LAST` => non-nulls (0) before nulls (1) => the IS-NULL key sorts ASC; FIRST => DESC.
+            let nulls_key_direction = match nulls {
+                crate::OrderNulls::Last => "ASC",
+                crate::OrderNulls::First => "DESC",
+            };
+            writer.write_all(b"(")?;
+            write_ast::<B, _>(writer, renderer, false, |visitor| order.visit_expr(visitor))?;
+            write!(writer, " IS NULL) {nulls_key_direction}, ")?;
+            write_ast::<B, _>(writer, renderer, false, |visitor| order.visit_expr(visitor))?;
+            write!(writer, " {direction}")
+        }
+        Some(nulls) => {
+            write_ast::<B, _>(writer, renderer, false, |visitor| order.visit_expr(visitor))?;
+            write!(writer, " {direction}")?;
+            dialect.write_order_nulls(nulls, writer)
+        }
+        None => {
+            write_ast::<B, _>(writer, renderer, false, |visitor| order.visit_expr(visitor))?;
+            write!(writer, " {direction}")
+        }
+    }
 }
 
 fn write_assignment_value<B, Value>(

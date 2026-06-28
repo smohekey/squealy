@@ -3502,3 +3502,41 @@ fn postgres_upsert_do_update_with_default_values_falls_back_to_do_nothing() {
          ON CONFLICT (\"id\") DO NOTHING RETURNING \"id\" AS \"id\""
     );
 }
+
+#[test]
+fn postgres_order_by_nulls_first_last_render_natively() {
+    let q = Postgres
+        .from::<User>()
+        .order_by(|(user,)| (user.name.desc().nulls_last(), user.id.asc().nulls_first()))
+        .select(|(user,)| user.id);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.\"id\" AS \"id\" FROM \"public\".\"users\" AS q0_0 \
+         ORDER BY q0_0.\"name\" DESC NULLS LAST, q0_0.\"id\" ASC NULLS FIRST"
+    );
+}
+
+#[test]
+fn postgres_for_update_renders_after_limit() {
+    let q = Postgres
+        .from::<User>()
+        .limit(10)
+        .for_update()
+        .select(|(user,)| user.id);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.\"id\" AS \"id\" FROM \"public\".\"users\" AS q0_0 LIMIT 10 FOR UPDATE"
+    );
+}
+
+#[test]
+fn postgres_for_share_renders() {
+    let q = Postgres
+        .from::<User>()
+        .for_share()
+        .select(|(user,)| user.id);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.\"id\" AS \"id\" FROM \"public\".\"users\" AS q0_0 FOR SHARE"
+    );
+}

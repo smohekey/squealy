@@ -2360,3 +2360,42 @@ fn test_self_join_renders_distinct_aliases() {
     );
     assert_row::<_, _, _, (i32, i32)>(&q);
 }
+
+#[test]
+fn test_order_by_nulls_first_and_last_render_natively() {
+    let q = TestConnection
+        .from::<User>()
+        .order_by(|(user,)| (user.name.desc().nulls_last(), user.id.asc().nulls_first()))
+        .select(|(user,)| user.id);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 \
+         ORDER BY q0_0.name DESC NULLS LAST, q0_0.id ASC NULLS FIRST"
+    );
+}
+
+#[test]
+fn test_for_update_renders_after_limit() {
+    let q = TestConnection
+        .from::<User>()
+        .order_by(|(user,)| user.id.asc())
+        .limit(10)
+        .for_update()
+        .select(|(user,)| user.id);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 ORDER BY q0_0.id ASC LIMIT 10 FOR UPDATE"
+    );
+}
+
+#[test]
+fn test_for_share_renders() {
+    let q = TestConnection
+        .from::<User>()
+        .for_share()
+        .select(|(user,)| user.id);
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.id AS id FROM public.users AS q0_0 FOR SHARE"
+    );
+}

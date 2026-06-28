@@ -3545,6 +3545,47 @@ pub enum NotDistinct {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IsDistinct {}
 
+/// Row-lock state of a select chain (carried as [`SelectAst::RowLockState`](crate::SelectAst::RowLockState)):
+/// the chain has no `FOR UPDATE`/`FOR SHARE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowUnlocked {}
+/// Row-lock state of a select chain: the chain has a `FOR UPDATE`/`FOR SHARE`. A locked select must
+/// identify individual table rows, so `select` requires it be non-distinct, ungrouped, scalar
+/// (non-aggregate), and free of outer joins — see [`RowLockSelectValid`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowLocked {}
+
+/// Outer-join state of a select chain (carried as [`SelectAst::OuterJoinState`](crate::SelectAst::OuterJoinState)):
+/// the chain has only inner/cross joins (or none).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotOuterJoined {}
+/// Outer-join state of a select chain: the chain has a `LEFT`/`RIGHT`/`FULL JOIN`, putting some relation
+/// on the nullable side. An untargeted `FOR UPDATE` cannot lock such a relation, so `select` rejects a
+/// row lock here (see [`RowLockSelectValid`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OuterJoined {}
+
+/// Compile-time guard for a row-locked (`FOR UPDATE`/`FOR SHARE`) select, dispatched on the chain's
+/// [`RowLockState`](crate::SelectAst::RowLockState). An unlocked chain ([`RowUnlocked`]) is always valid
+/// (and never consults [`ProjectionClass`]). A locked chain ([`RowLocked`]) requires the select to
+/// identify individual table rows: non-`DISTINCT`, no `GROUP BY`, no outer join, and a scalar
+/// (non-aggregate) projection — the databases reject `FOR UPDATE` otherwise. (A window function in the
+/// projection classifies as scalar and is *not* caught here; the database rejects it at runtime.)
+#[doc(hidden)]
+pub trait RowLockSelectValid<Distinctness, Grouped, OuterJoin, Projection> {}
+
+impl<Distinctness, Grouped, OuterJoin, Projection>
+    RowLockSelectValid<Distinctness, Grouped, OuterJoin, Projection> for RowUnlocked
+{
+}
+
+impl<Projection> RowLockSelectValid<NotDistinct, Ungrouped, NotOuterJoined, Projection>
+    for RowLocked
+where
+    Projection: ProjectionClass<Class = ScalarProjection>,
+{
+}
+
 /// Maps a projection's [`Shape`](crate::ReturningProjection::Shape) (a single kind, the unit shape, or a
 /// tuple of kinds) to the `HList` of its projected kinds, so a `DISTINCT` chain's `ORDER BY` keys can be
 /// checked for membership. Only consulted on the `DISTINCT` path; a non-distinct select never needs it.
@@ -7232,6 +7273,7 @@ where
 {
     ast: Ast,
     direction: OrderDirection,
+    nulls: Option<crate::OrderNulls>,
     _phantom: PhantomData<(&'scope (), K)>,
 }
 
@@ -7243,6 +7285,7 @@ where
         Self {
             ast,
             direction,
+            nulls: None,
             _phantom: PhantomData,
         }
     }
@@ -7260,7 +7303,45 @@ where
     pub fn direction(&self) -> OrderDirection {
         self.direction
     }
+
+    #[doc(hidden)]
+    pub fn nulls(&self) -> Option<crate::OrderNulls> {
+        self.nulls
+    }
 }
+
+/// Null placement is only offered on a **bare column** order term. The MySQL emulation expands
+/// `NULLS FIRST/LAST` into a leading `(<expr> IS NULL)` sort key; restricting it to a column keeps that
+/// emulation valid under `SELECT DISTINCT` (the [`DistinctOrderGate`] guarantees the column is in the
+/// projection, so the `IS NULL` key references only a selected column). Ordering a derived expression
+/// with explicit null placement is out of scope.
+impl<'scope, K> Order<'scope, K, ColumnExprAst<K>>
+where
+    K: ExprKind,
+{
+    /// Place `NULL`s first in this column's ordering (`NULLS FIRST`). On a backend without the syntax
+    /// (MySQL) it is emulated with a leading `(<column> IS NULL)` sort key.
+    pub fn nulls_first(mut self) -> OrderNullsTerm<'scope, K> {
+        self.nulls = Some(crate::OrderNulls::First);
+        OrderNullsTerm(self)
+    }
+
+    /// Place `NULL`s last in this column's ordering (`NULLS LAST`). On a backend without the syntax
+    /// (MySQL) it is emulated with a leading `(<column> IS NULL)` sort key.
+    pub fn nulls_last(mut self) -> OrderNullsTerm<'scope, K> {
+        self.nulls = Some(crate::OrderNulls::Last);
+        OrderNullsTerm(self)
+    }
+}
+
+/// A column `ORDER BY` term with an explicit `NULLS FIRST`/`LAST` placement, produced by
+/// [`Order::nulls_first`] / [`Order::nulls_last`].
+///
+/// It is a distinct type from [`Order`] on purpose: a top-level `order_by` accepts it (via
+/// `OrderByTerms`), but a window's `order_by` — which takes an [`Order`] — does not, so
+/// `over(|w| w.order_by(col.asc().nulls_last()))` is a compile error. Null placement inside a window
+/// `ORDER BY` is out of scope (its MySQL emulation would have to rewrite the `OVER (…)` ordering).
+pub struct OrderNullsTerm<'scope, K>(pub(crate) Order<'scope, K, ColumnExprAst<K>>);
 
 impl<'scope, K, Ast> Clone for Order<'scope, K, Ast>
 where
@@ -7270,6 +7351,7 @@ where
         Self {
             ast: self.ast.clone(),
             direction: self.direction,
+            nulls: self.nulls,
             _phantom: PhantomData,
         }
     }

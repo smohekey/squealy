@@ -1,0 +1,11 @@
+error[E0599]: no method named `nulls_last` found for struct `Order<'_, AddExpr<UserId, {integer}>, squealy::BinaryExprAst<squealy::ColumnExprAst<UserId>, squealy::LiteralExprAst<{integer}>>>` in the current scope
+  --> tests/compile_fail/nulls_ordering_requires_bare_column.rs:17:49
+   |
+17 |         .order_by(|(user,)| (user.id + 1).asc().nulls_last())
+   |                                                 ^^^^^^^^^^
+   |
+help: there is a method `nulls` with a similar name
+   |
+17 -         .order_by(|(user,)| (user.id + 1).asc().nulls_last())
+17 +         .order_by(|(user,)| (user.id + 1).asc().nulls())
+   |

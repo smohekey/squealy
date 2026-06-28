@@ -451,3 +451,19 @@ fn lowers_datetime_functions_to_ir() {
         other => panic!("expected ExtractSecond node, got {other:?}"),
     }
 }
+
+#[test]
+fn lowers_order_by_nulls_into_view_model() {
+    // A view/CTE body built via the query builder must carry an explicit NULLS placement into the model
+    // (it was previously dropped, silently losing the modifier in the rendered CREATE VIEW / CTE).
+    let conn = ModelConn;
+    let query = conn
+        .from::<User>()
+        .order_by(|(user,)| user.id.asc().nulls_last())
+        .project(|(user,)| user.id);
+
+    let model = lower_view(&query);
+    assert_eq!(model.order_by.len(), 1);
+    assert_eq!(model.order_by[0].direction, Some(OrderDirection::Asc));
+    assert_eq!(model.order_by[0].nulls, Some(OrderNulls::Last));
+}

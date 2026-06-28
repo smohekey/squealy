@@ -9,8 +9,8 @@ use squealy::{
     ProjectionVisitor, QueryBuilder, RenderAssignment, RenderAst, RenderCaseArms,
     RenderCoalesceArgs, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst,
     RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderSimpleCaseArms, RenderSubquery,
-    RenderUpdateAssignments, SchemaTable, SelectSink, Selected, SourceAlias, SqlType, Table,
-    TableProjection, UnaryStringFunc, UpdateableTable, WindowFunc,
+    RenderUpdateAssignments, RowLock, SchemaTable, SelectSink, Selected, SourceAlias, SqlType,
+    Table, TableProjection, UnaryStringFunc, UpdateableTable, WindowFunc,
 };
 
 use crate::query::{TestParam, TestParamWriter};
@@ -108,6 +108,7 @@ struct TestSelectSink<'writer, Writer> {
     orders: usize,
     limit: Option<usize>,
     offset: Option<usize>,
+    row_lock: Option<RowLock>,
 }
 
 impl<'writer, Writer> TestSelectSink<'writer, Writer>
@@ -127,6 +128,7 @@ where
             orders: 0,
             limit: None,
             offset: None,
+            row_lock: None,
         })
     }
 }
@@ -292,6 +294,11 @@ where
 
     fn set_offset(&mut self, rows: usize) -> io::Result<()> {
         self.offset = Some(rows);
+        Ok(())
+    }
+
+    fn set_row_lock(&mut self, lock: RowLock) -> io::Result<()> {
+        self.row_lock = Some(lock);
         Ok(())
     }
 }
@@ -488,6 +495,12 @@ where
         }
         if let Some(offset) = self.offset {
             write!(self.writer, " OFFSET {offset}")?;
+        }
+        if let Some(lock) = self.row_lock {
+            self.writer.write_all(match lock {
+                RowLock::Update => b" FOR UPDATE" as &[u8],
+                RowLock::Share => b" FOR SHARE",
+            })?;
         }
         Ok(())
     }
@@ -1110,7 +1123,14 @@ where
     Ast: RenderAst<crate::TestBackend>,
 {
     order.visit_expr(&mut RenderExpr { writer })?;
-    write!(writer, " {}", render_order_direction(order.direction()))
+    write!(writer, " {}", render_order_direction(order.direction()))?;
+    if let Some(nulls) = order.nulls() {
+        writer.write_all(match nulls {
+            OrderNulls::First => b" NULLS FIRST" as &[u8],
+            OrderNulls::Last => b" NULLS LAST",
+        })?;
+    }
+    Ok(())
 }
 
 fn write_assignment_value<Value>(value: &Value, writer: &mut impl SqlWriter) -> io::Result<()>

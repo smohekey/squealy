@@ -508,9 +508,10 @@ pub use expr::{
     AggregateNeedsGroupBy, AggregateProjection, AggregateTerm, Aggregated, AstProjectionClass,
     ColumnFree, ColumnTerm, CombineColumns, CombineTerm, ConstantTerm, DistinctOrderGate,
     ExprColumns, ExtendOrderClass, Grouped, HasBareColumn, HavingTransition, IntoKindList,
-    IsDistinct, NotDistinct, OrderAggregate, OrderCompatibleWith, OrderKeysInProjection,
-    OrderMixed, OrderNone, OrderScalar, PredicateColumns, ProjectionClass, ProjectionColumns,
-    TermProjectionClass, Ungrouped, ValidSelect,
+    IsDistinct, NotDistinct, NotOuterJoined, OrderAggregate, OrderCompatibleWith,
+    OrderKeysInProjection, OrderMixed, OrderNone, OrderNullsTerm, OrderScalar, OuterJoined,
+    PredicateColumns, ProjectionClass, ProjectionColumns, RowLockSelectValid, RowLocked,
+    RowUnlocked, TermProjectionClass, Ungrouped, ValidSelect,
 };
 pub use foreign_key::ForeignKey;
 pub use index::Index;
@@ -543,19 +544,20 @@ pub use query::{
     InsertAssignments, InsertColumnKey, InsertColumnNullability, InsertColumnValues, InsertQuery,
     InsertReady, InsertRow, InsertRowVisitor, InsertRows, InsertRowsBuilder, IntoAssignmentValue,
     IntoInsertColumnValue, IntoNullableAssignmentValue, IntoUpdateColumnValue, IsNullable, Join,
-    JoinTarget, LeftJoin, LeftJoinSource, LeftJoinTarget, Limited, MutationFiltered,
+    JoinTarget, LeftJoin, LeftJoinSource, LeftJoinTarget, Limited, Locked, MutationFiltered,
     MutationUnfiltered, NoSources, NonEmptyInsertRows, NonNullableColumn, NullableColumn, Offset,
     OnConflict, OnConflictQueryBuilder, OrderBy, OuterJoin, PredicateNodes, PredicateVisitor,
     PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery, PreparableSetSelectQuery,
     PreparableUpdateQuery, PreparedMutationQuery, PreparedSelectQuery, RecursiveSelf,
     RenderAssignment, RenderAssignmentValue, RenderInsertAssignments, RenderInsertRows,
     RenderPredicateNodes, RenderSelectAst, RenderSourceSpec, RenderSubquery,
-    RenderUpdateAssignments, ReturningProjection, RightJoinSource, RightJoinTarget, RootSource,
-    RowsAffected, RuntimeAssignmentValue, ScalarSubquery, SelectAst, SelectQuery, SelectSink,
-    Selected, SetArm, SetGroup, SetLeaf, SetNode, SetOp, SetOperand, SetOperations, SetOrder,
-    SetSelectModifiers, SetTail, SourceQuery, SourceSpec, StaticAssignmentValue, Subqueries,
-    Subquery, SubquerySelect, ToColumns, UpdateAssignment, UpdateAssignmentNode, UpdateAssignments,
-    UpdateColumnKey, UpdateColumnValues, UpdateQuery, Upsert, Where, default,
+    RenderUpdateAssignments, RendersRowLock, ReturningProjection, RightJoinSource, RightJoinTarget,
+    RootSource, RowLock, RowsAffected, RuntimeAssignmentValue, ScalarSubquery, SelectAst,
+    SelectQuery, SelectSink, Selected, SetArm, SetGroup, SetLeaf, SetNode, SetOp, SetOperand,
+    SetOperations, SetOrder, SetSelectModifiers, SetTail, SourceQuery, SourceSpec,
+    StaticAssignmentValue, Subqueries, Subquery, SubquerySelect, ToColumns, UpdateAssignment,
+    UpdateAssignmentNode, UpdateAssignments, UpdateColumnKey, UpdateColumnValues, UpdateQuery,
+    Upsert, Where, default,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{CTE, ColumnType, Database, RecursiveCTE, Schema, Table, View};
