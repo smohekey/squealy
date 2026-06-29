@@ -2327,6 +2327,84 @@ impl_insert_select_columns_tuple!(
     E1, F1
 );
 
+/// A source value type assignable to a target column's value type in an `INSERT … SELECT`: an exact
+/// match, or the safe non-null-into-nullable widening `T` → `Option<T>` (which SQL and the
+/// setter-based insert both allow). `Option<T>` → `T` is intentionally *not* assignable (it would
+/// insert `NULL` into a `NOT NULL` column).
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "an `INSERT … SELECT` source column type is not assignable to the target column",
+    note = "the source value type must equal the target's, or be `T` for a nullable `Option<T>` target \
+            (a nullable source cannot fill a `NOT NULL` target)"
+)]
+pub trait ColumnValueAssignable<Target> {}
+// Bound on `ColumnNullability` (every column value type implements it; tuples do not) so these scalar
+// rules never match a tuple row — that keeps the `ScalarRow` branch of `InsertSelectRowCompatible`
+// disjoint from the per-arity `TupleRow` branch, so the witness is inferred unambiguously.
+impl<T> ColumnValueAssignable<T> for T where T: crate::ColumnNullability {}
+impl<T> ColumnValueAssignable<Option<T>> for T where T: crate::ColumnNullability {}
+
+/// Witness selecting the scalar (single-column) branch of [`InsertSelectRowCompatible`].
+#[doc(hidden)]
+pub struct ScalarRow;
+/// Witness selecting the tuple (multi-column) branch of [`InsertSelectRowCompatible`].
+#[doc(hidden)]
+pub struct TupleRow;
+
+/// The source query's row type is assignable to the `INSERT … SELECT` target columns' row type,
+/// element-wise via [`ColumnValueAssignable`] (so a non-null source column may fill a nullable
+/// target). The inferred `Witness` picks the scalar vs tuple branch, which keeps the blanket scalar
+/// impl from overlapping the per-arity tuple impls.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "the `INSERT … SELECT` source row is not assignable to the target columns",
+    note = "the source query's projected types must match the target columns (a non-null source may \
+            fill a nullable `Option<T>` target, but not vice versa), and the arities must be equal"
+)]
+pub trait InsertSelectRowCompatible<Target, Witness> {}
+
+impl<S, T> InsertSelectRowCompatible<T, ScalarRow> for S where S: ColumnValueAssignable<T> {}
+
+macro_rules! impl_insert_select_row_compatible_tuple {
+    ($($s:ident => $t:ident),+) => {
+        impl<$($s,)+ $($t,)+> InsertSelectRowCompatible<($($t,)+), TupleRow> for ($($s,)+)
+        where
+            $($s: ColumnValueAssignable<$t>,)+
+        {}
+    };
+}
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15, S16 => T16);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15, S16 => T16, S17 => T17);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15, S16 => T16, S17 => T17, S18 => T18);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15, S16 => T16, S17 => T17, S18 => T18, S19 => T19);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15, S16 => T16, S17 => T17, S18 => T18, S19 => T19, S20 => T20);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15, S16 => T16, S17 => T17, S18 => T18, S19 => T19, S20 => T20, S21 => T21);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15, S16 => T16, S17 => T17, S18 => T18, S19 => T19, S20 => T20, S21 => T21, S22 => T22);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15, S16 => T16, S17 => T17, S18 => T18, S19 => T19, S20 => T20, S21 => T21, S22 => T22, S23 => T23);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15, S16 => T16, S17 => T17, S18 => T18, S19 => T19, S20 => T20, S21 => T21, S22 => T22, S23 => T23, S24 => T24);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15, S16 => T16, S17 => T17, S18 => T18, S19 => T19, S20 => T20, S21 => T21, S22 => T22, S23 => T23, S24 => T24, S25 => T25);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15, S16 => T16, S17 => T17, S18 => T18, S19 => T19, S20 => T20, S21 => T21, S22 => T22, S23 => T23, S24 => T24, S25 => T25, S26 => T26);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15, S16 => T16, S17 => T17, S18 => T18, S19 => T19, S20 => T20, S21 => T21, S22 => T22, S23 => T23, S24 => T24, S25 => T25, S26 => T26, S27 => T27);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15, S16 => T16, S17 => T17, S18 => T18, S19 => T19, S20 => T20, S21 => T21, S22 => T22, S23 => T23, S24 => T24, S25 => T25, S26 => T26, S27 => T27, S28 => T28);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15, S16 => T16, S17 => T17, S18 => T18, S19 => T19, S20 => T20, S21 => T21, S22 => T22, S23 => T23, S24 => T24, S25 => T25, S26 => T26, S27 => T27, S28 => T28, S29 => T29);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15, S16 => T16, S17 => T17, S18 => T18, S19 => T19, S20 => T20, S21 => T21, S22 => T22, S23 => T23, S24 => T24, S25 => T25, S26 => T26, S27 => T27, S28 => T28, S29 => T29, S30 => T30);
+impl_insert_select_row_compatible_tuple!(S0 => T0, S1 => T1, S2 => T2, S3 => T3, S4 => T4, S5 => T5, S6 => T6, S7 => T7, S8 => T8, S9 => T9, S10 => T10, S11 => T11, S12 => T12, S13 => T13, S14 => T14, S15 => T15, S16 => T16, S17 => T17, S18 => T18, S19 => T19, S20 => T20, S21 => T21, S22 => T22, S23 => T23, S24 => T24, S25 => T25, S26 => T26, S27 => T27, S28 => T28, S29 => T29, S30 => T30, S31 => T31);
+
 /// A query builder whose backend supports `INSERT … ON CONFLICT` (PostgreSQL). Gating `on_conflict` on
 /// this keeps upsert off backends that don't render it (e.g. MySQL's `ON DUPLICATE KEY UPDATE` is a
 /// later follow-up). The upsert reuses the existing `Insert` query object (the conflict clause is a

@@ -1654,7 +1654,7 @@ impl TableStruct {
             {
                 /// `INSERT INTO t (columns) <select>` — insert the result of a query. `columns` selects
                 /// the target columns; `source` is a select whose projected row type must match them.
-                pub fn insert_select<'src_scope, __SquealyCoverage, __SquealyCols, __SquealySource>(
+                pub fn insert_select<'src_scope, __SquealyCoverage, __SquealyRowWitness, __SquealyCols, __SquealySource>(
                     self,
                     columns: impl ::std::ops::FnOnce(
                         <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
@@ -1672,12 +1672,14 @@ impl TableStruct {
                             <<__SquealyCols as ::squealy::ReturningProjection<'static>>::Shape as ::squealy::IntoKindList>::Kinds,
                             __SquealyCoverage,
                         >,
-                    __SquealySource: ::squealy::IntoInsertSelect<
-                        'conn,
-                        'src_scope,
-                        Conn,
-                        Row = <<__SquealyCols as ::squealy::ReturningProjection<'static>>::Shape as ::squealy::ProjectionShape>::Row,
-                    >,
+                    __SquealySource: ::squealy::IntoInsertSelect<'conn, 'src_scope, Conn>,
+                    // The source's row type must be assignable to the target columns' row type —
+                    // element-wise exact-or-widen (`T` into a nullable `Option<T>`), not exact equality.
+                    <__SquealySource as ::squealy::IntoInsertSelect<'conn, 'src_scope, Conn>>::Row:
+                        ::squealy::InsertSelectRowCompatible<
+                            <<__SquealyCols as ::squealy::ReturningProjection<'static>>::Shape as ::squealy::ProjectionShape>::Row,
+                            __SquealyRowWitness,
+                        >,
                 {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                     let names = ::squealy::InsertSelectColumns::column_names(columns(table));

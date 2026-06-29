@@ -2058,6 +2058,23 @@ fn test_insert_select_omits_alias_nullable_column() {
 }
 
 #[test]
+fn test_insert_select_widens_nonnull_source_into_nullable_target() {
+    // A non-null source column (`name: String`) may fill a nullable target column
+    // (`label: Option<String>`) — the `T` → `Option<T>` widening that SQL and the setter insert allow.
+    let conn = TestConnection;
+    let query = conn.to::<AliasedRequired>().insert_select(
+        |aliased| (aliased.name, aliased.label),
+        conn.from::<AliasedRequired>()
+            .select(|(aliased,)| (aliased.name, aliased.name)),
+    );
+    assert_eq!(
+        query.to_sql(),
+        "INSERT INTO aliased_requireds (name, label) \
+         SELECT q0_0.name AS t0_name, q0_0.name AS t1_name FROM aliased_requireds AS q0_0"
+    );
+}
+
+#[test]
 fn test_case_with_in_subquery_condition_classifies() {
     // A non-aggregate `in_subquery` condition (column operand) keeps the CASE a scalar projection.
     let q = TestConnection
