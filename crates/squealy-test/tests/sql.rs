@@ -2461,3 +2461,19 @@ fn test_insert_select_union_source_renders() {
          UNION (SELECT q0_0.name AS name FROM public.users AS q0_0)"
     );
 }
+
+#[test]
+fn test_insert_select_locked_source_renders() {
+    // A single *locked* source (`for_update()`) is a valid insert source — it renders `FOR UPDATE`,
+    // locking the copied rows. (The row-lock ban applies only to set-op operands, not single selects.)
+    let conn = TestConnection;
+    let q = conn.to::<User>().insert_select(
+        |user| user.name,
+        conn.from::<User>().for_update().select(|(user,)| user.name),
+    );
+    assert_eq!(
+        q.to_sql(),
+        "INSERT INTO public.users (name) \
+         SELECT q0_0.name AS name FROM public.users AS q0_0 FOR UPDATE"
+    );
+}

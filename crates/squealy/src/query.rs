@@ -1882,10 +1882,15 @@ where
 /// The `INSERT…SELECT`'s target columns are supplied separately (by the write builder); the source's
 /// row type ([`SetOperand::Row`]) is matched against those columns there.
 #[doc(hidden)]
-pub trait IntoInsertSelect<'conn, 'scope, Conn>: SetOperand<'conn, 'scope, Conn>
+pub trait IntoInsertSelect<'conn, 'scope, Conn>
 where
     Conn: QueryBuilder + 'conn,
 {
+    /// The row type this source produces — matched against the `INSERT … SELECT` target columns. Kept
+    /// independent of [`SetOperand`] so a single locked source (`for_update().select(…)`, rendering
+    /// `INSERT … SELECT … FOR UPDATE`) is allowed; the row-lock ban applies only to set-op operands.
+    type Row;
+
     /// The backend's insert-select query object for target table `S` returning `Returning`.
     type InsertSelectQuery<S, Returning>
     where
@@ -2279,6 +2284,48 @@ impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M);
 impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N);
 impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
 impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
+impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q);
+impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R);
+impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S);
+impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T);
+impl_insert_select_columns_tuple!(
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U
+);
+impl_insert_select_columns_tuple!(
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V
+);
+impl_insert_select_columns_tuple!(
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W
+);
+impl_insert_select_columns_tuple!(
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X
+);
+impl_insert_select_columns_tuple!(
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y
+);
+impl_insert_select_columns_tuple!(
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z
+);
+impl_insert_select_columns_tuple!(
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, A1
+);
+impl_insert_select_columns_tuple!(
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, A1, B1
+);
+impl_insert_select_columns_tuple!(
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, A1, B1, C1
+);
+impl_insert_select_columns_tuple!(
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, A1, B1, C1, D1
+);
+impl_insert_select_columns_tuple!(
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, A1, B1, C1, D1,
+    E1
+);
+impl_insert_select_columns_tuple!(
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, A1, B1, C1, D1,
+    E1, F1
+);
 
 /// A query builder whose backend supports `INSERT … ON CONFLICT` (PostgreSQL). Gating `on_conflict` on
 /// this keeps upsert off backends that don't render it (e.g. MySQL's `ON DUPLICATE KEY UPDATE` is a

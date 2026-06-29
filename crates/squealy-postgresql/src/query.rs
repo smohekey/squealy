@@ -1549,10 +1549,14 @@ impl<'conn, 'scope, Shape, Base, Projection, Conn> IntoInsertSelect<'conn, 'scop
     for PostgresSelect<'conn, 'scope, Shape, Base, Projection, Conn>
 where
     Shape: ProjectionShape,
-    Base: SelectAst<'conn, 'scope, Conn, RowLockState = squealy::RowUnlocked>,
+    // Any row-lock state — a locked single select renders `INSERT … SELECT … FOR UPDATE` (valid on
+    // PostgreSQL). The lock ban applies only to set-op operands, via their `SetOperand` impls.
+    Base: SelectAst<'conn, 'scope, Conn>,
     Projection: Projectable,
     Conn: QueryBuilder<Backend = Postgres> + 'conn,
 {
+    type Row = Shape::Row;
+
     type InsertSelectQuery<S, Returning>
         = PostgresInsertSelect<
         'conn,
@@ -1589,6 +1593,8 @@ where
     Tree: SetArm<'conn, 'scope, Conn>,
     Conn: QueryBuilder<Backend = Postgres> + 'conn,
 {
+    type Row = <Tree as SetArm<'conn, 'scope, Conn>>::Row;
+
     type InsertSelectQuery<S, Returning>
         = PostgresInsertSelect<'conn, 'scope, S, squealy::SetGroup<Tree>, Returning, Conn>
     where

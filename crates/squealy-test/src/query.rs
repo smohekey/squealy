@@ -1015,9 +1015,13 @@ impl<'conn, 'scope, Shape, Base, Projection> IntoInsertSelect<'conn, 'scope, Tes
     for TestSelect<'conn, 'scope, Shape, Base, Projection>
 where
     Shape: ProjectionShape,
-    Base: SelectAst<'conn, 'scope, TestConnection, RowLockState = squealy::RowUnlocked>,
+    // Any row-lock state — a locked single select renders `INSERT … SELECT … FOR UPDATE`. The lock ban
+    // applies only to set-op operands, via their `SetOperand` impls.
+    Base: SelectAst<'conn, 'scope, TestConnection>,
     Projection: Projectable,
 {
+    type Row = Shape::Row;
+
     type InsertSelectQuery<S, Returning>
         = TestInsertSelect<
         'conn,
@@ -1051,6 +1055,8 @@ impl<'conn, 'scope, Tree> IntoInsertSelect<'conn, 'scope, TestConnection>
 where
     Tree: SetArm<'conn, 'scope, TestConnection>,
 {
+    type Row = <Tree as SetArm<'conn, 'scope, TestConnection>>::Row;
+
     type InsertSelectQuery<S, Returning>
         = TestInsertSelect<'conn, 'scope, S, squealy::SetGroup<Tree>, Returning>
     where

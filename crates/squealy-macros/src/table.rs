@@ -1672,13 +1672,12 @@ impl TableStruct {
                             <<__SquealyCols as ::squealy::ReturningProjection<'static>>::Shape as ::squealy::IntoKindList>::Kinds,
                             __SquealyCoverage,
                         >,
-                    __SquealySource: ::squealy::IntoInsertSelect<'conn, 'src_scope, Conn>
-                        + ::squealy::SetOperand<
-                            'conn,
-                            'src_scope,
-                            Conn,
-                            Row = <<__SquealyCols as ::squealy::ReturningProjection<'static>>::Shape as ::squealy::ProjectionShape>::Row,
-                        >,
+                    __SquealySource: ::squealy::IntoInsertSelect<
+                        'conn,
+                        'src_scope,
+                        Conn,
+                        Row = <<__SquealyCols as ::squealy::ReturningProjection<'static>>::Shape as ::squealy::ProjectionShape>::Row,
+                    >,
                 {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                     let names = ::squealy::InsertSelectColumns::column_names(columns(table));
