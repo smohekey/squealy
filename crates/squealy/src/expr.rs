@@ -1455,9 +1455,11 @@ pub enum FrameMode {
     Range,
 }
 
-/// A bound of a window frame's `BETWEEN <start> AND <end>` range. Offsets are compile-time literals,
-/// so a frame contributes no runtime bind parameters. Build the bounds with the free constructors
-/// ([`unbounded_preceding`], [`preceding`], [`current_row`], [`following`], [`unbounded_following`]).
+/// The stored value of a window frame bound (the left/right of `BETWEEN <start> AND <end>`). Offsets
+/// are compile-time literals, so a frame contributes no runtime bind parameters. End users do not name
+/// this directly — they build bounds with the typed constructors ([`unbounded_preceding`],
+/// [`preceding`], [`current_row`], [`following`], [`unbounded_following`]), which the [`FrameStart`] /
+/// [`FrameEnd`] traits restrict to the valid side. It is public for the view-model (de)serializer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameBound {
     /// `UNBOUNDED PRECEDING` — the start of the partition.
@@ -1484,29 +1486,110 @@ impl FrameBound {
     }
 }
 
-/// `UNBOUNDED PRECEDING` — the partition start, as a window frame bound.
-pub fn unbounded_preceding() -> FrameBound {
-    FrameBound::UnboundedPreceding
+/// A bound valid as a frame's **start** (the left of `BETWEEN … AND …`). SQL's `<frame start>` grammar
+/// admits everything except `UNBOUNDED FOLLOWING`, so [`unbounded_following`] does not implement this —
+/// passing it as the start of [`Window::rows`] / [`Window::range`] is a compile error.
+pub trait FrameStart {
+    #[doc(hidden)]
+    fn into_start_bound(self) -> FrameBound;
 }
 
-/// `<n> PRECEDING` — `n` rows/values before the current row, as a window frame bound.
-pub fn preceding(n: u64) -> FrameBound {
-    FrameBound::Preceding(n)
+/// A bound valid as a frame's **end** (the right of `BETWEEN … AND …`). SQL's `<frame end>` grammar
+/// admits everything except `UNBOUNDED PRECEDING`, so [`unbounded_preceding`] does not implement this —
+/// passing it as the end of [`Window::rows`] / [`Window::range`] is a compile error.
+pub trait FrameEnd {
+    #[doc(hidden)]
+    fn into_end_bound(self) -> FrameBound;
 }
 
-/// `CURRENT ROW`, as a window frame bound.
-pub fn current_row() -> FrameBound {
-    FrameBound::CurrentRow
+/// `UNBOUNDED PRECEDING` — valid only as a frame **start** (returned by [`unbounded_preceding`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct UnboundedPreceding;
+impl FrameStart for UnboundedPreceding {
+    fn into_start_bound(self) -> FrameBound {
+        FrameBound::UnboundedPreceding
+    }
 }
 
-/// `<n> FOLLOWING` — `n` rows/values after the current row, as a window frame bound.
-pub fn following(n: u64) -> FrameBound {
-    FrameBound::Following(n)
+/// `UNBOUNDED FOLLOWING` — valid only as a frame **end** (returned by [`unbounded_following`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct UnboundedFollowing;
+impl FrameEnd for UnboundedFollowing {
+    fn into_end_bound(self) -> FrameBound {
+        FrameBound::UnboundedFollowing
+    }
 }
 
-/// `UNBOUNDED FOLLOWING` — the partition end, as a window frame bound.
-pub fn unbounded_following() -> FrameBound {
-    FrameBound::UnboundedFollowing
+/// `<n> PRECEDING` — valid as either a frame start or end (returned by [`preceding`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct Preceding(u64);
+impl FrameStart for Preceding {
+    fn into_start_bound(self) -> FrameBound {
+        FrameBound::Preceding(self.0)
+    }
+}
+impl FrameEnd for Preceding {
+    fn into_end_bound(self) -> FrameBound {
+        FrameBound::Preceding(self.0)
+    }
+}
+
+/// `CURRENT ROW` — valid as either a frame start or end (returned by [`current_row`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct CurrentRow;
+impl FrameStart for CurrentRow {
+    fn into_start_bound(self) -> FrameBound {
+        FrameBound::CurrentRow
+    }
+}
+impl FrameEnd for CurrentRow {
+    fn into_end_bound(self) -> FrameBound {
+        FrameBound::CurrentRow
+    }
+}
+
+/// `<n> FOLLOWING` — valid as either a frame start or end (returned by [`following`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct Following(u64);
+impl FrameStart for Following {
+    fn into_start_bound(self) -> FrameBound {
+        FrameBound::Following(self.0)
+    }
+}
+impl FrameEnd for Following {
+    fn into_end_bound(self) -> FrameBound {
+        FrameBound::Following(self.0)
+    }
+}
+
+/// `UNBOUNDED PRECEDING` — the partition start. Valid only as a frame **start** bound.
+pub fn unbounded_preceding() -> UnboundedPreceding {
+    UnboundedPreceding
+}
+
+/// `<n> PRECEDING` — `n` rows/values before the current row. Valid as a frame start or end bound.
+pub fn preceding(n: u64) -> Preceding {
+    Preceding(n)
+}
+
+/// `CURRENT ROW`. Valid as a frame start or end bound.
+pub fn current_row() -> CurrentRow {
+    CurrentRow
+}
+
+/// `<n> FOLLOWING` — `n` rows/values after the current row. Valid as a frame start or end bound.
+pub fn following(n: u64) -> Following {
+    Following(n)
+}
+
+/// `UNBOUNDED FOLLOWING` — the partition end. Valid only as a frame **end** bound.
+pub fn unbounded_following() -> UnboundedFollowing {
+    UnboundedFollowing
 }
 
 /// The empty frame slot of a [`Window`] (the default): no frame clause is rendered, and the typestate
@@ -3133,39 +3216,42 @@ impl<'scope, Parts, Ords> Window<'scope, Parts, Ords> {
 
     /// Add a `ROWS BETWEEN <start> AND <end>` frame (physical, row-count offsets). Build the bounds
     /// with [`unbounded_preceding`] / [`preceding`] / [`current_row`] / [`following`] /
-    /// [`unbounded_following`]. The frame is written last, so this consumes the frame slot: a second
-    /// `.rows`/`.range` (or any later `.partition_by`/`.order_by`) is rejected at compile time.
-    pub fn rows(
-        self,
-        start: FrameBound,
-        end: FrameBound,
-    ) -> Window<'scope, Parts, Ords, FrameSpec> {
+    /// [`unbounded_following`]; the [`FrameStart`] / [`FrameEnd`] bounds reject a bound on the wrong
+    /// side (e.g. `UNBOUNDED FOLLOWING` as the start) at compile time. The frame is written last, so
+    /// this consumes the frame slot: a second `.rows`/`.range` (or any later
+    /// `.partition_by`/`.order_by`) is rejected at compile time.
+    pub fn rows<S, E>(self, start: S, end: E) -> Window<'scope, Parts, Ords, FrameSpec>
+    where
+        S: FrameStart,
+        E: FrameEnd,
+    {
         Window {
             partitions: self.partitions,
             orders: self.orders,
             frame: FrameSpec {
                 mode: FrameMode::Rows,
-                start,
-                end,
+                start: start.into_start_bound(),
+                end: end.into_end_bound(),
             },
             _scope: PhantomData,
         }
     }
 
     /// Add a `RANGE BETWEEN <start> AND <end>` frame (logical, value offsets relative to the
-    /// `ORDER BY` key). See [`rows`](Self::rows) for the bound constructors and the typestate gating.
-    pub fn range(
-        self,
-        start: FrameBound,
-        end: FrameBound,
-    ) -> Window<'scope, Parts, Ords, FrameSpec> {
+    /// `ORDER BY` key). See [`rows`](Self::rows) for the bound constructors, the start/end side
+    /// checking, and the typestate gating.
+    pub fn range<S, E>(self, start: S, end: E) -> Window<'scope, Parts, Ords, FrameSpec>
+    where
+        S: FrameStart,
+        E: FrameEnd,
+    {
         Window {
             partitions: self.partitions,
             orders: self.orders,
             frame: FrameSpec {
                 mode: FrameMode::Range,
-                start,
-                end,
+                start: start.into_start_bound(),
+                end: end.into_end_bound(),
             },
             _scope: PhantomData,
         }
