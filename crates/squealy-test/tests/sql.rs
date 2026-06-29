@@ -1409,6 +1409,55 @@ fn test_window_lag_and_lead_render_with_offset() {
 }
 
 #[test]
+fn test_window_rows_frame_renders_after_order_by() {
+    // Running total: every row from the partition start up to the current row.
+    let q = TestConnection.from::<Post>().select(|(post,)| {
+        post.user_id.sum().over(|w| {
+            w.partition_by(post.user_id)
+                .order_by(post.id.asc())
+                .rows(unbounded_preceding(), current_row())
+        })
+    });
+    assert_eq!(
+        q.to_sql(),
+        "SELECT SUM(q0_0.user_id) OVER (PARTITION BY q0_0.user_id ORDER BY q0_0.id ASC \
+         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS expr FROM posts AS q0_0"
+    );
+}
+
+#[test]
+fn test_window_range_frame_with_numeric_offsets() {
+    // A centred 3-row band, expressed with `n PRECEDING`/`n FOLLOWING`. Offsets are literals, so the
+    // frame binds no params.
+    let q = TestConnection.from::<Post>().select(|(post,)| {
+        post.user_id
+            .avg()
+            .over(|w| w.order_by(post.id.asc()).range(preceding(1), following(1)))
+    });
+    assert_eq!(
+        q.to_sql(),
+        "SELECT AVG(q0_0.user_id) OVER (ORDER BY q0_0.id ASC \
+         RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS expr FROM posts AS q0_0"
+    );
+    assert!(q.collect_params().unwrap().is_empty());
+}
+
+#[test]
+fn test_window_frame_without_partition_or_order() {
+    // A frame with neither `PARTITION BY` nor `ORDER BY` sits directly inside `OVER (…)`.
+    let q = TestConnection.from::<Post>().select(|(post,)| {
+        post.user_id
+            .sum()
+            .over(|w| w.rows(unbounded_preceding(), unbounded_following()))
+    });
+    assert_eq!(
+        q.to_sql(),
+        "SELECT SUM(q0_0.user_id) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) \
+         AS expr FROM posts AS q0_0"
+    );
+}
+
+#[test]
 fn test_window_lag_over_left_joined_column_flattens_nullable() {
     // LAG over a left-joined (already-nullable) column must flatten to a single `Option<T>`, not
     // `Option<Option<T>>`. This compiles only because the result row type is `Option<i32>`.

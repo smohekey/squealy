@@ -265,6 +265,30 @@ fn lowers_window_function() {
     }
 }
 
+// A window frame lowers into the structural `ExprNode::Window`'s `frame` slot, so a view body can
+// render it per-dialect.
+#[test]
+fn lowers_window_frame() {
+    let conn = ModelConn;
+    let query = conn.from::<User>().project(|(user,)| {
+        row_number().over(|w| {
+            w.order_by(user.id.asc())
+                .rows(unbounded_preceding(), current_row())
+        })
+    });
+
+    let model = lower_view(&query);
+    match &model.projection[0].expr {
+        ExprNode::Window { frame, .. } => {
+            let frame = frame.expect("frame should be captured");
+            assert!(matches!(frame.mode(), FrameMode::Rows));
+            assert!(matches!(frame.start(), FrameBound::UnboundedPreceding));
+            assert!(matches!(frame.end(), FrameBound::CurrentRow));
+        }
+        other => panic!("expected a window node, got {other:?}"),
+    }
+}
+
 #[test]
 fn lowers_case_expression_to_ir() {
     let conn = ModelConn;

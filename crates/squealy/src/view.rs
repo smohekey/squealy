@@ -15,13 +15,13 @@ use std::marker::PhantomData;
 
 use crate::{
     AggregateFunc, ArithmeticOp, Backend, CaseArm, ColumnRef, CompareOp, DateField, Decode, Encode,
-    Expr, ExprKind, ExprNode, ExprVisitor, InsertableTable, JoinItem, JoinKind, LogicalOp, Order,
-    OrderDirection, OrderItem, ParamWriter, Predicate, PredicateAstVisitor, PredicateKind,
-    Projectable, ProjectionItem, ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAst,
-    RenderCaseArms, RenderCoalesceArgs, RenderPredicateAst, RenderProjectable, RenderSelectAst,
-    RenderSimpleCaseArms, RenderSubquery, RowReader, ScalarFunc, SelectAst, SelectSink, Selected,
-    SourceAlias, SourceRef, SqlType, Table, TableProjection, UnaryStringFunc, ViewQueryModel,
-    WindowFunc, WindowOrderTerm,
+    Expr, ExprKind, ExprNode, ExprVisitor, FrameSpec, InsertableTable, JoinItem, JoinKind,
+    LogicalOp, Order, OrderDirection, OrderItem, ParamWriter, Predicate, PredicateAstVisitor,
+    PredicateKind, Projectable, ProjectionItem, ProjectionShape, ProjectionVisitor, QueryBuilder,
+    RenderAst, RenderCaseArms, RenderCoalesceArgs, RenderPredicateAst, RenderProjectable,
+    RenderSelectAst, RenderSimpleCaseArms, RenderSubquery, RowReader, ScalarFunc, SelectAst,
+    SelectSink, Selected, SourceAlias, SourceRef, SqlType, Table, TableProjection, UnaryStringFunc,
+    ViewQueryModel, WindowFunc, WindowOrderTerm,
 };
 
 // ---------------------------------------------------------------------------
@@ -344,6 +344,7 @@ impl ExprVisitor for IrBuilder {
         partitions: Partitions,
         has_orders: bool,
         orders: Orders,
+        frame: Option<FrameSpec>,
     ) -> io::Result<()>
     where
         Operand: FnOnce(&mut Self) -> io::Result<()>,
@@ -381,6 +382,7 @@ impl ExprVisitor for IrBuilder {
             args,
             partition_by,
             order_by,
+            frame,
             result: cast.cloned(),
         });
         Ok(())

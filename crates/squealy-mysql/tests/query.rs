@@ -224,6 +224,42 @@ fn mysql_window_functions_use_question_mark_placeholders() {
 }
 
 #[test]
+fn mysql_window_frame_clause_renders() {
+    // MySQL 8.0+ shares the standard frame syntax with PostgreSQL, so the `ROWS BETWEEN … AND …`
+    // clause renders identically (only the identifier quoting differs). Literal bounds bind no `?`.
+    let running = Mysql.from::<Widget>().select(|(widget,)| {
+        widget.id.sum().over(|w| {
+            w.partition_by(widget.name)
+                .order_by(widget.id.asc())
+                .rows(unbounded_preceding(), current_row())
+        })
+    });
+    let sql = running.to_sql();
+    assert!(
+        sql.contains(
+            "OVER (PARTITION BY q0_0.`name` ORDER BY q0_0.`id` ASC \
+             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
+        ),
+        "{sql}"
+    );
+    assert!(running.collect_params().unwrap().is_empty());
+
+    let banded = Mysql.from::<Widget>().select(|(widget,)| {
+        widget.id.avg().over(|w| {
+            w.order_by(widget.id.asc())
+                .range(preceding(2), following(1))
+        })
+    });
+    assert!(
+        banded
+            .to_sql()
+            .contains("RANGE BETWEEN 2 PRECEDING AND 1 FOLLOWING"),
+        "{}",
+        banded.to_sql()
+    );
+}
+
+#[test]
 fn mysql_distinct_renders_after_select() {
     let query = Mysql
         .from::<Widget>()

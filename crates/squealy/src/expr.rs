@@ -1444,6 +1444,224 @@ where
     }
 }
 
+// ===== Window frame clauses =====
+
+/// The mode of a window frame: `ROWS` (physical, row-count offsets) or `RANGE` (logical, value
+/// offsets relative to the `ORDER BY` key). Chosen by the [`Window::rows`] / [`Window::range`]
+/// builder method.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameMode {
+    Rows,
+    Range,
+}
+
+/// The stored value of a window frame bound (the left/right of `BETWEEN <start> AND <end>`). Offsets
+/// are compile-time literals, so a frame contributes no runtime bind parameters. End users do not name
+/// this directly — they build bounds with the typed constructors ([`unbounded_preceding`],
+/// [`preceding`], [`current_row`], [`following`], [`unbounded_following`]), which the [`FrameStart`] /
+/// [`FrameEnd`] traits restrict to the valid side. It is public for the view-model (de)serializer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameBound {
+    /// `UNBOUNDED PRECEDING` — the start of the partition.
+    UnboundedPreceding,
+    /// `<n> PRECEDING` — `n` rows (or `n` of the order key's value) before the current row.
+    Preceding(u64),
+    /// `CURRENT ROW`.
+    CurrentRow,
+    /// `<n> FOLLOWING` — `n` rows (or value) after the current row.
+    Following(u64),
+    /// `UNBOUNDED FOLLOWING` — the end of the partition.
+    UnboundedFollowing,
+}
+
+impl FrameBound {
+    fn render<W: std::io::Write + ?Sized>(self, w: &mut W) -> std::io::Result<()> {
+        match self {
+            FrameBound::UnboundedPreceding => w.write_all(b"UNBOUNDED PRECEDING"),
+            FrameBound::Preceding(n) => write!(w, "{n} PRECEDING"),
+            FrameBound::CurrentRow => w.write_all(b"CURRENT ROW"),
+            FrameBound::Following(n) => write!(w, "{n} FOLLOWING"),
+            FrameBound::UnboundedFollowing => w.write_all(b"UNBOUNDED FOLLOWING"),
+        }
+    }
+}
+
+/// A bound valid as a frame's **start** (the left of `BETWEEN … AND …`). SQL's `<frame start>` grammar
+/// admits everything except `UNBOUNDED FOLLOWING`, so [`unbounded_following`] does not implement this —
+/// passing it as the start of [`Window::rows`] / [`Window::range`] is a compile error.
+pub trait FrameStart {
+    #[doc(hidden)]
+    fn into_start_bound(self) -> FrameBound;
+}
+
+/// A bound valid as a frame's **end** (the right of `BETWEEN … AND …`). SQL's `<frame end>` grammar
+/// admits everything except `UNBOUNDED PRECEDING`, so [`unbounded_preceding`] does not implement this —
+/// passing it as the end of [`Window::rows`] / [`Window::range`] is a compile error.
+pub trait FrameEnd {
+    #[doc(hidden)]
+    fn into_end_bound(self) -> FrameBound;
+}
+
+/// `UNBOUNDED PRECEDING` — valid only as a frame **start** (returned by [`unbounded_preceding`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct UnboundedPreceding;
+impl FrameStart for UnboundedPreceding {
+    fn into_start_bound(self) -> FrameBound {
+        FrameBound::UnboundedPreceding
+    }
+}
+
+/// `UNBOUNDED FOLLOWING` — valid only as a frame **end** (returned by [`unbounded_following`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct UnboundedFollowing;
+impl FrameEnd for UnboundedFollowing {
+    fn into_end_bound(self) -> FrameBound {
+        FrameBound::UnboundedFollowing
+    }
+}
+
+/// `<n> PRECEDING` — valid as either a frame start or end (returned by [`preceding`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct Preceding(u64);
+impl FrameStart for Preceding {
+    fn into_start_bound(self) -> FrameBound {
+        FrameBound::Preceding(self.0)
+    }
+}
+impl FrameEnd for Preceding {
+    fn into_end_bound(self) -> FrameBound {
+        FrameBound::Preceding(self.0)
+    }
+}
+
+/// `CURRENT ROW` — valid as either a frame start or end (returned by [`current_row`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct CurrentRow;
+impl FrameStart for CurrentRow {
+    fn into_start_bound(self) -> FrameBound {
+        FrameBound::CurrentRow
+    }
+}
+impl FrameEnd for CurrentRow {
+    fn into_end_bound(self) -> FrameBound {
+        FrameBound::CurrentRow
+    }
+}
+
+/// `<n> FOLLOWING` — valid as either a frame start or end (returned by [`following`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct Following(u64);
+impl FrameStart for Following {
+    fn into_start_bound(self) -> FrameBound {
+        FrameBound::Following(self.0)
+    }
+}
+impl FrameEnd for Following {
+    fn into_end_bound(self) -> FrameBound {
+        FrameBound::Following(self.0)
+    }
+}
+
+/// `UNBOUNDED PRECEDING` — the partition start. Valid only as a frame **start** bound.
+pub fn unbounded_preceding() -> UnboundedPreceding {
+    UnboundedPreceding
+}
+
+/// `<n> PRECEDING` — `n` rows/values before the current row. Valid as a frame start or end bound.
+pub fn preceding(n: u64) -> Preceding {
+    Preceding(n)
+}
+
+/// `CURRENT ROW`. Valid as a frame start or end bound.
+pub fn current_row() -> CurrentRow {
+    CurrentRow
+}
+
+/// `<n> FOLLOWING` — `n` rows/values after the current row. Valid as a frame start or end bound.
+pub fn following(n: u64) -> Following {
+    Following(n)
+}
+
+/// `UNBOUNDED FOLLOWING` — the partition end. Valid only as a frame **end** bound.
+pub fn unbounded_following() -> UnboundedFollowing {
+    UnboundedFollowing
+}
+
+/// The empty frame slot of a [`Window`] (the default): no frame clause is rendered, and the typestate
+/// gates [`Window::rows`] / [`Window::range`] so at most one frame can be set.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoFrame;
+
+/// A concrete window frame clause (`{ROWS|RANGE} BETWEEN <start> AND <end>`) stored in a [`Window`]
+/// and its [`WindowExprAst`]. Contributes no runtime params (the bounds are literals). PostgreSQL and
+/// MySQL 8.0+ share this syntax, so it renders identically across backends.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameSpec {
+    mode: FrameMode,
+    start: FrameBound,
+    end: FrameBound,
+}
+
+impl FrameSpec {
+    /// Construct a frame clause from its mode and bounds. Used by the view-model (de)serializer to
+    /// rebuild a frame; query builders go through [`Window::rows`] / [`Window::range`] instead.
+    pub fn new(mode: FrameMode, start: FrameBound, end: FrameBound) -> Self {
+        Self { mode, start, end }
+    }
+
+    /// The frame mode (`ROWS` or `RANGE`).
+    pub fn mode(&self) -> FrameMode {
+        self.mode
+    }
+
+    /// The frame's start bound (the left of `BETWEEN … AND …`).
+    pub fn start(&self) -> FrameBound {
+        self.start
+    }
+
+    /// The frame's end bound (the right of `BETWEEN … AND …`).
+    pub fn end(&self) -> FrameBound {
+        self.end
+    }
+
+    /// Render the frame clause without a leading space (the caller emits the separator), e.g.
+    /// `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. Shared by every backend renderer.
+    pub fn render<W: std::io::Write + ?Sized>(&self, w: &mut W) -> std::io::Result<()> {
+        w.write_all(match self.mode {
+            FrameMode::Rows => b"ROWS BETWEEN ".as_slice(),
+            FrameMode::Range => b"RANGE BETWEEN ".as_slice(),
+        })?;
+        self.start.render(w)?;
+        w.write_all(b" AND ")?;
+        self.end.render(w)
+    }
+}
+
+/// The frame slot of a [`Window`]: either [`NoFrame`] or a concrete [`FrameSpec`]. Reports the frame
+/// (if any) to the renderer; the frame carries no runtime params, so it does not affect a window
+/// expression's `Params` type.
+#[doc(hidden)]
+pub trait WindowFrame: Clone {
+    fn spec(&self) -> Option<FrameSpec>;
+}
+impl WindowFrame for NoFrame {
+    fn spec(&self) -> Option<FrameSpec> {
+        None
+    }
+}
+impl WindowFrame for FrameSpec {
+    fn spec(&self) -> Option<FrameSpec> {
+        Some(*self)
+    }
+}
+
 // ===== Searched CASE expressions =====
 
 /// Terminator of the `WHEN … THEN …` arm cons-list (mirrors [`WindowNil`]).
@@ -2732,32 +2950,36 @@ impl<'scope, Cmp, T, OperandAst, Arms, Null>
 /// are the `OVER` lists.
 #[doc(hidden)]
 #[derive(Clone)]
-pub struct WindowExprAst<Operand, Parts, Ords> {
+pub struct WindowExprAst<Operand, Parts, Ords, Frame = NoFrame> {
     func: WindowFunc,
     cast: Option<crate::SqlType>,
     operand: Operand,
     partitions: Parts,
     orders: Ords,
+    frame: Frame,
 }
 
-impl<Operand, Parts, Ords> ExprAst for WindowExprAst<Operand, Parts, Ords>
+impl<Operand, Parts, Ords, Frame> ExprAst for WindowExprAst<Operand, Parts, Ords, Frame>
 where
     Operand: ExprAst,
     Parts: WindowListParams + Clone,
     Ords: WindowListParams + Clone,
+    Frame: WindowFrame,
     Operand::Params: crate::HAppend<Parts::Params>,
     <Operand::Params as crate::HAppend<Parts::Params>>::Output: crate::HAppend<Ords::Params>,
 {
+    // The frame's bounds are literals, so it contributes no params: the type is unchanged by `Frame`.
     type Params = <<Operand::Params as crate::HAppend<Parts::Params>>::Output as crate::HAppend<
         Ords::Params,
     >>::Output;
 }
 
-impl<Operand, Parts, Ords, B> RenderAst<B> for WindowExprAst<Operand, Parts, Ords>
+impl<Operand, Parts, Ords, Frame, B> RenderAst<B> for WindowExprAst<Operand, Parts, Ords, Frame>
 where
     Operand: RenderAst<B>,
     Parts: RenderWindowList<B> + Clone,
     Ords: RenderWindowList<B> + Clone,
+    Frame: WindowFrame,
     Operand::Params: crate::HAppend<Parts::Params>,
     <Operand::Params as crate::HAppend<Parts::Params>>::Output: crate::HAppend<Ords::Params>,
     B: crate::Backend,
@@ -2780,13 +3002,16 @@ where
                 let mut first = true;
                 self.orders.render(visitor, &mut first)
             },
+            self.frame.spec(),
         )
     }
 }
 
 // A window function yields one value per row (a scalar projection that needs no `GROUP BY`), so it
 // is a `ColumnTerm`/`ScalarProjection` and may be selected alongside bare columns.
-impl<Operand, Parts, Ords> AstProjectionClass for WindowExprAst<Operand, Parts, Ords> {
+impl<Operand, Parts, Ords, Frame> AstProjectionClass
+    for WindowExprAst<Operand, Parts, Ords, Frame>
+{
     type Class = ColumnTerm;
 }
 // Deliberately NOT `NonAggregateAst` (keeps windows out of `WHERE`/`GROUP BY`) and deliberately NOT
@@ -2933,22 +3158,27 @@ where
 /// The `OVER (…)` specification, built inside an `.over(|w| …)` closure. Chain
 /// [`partition_by`](Self::partition_by) and [`order_by`](Self::order_by); each call appends one
 /// term, so `.partition_by(a).partition_by(b)` yields `PARTITION BY a, b`.
-pub struct Window<'scope, Parts = WindowNil, Ords = WindowNil> {
+pub struct Window<'scope, Parts = WindowNil, Ords = WindowNil, Frame = NoFrame> {
     partitions: Parts,
     orders: Ords,
+    frame: Frame,
     _scope: PhantomData<&'scope ()>,
 }
 
-impl<'scope> Window<'scope, WindowNil, WindowNil> {
+impl<'scope> Window<'scope, WindowNil, WindowNil, NoFrame> {
     fn new() -> Self {
         Self {
             partitions: WindowNil,
             orders: WindowNil,
+            frame: NoFrame,
             _scope: PhantomData,
         }
     }
 }
 
+// `partition_by` / `order_by` / `rows` / `range` live on the frame-less window (`Frame = NoFrame`,
+// the default): a frame is written last in SQL (`PARTITION BY … ORDER BY … ROWS …`), so once a frame
+// is set the partition/order builders and a second frame are all unavailable.
 impl<'scope, Parts, Ords> Window<'scope, Parts, Ords> {
     /// Add a `PARTITION BY` term (a column or scalar expression). The term may not itself be a window
     /// or aggregate (a window definition is evaluated per row), enforced by `NonAggregateAst`.
@@ -2961,6 +3191,7 @@ impl<'scope, Parts, Ords> Window<'scope, Parts, Ords> {
         Window {
             partitions: self.partitions.append_partition(key.into_window_ast()),
             orders: self.orders,
+            frame: self.frame,
             _scope: PhantomData,
         }
     }
@@ -2978,6 +3209,50 @@ impl<'scope, Parts, Ords> Window<'scope, Parts, Ords> {
         Window {
             partitions: self.partitions,
             orders: self.orders.append_order(order.ast, order.direction),
+            frame: self.frame,
+            _scope: PhantomData,
+        }
+    }
+
+    /// Add a `ROWS BETWEEN <start> AND <end>` frame (physical, row-count offsets). Build the bounds
+    /// with [`unbounded_preceding`] / [`preceding`] / [`current_row`] / [`following`] /
+    /// [`unbounded_following`]; the [`FrameStart`] / [`FrameEnd`] bounds reject a bound on the wrong
+    /// side (e.g. `UNBOUNDED FOLLOWING` as the start) at compile time. The frame is written last, so
+    /// this consumes the frame slot: a second `.rows`/`.range` (or any later
+    /// `.partition_by`/`.order_by`) is rejected at compile time.
+    pub fn rows<S, E>(self, start: S, end: E) -> Window<'scope, Parts, Ords, FrameSpec>
+    where
+        S: FrameStart,
+        E: FrameEnd,
+    {
+        Window {
+            partitions: self.partitions,
+            orders: self.orders,
+            frame: FrameSpec {
+                mode: FrameMode::Rows,
+                start: start.into_start_bound(),
+                end: end.into_end_bound(),
+            },
+            _scope: PhantomData,
+        }
+    }
+
+    /// Add a `RANGE BETWEEN <start> AND <end>` frame (logical, value offsets relative to the
+    /// `ORDER BY` key). See [`rows`](Self::rows) for the bound constructors, the start/end side
+    /// checking, and the typestate gating.
+    pub fn range<S, E>(self, start: S, end: E) -> Window<'scope, Parts, Ords, FrameSpec>
+    where
+        S: FrameStart,
+        E: FrameEnd,
+    {
+        Window {
+            partitions: self.partitions,
+            orders: self.orders,
+            frame: FrameSpec {
+                mode: FrameMode::Range,
+                start: start.into_start_bound(),
+                end: end.into_end_bound(),
+            },
             _scope: PhantomData,
         }
     }
@@ -3005,15 +3280,18 @@ where
     /// Turn this aggregate into a window function: `SUM(x) OVER (…)`. The result keeps the
     /// aggregate's value type but is a per-row scalar (no `GROUP BY` required); build the `OVER`
     /// clause with the `Window` handle (`.partition_by(...)`, `.order_by(...)`).
-    pub fn over<F, Parts, Ords>(
+    pub fn over<F, Parts, Ords, Frame>(
         self,
         build: F,
-    ) -> Expr<'scope, K, WindowExprAst<Operand, Parts, Ords>>
+    ) -> Expr<'scope, K, WindowExprAst<Operand, Parts, Ords, Frame>>
     where
-        F: FnOnce(Window<'scope, WindowNil, WindowNil>) -> Window<'scope, Parts, Ords>,
+        F: FnOnce(
+            Window<'scope, WindowNil, WindowNil, NoFrame>,
+        ) -> Window<'scope, Parts, Ords, Frame>,
         Parts: Clone,
         Ords: Clone,
-        WindowExprAst<Operand, Parts, Ords>: ExprAst,
+        Frame: Clone,
+        WindowExprAst<Operand, Parts, Ords, Frame>: ExprAst,
     {
         let window = build(Window::new());
         Expr {
@@ -3023,6 +3301,7 @@ where
                 operand: self.ast.operand,
                 partitions: window.partitions,
                 orders: window.orders,
+                frame: window.frame,
             },
             project_alias: Cow::Borrowed("expr"),
             _phantom: PhantomData,
@@ -3044,15 +3323,18 @@ where
     Operand: ExprAst,
 {
     /// Complete the window function with its `OVER (…)` clause.
-    pub fn over<F, Parts, Ords>(
+    pub fn over<F, Parts, Ords, Frame>(
         self,
         build: F,
-    ) -> Expr<'scope, K, WindowExprAst<Operand, Parts, Ords>>
+    ) -> Expr<'scope, K, WindowExprAst<Operand, Parts, Ords, Frame>>
     where
-        F: FnOnce(Window<'scope, WindowNil, WindowNil>) -> Window<'scope, Parts, Ords>,
+        F: FnOnce(
+            Window<'scope, WindowNil, WindowNil, NoFrame>,
+        ) -> Window<'scope, Parts, Ords, Frame>,
         Parts: Clone,
         Ords: Clone,
-        WindowExprAst<Operand, Parts, Ords>: ExprAst,
+        Frame: Clone,
+        WindowExprAst<Operand, Parts, Ords, Frame>: ExprAst,
     {
         let window = build(Window::new());
         Expr {
@@ -3062,6 +3344,7 @@ where
                 operand: self.operand,
                 partitions: window.partitions,
                 orders: window.orders,
+                frame: window.frame,
             },
             project_alias: Cow::Borrowed("expr"),
             _phantom: PhantomData,
@@ -4155,11 +4438,12 @@ pub trait ExprVisitor {
     where
         Sub: crate::RenderSubquery<Self::Backend>;
 
-    /// Render a window function: `func(operand) OVER (PARTITION BY … ORDER BY …)`, optionally wrapped
-    /// in `CAST(… AS cast)`. `operand` renders the function arguments (nothing for `ROW_NUMBER()`);
-    /// `partitions`/`orders` render their lists (each uses [`visit_window_separator`] between
-    /// elements, and orders use [`visit_window_order_direction`]). The `has_*` flags say whether to
-    /// emit the `PARTITION BY` / `ORDER BY` keyword.
+    /// Render a window function: `func(operand) OVER (PARTITION BY … ORDER BY … <frame>)`, optionally
+    /// wrapped in `CAST(… AS cast)`. `operand` renders the function arguments (nothing for
+    /// `ROW_NUMBER()`); `partitions`/`orders` render their lists (each uses [`visit_window_separator`]
+    /// between elements, and orders use [`visit_window_order_direction`]). The `has_*` flags say
+    /// whether to emit the `PARTITION BY` / `ORDER BY` keyword. `frame` is the optional frame clause
+    /// (render it after the `ORDER BY` via [`FrameSpec::render`]).
     #[allow(clippy::too_many_arguments)]
     fn visit_window<Operand, Partitions, Orders>(
         &mut self,
@@ -4170,6 +4454,7 @@ pub trait ExprVisitor {
         partitions: Partitions,
         has_orders: bool,
         orders: Orders,
+        frame: Option<FrameSpec>,
     ) -> Result<(), Self::Error>
     where
         Operand: FnOnce(&mut Self) -> Result<(), Self::Error>,

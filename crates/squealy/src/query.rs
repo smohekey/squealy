@@ -4842,6 +4842,8 @@ where
         partitions: Partitions,
         _has_orders: bool,
         orders: Orders,
+        // The frame's bounds are literals, so it binds no params.
+        _frame: Option<crate::FrameSpec>,
     ) -> Result<(), Self::Error>
     where
         Operand: FnOnce(&mut Self) -> Result<(), Self::Error>,
