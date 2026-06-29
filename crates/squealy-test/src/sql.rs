@@ -485,6 +485,41 @@ where
     squealy::render::write_set_params::<crate::TestConnection, Tree>(&DIALECT, tree, tail, params)
 }
 
+pub(crate) fn write_insert_select<'conn, 'scope, S, Tree, Returning, Writer>(
+    columns: &[&str],
+    source: &Tree,
+    returning: &Returning,
+    writer: &mut Writer,
+) -> io::Result<()>
+where
+    S: squealy::InsertableTable,
+    Tree: squealy::render::RenderSetArm<'conn, 'scope, crate::TestConnection, crate::TestBackend>,
+    Returning: squealy::RenderProjectable<crate::TestBackend>,
+    Writer: Write,
+{
+    static DIALECT: TestDialect = TestDialect;
+    squealy::render::write_insert_select::<S, crate::TestConnection, Tree, Returning>(
+        &DIALECT, columns, source, returning, writer,
+    )
+}
+
+pub(crate) fn write_insert_select_params<'conn, 'scope, S, Tree, Returning>(
+    columns: &[&str],
+    source: &Tree,
+    returning: &Returning,
+    params: &mut Vec<TestParam>,
+) -> Result<(), crate::TestError>
+where
+    S: squealy::InsertableTable,
+    Tree: squealy::render::RenderSetArm<'conn, 'scope, crate::TestConnection, crate::TestBackend>,
+    Returning: squealy::RenderProjectable<crate::TestBackend>,
+{
+    static DIALECT: TestDialect = TestDialect;
+    squealy::render::write_insert_select_params::<S, crate::TestConnection, Tree, Returning>(
+        &DIALECT, columns, source, returning, params,
+    )
+}
+
 impl<Writer> TestSelectSink<'_, Writer>
 where
     Writer: SqlWriter,

@@ -717,6 +717,20 @@ where
         self.render_operand(writer, renderer)
     }
 
+    /// Render this arm as the source of an `INSERT … <select>`. A single leaf renders bare (no parens —
+    /// `INSERT INTO t (cols) SELECT …`); a set node renders its `UNION`/etc. unparenthesized (defaults
+    /// to [`render_root`](Self::render_root)).
+    fn render_insert_source<Writer>(
+        &self,
+        writer: &mut Writer,
+        renderer: &mut Renderer,
+    ) -> io::Result<()>
+    where
+        Writer: SqlWriter<B>,
+    {
+        self.render_root(writer, renderer)
+    }
+
     /// Collect the CTEs referenced by this arm (and nested arms), for hoisting into one leading `WITH`.
     fn collect_set_ctes(&self, ctes: &mut Vec<&'static dyn crate::CteDef>);
 }
@@ -741,6 +755,20 @@ where
             sink.finish()?;
         }
         writer.write_all(b")")
+    }
+
+    fn render_insert_source<Writer>(
+        &self,
+        writer: &mut Writer,
+        renderer: &mut Renderer,
+    ) -> io::Result<()>
+    where
+        Writer: SqlWriter<B>,
+    {
+        // A bare `SELECT …` (no enclosing parens) for `INSERT INTO t (cols) SELECT …`.
+        let mut sink = SelectRenderSink::<B, Writer>::new(writer, renderer)?;
+        self.selected.lower_into::<Conn, _>(&mut sink)?;
+        sink.finish()
     }
 
     fn collect_set_ctes(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
@@ -1037,6 +1065,91 @@ where
     }
     write_insert_returning::<B, _>(returning, writer, &mut renderer)?;
     Ok(())
+}
+
+/// Renders `INSERT INTO t (cols) <select>` — the inserted rows come from a query (`source`, a set-op
+/// arm; a single leaf renders bare). Any CTEs the source references are hoisted into one leading `WITH`.
+fn write_insert_select_with_params<'conn, 'scope, S, Conn, Tree, Returning, Writer>(
+    dialect: &'static dyn Dialect,
+    columns: &[&str],
+    source: &Tree,
+    returning: &Returning,
+    writer: &mut Writer,
+) -> io::Result<()>
+where
+    S: InsertableTable,
+    Conn: QueryBuilder + 'conn,
+    Tree: RenderSetArm<'conn, 'scope, Conn, Conn::Backend>,
+    Returning: RenderProjectable<Conn::Backend>,
+    Writer: SqlWriter<Conn::Backend>,
+{
+    let mut renderer = Renderer::new(dialect);
+    let mut ctes = Vec::new();
+    source.collect_set_ctes(&mut ctes);
+    write_cte_prefix(dialect, &dedup_set_ctes(ctes), writer)?;
+    writer.write_all(b"INSERT INTO ")?;
+    write_schema_table_ref::<S>(dialect, writer)?;
+    writer.write_all(b" (")?;
+    for (index, column) in columns.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        dialect.write_quoted_ident(column, writer)?;
+    }
+    writer.write_all(b") ")?;
+    source.render_insert_source(writer, &mut renderer)?;
+    write_insert_returning::<Conn::Backend, _>(returning, writer, &mut renderer)
+}
+
+/// Renders `INSERT INTO t (cols) <select>` into SQL text (discarding binds).
+pub fn write_insert_select<'conn, 'scope, S, Conn, Tree, Returning>(
+    dialect: &'static dyn Dialect,
+    columns: &[&str],
+    source: &Tree,
+    returning: &Returning,
+    writer: &mut impl Write,
+) -> io::Result<()>
+where
+    S: InsertableTable,
+    Conn: QueryBuilder + 'conn,
+    Tree: RenderSetArm<'conn, 'scope, Conn, Conn::Backend>,
+    Returning: RenderProjectable<Conn::Backend>,
+{
+    let mut writer = SqlOnly(writer);
+    write_insert_select_with_params::<S, Conn, _, _, _>(
+        dialect,
+        columns,
+        source,
+        returning,
+        &mut writer,
+    )
+}
+
+/// Collects the bind parameters of an `INSERT INTO t (cols) <select>` (from the source query), in
+/// render order.
+pub fn write_insert_select_params<'conn, 'scope, S, Conn, Tree, Returning>(
+    dialect: &'static dyn Dialect,
+    columns: &[&str],
+    source: &Tree,
+    returning: &Returning,
+    params: &mut Vec<<Conn::Backend as Backend>::Param>,
+) -> Result<(), <Conn::Backend as Backend>::Error>
+where
+    S: InsertableTable,
+    Conn: QueryBuilder + 'conn,
+    Tree: RenderSetArm<'conn, 'scope, Conn, Conn::Backend>,
+    Returning: RenderProjectable<Conn::Backend>,
+{
+    let mut writer = ParamCollector::<Conn::Backend>::new(params);
+    write_insert_select_with_params::<S, Conn, _, _, _>(
+        dialect,
+        columns,
+        source,
+        returning,
+        &mut writer,
+    )
+    .ok();
+    writer.finish()
 }
 
 /// Renders an upsert's conflict clause. The dialect-divergent structure (PostgreSQL `ON CONFLICT

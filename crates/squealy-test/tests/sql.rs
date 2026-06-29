@@ -2399,3 +2399,22 @@ fn test_for_share_renders() {
         "SELECT q0_0.id AS id FROM public.users AS q0_0 FOR SHARE"
     );
 }
+
+#[test]
+fn test_insert_select_renders() {
+    // INSERT INTO t (cols) SELECT … — the inserted rows come from a query whose projected row type
+    // matches the target columns.
+    let conn = TestConnection;
+    let q = conn.to::<User>().insert_select(
+        |user| user.name,
+        conn.from::<User>()
+            .where_(|user| user.id.greater_than(10))
+            .select(|(user,)| user.name),
+    );
+    assert_eq!(
+        q.to_sql(),
+        "INSERT INTO public.users (name) \
+         SELECT q0_0.name AS name FROM public.users AS q0_0 WHERE (q0_0.id > ?)"
+    );
+    assert_eq!(q.collect_params().unwrap(), vec![TestParam::Int(10)]);
+}

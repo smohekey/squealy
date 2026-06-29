@@ -1873,6 +1873,36 @@ where
     }
 }
 
+/// A finished select usable as the source of an `INSERT INTO t (cols) <select>`. Implemented by each
+/// backend's select query object (the same objects that implement [`SetOperand`]); the per-backend
+/// `into_insert_select` wraps the select as the backend's insert-select query object. A single select is
+/// embedded as a set-op leaf ([`SetLeaf`]) and rendered bare via
+/// [`render_insert_source`](crate::RenderSetArm::render_insert_source).
+///
+/// The `INSERT…SELECT`'s target columns are supplied separately (by the write builder); the source's
+/// row type ([`SetOperand::Row`]) is matched against those columns there.
+#[doc(hidden)]
+pub trait IntoInsertSelect<'conn, 'scope, Conn>: SetOperand<'conn, 'scope, Conn>
+where
+    Conn: QueryBuilder + 'conn,
+{
+    /// The backend's insert-select query object for target table `S` returning `Returning`.
+    type InsertSelectQuery<S, Returning>
+    where
+        S: InsertableTable,
+        Returning: Projectable;
+
+    /// Wrap this select as an `INSERT INTO S (columns) <this select>` query object.
+    fn into_insert_select<S, Returning>(
+        self,
+        columns: Vec<&'static str>,
+        returning: Returning,
+    ) -> Self::InsertSelectQuery<S, Returning>
+    where
+        S: InsertableTable,
+        Returning: Projectable;
+}
+
 /// One `ORDER BY` term of a set's trailing clause: an output column name + direction. (Set `ORDER BY`
 /// references the output column names produced by the left arm's projection, not source aliases.)
 #[derive(Clone, Debug, PartialEq, Eq)]

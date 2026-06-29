@@ -8,10 +8,10 @@ use futures_core::Stream;
 use squealy::{
     Backend, Decode, DeleteQuery, Encode, ExecutableDeleteQuery, ExecutableInsertQuery,
     ExecutableSelectQuery, ExecutableUpdateQuery, HAppend, HList, HNil, InsertQuery, InsertRows,
-    InsertableTable, NoRuntimeParams, ParamWriter, PredicateNodes, PreparableDeleteQuery,
-    PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery, PreparedMutationQuery,
-    PreparedParamValues, PreparedSelectQuery, Projectable, ProjectionShape, QueryBuilder,
-    RenderInsertRows, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
+    InsertableTable, IntoInsertSelect, NoRuntimeParams, ParamWriter, PredicateNodes,
+    PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery,
+    PreparedMutationQuery, PreparedParamValues, PreparedSelectQuery, Projectable, ProjectionShape,
+    QueryBuilder, RenderInsertRows, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
     RenderUpdateAssignments, RowsAffected, SelectAst, SelectQuery, Selected, SetArm, SetLeaf,
     SetOperand, SetOperations, SetSelectModifiers, SetTail, SourceAlias, TableProjection,
     UpdateQuery, UpdateableTable,
@@ -1008,6 +1008,107 @@ where
 
     fn into_set_parts(self) -> (&'conn TestConnection, Self::Arm) {
         (self.connection, SetLeaf::new(self.selected))
+    }
+}
+
+impl<'conn, 'scope, Shape, Base, Projection> IntoInsertSelect<'conn, 'scope, TestConnection>
+    for TestSelect<'conn, 'scope, Shape, Base, Projection>
+where
+    Shape: ProjectionShape,
+    Base: SelectAst<'conn, 'scope, TestConnection, RowLockState = squealy::RowUnlocked>,
+    Projection: Projectable,
+{
+    type InsertSelectQuery<S, Returning>
+        = TestInsertSelect<
+        'conn,
+        'scope,
+        S,
+        SetLeaf<'conn, 'scope, TestConnection, Base, Shape, Projection>,
+        Returning,
+    >
+    where
+        S: InsertableTable,
+        Returning: Projectable;
+
+    fn into_insert_select<S, Returning>(
+        self,
+        columns: Vec<&'static str>,
+        returning: Returning,
+    ) -> Self::InsertSelectQuery<S, Returning>
+    where
+        S: InsertableTable,
+        Returning: Projectable,
+    {
+        TestInsertSelect::new(
+            self.connection,
+            columns,
+            SetLeaf::new(self.selected),
+            returning,
+        )
+    }
+}
+
+/// `INSERT INTO t (columns) <select>` query object for the test backend.
+pub struct TestInsertSelect<'conn, 'scope, S, Tree, Returning> {
+    connection: &'conn TestConnection,
+    columns: Vec<&'static str>,
+    source: Tree,
+    returning: Returning,
+    _table: PhantomData<S>,
+    _scope: PhantomData<&'scope ()>,
+}
+
+impl<'conn, 'scope, S, Tree, Returning> TestInsertSelect<'conn, 'scope, S, Tree, Returning> {
+    fn new(
+        connection: &'conn TestConnection,
+        columns: Vec<&'static str>,
+        source: Tree,
+        returning: Returning,
+    ) -> Self {
+        Self {
+            connection,
+            columns,
+            source,
+            returning,
+            _table: PhantomData,
+            _scope: PhantomData,
+        }
+    }
+}
+
+impl<'conn, 'scope, S, Tree, Returning> TestInsertSelect<'conn, 'scope, S, Tree, Returning>
+where
+    S: InsertableTable,
+    Tree: squealy::render::RenderSetArm<'conn, 'scope, TestConnection, TestBackend>,
+    Returning: RenderProjectable<TestBackend>,
+{
+    /// Render this `INSERT … SELECT` into a newly allocated SQL string.
+    pub fn to_sql(&self) -> String {
+        render_sql(|writer| {
+            sql::write_insert_select::<S, Tree, Returning, _>(
+                &self.columns,
+                &self.source,
+                &self.returning,
+                writer,
+            )
+        })
+    }
+
+    /// Collect bind parameters (from the source query) into a newly allocated vector.
+    pub fn collect_params(&self) -> Result<Vec<crate::TestParam>, TestError> {
+        let mut params = Vec::new();
+        sql::write_insert_select_params::<S, Tree, Returning>(
+            &self.columns,
+            &self.source,
+            &self.returning,
+            &mut params,
+        )?;
+        Ok(params)
+    }
+
+    /// Execute the insert, returning the number of rows affected (mocked by the test backend).
+    pub fn insert(&self) -> Ready<Result<u64, TestError>> {
+        self.connection.execute_insert()
     }
 }
 
