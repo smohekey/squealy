@@ -1837,36 +1837,45 @@ async fn postgres_delete_using_round_trip() {
         .fetch_one()
         .await
         .expect("insert Ada");
-    connection
+    let grace = connection
         .to::<JoinUser>()
         .name("Grace")
-        .insert()
+        .insert_returning(|user| user)
+        .fetch_one()
         .await
         .expect("insert Grace");
     connection
         .to::<JoinPost>()
         .user_id(ada.id)
-        .title("Notes")
+        .title("Ada's post")
         .insert()
         .await
-        .expect("insert post");
+        .expect("insert Ada's post");
+    connection
+        .to::<JoinPost>()
+        .user_id(grace.id)
+        .title("Grace's post")
+        .insert()
+        .await
+        .expect("insert Grace's post");
 
-    // DELETE join_users a USING join_posts p WHERE a.id = p.user_id — removes users that authored a post.
+    // DELETE join_posts p USING join_users u WHERE p.user_id = u.id AND u.name = 'Ada' — removes the
+    // posts authored by Ada. Deleting the child side keeps the `join_posts → join_users` FK satisfied.
     let affected = connection
-        .from::<JoinUser>()
-        .using::<JoinPost>()
-        .where_(|(user, post)| user.id.equals(post.user_id))
+        .from::<JoinPost>()
+        .using::<JoinUser>()
+        .where_(|(post, user)| post.user_id.equals(user.id).and(user.name.equals("Ada")))
         .delete()
         .await
         .expect("delete ... using");
     assert_eq!(affected, 1);
 
-    let names = connection
-        .from::<JoinUser>()
-        .order_by(|(user,)| user.id.asc())
-        .select(|(user,)| user.name)
+    let titles = connection
+        .from::<JoinPost>()
+        .order_by(|(post,)| post.id.asc())
+        .select(|(post,)| post.title)
         .collect()
         .await
         .expect("select after delete-using");
-    assert_eq!(names, vec!["Grace".to_owned()]);
+    assert_eq!(titles, vec!["Grace's post".to_owned()]);
 }
