@@ -1084,9 +1084,6 @@ where
     Writer: SqlWriter<Conn::Backend>,
 {
     let mut renderer = Renderer::new(dialect);
-    let mut ctes = Vec::new();
-    source.collect_set_ctes(&mut ctes);
-    write_cte_prefix(dialect, &dedup_set_ctes(ctes), writer)?;
     writer.write_all(b"INSERT INTO ")?;
     write_schema_table_ref::<S>(dialect, writer)?;
     writer.write_all(b" (")?;
@@ -1097,6 +1094,12 @@ where
         dialect.write_quoted_ident(column, writer)?;
     }
     writer.write_all(b") ")?;
+    // The source query's CTEs belong to the SELECT, so the `WITH` goes *after* the column list
+    // (`INSERT INTO t (cols) WITH … SELECT …`) — valid on both PostgreSQL and MySQL, unlike a leading
+    // `WITH … INSERT` which MySQL rejects.
+    let mut ctes = Vec::new();
+    source.collect_set_ctes(&mut ctes);
+    write_cte_prefix(dialect, &dedup_set_ctes(ctes), writer)?;
     source.render_insert_source(writer, &mut renderer)?;
     write_insert_returning::<Conn::Backend, _>(returning, writer, &mut renderer)
 }

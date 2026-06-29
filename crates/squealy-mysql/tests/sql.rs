@@ -1789,3 +1789,20 @@ fn mysql_insert_select_renders() {
          SELECT q0_0.`slug` AS `slug` FROM `shop`.`tenants` AS q0_0 WHERE (q0_0.`id` > ?)"
     );
 }
+
+#[test]
+fn mysql_insert_select_multi_column_renders() {
+    // Multi-column target list (tuple of columns) — exercises the wider-arity column-list path.
+    let conn = Mysql;
+    let q = conn.to::<Membership>().insert_select(
+        |membership| (membership.tenant_id, membership.seats),
+        conn.from::<Membership>()
+            .select(|(membership,)| (membership.tenant_id, membership.seats)),
+    );
+    assert_eq!(
+        q.to_sql(),
+        "INSERT INTO `shop`.`memberships` (`tenant_id`, `seats`) \
+         SELECT q0_0.`tenant_id` AS `t0_tenant_id`, q0_0.`seats` AS `t1_seats` \
+         FROM `shop`.`memberships` AS q0_0"
+    );
+}

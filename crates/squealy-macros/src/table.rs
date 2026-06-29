@@ -1618,10 +1618,12 @@ impl TableStruct {
                 }
             }
 
-            // `insert_select` is available on a fresh builder (its values come from the source query,
-            // not column setters), so it sits in an impl block without the insert-readiness bounds.
-            impl<'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, #(#insert_state_idents,)* #(#update_state_idents),*>
-                #builder_ident <'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, #(#insert_state_idents,)* #(#update_state_idents),*>
+            // `insert_select` is only available on a *fresh* builder: its values come from the source
+            // query, not column setters, so the insert-state is pinned to `HNil` (no setters called) —
+            // mixing `.name(..).insert_select(..)` would silently drop the setter value, so it is a
+            // compile error. No insert-readiness bounds either (values come from the source).
+            impl<'conn, Conn, UpdateColumns, Filters, FilterState, #(#insert_state_idents,)* #(#update_state_idents),*>
+                #builder_ident <'conn, Conn, ::squealy::HNil, UpdateColumns, Filters, FilterState, #(#insert_state_idents,)* #(#update_state_idents),*>
             where
                 Conn: ::squealy::QueryBuilder + 'conn,
             {
@@ -1635,7 +1637,7 @@ impl TableStruct {
                     source: __SquealySource,
                 ) -> <__SquealySource as ::squealy::IntoInsertSelect<'conn, 'src_scope, Conn>>::InsertSelectQuery<#table_ident <'static, ::squealy::ColumnExpr>, ()>
                 where
-                    __SquealyCols: ::squealy::ConflictTarget + ::squealy::ReturningProjection<'static>,
+                    __SquealyCols: ::squealy::InsertSelectColumns + ::squealy::ReturningProjection<'static>,
                     __SquealySource: ::squealy::IntoInsertSelect<'conn, 'src_scope, Conn>
                         + ::squealy::SetOperand<
                             'conn,
@@ -1645,7 +1647,7 @@ impl TableStruct {
                         >,
                 {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
-                    let names = ::squealy::ConflictTarget::column_names(columns(table));
+                    let names = ::squealy::InsertSelectColumns::column_names(columns(table));
                     // Build the insert on the *destination* builder's connection (`self.connection`); the
                     // source provides only its SELECT arm.
                     ::squealy::IntoInsertSelect::into_insert_select::<#table_ident <'static, ::squealy::ColumnExpr>, ()>(source, self.connection, names, ())

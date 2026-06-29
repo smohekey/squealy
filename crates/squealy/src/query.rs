@@ -2230,6 +2230,53 @@ impl_conflict_target_tuple!(A, B);
 impl_conflict_target_tuple!(A, B, C);
 impl_conflict_target_tuple!(A, B, C, D);
 
+/// The explicit target column list of an `INSERT … SELECT` — a single column reference or a tuple of
+/// them, yielding the column names for the `(col, …)` clause. Separate from [`ConflictTarget`] so it
+/// supports the full projection arity (the upsert conflict-target stops at four columns).
+#[doc(hidden)]
+pub trait InsertSelectColumns {
+    fn column_names(self) -> Vec<&'static str>;
+}
+
+impl<'scope, K> InsertSelectColumns for crate::ColumnRef<'scope, K>
+where
+    K: ExprKind,
+{
+    fn column_names(self) -> Vec<&'static str> {
+        vec![self.column_name()]
+    }
+}
+
+macro_rules! impl_insert_select_columns_tuple {
+    ($($name:ident),+) => {
+        impl<$($name: InsertSelectColumns),+> InsertSelectColumns for ($($name,)+) {
+            fn column_names(self) -> Vec<&'static str> {
+                #[allow(non_snake_case)]
+                let ($($name,)+) = self;
+                let mut names = Vec::new();
+                $(names.extend($name.column_names());)+
+                names
+            }
+        }
+    };
+}
+impl_insert_select_columns_tuple!(A);
+impl_insert_select_columns_tuple!(A, B);
+impl_insert_select_columns_tuple!(A, B, C);
+impl_insert_select_columns_tuple!(A, B, C, D);
+impl_insert_select_columns_tuple!(A, B, C, D, E);
+impl_insert_select_columns_tuple!(A, B, C, D, E, F);
+impl_insert_select_columns_tuple!(A, B, C, D, E, F, G);
+impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H);
+impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H, I);
+impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H, I, J);
+impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H, I, J, K);
+impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
+impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M);
+impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N);
+impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
+impl_insert_select_columns_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
+
 /// A query builder whose backend supports `INSERT … ON CONFLICT` (PostgreSQL). Gating `on_conflict` on
 /// this keeps upsert off backends that don't render it (e.g. MySQL's `ON DUPLICATE KEY UPDATE` is a
 /// later follow-up). The upsert reuses the existing `Insert` query object (the conflict clause is a
