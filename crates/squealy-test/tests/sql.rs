@@ -2441,3 +2441,23 @@ fn test_insert_select_renders() {
     );
     assert_eq!(q.collect_params().unwrap(), vec![TestParam::Int(10)]);
 }
+
+#[test]
+fn test_insert_select_union_source_renders() {
+    // A set-op source (`select(...).union(...)`) inserts as `INSERT INTO t (cols) <union>`. The union
+    // is the insert source directly — no *outer* parentheses wrap it (the per-arm parens are the normal
+    // set-op rendering).
+    let conn = TestConnection;
+    let q = conn.to::<User>().insert_select(
+        |user| user.name,
+        conn.from::<User>()
+            .select(|(user,)| user.name)
+            .union(conn.from::<User>().select(|(user,)| user.name)),
+    );
+    assert_eq!(
+        q.to_sql(),
+        "INSERT INTO public.users (name) \
+         (SELECT q0_0.name AS name FROM public.users AS q0_0) \
+         UNION (SELECT q0_0.name AS name FROM public.users AS q0_0)"
+    );
+}

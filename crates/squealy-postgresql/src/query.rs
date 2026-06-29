@@ -1580,6 +1580,37 @@ where
     }
 }
 
+// A set-op source (`select(...).union(...)`, etc.) inserts as `INSERT INTO t (cols) SELECT … UNION …`.
+// Its `SetOperand::Arm` is a `SetGroup` carrying the set tree plus any trailing `ORDER BY`/`LIMIT`, so
+// `into_set_parts` preserves the tail.
+impl<'conn, 'scope, Tree, Conn> IntoInsertSelect<'conn, 'scope, Conn>
+    for PostgresSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Tree: SetArm<'conn, 'scope, Conn>,
+    Conn: QueryBuilder<Backend = Postgres> + 'conn,
+{
+    type InsertSelectQuery<S, Returning>
+        = PostgresInsertSelect<'conn, 'scope, S, squealy::SetGroup<Tree>, Returning, Conn>
+    where
+        S: InsertableTable,
+        Returning: Projectable;
+
+    fn into_insert_select<S, Returning>(
+        self,
+        connection: &'conn Conn,
+        columns: Vec<&'static str>,
+        returning: Returning,
+    ) -> Self::InsertSelectQuery<S, Returning>
+    where
+        S: InsertableTable,
+        Returning: Projectable,
+    {
+        // Use the *destination* `connection`; the source contributes only its set arm (with its tail).
+        let (_source_connection, arm) = self.into_set_parts();
+        PostgresInsertSelect::new(connection, columns, arm, returning)
+    }
+}
+
 /// `INSERT INTO t (columns) <select>` query object (PostgreSQL).
 pub struct PostgresInsertSelect<'conn, 'scope, S, Tree, Returning, Conn = PostgresConnection> {
     connection: &'conn Conn,

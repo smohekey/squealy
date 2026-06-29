@@ -1044,6 +1044,35 @@ where
     }
 }
 
+// A set-op source (`select(...).union(...)`, etc.) inserts as `INSERT INTO t (cols) SELECT … UNION …`.
+// Its `SetOperand::Arm` is a `SetGroup` carrying the set tree plus any trailing `ORDER BY`/`LIMIT`.
+impl<'conn, 'scope, Tree> IntoInsertSelect<'conn, 'scope, TestConnection>
+    for TestSetSelect<'conn, 'scope, Tree>
+where
+    Tree: SetArm<'conn, 'scope, TestConnection>,
+{
+    type InsertSelectQuery<S, Returning>
+        = TestInsertSelect<'conn, 'scope, S, squealy::SetGroup<Tree>, Returning>
+    where
+        S: InsertableTable,
+        Returning: Projectable;
+
+    fn into_insert_select<S, Returning>(
+        self,
+        connection: &'conn TestConnection,
+        columns: Vec<&'static str>,
+        returning: Returning,
+    ) -> Self::InsertSelectQuery<S, Returning>
+    where
+        S: InsertableTable,
+        Returning: Projectable,
+    {
+        // Use the *destination* `connection`; the source contributes only its set arm (with its tail).
+        let (_source_connection, arm) = self.into_set_parts();
+        TestInsertSelect::new(connection, columns, arm, returning)
+    }
+}
+
 /// `INSERT INTO t (columns) <select>` query object for the test backend.
 pub struct TestInsertSelect<'conn, 'scope, S, Tree, Returning> {
     connection: &'conn TestConnection,

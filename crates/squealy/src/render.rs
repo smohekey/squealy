@@ -827,6 +827,20 @@ where
         writer.write_all(b")")
     }
 
+    fn render_insert_source<Writer>(
+        &self,
+        writer: &mut Writer,
+        renderer: &mut Renderer,
+    ) -> io::Result<()>
+    where
+        Writer: SqlWriter<B>,
+    {
+        // The whole set is the insert source, so it renders unparenthesized with its trailing
+        // `ORDER BY`/`LIMIT` binding to the set: `INSERT INTO t (cols) SELECT … UNION SELECT … ORDER BY …`.
+        self.tree.render_root(writer, renderer)?;
+        write_set_tail(renderer.dialect, &self.tail, writer)
+    }
+
     fn collect_set_ctes(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
         self.tree.collect_set_ctes(ctes);
     }

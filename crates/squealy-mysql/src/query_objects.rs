@@ -530,6 +530,36 @@ where
     }
 }
 
+// A set-op source (`select(...).union(...)`, etc.) inserts as `INSERT INTO t (cols) SELECT … UNION …`.
+// Its `SetOperand::Arm` is a `SetGroup` carrying the set tree plus any trailing `ORDER BY`/`LIMIT`.
+impl<'conn, 'scope, Tree, Conn> IntoInsertSelect<'conn, 'scope, Conn>
+    for MysqlSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Tree: SetArm<'conn, 'scope, Conn>,
+    Conn: QueryBuilder<Backend = Mysql> + 'conn,
+{
+    type InsertSelectQuery<S, Returning>
+        = MysqlInsertSelect<'conn, 'scope, S, squealy::SetGroup<Tree>, Returning, Conn>
+    where
+        S: InsertableTable,
+        Returning: Projectable;
+
+    fn into_insert_select<S, Returning>(
+        self,
+        connection: &'conn Conn,
+        columns: Vec<&'static str>,
+        returning: Returning,
+    ) -> Self::InsertSelectQuery<S, Returning>
+    where
+        S: InsertableTable,
+        Returning: Projectable,
+    {
+        // Use the *destination* `connection`; the source contributes only its set arm (with its tail).
+        let (_source_connection, arm) = self.into_set_parts();
+        MysqlInsertSelect::new(connection, columns, arm, returning)
+    }
+}
+
 /// `INSERT INTO t (columns) <select>` query object (MySQL).
 pub struct MysqlInsertSelect<'conn, 'scope, S, Tree, Returning, Conn = MysqlConnection> {
     connection: &'conn Conn,
