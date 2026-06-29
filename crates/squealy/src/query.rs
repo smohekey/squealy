@@ -5486,9 +5486,12 @@ where
     /// Begin a correlated `DELETE … USING other` (PostgreSQL) / `DELETE … JOIN other` (MySQL): the
     /// subsequent `where_` closure receives `(target_exprs, source_exprs)`, so the correlation may
     /// reference the joined source `O`. A correlation predicate is required before the delete can run.
+    ///
+    /// `O` must be a real table ([`SchemaTable`]), not a CTE: the render emits `USING <table>` without
+    /// a `WITH`, so a CTE source would reference a non-existent relation.
     pub fn using<O>(self) -> DeleteUsingBuilder<'conn, 'scope, Conn, S, O>
     where
-        O: QuerySource,
+        O: SchemaTable + TableProjection,
     {
         DeleteUsingBuilder {
             connection: self.connection,
