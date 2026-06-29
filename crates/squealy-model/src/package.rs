@@ -1743,11 +1743,22 @@ fn frame_from_node(node: &KdlNode) -> Result<FrameSpec, PackageError> {
         "range" => FrameMode::Range,
         other => return Err(malformed(format!("unknown window frame mode `{other}`"))),
     };
-    Ok(FrameSpec::new(
-        mode,
-        frame_bound_from_node(node, "start")?,
-        frame_bound_from_node(node, "end")?,
-    ))
+    // Mirror the builder's `FrameStart`/`FrameEnd` compile-time guarantee on the deserialize path:
+    // SQL's `<frame start>` cannot be `UNBOUNDED FOLLOWING` and `<frame end>` cannot be
+    // `UNBOUNDED PRECEDING`, so reject a hand-written package that puts a bound on the wrong side.
+    let start = frame_bound_from_node(node, "start")?;
+    if matches!(start, FrameBound::UnboundedFollowing) {
+        return Err(malformed(
+            "window frame start cannot be `unbounded-following`",
+        ));
+    }
+    let end = frame_bound_from_node(node, "end")?;
+    if matches!(end, FrameBound::UnboundedPreceding) {
+        return Err(malformed(
+            "window frame end cannot be `unbounded-preceding`",
+        ));
+    }
+    Ok(FrameSpec::new(mode, start, end))
 }
 
 fn frame_bound_from_node(node: &KdlNode, key: &str) -> Result<FrameBound, PackageError> {
@@ -2814,6 +2825,31 @@ mod tests {
             expr_from_node(&expr_to_node(&no_frame)).expect("frame-less window round-trips"),
             no_frame
         );
+    }
+
+    #[test]
+    fn frame_deserializer_rejects_side_invalid_bounds() {
+        // The builder's `FrameStart`/`FrameEnd` typing can't guard a hand-written package, so the
+        // deserializer must reject `UNBOUNDED FOLLOWING` as the start / `UNBOUNDED PRECEDING` as the
+        // end itself.
+        let frame_node = |start: &str, end: &str| {
+            let mut node = KdlNode::new("frame");
+            node.push(KdlEntry::new_prop("mode", "rows"));
+            node.push(KdlEntry::new_prop("start", start));
+            node.push(KdlEntry::new_prop("end", end));
+            node
+        };
+
+        assert!(
+            frame_from_node(&frame_node("unbounded-following", "current-row")).is_err(),
+            "start = unbounded-following must be rejected"
+        );
+        assert!(
+            frame_from_node(&frame_node("current-row", "unbounded-preceding")).is_err(),
+            "end = unbounded-preceding must be rejected"
+        );
+        // A valid pair still parses.
+        assert!(frame_from_node(&frame_node("unbounded-preceding", "unbounded-following")).is_ok());
     }
 
     #[test]
