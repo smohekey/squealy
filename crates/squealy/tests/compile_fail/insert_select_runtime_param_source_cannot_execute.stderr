@@ -1,0 +1,19 @@
+error[E0277]: the trait bound `HCons<i32, HNil>: NoRuntimeParams` is not satisfied
+  --> tests/compile_fail/insert_select_runtime_param_source_cannot_execute.rs:24:10
+   |
+24 |         .insert();
+   |          ^^^^^^ the trait `NoRuntimeParams` is not implemented for `HCons<i32, HNil>`
+   |
+help: the trait `NoRuntimeParams` is implemented for `HNil`
+  --> src/list.rs
+   |
+   | impl NoRuntimeParams for HNil {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `squealy_test::query::TestInsertSelect::<'conn, 'scope, S, Tree, Returning>::insert`
+  --> $WORKSPACE/crates/squealy-test/src/query.rs
+   |
+   |     pub fn insert(&self) -> Ready<Result<u64, TestError>>
+   |            ------ required by a bound in this associated function
+...
+   |         <Tree as SetArm<'conn, 'scope, TestConnection>>::Params: NoRuntimeParams,
+   |                                                                  ^^^^^^^^^^^^^^^ required by this bound in `TestInsertSelect::<'conn, 'scope, S, Tree, Returning>::insert`

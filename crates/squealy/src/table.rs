@@ -160,7 +160,13 @@ pub trait SchemaTable: Table {
 }
 
 /// A table model whose value-mode fields can be inserted as bind parameters.
-pub trait InsertableTable: SchemaTable {}
+pub trait InsertableTable: SchemaTable {
+    /// The kinds of this table's **required** insert columns — insertable, non-null, and without a
+    /// default — i.e. those a typed insert must supply a value for. An `INSERT … SELECT`'s target
+    /// columns must cover this set (see the `insert_select` builder); the empty list means every
+    /// insertable column is omittable.
+    type RequiredInsertColumns: crate::HList;
+}
 
 /// A table model that can generate a typed update builder.
 pub trait UpdateableTable: SchemaTable {}

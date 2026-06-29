@@ -495,6 +495,164 @@ where
     }
 }
 
+impl<'conn, 'scope, Shape, Base, Projection, Conn> IntoInsertSelect<'conn, 'scope, Conn>
+    for MysqlSelect<'conn, 'scope, Shape, Base, Projection, Conn>
+where
+    Shape: ProjectionShape,
+    // Any row-lock state — a locked single select renders `INSERT … SELECT … FOR UPDATE`. The lock ban
+    // applies only to set-op operands, via their `SetOperand` impls.
+    Base: SelectAst<'conn, 'scope, Conn>,
+    Projection: Projectable,
+    Conn: QueryBuilder<Backend = Mysql> + 'conn,
+{
+    type Row = Shape::Row;
+
+    type InsertSelectQuery<S, Returning>
+        = MysqlInsertSelect<
+            'conn,
+            'scope,
+            S,
+            SetLeaf<'conn, 'scope, Conn, Base, Shape, Projection>,
+            Returning,
+            Conn,
+        >
+    where
+        S: InsertableTable,
+        Returning: Projectable;
+
+    fn into_insert_select<S, Returning>(
+        self,
+        connection: &'conn Conn,
+        columns: Vec<&'static str>,
+        returning: Returning,
+    ) -> Self::InsertSelectQuery<S, Returning>
+    where
+        S: InsertableTable,
+        Returning: Projectable,
+    {
+        MysqlInsertSelect::new(connection, columns, SetLeaf::new(self.selected), returning)
+    }
+}
+
+// A set-op source (`select(...).union(...)`, etc.) inserts as `INSERT INTO t (cols) SELECT … UNION …`.
+// Its `SetOperand::Arm` is a `SetGroup` carrying the set tree plus any trailing `ORDER BY`/`LIMIT`.
+impl<'conn, 'scope, Tree, Conn> IntoInsertSelect<'conn, 'scope, Conn>
+    for MysqlSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Tree: SetArm<'conn, 'scope, Conn>,
+    Conn: QueryBuilder<Backend = Mysql> + 'conn,
+{
+    type Row = <Tree as SetArm<'conn, 'scope, Conn>>::Row;
+
+    type InsertSelectQuery<S, Returning>
+        = MysqlInsertSelect<'conn, 'scope, S, squealy::SetGroup<Tree>, Returning, Conn>
+    where
+        S: InsertableTable,
+        Returning: Projectable;
+
+    fn into_insert_select<S, Returning>(
+        self,
+        connection: &'conn Conn,
+        columns: Vec<&'static str>,
+        returning: Returning,
+    ) -> Self::InsertSelectQuery<S, Returning>
+    where
+        S: InsertableTable,
+        Returning: Projectable,
+    {
+        // Use the *destination* `connection`; the source contributes only its set arm (with its tail).
+        let (_source_connection, arm) = self.into_set_parts();
+        MysqlInsertSelect::new(connection, columns, arm, returning)
+    }
+}
+
+/// `INSERT INTO t (columns) <select>` query object (MySQL).
+pub struct MysqlInsertSelect<'conn, 'scope, S, Tree, Returning, Conn = MysqlConnection> {
+    connection: &'conn Conn,
+    columns: Vec<&'static str>,
+    source: Tree,
+    returning: Returning,
+    _table: PhantomData<S>,
+    _scope: PhantomData<&'scope ()>,
+}
+
+impl<'conn, 'scope, S, Tree, Returning, Conn>
+    MysqlInsertSelect<'conn, 'scope, S, Tree, Returning, Conn>
+{
+    fn new(
+        connection: &'conn Conn,
+        columns: Vec<&'static str>,
+        source: Tree,
+        returning: Returning,
+    ) -> Self {
+        Self {
+            connection,
+            columns,
+            source,
+            returning,
+            _table: PhantomData,
+            _scope: PhantomData,
+        }
+    }
+}
+
+impl<'conn, 'scope, S, Tree, Returning, Conn>
+    MysqlInsertSelect<'conn, 'scope, S, Tree, Returning, Conn>
+where
+    S: InsertableTable,
+    Tree: render::RenderSetArm<'conn, 'scope, Conn, Mysql>,
+    Returning: RenderProjectable<Mysql>,
+    Conn: QueryBuilder<Backend = Mysql> + 'conn,
+{
+    fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError> {
+        let sql = rendered_sql(|writer| {
+            render::write_insert_select::<S, Conn, _, _>(
+                &MysqlDialect,
+                &self.columns,
+                &self.source,
+                &self.returning,
+                writer,
+            )
+        });
+        let params = collect_mysql_params(0, |params| {
+            render::write_insert_select_params::<S, Conn, _, _>(
+                &MysqlDialect,
+                &self.columns,
+                &self.source,
+                &self.returning,
+                params,
+            )
+        })?;
+        Ok((sql, params))
+    }
+
+    /// Render this `INSERT … SELECT` into a newly allocated SQL string.
+    pub fn to_sql(&self) -> String {
+        rendered_sql(|writer| {
+            render::write_insert_select::<S, Conn, _, _>(
+                &MysqlDialect,
+                &self.columns,
+                &self.source,
+                &self.returning,
+                writer,
+            )
+        })
+    }
+
+    /// Execute the insert, returning the number of rows affected.
+    pub fn insert(&self) -> impl Future<Output = Result<u64, MysqlError>> + Send + '_
+    where
+        Conn: MysqlExecutor,
+        // One-shot execution collects only static binds, so the source must be free of runtime `param`s.
+        <Tree as SetArm<'conn, 'scope, Conn>>::Params: NoRuntimeParams,
+    {
+        match self.execution_parts() {
+            Ok((sql, params)) => self.connection.run_execute(sql, params),
+            Err(error) => execute_error(error),
+        }
+    }
+}
+
 impl<'conn, 'scope, Shape, Base, Projection, Conn> SetOperations<'conn, 'scope, Conn>
     for MysqlSelect<'conn, 'scope, Shape, Base, Projection, Conn>
 where
