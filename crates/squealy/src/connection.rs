@@ -47,6 +47,16 @@ pub trait QueryBuilder: Sized {
         Filters: crate::PredicateNodes,
         Returning: Projectable;
 
+    /// A correlated `UPDATE … <source>` query object (see [`UpdateFromQuery`](crate::UpdateFromQuery)).
+    /// `O` is the joined source table; `Filters` the correlation/filter predicates over both sources.
+    type UpdateFrom<'builder, S, O, Columns, Filters>: crate::UpdateFromQuery<'builder, S, O, Columns, Filters, Builder = Self>
+    where
+        Self: 'builder,
+        S: UpdateableTable,
+        O: crate::SchemaTable,
+        Columns: crate::UpdateAssignments,
+        Filters: crate::PredicateNodes;
+
     fn select<P>(
         &self,
         projection: P,

@@ -1207,6 +1207,7 @@ macro_rules! never_query {
 never_query!(ModelSelect);
 never_query!(ModelInsert);
 never_query!(ModelUpdate);
+never_query!(ModelUpdateFrom);
 never_query!(ModelDelete);
 
 impl<'builder, 'scope, Base, Shape, Projection>
@@ -1273,6 +1274,27 @@ where
         _returning: Returning,
     ) -> Self {
         unreachable!("ModelConn never builds an update")
+    }
+}
+
+impl<'builder, S, O, Columns, Filters> crate::UpdateFromQuery<'builder, S, O, Columns, Filters>
+    for ModelUpdateFrom<(&'builder (), S, O, Columns, Filters)>
+where
+    S: crate::UpdateableTable,
+    O: crate::SchemaTable,
+    Columns: crate::UpdateAssignments,
+    Filters: crate::PredicateNodes,
+{
+    type Builder = ModelConn;
+
+    fn build(
+        _builder: &'builder ModelConn,
+        _target_alias: SourceAlias,
+        _source_alias: SourceAlias,
+        _columns: Columns,
+        _filters: Filters,
+    ) -> Self {
+        unreachable!("ModelConn never builds an update-from")
     }
 }
 
@@ -1343,4 +1365,13 @@ impl QueryBuilder for ModelConn {
         Shape::Row: Decode<Self::Backend>,
         Filters: crate::PredicateNodes,
         Returning: Projectable;
+
+    type UpdateFrom<'builder, S, O, Columns, Filters>
+        = ModelUpdateFrom<(&'builder (), S, O, Columns, Filters)>
+    where
+        Self: 'builder,
+        S: crate::UpdateableTable,
+        O: crate::SchemaTable,
+        Columns: crate::UpdateAssignments,
+        Filters: crate::PredicateNodes;
 }

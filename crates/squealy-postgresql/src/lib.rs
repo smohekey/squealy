@@ -20,6 +20,7 @@ pub use query::Json;
 pub use query::{
     EmptyRows, PostgresDelete, PostgresInsert, PostgresParam, PostgresPreparedMutation,
     PostgresPreparedSelect, PostgresRowReader, PostgresSelect, PostgresSetSelect, PostgresUpdate,
+    PostgresUpdateFrom,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -525,6 +526,15 @@ impl QueryBuilder for Postgres {
         Shape::Row: Decode<Self::Backend>,
         Filters: squealy::PredicateNodes,
         Returning: Projectable;
+
+    type UpdateFrom<'conn, S, O, Columns, Filters>
+        = PostgresUpdateFrom<'conn, S, O, Columns, Filters, Self>
+    where
+        Self: 'conn,
+        S: UpdateableTable,
+        O: squealy::SchemaTable,
+        Columns: squealy::UpdateAssignments,
+        Filters: squealy::PredicateNodes;
 }
 
 impl QueryBuilder for PostgresConnection {
@@ -569,6 +579,15 @@ impl QueryBuilder for PostgresConnection {
         Shape::Row: Decode<Self::Backend>,
         Filters: squealy::PredicateNodes,
         Returning: Projectable;
+
+    type UpdateFrom<'conn, S, O, Columns, Filters>
+        = PostgresUpdateFrom<'conn, S, O, Columns, Filters, Self>
+    where
+        Self: 'conn,
+        S: UpdateableTable,
+        O: squealy::SchemaTable,
+        Columns: squealy::UpdateAssignments,
+        Filters: squealy::PredicateNodes;
 }
 
 impl QueryBuilder for PostgresTransaction<'_> {
@@ -613,6 +632,15 @@ impl QueryBuilder for PostgresTransaction<'_> {
         Shape::Row: Decode<Self::Backend>,
         Filters: squealy::PredicateNodes,
         Returning: Projectable;
+
+    type UpdateFrom<'conn, S, O, Columns, Filters>
+        = PostgresUpdateFrom<'conn, S, O, Columns, Filters, Self>
+    where
+        Self: 'conn,
+        S: UpdateableTable,
+        O: squealy::SchemaTable,
+        Columns: squealy::UpdateAssignments,
+        Filters: squealy::PredicateNodes;
 }
 
 // Upsert (`INSERT … ON CONFLICT`) is PostgreSQL-only; the conflict clause is a runtime field on the

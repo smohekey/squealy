@@ -196,4 +196,23 @@ pub trait Dialect {
         }
         writer.write_all(b") DO NOTHING")
     }
+
+    /// How `UPDATE … FROM` / `DELETE … USING` render a correlated extra source. PostgreSQL appends the
+    /// source after the `SET`/target with the correlation in `WHERE`; MySQL joins the source before the
+    /// `SET`, with the correlation in the join's `ON`. Defaults to the PostgreSQL form.
+    fn update_from_style(&self) -> UpdateFromStyle {
+        UpdateFromStyle::PgFrom
+    }
+}
+
+/// The two shapes a correlated `UPDATE … <source>` / `DELETE … <source>` takes across dialects (see
+/// [`Dialect::update_from_style`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateFromStyle {
+    /// PostgreSQL: `UPDATE t AS a SET … FROM other AS b WHERE <correlation [AND filters]>` and
+    /// `DELETE FROM t AS a USING other AS b WHERE <correlation [AND filters]>`.
+    PgFrom,
+    /// MySQL: `UPDATE t AS a JOIN other AS b ON <correlation> SET … [WHERE filters]` and
+    /// `DELETE a FROM t AS a JOIN other AS b ON <correlation> [WHERE filters]`.
+    MysqlJoin,
 }
