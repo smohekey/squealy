@@ -4,8 +4,8 @@ use std::io::{self, Write};
 use squealy::{
     AggregateFunc, ArithmeticOp, AssignmentValueVisitor, AssignmentVisitor, Column, ColumnDefault,
     ColumnRef, ColumnType, CompareOp, CteDef, DateField, Dialect, Encode, Expr, ExprKind,
-    ExprVisitor, InsertRow, InsertRowVisitor, InsertableTable, Order, OrderDirection, OrderNulls,
-    Predicate, PredicateAstVisitor, PredicateKind, PredicateVisitor, ProjectionShape,
+    ExprVisitor, FrameSpec, InsertRow, InsertRowVisitor, InsertableTable, Order, OrderDirection,
+    OrderNulls, Predicate, PredicateAstVisitor, PredicateKind, PredicateVisitor, ProjectionShape,
     ProjectionVisitor, QueryBuilder, RenderAssignment, RenderAst, RenderCaseArms,
     RenderCoalesceArgs, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst,
     RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderSimpleCaseArms, RenderSubquery,
@@ -1429,6 +1429,7 @@ where
         partitions: Partitions,
         has_orders: bool,
         orders: Orders,
+        frame: Option<FrameSpec>,
     ) -> Result<(), Self::Error>
     where
         Operand: FnOnce(&mut Self) -> Result<(), Self::Error>,
@@ -1440,16 +1441,25 @@ where
         write!(self.writer, "{}(", render_window_func(func))?;
         operand(self)?;
         self.writer.write_all(b") OVER (")?;
+        let mut wrote = false;
         if has_partitions {
             self.writer.write_all(b"PARTITION BY ")?;
             partitions(self)?;
+            wrote = true;
         }
         if has_orders {
-            if has_partitions {
+            if wrote {
                 self.writer.write_all(b" ")?;
             }
             self.writer.write_all(b"ORDER BY ")?;
             orders(self)?;
+            wrote = true;
+        }
+        if let Some(frame) = frame {
+            if wrote {
+                self.writer.write_all(b" ")?;
+            }
+            frame.render(&mut self.writer)?;
         }
         self.writer.write_all(b")")
     }

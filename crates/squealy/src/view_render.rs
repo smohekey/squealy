@@ -437,6 +437,7 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
             args,
             partition_by,
             order_by,
+            frame,
             result,
         } => {
             if result.is_some() {
@@ -450,6 +451,7 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
                 render_expr(arg, dialect, writer)?;
             }
             writer.write_all(b") OVER (")?;
+            let mut wrote = false;
             if !partition_by.is_empty() {
                 writer.write_all(b"PARTITION BY ")?;
                 for (index, partition) in partition_by.iter().enumerate() {
@@ -458,9 +460,10 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
                     }
                     render_expr(partition, dialect, writer)?;
                 }
+                wrote = true;
             }
             if !order_by.is_empty() {
-                if !partition_by.is_empty() {
+                if wrote {
                     writer.write_all(b" ")?;
                 }
                 writer.write_all(b"ORDER BY ")?;
@@ -474,6 +477,13 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
                         OrderDirection::Desc => b" DESC".as_slice(),
                     })?;
                 }
+                wrote = true;
+            }
+            if let Some(frame) = frame {
+                if wrote {
+                    writer.write_all(b" ")?;
+                }
+                frame.render(writer)?;
             }
             writer.write_all(b")")?;
             if let Some(ty) = result {

@@ -3003,6 +3003,40 @@ fn postgres_window_functions_render_with_numbered_placeholders() {
     );
 }
 
+#[test]
+fn postgres_window_frame_clause_renders() {
+    // A `ROWS BETWEEN … AND …` running-total frame renders after the `ORDER BY`. The bounds are
+    // literals, so the frame binds no `$n` placeholders.
+    let running = Postgres.from::<Post>().select(|(post,)| {
+        post.user_id.sum().over(|w| {
+            w.partition_by(post.user_id)
+                .order_by(post.id.asc())
+                .rows(unbounded_preceding(), current_row())
+        })
+    });
+    assert_eq!(
+        running.to_sql(),
+        "SELECT CAST(SUM(q0_0.\"user_id\") OVER (PARTITION BY q0_0.\"user_id\" \
+         ORDER BY q0_0.\"id\" ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS bigint) \
+         AS \"expr\" FROM \"public\".\"posts\" AS q0_0"
+    );
+    assert!(running.collect_params().unwrap().is_empty());
+
+    // `RANGE` with numeric offsets.
+    let banded = Postgres.from::<Post>().select(|(post,)| {
+        post.user_id
+            .avg()
+            .over(|w| w.order_by(post.id.asc()).range(preceding(1), following(2)))
+    });
+    assert!(
+        banded
+            .to_sql()
+            .contains("RANGE BETWEEN 1 PRECEDING AND 2 FOLLOWING"),
+        "{}",
+        banded.to_sql()
+    );
+}
+
 // PostgreSQL supports `NULLS FIRST`/`NULLS LAST`, so a view body carrying an explicit null ordering
 // renders it (the counterpart to MySQL dropping it).
 #[test]

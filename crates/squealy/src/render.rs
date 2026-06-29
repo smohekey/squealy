@@ -2252,6 +2252,7 @@ where
         partitions: Partitions,
         has_orders: bool,
         orders: Orders,
+        frame: Option<crate::FrameSpec>,
     ) -> Result<(), Self::Error>
     where
         Operand: FnOnce(&mut Self) -> Result<(), Self::Error>,
@@ -2264,16 +2265,25 @@ where
         write!(self.writer, "{}(", render_window_func(func))?;
         operand(self)?;
         self.writer.write_all(b") OVER (")?;
+        let mut wrote = false;
         if has_partitions {
             self.writer.write_all(b"PARTITION BY ")?;
             partitions(self)?;
+            wrote = true;
         }
         if has_orders {
-            if has_partitions {
+            if wrote {
                 self.writer.write_all(b" ")?;
             }
             self.writer.write_all(b"ORDER BY ")?;
             orders(self)?;
+            wrote = true;
+        }
+        if let Some(frame) = frame {
+            if wrote {
+                self.writer.write_all(b" ")?;
+            }
+            frame.render(&mut self.writer)?;
         }
         self.writer.write_all(b")")?;
         if let Some(ty) = cast {
