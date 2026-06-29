@@ -1364,6 +1364,8 @@ where
         writer,
         renderer: &mut renderer,
         index: 0,
+        // Single-table `UPDATE`: the bare column is unambiguous.
+        qualify: None,
         _backend: PhantomData::<B>,
     };
     columns.try_visit(&mut assignments)?;
@@ -1376,6 +1378,10 @@ struct WriteUpdateAssignments<'writer, 'renderer, B, Writer> {
     writer: &'writer mut Writer,
     renderer: &'renderer mut Renderer,
     index: usize,
+    /// When set, the assignment target is qualified with this alias (`alias.col = …`). MySQL's
+    /// multi-table `UPDATE … JOIN … SET` resolves a bare column against the whole join list, so the
+    /// target must be qualified; PostgreSQL's `UPDATE t SET col … FROM …` requires it unqualified.
+    qualify: Option<SourceAlias>,
     _backend: PhantomData<B>,
 }
 
@@ -1399,6 +1405,9 @@ where
             self.writer.write_all(b", ")?;
         }
         self.index += 1;
+        if let Some(alias) = self.qualify {
+            write!(self.writer, "{alias}.")?;
+        }
         self.renderer
             .dialect
             .write_quoted_ident(column, self.writer)?;
@@ -1468,7 +1477,8 @@ where
     match dialect.update_from_style() {
         UpdateFromStyle::PgFrom => {
             writer.write_all(b" SET ")?;
-            write_update_assignment_list::<B, _, _>(columns, writer, &mut renderer)?;
+            // PostgreSQL forbids qualifying the `SET` target (it is implicitly the updated table).
+            write_update_assignment_list::<B, _, _>(columns, writer, &mut renderer, None)?;
             writer.write_all(b" FROM ")?;
             write_schema_table_ref::<O>(renderer.dialect, writer)?;
             write!(writer, " AS {source_alias}")?;
@@ -1486,7 +1496,15 @@ where
             };
             filters.try_visit(&mut predicates)?;
             writer.write_all(b" SET ")?;
-            write_update_assignment_list::<B, _, _>(columns, writer, &mut renderer)?;
+            // MySQL's multi-table `UPDATE … JOIN … SET` resolves a bare column against the whole join
+            // list, so qualify the target with its alias to avoid ambiguity with a same-named source
+            // column.
+            write_update_assignment_list::<B, _, _>(
+                columns,
+                writer,
+                &mut renderer,
+                Some(target_alias),
+            )?;
         }
     }
     write_returning::<B, _>(returning, writer, &mut renderer)?;
@@ -1526,10 +1544,12 @@ where
 }
 
 /// Renders a comma-separated `col = <value>` assignment list (shared by `UPDATE` and `UPDATE … FROM`).
+/// `qualify` qualifies each target column with an alias (MySQL `UPDATE … JOIN`); `None` leaves it bare.
 fn write_update_assignment_list<B, Columns, Writer>(
     columns: &Columns,
     writer: &mut Writer,
     renderer: &mut Renderer,
+    qualify: Option<SourceAlias>,
 ) -> io::Result<()>
 where
     B: Backend,
@@ -1540,6 +1560,7 @@ where
         writer,
         renderer,
         index: 0,
+        qualify,
         _backend: PhantomData::<B>,
     })
 }

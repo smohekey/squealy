@@ -1820,6 +1820,6 @@ fn mysql_update_from_renders_join() {
         update.to_sql(),
         "UPDATE `shop`.`memberships` AS q0_0 \
          JOIN `shop`.`tenants` AS q0_1 ON (q0_0.`tenant_id` = q0_1.`id`) \
-         SET `tenant_id` = q0_1.`id`"
+         SET q0_0.`tenant_id` = q0_1.`id`"
     );
 }
