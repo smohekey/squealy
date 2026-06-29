@@ -2238,9 +2238,12 @@ pub trait InsertSelectColumns {
     fn column_names(self) -> Vec<&'static str>;
 }
 
+// Only insertable columns may be an `INSERT … SELECT` target — generated, auto-increment, and
+// `#[column(insert = false)]` columns do not implement `InsertColumnKey`, so they are rejected (matching
+// the explicit setter-based insert path).
 impl<'scope, K> InsertSelectColumns for crate::ColumnRef<'scope, K>
 where
-    K: ExprKind,
+    K: InsertColumnKey,
 {
     fn column_names(self) -> Vec<&'static str> {
         vec![self.column_name()]

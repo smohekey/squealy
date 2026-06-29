@@ -94,6 +94,9 @@ pub struct There<Index>(core::marker::PhantomData<Index>);
 
 /// `Self` contains type `T` (with the position witnessed by `Index`). Currently used only by the
 /// `SELECT DISTINCT` + `ORDER BY` guard, so its unsatisfied-bound message is phrased for that case.
+/// (`INSERT … SELECT` column coverage uses the parallel [`CoversColumn`] leaf so it gets its own
+/// message — rustc surfaces the *deepest* failing trait, so the message must live on the leaf, not on
+/// a wrapper like [`AllContained`].)
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`SELECT DISTINCT` requires every `ORDER BY` key to also be in the projection",
@@ -110,6 +113,40 @@ impl<T, Tail> Contains<T, Here> for HCons<crate::Nullable<T>, Tail> {}
 
 impl<T, Head, Tail, Index> Contains<T, There<Index>> for HCons<Head, Tail> where
     Tail: Contains<T, Index>
+{
+}
+
+/// The target column list `Set` (an `HList` of column kinds) contains the required column `T` (position
+/// witnessed by `Index`). A parallel of [`Contains`] dedicated to `INSERT … SELECT` required-column
+/// coverage so its unsatisfied-bound message is phrased for that case — rustc surfaces the deepest
+/// failing trait, so the message must live here on the leaf rather than on [`AllContained`].
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`INSERT … SELECT` must list every required (non-null, no-default) column of the target table",
+    note = "add the missing required column(s) to the `INSERT … SELECT` target column list"
+)]
+pub trait CoversColumn<T, Index> {}
+
+impl<T, Tail> CoversColumn<T, Here> for HCons<T, Tail> {}
+
+impl<T, Head, Tail, Index> CoversColumn<T, There<Index>> for HCons<Head, Tail> where
+    Tail: CoversColumn<T, Index>
+{
+}
+
+/// Every required column in `Self` (an `HList` of column kinds) is contained in the target column list
+/// `Set` (each at its own inferred position) — i.e. required ⊆ target, the `INSERT … SELECT` coverage
+/// check. The trailing `Indices` are the per-element positions, inferred by the compiler.
+#[doc(hidden)]
+pub trait AllContained<Set, Indices> {}
+
+impl<Set> AllContained<Set, HNil> for HNil {}
+
+impl<Set, Head, Tail, Index, RestIndices> AllContained<Set, HCons<Index, RestIndices>>
+    for HCons<Head, Tail>
+where
+    Set: CoversColumn<Head, Index>,
+    Tail: AllContained<Set, RestIndices>,
 {
 }
 
