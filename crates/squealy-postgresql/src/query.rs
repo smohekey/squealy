@@ -1913,7 +1913,7 @@ where
 impl<'conn, S, O, Filters, Conn> ExecutableDeleteUsingQuery<'conn, S, O, Filters>
     for PostgresDeleteUsing<'conn, S, O, Filters, Conn>
 where
-    S: TableProjection,
+    S: TableProjection + UpdateableTable,
     O: TableProjection,
     Filters: RenderPredicateNodes<Postgres>,
     Filters::Params: NoRuntimeParams,

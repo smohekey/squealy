@@ -1106,7 +1106,7 @@ where
 impl<'conn, S, O, Filters, Conn> ExecutableDeleteUsingQuery<'conn, S, O, Filters>
     for MysqlDeleteUsing<'conn, S, O, Filters, Conn>
 where
-    S: TableProjection,
+    S: TableProjection + UpdateableTable,
     O: TableProjection,
     Filters: RenderPredicateNodes<Mysql>,
     Filters::Params: NoRuntimeParams,

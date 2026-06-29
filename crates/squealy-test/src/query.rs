@@ -1428,7 +1428,7 @@ where
 impl<'conn, S, O, Filters> ExecutableDeleteUsingQuery<'conn, S, O, Filters>
     for TestDeleteUsing<'conn, S, O, Filters>
 where
-    S: TableProjection,
+    S: TableProjection + UpdateableTable,
     O: TableProjection,
     Filters: RenderPredicateNodes<TestBackend>,
     Filters::Params: NoRuntimeParams,

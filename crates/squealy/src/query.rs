@@ -3282,7 +3282,11 @@ pub trait ExecutableDeleteUsingQuery<'builder, S, O, Filters>:
     DeleteUsingQuery<'builder, S, O, Filters>
 where
     Self::Builder: Connection,
-    S: TableProjection,
+    // A read-only view does not implement `UpdateableTable`, so deleting through one is rejected here —
+    // the guard lives on execution (not just the `delete()` convenience) so `build().execute()` can't
+    // bypass it. `TableProjection` is also required (for the supertrait); `UpdateableTable` does not
+    // imply it.
+    S: TableProjection + UpdateableTable,
     O: TableProjection,
     Filters: PredicateNodes,
     Filters::Params: NoRuntimeParams,
