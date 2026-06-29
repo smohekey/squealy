@@ -1767,3 +1767,52 @@ async fn postgres_insert_select_round_trip() {
         .expect("select after insert-select");
     assert_eq!(names, vec!["Ada".to_owned(), "Ada".to_owned()]);
 }
+
+#[tokio::test]
+#[ignore]
+async fn postgres_update_from_round_trip() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS join_posts; DROP TABLE IF EXISTS join_users")
+        .await
+        .expect("drop old join tables");
+    create_table::<JoinUser>(&client, &Postgres).await;
+    create_table::<JoinPost>(&client, &Postgres).await;
+    let connection = PostgresConnection::new(client);
+
+    let ada = connection
+        .to::<JoinUser>()
+        .name("Ada")
+        .insert_returning(|user| user)
+        .fetch_one()
+        .await
+        .expect("insert Ada");
+    connection
+        .to::<JoinPost>()
+        .user_id(ada.id)
+        .title("Renamed")
+        .insert()
+        .await
+        .expect("insert post");
+
+    // UPDATE join_users SET name = p.title FROM join_posts p WHERE join_users.id = p.user_id.
+    let affected = connection
+        .to_columns::<JoinUser, (JoinUserName,)>()
+        .from::<JoinPost>()
+        .set(|(_user, post)| (post.title,))
+        .where_(|(user, post)| user.id.equals(post.user_id))
+        .update()
+        .await
+        .expect("update ... from");
+    assert_eq!(affected, 1);
+
+    let names = connection
+        .from::<JoinUser>()
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| user.name)
+        .collect()
+        .await
+        .expect("select after update-from");
+    assert_eq!(names, vec!["Renamed".to_owned()]);
+}
