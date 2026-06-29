@@ -1662,7 +1662,7 @@ impl TableStruct {
                     source: __SquealySource,
                 ) -> <__SquealySource as ::squealy::IntoInsertSelect<'conn, 'src_scope, Conn>>::InsertSelectQuery<#table_ident <'static, ::squealy::ColumnExpr>, ()>
                 where
-                    __SquealyCols: ::squealy::InsertSelectColumns + ::squealy::ReturningProjection<'static>,
+                    __SquealyCols: ::squealy::InsertSelectColumns<#table_ident <'static, ::squealy::ColumnExpr>> + ::squealy::ReturningProjection<'static>,
                     <__SquealyCols as ::squealy::ReturningProjection<'static>>::Shape: ::squealy::IntoKindList,
                     // The target columns must cover every required (insertable, non-null, no-default)
                     // column, just like the setter-based insert (`__SquealyCoverage` are the inferred
@@ -1682,7 +1682,7 @@ impl TableStruct {
                         >,
                 {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
-                    let names = ::squealy::InsertSelectColumns::column_names(columns(table));
+                    let names = <__SquealyCols as ::squealy::InsertSelectColumns<#table_ident <'static, ::squealy::ColumnExpr>>>::column_names(columns(table));
                     // Build the insert on the *destination* builder's connection (`self.connection`); the
                     // source provides only its SELECT arm.
                     ::squealy::IntoInsertSelect::into_insert_select::<#table_ident <'static, ::squealy::ColumnExpr>, ()>(source, self.connection, names, ())

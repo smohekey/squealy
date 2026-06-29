@@ -2238,17 +2238,19 @@ impl_conflict_target_tuple!(A, B, C, D);
 /// The explicit target column list of an `INSERT … SELECT` — a single column reference or a tuple of
 /// them, yielding the column names for the `(col, …)` clause. Separate from [`ConflictTarget`] so it
 /// supports the full projection arity (the upsert conflict-target stops at four columns).
+// Parameterized by the destination table `S` so a target column must belong to *that* table — not just
+// be insertable for some table (matching the explicit insert path's `ColumnKey<Table = S>`).
 #[doc(hidden)]
-pub trait InsertSelectColumns {
+pub trait InsertSelectColumns<S> {
     fn column_names(self) -> Vec<&'static str>;
 }
 
-// Only insertable columns may be an `INSERT … SELECT` target — generated, auto-increment, and
-// `#[column(insert = false)]` columns do not implement `InsertColumnKey`, so they are rejected (matching
-// the explicit setter-based insert path).
-impl<'scope, K> InsertSelectColumns for crate::ColumnRef<'scope, K>
+// Only insertable columns of the destination table `S` may be a target — generated, auto-increment, and
+// `#[column(insert = false)]` columns do not implement `InsertColumnKey`, and a column of another table
+// has a different `ColumnKey::Table`, so both are rejected (matching the explicit insert path).
+impl<'scope, K, S> InsertSelectColumns<S> for crate::ColumnRef<'scope, K>
 where
-    K: InsertColumnKey,
+    K: InsertColumnKey + ColumnKey<Table = S>,
 {
     fn column_names(self) -> Vec<&'static str> {
         vec![self.column_name()]
@@ -2257,7 +2259,7 @@ where
 
 macro_rules! impl_insert_select_columns_tuple {
     ($($name:ident),+) => {
-        impl<$($name: InsertSelectColumns),+> InsertSelectColumns for ($($name,)+) {
+        impl<Tbl, $($name: InsertSelectColumns<Tbl>),+> InsertSelectColumns<Tbl> for ($($name,)+) {
             fn column_names(self) -> Vec<&'static str> {
                 #[allow(non_snake_case)]
                 let ($($name,)+) = self;
