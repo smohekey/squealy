@@ -516,9 +516,9 @@ pub use expr::{
 pub use foreign_key::ForeignKey;
 pub use index::Index;
 pub use list::{
-    AllContained, Contains, FixedList, HAppend, HCons, HList, HNil, Here, IntoNullableExprs,
-    IntoPreparedParam, MapFixedList, NoRuntimeParams, PreparedParamValues, PushBack, There,
-    ToTuple, TupleAppend, TupleConcat,
+    Contains, FixedList, HAppend, HCons, HList, HNil, Here, IntoNullableExprs, IntoPreparedParam,
+    MapFixedList, NoRuntimeParams, PreparedParamValues, PushBack, RequiredCol, RequiredCovered,
+    There, ToTuple, TupleAppend, TupleConcat,
 };
 pub use model::{
     CaseArm, CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintEnforcement,

@@ -173,21 +173,26 @@ impl TableStruct {
             quote::quote! { ::squealy::HNil },
             |tail, kind| quote::quote! { ::squealy::HCons<#kind, #tail> },
         );
-        // The kinds of the *required* insert columns (insertable, non-null, no default) — the set an
-        // `INSERT … SELECT`'s target columns must cover. Mirrors the `insert_ready_bounds` filter (a
-        // nullable or defaulted column is omittable, so it is not required).
-        let required_insert_kinds = self
+        // The *required* insert columns (insertable, no default) as a list of `RequiredCol<K,
+        // Nullability>` — the set an `INSERT … SELECT`'s target columns must cover. Nullability is
+        // resolved type-level via `ColumnNullability` (matching `insert_ready_bounds`, not a syntactic
+        // `Option<…>` check), so the coverage check treats a column nullable through a type alias as
+        // omittable. A defaulted column is always omittable, so it is excluded entirely.
+        let required_insert_cols = self
             .fields
             .iter()
             .zip(expr_kind_idents.iter())
-            .filter(|(field, _)| {
-                field.insertable() && field.attrs.default.is_none() && !field.nullable()
+            .filter(|(field, _)| field.insertable() && field.attrs.default.is_none())
+            .map(|(field, kind)| {
+                let d = field.value_ty.clone();
+                quote::quote! {
+                    ::squealy::RequiredCol<#kind, <#d as ::squealy::ColumnNullability>::Nullability>
+                }
             })
-            .map(|(_, kind)| kind)
             .collect::<Vec<_>>();
-        let required_insert_kind_list = required_insert_kinds.iter().rev().fold(
+        let required_insert_kind_list = required_insert_cols.iter().rev().fold(
             quote::quote! { ::squealy::HNil },
-            |tail, kind| quote::quote! { ::squealy::HCons<#kind, #tail> },
+            |tail, item| quote::quote! { ::squealy::HCons<#item, #tail> },
         );
         // The *declared* field value type `D` (e.g. `Option<SystemTime>` or `SystemTime`). Nullability
         // is resolved from it at the type level via `ColumnNullability`.
@@ -1661,9 +1666,9 @@ impl TableStruct {
                     <__SquealyCols as ::squealy::ReturningProjection<'static>>::Shape: ::squealy::IntoKindList,
                     // The target columns must cover every required (insertable, non-null, no-default)
                     // column, just like the setter-based insert (`__SquealyCoverage` are the inferred
-                    // per-required-column positions).
+                    // per-required-column witnesses; nullable required columns are omittable).
                     <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::InsertableTable>::RequiredInsertColumns:
-                        ::squealy::AllContained<
+                        ::squealy::RequiredCovered<
                             <<__SquealyCols as ::squealy::ReturningProjection<'static>>::Shape as ::squealy::IntoKindList>::Kinds,
                             __SquealyCoverage,
                         >,

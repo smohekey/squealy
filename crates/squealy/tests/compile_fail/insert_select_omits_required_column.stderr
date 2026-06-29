@@ -15,9 +15,9 @@ help: the following other types implement trait `squealy::list::CoversColumn<T, 
    | |     Tail: CoversColumn<T, Index>
    | |________________________________^ `HCons<Head, Tail>` implements `squealy::list::CoversColumn<T, squealy::There<Index>>`
    = note: required for `HCons<AccountName, HNil>` to implement `squealy::list::CoversColumn<AccountEmail, squealy::There<_>>`
-   = note: required for `HCons<AccountEmail, HNil>` to implement `squealy::AllContained<HCons<AccountName, HNil>, HCons<squealy::There<_>, HNil>>`
+   = note: required for `HCons<squealy::RequiredCol<AccountEmail, squealy::NonNullableColumn>, HNil>` to implement `squealy::RequiredCovered<HCons<AccountName, HNil>, HCons<squealy::There<_>, HNil>>`
    = note: 1 redundant requirement hidden
-   = note: required for `HCons<AccountName, HCons<AccountEmail, HNil>>` to implement `squealy::AllContained<HCons<AccountName, HNil>, HCons<squealy::Here, HCons<squealy::There<_>, HNil>>>`
+   = note: required for `HCons<squealy::RequiredCol<AccountName, squealy::NonNullableColumn>, HCons<squealy::RequiredCol<AccountEmail, squealy::NonNullableColumn>, HNil>>` to implement `squealy::RequiredCovered<HCons<AccountName, HNil>, HCons<squealy::Here, HCons<squealy::There<_>, HNil>>>`
 note: required by a bound in `__SquealyAccountWriteBuilder::<'conn, Conn, HNil, HNil, HNil, squealy::MutationUnfiltered, __SquealyAccountNameWriteInsertState, __SquealyAccountEmailWriteInsertState, __SquealyAccountNameWriteUpdateState, __SquealyAccountEmailWriteUpdateState>::insert_select`
   --> tests/compile_fail/insert_select_omits_required_column.rs:4:35
    |

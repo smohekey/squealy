@@ -2034,6 +2034,29 @@ fn test_case_with_type_aliased_nullable_branch_is_nullable() {
     assert!(sql.contains("IS NULL"), "{sql}");
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+struct AliasedRequired<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    name: C::Type<'scope, String>,
+    label: C::Type<'scope, MaybeLabel>,
+}
+
+#[test]
+fn test_insert_select_omits_alias_nullable_column() {
+    // `label` is nullable through a type alias, so it is omittable from an `INSERT … SELECT` target
+    // list — the required-column coverage resolves nullability type-level via `ColumnNullability`, not a
+    // syntactic `Option<…>` check. This must compile (only the required, non-null `name` is covered).
+    let conn = TestConnection;
+    let query = conn.to::<AliasedRequired>().insert_select(
+        |aliased| aliased.name,
+        conn.from::<AliasedRequired>()
+            .select(|(aliased,)| aliased.name),
+    );
+    let sql = query.to_sql();
+    assert!(sql.contains("INSERT INTO") && sql.contains("name"), "{sql}");
+}
+
 #[test]
 fn test_case_with_in_subquery_condition_classifies() {
     // A non-aggregate `in_subquery` condition (column operand) keeps the CASE a scalar projection.
