@@ -6,12 +6,13 @@ use std::task::{Context, Poll};
 use futures_core::Stream;
 
 use squealy::{
-    Backend, Decode, DeleteQuery, Encode, ExecutableDeleteQuery, ExecutableInsertQuery,
-    ExecutableSelectQuery, ExecutableUpdateQuery, HAppend, HList, HNil, InsertQuery, InsertRows,
-    InsertableTable, IntoInsertSelect, NoRuntimeParams, ParamWriter, PredicateNodes,
-    PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery,
-    PreparedMutationQuery, PreparedParamValues, PreparedSelectQuery, Projectable, ProjectionShape,
-    QueryBuilder, RenderInsertRows, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
+    Backend, Decode, DeleteQuery, DeleteUsingQuery, Encode, ExecutableDeleteQuery,
+    ExecutableDeleteUsingQuery, ExecutableInsertQuery, ExecutableSelectQuery,
+    ExecutableUpdateQuery, HAppend, HList, HNil, InsertQuery, InsertRows, InsertableTable,
+    IntoInsertSelect, NoRuntimeParams, ParamWriter, PredicateNodes, PreparableDeleteQuery,
+    PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery, PreparedMutationQuery,
+    PreparedParamValues, PreparedSelectQuery, Projectable, ProjectionShape, QueryBuilder,
+    RenderInsertRows, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
     RenderUpdateAssignments, RowsAffected, SchemaTable, SelectAst, SelectQuery, Selected, SetArm,
     SetLeaf, SetOperand, SetOperations, SetSelectModifiers, SetTail, SourceAlias, TableProjection,
     UpdateFromQuery, UpdateQuery, UpdateableTable,
@@ -1377,6 +1378,91 @@ where
             self.target_alias,
             self.source_alias,
             &self.columns,
+            &self.filters,
+            &(),
+            &mut params,
+        )?;
+        Ok(params)
+    }
+}
+
+/// Correlated `DELETE … <source>` query object for the test backend.
+pub struct TestDeleteUsing<'conn, S, O, Filters = HNil>
+where
+    S: TableProjection,
+    O: TableProjection,
+    Filters: PredicateNodes,
+{
+    connection: &'conn TestConnection,
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    filters: Filters,
+    _table: PhantomData<(S, O)>,
+}
+
+impl<'conn, S, O, Filters> DeleteUsingQuery<'conn, S, O, Filters>
+    for TestDeleteUsing<'conn, S, O, Filters>
+where
+    S: TableProjection,
+    O: TableProjection,
+    Filters: PredicateNodes,
+{
+    type Builder = TestConnection;
+
+    fn build(
+        connection: &'conn TestConnection,
+        target_alias: SourceAlias,
+        source_alias: SourceAlias,
+        filters: Filters,
+    ) -> Self {
+        Self {
+            connection,
+            target_alias,
+            source_alias,
+            filters,
+            _table: PhantomData,
+        }
+    }
+}
+
+impl<'conn, S, O, Filters> ExecutableDeleteUsingQuery<'conn, S, O, Filters>
+    for TestDeleteUsing<'conn, S, O, Filters>
+where
+    S: TableProjection + UpdateableTable,
+    O: TableProjection,
+    Filters: RenderPredicateNodes<TestBackend>,
+    Filters::Params: NoRuntimeParams,
+{
+    fn execute(&self) -> impl Future<Output = Result<u64, TestError>> + Send + '_ {
+        self.connection.execute_delete()
+    }
+}
+
+impl<S, O, Filters> TestDeleteUsing<'_, S, O, Filters>
+where
+    S: TableProjection,
+    O: TableProjection,
+    Filters: RenderPredicateNodes<TestBackend>,
+{
+    /// Render this correlated delete into a newly allocated SQL string.
+    pub fn to_sql(&self) -> String {
+        render_sql(|writer| {
+            sql::write_delete_using::<S, O, _, _>(
+                self.target_alias,
+                self.source_alias,
+                &self.filters,
+                &(),
+                writer,
+            )
+        })
+    }
+
+    /// Collect bind parameters into a newly allocated vector.
+    pub fn collect_params(&self) -> Result<Vec<crate::TestParam>, TestError> {
+        let mut params = Vec::new();
+        sql::write_delete_using_params::<S, O, _, _>(
+            self.target_alias,
+            self.source_alias,
             &self.filters,
             &(),
             &mut params,

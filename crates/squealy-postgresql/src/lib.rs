@@ -18,9 +18,9 @@ mod sql;
 #[cfg(feature = "serde")]
 pub use query::Json;
 pub use query::{
-    EmptyRows, PostgresDelete, PostgresInsert, PostgresParam, PostgresPreparedMutation,
-    PostgresPreparedSelect, PostgresRowReader, PostgresSelect, PostgresSetSelect, PostgresUpdate,
-    PostgresUpdateFrom,
+    EmptyRows, PostgresDelete, PostgresDeleteUsing, PostgresInsert, PostgresParam,
+    PostgresPreparedMutation, PostgresPreparedSelect, PostgresRowReader, PostgresSelect,
+    PostgresSetSelect, PostgresUpdate, PostgresUpdateFrom,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -535,6 +535,14 @@ impl QueryBuilder for Postgres {
         O: squealy::SchemaTable,
         Columns: squealy::UpdateAssignments,
         Filters: squealy::PredicateNodes;
+
+    type DeleteUsing<'conn, S, O, Filters>
+        = PostgresDeleteUsing<'conn, S, O, Filters, Self>
+    where
+        Self: 'conn,
+        S: TableProjection,
+        O: TableProjection,
+        Filters: squealy::PredicateNodes;
 }
 
 impl QueryBuilder for PostgresConnection {
@@ -588,6 +596,14 @@ impl QueryBuilder for PostgresConnection {
         O: squealy::SchemaTable,
         Columns: squealy::UpdateAssignments,
         Filters: squealy::PredicateNodes;
+
+    type DeleteUsing<'conn, S, O, Filters>
+        = PostgresDeleteUsing<'conn, S, O, Filters, Self>
+    where
+        Self: 'conn,
+        S: TableProjection,
+        O: TableProjection,
+        Filters: squealy::PredicateNodes;
 }
 
 impl QueryBuilder for PostgresTransaction<'_> {
@@ -640,6 +656,14 @@ impl QueryBuilder for PostgresTransaction<'_> {
         S: UpdateableTable,
         O: squealy::SchemaTable,
         Columns: squealy::UpdateAssignments,
+        Filters: squealy::PredicateNodes;
+
+    type DeleteUsing<'conn, S, O, Filters>
+        = PostgresDeleteUsing<'conn, S, O, Filters, Self>
+    where
+        Self: 'conn,
+        S: TableProjection,
+        O: TableProjection,
         Filters: squealy::PredicateNodes;
 }
 

@@ -1209,6 +1209,7 @@ never_query!(ModelInsert);
 never_query!(ModelUpdate);
 never_query!(ModelUpdateFrom);
 never_query!(ModelDelete);
+never_query!(ModelDeleteUsing);
 
 impl<'builder, 'scope, Base, Shape, Projection>
     crate::SelectQuery<'builder, 'scope, Base, Projection>
@@ -1298,6 +1299,25 @@ where
     }
 }
 
+impl<'builder, S, O, Filters> crate::DeleteUsingQuery<'builder, S, O, Filters>
+    for ModelDeleteUsing<(&'builder (), S, O, Filters)>
+where
+    S: TableProjection,
+    O: TableProjection,
+    Filters: crate::PredicateNodes,
+{
+    type Builder = ModelConn;
+
+    fn build(
+        _builder: &'builder ModelConn,
+        _target_alias: SourceAlias,
+        _source_alias: SourceAlias,
+        _filters: Filters,
+    ) -> Self {
+        unreachable!("ModelConn never builds a delete-using")
+    }
+}
+
 impl<'builder, S, Shape, Filters, Returning> crate::DeleteQuery<'builder, Filters, Returning>
     for ModelDelete<(&'builder (), S, Shape, Filters, Returning)>
 where
@@ -1373,5 +1393,13 @@ impl QueryBuilder for ModelConn {
         S: crate::UpdateableTable,
         O: crate::SchemaTable,
         Columns: crate::UpdateAssignments,
+        Filters: crate::PredicateNodes;
+
+    type DeleteUsing<'builder, S, O, Filters>
+        = ModelDeleteUsing<(&'builder (), S, O, Filters)>
+    where
+        Self: 'builder,
+        S: TableProjection,
+        O: TableProjection,
         Filters: crate::PredicateNodes;
 }
