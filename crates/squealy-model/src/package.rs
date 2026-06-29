@@ -19,12 +19,12 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
     AggregateFunc, ArithmeticOp, CaseArm, CheckModel, ColumnModel, CompareOp, Constraint,
     ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, DatabaseModel, DateField,
-    DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
-    GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
-    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, JoinItem,
-    JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem, ScalarFunc,
-    SchemaModel, SourceRef, SqlType, TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
-    WindowFunc, WindowOrderTerm,
+    DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, FrameBound,
+    FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
+    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
+    JoinItem, JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem,
+    ScalarFunc, SchemaModel, SourceRef, SqlType, TableModel, ViewColumnModel, ViewModel,
+    ViewQueryModel, WindowFunc, WindowOrderTerm,
 };
 
 use crate::{CastColumn, RefactorLog, RefactorOperation, RenameColumn, RenameTable};
@@ -719,6 +719,7 @@ fn expr_to_node(expr: &ExprNode) -> KdlNode {
             args,
             partition_by,
             order_by,
+            frame,
             result,
         } => {
             let mut node = KdlNode::new("window");
@@ -743,6 +744,9 @@ fn expr_to_node(expr: &ExprNode) -> KdlNode {
                 ));
                 push_child(&mut order_node, expr_to_node(&order.expr));
                 push_child(&mut node, order_node);
+            }
+            if let Some(frame) = frame {
+                push_child(&mut node, frame_to_node(frame));
             }
             node
         }
@@ -916,6 +920,39 @@ fn window_func_str(func: WindowFunc) -> &'static str {
         WindowFunc::Ntile => "ntile",
         WindowFunc::Lag => "lag",
         WindowFunc::Lead => "lead",
+    }
+}
+
+/// Serialize a window frame clause as a `frame` node: `frame mode="rows" start="…" end="…"`, with a
+/// `start-offset`/`end-offset` integer prop for the `<n> PRECEDING`/`<n> FOLLOWING` bounds.
+fn frame_to_node(frame: &FrameSpec) -> KdlNode {
+    let mut node = KdlNode::new("frame");
+    node.push(KdlEntry::new_prop(
+        "mode",
+        match frame.mode() {
+            FrameMode::Rows => "rows",
+            FrameMode::Range => "range",
+        },
+    ));
+    push_frame_bound(&mut node, "start", frame.start());
+    push_frame_bound(&mut node, "end", frame.end());
+    node
+}
+
+fn push_frame_bound(node: &mut KdlNode, key: &str, bound: FrameBound) {
+    let (kind, offset) = match bound {
+        FrameBound::UnboundedPreceding => ("unbounded-preceding", None),
+        FrameBound::Preceding(n) => ("preceding", Some(n)),
+        FrameBound::CurrentRow => ("current-row", None),
+        FrameBound::Following(n) => ("following", Some(n)),
+        FrameBound::UnboundedFollowing => ("unbounded-following", None),
+    };
+    node.push(KdlEntry::new_prop(key, kind));
+    if let Some(n) = offset {
+        node.push(KdlEntry::new_prop(
+            format!("{key}-offset"),
+            KdlValue::Integer(i128::from(n)),
+        ));
     }
 }
 
@@ -1600,6 +1637,10 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?,
+            frame: match child_nodes(node, "frame").next() {
+                Some(frame_node) => Some(frame_from_node(frame_node)?),
+                None => None,
+            },
             result: optional_sql_type_from_node(node)?,
         },
         "case" => {
@@ -1693,6 +1734,41 @@ fn window_func_from_str(value: &str) -> Result<WindowFunc, PackageError> {
         "lead" => WindowFunc::Lead,
         // The remaining names are aggregates used as window functions (`SUM(..) OVER (..)`).
         aggregate => WindowFunc::Aggregate(aggregate_func_from_str(aggregate)?),
+    })
+}
+
+fn frame_from_node(node: &KdlNode) -> Result<FrameSpec, PackageError> {
+    let mode = match required_prop(node, "mode")?.as_str() {
+        "rows" => FrameMode::Rows,
+        "range" => FrameMode::Range,
+        other => return Err(malformed(format!("unknown window frame mode `{other}`"))),
+    };
+    // Mirror the builder's `FrameStart`/`FrameEnd` compile-time guarantee on the deserialize path:
+    // SQL's `<frame start>` cannot be `UNBOUNDED FOLLOWING` and `<frame end>` cannot be
+    // `UNBOUNDED PRECEDING`, so reject a hand-written package that puts a bound on the wrong side.
+    let start = frame_bound_from_node(node, "start")?;
+    if matches!(start, FrameBound::UnboundedFollowing) {
+        return Err(malformed(
+            "window frame start cannot be `unbounded-following`",
+        ));
+    }
+    let end = frame_bound_from_node(node, "end")?;
+    if matches!(end, FrameBound::UnboundedPreceding) {
+        return Err(malformed(
+            "window frame end cannot be `unbounded-preceding`",
+        ));
+    }
+    Ok(FrameSpec::new(mode, start, end))
+}
+
+fn frame_bound_from_node(node: &KdlNode, key: &str) -> Result<FrameBound, PackageError> {
+    Ok(match required_prop(node, key)?.as_str() {
+        "unbounded-preceding" => FrameBound::UnboundedPreceding,
+        "preceding" => FrameBound::Preceding(required_u64(node, &format!("{key}-offset"))?),
+        "current-row" => FrameBound::CurrentRow,
+        "following" => FrameBound::Following(required_u64(node, &format!("{key}-offset"))?),
+        "unbounded-following" => FrameBound::UnboundedFollowing,
+        other => return Err(malformed(format!("unknown window frame bound `{other}`"))),
     })
 }
 
@@ -1881,6 +1957,22 @@ fn required_u32(node: &KdlNode, key: &str) -> Result<u32, PackageError> {
             ))
         })?;
     u32::try_from(value).map_err(|_| malformed(format!("`{key}` is out of range for u32")))
+}
+
+/// Reads a required non-negative integer property as `u64` (window frame offsets).
+fn required_u64(node: &KdlNode, key: &str) -> Result<u64, PackageError> {
+    let value = node
+        .entries()
+        .iter()
+        .find(|entry| entry.name().map(|name| name.value()) == Some(key))
+        .and_then(|entry| entry.value().as_integer())
+        .ok_or_else(|| {
+            malformed(format!(
+                "`{}` is missing integer `{key}`",
+                node.name().value()
+            ))
+        })?;
+    u64::try_from(value).map_err(|_| malformed(format!("`{key}` is out of range for u64")))
 }
 
 /// Reads an optional non-negative integer property as `usize` (view `limit`/`offset`).
@@ -2674,6 +2766,90 @@ mod tests {
                 node
             );
         }
+    }
+
+    #[test]
+    fn expr_node_window_frame_round_trips_through_kdl() {
+        let col = |c: &str| ExprNode::Column {
+            alias: "q0_0".to_owned(),
+            column: c.to_owned(),
+        };
+        // Cover every bound shape (including the offset-carrying ones) across both frame modes.
+        for frame in [
+            FrameSpec::new(
+                FrameMode::Rows,
+                FrameBound::UnboundedPreceding,
+                FrameBound::CurrentRow,
+            ),
+            FrameSpec::new(
+                FrameMode::Range,
+                FrameBound::Preceding(2),
+                FrameBound::Following(3),
+            ),
+            FrameSpec::new(
+                FrameMode::Rows,
+                FrameBound::CurrentRow,
+                FrameBound::UnboundedFollowing,
+            ),
+        ] {
+            let node = ExprNode::Window {
+                func: WindowFunc::Aggregate(AggregateFunc::Sum),
+                args: vec![col("amount")],
+                partition_by: vec![col("user_id")],
+                order_by: vec![WindowOrderTerm {
+                    expr: col("id"),
+                    direction: OrderDirection::Asc,
+                }],
+                frame: Some(frame),
+                result: Some(SqlType::I64),
+            };
+            assert_eq!(
+                expr_from_node(&expr_to_node(&node)).expect("window frame round-trips"),
+                node
+            );
+        }
+
+        // A frame-less window round-trips with `frame: None` (no `frame` child emitted).
+        let no_frame = ExprNode::Window {
+            func: WindowFunc::RowNumber,
+            args: vec![],
+            partition_by: vec![],
+            order_by: vec![WindowOrderTerm {
+                expr: col("id"),
+                direction: OrderDirection::Desc,
+            }],
+            frame: None,
+            result: None,
+        };
+        assert_eq!(
+            expr_from_node(&expr_to_node(&no_frame)).expect("frame-less window round-trips"),
+            no_frame
+        );
+    }
+
+    #[test]
+    fn frame_deserializer_rejects_side_invalid_bounds() {
+        // The builder's `FrameStart`/`FrameEnd` typing can't guard a hand-written package, so the
+        // deserializer must reject `UNBOUNDED FOLLOWING` as the start / `UNBOUNDED PRECEDING` as the
+        // end itself.
+        let frame_node = |start: &str, end: &str| {
+            let mut node = KdlNode::new("frame");
+            node.push(KdlEntry::new_prop("mode", "rows"));
+            node.push(KdlEntry::new_prop("start", start));
+            node.push(KdlEntry::new_prop("end", end));
+            node
+        };
+
+        assert!(
+            frame_from_node(&frame_node("unbounded-following", "current-row")).is_err(),
+            "start = unbounded-following must be rejected"
+        );
+        assert!(
+            frame_from_node(&frame_node("current-row", "unbounded-preceding")).is_err(),
+            "end = unbounded-preceding must be rejected"
+        );
+        // A valid pair still parses.
+        assert!(frame_from_node(&frame_node("unbounded-preceding", "unbounded-following")).is_ok());
     }
 
     #[test]

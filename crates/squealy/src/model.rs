@@ -12,7 +12,7 @@
 
 use crate::{
     AggregateFunc, ArithmeticOp, Column, ColumnDefault, ColumnType, CompareOp, Database,
-    DatabaseSchema, DateField, ForeignKey, Index, OrderDirection, Table, WindowFunc,
+    DatabaseSchema, DateField, ForeignKey, FrameSpec, Index, OrderDirection, Table, WindowFunc,
 };
 
 /// An owned, backend-neutral model of a whole database.
@@ -689,12 +689,14 @@ pub enum ExprNode {
         negated: bool,
         subquery: Box<ViewQueryModel>,
     },
-    /// A window function: `FUNC(<args>) OVER (PARTITION BY … ORDER BY …)`, optionally cast to `result`.
+    /// A window function: `FUNC(<args>) OVER (PARTITION BY … ORDER BY … <frame>)`, optionally cast to
+    /// `result`. `frame` is the optional `ROWS`/`RANGE BETWEEN …` clause (literal bounds, no params).
     Window {
         func: WindowFunc,
         args: Vec<ExprNode>,
         partition_by: Vec<ExprNode>,
         order_by: Vec<WindowOrderTerm>,
+        frame: Option<FrameSpec>,
         result: Option<SqlType>,
     },
     /// Searched `CASE WHEN … THEN … [ELSE …] END`, optionally wrapped in `CAST(… AS result)` to pin
