@@ -1683,6 +1683,9 @@ impl TableStruct {
                 {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                     let names = <__SquealyCols as ::squealy::InsertSelectColumns<#table_ident <'static, ::squealy::ColumnExpr>>>::column_names(columns(table));
+                    // The target list is fixed at the call site; reject a duplicate column (which the
+                    // database would reject) here rather than emitting invalid SQL.
+                    ::squealy::assert_distinct_insert_select_columns(&names);
                     // Build the insert on the *destination* builder's connection (`self.connection`); the
                     // source provides only its SELECT arm.
                     ::squealy::IntoInsertSelect::into_insert_select::<#table_ident <'static, ::squealy::ColumnExpr>, ()>(source, self.connection, names, ())

@@ -2235,6 +2235,20 @@ impl_conflict_target_tuple!(A, B);
 impl_conflict_target_tuple!(A, B, C);
 impl_conflict_target_tuple!(A, B, C, D);
 
+/// Panics if `columns` lists a target column name more than once — a duplicate `INSERT … SELECT` target
+/// (`insert_select(|u| (u.name, u.name), …)`) the database would reject. The target list is fixed at the
+/// call site, so this is a query-construction-time check; compile-time rejection isn't expressible
+/// without negative trait bounds (the same column kind appearing twice).
+#[doc(hidden)]
+pub fn assert_distinct_insert_select_columns(columns: &[&'static str]) {
+    for (index, column) in columns.iter().enumerate() {
+        assert!(
+            !columns[..index].contains(column),
+            "INSERT … SELECT lists the target column `{column}` more than once",
+        );
+    }
+}
+
 /// The explicit target column list of an `INSERT … SELECT` — a single column reference or a tuple of
 /// them, yielding the column names for the `(col, …)` clause. Separate from [`ConflictTarget`] so it
 /// supports the full projection arity (the upsert conflict-target stops at four columns).

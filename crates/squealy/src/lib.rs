@@ -558,7 +558,7 @@ pub use query::{
     SetOperations, SetOrder, SetSelectModifiers, SetTail, SourceQuery, SourceSpec,
     StaticAssignmentValue, Subqueries, Subquery, SubquerySelect, ToColumns, UpdateAssignment,
     UpdateAssignmentNode, UpdateAssignments, UpdateColumnKey, UpdateColumnValues, UpdateQuery,
-    Upsert, Where, default,
+    Upsert, Where, assert_distinct_insert_select_columns, default,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{CTE, ColumnType, Database, RecursiveCTE, Schema, Table, View};

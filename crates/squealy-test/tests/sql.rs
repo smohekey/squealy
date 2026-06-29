@@ -2460,6 +2460,20 @@ fn test_insert_select_renders() {
 }
 
 #[test]
+#[should_panic(expected = "lists the target column `label` more than once")]
+fn test_insert_select_rejects_duplicate_target_columns() {
+    // A repeated target column would render `INSERT INTO ... (..., label, label) ...`, which the
+    // database rejects — caught at query-construction time. (A repeated *required* column is instead a
+    // compile error via the coverage check; this exercises the construction-time guard for the rest.)
+    let conn = TestConnection;
+    let _query = conn.to::<AliasedRequired>().insert_select(
+        |aliased| (aliased.name, aliased.label, aliased.label),
+        conn.from::<AliasedRequired>()
+            .select(|(aliased,)| (aliased.name, aliased.label, aliased.label)),
+    );
+}
+
+#[test]
 fn test_insert_select_union_source_renders() {
     // A set-op source (`select(...).union(...)`) inserts as `INSERT INTO t (cols) <union>`. The union
     // is the insert source directly — no *outer* parentheses wrap it (the per-arm parens are the normal
