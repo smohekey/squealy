@@ -495,6 +495,125 @@ where
     }
 }
 
+impl<'conn, 'scope, Shape, Base, Projection, Conn> IntoInsertSelect<'conn, 'scope, Conn>
+    for MysqlSelect<'conn, 'scope, Shape, Base, Projection, Conn>
+where
+    Shape: ProjectionShape,
+    Base: SelectAst<'conn, 'scope, Conn, RowLockState = squealy::RowUnlocked>,
+    Projection: Projectable,
+    Conn: QueryBuilder<Backend = Mysql> + 'conn,
+{
+    type InsertSelectQuery<S, Returning>
+        = MysqlInsertSelect<
+            'conn,
+            'scope,
+            S,
+            SetLeaf<'conn, 'scope, Conn, Base, Shape, Projection>,
+            Returning,
+            Conn,
+        >
+    where
+        S: InsertableTable,
+        Returning: Projectable;
+
+    fn into_insert_select<S, Returning>(
+        self,
+        columns: Vec<&'static str>,
+        returning: Returning,
+    ) -> Self::InsertSelectQuery<S, Returning>
+    where
+        S: InsertableTable,
+        Returning: Projectable,
+    {
+        MysqlInsertSelect::new(self.connection, columns, SetLeaf::new(self.selected), returning)
+    }
+}
+
+/// `INSERT INTO t (columns) <select>` query object (MySQL).
+pub struct MysqlInsertSelect<'conn, 'scope, S, Tree, Returning, Conn = MysqlConnection> {
+    connection: &'conn Conn,
+    columns: Vec<&'static str>,
+    source: Tree,
+    returning: Returning,
+    _table: PhantomData<S>,
+    _scope: PhantomData<&'scope ()>,
+}
+
+impl<'conn, 'scope, S, Tree, Returning, Conn>
+    MysqlInsertSelect<'conn, 'scope, S, Tree, Returning, Conn>
+{
+    fn new(
+        connection: &'conn Conn,
+        columns: Vec<&'static str>,
+        source: Tree,
+        returning: Returning,
+    ) -> Self {
+        Self {
+            connection,
+            columns,
+            source,
+            returning,
+            _table: PhantomData,
+            _scope: PhantomData,
+        }
+    }
+}
+
+impl<'conn, 'scope, S, Tree, Returning, Conn>
+    MysqlInsertSelect<'conn, 'scope, S, Tree, Returning, Conn>
+where
+    S: InsertableTable,
+    Tree: render::RenderSetArm<'conn, 'scope, Conn, Mysql>,
+    Returning: RenderProjectable<Mysql>,
+    Conn: QueryBuilder<Backend = Mysql> + 'conn,
+{
+    fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError> {
+        let sql = rendered_sql(|writer| {
+            render::write_insert_select::<S, Conn, _, _>(
+                &MysqlDialect,
+                &self.columns,
+                &self.source,
+                &self.returning,
+                writer,
+            )
+        });
+        let params = collect_mysql_params(0, |params| {
+            render::write_insert_select_params::<S, Conn, _, _>(
+                &MysqlDialect,
+                &self.columns,
+                &self.source,
+                &self.returning,
+                params,
+            )
+        })?;
+        Ok((sql, params))
+    }
+
+    /// Render this `INSERT … SELECT` into a newly allocated SQL string.
+    pub fn to_sql(&self) -> String {
+        rendered_sql(|writer| {
+            render::write_insert_select::<S, Conn, _, _>(
+                &MysqlDialect,
+                &self.columns,
+                &self.source,
+                &self.returning,
+                writer,
+            )
+        })
+    }
+
+    /// Execute the insert, returning the number of rows affected.
+    pub fn insert(&self) -> impl Future<Output = Result<u64, MysqlError>> + Send + '_
+    where
+        Conn: MysqlExecutor,
+    {
+        match self.execution_parts() {
+            Ok((sql, params)) => self.connection.run_execute(sql, params),
+            Err(error) => execute_error(error),
+        }
+    }
+}
+
 impl<'conn, 'scope, Shape, Base, Projection, Conn> SetOperations<'conn, 'scope, Conn>
     for MysqlSelect<'conn, 'scope, Shape, Base, Projection, Conn>
 where

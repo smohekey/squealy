@@ -10,10 +10,10 @@ use futures_core::Stream;
 use squealy::{
     Backend, Connection, Decode, DeleteQuery, Encode, ExecutableDeleteQuery, ExecutableInsertQuery,
     ExecutableSelectQuery, ExecutableUpdateQuery, HAppend, HList, HNil, InsertQuery, InsertRows,
-    InsertableTable, NoRuntimeParams, ParamWriter, PredicateNodes, PreparableDeleteQuery,
-    PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery, PreparedMutationQuery,
-    PreparedParamValues, PreparedSelectQuery, Projectable, ProjectionShape, QueryBuilder,
-    RenderInsertRows, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
+    InsertableTable, IntoInsertSelect, NoRuntimeParams, ParamWriter, PredicateNodes,
+    PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery,
+    PreparedMutationQuery, PreparedParamValues, PreparedSelectQuery, Projectable, ProjectionShape,
+    QueryBuilder, RenderInsertRows, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
     RenderUpdateAssignments, RowsAffected, SelectAst, SelectQuery, Selected, SetArm, SetLeaf,
     SetOperand, SetOperations, SetSelectModifiers, SetTail, SourceAlias, TableProjection,
     UpdateQuery, UpdateableTable,
@@ -1542,6 +1542,130 @@ where
 
     fn into_set_parts(self) -> (&'conn Conn, Self::Arm) {
         (self.connection, SetLeaf::new(self.selected))
+    }
+}
+
+impl<'conn, 'scope, Shape, Base, Projection, Conn> IntoInsertSelect<'conn, 'scope, Conn>
+    for PostgresSelect<'conn, 'scope, Shape, Base, Projection, Conn>
+where
+    Shape: ProjectionShape,
+    Base: SelectAst<'conn, 'scope, Conn, RowLockState = squealy::RowUnlocked>,
+    Projection: Projectable,
+    Conn: QueryBuilder<Backend = Postgres> + 'conn,
+{
+    type InsertSelectQuery<S, Returning>
+        = PostgresInsertSelect<
+        'conn,
+        'scope,
+        S,
+        SetLeaf<'conn, 'scope, Conn, Base, Shape, Projection>,
+        Returning,
+        Conn,
+    >
+    where
+        S: InsertableTable,
+        Returning: Projectable;
+
+    fn into_insert_select<S, Returning>(
+        self,
+        columns: Vec<&'static str>,
+        returning: Returning,
+    ) -> Self::InsertSelectQuery<S, Returning>
+    where
+        S: InsertableTable,
+        Returning: Projectable,
+    {
+        PostgresInsertSelect::new(
+            self.connection,
+            columns,
+            SetLeaf::new(self.selected),
+            returning,
+        )
+    }
+}
+
+/// `INSERT INTO t (columns) <select>` query object (PostgreSQL).
+pub struct PostgresInsertSelect<'conn, 'scope, S, Tree, Returning, Conn = PostgresConnection> {
+    connection: &'conn Conn,
+    columns: Vec<&'static str>,
+    source: Tree,
+    returning: Returning,
+    _table: PhantomData<S>,
+    _scope: PhantomData<&'scope ()>,
+}
+
+impl<'conn, 'scope, S, Tree, Returning, Conn>
+    PostgresInsertSelect<'conn, 'scope, S, Tree, Returning, Conn>
+{
+    fn new(
+        connection: &'conn Conn,
+        columns: Vec<&'static str>,
+        source: Tree,
+        returning: Returning,
+    ) -> Self {
+        Self {
+            connection,
+            columns,
+            source,
+            returning,
+            _table: PhantomData,
+            _scope: PhantomData,
+        }
+    }
+}
+
+impl<'conn, 'scope, S, Tree, Returning, Conn>
+    PostgresInsertSelect<'conn, 'scope, S, Tree, Returning, Conn>
+where
+    S: InsertableTable,
+    Tree: render::RenderSetArm<'conn, 'scope, Conn, Postgres>,
+    Returning: RenderProjectable<Postgres>,
+    Conn: QueryBuilder<Backend = Postgres> + 'conn,
+{
+    fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
+        let sql = rendered_sql(|writer| {
+            render::write_insert_select::<S, Conn, _, _>(
+                &PostgresDialect,
+                &self.columns,
+                &self.source,
+                &self.returning,
+                writer,
+            )
+        });
+        let params = collect_postgres_params(0, |params| {
+            render::write_insert_select_params::<S, Conn, _, _>(
+                &PostgresDialect,
+                &self.columns,
+                &self.source,
+                &self.returning,
+                params,
+            )
+        })?;
+        Ok((sql, params))
+    }
+
+    /// Render this `INSERT … SELECT` into a newly allocated SQL string.
+    pub fn to_sql(&self) -> String {
+        rendered_sql(|writer| {
+            render::write_insert_select::<S, Conn, _, _>(
+                &PostgresDialect,
+                &self.columns,
+                &self.source,
+                &self.returning,
+                writer,
+            )
+        })
+    }
+
+    /// Execute the insert, returning the number of rows affected.
+    pub fn insert(&self) -> impl Future<Output = Result<u64, PostgresError>> + Send + '_
+    where
+        Conn: PostgresExecutor,
+    {
+        match self.execution_parts() {
+            Ok((sql, params)) => self.connection.execute_sql(sql, params),
+            Err(error) => execute_error(error),
+        }
     }
 }
 

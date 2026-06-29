@@ -1724,3 +1724,46 @@ async fn postgres_upsert_on_conflict_round_trip() {
         .expect("fetch after do_update");
     assert_eq!(after_update, vec!["Grace".to_owned()]);
 }
+
+#[tokio::test]
+#[ignore]
+async fn postgres_insert_select_round_trip() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS integration_users")
+        .await
+        .expect("drop old integration table");
+    create_table::<IntegrationUser>(&client, &Postgres).await;
+    let connection = PostgresConnection::new(client);
+
+    connection
+        .to::<IntegrationUser>()
+        .name("Ada")
+        .insert()
+        .await
+        .expect("seed Ada");
+
+    // INSERT INTO integration_users (name) SELECT name FROM integration_users — duplicates each row.
+    let affected = connection
+        .to::<IntegrationUser>()
+        .insert_select(
+            |user| user.name,
+            connection
+                .from::<IntegrationUser>()
+                .select(|(user,)| user.name),
+        )
+        .insert()
+        .await
+        .expect("insert ... select");
+    assert_eq!(affected, 1);
+
+    let names = connection
+        .from::<IntegrationUser>()
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| user.name)
+        .collect()
+        .await
+        .expect("select after insert-select");
+    assert_eq!(names, vec!["Ada".to_owned(), "Ada".to_owned()]);
+}

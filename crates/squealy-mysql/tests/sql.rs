@@ -1772,3 +1772,20 @@ fn mysql_for_share_renders_lock_in_share_mode() {
         "SELECT q0_0.`id` AS `id` FROM `shop`.`tenants` AS q0_0 LOCK IN SHARE MODE"
     );
 }
+
+#[test]
+fn mysql_insert_select_renders() {
+    // INSERT INTO t (cols) SELECT … with `?` placeholders.
+    let conn = Mysql;
+    let q = conn.to::<Tenant>().insert_select(
+        |tenant| tenant.slug,
+        conn.from::<Tenant>()
+            .where_(|tenant| tenant.id.greater_than(10))
+            .select(|(tenant,)| tenant.slug),
+    );
+    assert_eq!(
+        q.to_sql(),
+        "INSERT INTO `shop`.`tenants` (`slug`) \
+         SELECT q0_0.`slug` AS `slug` FROM `shop`.`tenants` AS q0_0 WHERE (q0_0.`id` > ?)"
+    );
+}

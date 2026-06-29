@@ -1,0 +1,11 @@
+error[E0271]: type mismatch resolving `<UserName as ProjectionShape>::Row == i32`
+  --> tests/compile_fail/insert_select_row_type_mismatch.rs:15:36
+   |
+15 |     let _query = conn.to::<User>().insert_select(
+   |                                    ^^^^^^^^^^^^^ type mismatch resolving `<UserName as ProjectionShape>::Row == i32`
+   |
+note: expected this to be `i32`
+  --> tests/compile_fail/insert_select_row_type_mismatch.rs:8:27
+   |
+ 8 |     name: C::Type<'scope, String>,
+   |                           ^^^^^^
