@@ -1816,3 +1816,66 @@ async fn postgres_update_from_round_trip() {
         .expect("select after update-from");
     assert_eq!(names, vec!["Renamed".to_owned()]);
 }
+
+#[tokio::test]
+#[ignore]
+async fn postgres_delete_using_round_trip() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS join_posts; DROP TABLE IF EXISTS join_users")
+        .await
+        .expect("drop old join tables");
+    create_table::<JoinUser>(&client, &Postgres).await;
+    create_table::<JoinPost>(&client, &Postgres).await;
+    let connection = PostgresConnection::new(client);
+
+    let ada = connection
+        .to::<JoinUser>()
+        .name("Ada")
+        .insert_returning(|user| user)
+        .fetch_one()
+        .await
+        .expect("insert Ada");
+    let grace = connection
+        .to::<JoinUser>()
+        .name("Grace")
+        .insert_returning(|user| user)
+        .fetch_one()
+        .await
+        .expect("insert Grace");
+    connection
+        .to::<JoinPost>()
+        .user_id(ada.id)
+        .title("Ada's post")
+        .insert()
+        .await
+        .expect("insert Ada's post");
+    connection
+        .to::<JoinPost>()
+        .user_id(grace.id)
+        .title("Grace's post")
+        .insert()
+        .await
+        .expect("insert Grace's post");
+
+    // DELETE join_posts p USING join_users u WHERE p.user_id = u.id AND u.name = 'Ada' — removes the
+    // posts authored by Ada. Deleting the child side keeps the `join_posts → join_users` FK satisfied.
+    let affected = connection
+        .from::<JoinPost>()
+        .using::<JoinUser>()
+        .where_(|(post, user)| post.user_id.equals(user.id).and(user.name.equals("Ada")))
+        .delete()
+        .await
+        .expect("delete ... using");
+    assert_eq!(affected, 1);
+
+    let titles = connection
+        .from::<JoinPost>()
+        .order_by(|(post,)| post.id.asc())
+        .select(|(post,)| post.title)
+        .collect()
+        .await
+        .expect("select after delete-using");
+    assert_eq!(titles, vec!["Grace's post".to_owned()]);
+}

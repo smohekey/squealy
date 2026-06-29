@@ -57,6 +57,15 @@ pub trait QueryBuilder: Sized {
         Columns: crate::UpdateAssignments,
         Filters: crate::PredicateNodes;
 
+    /// A correlated `DELETE … <source>` query object (see [`DeleteUsingQuery`](crate::DeleteUsingQuery)).
+    /// `O` is the joined source table; `Filters` the correlation/filter predicates over both sources.
+    type DeleteUsing<'builder, S, O, Filters>: crate::DeleteUsingQuery<'builder, S, O, Filters, Builder = Self>
+    where
+        Self: 'builder,
+        S: TableProjection,
+        O: TableProjection,
+        Filters: crate::PredicateNodes;
+
     fn select<P>(
         &self,
         projection: P,

@@ -574,6 +574,54 @@ where
     )
 }
 
+pub(crate) fn write_delete_using<S, O, Filters, Returning>(
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    filters: &Filters,
+    returning: &Returning,
+    writer: &mut impl Write,
+) -> io::Result<()>
+where
+    S: TableProjection,
+    O: TableProjection,
+    Filters: RenderPredicateNodes<crate::TestBackend>,
+    Returning: RenderProjectable<crate::TestBackend>,
+{
+    static DIALECT: TestDialect = TestDialect;
+    squealy::render::write_delete_using::<S, O, crate::TestBackend, Filters, Returning>(
+        &DIALECT,
+        target_alias,
+        source_alias,
+        filters,
+        returning,
+        writer,
+    )
+}
+
+pub(crate) fn write_delete_using_params<S, O, Filters, Returning>(
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    filters: &Filters,
+    returning: &Returning,
+    params: &mut Vec<TestParam>,
+) -> Result<(), crate::TestError>
+where
+    S: TableProjection,
+    O: TableProjection,
+    Filters: RenderPredicateNodes<crate::TestBackend>,
+    Returning: RenderProjectable<crate::TestBackend>,
+{
+    static DIALECT: TestDialect = TestDialect;
+    squealy::render::write_delete_using_params::<S, O, crate::TestBackend, Filters, Returning>(
+        &DIALECT,
+        target_alias,
+        source_alias,
+        filters,
+        returning,
+        params,
+    )
+}
+
 impl<Writer> TestSelectSink<'_, Writer>
 where
     Writer: SqlWriter,

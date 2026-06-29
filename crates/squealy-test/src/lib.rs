@@ -10,8 +10,9 @@ mod query;
 mod sql;
 
 pub use query::{
-    EmptyRows, TestDelete, TestInsert, TestParam, TestParamWriter, TestPreparedMutation,
-    TestPreparedSelect, TestRowReader, TestSelect, TestUpdate, TestUpdateFrom,
+    EmptyRows, TestDelete, TestDeleteUsing, TestInsert, TestParam, TestParamWriter,
+    TestPreparedMutation, TestPreparedSelect, TestRowReader, TestSelect, TestUpdate,
+    TestUpdateFrom,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -110,6 +111,14 @@ impl QueryBuilder for TestConnection {
         S: UpdateableTable,
         O: squealy::SchemaTable,
         Columns: squealy::UpdateAssignments,
+        Filters: squealy::PredicateNodes;
+
+    type DeleteUsing<'conn, S, O, Filters>
+        = TestDeleteUsing<'conn, S, O, Filters>
+    where
+        Self: 'conn,
+        S: TableProjection,
+        O: TableProjection,
         Filters: squealy::PredicateNodes;
 }
 

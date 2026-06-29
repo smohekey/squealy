@@ -23,14 +23,7 @@ note: candidate #1 is defined in the trait `squealy::DeleteQuery`
    | |     where
    | |         Self: Sized;
    | |____________________^
-note: candidate #2 is defined in the trait `squealy::InsertQuery`
-  --> src/query.rs
-   |
-   | /     fn build(builder: &'builder Self::Builder, rows: Rows, returning: Returning) -> Self
-   | |     where
-   | |         Self: Sized;
-   | |____________________^
-note: candidate #3 is defined in the trait `squealy::UpdateFromQuery`
+note: candidate #2 is defined in the trait `squealy::DeleteUsingQuery`
   --> src/query.rs
    |
    | /     fn build(
@@ -41,7 +34,25 @@ note: candidate #3 is defined in the trait `squealy::UpdateFromQuery`
    | |     where
    | |         Self: Sized;
    | |____________________^
-note: candidate #4 is defined in the trait `squealy::UpdateQuery`
+note: candidate #3 is defined in the trait `squealy::InsertQuery`
+  --> src/query.rs
+   |
+   | /     fn build(builder: &'builder Self::Builder, rows: Rows, returning: Returning) -> Self
+   | |     where
+   | |         Self: Sized;
+   | |____________________^
+note: candidate #4 is defined in the trait `squealy::UpdateFromQuery`
+  --> src/query.rs
+   |
+   | /     fn build(
+   | |         builder: &'builder Self::Builder,
+   | |         target_alias: SourceAlias,
+   | |         source_alias: SourceAlias,
+...  |
+   | |     where
+   | |         Self: Sized;
+   | |____________________^
+note: candidate #5 is defined in the trait `squealy::UpdateQuery`
   --> src/query.rs
    |
    | /     fn build(
@@ -68,7 +79,7 @@ help: disambiguate the associated function for candidate #2
 25 -         .from::<Post>()
 26 -         .set(|(_counter, post)| (post.user_id,))
 27 -         .build();
-23 +     let _query = <UpdateFromBuilder<'_, TestConnection, Counter<'_>, Post<'_>, HCons<squealy::UpdateAssignment<CounterCount, squealy::ExprAssignmentValue<'_, PostUserId, squealy::ColumnExprAst<PostUserId>>>, HNil>> as squealy::InsertQuery>::build(&);
+23 +     let _query = <UpdateFromBuilder<'_, TestConnection, Counter<'_>, Post<'_>, HCons<squealy::UpdateAssignment<CounterCount, squealy::ExprAssignmentValue<'_, PostUserId, squealy::ColumnExprAst<PostUserId>>>, HNil>> as squealy::DeleteUsingQuery>::build(&);
    |
 help: disambiguate the associated function for candidate #3
    |
@@ -77,9 +88,18 @@ help: disambiguate the associated function for candidate #3
 25 -         .from::<Post>()
 26 -         .set(|(_counter, post)| (post.user_id,))
 27 -         .build();
-23 +     let _query = <UpdateFromBuilder<'_, TestConnection, Counter<'_>, Post<'_>, HCons<squealy::UpdateAssignment<CounterCount, squealy::ExprAssignmentValue<'_, PostUserId, squealy::ColumnExprAst<PostUserId>>>, HNil>> as squealy::UpdateFromQuery>::build(&);
+23 +     let _query = <UpdateFromBuilder<'_, TestConnection, Counter<'_>, Post<'_>, HCons<squealy::UpdateAssignment<CounterCount, squealy::ExprAssignmentValue<'_, PostUserId, squealy::ColumnExprAst<PostUserId>>>, HNil>> as squealy::InsertQuery>::build(&);
    |
 help: disambiguate the associated function for candidate #4
+   |
+23 -     let _query = conn
+24 -         .to_columns::<Counter, (CounterCount,)>()
+25 -         .from::<Post>()
+26 -         .set(|(_counter, post)| (post.user_id,))
+27 -         .build();
+23 +     let _query = <UpdateFromBuilder<'_, TestConnection, Counter<'_>, Post<'_>, HCons<squealy::UpdateAssignment<CounterCount, squealy::ExprAssignmentValue<'_, PostUserId, squealy::ColumnExprAst<PostUserId>>>, HNil>> as squealy::UpdateFromQuery>::build(&);
+   |
+help: disambiguate the associated function for candidate #5
    |
 23 -     let _query = conn
 24 -         .to_columns::<Counter, (CounterCount,)>()
