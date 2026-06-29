@@ -518,6 +518,7 @@ where
 
     fn into_insert_select<S, Returning>(
         self,
+        connection: &'conn Conn,
         columns: Vec<&'static str>,
         returning: Returning,
     ) -> Self::InsertSelectQuery<S, Returning>
@@ -525,7 +526,7 @@ where
         S: InsertableTable,
         Returning: Projectable,
     {
-        MysqlInsertSelect::new(self.connection, columns, SetLeaf::new(self.selected), returning)
+        MysqlInsertSelect::new(connection, columns, SetLeaf::new(self.selected), returning)
     }
 }
 
@@ -606,6 +607,8 @@ where
     pub fn insert(&self) -> impl Future<Output = Result<u64, MysqlError>> + Send + '_
     where
         Conn: MysqlExecutor,
+        // One-shot execution collects only static binds, so the source must be free of runtime `param`s.
+        <Tree as SetArm<'conn, 'scope, Conn>>::Params: NoRuntimeParams,
     {
         match self.execution_parts() {
             Ok((sql, params)) => self.connection.run_execute(sql, params),

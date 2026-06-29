@@ -1892,9 +1892,13 @@ where
         S: InsertableTable,
         Returning: Projectable;
 
-    /// Wrap this select as an `INSERT INTO S (columns) <this select>` query object.
+    /// Wrap this select as an `INSERT INTO S (columns) <this select>` query object. The insert executes
+    /// on `connection` (the **destination** builder's connection); this select contributes only its
+    /// rendered `SELECT` arm, never its own connection — so the write lands on the intended
+    /// database/transaction even if the source was built from a different connection.
     fn into_insert_select<S, Returning>(
         self,
+        connection: &'conn Conn,
         columns: Vec<&'static str>,
         returning: Returning,
     ) -> Self::InsertSelectQuery<S, Returning>

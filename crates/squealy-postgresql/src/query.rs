@@ -1568,6 +1568,7 @@ where
 
     fn into_insert_select<S, Returning>(
         self,
+        connection: &'conn Conn,
         columns: Vec<&'static str>,
         returning: Returning,
     ) -> Self::InsertSelectQuery<S, Returning>
@@ -1575,12 +1576,7 @@ where
         S: InsertableTable,
         Returning: Projectable,
     {
-        PostgresInsertSelect::new(
-            self.connection,
-            columns,
-            SetLeaf::new(self.selected),
-            returning,
-        )
+        PostgresInsertSelect::new(connection, columns, SetLeaf::new(self.selected), returning)
     }
 }
 
@@ -1661,6 +1657,9 @@ where
     pub fn insert(&self) -> impl Future<Output = Result<u64, PostgresError>> + Send + '_
     where
         Conn: PostgresExecutor,
+        // One-shot execution collects only static binds, so the source must be free of runtime
+        // `param`s (a runtime-parameterized source would leave a placeholder with no value).
+        <Tree as SetArm<'conn, 'scope, Conn>>::Params: NoRuntimeParams,
     {
         match self.execution_parts() {
             Ok((sql, params)) => self.connection.execute_sql(sql, params),

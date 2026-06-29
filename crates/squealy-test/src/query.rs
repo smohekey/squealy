@@ -1032,6 +1032,7 @@ where
 
     fn into_insert_select<S, Returning>(
         self,
+        connection: &'conn TestConnection,
         columns: Vec<&'static str>,
         returning: Returning,
     ) -> Self::InsertSelectQuery<S, Returning>
@@ -1039,12 +1040,7 @@ where
         S: InsertableTable,
         Returning: Projectable,
     {
-        TestInsertSelect::new(
-            self.connection,
-            columns,
-            SetLeaf::new(self.selected),
-            returning,
-        )
+        TestInsertSelect::new(connection, columns, SetLeaf::new(self.selected), returning)
     }
 }
 
@@ -1107,7 +1103,11 @@ where
     }
 
     /// Execute the insert, returning the number of rows affected (mocked by the test backend).
-    pub fn insert(&self) -> Ready<Result<u64, TestError>> {
+    pub fn insert(&self) -> Ready<Result<u64, TestError>>
+    where
+        // One-shot execution collects only static binds, so the source must be free of runtime `param`s.
+        <Tree as SetArm<'conn, 'scope, TestConnection>>::Params: NoRuntimeParams,
+    {
         self.connection.execute_insert()
     }
 }

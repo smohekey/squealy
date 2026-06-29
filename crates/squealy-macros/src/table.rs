@@ -1646,7 +1646,9 @@ impl TableStruct {
                 {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                     let names = ::squealy::ConflictTarget::column_names(columns(table));
-                    ::squealy::IntoInsertSelect::into_insert_select::<#table_ident <'static, ::squealy::ColumnExpr>, ()>(source, names, ())
+                    // Build the insert on the *destination* builder's connection (`self.connection`); the
+                    // source provides only its SELECT arm.
+                    ::squealy::IntoInsertSelect::into_insert_select::<#table_ident <'static, ::squealy::ColumnExpr>, ()>(source, self.connection, names, ())
                 }
             }
 
