@@ -23,7 +23,8 @@ use crate::{
     QueryBuilder, RenderAssignment, RenderAst, RenderCaseArms, RenderCoalesceArgs,
     RenderInsertAssignments, RenderInsertRows, RenderPredicateAst, RenderPredicateNodes,
     RenderProjectable, RenderSelectAst, RenderSimpleCaseArms, RenderUpdateAssignments, SchemaTable,
-    SelectSink, Selected, SourceAlias, SqlType, TableProjection, UnaryStringFunc, UpdateableTable,
+    SelectSink, Selected, SourceAlias, SqlType, TableProjection, UnaryStringFunc, UpdateFromStyle,
+    UpdateableTable,
 };
 use std::marker::PhantomData;
 
@@ -1404,6 +1405,143 @@ where
         self.writer.write_all(b" = ")?;
         write_assignment_value::<B, _>(value, self.writer, self.renderer)
     }
+}
+
+/// Renders a correlated `UPDATE … <source>` into SQL text (discarding binds).
+pub fn write_update_from<S, O, B, Columns, Filters, Returning>(
+    dialect: &'static dyn Dialect,
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    columns: &Columns,
+    filters: &Filters,
+    returning: &Returning,
+    writer: &mut impl Write,
+) -> io::Result<()>
+where
+    S: UpdateableTable,
+    O: SchemaTable,
+    B: Backend,
+    Columns: RenderUpdateAssignments<B>,
+    Filters: RenderPredicateNodes<B>,
+    Returning: RenderProjectable<B>,
+{
+    let mut writer = SqlOnly(writer);
+    write_update_from_with_params::<S, O, B, _, _, _, _>(
+        dialect,
+        target_alias,
+        source_alias,
+        columns,
+        filters,
+        returning,
+        &mut writer,
+    )
+}
+
+/// Renders `UPDATE t AS a SET … <correlated source>` — the assignments and the correlation/filter
+/// predicates may reference both the target (`target_alias`) and the joined source (`source_alias`).
+/// The shape is dialect-specific ([`Dialect::update_from_style`]): PostgreSQL appends
+/// `FROM other AS b WHERE <predicates>`; MySQL joins `JOIN other AS b ON <predicates>` before `SET`.
+/// (For an inner-join update the join's `ON` and a trailing `WHERE` are equivalent, so the correlation
+/// and any extra filters render as one predicate list.)
+fn write_update_from_with_params<S, O, B, Columns, Filters, Returning, Writer>(
+    dialect: &'static dyn Dialect,
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    columns: &Columns,
+    filters: &Filters,
+    returning: &Returning,
+    writer: &mut Writer,
+) -> io::Result<()>
+where
+    S: UpdateableTable,
+    O: SchemaTable,
+    B: Backend,
+    Columns: RenderUpdateAssignments<B>,
+    Filters: RenderPredicateNodes<B>,
+    Returning: RenderProjectable<B>,
+    Writer: SqlWriter<B>,
+{
+    let mut renderer = Renderer::new(dialect);
+    writer.write_all(b"UPDATE ")?;
+    write_schema_table_ref::<S>(renderer.dialect, writer)?;
+    write!(writer, " AS {target_alias}")?;
+    match dialect.update_from_style() {
+        UpdateFromStyle::PgFrom => {
+            writer.write_all(b" SET ")?;
+            write_update_assignment_list::<B, _, _>(columns, writer, &mut renderer)?;
+            writer.write_all(b" FROM ")?;
+            write_schema_table_ref::<O>(renderer.dialect, writer)?;
+            write!(writer, " AS {source_alias}")?;
+            write_filters::<B, _>(filters, writer, &mut renderer)?;
+        }
+        UpdateFromStyle::MysqlJoin => {
+            writer.write_all(b" JOIN ")?;
+            write_schema_table_ref::<O>(renderer.dialect, writer)?;
+            write!(writer, " AS {source_alias} ON ")?;
+            let mut predicates = WritePredicateFilters {
+                writer,
+                renderer: &mut renderer,
+                index: 0,
+                _backend: PhantomData::<B>,
+            };
+            filters.try_visit(&mut predicates)?;
+            writer.write_all(b" SET ")?;
+            write_update_assignment_list::<B, _, _>(columns, writer, &mut renderer)?;
+        }
+    }
+    write_returning::<B, _>(returning, writer, &mut renderer)?;
+    Ok(())
+}
+
+/// Collects the binds of a correlated `UPDATE … <source>` (left-to-right in render order).
+pub fn write_update_from_params<S, O, B, Columns, Filters, Returning>(
+    dialect: &'static dyn Dialect,
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    columns: &Columns,
+    filters: &Filters,
+    returning: &Returning,
+    params: &mut Vec<<B as Backend>::Param>,
+) -> Result<(), <B as Backend>::Error>
+where
+    S: UpdateableTable,
+    O: SchemaTable,
+    B: Backend,
+    Columns: RenderUpdateAssignments<B>,
+    Filters: RenderPredicateNodes<B>,
+    Returning: RenderProjectable<B>,
+{
+    let mut writer = ParamCollector::<B>::new(params);
+    write_update_from_with_params::<S, O, B, _, _, _, _>(
+        dialect,
+        target_alias,
+        source_alias,
+        columns,
+        filters,
+        returning,
+        &mut writer,
+    )
+    .ok();
+    writer.finish()
+}
+
+/// Renders a comma-separated `col = <value>` assignment list (shared by `UPDATE` and `UPDATE … FROM`).
+fn write_update_assignment_list<B, Columns, Writer>(
+    columns: &Columns,
+    writer: &mut Writer,
+    renderer: &mut Renderer,
+) -> io::Result<()>
+where
+    B: Backend,
+    Columns: RenderUpdateAssignments<B>,
+    Writer: SqlWriter<B>,
+{
+    columns.try_visit(&mut WriteUpdateAssignments {
+        writer,
+        renderer,
+        index: 0,
+        _backend: PhantomData::<B>,
+    })
 }
 
 pub fn write_delete<S, B, Filters, Returning>(
