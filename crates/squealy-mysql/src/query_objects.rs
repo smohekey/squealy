@@ -1016,6 +1016,110 @@ where
     }
 }
 
+// --- DELETE … USING (MySQL renders `DELETE a FROM t JOIN other ON …`) ---
+
+/// Correlated `DELETE … USING` query object (MySQL).
+pub struct MysqlDeleteUsing<'conn, S, O, Filters = HNil, Conn = MysqlConnection> {
+    connection: &'conn Conn,
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    filters: Filters,
+    _table: PhantomData<(S, O)>,
+}
+
+impl<'conn, S, O, Filters, Conn> MysqlDeleteUsing<'conn, S, O, Filters, Conn>
+where
+    S: TableProjection,
+    O: TableProjection,
+    Filters: RenderPredicateNodes<Mysql>,
+{
+    fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError> {
+        let sql = self.to_sql();
+        let params = collect_mysql_params(0, |params| {
+            render::write_delete_using_params::<S, O, Mysql, _, _>(
+                &MysqlDialect,
+                self.target_alias,
+                self.source_alias,
+                &self.filters,
+                &(),
+                params,
+            )
+        })?;
+        Ok((sql, params))
+    }
+
+    /// Render this correlated delete into a newly allocated SQL string.
+    pub fn to_sql(&self) -> String {
+        rendered_sql(|writer| {
+            render::write_delete_using::<S, O, Mysql, _, _>(
+                &MysqlDialect,
+                self.target_alias,
+                self.source_alias,
+                &self.filters,
+                &(),
+                writer,
+            )
+        })
+    }
+
+    /// Collect bind parameters into a newly allocated vector.
+    pub fn collect_params(&self) -> Result<Vec<Value>, MysqlError> {
+        let mut params = Vec::new();
+        render::write_delete_using_params::<S, O, Mysql, _, _>(
+            &MysqlDialect,
+            self.target_alias,
+            self.source_alias,
+            &self.filters,
+            &(),
+            &mut params,
+        )?;
+        Ok(params)
+    }
+}
+
+impl<'conn, S, O, Filters, Conn> DeleteUsingQuery<'conn, S, O, Filters>
+    for MysqlDeleteUsing<'conn, S, O, Filters, Conn>
+where
+    S: TableProjection,
+    O: TableProjection,
+    Filters: PredicateNodes,
+    Conn: QueryBuilder<Backend = Mysql> + 'conn,
+{
+    type Builder = Conn;
+
+    fn build(
+        connection: &'conn Conn,
+        target_alias: SourceAlias,
+        source_alias: SourceAlias,
+        filters: Filters,
+    ) -> Self {
+        Self {
+            connection,
+            target_alias,
+            source_alias,
+            filters,
+            _table: PhantomData,
+        }
+    }
+}
+
+impl<'conn, S, O, Filters, Conn> ExecutableDeleteUsingQuery<'conn, S, O, Filters>
+    for MysqlDeleteUsing<'conn, S, O, Filters, Conn>
+where
+    S: TableProjection,
+    O: TableProjection,
+    Filters: RenderPredicateNodes<Mysql>,
+    Filters::Params: NoRuntimeParams,
+    Conn: MysqlExecutor + 'conn,
+{
+    fn execute(&self) -> impl Future<Output = Result<u64, MysqlError>> + Send + '_ {
+        match self.execution_parts() {
+            Ok((sql, params)) => self.connection.run_execute(sql, params),
+            Err(error) => execute_error(error),
+        }
+    }
+}
+
 macro_rules! impl_query_builder_for {
     ($ty:ty) => {
         impl QueryBuilder for $ty {
@@ -1068,6 +1172,14 @@ macro_rules! impl_query_builder_for {
                 S: UpdateableTable,
                 O: squealy::SchemaTable,
                 Columns: UpdateAssignments,
+                Filters: PredicateNodes;
+
+            type DeleteUsing<'conn, S, O, Filters>
+                = MysqlDeleteUsing<'conn, S, O, Filters, Self>
+            where
+                Self: 'conn,
+                S: TableProjection,
+                O: TableProjection,
                 Filters: PredicateNodes;
         }
     };

@@ -3254,6 +3254,43 @@ where
     fn execute(&self) -> impl Future<Output = Result<u64, ErrorOf<Self::Builder>>> + Send + '_;
 }
 
+/// A correlated `DELETE … <source>` query object (PostgreSQL `DELETE FROM t USING other WHERE …` /
+/// MySQL `DELETE a FROM t JOIN other ON …`). The delete-from-second-source analogue of
+/// [`UpdateFromQuery`]; v1 supports neither `RETURNING` nor runtime params.
+pub trait DeleteUsingQuery<'builder, S, O, Filters>
+where
+    S: TableProjection,
+    O: TableProjection,
+    Filters: PredicateNodes,
+{
+    type Builder: QueryBuilder + 'builder;
+
+    fn build(
+        builder: &'builder Self::Builder,
+        target_alias: SourceAlias,
+        source_alias: SourceAlias,
+        filters: Filters,
+    ) -> Self
+    where
+        Self: Sized;
+}
+
+/// A correlated `DELETE … <source>` query object that can execute through a connection. Split from
+/// [`DeleteUsingQuery`] so the executor bound stays at the `delete()` call site (mirroring
+/// [`ExecutableUpdateFromQuery`]).
+pub trait ExecutableDeleteUsingQuery<'builder, S, O, Filters>:
+    DeleteUsingQuery<'builder, S, O, Filters>
+where
+    Self::Builder: Connection,
+    S: TableProjection,
+    O: TableProjection,
+    Filters: PredicateNodes,
+    Filters::Params: NoRuntimeParams,
+{
+    /// Execute the correlated delete, returning the number of rows affected.
+    fn execute(&self) -> impl Future<Output = Result<u64, ErrorOf<Self::Builder>>> + Send + '_;
+}
+
 /// An update query object that can execute or fetch rows through a connection.
 pub trait ExecutableUpdateQuery<'conn, Columns, Filters, Returning>:
     UpdateQuery<'conn, Columns, Filters, Returning>
@@ -5305,6 +5342,114 @@ where
 }
 
 /// A consuming, source-first select builder carrying typed sources.
+/// Builder for a correlated `DELETE … <source>` (from `from::<T>().using::<O>()`). `where_` adds the
+/// correlation/filter predicates over both sources; at least one is required (the join predicate)
+/// before the delete can run.
+pub struct DeleteUsingBuilder<
+    'conn,
+    'scope,
+    Conn,
+    S,
+    O,
+    Filters = HNil,
+    FilterState = MutationUnfiltered,
+> where
+    Conn: QueryBuilder + 'conn,
+    S: TableProjection,
+    O: TableProjection,
+    Filters: PredicateNodes,
+{
+    connection: &'conn Conn,
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    filters: Filters,
+    _table: PhantomData<(S, O)>,
+    _state: PhantomData<FilterState>,
+    _scope: PhantomData<&'scope ()>,
+}
+
+impl<'conn, 'scope, Conn, S, O, Filters, FilterState>
+    DeleteUsingBuilder<'conn, 'scope, Conn, S, O, Filters, FilterState>
+where
+    Conn: QueryBuilder + 'conn,
+    S: TableProjection + ProjectionShape,
+    O: TableProjection + ProjectionShape,
+    Filters: PredicateNodes,
+{
+    /// Add a correlation/filter predicate over `(target_exprs, source_exprs)`. Transitions to the
+    /// filtered state the delete requires — a correlated delete must carry a join predicate.
+    #[allow(clippy::type_complexity)] // the widened builder type is inherent to the typestate
+    pub fn where_<P, PredicateAst>(
+        self,
+        predicate: impl FnOnce(
+            (
+                <S as ProjectionShape>::Exprs<'scope>,
+                <O as ProjectionShape>::Exprs<'scope>,
+            ),
+        ) -> Predicate<'scope, P, PredicateAst>,
+    ) -> DeleteUsingBuilder<
+        'conn,
+        'scope,
+        Conn,
+        S,
+        O,
+        <Filters as PushBack<Predicate<'scope, P, PredicateAst>>>::Output,
+        MutationFiltered,
+    >
+    where
+        P: PredicateKind,
+        PredicateAst: crate::PredicateAst + crate::NonAggregatePredicate,
+        Filters: PushBack<Predicate<'scope, P, PredicateAst>>,
+        <Filters as PushBack<Predicate<'scope, P, PredicateAst>>>::Output: PredicateNodes,
+    {
+        let target = <S as ProjectionShape>::exprs(self.target_alias);
+        let source = <O as ProjectionShape>::exprs(self.source_alias);
+        DeleteUsingBuilder {
+            connection: self.connection,
+            target_alias: self.target_alias,
+            source_alias: self.source_alias,
+            filters: self.filters.push_back(predicate((target, source))),
+            _table: PhantomData,
+            _state: PhantomData,
+            _scope: PhantomData,
+        }
+    }
+}
+
+impl<'conn, 'scope, Conn, S, O, Filters>
+    DeleteUsingBuilder<'conn, 'scope, Conn, S, O, Filters, MutationFiltered>
+where
+    Conn: QueryBuilder + 'conn,
+    S: TableProjection + 'conn,
+    O: TableProjection + 'conn,
+    Filters: PredicateNodes + 'conn,
+{
+    /// Build the backend query object — render it with `to_sql`/`collect_params`, run it with `delete`.
+    pub fn build(self) -> Conn::DeleteUsing<'conn, S, O, Filters> {
+        <Conn::DeleteUsing<'conn, S, O, Filters> as DeleteUsingQuery<'conn, S, O, Filters>>::build(
+            self.connection,
+            self.target_alias,
+            self.source_alias,
+            self.filters,
+        )
+    }
+
+    /// Execute the correlated delete, returning the number of rows affected.
+    pub fn delete(self) -> impl Future<Output = Result<u64, ErrorOf<Conn>>> + Send + 'conn
+    where
+        Conn: Connection + 'conn,
+        'scope: 'conn,
+        // Read-only views do not implement `UpdateableTable`, so deleting through one is a compile error.
+        S: UpdateableTable,
+        Filters::Params: NoRuntimeParams,
+        Conn::DeleteUsing<'conn, S, O, Filters>:
+            ExecutableDeleteUsingQuery<'conn, S, O, Filters> + Send,
+    {
+        let query = self.build();
+        async move { query.execute().await }
+    }
+}
+
 pub struct From<'conn, 'scope, Conn, Exprs, Source>
 where
     Conn: QueryBuilder,
@@ -5334,6 +5479,24 @@ where
                 tail: HNil,
             },
             source: RootSource::new(alias),
+            _scope: PhantomData,
+        }
+    }
+
+    /// Begin a correlated `DELETE … USING other` (PostgreSQL) / `DELETE … JOIN other` (MySQL): the
+    /// subsequent `where_` closure receives `(target_exprs, source_exprs)`, so the correlation may
+    /// reference the joined source `O`. A correlation predicate is required before the delete can run.
+    pub fn using<O>(self) -> DeleteUsingBuilder<'conn, 'scope, Conn, S, O>
+    where
+        O: QuerySource,
+    {
+        DeleteUsingBuilder {
+            connection: self.connection,
+            target_alias: SourceAlias::new(self.depth, 0),
+            source_alias: SourceAlias::new(self.depth, 1),
+            filters: HNil,
+            _table: PhantomData,
+            _state: PhantomData,
             _scope: PhantomData,
         }
     }

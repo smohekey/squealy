@@ -196,6 +196,23 @@ fn test_update_from_collects_params() {
 }
 
 #[test]
+fn test_delete_using_renders_pg_style() {
+    // `DELETE … USING` correlates the target with a second source; the test backend renders the
+    // PostgreSQL form (`DELETE FROM t AS a USING other AS b WHERE <correlation>`).
+    let conn = TestConnection;
+    let query = conn
+        .from::<Counter>()
+        .using::<Post>()
+        .where_(|(counter, post)| counter.id.equals(post.user_id))
+        .build();
+    assert_eq!(
+        query.to_sql(),
+        "DELETE FROM counters AS q0_0 USING posts AS q0_1 WHERE (q0_0.id = q0_1.user_id)"
+    );
+    assert_eq!(query.collect_params().unwrap(), Vec::<TestParam>::new());
+}
+
+#[test]
 fn test_explicit_update_columns_render_expression_assignments() {
     let update = TestConnection
         .to_columns::<Counter, (CounterCount,)>()

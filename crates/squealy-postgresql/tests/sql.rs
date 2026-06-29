@@ -1146,6 +1146,25 @@ fn postgres_explicit_update_columns_render_expression_assignments() {
 }
 
 #[test]
+fn postgres_delete_using_renders_using_clause() {
+    // PostgreSQL renders a correlated delete as `DELETE FROM t AS a USING other AS b WHERE <corr>`.
+    let delete = Postgres
+        .from::<Counter>()
+        .using::<Post>()
+        .where_(|(counter, post)| counter.id.equals(post.user_id))
+        .build();
+    assert_eq!(
+        delete.to_sql(),
+        "DELETE FROM \"counters\" AS q0_0 USING \"public\".\"posts\" AS q0_1 \
+         WHERE (q0_0.\"id\" = q0_1.\"user_id\")"
+    );
+    assert_eq!(
+        delete.collect_params().unwrap(),
+        Vec::<PostgresParam>::new()
+    );
+}
+
+#[test]
 fn postgres_update_from_renders_from_clause() {
     // PostgreSQL renders a correlated update as `SET … FROM other AS b WHERE <correlation>`.
     let update = Postgres

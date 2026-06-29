@@ -1816,3 +1816,57 @@ async fn postgres_update_from_round_trip() {
         .expect("select after update-from");
     assert_eq!(names, vec!["Renamed".to_owned()]);
 }
+
+#[tokio::test]
+#[ignore]
+async fn postgres_delete_using_round_trip() {
+    let _db_guard = db_lock().lock().await;
+    let client = connect().await;
+    client
+        .batch_execute("DROP TABLE IF EXISTS join_posts; DROP TABLE IF EXISTS join_users")
+        .await
+        .expect("drop old join tables");
+    create_table::<JoinUser>(&client, &Postgres).await;
+    create_table::<JoinPost>(&client, &Postgres).await;
+    let connection = PostgresConnection::new(client);
+
+    let ada = connection
+        .to::<JoinUser>()
+        .name("Ada")
+        .insert_returning(|user| user)
+        .fetch_one()
+        .await
+        .expect("insert Ada");
+    connection
+        .to::<JoinUser>()
+        .name("Grace")
+        .insert()
+        .await
+        .expect("insert Grace");
+    connection
+        .to::<JoinPost>()
+        .user_id(ada.id)
+        .title("Notes")
+        .insert()
+        .await
+        .expect("insert post");
+
+    // DELETE join_users a USING join_posts p WHERE a.id = p.user_id — removes users that authored a post.
+    let affected = connection
+        .from::<JoinUser>()
+        .using::<JoinPost>()
+        .where_(|(user, post)| user.id.equals(post.user_id))
+        .delete()
+        .await
+        .expect("delete ... using");
+    assert_eq!(affected, 1);
+
+    let names = connection
+        .from::<JoinUser>()
+        .order_by(|(user,)| user.id.asc())
+        .select(|(user,)| user.name)
+        .collect()
+        .await
+        .expect("select after delete-using");
+    assert_eq!(names, vec!["Grace".to_owned()]);
+}

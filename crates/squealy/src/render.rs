@@ -1605,6 +1605,112 @@ where
     Ok(())
 }
 
+/// Renders a correlated `DELETE … <source>` into SQL text (discarding binds).
+pub fn write_delete_using<S, O, B, Filters, Returning>(
+    dialect: &'static dyn Dialect,
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    filters: &Filters,
+    returning: &Returning,
+    writer: &mut impl Write,
+) -> io::Result<()>
+where
+    S: TableProjection,
+    O: TableProjection,
+    B: Backend,
+    Filters: RenderPredicateNodes<B>,
+    Returning: RenderProjectable<B>,
+{
+    let mut writer = SqlOnly(writer);
+    write_delete_using_with_params::<S, O, B, _, _, _>(
+        dialect,
+        target_alias,
+        source_alias,
+        filters,
+        returning,
+        &mut writer,
+    )
+}
+
+/// Renders `DELETE FROM t AS a <correlated source>` — the correlation/filter predicates may reference
+/// both the target (`target_alias`) and the joined source (`source_alias`). Dialect-specific
+/// ([`Dialect::update_from_style`]): PostgreSQL `DELETE FROM t AS a USING other AS b WHERE <predicates>`;
+/// MySQL `DELETE a FROM t AS a JOIN other AS b ON <predicates>` (the leading alias picks the table whose
+/// rows are deleted).
+fn write_delete_using_with_params<S, O, B, Filters, Returning, Writer>(
+    dialect: &'static dyn Dialect,
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    filters: &Filters,
+    returning: &Returning,
+    writer: &mut Writer,
+) -> io::Result<()>
+where
+    S: TableProjection,
+    O: TableProjection,
+    B: Backend,
+    Filters: RenderPredicateNodes<B>,
+    Returning: RenderProjectable<B>,
+    Writer: SqlWriter<B>,
+{
+    let mut renderer = Renderer::new(dialect);
+    match dialect.update_from_style() {
+        UpdateFromStyle::PgFrom => {
+            writer.write_all(b"DELETE FROM ")?;
+            write_table_ref::<S>(renderer.dialect, writer)?;
+            write!(writer, " AS {target_alias} USING ")?;
+            write_table_ref::<O>(renderer.dialect, writer)?;
+            write!(writer, " AS {source_alias}")?;
+            write_filters::<B, _>(filters, writer, &mut renderer)?;
+        }
+        UpdateFromStyle::MysqlJoin => {
+            write!(writer, "DELETE {target_alias} FROM ")?;
+            write_table_ref::<S>(renderer.dialect, writer)?;
+            write!(writer, " AS {target_alias} JOIN ")?;
+            write_table_ref::<O>(renderer.dialect, writer)?;
+            write!(writer, " AS {source_alias} ON ")?;
+            let mut predicates = WritePredicateFilters {
+                writer,
+                renderer: &mut renderer,
+                index: 0,
+                _backend: PhantomData::<B>,
+            };
+            filters.try_visit(&mut predicates)?;
+        }
+    }
+    write_returning::<B, _>(returning, writer, &mut renderer)?;
+    Ok(())
+}
+
+/// Collects the binds of a correlated `DELETE … <source>` (left-to-right in render order).
+pub fn write_delete_using_params<S, O, B, Filters, Returning>(
+    dialect: &'static dyn Dialect,
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    filters: &Filters,
+    returning: &Returning,
+    params: &mut Vec<<B as Backend>::Param>,
+) -> Result<(), <B as Backend>::Error>
+where
+    S: TableProjection,
+    O: TableProjection,
+    B: Backend,
+    Filters: RenderPredicateNodes<B>,
+    Returning: RenderProjectable<B>,
+{
+    let mut writer = ParamCollector::<B>::new(params);
+    write_delete_using_with_params::<S, O, B, _, _, _>(
+        dialect,
+        target_alias,
+        source_alias,
+        filters,
+        returning,
+        &mut writer,
+    )
+    .ok();
+    writer.finish()
+}
+
 fn write_returning<B, Writer>(
     returning: &impl RenderProjectable<B>,
     writer: &mut Writer,

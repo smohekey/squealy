@@ -1823,3 +1823,19 @@ fn mysql_update_from_renders_join() {
          SET q0_0.`tenant_id` = q0_1.`id`"
     );
 }
+
+#[test]
+fn mysql_delete_using_renders_join() {
+    // MySQL renders a correlated delete as `DELETE a FROM t AS a JOIN other AS b ON <corr>` — the
+    // leading alias selects which table's rows are deleted.
+    let delete = Mysql
+        .from::<Membership>()
+        .using::<Tenant>()
+        .where_(|(membership, tenant)| membership.tenant_id.equals(tenant.id))
+        .build();
+    assert_eq!(
+        delete.to_sql(),
+        "DELETE q0_0 FROM `shop`.`memberships` AS q0_0 \
+         JOIN `shop`.`tenants` AS q0_1 ON (q0_0.`tenant_id` = q0_1.`id`)"
+    );
+}

@@ -8,16 +8,16 @@ use bytes::{Buf, BufMut, BytesMut};
 use futures_core::Stream;
 
 use squealy::{
-    Backend, Connection, Decode, DeleteQuery, Encode, ExecutableDeleteQuery, ExecutableInsertQuery,
-    ExecutableSelectQuery, ExecutableUpdateFromQuery, ExecutableUpdateQuery, HAppend, HList, HNil,
-    InsertQuery, InsertRows, InsertableTable, IntoInsertSelect, NoRuntimeParams, ParamWriter,
-    PredicateNodes, PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery,
-    PreparableUpdateQuery, PreparedMutationQuery, PreparedParamValues, PreparedSelectQuery,
-    Projectable, ProjectionShape, QueryBuilder, RenderInsertRows, RenderPredicateNodes,
-    RenderProjectable, RenderSelectAst, RenderUpdateAssignments, RowsAffected, SchemaTable,
-    SelectAst, SelectQuery, Selected, SetArm, SetLeaf, SetOperand, SetOperations,
-    SetSelectModifiers, SetTail, SourceAlias, TableProjection, UpdateAssignments, UpdateFromQuery,
-    UpdateQuery, UpdateableTable,
+    Backend, Connection, Decode, DeleteQuery, DeleteUsingQuery, Encode, ExecutableDeleteQuery,
+    ExecutableDeleteUsingQuery, ExecutableInsertQuery, ExecutableSelectQuery,
+    ExecutableUpdateFromQuery, ExecutableUpdateQuery, HAppend, HList, HNil, InsertQuery,
+    InsertRows, InsertableTable, IntoInsertSelect, NoRuntimeParams, ParamWriter, PredicateNodes,
+    PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery,
+    PreparedMutationQuery, PreparedParamValues, PreparedSelectQuery, Projectable, ProjectionShape,
+    QueryBuilder, RenderInsertRows, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
+    RenderUpdateAssignments, RowsAffected, SchemaTable, SelectAst, SelectQuery, Selected, SetArm,
+    SetLeaf, SetOperand, SetOperations, SetSelectModifiers, SetTail, SourceAlias, TableProjection,
+    UpdateAssignments, UpdateFromQuery, UpdateQuery, UpdateableTable,
 };
 use squealy::{ExecutableSetSelectQuery, PreparableSetSelectQuery};
 use tokio_postgres::{
@@ -1813,6 +1813,108 @@ where
     O: SchemaTable,
     Columns: RenderUpdateAssignments<Postgres>,
     Columns::Params: NoRuntimeParams,
+    Filters: RenderPredicateNodes<Postgres>,
+    Filters::Params: NoRuntimeParams,
+    Conn: PostgresExecutor + 'conn,
+{
+    fn execute(&self) -> impl Future<Output = Result<u64, PostgresError>> + Send + '_ {
+        match self.execution_parts() {
+            Ok((sql, params)) => self.connection.execute_sql(sql, params),
+            Err(error) => execute_error(error),
+        }
+    }
+}
+
+/// Correlated `DELETE … USING` query object (PostgreSQL).
+pub struct PostgresDeleteUsing<'conn, S, O, Filters = HNil, Conn = PostgresConnection> {
+    connection: &'conn Conn,
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    filters: Filters,
+    _table: PhantomData<(S, O)>,
+}
+
+impl<'conn, S, O, Filters, Conn> PostgresDeleteUsing<'conn, S, O, Filters, Conn>
+where
+    S: TableProjection,
+    O: TableProjection,
+    Filters: RenderPredicateNodes<Postgres>,
+{
+    fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
+        let sql = self.to_sql();
+        let params = collect_postgres_params(0, |params| {
+            render::write_delete_using_params::<S, O, Postgres, _, _>(
+                &PostgresDialect,
+                self.target_alias,
+                self.source_alias,
+                &self.filters,
+                &(),
+                params,
+            )
+        })?;
+        Ok((sql, params))
+    }
+
+    /// Render this correlated delete into a newly allocated SQL string.
+    pub fn to_sql(&self) -> String {
+        rendered_sql(|writer| {
+            render::write_delete_using::<S, O, Postgres, _, _>(
+                &PostgresDialect,
+                self.target_alias,
+                self.source_alias,
+                &self.filters,
+                &(),
+                writer,
+            )
+        })
+    }
+
+    /// Collect bind parameters into a newly allocated vector.
+    pub fn collect_params(&self) -> Result<Vec<PostgresParam>, PostgresError> {
+        let mut params = Vec::new();
+        render::write_delete_using_params::<S, O, Postgres, _, _>(
+            &PostgresDialect,
+            self.target_alias,
+            self.source_alias,
+            &self.filters,
+            &(),
+            &mut params,
+        )?;
+        Ok(params)
+    }
+}
+
+impl<'conn, S, O, Filters, Conn> DeleteUsingQuery<'conn, S, O, Filters>
+    for PostgresDeleteUsing<'conn, S, O, Filters, Conn>
+where
+    S: TableProjection,
+    O: TableProjection,
+    Filters: PredicateNodes,
+    Conn: QueryBuilder<Backend = Postgres> + 'conn,
+{
+    type Builder = Conn;
+
+    fn build(
+        connection: &'conn Conn,
+        target_alias: SourceAlias,
+        source_alias: SourceAlias,
+        filters: Filters,
+    ) -> Self {
+        Self {
+            connection,
+            target_alias,
+            source_alias,
+            filters,
+            _table: PhantomData,
+        }
+    }
+}
+
+impl<'conn, S, O, Filters, Conn> ExecutableDeleteUsingQuery<'conn, S, O, Filters>
+    for PostgresDeleteUsing<'conn, S, O, Filters, Conn>
+where
+    S: TableProjection,
+    O: TableProjection,
     Filters: RenderPredicateNodes<Postgres>,
     Filters::Params: NoRuntimeParams,
     Conn: PostgresExecutor + 'conn,
