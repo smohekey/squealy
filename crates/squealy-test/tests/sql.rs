@@ -2034,6 +2034,46 @@ fn test_case_with_type_aliased_nullable_branch_is_nullable() {
     assert!(sql.contains("IS NULL"), "{sql}");
 }
 
+#[derive(Clone, Debug, PartialEq, Table)]
+struct AliasedRequired<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    name: C::Type<'scope, String>,
+    label: C::Type<'scope, MaybeLabel>,
+}
+
+#[test]
+fn test_insert_select_omits_alias_nullable_column() {
+    // `label` is nullable through a type alias, so it is omittable from an `INSERT … SELECT` target
+    // list — the required-column coverage resolves nullability type-level via `ColumnNullability`, not a
+    // syntactic `Option<…>` check. This must compile (only the required, non-null `name` is covered).
+    let conn = TestConnection;
+    let query = conn.to::<AliasedRequired>().insert_select(
+        |aliased| aliased.name,
+        conn.from::<AliasedRequired>()
+            .select(|(aliased,)| aliased.name),
+    );
+    let sql = query.to_sql();
+    assert!(sql.contains("INSERT INTO") && sql.contains("name"), "{sql}");
+}
+
+#[test]
+fn test_insert_select_widens_nonnull_source_into_nullable_target() {
+    // A non-null source column (`name: String`) may fill a nullable target column
+    // (`label: Option<String>`) — the `T` → `Option<T>` widening that SQL and the setter insert allow.
+    let conn = TestConnection;
+    let query = conn.to::<AliasedRequired>().insert_select(
+        |aliased| (aliased.name, aliased.label),
+        conn.from::<AliasedRequired>()
+            .select(|(aliased,)| (aliased.name, aliased.name)),
+    );
+    assert_eq!(
+        query.to_sql(),
+        "INSERT INTO aliased_requireds (name, label) \
+         SELECT q0_0.name AS t0_name, q0_0.name AS t1_name FROM aliased_requireds AS q0_0"
+    );
+}
+
 #[test]
 fn test_case_with_in_subquery_condition_classifies() {
     // A non-aggregate `in_subquery` condition (column operand) keeps the CASE a scalar projection.
@@ -2397,5 +2437,74 @@ fn test_for_share_renders() {
     assert_eq!(
         q.to_sql(),
         "SELECT q0_0.id AS id FROM public.users AS q0_0 FOR SHARE"
+    );
+}
+
+#[test]
+fn test_insert_select_renders() {
+    // INSERT INTO t (cols) SELECT … — the inserted rows come from a query whose projected row type
+    // matches the target columns.
+    let conn = TestConnection;
+    let q = conn.to::<User>().insert_select(
+        |user| user.name,
+        conn.from::<User>()
+            .where_(|user| user.id.greater_than(10))
+            .select(|(user,)| user.name),
+    );
+    assert_eq!(
+        q.to_sql(),
+        "INSERT INTO public.users (name) \
+         SELECT q0_0.name AS name FROM public.users AS q0_0 WHERE (q0_0.id > ?)"
+    );
+    assert_eq!(q.collect_params().unwrap(), vec![TestParam::Int(10)]);
+}
+
+#[test]
+#[should_panic(expected = "lists the target column `label` more than once")]
+fn test_insert_select_rejects_duplicate_target_columns() {
+    // A repeated target column would render `INSERT INTO ... (..., label, label) ...`, which the
+    // database rejects — caught at query-construction time. (A repeated *required* column is instead a
+    // compile error via the coverage check; this exercises the construction-time guard for the rest.)
+    let conn = TestConnection;
+    let _query = conn.to::<AliasedRequired>().insert_select(
+        |aliased| (aliased.name, aliased.label, aliased.label),
+        conn.from::<AliasedRequired>()
+            .select(|(aliased,)| (aliased.name, aliased.label, aliased.label)),
+    );
+}
+
+#[test]
+fn test_insert_select_union_source_renders() {
+    // A set-op source (`select(...).union(...)`) inserts as `INSERT INTO t (cols) <union>`. The union
+    // is the insert source directly — no *outer* parentheses wrap it (the per-arm parens are the normal
+    // set-op rendering).
+    let conn = TestConnection;
+    let q = conn.to::<User>().insert_select(
+        |user| user.name,
+        conn.from::<User>()
+            .select(|(user,)| user.name)
+            .union(conn.from::<User>().select(|(user,)| user.name)),
+    );
+    assert_eq!(
+        q.to_sql(),
+        "INSERT INTO public.users (name) \
+         (SELECT q0_0.name AS name FROM public.users AS q0_0) \
+         UNION (SELECT q0_0.name AS name FROM public.users AS q0_0)"
+    );
+}
+
+#[test]
+fn test_insert_select_locked_source_renders() {
+    // A single *locked* source (`for_update()`) is a valid insert source — it renders `FOR UPDATE`,
+    // locking the copied rows. (The row-lock ban applies only to set-op operands, not single selects.)
+    let conn = TestConnection;
+    let q = conn.to::<User>().insert_select(
+        |user| user.name,
+        conn.from::<User>().for_update().select(|(user,)| user.name),
+    );
+    assert_eq!(
+        q.to_sql(),
+        "INSERT INTO public.users (name) \
+         SELECT q0_0.name AS name FROM public.users AS q0_0 FOR UPDATE"
     );
 }

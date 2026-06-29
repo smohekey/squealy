@@ -517,8 +517,8 @@ pub use foreign_key::ForeignKey;
 pub use index::Index;
 pub use list::{
     Contains, FixedList, HAppend, HCons, HList, HNil, Here, IntoNullableExprs, IntoPreparedParam,
-    MapFixedList, NoRuntimeParams, PreparedParamValues, PushBack, There, ToTuple, TupleAppend,
-    TupleConcat,
+    MapFixedList, NoRuntimeParams, PreparedParamValues, PushBack, RequiredCol, RequiredCovered,
+    There, ToTuple, TupleAppend, TupleConcat,
 };
 pub use model::{
     CaseArm, CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintEnforcement,
@@ -542,11 +542,12 @@ pub use query::{
     ExecutableSetSelectQuery, ExecutableUpdateQuery, ExplicitUpdateBuilder, ExprAssignmentValue,
     From, FullJoinSource, FullJoinTarget, InnerJoinSource, InsertAssignment, InsertAssignmentNode,
     InsertAssignments, InsertColumnKey, InsertColumnNullability, InsertColumnValues, InsertQuery,
-    InsertReady, InsertRow, InsertRowVisitor, InsertRows, InsertRowsBuilder, IntoAssignmentValue,
-    IntoInsertColumnValue, IntoNullableAssignmentValue, IntoUpdateColumnValue, IsNullable, Join,
-    JoinTarget, LeftJoin, LeftJoinSource, LeftJoinTarget, Limited, Locked, MutationFiltered,
-    MutationUnfiltered, NoSources, NonEmptyInsertRows, NonNullableColumn, NullableColumn, Offset,
-    OnConflict, OnConflictQueryBuilder, OrderBy, OuterJoin, PredicateNodes, PredicateVisitor,
+    InsertReady, InsertRow, InsertRowVisitor, InsertRows, InsertRowsBuilder, InsertSelectColumns,
+    InsertSelectRowCompatible, IntoAssignmentValue, IntoInsertColumnValue, IntoInsertSelect,
+    IntoNullableAssignmentValue, IntoUpdateColumnValue, IsNullable, Join, JoinTarget, LeftJoin,
+    LeftJoinSource, LeftJoinTarget, Limited, Locked, MutationFiltered, MutationUnfiltered,
+    NoSources, NonEmptyInsertRows, NonNullableColumn, NullableColumn, Offset, OnConflict,
+    OnConflictQueryBuilder, OrderBy, OuterJoin, PredicateNodes, PredicateVisitor,
     PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery, PreparableSetSelectQuery,
     PreparableUpdateQuery, PreparedMutationQuery, PreparedSelectQuery, RecursiveSelf,
     RenderAssignment, RenderAssignmentValue, RenderInsertAssignments, RenderInsertRows,
@@ -557,7 +558,7 @@ pub use query::{
     SetOperations, SetOrder, SetSelectModifiers, SetTail, SourceQuery, SourceSpec,
     StaticAssignmentValue, Subqueries, Subquery, SubquerySelect, ToColumns, UpdateAssignment,
     UpdateAssignmentNode, UpdateAssignments, UpdateColumnKey, UpdateColumnValues, UpdateQuery,
-    Upsert, Where, default,
+    Upsert, Where, assert_distinct_insert_select_columns, default,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{CTE, ColumnType, Database, RecursiveCTE, Schema, Table, View};

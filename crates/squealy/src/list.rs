@@ -94,6 +94,9 @@ pub struct There<Index>(core::marker::PhantomData<Index>);
 
 /// `Self` contains type `T` (with the position witnessed by `Index`). Currently used only by the
 /// `SELECT DISTINCT` + `ORDER BY` guard, so its unsatisfied-bound message is phrased for that case.
+/// (`INSERT … SELECT` column coverage uses the parallel [`CoversColumn`] leaf so it gets its own
+/// message — rustc surfaces the *deepest* failing trait, so the message must live on the leaf, not on
+/// a wrapper like [`AllContained`].)
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`SELECT DISTINCT` requires every `ORDER BY` key to also be in the projection",
@@ -110,6 +113,66 @@ impl<T, Tail> Contains<T, Here> for HCons<crate::Nullable<T>, Tail> {}
 
 impl<T, Head, Tail, Index> Contains<T, There<Index>> for HCons<Head, Tail> where
     Tail: Contains<T, Index>
+{
+}
+
+/// The target column list `Set` (an `HList` of column kinds) contains the required column `T` (position
+/// witnessed by `Index`). A parallel of [`Contains`] dedicated to `INSERT … SELECT` required-column
+/// coverage so its unsatisfied-bound message is phrased for that case — rustc surfaces the deepest
+/// failing trait, so the message must live here on the leaf rather than on the [`RequiredCovered`]
+/// wrapper.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`INSERT … SELECT` must list every required (non-null, no-default) column of the target table",
+    note = "add the missing required column(s) to the `INSERT … SELECT` target column list"
+)]
+pub trait CoversColumn<T, Index> {}
+
+impl<T, Tail> CoversColumn<T, Here> for HCons<T, Tail> {}
+
+impl<T, Head, Tail, Index> CoversColumn<T, There<Index>> for HCons<Head, Tail> where
+    Tail: CoversColumn<T, Index>
+{
+}
+
+/// A required insert column: its kind `K` paired with its type-level nullability `N`
+/// ([`NonNullableColumn`](crate::NonNullableColumn) / [`NullableColumn`](crate::NullableColumn)). The
+/// `Table` derive lists one per insertable, no-default column, resolving `N` via `ColumnNullability`
+/// (the same type-level path as the setter-based insert's readiness bounds — so a nullable column
+/// declared through a type alias is still recognized as omittable). [`RequiredCovered`] then requires
+/// only the non-null ones appear in an `INSERT … SELECT` target.
+#[doc(hidden)]
+pub struct RequiredCol<K, N>(core::marker::PhantomData<(K, N)>);
+
+/// Witness that a required column was satisfied by being omittable (nullable) rather than by membership
+/// in the target list.
+#[doc(hidden)]
+pub struct Omittable;
+
+/// Every **non-null** required column in `Self` (an `HList` of [`RequiredCol`]) appears in the target
+/// column list `Set`; nullable required columns are omittable and skipped. Mirrors the setter-based
+/// insert's type-level nullability. `Indices` are the per-element witnesses (a membership index for a
+/// covered non-null column, [`Omittable`] for a skipped nullable one), inferred by the compiler.
+#[doc(hidden)]
+pub trait RequiredCovered<Set, Indices> {}
+
+impl<Set> RequiredCovered<Set, HNil> for HNil {}
+
+// A non-null required column must be present in the target list.
+impl<Set, K, Tail, Index, RestIndices> RequiredCovered<Set, HCons<Index, RestIndices>>
+    for HCons<RequiredCol<K, crate::NonNullableColumn>, Tail>
+where
+    Set: CoversColumn<K, Index>,
+    Tail: RequiredCovered<Set, RestIndices>,
+{
+}
+
+// A nullable required column is omittable — skip it (no membership requirement). The concrete
+// nullability marker in the head keeps this from overlapping the non-null impl above.
+impl<Set, K, Tail, RestIndices> RequiredCovered<Set, HCons<Omittable, RestIndices>>
+    for HCons<RequiredCol<K, crate::NullableColumn>, Tail>
+where
+    Tail: RequiredCovered<Set, RestIndices>,
 {
 }
 

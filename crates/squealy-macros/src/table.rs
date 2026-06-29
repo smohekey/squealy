@@ -173,6 +173,27 @@ impl TableStruct {
             quote::quote! { ::squealy::HNil },
             |tail, kind| quote::quote! { ::squealy::HCons<#kind, #tail> },
         );
+        // The *required* insert columns (insertable, no default) as a list of `RequiredCol<K,
+        // Nullability>` — the set an `INSERT … SELECT`'s target columns must cover. Nullability is
+        // resolved type-level via `ColumnNullability` (matching `insert_ready_bounds`, not a syntactic
+        // `Option<…>` check), so the coverage check treats a column nullable through a type alias as
+        // omittable. A defaulted column is always omittable, so it is excluded entirely.
+        let required_insert_cols = self
+            .fields
+            .iter()
+            .zip(expr_kind_idents.iter())
+            .filter(|(field, _)| field.insertable() && field.attrs.default.is_none())
+            .map(|(field, kind)| {
+                let d = field.value_ty.clone();
+                quote::quote! {
+                    ::squealy::RequiredCol<#kind, <#d as ::squealy::ColumnNullability>::Nullability>
+                }
+            })
+            .collect::<Vec<_>>();
+        let required_insert_kind_list = required_insert_cols.iter().rev().fold(
+            quote::quote! { ::squealy::HNil },
+            |tail, item| quote::quote! { ::squealy::HCons<#item, #tail> },
+        );
         // The *declared* field value type `D` (e.g. `Option<SystemTime>` or `SystemTime`). Nullability
         // is resolved from it at the type level via `ColumnNullability`.
         let field_value_tys = self
@@ -471,7 +492,9 @@ impl TableStruct {
                 write_builder.definitions,
                 write_builder.table_impl,
                 quote::quote! {
-                    impl<'scope> ::squealy::InsertableTable for #ident <'scope, ::squealy::ColumnExpr> {}
+                    impl<'scope> ::squealy::InsertableTable for #ident <'scope, ::squealy::ColumnExpr> {
+                        type RequiredInsertColumns = #required_insert_kind_list;
+                    }
 
                     impl<'scope> ::squealy::UpdateableTable for #ident <'scope, ::squealy::ColumnExpr> {}
                 },
@@ -1615,6 +1638,57 @@ impl TableStruct {
                     let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
                     let target = ::squealy::ConflictTarget::column_names(target(table));
                     ::squealy::OnConflict::new(self.connection, self.insert_columns, target)
+                }
+            }
+
+            // `insert_select` is only available on a *fresh* builder: its rows come entirely from the
+            // source query, so any prior write-builder state would be silently dropped. The whole state
+            // is pinned to its initial form — no insert setters (`InsertColumns = HNil`), no update
+            // setters (`UpdateColumns = HNil`), and no filter (`Filters = HNil`, `MutationUnfiltered`) —
+            // so e.g. `.name(..).insert_select(..)` or `.where_(..).insert_select(..)` is a compile
+            // error. No insert-readiness bounds either (values come from the source, not setters).
+            impl<'conn, Conn, #(#insert_state_idents,)* #(#update_state_idents),*>
+                #builder_ident <'conn, Conn, ::squealy::HNil, ::squealy::HNil, ::squealy::HNil, ::squealy::MutationUnfiltered, #(#insert_state_idents,)* #(#update_state_idents),*>
+            where
+                Conn: ::squealy::QueryBuilder + 'conn,
+            {
+                /// `INSERT INTO t (columns) <select>` — insert the result of a query. `columns` selects
+                /// the target columns; `source` is a select whose projected row type must match them.
+                pub fn insert_select<'src_scope, __SquealyCoverage, __SquealyRowWitness, __SquealyCols, __SquealySource>(
+                    self,
+                    columns: impl ::std::ops::FnOnce(
+                        <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
+                    ) -> __SquealyCols,
+                    source: __SquealySource,
+                ) -> <__SquealySource as ::squealy::IntoInsertSelect<'conn, 'src_scope, Conn>>::InsertSelectQuery<#table_ident <'static, ::squealy::ColumnExpr>, ()>
+                where
+                    __SquealyCols: ::squealy::InsertSelectColumns<#table_ident <'static, ::squealy::ColumnExpr>> + ::squealy::ReturningProjection<'static>,
+                    <__SquealyCols as ::squealy::ReturningProjection<'static>>::Shape: ::squealy::IntoKindList,
+                    // The target columns must cover every required (insertable, non-null, no-default)
+                    // column, just like the setter-based insert (`__SquealyCoverage` are the inferred
+                    // per-required-column witnesses; nullable required columns are omittable).
+                    <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::InsertableTable>::RequiredInsertColumns:
+                        ::squealy::RequiredCovered<
+                            <<__SquealyCols as ::squealy::ReturningProjection<'static>>::Shape as ::squealy::IntoKindList>::Kinds,
+                            __SquealyCoverage,
+                        >,
+                    __SquealySource: ::squealy::IntoInsertSelect<'conn, 'src_scope, Conn>,
+                    // The source's row type must be assignable to the target columns' row type —
+                    // element-wise exact-or-widen (`T` into a nullable `Option<T>`), not exact equality.
+                    <__SquealySource as ::squealy::IntoInsertSelect<'conn, 'src_scope, Conn>>::Row:
+                        ::squealy::InsertSelectRowCompatible<
+                            <<__SquealyCols as ::squealy::ReturningProjection<'static>>::Shape as ::squealy::ProjectionShape>::Row,
+                            __SquealyRowWitness,
+                        >,
+                {
+                    let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
+                    let names = <__SquealyCols as ::squealy::InsertSelectColumns<#table_ident <'static, ::squealy::ColumnExpr>>>::column_names(columns(table));
+                    // The target list is fixed at the call site; reject a duplicate column (which the
+                    // database would reject) here rather than emitting invalid SQL.
+                    ::squealy::assert_distinct_insert_select_columns(&names);
+                    // Build the insert on the *destination* builder's connection (`self.connection`); the
+                    // source provides only its SELECT arm.
+                    ::squealy::IntoInsertSelect::into_insert_select::<#table_ident <'static, ::squealy::ColumnExpr>, ()>(source, self.connection, names, ())
                 }
             }
 
