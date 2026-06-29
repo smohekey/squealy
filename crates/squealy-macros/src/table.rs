@@ -1636,12 +1636,14 @@ impl TableStruct {
                 }
             }
 
-            // `insert_select` is only available on a *fresh* builder: its values come from the source
-            // query, not column setters, so the insert-state is pinned to `HNil` (no setters called) —
-            // mixing `.name(..).insert_select(..)` would silently drop the setter value, so it is a
-            // compile error. No insert-readiness bounds either (values come from the source).
-            impl<'conn, Conn, UpdateColumns, Filters, FilterState, #(#insert_state_idents,)* #(#update_state_idents),*>
-                #builder_ident <'conn, Conn, ::squealy::HNil, UpdateColumns, Filters, FilterState, #(#insert_state_idents,)* #(#update_state_idents),*>
+            // `insert_select` is only available on a *fresh* builder: its rows come entirely from the
+            // source query, so any prior write-builder state would be silently dropped. The whole state
+            // is pinned to its initial form — no insert setters (`InsertColumns = HNil`), no update
+            // setters (`UpdateColumns = HNil`), and no filter (`Filters = HNil`, `MutationUnfiltered`) —
+            // so e.g. `.name(..).insert_select(..)` or `.where_(..).insert_select(..)` is a compile
+            // error. No insert-readiness bounds either (values come from the source, not setters).
+            impl<'conn, Conn, #(#insert_state_idents,)* #(#update_state_idents),*>
+                #builder_ident <'conn, Conn, ::squealy::HNil, ::squealy::HNil, ::squealy::HNil, ::squealy::MutationUnfiltered, #(#insert_state_idents,)* #(#update_state_idents),*>
             where
                 Conn: ::squealy::QueryBuilder + 'conn,
             {

@@ -7,4 +7,4 @@ error[E0599]: no method named `insert_select` found for struct `__SquealyUserWri
 15 |     let _query = conn.to::<User>().name("Ada").insert_select(
    |                  ------------------------------^^^^^^^^^^^^^ method not found in `__SquealyUserWriteBuilder<'_, TestConnection, HCons<squealy::InsertAssignment<UserName, squealy::StaticAssignmentValue<std::string::String>>, HNil>, HCons<squealy::UpdateAssignment<UserName, squealy::StaticAssignmentValue<std::string::String>>, HNil>, HNil, squealy::MutationUnfiltered, __SquealyUserNameWriteInsertSet, __SquealyUserNameWriteUpdateSet>`
    |
-   = note: the method was found for `__SquealyUserWriteBuilder<'conn, Conn, HNil, UpdateColumns, Filters, FilterState, __SquealyUserNameWriteInsertState, __SquealyUserNameWriteUpdateState>`
+   = note: the method was found for `__SquealyUserWriteBuilder<'conn, Conn, HNil, HNil, HNil, squealy::MutationUnfiltered, __SquealyUserNameWriteInsertState, __SquealyUserNameWriteUpdateState>`
