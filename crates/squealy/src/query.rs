@@ -9,8 +9,8 @@ use crate::{
     Backend, ColumnExprAst, ColumnRef, Connection, Decode, Expr, ExprAst, ExprKind, HCons, HList,
     HNil, InsertableTable, IntoNullableExprs, Maybe, NoRuntimeParams, Order, ParamExprAst,
     Predicate, PredicateKind, Projectable, ProjectionShape, PushBack, QueryBuilder, QuerySource,
-    RenderAst, RenderProjectable, RuntimeParam, SourceAlias, SupportsReturning, TableProjection,
-    ToTuple, UpdateableTable,
+    RenderAst, RenderProjectable, RuntimeParam, SchemaTable, SourceAlias, SupportsReturning,
+    TableProjection, ToTuple, UpdateableTable,
 };
 
 type ErrorOf<Builder> = <<Builder as QueryBuilder>::Backend as Backend>::Error;
@@ -3006,6 +3006,188 @@ where
     }
 }
 
+// --- UPDATE … FROM (correlated update from a second source) ---
+
+impl<'conn, Conn, S, Columns> ToColumns<'conn, Conn, S, Columns, HNil>
+where
+    Conn: QueryBuilder + 'conn,
+{
+    /// Begin a correlated `UPDATE … FROM other` (PostgreSQL) / `UPDATE … JOIN other` (MySQL): the
+    /// subsequent `set`/`where_` closures receive `(target_exprs, source_exprs)`, so assignments and the
+    /// correlation may reference the joined source `O`.
+    pub fn from<O>(self) -> UpdateFromColumns<'conn, Conn, S, O, Columns>
+    where
+        O: SchemaTable,
+    {
+        UpdateFromColumns {
+            connection: self.connection,
+            target_alias: SourceAlias::new(0, 0),
+            source_alias: SourceAlias::new(0, 1),
+            _table: PhantomData,
+        }
+    }
+}
+
+/// Intermediate builder between `to_columns::<S, Cols>().from::<O>()` and `set`.
+pub struct UpdateFromColumns<'conn, Conn, S, O, Columns>
+where
+    Conn: QueryBuilder + 'conn,
+{
+    connection: &'conn Conn,
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    _table: PhantomData<(S, O, Columns)>,
+}
+
+impl<'conn, Conn, S, O, Columns> UpdateFromColumns<'conn, Conn, S, O, Columns>
+where
+    Conn: QueryBuilder + 'conn,
+    S: UpdateableTable + ProjectionShape,
+    O: SchemaTable + ProjectionShape,
+{
+    /// Provide the assignments; the closure receives `(target_exprs, source_exprs)` so a value may
+    /// reference the joined source (`SET col = source.col`).
+    pub fn set<Values>(
+        self,
+        values: impl FnOnce(
+            (
+                <S as ProjectionShape>::Exprs<'static>,
+                <O as ProjectionShape>::Exprs<'static>,
+            ),
+        ) -> Values,
+    ) -> UpdateFromBuilder<'conn, Conn, S, O, <Columns as UpdateColumnValues<S, Values>>::Assignments>
+    where
+        Columns: UpdateColumnValues<S, Values>,
+    {
+        let target = <S as ProjectionShape>::exprs(self.target_alias);
+        let source = <O as ProjectionShape>::exprs(self.source_alias);
+        UpdateFromBuilder {
+            connection: self.connection,
+            target_alias: self.target_alias,
+            source_alias: self.source_alias,
+            columns: Columns::into_update_assignments(values((target, source))),
+            filters: HNil,
+            _table: PhantomData,
+            _state: PhantomData,
+        }
+    }
+}
+
+/// Builder for a correlated `UPDATE … <source>`. `where_` adds the correlation/filter predicates (over
+/// both sources); at least one is required (the join predicate) before the update can run.
+pub struct UpdateFromBuilder<
+    'conn,
+    Conn,
+    S,
+    O,
+    Columns,
+    Filters = HNil,
+    FilterState = MutationUnfiltered,
+> where
+    Conn: QueryBuilder + 'conn,
+    S: UpdateableTable,
+    O: SchemaTable,
+    Columns: UpdateAssignments,
+    Filters: PredicateNodes,
+{
+    connection: &'conn Conn,
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    columns: Columns,
+    filters: Filters,
+    _table: PhantomData<(S, O)>,
+    _state: PhantomData<FilterState>,
+}
+
+impl<'conn, Conn, S, O, Columns, Filters, FilterState>
+    UpdateFromBuilder<'conn, Conn, S, O, Columns, Filters, FilterState>
+where
+    Conn: QueryBuilder + 'conn,
+    S: UpdateableTable + ProjectionShape,
+    O: SchemaTable + ProjectionShape,
+    Columns: UpdateAssignments,
+    Filters: PredicateNodes,
+{
+    /// Add a correlation/filter predicate over `(target_exprs, source_exprs)`. Transitions to the
+    /// filtered state the update requires — a correlated update must carry a join predicate.
+    #[allow(clippy::type_complexity)] // the widened builder type is inherent to the typestate
+    pub fn where_<P, PredicateAst>(
+        self,
+        predicate: impl FnOnce(
+            (
+                <S as ProjectionShape>::Exprs<'static>,
+                <O as ProjectionShape>::Exprs<'static>,
+            ),
+        ) -> Predicate<'static, P, PredicateAst>,
+    ) -> UpdateFromBuilder<
+        'conn,
+        Conn,
+        S,
+        O,
+        Columns,
+        <Filters as PushBack<Predicate<'static, P, PredicateAst>>>::Output,
+        MutationFiltered,
+    >
+    where
+        P: PredicateKind,
+        PredicateAst: crate::PredicateAst + crate::NonAggregatePredicate,
+        Filters: PushBack<Predicate<'static, P, PredicateAst>>,
+        <Filters as PushBack<Predicate<'static, P, PredicateAst>>>::Output: PredicateNodes,
+    {
+        let target = <S as ProjectionShape>::exprs(self.target_alias);
+        let source = <O as ProjectionShape>::exprs(self.source_alias);
+        UpdateFromBuilder {
+            connection: self.connection,
+            target_alias: self.target_alias,
+            source_alias: self.source_alias,
+            columns: self.columns,
+            filters: self.filters.push_back(predicate((target, source))),
+            _table: PhantomData,
+            _state: PhantomData,
+        }
+    }
+}
+
+impl<'conn, Conn, S, O, Columns, Filters>
+    UpdateFromBuilder<'conn, Conn, S, O, Columns, Filters, MutationFiltered>
+where
+    Conn: QueryBuilder + 'conn,
+    S: UpdateableTable + 'conn,
+    O: SchemaTable + 'conn,
+    Columns: UpdateAssignments + 'conn,
+    Filters: PredicateNodes + 'conn,
+{
+    /// Build the backend query object — render it with `to_sql`/`collect_params`, run it with `execute`.
+    pub fn build(self) -> Conn::UpdateFrom<'conn, S, O, Columns, Filters> {
+        <Conn::UpdateFrom<'conn, S, O, Columns, Filters> as UpdateFromQuery<
+            'conn,
+            S,
+            O,
+            Columns,
+            Filters,
+        >>::build(
+            self.connection,
+            self.target_alias,
+            self.source_alias,
+            self.columns,
+            self.filters,
+        )
+    }
+
+    /// Execute the correlated update, returning the number of rows affected.
+    pub fn update(self) -> impl Future<Output = Result<u64, ErrorOf<Conn>>> + Send + 'conn
+    where
+        Conn: Connection + 'conn,
+        Columns::Params: NoRuntimeParams,
+        Filters::Params: NoRuntimeParams,
+        Conn::UpdateFrom<'conn, S, O, Columns, Filters>:
+            ExecutableUpdateFromQuery<'conn, S, O, Columns, Filters> + Send,
+    {
+        let query = self.build();
+        async move { query.execute().await }
+    }
+}
+
 /// A backend-specific update query object built from typed update state.
 pub trait UpdateQuery<'builder, Columns, Filters, Returning>
 where
@@ -3027,6 +3209,49 @@ where
     ) -> Self
     where
         Self: Sized;
+}
+
+/// A correlated `UPDATE … <source>` query object (PostgreSQL `UPDATE t SET … FROM other WHERE …` /
+/// MySQL `UPDATE t JOIN other ON … SET …`). Kept separate from [`UpdateQuery`] because it carries a
+/// second source `O` (at `source_alias`); v1 supports neither `RETURNING` nor runtime params (the
+/// assignments/filters must be `NoRuntimeParams` to execute), so the surface is just render + execute.
+pub trait UpdateFromQuery<'builder, S, O, Columns, Filters>
+where
+    S: UpdateableTable,
+    O: SchemaTable,
+    Columns: UpdateAssignments,
+    Filters: PredicateNodes,
+{
+    type Builder: QueryBuilder + 'builder;
+
+    fn build(
+        builder: &'builder Self::Builder,
+        target_alias: SourceAlias,
+        source_alias: SourceAlias,
+        columns: Columns,
+        filters: Filters,
+    ) -> Self
+    where
+        Self: Sized;
+}
+
+/// A correlated `UPDATE … <source>` query object that can execute through a connection. Split from
+/// [`UpdateFromQuery`] (which the `UpdateFrom` GAT requires of every builder) so the executor bound
+/// stays at the `update()` call site — mirroring [`ExecutableUpdateQuery`]. v1 supports no runtime
+/// params, so the assignments and filters must be `NoRuntimeParams`.
+pub trait ExecutableUpdateFromQuery<'builder, S, O, Columns, Filters>:
+    UpdateFromQuery<'builder, S, O, Columns, Filters>
+where
+    Self::Builder: Connection,
+    S: UpdateableTable,
+    O: SchemaTable,
+    Columns: UpdateAssignments,
+    Columns::Params: NoRuntimeParams,
+    Filters: PredicateNodes,
+    Filters::Params: NoRuntimeParams,
+{
+    /// Execute the correlated update, returning the number of rows affected.
+    fn execute(&self) -> impl Future<Output = Result<u64, ErrorOf<Self::Builder>>> + Send + '_;
 }
 
 /// An update query object that can execute or fetch rows through a connection.

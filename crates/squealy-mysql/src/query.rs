@@ -14,13 +14,14 @@ use mysql_async::Value;
 use mysql_async::prelude::{FromValue, Queryable};
 use squealy::{
     Backend, Connection, Decode, DeleteQuery, Encode, ExecutableDeleteQuery, ExecutableInsertQuery,
-    ExecutableSelectQuery, ExecutableSetSelectQuery, ExecutableUpdateQuery, HNil, InsertQuery,
-    InsertRows, InsertableTable, IntoInsertSelect, NoRuntimeParams, ParamWriter, PredicateNodes,
-    PreparedParamValues, Projectable, ProjectionShape, QueryBuilder, RenderInsertRows,
-    RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderUpdateAssignments,
-    RowsAffected, SelectAst, SelectQuery, Selected, SetArm, SetLeaf, SetOperand, SetOperations,
-    SetSelectModifiers, SetTail, SourceAlias, Table, TableProjection, UpdateAssignments,
-    UpdateQuery, UpdateableTable, render,
+    ExecutableSelectQuery, ExecutableSetSelectQuery, ExecutableUpdateFromQuery,
+    ExecutableUpdateQuery, HNil, InsertQuery, InsertRows, InsertableTable, IntoInsertSelect,
+    NoRuntimeParams, ParamWriter, PredicateNodes, PreparedParamValues, Projectable,
+    ProjectionShape, QueryBuilder, RenderInsertRows, RenderPredicateNodes, RenderProjectable,
+    RenderSelectAst, RenderUpdateAssignments, RowsAffected, SchemaTable, SelectAst, SelectQuery,
+    Selected, SetArm, SetLeaf, SetOperand, SetOperations, SetSelectModifiers, SetTail, SourceAlias,
+    Table, TableProjection, UpdateAssignments, UpdateFromQuery, UpdateQuery, UpdateableTable,
+    render,
 };
 
 use crate::{Mysql, MysqlConnection, MysqlError};

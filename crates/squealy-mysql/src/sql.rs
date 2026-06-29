@@ -765,6 +765,12 @@ impl squealy::Dialect for MysqlDialect {
         write_quoted_ident(ident, &mut writer)
     }
 
+    /// MySQL has no `UPDATE … FROM`; a correlated update joins the source before `SET`
+    /// (`UPDATE t JOIN other ON … SET …`).
+    fn update_from_style(&self) -> squealy::UpdateFromStyle {
+        squealy::UpdateFromStyle::MysqlJoin
+    }
+
     // --- Upsert (`INSERT … ON DUPLICATE KEY UPDATE`) ---
 
     /// MySQL references the proposed row as `VALUES(\`col\`)` (vs PostgreSQL's `EXCLUDED."col"`). The

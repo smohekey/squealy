@@ -11,7 +11,7 @@ mod sql;
 
 pub use query::{
     EmptyRows, TestDelete, TestInsert, TestParam, TestParamWriter, TestPreparedMutation,
-    TestPreparedSelect, TestRowReader, TestSelect, TestUpdate,
+    TestPreparedSelect, TestRowReader, TestSelect, TestUpdate, TestUpdateFrom,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -102,6 +102,15 @@ impl QueryBuilder for TestConnection {
         Shape::Row: Decode<Self::Backend>,
         Filters: squealy::PredicateNodes,
         Returning: Projectable;
+
+    type UpdateFrom<'conn, S, O, Columns, Filters>
+        = TestUpdateFrom<'conn, S, O, Columns, Filters>
+    where
+        Self: 'conn,
+        S: UpdateableTable,
+        O: squealy::SchemaTable,
+        Columns: squealy::UpdateAssignments,
+        Filters: squealy::PredicateNodes;
 }
 
 impl Connection for TestConnection {}

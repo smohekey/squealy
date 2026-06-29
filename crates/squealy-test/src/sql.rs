@@ -520,6 +520,60 @@ where
     )
 }
 
+pub(crate) fn write_update_from<S, O, Columns, Filters, Returning>(
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    columns: &Columns,
+    filters: &Filters,
+    returning: &Returning,
+    writer: &mut impl Write,
+) -> io::Result<()>
+where
+    S: UpdateableTable,
+    O: SchemaTable,
+    Columns: RenderUpdateAssignments<crate::TestBackend>,
+    Filters: RenderPredicateNodes<crate::TestBackend>,
+    Returning: RenderProjectable<crate::TestBackend>,
+{
+    static DIALECT: TestDialect = TestDialect;
+    squealy::render::write_update_from::<S, O, crate::TestBackend, Columns, Filters, Returning>(
+        &DIALECT,
+        target_alias,
+        source_alias,
+        columns,
+        filters,
+        returning,
+        writer,
+    )
+}
+
+pub(crate) fn write_update_from_params<S, O, Columns, Filters, Returning>(
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    columns: &Columns,
+    filters: &Filters,
+    returning: &Returning,
+    params: &mut Vec<TestParam>,
+) -> Result<(), crate::TestError>
+where
+    S: UpdateableTable,
+    O: SchemaTable,
+    Columns: RenderUpdateAssignments<crate::TestBackend>,
+    Filters: RenderPredicateNodes<crate::TestBackend>,
+    Returning: RenderProjectable<crate::TestBackend>,
+{
+    static DIALECT: TestDialect = TestDialect;
+    squealy::render::write_update_from_params::<S, O, crate::TestBackend, Columns, Filters, Returning>(
+        &DIALECT,
+        target_alias,
+        source_alias,
+        columns,
+        filters,
+        returning,
+        params,
+    )
+}
+
 impl<Writer> TestSelectSink<'_, Writer>
 where
     Writer: SqlWriter,
