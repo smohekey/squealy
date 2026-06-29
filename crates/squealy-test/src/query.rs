@@ -12,9 +12,9 @@ use squealy::{
     PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery,
     PreparedMutationQuery, PreparedParamValues, PreparedSelectQuery, Projectable, ProjectionShape,
     QueryBuilder, RenderInsertRows, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
-    RenderUpdateAssignments, RowsAffected, SelectAst, SelectQuery, Selected, SetArm, SetLeaf,
-    SetOperand, SetOperations, SetSelectModifiers, SetTail, SourceAlias, TableProjection,
-    UpdateQuery, UpdateableTable,
+    RenderUpdateAssignments, RowsAffected, SchemaTable, SelectAst, SelectQuery, Selected, SetArm,
+    SetLeaf, SetOperand, SetOperations, SetSelectModifiers, SetTail, SourceAlias, TableProjection,
+    UpdateFromQuery, UpdateQuery, UpdateableTable,
 };
 
 use crate::{TestBackend, TestConnection, TestError, sql};
@@ -1285,6 +1285,102 @@ where
     {
         let mut params = Vec::new();
         self.write_params(&mut params)?;
+        Ok(params)
+    }
+}
+
+/// Correlated `UPDATE … <source>` query object for the test backend.
+pub struct TestUpdateFrom<'conn, S, O, Columns = HNil, Filters = HNil>
+where
+    S: UpdateableTable,
+    O: SchemaTable,
+    Columns: squealy::UpdateAssignments,
+    Filters: PredicateNodes,
+{
+    connection: &'conn TestConnection,
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    columns: Columns,
+    filters: Filters,
+    _table: PhantomData<(S, O)>,
+}
+
+impl<'conn, S, O, Columns, Filters> UpdateFromQuery<'conn, S, O, Columns, Filters>
+    for TestUpdateFrom<'conn, S, O, Columns, Filters>
+where
+    S: UpdateableTable,
+    O: SchemaTable,
+    Columns: squealy::UpdateAssignments,
+    Filters: PredicateNodes,
+{
+    type Builder = TestConnection;
+
+    fn build(
+        connection: &'conn TestConnection,
+        target_alias: SourceAlias,
+        source_alias: SourceAlias,
+        columns: Columns,
+        filters: Filters,
+    ) -> Self {
+        Self {
+            connection,
+            target_alias,
+            source_alias,
+            columns,
+            filters,
+            _table: PhantomData,
+        }
+    }
+}
+
+impl<'conn, S, O, Columns, Filters>
+    squealy::ExecutableUpdateFromQuery<'conn, S, O, Columns, Filters>
+    for TestUpdateFrom<'conn, S, O, Columns, Filters>
+where
+    S: UpdateableTable,
+    O: SchemaTable,
+    Columns: RenderUpdateAssignments<TestBackend>,
+    Columns::Params: NoRuntimeParams,
+    Filters: RenderPredicateNodes<TestBackend>,
+    Filters::Params: NoRuntimeParams,
+{
+    fn execute(&self) -> impl Future<Output = Result<u64, TestError>> + Send + '_ {
+        self.connection.execute_update()
+    }
+}
+
+impl<S, O, Columns, Filters> TestUpdateFrom<'_, S, O, Columns, Filters>
+where
+    S: UpdateableTable,
+    O: SchemaTable,
+    Columns: RenderUpdateAssignments<TestBackend>,
+    Filters: RenderPredicateNodes<TestBackend>,
+{
+    /// Render this correlated update into a newly allocated SQL string.
+    pub fn to_sql(&self) -> String {
+        render_sql(|writer| {
+            sql::write_update_from::<S, O, _, _, _>(
+                self.target_alias,
+                self.source_alias,
+                &self.columns,
+                &self.filters,
+                &(),
+                writer,
+            )
+        })
+    }
+
+    /// Collect bind parameters into a newly allocated vector.
+    pub fn collect_params(&self) -> Result<Vec<crate::TestParam>, TestError> {
+        let mut params = Vec::new();
+        sql::write_update_from_params::<S, O, _, _, _>(
+            self.target_alias,
+            self.source_alias,
+            &self.columns,
+            &self.filters,
+            &(),
+            &mut params,
+        )?;
         Ok(params)
     }
 }

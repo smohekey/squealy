@@ -1146,6 +1146,26 @@ fn postgres_explicit_update_columns_render_expression_assignments() {
 }
 
 #[test]
+fn postgres_update_from_renders_from_clause() {
+    // PostgreSQL renders a correlated update as `SET … FROM other AS b WHERE <correlation>`.
+    let update = Postgres
+        .to_columns::<Counter, (CounterCount,)>()
+        .from::<Post>()
+        .set(|(_counter, post)| (post.user_id,))
+        .where_(|(counter, post)| counter.id.equals(post.id))
+        .build();
+    assert_eq!(
+        update.to_sql(),
+        "UPDATE \"counters\" AS q0_0 SET \"count\" = q0_1.\"user_id\" \
+         FROM \"public\".\"posts\" AS q0_1 WHERE (q0_0.\"id\" = q0_1.\"id\")"
+    );
+    assert_eq!(
+        update.collect_params().unwrap(),
+        Vec::<PostgresParam>::new()
+    );
+}
+
+#[test]
 fn postgres_source_first_select_renders_from_backend_selected_ast() {
     let users = Postgres
         .from::<User>()

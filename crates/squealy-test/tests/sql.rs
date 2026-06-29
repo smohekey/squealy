@@ -155,6 +155,47 @@ fn test_update_renders_explicit_defaults() {
 }
 
 #[test]
+fn test_update_from_renders_pg_style() {
+    // `UPDATE … FROM` correlates the target with a second source; the test backend renders the
+    // PostgreSQL form (`SET … FROM other AS b WHERE <correlation>`). The set value and the correlation
+    // both reference the joined source.
+    let conn = TestConnection;
+    let query = conn
+        .to_columns::<Counter, (CounterCount,)>()
+        .from::<Post>()
+        .set(|(_counter, post)| (post.user_id,))
+        .where_(|(counter, post)| counter.id.equals(post.id))
+        .build();
+    assert_eq!(
+        query.to_sql(),
+        "UPDATE counters AS q0_0 SET count = q0_1.user_id \
+         FROM posts AS q0_1 WHERE (q0_0.id = q0_1.id)"
+    );
+    assert_eq!(query.collect_params().unwrap(), Vec::<TestParam>::new());
+}
+
+#[test]
+fn test_update_from_collects_params() {
+    // Binds are collected in render order: assignment value first, then the correlation/filter.
+    let conn = TestConnection;
+    let query = conn
+        .to_columns::<Counter, (CounterCount,)>()
+        .from::<Post>()
+        .set(|(_counter, _post)| (0,))
+        .where_(|(counter, post)| counter.id.equals(post.id).and(post.user_id.greater_than(5)))
+        .build();
+    assert_eq!(
+        query.to_sql(),
+        "UPDATE counters AS q0_0 SET count = ? \
+         FROM posts AS q0_1 WHERE ((q0_0.id = q0_1.id) AND (q0_1.user_id > ?))"
+    );
+    assert_eq!(
+        query.collect_params().unwrap(),
+        vec![TestParam::Int(0), TestParam::Int(5)]
+    );
+}
+
+#[test]
 fn test_explicit_update_columns_render_expression_assignments() {
     let update = TestConnection
         .to_columns::<Counter, (CounterCount,)>()

@@ -9,13 +9,14 @@ use futures_core::Stream;
 
 use squealy::{
     Backend, Connection, Decode, DeleteQuery, Encode, ExecutableDeleteQuery, ExecutableInsertQuery,
-    ExecutableSelectQuery, ExecutableUpdateQuery, HAppend, HList, HNil, InsertQuery, InsertRows,
-    InsertableTable, IntoInsertSelect, NoRuntimeParams, ParamWriter, PredicateNodes,
-    PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery, PreparableUpdateQuery,
-    PreparedMutationQuery, PreparedParamValues, PreparedSelectQuery, Projectable, ProjectionShape,
-    QueryBuilder, RenderInsertRows, RenderPredicateNodes, RenderProjectable, RenderSelectAst,
-    RenderUpdateAssignments, RowsAffected, SelectAst, SelectQuery, Selected, SetArm, SetLeaf,
-    SetOperand, SetOperations, SetSelectModifiers, SetTail, SourceAlias, TableProjection,
+    ExecutableSelectQuery, ExecutableUpdateFromQuery, ExecutableUpdateQuery, HAppend, HList, HNil,
+    InsertQuery, InsertRows, InsertableTable, IntoInsertSelect, NoRuntimeParams, ParamWriter,
+    PredicateNodes, PreparableDeleteQuery, PreparableInsertQuery, PreparableSelectQuery,
+    PreparableUpdateQuery, PreparedMutationQuery, PreparedParamValues, PreparedSelectQuery,
+    Projectable, ProjectionShape, QueryBuilder, RenderInsertRows, RenderPredicateNodes,
+    RenderProjectable, RenderSelectAst, RenderUpdateAssignments, RowsAffected, SchemaTable,
+    SelectAst, SelectQuery, Selected, SetArm, SetLeaf, SetOperand, SetOperations,
+    SetSelectModifiers, SetTail, SourceAlias, TableProjection, UpdateAssignments, UpdateFromQuery,
     UpdateQuery, UpdateableTable,
 };
 use squealy::{ExecutableSetSelectQuery, PreparableSetSelectQuery};
@@ -1698,6 +1699,125 @@ where
         // `param`s (a runtime-parameterized source would leave a placeholder with no value).
         <Tree as SetArm<'conn, 'scope, Conn>>::Params: NoRuntimeParams,
     {
+        match self.execution_parts() {
+            Ok((sql, params)) => self.connection.execute_sql(sql, params),
+            Err(error) => execute_error(error),
+        }
+    }
+}
+
+/// Correlated `UPDATE … FROM` query object (PostgreSQL).
+pub struct PostgresUpdateFrom<
+    'conn,
+    S,
+    O,
+    Columns = HNil,
+    Filters = HNil,
+    Conn = PostgresConnection,
+> {
+    connection: &'conn Conn,
+    target_alias: SourceAlias,
+    source_alias: SourceAlias,
+    columns: Columns,
+    filters: Filters,
+    _table: PhantomData<(S, O)>,
+}
+
+impl<'conn, S, O, Columns, Filters, Conn> PostgresUpdateFrom<'conn, S, O, Columns, Filters, Conn>
+where
+    S: UpdateableTable,
+    O: SchemaTable,
+    Columns: RenderUpdateAssignments<Postgres>,
+    Filters: RenderPredicateNodes<Postgres>,
+{
+    fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
+        let sql = self.to_sql();
+        let params = collect_postgres_params(0, |params| {
+            render::write_update_from_params::<S, O, Postgres, _, _, _>(
+                &PostgresDialect,
+                self.target_alias,
+                self.source_alias,
+                &self.columns,
+                &self.filters,
+                &(),
+                params,
+            )
+        })?;
+        Ok((sql, params))
+    }
+
+    /// Render this correlated update into a newly allocated SQL string.
+    pub fn to_sql(&self) -> String {
+        rendered_sql(|writer| {
+            render::write_update_from::<S, O, Postgres, _, _, _>(
+                &PostgresDialect,
+                self.target_alias,
+                self.source_alias,
+                &self.columns,
+                &self.filters,
+                &(),
+                writer,
+            )
+        })
+    }
+
+    /// Collect bind parameters into a newly allocated vector.
+    pub fn collect_params(&self) -> Result<Vec<PostgresParam>, PostgresError> {
+        let mut params = Vec::new();
+        render::write_update_from_params::<S, O, Postgres, _, _, _>(
+            &PostgresDialect,
+            self.target_alias,
+            self.source_alias,
+            &self.columns,
+            &self.filters,
+            &(),
+            &mut params,
+        )?;
+        Ok(params)
+    }
+}
+
+impl<'conn, S, O, Columns, Filters, Conn> UpdateFromQuery<'conn, S, O, Columns, Filters>
+    for PostgresUpdateFrom<'conn, S, O, Columns, Filters, Conn>
+where
+    S: UpdateableTable,
+    O: SchemaTable,
+    Columns: UpdateAssignments,
+    Filters: PredicateNodes,
+    Conn: QueryBuilder<Backend = Postgres> + 'conn,
+{
+    type Builder = Conn;
+
+    fn build(
+        connection: &'conn Conn,
+        target_alias: SourceAlias,
+        source_alias: SourceAlias,
+        columns: Columns,
+        filters: Filters,
+    ) -> Self {
+        Self {
+            connection,
+            target_alias,
+            source_alias,
+            columns,
+            filters,
+            _table: PhantomData,
+        }
+    }
+}
+
+impl<'conn, S, O, Columns, Filters, Conn> ExecutableUpdateFromQuery<'conn, S, O, Columns, Filters>
+    for PostgresUpdateFrom<'conn, S, O, Columns, Filters, Conn>
+where
+    S: UpdateableTable,
+    O: SchemaTable,
+    Columns: RenderUpdateAssignments<Postgres>,
+    Columns::Params: NoRuntimeParams,
+    Filters: RenderPredicateNodes<Postgres>,
+    Filters::Params: NoRuntimeParams,
+    Conn: PostgresExecutor + 'conn,
+{
+    fn execute(&self) -> impl Future<Output = Result<u64, PostgresError>> + Send + '_ {
         match self.execution_parts() {
             Ok((sql, params)) => self.connection.execute_sql(sql, params),
             Err(error) => execute_error(error),

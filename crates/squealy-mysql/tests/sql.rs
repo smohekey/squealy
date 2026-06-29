@@ -1806,3 +1806,20 @@ fn mysql_insert_select_multi_column_renders() {
          FROM `shop`.`memberships` AS q0_0"
     );
 }
+
+#[test]
+fn mysql_update_from_renders_join() {
+    // MySQL renders a correlated update as `JOIN other AS b ON <correlation> SET …` (no `FROM`).
+    let update = Mysql
+        .to_columns::<Membership, (MembershipTenantId,)>()
+        .from::<Tenant>()
+        .set(|(_membership, tenant)| (tenant.id,))
+        .where_(|(membership, tenant)| membership.tenant_id.equals(tenant.id))
+        .build();
+    assert_eq!(
+        update.to_sql(),
+        "UPDATE `shop`.`memberships` AS q0_0 \
+         JOIN `shop`.`tenants` AS q0_1 ON (q0_0.`tenant_id` = q0_1.`id`) \
+         SET `tenant_id` = q0_1.`id`"
+    );
+}
