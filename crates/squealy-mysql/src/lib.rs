@@ -62,6 +62,14 @@ pub struct MysqlConnection {
 }
 
 impl MysqlConnection {
+    /// Wraps an already-established `mysql_async::Conn`.
+    ///
+    /// This does not configure the session (it is synchronous and issues no SQL). If you use the
+    /// timestamp codecs (the `time`/`chrono`/`systemtime` features), the session **must** run with
+    /// `time_zone = '+00:00'`: those codecs bind/return UTC values, and MySQL interprets a `TIMESTAMP`
+    /// in the session zone, so a non-UTC session shifts stored instants. Run `SET time_zone = '+00:00'`
+    /// on the connection before binding timestamp values, or use `Mysql::connect` (the `SchemaConnect`
+    /// impl), which establishes it for you.
     pub fn new(conn: mysql_async::Conn) -> Self {
         Self {
             conn: tokio::sync::Mutex::new(conn),
