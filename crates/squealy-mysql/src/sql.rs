@@ -527,11 +527,10 @@ fn write_mysql_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()>
         }
         SqlType::Date => "DATE",
         SqlType::Time { .. } => "TIME",
-        // `(6)` fractional precision: a bare `TIMESTAMP`/`DATETIME` stores whole seconds, which would
-        // silently truncate the microseconds the timestamp codecs bind. Introspection keys on the base
-        // `data_type` (`timestamp`/`datetime`), ignoring the precision, so this does not churn.
-        SqlType::Timestamp { tz: true } => "TIMESTAMP(6)",
-        SqlType::Timestamp { tz: false } => "DATETIME(6)",
+        // Bare `TIMESTAMP`/`DATETIME` (fractional precision 0). The neutral model carries no timestamp
+        // precision, so the timestamp codecs normalize to whole seconds to match these columns.
+        SqlType::Timestamp { tz: true } => "TIMESTAMP",
+        SqlType::Timestamp { tz: false } => "DATETIME",
         SqlType::Uuid => "CHAR(36)",
         SqlType::Json | SqlType::Jsonb => "JSON",
         SqlType::Bytes => "BLOB",
@@ -561,9 +560,7 @@ fn write_default_value(default: &DefaultValue, writer: &mut impl Write) -> io::R
         DefaultValue::Text(value) => write_quoted_text(value, writer),
         DefaultValue::Bool(true) => writer.write_all(b"TRUE"),
         DefaultValue::Bool(false) => writer.write_all(b"FALSE"),
-        // `(6)` to match the `TIMESTAMP(6)`/`DATETIME(6)` column: MySQL rejects a temporal column that
-        // mixes an explicit fractional precision on the type with a bare `CURRENT_TIMESTAMP` default.
-        DefaultValue::CurrentTimestamp => writer.write_all(b"CURRENT_TIMESTAMP(6)"),
+        DefaultValue::CurrentTimestamp => writer.write_all(b"CURRENT_TIMESTAMP"),
         DefaultValue::CurrentDate => writer.write_all(b"(CURRENT_DATE)"),
         DefaultValue::CurrentTime => writer.write_all(b"(CURRENT_TIME)"),
         DefaultValue::Raw(value) => writer.write_all(value.as_bytes()),
@@ -1069,8 +1066,7 @@ fn write_column_default(default: ColumnDefault, writer: &mut impl Write) -> io::
         ColumnDefault::Text(value) => write_quoted_text(value, writer),
         ColumnDefault::Bool(true) => writer.write_all(b"TRUE"),
         ColumnDefault::Bool(false) => writer.write_all(b"FALSE"),
-        // `(6)` to match the `TIMESTAMP(6)`/`DATETIME(6)` column (see `write_default_value`).
-        ColumnDefault::CurrentTimestamp => writer.write_all(b"CURRENT_TIMESTAMP(6)"),
+        ColumnDefault::CurrentTimestamp => writer.write_all(b"CURRENT_TIMESTAMP"),
         ColumnDefault::CurrentDate => writer.write_all(b"(CURRENT_DATE)"),
         ColumnDefault::CurrentTime => writer.write_all(b"(CURRENT_TIME)"),
         ColumnDefault::Raw(value) => writer.write_all(value.as_bytes()),
@@ -1226,8 +1222,8 @@ mod tests {
         );
         assert_eq!(render_type(SqlType::Date), "DATE");
         assert_eq!(render_type(SqlType::Time { tz: false }), "TIME");
-        assert_eq!(render_type(SqlType::Timestamp { tz: false }), "DATETIME(6)");
-        assert_eq!(render_type(SqlType::Timestamp { tz: true }), "TIMESTAMP(6)");
+        assert_eq!(render_type(SqlType::Timestamp { tz: false }), "DATETIME");
+        assert_eq!(render_type(SqlType::Timestamp { tz: true }), "TIMESTAMP");
         assert_eq!(render_type(SqlType::Uuid), "CHAR(36)");
         assert_eq!(render_type(SqlType::Json), "JSON");
         assert_eq!(render_type(SqlType::Jsonb), "JSON");
