@@ -397,6 +397,225 @@ where
     }
 }
 
+// ===== UTC timestamp codecs (via the driver's `Value::Date`) =====
+//
+// `SystemTime` / `time::OffsetDateTime` / `chrono::DateTime<Utc>` all map to a `Timestamp { tz: true }`
+// column (rendered bare `TIMESTAMP`). MySQL has no offset-carrying value, so each is converted to UTC
+// and bound as a civil `Value::Date(year, month, day, hour, minute, second, microsecond)`; decoding
+// reads the same shape back and reattaches UTC. Run the driver session with `time_zone = '+00:00'`
+// (done in `Mysql::connect`) so MySQL stores/returns the `TIMESTAMP` without shifting it.
+//
+// Resolution is **whole seconds**: a bare `TIMESTAMP`/`DATETIME` has fractional precision 0, and the
+// neutral model carries no timestamp precision to render `TIMESTAMP(6)` against (or to migrate an
+// existing column to). So binding normalizes the microseconds to 0 rather than advertising sub-second
+// precision the column silently drops. (Tracked for a follow-up: full sub-second precision needs the
+// core model to carry the fractional precision.)
+
+// The civil components of a `Value::Date`: year, month, day, hour, minute, second, microsecond.
+#[cfg(any(feature = "time", feature = "chrono", feature = "systemtime"))]
+type DateParts = (u16, u8, u8, u8, u8, u8, u32);
+
+// MySQL `TIMESTAMP` spans 1970-01-01 00:00:01 .. 2038-01-19 03:14:07 UTC (a 32-bit epoch). Binding an
+// instant outside that range errors in strict mode and silently stores a zero date otherwise, so the
+// encoders reject it up front with a clear error rather than corrupting the value.
+#[cfg(any(feature = "time", feature = "chrono", feature = "systemtime"))]
+fn check_timestamp_range(unix_seconds: i64) -> Result<(), MysqlError> {
+    if (1..=2_147_483_647).contains(&unix_seconds) {
+        Ok(())
+    } else {
+        Err(MysqlError::Conversion(
+            "timestamp outside MySQL TIMESTAMP range (1970-01-01..2038-01-19 UTC)",
+        ))
+    }
+}
+
+// Reads a `Value::Date` from the next column, rejecting any other driver value and any out-of-range
+// civil components. The range check matters for the `SystemTime` decoder, whose calendar math does not
+// validate its inputs — a legacy/non-strict MySQL table can return a zero date (`0000-00-00 …`), which
+// must fail rather than decode garbage. (The `time`/`chrono` decoders also reject these via their own
+// constructors; validating here keeps all three consistent.)
+#[cfg(any(feature = "time", feature = "chrono", feature = "systemtime"))]
+fn take_date(row: &mut <Mysql as Backend>::RowReader<'_>) -> Result<DateParts, MysqlError> {
+    match row.take::<Value>()? {
+        Value::Date(year, month, day, hour, minute, second, micros)
+            if (1..=12).contains(&month)
+                && (1..=31).contains(&day)
+                && hour <= 23
+                && minute <= 59
+                && second <= 59
+                && micros <= 999_999 =>
+        {
+            Ok((year, month, day, hour, minute, second, micros))
+        }
+        _ => Err(MysqlError::Conversion("timestamp")),
+    }
+}
+
+#[cfg(feature = "chrono")]
+impl Encode<Mysql> for chrono::DateTime<chrono::Utc> {
+    fn encode(&self, out: &mut MysqlParamWriter<'_>) -> Result<(), MysqlError> {
+        use chrono::{Datelike, Timelike};
+        check_timestamp_range(self.timestamp())?;
+        let year = u16::try_from(self.year())
+            .map_err(|_| MysqlError::Conversion("chrono year out of range"))?;
+        out.push(Value::Date(
+            year,
+            self.month() as u8,
+            self.day() as u8,
+            self.hour() as u8,
+            self.minute() as u8,
+            self.second() as u8,
+            0, // whole-second resolution (see the codec module comment)
+        ));
+        Ok(())
+    }
+}
+
+#[cfg(feature = "chrono")]
+impl Decode<Mysql> for chrono::DateTime<chrono::Utc> {
+    fn decode(row: &mut <Mysql as Backend>::RowReader<'_>) -> Result<Self, MysqlError> {
+        let (year, month, day, hour, minute, second, micros) = take_date(row)?;
+        let naive =
+            chrono::NaiveDate::from_ymd_opt(i32::from(year), u32::from(month), u32::from(day))
+                .and_then(|date| {
+                    date.and_hms_micro_opt(
+                        u32::from(hour),
+                        u32::from(minute),
+                        u32::from(second),
+                        micros,
+                    )
+                })
+                .ok_or(MysqlError::Conversion("chrono::DateTime"))?;
+        Ok(naive.and_utc())
+    }
+}
+
+#[cfg(feature = "time")]
+impl Encode<Mysql> for time::OffsetDateTime {
+    fn encode(&self, out: &mut MysqlParamWriter<'_>) -> Result<(), MysqlError> {
+        let utc = self.to_offset(time::UtcOffset::UTC);
+        check_timestamp_range(utc.unix_timestamp())?;
+        let year = u16::try_from(utc.year())
+            .map_err(|_| MysqlError::Conversion("time year out of range"))?;
+        out.push(Value::Date(
+            year,
+            u8::from(utc.month()),
+            utc.day(),
+            utc.hour(),
+            utc.minute(),
+            utc.second(),
+            0, // whole-second resolution (see the codec module comment)
+        ));
+        Ok(())
+    }
+}
+
+#[cfg(feature = "time")]
+impl Decode<Mysql> for time::OffsetDateTime {
+    fn decode(row: &mut <Mysql as Backend>::RowReader<'_>) -> Result<Self, MysqlError> {
+        let (year, month, day, hour, minute, second, micros) = take_date(row)?;
+        let month =
+            time::Month::try_from(month).map_err(|_| MysqlError::Conversion("time month"))?;
+        let date = time::Date::from_calendar_date(i32::from(year), month, day)
+            .map_err(|_| MysqlError::Conversion("time::Date"))?;
+        let clock = time::Time::from_hms_micro(hour, minute, second, micros)
+            .map_err(|_| MysqlError::Conversion("time::Time"))?;
+        Ok(time::PrimitiveDateTime::new(date, clock).assume_utc())
+    }
+}
+
+#[cfg(feature = "systemtime")]
+impl Encode<Mysql> for std::time::SystemTime {
+    fn encode(&self, out: &mut MysqlParamWriter<'_>) -> Result<(), MysqlError> {
+        // Microseconds from the Unix epoch, negative before it.
+        let total_micros: i64 = match self.duration_since(std::time::UNIX_EPOCH) {
+            Ok(after) => i64::try_from(after.as_micros())
+                .map_err(|_| MysqlError::Conversion("SystemTime too far in the future"))?,
+            Err(before) => -i64::try_from(before.duration().as_micros())
+                .map_err(|_| MysqlError::Conversion("SystemTime too far in the past"))?,
+        };
+        // Whole-second resolution: floor to the second, dropping the sub-second remainder.
+        let seconds = total_micros.div_euclid(1_000_000);
+        check_timestamp_range(seconds)?;
+        let (year, month, day, hour, minute, second) = civil_from_unix_seconds(seconds);
+        let year = u16::try_from(year)
+            .map_err(|_| MysqlError::Conversion("SystemTime year out of range"))?;
+        out.push(Value::Date(year, month, day, hour, minute, second, 0));
+        Ok(())
+    }
+}
+
+#[cfg(feature = "systemtime")]
+impl Decode<Mysql> for std::time::SystemTime {
+    fn decode(row: &mut <Mysql as Backend>::RowReader<'_>) -> Result<Self, MysqlError> {
+        let (year, month, day, hour, minute, second, micros) = take_date(row)?;
+        let seconds = unix_seconds_from_civil(i32::from(year), month, day, hour, minute, second);
+        let total_micros = seconds * 1_000_000 + i64::from(micros);
+        Ok(if total_micros >= 0 {
+            std::time::UNIX_EPOCH + std::time::Duration::from_micros(total_micros as u64)
+        } else {
+            std::time::UNIX_EPOCH - std::time::Duration::from_micros((-total_micros) as u64)
+        })
+    }
+}
+
+// Civil-date conversions for `SystemTime`, which (unlike `time`/`chrono`) carries no calendar. These
+// are Howard Hinnant's algorithms (http://howardhinnant.github.io/date_algorithms.html), valid for
+// the proleptic Gregorian calendar across the full `Value::Date` year range with no dependencies.
+#[cfg(feature = "systemtime")]
+fn civil_from_unix_seconds(seconds: i64) -> (i64, u8, u8, u8, u8, u8) {
+    let days = seconds.div_euclid(86_400);
+    let rem = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    (
+        year,
+        month,
+        day,
+        (rem / 3_600) as u8,
+        ((rem % 3_600) / 60) as u8,
+        (rem % 60) as u8,
+    )
+}
+
+#[cfg(feature = "systemtime")]
+fn unix_seconds_from_civil(year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> i64 {
+    days_from_civil(i64::from(year), u32::from(month), u32::from(day)) * 86_400
+        + i64::from(hour) * 3_600
+        + i64::from(minute) * 60
+        + i64::from(second)
+}
+
+#[cfg(feature = "systemtime")]
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = (if year >= 0 { year } else { year - 399 }) / 400;
+    let year_of_era = year - era * 400; // [0, 399]
+    let month_index = i64::from(if month > 2 { month - 3 } else { month + 9 });
+    let day_of_year = (153 * month_index + 2) / 5 + i64::from(day) - 1; // [0, 365]
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+#[cfg(feature = "systemtime")]
+fn civil_from_days(days: i64) -> (i64, u8, u8) {
+    let z = days + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let day_of_era = z - era * 146_097; // [0, 146096]
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365; // [0, 399]
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100); // [0, 365]
+    let month_position = (5 * day_of_year + 2) / 153; // [0, 11]
+    let day = (day_of_year - (153 * month_position + 2) / 5 + 1) as u8; // [1, 31]
+    let month = if month_position < 10 {
+        month_position + 3
+    } else {
+        month_position - 9
+    } as u8; // [1, 12]
+    let year = if month <= 2 { year + 1 } else { year };
+    (year, month, day)
+}
+
 impl Backend for Mysql {
     type Error = MysqlError;
 
@@ -718,5 +937,115 @@ mod tests {
             <super::Json<serde_json::Value> as squealy::HasColumnType>::COLUMN_TYPE,
             squealy::ColumnType::Json
         );
+    }
+
+    // 1_700_000_000 Unix seconds is 2023-11-14T22:13:20 UTC — a fixed anchor each timestamp codec must
+    // bind as the same civil `Value::Date`, so the conversions are checked for real correctness rather
+    // than mere self-consistency. Resolution is whole seconds, so sub-second input is dropped (micros 0).
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn chrono_encodes_as_utc_value_date() {
+        let ts =
+            chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 123_456_000).unwrap();
+        assert_eq!(
+            encode_to_value(&ts).unwrap(),
+            Value::Date(2023, 11, 14, 22, 13, 20, 0)
+        );
+        assert_eq!(
+            <chrono::DateTime<chrono::Utc> as squealy::HasColumnType>::COLUMN_TYPE,
+            squealy::ColumnType::Timestamp { tz: true }
+        );
+    }
+
+    #[cfg(feature = "time")]
+    #[test]
+    fn time_encodes_as_utc_value_date_converting_the_offset() {
+        let utc = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        assert_eq!(
+            encode_to_value(&utc).unwrap(),
+            Value::Date(2023, 11, 14, 22, 13, 20, 0)
+        );
+        // A value in another offset is converted to UTC before binding (same instant, same civil date).
+        let shifted = utc.to_offset(time::UtcOffset::from_hms(5, 30, 0).unwrap());
+        assert_eq!(
+            encode_to_value(&shifted).unwrap(),
+            encode_to_value(&utc).unwrap()
+        );
+        assert_eq!(
+            <time::OffsetDateTime as squealy::HasColumnType>::COLUMN_TYPE,
+            squealy::ColumnType::Timestamp { tz: true }
+        );
+    }
+
+    #[cfg(feature = "systemtime")]
+    #[test]
+    fn systemtime_encodes_as_utc_value_date() {
+        // Sub-second input is floored to whole seconds (micros 0).
+        let ts = std::time::UNIX_EPOCH + std::time::Duration::from_micros(1_700_000_000_123_456);
+        assert_eq!(
+            encode_to_value(&ts).unwrap(),
+            Value::Date(2023, 11, 14, 22, 13, 20, 0)
+        );
+        assert_eq!(
+            <std::time::SystemTime as squealy::HasColumnType>::COLUMN_TYPE,
+            squealy::ColumnType::Timestamp { tz: true }
+        );
+    }
+
+    // The dependency-free civil-date algorithm underpins the `SystemTime` codec, so check it against
+    // fixed anchors (incl. the epoch and a leap day) and round-trip a spread of instants — including
+    // pre-1970 — through both directions.
+    #[cfg(feature = "systemtime")]
+    #[test]
+    fn civil_date_conversions_round_trip() {
+        use super::{civil_from_unix_seconds, unix_seconds_from_civil};
+
+        assert_eq!(civil_from_unix_seconds(0), (1970, 1, 1, 0, 0, 0));
+        // 2000-02-29 (a leap day) at noon must survive the round trip.
+        let leap = unix_seconds_from_civil(2000, 2, 29, 12, 0, 0);
+        assert_eq!(civil_from_unix_seconds(leap), (2000, 2, 29, 12, 0, 0));
+
+        for &seconds in &[
+            0_i64,
+            1,
+            -1,
+            86_399,
+            -86_400,
+            1_700_000_000,
+            -2_208_988_800,  // 1900-01-01T00:00:00 UTC (well before the epoch)
+            253_402_300_799, // 9999-12-31T23:59:59 UTC
+        ] {
+            let (year, month, day, hour, minute, second) = civil_from_unix_seconds(seconds);
+            assert_eq!(
+                unix_seconds_from_civil(year as i32, month, day, hour, minute, second),
+                seconds,
+                "round trip failed for {seconds}"
+            );
+        }
+    }
+
+    // Instants outside MySQL `TIMESTAMP`'s 1970..2038 UTC range are rejected at bind time rather than
+    // erroring in strict mode / silently storing a zero date.
+    #[cfg(any(feature = "chrono", feature = "time", feature = "systemtime"))]
+    #[test]
+    fn timestamps_outside_mysql_range_are_rejected() {
+        #[cfg(feature = "chrono")]
+        {
+            let post_2038 =
+                chrono::DateTime::<chrono::Utc>::from_timestamp(2_147_483_648, 0).unwrap();
+            assert!(encode_to_value(&post_2038).is_err());
+        }
+        #[cfg(feature = "time")]
+        {
+            let post_2038 = time::OffsetDateTime::from_unix_timestamp(2_147_483_648).unwrap();
+            assert!(encode_to_value(&post_2038).is_err());
+        }
+        #[cfg(feature = "systemtime")]
+        {
+            // Pre-1970, and the epoch second itself (TIMESTAMP's floor is 1970-01-01 00:00:01).
+            let pre_1970 = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
+            assert!(encode_to_value(&pre_1970).is_err());
+            assert!(encode_to_value(&std::time::UNIX_EPOCH).is_err());
+        }
     }
 }
