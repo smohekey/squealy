@@ -409,11 +409,22 @@ where
 #[cfg(any(feature = "time", feature = "chrono", feature = "systemtime"))]
 type DateParts = (u16, u8, u8, u8, u8, u8, u32);
 
-// Reads a `Value::Date` from the next column, rejecting any other driver value.
+// Reads a `Value::Date` from the next column, rejecting any other driver value and any out-of-range
+// civil components. The range check matters for the `SystemTime` decoder, whose calendar math does not
+// validate its inputs — a legacy/non-strict MySQL table can return a zero date (`0000-00-00 …`), which
+// must fail rather than decode garbage. (The `time`/`chrono` decoders also reject these via their own
+// constructors; validating here keeps all three consistent.)
 #[cfg(any(feature = "time", feature = "chrono", feature = "systemtime"))]
 fn take_date(row: &mut <Mysql as Backend>::RowReader<'_>) -> Result<DateParts, MysqlError> {
     match row.take::<Value>()? {
-        Value::Date(year, month, day, hour, minute, second, micros) => {
+        Value::Date(year, month, day, hour, minute, second, micros)
+            if (1..=12).contains(&month)
+                && (1..=31).contains(&day)
+                && hour <= 23
+                && minute <= 59
+                && second <= 59
+                && micros <= 999_999 =>
+        {
             Ok((year, month, day, hour, minute, second, micros))
         }
         _ => Err(MysqlError::Conversion("timestamp")),

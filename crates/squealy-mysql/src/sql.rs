@@ -527,8 +527,11 @@ fn write_mysql_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()>
         }
         SqlType::Date => "DATE",
         SqlType::Time { .. } => "TIME",
-        SqlType::Timestamp { tz: true } => "TIMESTAMP",
-        SqlType::Timestamp { tz: false } => "DATETIME",
+        // `(6)` fractional precision: a bare `TIMESTAMP`/`DATETIME` stores whole seconds, which would
+        // silently truncate the microseconds the timestamp codecs bind. Introspection keys on the base
+        // `data_type` (`timestamp`/`datetime`), ignoring the precision, so this does not churn.
+        SqlType::Timestamp { tz: true } => "TIMESTAMP(6)",
+        SqlType::Timestamp { tz: false } => "DATETIME(6)",
         SqlType::Uuid => "CHAR(36)",
         SqlType::Json | SqlType::Jsonb => "JSON",
         SqlType::Bytes => "BLOB",
@@ -1220,8 +1223,8 @@ mod tests {
         );
         assert_eq!(render_type(SqlType::Date), "DATE");
         assert_eq!(render_type(SqlType::Time { tz: false }), "TIME");
-        assert_eq!(render_type(SqlType::Timestamp { tz: false }), "DATETIME");
-        assert_eq!(render_type(SqlType::Timestamp { tz: true }), "TIMESTAMP");
+        assert_eq!(render_type(SqlType::Timestamp { tz: false }), "DATETIME(6)");
+        assert_eq!(render_type(SqlType::Timestamp { tz: true }), "TIMESTAMP(6)");
         assert_eq!(render_type(SqlType::Uuid), "CHAR(36)");
         assert_eq!(render_type(SqlType::Json), "JSON");
         assert_eq!(render_type(SqlType::Jsonb), "JSON");

@@ -134,6 +134,18 @@ impl SchemaConnect for Mysql {
         let conn = mysql_async::Conn::from_url(url)
             .await
             .map_err(MysqlError::Connect)?;
+        // The timestamp codecs bind (and read back) UTC civil values. MySQL interprets a `TIMESTAMP`
+        // literal in the session zone, so on a non-UTC session a UTC value would be shifted on write;
+        // pin the session to UTC so stored instants round-trip. Only relevant when a timestamp codec
+        // is compiled in, so the connection behaviour is otherwise unchanged.
+        #[cfg(any(feature = "time", feature = "chrono", feature = "systemtime"))]
+        let conn = {
+            let mut conn = conn;
+            conn.query_drop("SET time_zone = '+00:00'")
+                .await
+                .map_err(MysqlError::Connect)?;
+            conn
+        };
         Ok(MysqlConnection::new(conn))
     }
 }
