@@ -39,11 +39,15 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
         }
     }
 
-    // Views are created last (all tables exist) and in dependency order so a view that selects from
-    // another view follows it. SQLite has no schemas, so the view's schema name is dropped.
-    for (_schema_name, view) in squealy::ordered_views(model) {
-        statement(writer, &mut first)?;
-        squealy::render_create_view(None, view, false, &SqliteDialect, writer)?;
+    // View rendering is deferred. The shared view-body renderer emits schema-qualified source names
+    // (`"app"."users"`) and PostgreSQL/MySQL scalar-function spellings (e.g. `CHAR_LENGTH`) that SQLite
+    // rejects; rendering views correctly needs SQLite-specific `Dialect` seams (schema suppression +
+    // scalar-function names) — a later slice. Error rather than emit broken DDL.
+    if model.schemas.iter().any(|schema| !schema.views.is_empty()) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "SQLite view rendering is not supported yet",
+        ));
     }
 
     if !first {
@@ -395,8 +399,11 @@ fn write_delimited(value: &str, delimiter: char, writer: &mut impl Write) -> io:
 /// SQLite's [`Dialect`](squealy::Dialect): `?` placeholders, double-quoted identifiers, and SQLite
 /// `CAST` affinity names. Everything else uses the trait defaults, which already match SQLite —
 /// integer division needs a float cast, `DEFAULT VALUES` empty inserts, `NULLS FIRST`/`LAST`,
-/// `ON CONFLICT … DO UPDATE/NOTHING` upserts, and `UPDATE … FROM`. Used here for view-body rendering;
-/// the query layer (a later slice) reuses it for query rendering.
+/// `ON CONFLICT … DO UPDATE/NOTHING` upserts, and `UPDATE … FROM`. The query layer (a later slice)
+/// renders queries through this; it is defined now so the dialect mapping lives with the DDL renderer.
+// Wired up by the SQLite query layer (a later slice); view-body rendering is deferred until the
+// SQLite-specific scalar-function / schema-suppression seams exist.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SqliteDialect;
 

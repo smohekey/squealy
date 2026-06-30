@@ -134,3 +134,38 @@ fn render_plan_is_unsupported() {
     let error = Sqlite.render_plan(&plan, &mut sql).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
 }
+
+#[test]
+fn render_create_rejects_views_for_now() {
+    // View rendering is deferred (the shared view-body renderer emits schema-qualified sources and
+    // non-SQLite scalar-function spellings); a model carrying a view errors rather than emit broken
+    // DDL. Build a minimal model with a single (empty) view to exercise the guard.
+    use squealy::{DatabaseModel, SchemaModel, ViewModel, ViewQueryModel};
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: vec![ViewModel {
+                name: "v".to_owned(),
+                comment: None,
+                columns: Vec::new(),
+                query: ViewQueryModel {
+                    dependencies: Vec::new(),
+                    distinct: false,
+                    projection: Vec::new(),
+                    from: None,
+                    joins: Vec::new(),
+                    filter: None,
+                    group_by: Vec::new(),
+                    having: None,
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                },
+            }],
+        }],
+    };
+    let mut sql = Vec::new();
+    let error = Sqlite.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
