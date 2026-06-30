@@ -203,11 +203,15 @@ impl SchemaIntrospect for MysqlConnection {
 }
 
 /// Maps a neutral [`SqlType`](squealy::SqlType) to the physical form the MySQL introspector reads
-/// back, so a desired model does not churn against a live schema. MySQL has no key-usable unbounded
-/// `text`, so bare `String` is rendered (and read back) as `VARCHAR(255)`.
+/// back, so a desired model does not churn against a live schema:
+/// - MySQL has no key-usable unbounded `text`, so bare `String` is rendered (and read back) as
+///   `VARCHAR(255)`.
+/// - MySQL has no native `uuid` type: a `uuid::Uuid` column is rendered as `CHAR(36)`, which
+///   introspects back as `Char(36)`.
 fn canonical_sql_type(ty: &squealy::SqlType) -> squealy::SqlType {
     match ty {
         squealy::SqlType::String => squealy::SqlType::Varchar(255),
+        squealy::SqlType::Uuid => squealy::SqlType::Char(36),
         other => other.clone(),
     }
 }
@@ -488,6 +492,13 @@ mod tests {
         );
         assert_eq!(canonical_sql_type(&SqlType::Text), SqlType::Text);
         assert_eq!(canonical_sql_type(&SqlType::I32), SqlType::I32);
+    }
+
+    #[test]
+    fn canonical_sql_type_maps_uuid_to_char36() {
+        // MySQL has no native `uuid`: a `uuid::Uuid` column renders as `CHAR(36)` and introspects back
+        // as `Char(36)`, so the desired side must canonicalize to that or an incremental plan churns.
+        assert_eq!(canonical_sql_type(&SqlType::Uuid), SqlType::Char(36));
     }
 
     #[test]
