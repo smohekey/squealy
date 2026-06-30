@@ -527,6 +527,8 @@ fn write_mysql_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()>
         }
         SqlType::Date => "DATE",
         SqlType::Time { .. } => "TIME",
+        // Bare `TIMESTAMP`/`DATETIME` (fractional precision 0). The neutral model carries no timestamp
+        // precision, so the timestamp codecs normalize to whole seconds to match these columns.
         SqlType::Timestamp { tz: true } => "TIMESTAMP",
         SqlType::Timestamp { tz: false } => "DATETIME",
         SqlType::Uuid => "CHAR(36)",

@@ -11,7 +11,7 @@ categories.workspace = true
 
 [features]
 # Native timestamp column support: enables the core feature so `SystemTime` maps to a timestamp
-# column and can be used in the query builder (render-only; no MySQL Encode/Decode yet).
+# column, plus Encode/Decode against a `TIMESTAMP` column (UTC, whole-second resolution).
 systemtime = ["squealy/systemtime"]
 # Native `bytes::Bytes` column support: Encode/Decode for `bytes::Bytes` against a `BLOB` column
 # (via `Vec<u8>`). Enables the core `bytes` feature.
@@ -23,15 +23,22 @@ uuid = ["dep:uuid", "squealy/uuid"]
 # column. The `Json` wrapper lives in this crate (mirroring the PostgreSQL backend), so no core
 # feature is needed — only the serde crates.
 serde = ["dep:serde", "dep:serde_json"]
+# Native UTC timestamp columns: Encode/Decode for the respective crate's UTC datetime type against a
+# `TIMESTAMP` column, at whole-second resolution. Each enables the matching core feature. The value is
+# stored in UTC (`Mysql::connect` pins the session to `time_zone = '+00:00'`).
+time = ["dep:time", "squealy/time"]
+chrono = ["dep:chrono", "squealy/chrono"]
 
 [dependencies]
 bytes = { version = "1", optional = true }
+chrono = { version = "0.4", optional = true, default-features = false }
 futures-core.workspace = true
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls"] }
 serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 squealy.workspace = true
 thiserror.workspace = true
+time = { version = "0.3", optional = true, default-features = false }
 uuid = { version = "1", optional = true }
 # `tokio::sync::Mutex` holds the single `Conn` behind interior mutability: query execution borrows
 # `&self` (the core API) but `mysql_async` needs `&mut Conn`, so we lock across the await. Schema ops
