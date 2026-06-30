@@ -190,6 +190,45 @@ fn rejects_non_integer_autoincrement_column() {
 }
 
 #[test]
+fn fixed_bytes_column_enforces_width_with_a_check() {
+    // `BLOB` has no fixed width, so a `FixedBytes(N)` column carries a `CHECK (length("col") = N)` to
+    // preserve the fixed-width invariant the core type and other backends enforce.
+    use squealy::{ColumnModel, DatabaseModel, SchemaModel, SqlType, TableModel};
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![TableModel {
+                name: "t".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "hash".to_owned(),
+                    comment: None,
+                    ty: SqlType::FixedBytes(16),
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+            views: Vec::new(),
+        }],
+    };
+    let mut sql = Vec::new();
+    Sqlite.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+    assert!(
+        sql.contains("\"hash\" BLOB NOT NULL CHECK (length(\"hash\") = 16)"),
+        "{sql}"
+    );
+}
+
+#[test]
 fn render_create_rejects_views_for_now() {
     // View rendering is deferred (the shared view-body renderer emits schema-qualified sources and
     // non-SQLite scalar-function spellings); a model carrying a view errors rather than emit broken
