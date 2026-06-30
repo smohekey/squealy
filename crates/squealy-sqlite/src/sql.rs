@@ -137,7 +137,36 @@ fn autoincrement_column(table: &TableModel) -> io::Result<Option<&str>> {
              single-column INTEGER primary key",
         ));
     }
+    // The column is rewritten to `INTEGER PRIMARY KEY AUTOINCREMENT`, so its declared type must be an
+    // integer — otherwise a (e.g. packaged/hand-written) model with a `TEXT` identity would be created
+    // with a silently different column type.
+    if !is_integer_type(&column.ty) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "SQLite AUTOINCREMENT requires an integer-typed primary key column",
+        ));
+    }
     Ok(Some(column.name.as_str()))
+}
+
+/// Whether the neutral type is a true integer (the only types valid as a SQLite
+/// `INTEGER PRIMARY KEY AUTOINCREMENT` rowid alias). `Bool` is deliberately excluded.
+fn is_integer_type(ty: &SqlType) -> bool {
+    matches!(
+        ty,
+        SqlType::I8
+            | SqlType::I16
+            | SqlType::I32
+            | SqlType::I64
+            | SqlType::I128
+            | SqlType::Isize
+            | SqlType::U8
+            | SqlType::U16
+            | SqlType::U32
+            | SqlType::U64
+            | SqlType::U128
+            | SqlType::Usize
+    )
 }
 
 fn entry(writer: &mut impl Write, first: &mut bool) -> io::Result<()> {

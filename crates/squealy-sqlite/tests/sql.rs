@@ -136,6 +136,60 @@ fn render_plan_is_unsupported() {
 }
 
 #[test]
+fn advertises_partial_index_capability() {
+    // The renderer emits partial-index `WHERE`, so the backend must advertise it or the schema engine
+    // rejects an `IndexModel::predicate` before this backend renders it. Other index metadata is off.
+    let capabilities = Sqlite.capabilities();
+    assert!(capabilities.indexes.predicates);
+    assert!(!capabilities.indexes.expressions);
+    assert!(!capabilities.indexes.include_columns);
+    assert!(!capabilities.indexes.operator_classes);
+}
+
+#[test]
+fn rejects_non_integer_autoincrement_column() {
+    // A (hand-written / packaged) model with a non-integer identity primary key must be rejected
+    // rather than silently rewritten to `INTEGER PRIMARY KEY AUTOINCREMENT`.
+    use squealy::{
+        ColumnModel, Constraint, DatabaseModel, IdentityMode, IdentityModel, SchemaModel, SqlType,
+        TableModel,
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![TableModel {
+                name: "t".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "id".to_owned(),
+                    comment: None,
+                    ty: SqlType::Text,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: Some(IdentityModel {
+                        mode: IdentityMode::AutoIncrement,
+                    }),
+                    generated: None,
+                }],
+                primary_key: Some(Constraint {
+                    name: "pk".to_owned(),
+                    columns: vec!["id".to_owned()],
+                }),
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+            views: Vec::new(),
+        }],
+    };
+    let mut sql = Vec::new();
+    let error = Sqlite.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
 fn render_create_rejects_views_for_now() {
     // View rendering is deferred (the shared view-body renderer emits schema-qualified sources and
     // non-SQLite scalar-function spellings); a model carrying a view errors rather than emit broken

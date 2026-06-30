@@ -24,6 +24,20 @@ mod sql;
 pub struct Sqlite;
 
 impl SchemaBackend for Sqlite {
+    fn capabilities(&self) -> squealy::SchemaCapabilities {
+        // Mirrors what the renderer accepts: SQLite supports partial (predicate) indexes, but none of
+        // the other index metadata, and no constraint validation/enforcement/deferrability/match
+        // metadata. Without advertising `predicates`, the schema engine's `check_create` would reject a
+        // partial index before this backend ever rendered it.
+        squealy::SchemaCapabilities {
+            constraints: squealy::ConstraintCapabilities::default(),
+            indexes: squealy::IndexCapabilities {
+                predicates: true,
+                ..squealy::IndexCapabilities::default()
+            },
+        }
+    }
+
     fn render_create(&self, model: &DatabaseModel, writer: &mut impl Write) -> io::Result<()> {
         sql::write_database(model, writer)
     }
