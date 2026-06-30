@@ -6,6 +6,7 @@ members = [
     "crates/squealy-model",
     "crates/squealy-mysql",
     "crates/squealy-postgresql",
+    "crates/squealy-sqlite",
     "crates/squealy-test",
 ]
 resolver = "3"
@@ -27,6 +28,7 @@ squealy-macros = { version = "0.1.0", path = "crates/squealy-macros" }
 squealy-model = { version = "0.1.0", path = "crates/squealy-model" }
 squealy-mysql = { version = "0.1.0", path = "crates/squealy-mysql" }
 squealy-postgresql = { version = "0.1.0", path = "crates/squealy-postgresql" }
+squealy-sqlite = { version = "0.1.0", path = "crates/squealy-sqlite" }
 squealy-test = { version = "0.1.0", path = "crates/squealy-test" }
 futures-core = "0.3"
 kdl = "6.5"
