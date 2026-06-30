@@ -16,13 +16,23 @@ systemtime = ["squealy/systemtime"]
 # Native `bytes::Bytes` column support: Encode/Decode for `bytes::Bytes` against a `BLOB` column
 # (via `Vec<u8>`). Enables the core `bytes` feature.
 bytes = ["dep:bytes", "squealy/bytes"]
+# Native `uuid` column support: Encode/Decode for `uuid::Uuid` against a `CHAR(36)` column (the
+# hyphenated text form). Enables the core `uuid` feature so a bare `Uuid` maps to a `uuid` column.
+uuid = ["dep:uuid", "squealy/uuid"]
+# serde-backed `Json<T>`: any `T: Serialize`/`DeserializeOwned` encodes to / decodes from a `JSON`
+# column. The `Json` wrapper lives in this crate (mirroring the PostgreSQL backend), so no core
+# feature is needed — only the serde crates.
+serde = ["dep:serde", "dep:serde_json"]
 
 [dependencies]
 bytes = { version = "1", optional = true }
 futures-core.workspace = true
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls"] }
+serde = { version = "1", optional = true }
+serde_json = { version = "1", optional = true }
 squealy.workspace = true
 thiserror.workspace = true
+uuid = { version = "1", optional = true }
 # `tokio::sync::Mutex` holds the single `Conn` behind interior mutability: query execution borrows
 # `&self` (the core API) but `mysql_async` needs `&mut Conn`, so we lock across the await. Schema ops
 # already have `&mut self` and use `get_mut()` without locking.

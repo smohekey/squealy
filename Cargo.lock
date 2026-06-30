@@ -1699,10 +1699,13 @@ dependencies = [
  "bytes",
  "futures-core",
  "mysql_async",
+ "serde",
+ "serde_json",
  "squealy",
  "squealy-model",
  "thiserror",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
