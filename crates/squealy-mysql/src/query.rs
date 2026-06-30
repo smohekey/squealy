@@ -323,6 +323,76 @@ where
     }
 }
 
+// ===== Optional type codecs (each behind its feature flag) =====
+
+// `uuid::Uuid` binds to a `CHAR(36)` column as its hyphenated lowercase text form (MySQL has no
+// native UUID type — the column renders `CHAR(36)`, see `sql::write_mysql_sql_type`).
+#[cfg(feature = "uuid")]
+impl Encode<Mysql> for uuid::Uuid {
+    fn encode(&self, out: &mut MysqlParamWriter<'_>) -> Result<(), MysqlError> {
+        out.push(Value::Bytes(self.to_string().into_bytes()));
+        Ok(())
+    }
+}
+
+#[cfg(feature = "uuid")]
+impl Decode<Mysql> for uuid::Uuid {
+    fn decode(row: &mut <Mysql as Backend>::RowReader<'_>) -> Result<Self, MysqlError> {
+        let text = row.take::<String>()?;
+        uuid::Uuid::parse_str(&text).map_err(|_| MysqlError::Conversion("uuid::Uuid"))
+    }
+}
+
+// serde-backed `Json<T>`: any `T: Serialize`/`DeserializeOwned` round-trips through a `JSON` column.
+// The wrapper lives in this crate (mirroring the PostgreSQL backend's `Json<T>`); the column renders
+// `JSON` (see `sql::write_mysql_sql_type`), and MySQL accepts/returns the JSON text.
+#[cfg(feature = "serde")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Json<T>(pub T);
+
+#[cfg(feature = "serde")]
+impl<T> squealy::HasColumnType for Json<T> {
+    const COLUMN_TYPE: squealy::ColumnType = squealy::ColumnType::Jsonb;
+}
+
+#[cfg(feature = "serde")]
+impl<T> squealy::ColumnNullability for Json<T> {
+    type Inner = Self;
+    type Nullability = squealy::NonNullableColumn;
+    const NULLABLE: bool = false;
+}
+
+#[cfg(feature = "serde")]
+impl<T> squealy::ExprKind for Json<T> {
+    type Value = Self;
+}
+
+#[cfg(feature = "serde")]
+impl<T> Encode<Mysql> for Json<T>
+where
+    T: serde::Serialize,
+{
+    fn encode(&self, out: &mut MysqlParamWriter<'_>) -> Result<(), MysqlError> {
+        let json =
+            serde_json::to_vec(&self.0).map_err(|_| MysqlError::Conversion("serialize json"))?;
+        out.push(Value::Bytes(json));
+        Ok(())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<T> Decode<Mysql> for Json<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    fn decode(row: &mut <Mysql as Backend>::RowReader<'_>) -> Result<Self, MysqlError> {
+        let bytes = row.take::<Vec<u8>>()?;
+        let inner = serde_json::from_slice(&bytes)
+            .map_err(|_| MysqlError::Conversion("deserialize json"))?;
+        Ok(Json(inner))
+    }
+}
+
 impl Backend for Mysql {
     type Error = MysqlError;
 
@@ -607,6 +677,42 @@ mod tests {
         assert_eq!(
             encode_to_value(&Option::<Vec<u8>>::None).unwrap(),
             Value::NULL
+        );
+    }
+
+    // A `uuid::Uuid` binds as its hyphenated `CHAR(36)` text, and the decode path (read the column as
+    // a `String`, then `parse_str`) recovers it. Full row decoding is covered by integration tests.
+    #[cfg(feature = "uuid")]
+    #[test]
+    fn uuid_encodes_as_char36_text_and_round_trips() {
+        use mysql_async::prelude::FromValue;
+        let id = uuid::Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0);
+        let encoded = encode_to_value(&id).unwrap();
+        assert_eq!(encoded, Value::Bytes(id.to_string().into_bytes()));
+        assert_eq!(id.to_string().len(), 36);
+        let text = String::from_value(encoded);
+        assert_eq!(uuid::Uuid::parse_str(&text).unwrap(), id);
+        assert_eq!(
+            <uuid::Uuid as squealy::HasColumnType>::COLUMN_TYPE,
+            squealy::ColumnType::Uuid
+        );
+    }
+
+    // `Json<T>` binds as its serialized JSON text (a `JSON` column), and the decode path
+    // (`from_slice`) recovers the value.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn json_encodes_as_text_and_round_trips() {
+        use mysql_async::prelude::FromValue;
+        let payload = serde_json::json!({ "ok": true, "n": 5, "name": "Ada" });
+        let encoded = encode_to_value(&super::Json(payload.clone())).unwrap();
+        assert_eq!(encoded, Value::Bytes(serde_json::to_vec(&payload).unwrap()));
+        let bytes = Vec::<u8>::from_value(encoded);
+        let back: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back, payload);
+        assert_eq!(
+            <super::Json<serde_json::Value> as squealy::HasColumnType>::COLUMN_TYPE,
+            squealy::ColumnType::Jsonb
         );
     }
 }

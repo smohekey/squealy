@@ -21,6 +21,8 @@ mod introspect;
 mod query;
 mod sql;
 
+#[cfg(feature = "serde")]
+pub use query::Json;
 pub use query::MysqlRowReader;
 
 /// The MySQL schema backend marker.
