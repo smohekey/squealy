@@ -415,6 +415,20 @@ where
 #[cfg(any(feature = "time", feature = "chrono", feature = "systemtime"))]
 type DateParts = (u16, u8, u8, u8, u8, u8, u32);
 
+// MySQL `TIMESTAMP` spans 1970-01-01 00:00:01 .. 2038-01-19 03:14:07 UTC (a 32-bit epoch). Binding an
+// instant outside that range errors in strict mode and silently stores a zero date otherwise, so the
+// encoders reject it up front with a clear error rather than corrupting the value.
+#[cfg(any(feature = "time", feature = "chrono", feature = "systemtime"))]
+fn check_timestamp_range(unix_seconds: i64) -> Result<(), MysqlError> {
+    if (1..=2_147_483_647).contains(&unix_seconds) {
+        Ok(())
+    } else {
+        Err(MysqlError::Conversion(
+            "timestamp outside MySQL TIMESTAMP range (1970-01-01..2038-01-19 UTC)",
+        ))
+    }
+}
+
 // Reads a `Value::Date` from the next column, rejecting any other driver value and any out-of-range
 // civil components. The range check matters for the `SystemTime` decoder, whose calendar math does not
 // validate its inputs — a legacy/non-strict MySQL table can return a zero date (`0000-00-00 …`), which
@@ -441,6 +455,7 @@ fn take_date(row: &mut <Mysql as Backend>::RowReader<'_>) -> Result<DateParts, M
 impl Encode<Mysql> for chrono::DateTime<chrono::Utc> {
     fn encode(&self, out: &mut MysqlParamWriter<'_>) -> Result<(), MysqlError> {
         use chrono::{Datelike, Timelike};
+        check_timestamp_range(self.timestamp())?;
         let year = u16::try_from(self.year())
             .map_err(|_| MysqlError::Conversion("chrono year out of range"))?;
         out.push(Value::Date(
@@ -479,6 +494,7 @@ impl Decode<Mysql> for chrono::DateTime<chrono::Utc> {
 impl Encode<Mysql> for time::OffsetDateTime {
     fn encode(&self, out: &mut MysqlParamWriter<'_>) -> Result<(), MysqlError> {
         let utc = self.to_offset(time::UtcOffset::UTC);
+        check_timestamp_range(utc.unix_timestamp())?;
         let year = u16::try_from(utc.year())
             .map_err(|_| MysqlError::Conversion("time year out of range"))?;
         out.push(Value::Date(
@@ -520,6 +536,7 @@ impl Encode<Mysql> for std::time::SystemTime {
         };
         // Whole-second resolution: floor to the second, dropping the sub-second remainder.
         let seconds = total_micros.div_euclid(1_000_000);
+        check_timestamp_range(seconds)?;
         let (year, month, day, hour, minute, second) = civil_from_unix_seconds(seconds);
         let year = u16::try_from(year)
             .map_err(|_| MysqlError::Conversion("SystemTime year out of range"))?;
@@ -1004,6 +1021,31 @@ mod tests {
                 seconds,
                 "round trip failed for {seconds}"
             );
+        }
+    }
+
+    // Instants outside MySQL `TIMESTAMP`'s 1970..2038 UTC range are rejected at bind time rather than
+    // erroring in strict mode / silently storing a zero date.
+    #[cfg(any(feature = "chrono", feature = "time", feature = "systemtime"))]
+    #[test]
+    fn timestamps_outside_mysql_range_are_rejected() {
+        #[cfg(feature = "chrono")]
+        {
+            let post_2038 =
+                chrono::DateTime::<chrono::Utc>::from_timestamp(2_147_483_648, 0).unwrap();
+            assert!(encode_to_value(&post_2038).is_err());
+        }
+        #[cfg(feature = "time")]
+        {
+            let post_2038 = time::OffsetDateTime::from_unix_timestamp(2_147_483_648).unwrap();
+            assert!(encode_to_value(&post_2038).is_err());
+        }
+        #[cfg(feature = "systemtime")]
+        {
+            // Pre-1970, and the epoch second itself (TIMESTAMP's floor is 1970-01-01 00:00:01).
+            let pre_1970 = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
+            assert!(encode_to_value(&pre_1970).is_err());
+            assert!(encode_to_value(&std::time::UNIX_EPOCH).is_err());
         }
     }
 }
