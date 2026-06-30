@@ -605,7 +605,11 @@ fn default_value(ty: &SqlType, value: &str) -> DefaultValue {
     let trimmed = value.trim();
     match trimmed.to_ascii_lowercase().as_str() {
         "null" => return DefaultValue::Null,
-        "current_timestamp" | "current_timestamp()" => return DefaultValue::CurrentTimestamp,
+        // `current_timestamp(6)` is how MySQL 8 reports the default of a `TIMESTAMP(6)`/`DATETIME(6)`
+        // column (which is what this backend renders), alongside the unparenthesized legacy spellings.
+        "current_timestamp" | "current_timestamp()" | "current_timestamp(6)" => {
+            return DefaultValue::CurrentTimestamp;
+        }
         "current_date" | "current_date()" => return DefaultValue::CurrentDate,
         "current_time" | "current_time()" => return DefaultValue::CurrentTime,
         _ => {}
@@ -742,6 +746,12 @@ mod tests {
         assert_eq!(default_value(&SqlType::U32, "42"), DefaultValue::UInt(42));
         assert_eq!(
             default_value(&SqlType::Timestamp { tz: true }, "current_timestamp()"),
+            DefaultValue::CurrentTimestamp
+        );
+        // MySQL 8 reports the default of the `TIMESTAMP(6)` column this backend renders with the
+        // fractional precision; it must still map back to `CurrentTimestamp` so the schema settles.
+        assert_eq!(
+            default_value(&SqlType::Timestamp { tz: true }, "CURRENT_TIMESTAMP(6)"),
             DefaultValue::CurrentTimestamp
         );
         assert_eq!(

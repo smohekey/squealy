@@ -561,7 +561,9 @@ fn write_default_value(default: &DefaultValue, writer: &mut impl Write) -> io::R
         DefaultValue::Text(value) => write_quoted_text(value, writer),
         DefaultValue::Bool(true) => writer.write_all(b"TRUE"),
         DefaultValue::Bool(false) => writer.write_all(b"FALSE"),
-        DefaultValue::CurrentTimestamp => writer.write_all(b"CURRENT_TIMESTAMP"),
+        // `(6)` to match the `TIMESTAMP(6)`/`DATETIME(6)` column: MySQL rejects a temporal column that
+        // mixes an explicit fractional precision on the type with a bare `CURRENT_TIMESTAMP` default.
+        DefaultValue::CurrentTimestamp => writer.write_all(b"CURRENT_TIMESTAMP(6)"),
         DefaultValue::CurrentDate => writer.write_all(b"(CURRENT_DATE)"),
         DefaultValue::CurrentTime => writer.write_all(b"(CURRENT_TIME)"),
         DefaultValue::Raw(value) => writer.write_all(value.as_bytes()),
@@ -1067,7 +1069,8 @@ fn write_column_default(default: ColumnDefault, writer: &mut impl Write) -> io::
         ColumnDefault::Text(value) => write_quoted_text(value, writer),
         ColumnDefault::Bool(true) => writer.write_all(b"TRUE"),
         ColumnDefault::Bool(false) => writer.write_all(b"FALSE"),
-        ColumnDefault::CurrentTimestamp => writer.write_all(b"CURRENT_TIMESTAMP"),
+        // `(6)` to match the `TIMESTAMP(6)`/`DATETIME(6)` column (see `write_default_value`).
+        ColumnDefault::CurrentTimestamp => writer.write_all(b"CURRENT_TIMESTAMP(6)"),
         ColumnDefault::CurrentDate => writer.write_all(b"(CURRENT_DATE)"),
         ColumnDefault::CurrentTime => writer.write_all(b"(CURRENT_TIME)"),
         ColumnDefault::Raw(value) => writer.write_all(value.as_bytes()),
