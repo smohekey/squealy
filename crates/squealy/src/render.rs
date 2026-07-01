@@ -834,12 +834,17 @@ where
     where
         Writer: SqlWriter<B>,
     {
-        // A nested set renders its trailing modifiers inside its own parentheses, so they bind to this
-        // operand and not the enclosing set.
-        writer.write_all(b"(")?;
+        // A nested set renders its trailing modifiers inside its own wrapper, so they bind to this
+        // operand and not the enclosing set. Postgres/MySQL wrap in `(…)`; SQLite rejects a
+        // parenthesized compound operand, so it uses `SELECT * FROM (…)` (see `SetLeaf::render_operand`).
+        let (open, close): (&[u8], &[u8]) = match renderer.dialect.set_operand_style() {
+            SetOperandStyle::Parenthesized => (b"(", b")"),
+            SetOperandStyle::SubquerySelect => (b"SELECT * FROM (", b")"),
+        };
+        writer.write_all(open)?;
         self.tree.render_root(writer, renderer)?;
         write_set_tail(renderer.dialect, &self.tail, writer)?;
-        writer.write_all(b")")
+        writer.write_all(close)
     }
 
     fn render_insert_source<Writer>(

@@ -238,6 +238,42 @@ fn sqlite_wraps_ordered_set_operand_as_subquery() {
 }
 
 #[test]
+fn sqlite_wraps_nested_set_group_operand_as_subquery() {
+    // A completed set-select used as another operand (`a.union(b).union(c)`) becomes a `SetGroup`, which
+    // must also use SQLite's sub-select wrapping — not `(a UNION b) UNION c`, which SQLite rejects with a
+    // `near "(": syntax error`.
+    let union = Sqlite
+        .from::<Widget>()
+        .select(|(widget,)| (widget.id, widget.name))
+        .union(
+            Sqlite
+                .from::<Widget>()
+                .select(|(widget,)| (widget.id, widget.name)),
+        )
+        .union(
+            Sqlite
+                .from::<Widget>()
+                .select(|(widget,)| (widget.id, widget.name)),
+        );
+
+    let sql = union.to_sql();
+    // The whole statement must not open with a parenthesized compound.
+    assert!(
+        !sql.starts_with('('),
+        "SQLite must not open with a parenthesized compound operand: {sql}"
+    );
+    // The nested `a UNION b` group renders as a sub-select, then the outer `UNION c`.
+    assert!(
+        sql.starts_with("SELECT * FROM (SELECT * FROM (SELECT "),
+        "expected the nested group to be sub-select wrapped: {sql}"
+    );
+    assert!(
+        !sql.contains(") UNION ("),
+        "SQLite must not parenthesize any set operand: {sql}"
+    );
+}
+
+#[test]
 fn sqlite_concat_renders_as_pipe_operator() {
     // SQLite's `CONCAT` ignores NULL operands, but squealy's concat is nullable iff either operand is;
     // the null-propagating `||` operator matches that, so the dialect must render `||`, not `CONCAT`.
