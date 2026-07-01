@@ -256,6 +256,56 @@ fn rejects_table_name_collision_across_schemas() {
 }
 
 #[test]
+fn rejects_index_name_collision_across_tables() {
+    // SQLite keeps tables and indexes in one object namespace, so the same index name on two tables
+    // (which is fine on the schema-aware backends) collides once schemas are flattened.
+    use squealy::{ColumnModel, DatabaseModel, IndexModel, SchemaModel, SqlType, TableModel};
+    let column = || ColumnModel {
+        name: "x".to_owned(),
+        comment: None,
+        ty: SqlType::I32,
+        collation: None,
+        nullable: false,
+        default: None,
+        identity: None,
+        generated: None,
+    };
+    let index = || IndexModel {
+        name: "idx_x".to_owned(),
+        columns: vec!["x".to_owned()],
+        expressions: Vec::new(),
+        include_columns: Vec::new(),
+        unique: false,
+        method: None,
+        directions: Vec::new(),
+        nulls: Vec::new(),
+        collations: Vec::new(),
+        operator_classes: Vec::new(),
+        predicate: None,
+    };
+    let table = |name: &str| TableModel {
+        name: name.to_owned(),
+        comment: None,
+        columns: vec![column()],
+        primary_key: None,
+        foreign_keys: Vec::new(),
+        uniques: Vec::new(),
+        checks: Vec::new(),
+        indexes: vec![index()],
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![table("a"), table("b")],
+            views: Vec::new(),
+        }],
+    };
+    let mut sql = Vec::new();
+    let error = Sqlite.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
 fn render_create_rejects_views_for_now() {
     // View rendering is deferred (the shared view-body renderer emits schema-qualified sources and
     // non-SQLite scalar-function spellings); a model carrying a view errors rather than emit broken

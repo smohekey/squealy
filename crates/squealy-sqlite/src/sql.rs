@@ -21,22 +21,37 @@ use squealy::{
 /// newline-separated: tables (with inline PK/unique/check/foreign-keys), then indexes, then views in
 /// dependency order. SQLite has no schemas, so schema names are dropped and all tables are flattened.
 pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> io::Result<()> {
-    // SQLite has a single, unqualified table namespace, so flattening two schemas that share a table
-    // name would emit duplicate `CREATE TABLE` statements (and mis-target later indexes/foreign keys).
-    // Such a model is valid for the schema-aware backends but cannot be represented in SQLite; reject
-    // it before rendering.
-    let mut seen_tables = std::collections::HashSet::new();
+    // View rendering is deferred. The shared view-body renderer emits schema-qualified source names
+    // (`"app"."users"`) and PostgreSQL/MySQL scalar-function spellings (e.g. `CHAR_LENGTH`) that SQLite
+    // rejects; rendering views correctly needs SQLite-specific `Dialect` seams (schema suppression +
+    // scalar-function names) — a later slice. Error rather than emit broken DDL.
+    if model.schemas.iter().any(|schema| !schema.views.is_empty()) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "SQLite view rendering is not supported yet",
+        ));
+    }
+
+    // SQLite keeps tables and indexes in one database-wide object namespace (there are no schemas), so
+    // once schemas are flattened every table and index name must be unique — including a table name
+    // that matches an index name. A model that relies on schema/table scoping for those names is valid
+    // for the schema-aware backends but cannot be represented in SQLite; reject it before rendering
+    // duplicate `CREATE TABLE`/`CREATE INDEX` statements. Tables are inserted first so an index that
+    // collides with a table is reported too.
+    let mut seen = std::collections::HashSet::new();
     for schema in &model.schemas {
         for table in &schema.tables {
-            if !seen_tables.insert(table.name.as_str()) {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    format!(
-                        "SQLite has no schemas, so table `{}` appears in more than one schema and \
-                         would collide when flattened",
-                        table.name
-                    ),
-                ));
+            if !seen.insert(table.name.as_str()) {
+                return Err(object_name_collision(&table.name));
+            }
+        }
+    }
+    for schema in &model.schemas {
+        for table in &schema.tables {
+            for index in &table.indexes {
+                if !seen.insert(index.name.as_str()) {
+                    return Err(object_name_collision(&index.name));
+                }
             }
         }
     }
@@ -59,21 +74,20 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
         }
     }
 
-    // View rendering is deferred. The shared view-body renderer emits schema-qualified source names
-    // (`"app"."users"`) and PostgreSQL/MySQL scalar-function spellings (e.g. `CHAR_LENGTH`) that SQLite
-    // rejects; rendering views correctly needs SQLite-specific `Dialect` seams (schema suppression +
-    // scalar-function names) — a later slice. Error rather than emit broken DDL.
-    if model.schemas.iter().any(|schema| !schema.views.is_empty()) {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "SQLite view rendering is not supported yet",
-        ));
-    }
-
     if !first {
         writer.write_all(b";")?;
     }
     Ok(())
+}
+
+fn object_name_collision(name: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "SQLite has no schemas and keeps tables and indexes in one object namespace, so `{name}` \
+             is not unique after flattening schemas"
+        ),
+    )
 }
 
 fn statement(writer: &mut impl Write, first: &mut bool) -> io::Result<()> {
