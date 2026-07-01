@@ -89,6 +89,23 @@ fn renders_autoincrement_primary_key_and_affinities() {
 }
 
 #[test]
+fn write_table_renders_single_table_via_the_model() {
+    // `Backend::write_table` (the `to::<T>()` create path) lowers the table to a model and reuses the
+    // model renderer, so it matches `render_create` for that table.
+    use squealy::Backend;
+    let tables = <App as Schema>::tables().collect::<Vec<_>>();
+    let users = tables.iter().find(|t| t.name() == "users").unwrap();
+    let mut sql = Vec::new();
+    Sqlite.write_table(*users, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+    assert!(
+        sql.contains("CREATE TABLE \"users\" (\n  \"id\" INTEGER PRIMARY KEY AUTOINCREMENT,"),
+        "{sql}"
+    );
+    assert!(sql.contains("\"name\" TEXT NOT NULL"), "{sql}");
+}
+
+#[test]
 fn renders_inline_foreign_key() {
     let sql = render();
     assert!(

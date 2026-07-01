@@ -17,11 +17,30 @@ use std::io::{self, Write};
 
 use squealy::{DatabaseModel, DatabasePlan, SchemaBackend};
 
+mod query;
 mod sql;
 
-/// The SQLite schema backend marker.
+pub use query::{SqliteRowReader, SqliteValue};
+
+/// The SQLite schema/query backend marker.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Sqlite;
+
+/// An error decoding a result column, encoding a bind parameter, or executing against SQLite.
+#[derive(Debug, thiserror::Error)]
+pub enum SqliteError {
+    #[error("query returned no rows")]
+    NoRows,
+    #[error("row is missing column {0}")]
+    MissingColumn(usize),
+    #[error("could not decode a {target} from a SQLite {found} value")]
+    Decode {
+        target: &'static str,
+        found: &'static str,
+    },
+    #[error("could not convert value to {0}")]
+    Conversion(&'static str),
+}
 
 impl SchemaBackend for Sqlite {
     fn capabilities(&self) -> squealy::SchemaCapabilities {

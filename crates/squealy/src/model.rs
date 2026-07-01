@@ -982,7 +982,11 @@ fn view_from_dyn(view: &(dyn crate::ViewDef + Sync)) -> ViewModel {
     }
 }
 
-fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
+/// Builds the neutral [`TableModel`] for a query-builder [`Table`]. This is the canonical
+/// `&dyn Table` → model conversion used when lowering a whole database; a backend can reuse it so its
+/// single-table create path (`Backend::write_table`) renders identically to its model-based
+/// create-from-scratch path.
+pub fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
     let name = table.name().to_owned();
     let columns = table.columns();
 
