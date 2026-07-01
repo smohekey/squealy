@@ -27,6 +27,9 @@ impl squealy::RendersRowLock for TestBackend {}
 // The test backend mirrors Postgres/MySQL, which support `INTERSECT ALL` / `EXCEPT ALL`.
 impl squealy::SupportsIntersectExceptAll for TestBackend {}
 
+// The test backend mirrors Postgres/MySQL, which can render a columnless (all-default-row) upsert.
+impl squealy::SupportsColumnlessUpsert for TestBackend {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TestError {
     NoRows,

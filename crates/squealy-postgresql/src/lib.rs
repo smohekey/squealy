@@ -29,6 +29,9 @@ pub struct Postgres;
 // Postgres supports `INTERSECT ALL` / `EXCEPT ALL`.
 impl squealy::SupportsIntersectExceptAll for Postgres {}
 
+// Postgres can render a columnless upsert: `INSERT INTO t DEFAULT VALUES ON CONFLICT …`.
+impl squealy::SupportsColumnlessUpsert for Postgres {}
+
 pub struct PostgresConnection {
     client: Client,
 }

@@ -32,6 +32,10 @@ pub struct Mysql;
 // MySQL (8.0.31+) supports `INTERSECT ALL` / `EXCEPT ALL`.
 impl squealy::SupportsIntersectExceptAll for Mysql {}
 
+// MySQL renders a columnless upsert via `() VALUES () ON DUPLICATE KEY UPDATE` (self-assigning the
+// conflict-target column), so an all-default-row upsert is expressible.
+impl squealy::SupportsColumnlessUpsert for Mysql {}
+
 impl SchemaBackend for Mysql {
     fn capabilities(&self) -> squealy::SchemaCapabilities {
         squealy::SchemaCapabilities {

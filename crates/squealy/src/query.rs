@@ -2451,6 +2451,22 @@ pub trait OnConflictQueryBuilder: QueryBuilder {
         Returning: Projectable;
 }
 
+/// Marker for backends that can render a *columnless* upsert — an all-default-row insert (`DEFAULT
+/// VALUES`, or the MySQL `() VALUES ()` form) followed by a conflict clause. Postgres and MySQL can;
+/// SQLite rejects `ON CONFLICT` after `DEFAULT VALUES` (a syntax error) and has no valid rewrite, so
+/// it does **not** implement this — making a columnless upsert a compile error for SQLite.
+pub trait SupportsColumnlessUpsert {}
+
+/// Whether an insert-column list is a valid upsert payload for backend `B`. A non-empty list
+/// ([`HCons`](crate::HCons)) always is; the empty list ([`HNil`](crate::HNil), a columnless
+/// all-default row) is valid only when the backend implements [`SupportsColumnlessUpsert`]. This is the
+/// bound that makes `on_conflict(...).do_nothing()/do_update()` reject a columnless upsert for SQLite.
+pub trait ValidUpsertColumns<B> {}
+
+impl<Head, Tail, B> ValidUpsertColumns<B> for HCons<Head, Tail> {}
+
+impl<B: SupportsColumnlessUpsert> ValidUpsertColumns<B> for HNil {}
+
 /// Upsert builder produced by `on_conflict(target)` — choose `do_nothing()` or `do_update()`.
 #[doc(hidden)]
 pub struct OnConflict<'conn, Conn, S, InsertColumns> {
@@ -2476,7 +2492,14 @@ impl<'conn, Conn, S, InsertColumns> OnConflict<'conn, Conn, S, InsertColumns> {
     }
 
     /// `ON CONFLICT (<target>) DO NOTHING`.
-    pub fn do_nothing(self) -> Upsert<'conn, Conn, S, InsertColumns> {
+    ///
+    /// A columnless (all-default-row) upsert is rejected at compile time for backends that cannot
+    /// express it — see [`ValidUpsertColumns`]/[`SupportsColumnlessUpsert`] (SQLite).
+    pub fn do_nothing(self) -> Upsert<'conn, Conn, S, InsertColumns>
+    where
+        Conn: QueryBuilder,
+        InsertColumns: ValidUpsertColumns<Conn::Backend>,
+    {
         Upsert::new(
             self.connection,
             self.insert_columns,
@@ -2489,7 +2512,14 @@ impl<'conn, Conn, S, InsertColumns> OnConflict<'conn, Conn, S, InsertColumns> {
 
     /// `ON CONFLICT (<target>) DO UPDATE SET <col> = EXCLUDED.<col>` for every inserted column (replace
     /// the existing row with the values being inserted).
-    pub fn do_update(self) -> Upsert<'conn, Conn, S, InsertColumns> {
+    ///
+    /// A columnless (all-default-row) upsert is rejected at compile time for backends that cannot
+    /// express it — see [`ValidUpsertColumns`]/[`SupportsColumnlessUpsert`] (SQLite).
+    pub fn do_update(self) -> Upsert<'conn, Conn, S, InsertColumns>
+    where
+        Conn: QueryBuilder,
+        InsertColumns: ValidUpsertColumns<Conn::Backend>,
+    {
         Upsert::new(
             self.connection,
             self.insert_columns,
