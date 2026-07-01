@@ -17,14 +17,14 @@ use std::io::{self, Write};
 
 use crate::{
     AggregateFunc, ArithmeticOp, AssignmentValueVisitor, AssignmentVisitor, Backend, ColumnRef,
-    CompareOp, ConflictAction, ConflictClause, DateField, Dialect, Encode, Expr, ExprKind,
-    ExprVisitor, InsertRow, InsertRowVisitor, InsertableTable, Order, OrderDirection, Predicate,
-    PredicateAstVisitor, PredicateKind, PredicateVisitor, ProjectionShape, ProjectionVisitor,
-    QueryBuilder, RenderAssignment, RenderAst, RenderCaseArms, RenderCoalesceArgs,
-    RenderInsertAssignments, RenderInsertRows, RenderPredicateAst, RenderPredicateNodes,
-    RenderProjectable, RenderSelectAst, RenderSimpleCaseArms, RenderUpdateAssignments, SchemaTable,
-    SelectSink, Selected, SourceAlias, SqlType, TableProjection, UnaryStringFunc, UpdateFromStyle,
-    UpdateableTable,
+    CompareOp, ConflictAction, ConflictClause, DateField, DeleteUsingStyle, Dialect, Encode, Expr,
+    ExprKind, ExprVisitor, InsertRow, InsertRowVisitor, InsertableTable, Order, OrderDirection,
+    Predicate, PredicateAstVisitor, PredicateKind, PredicateVisitor, ProjectionShape,
+    ProjectionVisitor, QueryBuilder, RenderAssignment, RenderAst, RenderCaseArms,
+    RenderCoalesceArgs, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst,
+    RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderSimpleCaseArms,
+    RenderUpdateAssignments, SchemaTable, SelectSink, Selected, SourceAlias, SqlType,
+    TableProjection, UnaryStringFunc, UpdateFromStyle, UpdateableTable,
 };
 use std::marker::PhantomData;
 
@@ -749,13 +749,21 @@ where
     where
         Writer: SqlWriter<B>,
     {
-        writer.write_all(b"(")?;
+        // SQLite rejects a compound select whose operand is a parenthesized `(SELECT …)`, so the
+        // dialect can suppress the enclosing parentheses (operands then associate left-to-right).
+        let parenthesize = renderer.dialect.parenthesize_set_operands();
+        if parenthesize {
+            writer.write_all(b"(")?;
+        }
         {
             let mut sink = SelectRenderSink::<B, Writer>::new(writer, renderer)?;
             self.selected.lower_into::<Conn, _>(&mut sink)?;
             sink.finish()?;
         }
-        writer.write_all(b")")
+        if parenthesize {
+            writer.write_all(b")")?;
+        }
+        Ok(())
     }
 
     fn render_insert_source<Writer>(
@@ -790,9 +798,16 @@ where
     where
         Writer: SqlWriter<B>,
     {
-        writer.write_all(b"(")?;
+        // See `SetLeaf::render_operand`: SQLite renders compound operands without enclosing parens.
+        let parenthesize = renderer.dialect.parenthesize_set_operands();
+        if parenthesize {
+            writer.write_all(b"(")?;
+        }
         self.render_root(writer, renderer)?;
-        writer.write_all(b")")
+        if parenthesize {
+            writer.write_all(b")")?;
+        }
+        Ok(())
     }
 
     fn render_root<Writer>(&self, writer: &mut Writer, renderer: &mut Renderer) -> io::Result<()>
@@ -1006,7 +1021,9 @@ fn write_table_ref<S>(dialect: &dyn Dialect, writer: &mut impl Write) -> io::Res
 where
     S: TableProjection,
 {
-    if let Some(schema) = <S as TableProjection>::schema_name() {
+    if dialect.qualify_schema()
+        && let Some(schema) = <S as TableProjection>::schema_name()
+    {
         dialect.write_quoted_ident(schema, writer)?;
         writer.write_all(b".")?;
     }
@@ -1018,7 +1035,9 @@ fn write_schema_table_ref<S>(dialect: &dyn Dialect, writer: &mut impl Write) -> 
 where
     S: SchemaTable,
 {
-    if let Some(schema) = <S as SchemaTable>::schema_name() {
+    if dialect.qualify_schema()
+        && let Some(schema) = <S as SchemaTable>::schema_name()
+    {
         dialect.write_quoted_ident(schema, writer)?;
         writer.write_all(b".")?;
     }
@@ -1654,8 +1673,8 @@ where
     Writer: SqlWriter<B>,
 {
     let mut renderer = Renderer::new(dialect);
-    match dialect.update_from_style() {
-        UpdateFromStyle::PgFrom => {
+    match dialect.delete_using_style() {
+        DeleteUsingStyle::PgUsing => {
             writer.write_all(b"DELETE FROM ")?;
             write_table_ref::<S>(renderer.dialect, writer)?;
             write!(writer, " AS {target_alias} USING ")?;
@@ -1663,7 +1682,7 @@ where
             write!(writer, " AS {source_alias}")?;
             write_filters::<B, _>(filters, writer, &mut renderer)?;
         }
-        UpdateFromStyle::MysqlJoin => {
+        DeleteUsingStyle::MysqlJoin => {
             write!(writer, "DELETE {target_alias} FROM ")?;
             write_table_ref::<S>(renderer.dialect, writer)?;
             write!(writer, " AS {target_alias} JOIN ")?;
@@ -1676,6 +1695,24 @@ where
                 _backend: PhantomData::<B>,
             };
             filters.try_visit(&mut predicates)?;
+        }
+        DeleteUsingStyle::SqliteExists => {
+            // SQLite has no join-delete, so the correlated delete becomes a correlated `EXISTS`
+            // subquery: `DELETE FROM t AS a WHERE EXISTS (SELECT 1 FROM other AS b WHERE <correlation>)`
+            // (SQLite's `DELETE` target allows an alias, and the subquery may reference it).
+            writer.write_all(b"DELETE FROM ")?;
+            write_table_ref::<S>(renderer.dialect, writer)?;
+            write!(writer, " AS {target_alias} WHERE EXISTS (SELECT 1 FROM ")?;
+            write_table_ref::<O>(renderer.dialect, writer)?;
+            write!(writer, " AS {source_alias} WHERE ")?;
+            let mut predicates = WritePredicateFilters {
+                writer,
+                renderer: &mut renderer,
+                index: 0,
+                _backend: PhantomData::<B>,
+            };
+            filters.try_visit(&mut predicates)?;
+            writer.write_all(b")")?;
         }
     }
     write_returning::<B, _>(returning, writer, &mut renderer)?;
@@ -2412,6 +2449,18 @@ where
         // regex `substring(text FROM pattern FOR escape)` overload. MySQL binds `?` by value (no
         // inference, no regex overload), so it needs no cast. The text operand is anchored by the
         // function and is never cast.
+        // SQLite has no `SUBSTRING(s FROM start FOR len)` syntax — it spells it as the comma-argument
+        // call `substr(s, start, len)` (1-based `start`, same as the standard form), and binds `?` by
+        // value so the bounds need no cast.
+        if self.renderer.dialect.substring_uses_function_call() {
+            self.writer.write_all(b"substr(")?;
+            string(self)?;
+            self.writer.write_all(b", ")?;
+            start(self)?;
+            self.writer.write_all(b", ")?;
+            len(self)?;
+            return self.writer.write_all(b")");
+        }
         let bound_cast = if self.renderer.dialect.substring_bounds_need_cast() {
             Some(SqlType::I32)
         } else {

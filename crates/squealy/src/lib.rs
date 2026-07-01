@@ -475,7 +475,7 @@ pub use cte::{
     recursive_cte_definition_dependencies,
 };
 pub use database::Database;
-pub use dialect::{Dialect, UpdateFromStyle};
+pub use dialect::{DeleteUsingStyle, Dialect, UpdateFromStyle};
 pub use expr::{
     AddExpr, AggregateExprAst, AggregateFunc, AggregateScalar, AndPredicate, AnyPredicate,
     AppendArm, AppendCoalesceArg, AppendOrder, AppendPartition, AppendSimpleArm, ArithmeticOp,

@@ -527,6 +527,26 @@ impl squealy::Dialect for SqliteDialect {
             other => other.sql_name(),
         }
     }
+
+    fn qualify_schema(&self) -> bool {
+        // SQLite has no schemas; table names render unqualified (matching the flattened DDL).
+        false
+    }
+
+    fn parenthesize_set_operands(&self) -> bool {
+        // SQLite rejects a compound select whose operand is a parenthesized `(SELECT …)`.
+        false
+    }
+
+    fn substring_uses_function_call(&self) -> bool {
+        // SQLite spells substring as `substr(s, start, len)`, not `SUBSTRING(s FROM start FOR len)`.
+        true
+    }
+
+    fn delete_using_style(&self) -> squealy::DeleteUsingStyle {
+        // SQLite has no join-delete; a correlated delete becomes `DELETE … WHERE EXISTS (SELECT …)`.
+        squealy::DeleteUsingStyle::SqliteExists
+    }
 }
 
 #[cfg(test)]

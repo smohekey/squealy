@@ -106,10 +106,64 @@ fn sqlite_renders_correlated_delete() {
         .build();
 
     let sql = delete.to_sql();
+    // SQLite has no join-delete, so a correlated delete is a correlated EXISTS subquery.
     assert!(sql.starts_with("DELETE FROM \"widgets\" AS "), "{sql}");
-    assert!(sql.contains("\"gadgets\" AS "), "{sql}");
+    assert!(
+        sql.contains("WHERE EXISTS (SELECT 1 FROM \"gadgets\" AS "),
+        "expected an EXISTS-subquery correlated delete: {sql}"
+    );
+    assert!(
+        !sql.contains("USING"),
+        "SQLite has no DELETE … USING: {sql}"
+    );
     assert!(!sql.contains('`'), "must not use MySQL backticks: {sql}");
     assert_eq!(delete.collect_params().unwrap(), Vec::<SqliteValue>::new());
+}
+
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Public)]
+struct Account<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    handle: C::Type<'scope, String>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct Public {
+    accounts: Account<'static, ColumnName>,
+}
+
+#[test]
+fn sqlite_suppresses_schema_qualification() {
+    // A `#[schema(Public)]` table renders unqualified for SQLite (which has no schemas), matching how
+    // its DDL flattens schemas — not `"public"."accounts"`, which SQLite would read as a database name.
+    let query = Sqlite.from::<Account>().select(|(account,)| account.id);
+    let sql = query.to_sql();
+    assert!(sql.contains("FROM \"accounts\""), "{sql}");
+    assert!(
+        !sql.contains("\"public\""),
+        "must not qualify with the schema: {sql}"
+    );
+}
+
+#[test]
+fn sqlite_substring_renders_as_substr_function_call() {
+    // SQLite has no `SUBSTRING(s FROM start FOR len)`; it uses the `substr(s, start, len)` call.
+    let query = Sqlite
+        .from::<Widget>()
+        .select(|(widget,)| substring(widget.name, 2, 3));
+    let sql = query.to_sql();
+    assert!(sql.contains("substr("), "expected substr(...): {sql}");
+    assert!(
+        !sql.contains("SUBSTRING"),
+        "SQLite must not use SUBSTRING: {sql}"
+    );
+    // The `FROM start FOR len` substring syntax is gone (the ` FOR ` keyword is unique to it).
+    assert!(
+        !sql.contains(" FOR "),
+        "no FROM/FOR substring syntax: {sql}"
+    );
 }
 
 #[test]
@@ -125,7 +179,15 @@ fn sqlite_renders_union_set_operation() {
         );
 
     let sql = union.to_sql();
-    assert!(sql.contains(") UNION ("), "expected a UNION set op: {sql}");
+    // SQLite renders set operands bare (no parenthesized `(SELECT …)`, which it rejects).
+    assert!(
+        sql.contains(" UNION SELECT "),
+        "expected a bare UNION: {sql}"
+    );
+    assert!(
+        !sql.contains(") UNION ("),
+        "SQLite must not parenthesize set operands: {sql}"
+    );
     assert!(
         sql.contains("\"widgets\""),
         "expected double-quoted identifiers: {sql}"

@@ -210,6 +210,37 @@ pub trait Dialect {
     fn update_from_style(&self) -> UpdateFromStyle {
         UpdateFromStyle::PgFrom
     }
+
+    /// How a correlated `DELETE … <source>` renders. The default derives from
+    /// [`update_from_style`](Self::update_from_style), so PostgreSQL/MySQL are unchanged; SQLite
+    /// overrides it, having no join-delete syntax — it rewrites the correlated delete as
+    /// `DELETE FROM t AS a WHERE EXISTS (SELECT 1 FROM other AS b WHERE <correlation>)`.
+    fn delete_using_style(&self) -> DeleteUsingStyle {
+        match self.update_from_style() {
+            UpdateFromStyle::PgFrom => DeleteUsingStyle::PgUsing,
+            UpdateFromStyle::MysqlJoin => DeleteUsingStyle::MysqlJoin,
+        }
+    }
+
+    /// Whether a schema/namespace qualifier is emitted before a table name. Defaults to `true`; SQLite
+    /// has no schemas (tables render unqualified/flattened), so it returns `false`.
+    fn qualify_schema(&self) -> bool {
+        true
+    }
+
+    /// Whether the operands of a set operation (`UNION`/`INTERSECT`/`EXCEPT`) are parenthesized.
+    /// Defaults to `true`; SQLite rejects a compound select whose operand is a parenthesized
+    /// `(SELECT …)`, so it returns `false` (operands render bare, associating left-to-right).
+    fn parenthesize_set_operands(&self) -> bool {
+        true
+    }
+
+    /// Whether `substring` renders as the comma-argument call `substr(s, start, len)` rather than the
+    /// SQL-standard `SUBSTRING(s FROM start FOR len)`. Defaults to `false`; SQLite has no `FROM`/`FOR`
+    /// substring syntax, so it returns `true`.
+    fn substring_uses_function_call(&self) -> bool {
+        false
+    }
 }
 
 /// The two shapes a correlated `UPDATE … <source>` / `DELETE … <source>` takes across dialects (see
@@ -222,4 +253,17 @@ pub enum UpdateFromStyle {
     /// MySQL: `UPDATE t AS a JOIN other AS b ON <correlation> SET … [WHERE filters]` and
     /// `DELETE a FROM t AS a JOIN other AS b ON <correlation> [WHERE filters]`.
     MysqlJoin,
+}
+
+/// The shapes a correlated `DELETE … <source>` takes across dialects (see
+/// [`Dialect::delete_using_style`]). Decoupled from [`UpdateFromStyle`] because SQLite can render
+/// `UPDATE … FROM` but has no join-delete, so it falls back to a correlated `EXISTS` subquery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeleteUsingStyle {
+    /// PostgreSQL: `DELETE FROM t AS a USING other AS b WHERE <correlation>`.
+    PgUsing,
+    /// MySQL: `DELETE a FROM t AS a JOIN other AS b ON <correlation>`.
+    MysqlJoin,
+    /// SQLite: `DELETE FROM t AS a WHERE EXISTS (SELECT 1 FROM other AS b WHERE <correlation>)`.
+    SqliteExists,
 }
