@@ -21,6 +21,26 @@ use squealy::{
 /// newline-separated: tables (with inline PK/unique/check/foreign-keys), then indexes, then views in
 /// dependency order. SQLite has no schemas, so schema names are dropped and all tables are flattened.
 pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> io::Result<()> {
+    // SQLite has a single, unqualified table namespace, so flattening two schemas that share a table
+    // name would emit duplicate `CREATE TABLE` statements (and mis-target later indexes/foreign keys).
+    // Such a model is valid for the schema-aware backends but cannot be represented in SQLite; reject
+    // it before rendering.
+    let mut seen_tables = std::collections::HashSet::new();
+    for schema in &model.schemas {
+        for table in &schema.tables {
+            if !seen_tables.insert(table.name.as_str()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "SQLite has no schemas, so table `{}` appears in more than one schema and \
+                         would collide when flattened",
+                        table.name
+                    ),
+                ));
+            }
+        }
+    }
+
     let mut first = true;
 
     for schema in &model.schemas {

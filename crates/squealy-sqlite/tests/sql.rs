@@ -229,6 +229,33 @@ fn fixed_bytes_column_enforces_width_with_a_check() {
 }
 
 #[test]
+fn rejects_table_name_collision_across_schemas() {
+    // SQLite flattens schemas into one namespace, so the same table name in two schemas would collide.
+    use squealy::{DatabaseModel, SchemaModel, TableModel};
+    let users = || TableModel {
+        name: "users".to_owned(),
+        comment: None,
+        columns: Vec::new(),
+        primary_key: None,
+        foreign_keys: Vec::new(),
+        uniques: Vec::new(),
+        checks: Vec::new(),
+        indexes: Vec::new(),
+    };
+    let schema = |name: &str| SchemaModel {
+        name: Some(name.to_owned()),
+        tables: vec![users()],
+        views: Vec::new(),
+    };
+    let model = DatabaseModel {
+        schemas: vec![schema("public"), schema("archive")],
+    };
+    let mut sql = Vec::new();
+    let error = Sqlite.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
 fn render_create_rejects_views_for_now() {
     // View rendering is deferred (the shared view-body renderer emits schema-qualified sources and
     // non-SQLite scalar-function spellings); a model carrying a view errors rather than emit broken
