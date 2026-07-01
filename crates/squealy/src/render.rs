@@ -23,8 +23,8 @@ use crate::{
     ProjectionVisitor, QueryBuilder, RenderAssignment, RenderAst, RenderCaseArms,
     RenderCoalesceArgs, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst,
     RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderSimpleCaseArms,
-    RenderUpdateAssignments, SchemaTable, SelectSink, Selected, SourceAlias, SqlType,
-    TableProjection, UnaryStringFunc, UpdateFromStyle, UpdateableTable,
+    RenderUpdateAssignments, SchemaTable, SelectSink, Selected, SetOperandStyle, SourceAlias,
+    SqlType, TableProjection, UnaryStringFunc, UpdateFromStyle, UpdateableTable,
 };
 use std::marker::PhantomData;
 
@@ -749,21 +749,20 @@ where
     where
         Writer: SqlWriter<B>,
     {
-        // SQLite rejects a compound select whose operand is a parenthesized `(SELECT …)`, so the
-        // dialect can suppress the enclosing parentheses (operands then associate left-to-right).
-        let parenthesize = renderer.dialect.parenthesize_set_operands();
-        if parenthesize {
-            writer.write_all(b"(")?;
-        }
+        // A set operand is wrapped so its `ORDER BY`/`LIMIT` (and, for a nested compound, its grouping)
+        // binds to the operand and not the enclosing set. Postgres/MySQL use `(SELECT …)`; SQLite
+        // rejects a parenthesized compound operand, so it uses `SELECT * FROM (SELECT …)` instead.
+        let (open, close): (&[u8], &[u8]) = match renderer.dialect.set_operand_style() {
+            SetOperandStyle::Parenthesized => (b"(", b")"),
+            SetOperandStyle::SubquerySelect => (b"SELECT * FROM (", b")"),
+        };
+        writer.write_all(open)?;
         {
             let mut sink = SelectRenderSink::<B, Writer>::new(writer, renderer)?;
             self.selected.lower_into::<Conn, _>(&mut sink)?;
             sink.finish()?;
         }
-        if parenthesize {
-            writer.write_all(b")")?;
-        }
-        Ok(())
+        writer.write_all(close)
     }
 
     fn render_insert_source<Writer>(
@@ -798,16 +797,16 @@ where
     where
         Writer: SqlWriter<B>,
     {
-        // See `SetLeaf::render_operand`: SQLite renders compound operands without enclosing parens.
-        let parenthesize = renderer.dialect.parenthesize_set_operands();
-        if parenthesize {
-            writer.write_all(b"(")?;
-        }
+        // See `SetLeaf::render_operand`. A nested compound is wrapped so its operators group correctly
+        // under the enclosing set: `(a UNION b)` for Postgres/MySQL, `SELECT * FROM (a UNION b)` for
+        // SQLite (which rejects a parenthesized compound operand).
+        let (open, close): (&[u8], &[u8]) = match renderer.dialect.set_operand_style() {
+            SetOperandStyle::Parenthesized => (b"(", b")"),
+            SetOperandStyle::SubquerySelect => (b"SELECT * FROM (", b")"),
+        };
+        writer.write_all(open)?;
         self.render_root(writer, renderer)?;
-        if parenthesize {
-            writer.write_all(b")")?;
-        }
-        Ok(())
+        writer.write_all(close)
     }
 
     fn render_root<Writer>(&self, writer: &mut Writer, renderer: &mut Renderer) -> io::Result<()>

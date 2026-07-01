@@ -3,8 +3,9 @@
 //! This slice is driver-free, so the tests only assert `to_sql()` / `collect_params()` output — no
 //! execution. They cover the reachable render paths: a filtered `SELECT`, an `INSERT` (via the upsert
 //! `build()` inspection path, since SQLite advertises no `RETURNING` in this slice), a correlated
-//! `UPDATE … FROM`, a correlated `DELETE … USING`, a `UNION` set operation, and the SQLite-specific
-//! `length()` spelling of the character-length scalar function.
+//! `UPDATE … FROM`, a correlated `DELETE … USING`, a `UNION` set operation (with sub-select-wrapped
+//! operands, including an ordered operand), and the SQLite-specific spellings of the character-length
+//! (`length()`), substring (`substr()`), and string-concatenation (`||`) scalars.
 
 use squealy::*;
 use squealy_sqlite::{Sqlite, SqliteValue};
@@ -179,10 +180,15 @@ fn sqlite_renders_union_set_operation() {
         );
 
     let sql = union.to_sql();
-    // SQLite renders set operands bare (no parenthesized `(SELECT …)`, which it rejects).
+    // SQLite rejects a parenthesized compound operand `(SELECT …)`, so each operand is wrapped as a
+    // sub-select `SELECT * FROM (SELECT …)` — which also keeps ordered/limited operands valid.
     assert!(
-        sql.contains(" UNION SELECT "),
-        "expected a bare UNION: {sql}"
+        sql.starts_with("SELECT * FROM (SELECT "),
+        "expected a sub-select-wrapped operand: {sql}"
+    );
+    assert!(
+        sql.contains(") UNION SELECT * FROM (SELECT "),
+        "expected sub-select-wrapped UNION operands: {sql}"
     );
     assert!(
         !sql.contains(") UNION ("),
@@ -196,6 +202,54 @@ fn sqlite_renders_union_set_operation() {
     assert_eq!(
         union.collect_params().unwrap(),
         vec![SqliteValue::Text("Ada".to_owned())]
+    );
+}
+
+#[test]
+fn sqlite_wraps_ordered_set_operand_as_subquery() {
+    // An operand with its own ORDER BY/LIMIT can't sit bare in a SQLite compound (SQLite only allows a
+    // trailing ORDER BY/LIMIT on the whole compound), so it must render as `SELECT * FROM (SELECT … ORDER
+    // BY … LIMIT …)`.
+    let union = Sqlite
+        .from::<Widget>()
+        .order_by(|(widget,)| widget.id.asc())
+        .limit(1)
+        .select(|(widget,)| (widget.id, widget.name))
+        .union(
+            Sqlite
+                .from::<Widget>()
+                .select(|(widget,)| (widget.id, widget.name)),
+        );
+
+    let sql = union.to_sql();
+    assert!(
+        sql.starts_with("SELECT * FROM (SELECT "),
+        "ordered operand must be sub-select wrapped: {sql}"
+    );
+    assert!(
+        sql.contains("ORDER BY ") && sql.contains("LIMIT 1)"),
+        "the operand's ORDER BY/LIMIT must stay inside its sub-select: {sql}"
+    );
+    // The compound-level `UNION` must follow the closed sub-select, not a bare `ORDER BY … UNION`.
+    assert!(
+        sql.contains("LIMIT 1) UNION SELECT * FROM (SELECT "),
+        "expected the ORDER BY/LIMIT to bind to the operand, not the compound: {sql}"
+    );
+}
+
+#[test]
+fn sqlite_concat_renders_as_pipe_operator() {
+    // SQLite's `CONCAT` ignores NULL operands, but squealy's concat is nullable iff either operand is;
+    // the null-propagating `||` operator matches that, so the dialect must render `||`, not `CONCAT`.
+    let query = Sqlite
+        .from::<Widget>()
+        .select(|(widget,)| widget.name.concat(widget.name));
+
+    let sql = query.to_sql();
+    assert!(sql.contains(" || "), "expected the `||` operator: {sql}");
+    assert!(
+        !sql.contains("CONCAT"),
+        "SQLite must not render CONCAT: {sql}"
     );
 }
 

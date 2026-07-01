@@ -1795,10 +1795,18 @@ where
     fn into_set_parts(self) -> (&'conn Conn, Self::Arm);
 }
 
+/// Marker for backends whose compound-select grammar supports the `ALL` quantifier on `INTERSECT`
+/// and `EXCEPT`. Postgres and MySQL do; SQLite only allows `ALL` after `UNION`, so it does **not**
+/// implement this, which makes [`SetOperations::intersect_all`]/[`SetOperations::except_all`] absent
+/// (a compile error) for SQLite rather than rendering SQL that fails to prepare.
+pub trait SupportsIntersectExceptAll {}
+
 /// The set-operation builder methods (`union`/`union_all`/`intersect`/`intersect_all`/`except`/
 /// `except_all`), shared across backends. Implemented per-backend on both the select and set-select
 /// query objects via the single [`make_set_select`](Self::make_set_select) hook; the six methods are
 /// defaulted. Each combines `self` with a row-compatible `other` into a new set-select query object.
+/// `intersect_all`/`except_all` are additionally bounded on [`SupportsIntersectExceptAll`], so they
+/// are unavailable for backends (SQLite) whose grammar lacks those operators.
 pub trait SetOperations<'conn, 'scope, Conn>: SetOperand<'conn, 'scope, Conn> + Sized
 where
     Conn: QueryBuilder + 'conn,
@@ -1841,6 +1849,7 @@ where
     where
         O: SetOperand<'conn, 'scope, Conn, Row = Self::Row>,
         SetNode<Self::Arm, O::Arm>: SetArm<'conn, 'scope, Conn>,
+        Conn::Backend: SupportsIntersectExceptAll,
     {
         self.set_op(other, SetOp::IntersectAll)
     }
@@ -1857,6 +1866,7 @@ where
     where
         O: SetOperand<'conn, 'scope, Conn, Row = Self::Row>,
         SetNode<Self::Arm, O::Arm>: SetArm<'conn, 'scope, Conn>,
+        Conn::Backend: SupportsIntersectExceptAll,
     {
         self.set_op(other, SetOp::ExceptAll)
     }

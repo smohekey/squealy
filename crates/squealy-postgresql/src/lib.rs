@@ -26,6 +26,9 @@ pub use query::{
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Postgres;
 
+// Postgres supports `INTERSECT ALL` / `EXCEPT ALL`.
+impl squealy::SupportsIntersectExceptAll for Postgres {}
+
 pub struct PostgresConnection {
     client: Client,
 }

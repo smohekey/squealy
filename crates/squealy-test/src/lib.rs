@@ -24,6 +24,9 @@ pub struct TestBackend;
 // The test backend renders `FOR UPDATE` / `FOR SHARE`, so the row-lock builders are available.
 impl squealy::RendersRowLock for TestBackend {}
 
+// The test backend mirrors Postgres/MySQL, which support `INTERSECT ALL` / `EXCEPT ALL`.
+impl squealy::SupportsIntersectExceptAll for TestBackend {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TestError {
     NoRows,

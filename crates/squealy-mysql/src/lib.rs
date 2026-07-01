@@ -29,6 +29,9 @@ pub use query::MysqlRowReader;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Mysql;
 
+// MySQL (8.0.31+) supports `INTERSECT ALL` / `EXCEPT ALL`.
+impl squealy::SupportsIntersectExceptAll for Mysql {}
+
 impl SchemaBackend for Mysql {
     fn capabilities(&self) -> squealy::SchemaCapabilities {
         squealy::SchemaCapabilities {

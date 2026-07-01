@@ -228,11 +228,13 @@ pub trait Dialect {
         true
     }
 
-    /// Whether the operands of a set operation (`UNION`/`INTERSECT`/`EXCEPT`) are parenthesized.
-    /// Defaults to `true`; SQLite rejects a compound select whose operand is a parenthesized
-    /// `(SELECT …)`, so it returns `false` (operands render bare, associating left-to-right).
-    fn parenthesize_set_operands(&self) -> bool {
-        true
+    /// How the operands of a set operation (`UNION`/`INTERSECT`/`EXCEPT`) are wrapped. Defaults to
+    /// [`SetOperandStyle::Parenthesized`] (`(SELECT …)`); SQLite rejects a parenthesized compound
+    /// operand *and* a per-operand `ORDER BY`/`LIMIT`, so it uses [`SetOperandStyle::SubquerySelect`]
+    /// (`SELECT * FROM (SELECT …)`), which stays valid for ordered/limited operands and preserves the
+    /// grouping of a nested compound.
+    fn set_operand_style(&self) -> SetOperandStyle {
+        SetOperandStyle::Parenthesized
     }
 
     /// Whether `substring` renders as the comma-argument call `substr(s, start, len)` rather than the
@@ -266,4 +268,16 @@ pub enum DeleteUsingStyle {
     MysqlJoin,
     /// SQLite: `DELETE FROM t AS a WHERE EXISTS (SELECT 1 FROM other AS b WHERE <correlation>)`.
     SqliteExists,
+}
+
+/// How a set-operation operand is wrapped when rendered (see [`Dialect::set_operand_style`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetOperandStyle {
+    /// PostgreSQL/MySQL: `(SELECT …)` — each operand parenthesized.
+    Parenthesized,
+    /// SQLite: `SELECT * FROM (SELECT …)` — each operand wrapped as a sub-select. SQLite's
+    /// compound-select grammar rejects a parenthesized operand and a bare operand's `ORDER BY`/`LIMIT`,
+    /// so the sub-select form is the only one that stays valid for ordered/limited operands and that
+    /// preserves the grouping of a nested compound.
+    SubquerySelect,
 }

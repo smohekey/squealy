@@ -533,13 +533,20 @@ impl squealy::Dialect for SqliteDialect {
         false
     }
 
-    fn parenthesize_set_operands(&self) -> bool {
-        // SQLite rejects a compound select whose operand is a parenthesized `(SELECT …)`.
-        false
+    fn set_operand_style(&self) -> squealy::SetOperandStyle {
+        // SQLite rejects a parenthesized compound operand and a per-operand `ORDER BY`/`LIMIT`, so an
+        // operand is wrapped as `SELECT * FROM (SELECT …)` (valid for ordered/limited/nested operands).
+        squealy::SetOperandStyle::SubquerySelect
     }
 
     fn substring_uses_function_call(&self) -> bool {
         // SQLite spells substring as `substr(s, start, len)`, not `SUBSTRING(s FROM start FOR len)`.
+        true
+    }
+
+    fn concat_uses_pipe_operator(&self) -> bool {
+        // SQLite has no null-propagating `CONCAT`; `||` returns NULL if either operand is NULL,
+        // matching squealy's concat expression (nullable iff either operand is nullable).
         true
     }
 
