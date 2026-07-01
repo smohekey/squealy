@@ -36,26 +36,14 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
     // once schemas are flattened every table and index name must be unique — including a table name
     // that matches an index name. A model that relies on schema/table scoping for those names is valid
     // for the schema-aware backends but cannot be represented in SQLite; reject it before rendering
-    // duplicate `CREATE TABLE`/`CREATE INDEX` statements. Names are compared case-insensitively
-    // (ASCII-folded), matching how SQLite compares object identifiers even when quoted, and tables are
-    // inserted first so an index that collides with a table is reported too.
-    let mut seen = std::collections::HashSet::new();
-    for schema in &model.schemas {
-        for table in &schema.tables {
-            if !seen.insert(table.name.to_ascii_lowercase()) {
-                return Err(object_name_collision(&table.name));
-            }
-        }
-    }
-    for schema in &model.schemas {
-        for table in &schema.tables {
-            for index in &table.indexes {
-                if !seen.insert(index.name.to_ascii_lowercase()) {
-                    return Err(object_name_collision(&index.name));
-                }
-            }
-        }
-    }
+    // duplicate `CREATE TABLE`/`CREATE INDEX` statements. Tables are checked first so an index that
+    // collides with a table is reported as the index.
+    let tables = || model.schemas.iter().flat_map(|schema| schema.tables.iter());
+    check_object_name_uniqueness(
+        tables().map(|table| table.name.as_str()).chain(
+            tables().flat_map(|table| table.indexes.iter().map(|index| index.name.as_str())),
+        ),
+    )?;
 
     let mut first = true;
 
@@ -81,6 +69,19 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
     Ok(())
 }
 
+/// Rejects any case-insensitive duplicate among SQLite object names. SQLite keeps tables and indexes
+/// in one database-wide namespace and compares identifiers case-insensitively (ASCII-folded) even when
+/// quoted, so every rendered name must be unique after schemas are flattened.
+fn check_object_name_uniqueness<'a>(names: impl Iterator<Item = &'a str>) -> io::Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for name in names {
+        if !seen.insert(name.to_ascii_lowercase()) {
+            return Err(object_name_collision(name));
+        }
+    }
+    Ok(())
+}
+
 fn object_name_collision(name: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
@@ -100,6 +101,12 @@ pub(crate) fn write_table(
     writer: &mut impl Write,
 ) -> io::Result<()> {
     let model = squealy::table_from_dyn(table);
+    // Same single-namespace guard as `write_database`: the table name and its index names must be
+    // unique (an index whose name matches the table would collide in SQLite).
+    check_object_name_uniqueness(
+        std::iter::once(model.name.as_str())
+            .chain(model.indexes.iter().map(|index| index.name.as_str())),
+    )?;
     write_create_table(&model, writer)?;
     for index in &model.indexes {
         writer.write_all(b";\n")?;
