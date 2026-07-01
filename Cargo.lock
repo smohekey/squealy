@@ -1729,6 +1729,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "squealy-sqlite"
+version = "0.1.0"
+dependencies = [
+ "squealy",
+ "thiserror",
+]
+
+[[package]]
 name = "squealy-test"
 version = "0.1.0"
 dependencies = [
