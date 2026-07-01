@@ -99,28 +99,10 @@ macro_rules! impl_decode_from_i64 {
         })*
     };
 }
-impl_decode_from_i64!(i8, i16, i32, isize, u8, u16, u32);
-
-/// Wide integers (`u64`/`usize`/`i128`/`u128`) are stored as `INTEGER` when they fit `i64`, else as a
-/// decimal `TEXT` (SQLite has no unsigned or 128-bit integer), so decoding accepts either.
-macro_rules! impl_decode_wide_integer {
-    ($($ty:ty),* $(,)?) => {
-        $(impl Decode<Sqlite> for $ty {
-            fn decode(row: &mut SqliteRowReader<'_>) -> Result<Self, SqliteError> {
-                match row.take()? {
-                    SqliteValue::Integer(value) => {
-                        <$ty>::try_from(*value).map_err(|_| SqliteError::Conversion(stringify!($ty)))
-                    }
-                    SqliteValue::Text(text) => {
-                        text.parse().map_err(|_| SqliteError::Conversion(stringify!($ty)))
-                    }
-                    other => Err(wrong_kind(stringify!($ty), other)),
-                }
-            }
-        })*
-    };
-}
-impl_decode_wide_integer!(u64, usize, i128, u128);
+// `u64`/`usize`/`i128`/`u128` are stored as `INTEGER` (SQLite's only integer type is signed 64-bit;
+// a value outside `i64` is rejected at bind time — see the encoders), so they decode from `INTEGER`
+// like the narrower widths.
+impl_decode_from_i64!(i8, i16, i32, isize, u8, u16, u32, u64, usize, i128, u128);
 
 impl Decode<Sqlite> for f64 {
     fn decode(row: &mut SqliteRowReader<'_>) -> Result<Self, SqliteError> {
@@ -268,18 +250,22 @@ impl_encode! {
     bool => |v| SqliteValue::Integer(i64::from(*v)),
 }
 
-/// SQLite `INTEGER` is signed 64-bit, so a `u64`/`usize`/`i128`/`u128` that overflows `i64` is sent as
-/// a decimal `TEXT` (which SQLite accepts and comparisons still order lexically only within the same
-/// affinity — round-tripping is preserved by the matching decode). Narrower-fitting values are native
+/// SQLite's only integer type is signed 64-bit, and it has no lossless representation for a value
+/// outside that range: a decimal `TEXT` bound into an `INTEGER`-affinity column is coerced to `REAL`
+/// (losing precision), and a `BLOB` has no numeric meaning. So a `u64`/`usize`/`i128`/`u128` that
+/// overflows `i64` is rejected at bind time rather than silently corrupted; in-range values are native
 /// `INTEGER`.
 macro_rules! impl_encode_wide_integer {
     ($($ty:ty),* $(,)?) => {
         $(impl Encode<Sqlite> for $ty {
             fn encode(&self, out: &mut SqliteParamWriter<'_>) -> Result<(), SqliteError> {
-                out.push(match i64::try_from(*self) {
-                    Ok(value) => SqliteValue::Integer(value),
-                    Err(_) => SqliteValue::Text(self.to_string()),
-                });
+                let value = i64::try_from(*self).map_err(|_| {
+                    SqliteError::Conversion(concat!(
+                        stringify!($ty),
+                        " value is outside SQLite's signed 64-bit INTEGER range"
+                    ))
+                })?;
+                out.push(SqliteValue::Integer(value));
                 Ok(())
             }
         })*
@@ -380,15 +366,16 @@ mod tests {
     }
 
     #[test]
-    fn encodes_wide_integers_as_text_when_out_of_i64_range() {
+    fn wide_integers_bind_as_integer_or_are_rejected_out_of_range() {
         // Fits i64 -> INTEGER.
         assert_eq!(encode_to_value(&5u64).unwrap(), SqliteValue::Integer(5));
-        // Beyond i64::MAX -> decimal TEXT.
-        let big = u64::MAX;
         assert_eq!(
-            encode_to_value(&big).unwrap(),
-            SqliteValue::Text(big.to_string())
+            encode_to_value(&(i64::MAX as u64)).unwrap(),
+            SqliteValue::Integer(i64::MAX)
         );
+        // Beyond i64::MAX -> rejected (SQLite cannot store it losslessly).
+        assert!(encode_to_value(&u64::MAX).is_err());
+        assert!(encode_to_value(&(i128::from(i64::MAX) + 1)).is_err());
     }
 
     #[test]
@@ -413,13 +400,12 @@ mod tests {
     }
 
     #[test]
-    fn decodes_wide_integer_from_text() {
+    fn decodes_wide_integer_from_integer() {
         fn decode<T: squealy::Decode<crate::Sqlite>>(values: &[SqliteValue]) -> T {
             SqliteRowReader::new(values).read::<T>().unwrap()
         }
-        let big = u64::MAX;
-        assert_eq!(decode::<u64>(&[SqliteValue::Text(big.to_string())]), big);
         assert_eq!(decode::<u64>(&[SqliteValue::Integer(5)]), 5u64);
+        assert_eq!(decode::<i128>(&[SqliteValue::Integer(-7)]), -7i128);
     }
 
     #[test]
