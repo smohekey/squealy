@@ -519,6 +519,14 @@ impl squealy::Dialect for SqliteDialect {
         // `CAST(expr AS <type>)` uses SQLite's affinity names, the same mapping as the column type.
         writer.write_all(sqlite_affinity(ty).as_bytes())
     }
+
+    fn unary_string_fn_name(&self, func: squealy::UnaryStringFunc) -> &'static str {
+        match func {
+            // SQLite has no `CHAR_LENGTH`; `length()` counts characters for TEXT values.
+            squealy::UnaryStringFunc::Length => "length",
+            other => other.sql_name(),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use crate::{OrderNulls, RowLock, SqlType};
+use crate::{OrderNulls, RowLock, SqlType, UnaryStringFunc};
 
 /// The SQL-dialect differences the query renderer needs from a backend.
 ///
@@ -29,6 +29,13 @@ pub trait Dialect {
     /// division (`false`), and casting would change `DECIMAL` results.
     fn integer_division_needs_float_cast(&self) -> bool {
         true
+    }
+
+    /// The SQL name for a scalar string function. The default is the standard spelling
+    /// ([`UnaryStringFunc::sql_name`], shared by PostgreSQL and MySQL); a backend overrides it where its
+    /// builtin differs — e.g. SQLite spells character length `length` rather than `CHAR_LENGTH`.
+    fn unary_string_fn_name(&self, func: UnaryStringFunc) -> &'static str {
+        func.sql_name()
     }
 
     /// Writes a `LIMIT`/`OFFSET` clause. The default is the standard form, with `OFFSET` emittable on

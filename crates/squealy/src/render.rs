@@ -2366,7 +2366,8 @@ where
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>,
     {
-        self.writer.write_all(func.sql_name().as_bytes())?;
+        let name = self.renderer.dialect.unary_string_fn_name(func);
+        self.writer.write_all(name.as_bytes())?;
         self.writer.write_all(b"(")?;
         operand(self)?;
         self.writer.write_all(b")")
