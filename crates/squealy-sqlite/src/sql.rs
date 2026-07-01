@@ -36,12 +36,13 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
     // once schemas are flattened every table and index name must be unique — including a table name
     // that matches an index name. A model that relies on schema/table scoping for those names is valid
     // for the schema-aware backends but cannot be represented in SQLite; reject it before rendering
-    // duplicate `CREATE TABLE`/`CREATE INDEX` statements. Tables are inserted first so an index that
-    // collides with a table is reported too.
+    // duplicate `CREATE TABLE`/`CREATE INDEX` statements. Names are compared case-insensitively
+    // (ASCII-folded), matching how SQLite compares object identifiers even when quoted, and tables are
+    // inserted first so an index that collides with a table is reported too.
     let mut seen = std::collections::HashSet::new();
     for schema in &model.schemas {
         for table in &schema.tables {
-            if !seen.insert(table.name.as_str()) {
+            if !seen.insert(table.name.to_ascii_lowercase()) {
                 return Err(object_name_collision(&table.name));
             }
         }
@@ -49,7 +50,7 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
     for schema in &model.schemas {
         for table in &schema.tables {
             for index in &table.indexes {
-                if !seen.insert(index.name.as_str()) {
+                if !seen.insert(index.name.to_ascii_lowercase()) {
                     return Err(object_name_collision(&index.name));
                 }
             }

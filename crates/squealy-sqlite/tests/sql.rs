@@ -256,6 +256,33 @@ fn rejects_table_name_collision_across_schemas() {
 }
 
 #[test]
+fn rejects_case_insensitive_table_name_collision() {
+    // SQLite compares object identifiers case-insensitively (ASCII), so `Users` and `users` are the
+    // same object and must collide even though the strings differ.
+    use squealy::{DatabaseModel, SchemaModel, TableModel};
+    let table = |name: &str| TableModel {
+        name: name.to_owned(),
+        comment: None,
+        columns: Vec::new(),
+        primary_key: None,
+        foreign_keys: Vec::new(),
+        uniques: Vec::new(),
+        checks: Vec::new(),
+        indexes: Vec::new(),
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![table("Users"), table("users")],
+            views: Vec::new(),
+        }],
+    };
+    let mut sql = Vec::new();
+    let error = Sqlite.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
 fn rejects_index_name_collision_across_tables() {
     // SQLite keeps tables and indexes in one object namespace, so the same index name on two tables
     // (which is fine on the schema-aware backends) collides once schemas are flattened.
