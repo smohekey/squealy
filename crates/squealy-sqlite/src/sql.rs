@@ -91,6 +91,23 @@ fn object_name_collision(name: &str) -> io::Error {
     )
 }
 
+/// Renders a `CREATE TABLE` (plus any secondary indexes) for a query-builder [`squealy::Table`], used
+/// by the `to::<T>()` create path and `Backend::write_table`. It lowers the table to a `TableModel` and
+/// reuses the model renderer, so this single-table path is identical to `render_create` for that table
+/// (no separate query-side rendering to drift out of sync).
+pub(crate) fn write_table(
+    table: &(dyn squealy::Table + Sync),
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let model = squealy::table_from_dyn(table);
+    write_create_table(&model, writer)?;
+    for index in &model.indexes {
+        writer.write_all(b";\n")?;
+        write_create_index(&model.name, index, writer)?;
+    }
+    Ok(())
+}
+
 fn statement(writer: &mut impl Write, first: &mut bool) -> io::Result<()> {
     if *first {
         *first = false;
