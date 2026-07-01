@@ -245,13 +245,14 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
         write_default_value(default, writer)?;
     }
     // SQLite's `BLOB` affinity has no fixed width, so a `[u8; N]`/`FixedBytes(N)` column enforces it
-    // with a column `CHECK (length("col") = N)` — the equivalent of the PostgreSQL backend's generated
-    // `octet_length` check (a `NULL` value passes, matching a nullable column). `length()` on a blob
-    // returns its byte count.
+    // with a column `CHECK (length(CAST("col" AS BLOB)) = N)` — the equivalent of the PostgreSQL
+    // backend's generated `octet_length` check (a `NULL` value passes, matching a nullable column). The
+    // `CAST(… AS BLOB)` makes the check byte-based even if a value is stored with text affinity, where a
+    // bare `length()` would count characters rather than bytes.
     if let SqlType::FixedBytes(width) = &column.ty {
-        writer.write_all(b" CHECK (length(")?;
+        writer.write_all(b" CHECK (length(CAST(")?;
         write_quoted_ident(&column.name, writer)?;
-        write!(writer, ") = {width})")?;
+        write!(writer, " AS BLOB)) = {width})")?;
     }
     Ok(())
 }

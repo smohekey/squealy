@@ -223,7 +223,7 @@ fn fixed_bytes_column_enforces_width_with_a_check() {
     Sqlite.render_create(&model, &mut sql).unwrap();
     let sql = String::from_utf8(sql).unwrap();
     assert!(
-        sql.contains("\"hash\" BLOB NOT NULL CHECK (length(\"hash\") = 16)"),
+        sql.contains("\"hash\" BLOB NOT NULL CHECK (length(CAST(\"hash\" AS BLOB)) = 16)"),
         "{sql}"
     );
 }
