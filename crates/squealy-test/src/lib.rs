@@ -30,6 +30,9 @@ impl squealy::SupportsIntersectExceptAll for TestBackend {}
 // The test backend mirrors Postgres/MySQL, which can render a columnless (all-default-row) upsert.
 impl squealy::SupportsColumnlessUpsert for TestBackend {}
 
+// The test backend mirrors Postgres/MySQL, which accept the `DEFAULT` keyword as an assignment value.
+impl squealy::SupportsDefaultKeyword for TestBackend {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TestError {
     NoRows,

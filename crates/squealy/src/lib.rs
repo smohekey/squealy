@@ -562,10 +562,10 @@ pub use query::{
     SelectQuery, SelectSink, Selected, SetArm, SetGroup, SetLeaf, SetNode, SetOp, SetOperand,
     SetOperations, SetOrder, SetSelectModifiers, SetTail, SourceQuery, SourceSpec,
     StaticAssignmentValue, Subqueries, Subquery, SubquerySelect, SupportsColumnlessUpsert,
-    SupportsIntersectExceptAll, ToColumns, UpdateAssignment, UpdateAssignmentNode,
-    UpdateAssignments, UpdateColumnKey, UpdateColumnValues, UpdateFromBuilder, UpdateFromColumns,
-    UpdateFromQuery, UpdateQuery, Upsert, ValidUpsertColumns, Where,
-    assert_distinct_insert_select_columns, default,
+    SupportsDefaultKeyword, SupportsIntersectExceptAll, ToColumns, UpdateAssignment,
+    UpdateAssignmentNode, UpdateAssignments, UpdateColumnKey, UpdateColumnValues,
+    UpdateFromBuilder, UpdateFromColumns, UpdateFromQuery, UpdateQuery, Upsert, ValidUpsertColumns,
+    Where, assert_distinct_insert_select_columns, default,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{CTE, ColumnType, Database, RecursiveCTE, Schema, Table, View};

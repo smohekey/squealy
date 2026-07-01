@@ -36,6 +36,9 @@ impl squealy::SupportsIntersectExceptAll for Mysql {}
 // conflict-target column), so an all-default-row upsert is expressible.
 impl squealy::SupportsColumnlessUpsert for Mysql {}
 
+// MySQL accepts the `DEFAULT` keyword as an assignment value (`VALUES (DEFAULT)`, `SET c = DEFAULT`).
+impl squealy::SupportsDefaultKeyword for Mysql {}
+
 impl SchemaBackend for Mysql {
     fn capabilities(&self) -> squealy::SchemaCapabilities {
         squealy::SchemaCapabilities {

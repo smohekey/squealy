@@ -32,6 +32,9 @@ impl squealy::SupportsIntersectExceptAll for Postgres {}
 // Postgres can render a columnless upsert: `INSERT INTO t DEFAULT VALUES ON CONFLICT …`.
 impl squealy::SupportsColumnlessUpsert for Postgres {}
 
+// Postgres accepts the `DEFAULT` keyword as an assignment value (`VALUES (DEFAULT)`, `SET c = DEFAULT`).
+impl squealy::SupportsDefaultKeyword for Postgres {}
+
 pub struct PostgresConnection {
     client: Client,
 }

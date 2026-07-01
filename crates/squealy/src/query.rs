@@ -213,6 +213,14 @@ pub struct StaticAssignmentValue<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DefaultAssignmentValue;
 
+/// Marker for backends that can render the `DEFAULT` keyword as an assignment value — i.e. `VALUES
+/// (DEFAULT)` in an insert or `SET col = DEFAULT` in an update, produced by [`default()`](default).
+/// Postgres and MySQL can; SQLite rejects `DEFAULT` in both positions (it takes a default only by
+/// omitting the column or via a whole-row `DEFAULT VALUES`), so it does **not** implement this — which
+/// makes an insert/update that uses `default()` a compile error for SQLite (the
+/// [`RenderAssignmentValue`] impl for [`DefaultAssignmentValue`] is bounded on this marker).
+pub trait SupportsDefaultKeyword {}
+
 #[doc(hidden)]
 #[derive(Debug, PartialEq)]
 pub struct ExprAssignmentValue<'scope, K, Ast>
@@ -360,7 +368,7 @@ impl AssignmentValueNode for DefaultAssignmentValue {
 
 impl<B> RenderAssignmentValue<B> for DefaultAssignmentValue
 where
-    B: Backend,
+    B: Backend + SupportsDefaultKeyword,
 {
     fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
