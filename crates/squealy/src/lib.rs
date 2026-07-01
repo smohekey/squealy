@@ -530,7 +530,7 @@ pub use model::{
     IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
     JoinItem, JoinKind, LogicalOp, OrderItem, OrderNulls, ProjectionItem, ScalarFunc, SchemaModel,
     SourceRef, SqlType, TableModel, ViewColumnModel, ViewDef, ViewModel, ViewQueryModel,
-    WindowOrderTerm,
+    WindowOrderTerm, table_from_dyn,
 };
 pub use plan::{DatabasePlan, DatabasePlanStep, TablePlanStep};
 pub use projection::{
