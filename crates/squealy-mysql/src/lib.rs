@@ -29,6 +29,19 @@ pub use query::MysqlRowReader;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Mysql;
 
+// MySQL (8.0.31+) supports `INTERSECT ALL` / `EXCEPT ALL`.
+impl squealy::SupportsIntersectExceptAll for Mysql {}
+
+// MySQL renders a columnless upsert via `() VALUES () ON DUPLICATE KEY UPDATE` (self-assigning the
+// conflict-target column), so an all-default-row upsert is expressible.
+impl squealy::SupportsColumnlessUpsert for Mysql {}
+
+// MySQL accepts the `DEFAULT` keyword as an assignment value (`VALUES (DEFAULT)`, `SET c = DEFAULT`).
+impl squealy::SupportsDefaultKeyword for Mysql {}
+
+// MySQL supports `EXTRACT(<field> FROM <ts>)` (and the `SECOND_MICROSECOND` unit for fractional seconds).
+impl squealy::SupportsExtract for Mysql {}
+
 impl SchemaBackend for Mysql {
     fn capabilities(&self) -> squealy::SchemaCapabilities {
         squealy::SchemaCapabilities {

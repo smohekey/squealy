@@ -6,7 +6,17 @@
 //! trivially. This slice is driver-free: encoding is exercised by unit tests, and decoding reads from
 //! an in-memory row of `SqliteValue`s.
 
-use squealy::{Backend, Decode, Encode, ParamWriter, RowReader, Table};
+use std::marker::PhantomData;
+
+use squealy::{
+    Backend, Connection, Decode, DeleteQuery, DeleteUsingQuery, Encode, HNil, InsertQuery,
+    InsertRows, InsertableTable, IntoInsertSelect, ParamWriter, PredicateNodes, Projectable,
+    ProjectionShape, QueryBuilder, RenderInsertRows, RenderPredicateNodes, RenderProjectable,
+    RenderSelectAst, RenderUpdateAssignments, RowReader, SchemaTable, SelectAst, SelectQuery,
+    Selected, SetArm, SetLeaf, SetOperand, SetOperations, SetSelectModifiers, SetTail, SourceAlias,
+    Table, TableProjection, UpdateAssignments, UpdateFromQuery, UpdateQuery, UpdateableTable,
+    render,
+};
 
 use crate::{Sqlite, SqliteError};
 
@@ -338,6 +348,15 @@ impl Backend for Sqlite {
         crate::sql::write_table(table, writer)
     }
 }
+
+/// Renders SQL into a freshly allocated string (the renderer only ever emits UTF-8).
+fn rendered_sql(write: impl FnOnce(&mut Vec<u8>) -> std::io::Result<()>) -> String {
+    let mut buffer = Vec::new();
+    write(&mut buffer).expect("render SQL");
+    String::from_utf8(buffer).expect("renderer emits UTF-8")
+}
+
+include!("query_objects.rs");
 
 #[cfg(test)]
 mod tests {

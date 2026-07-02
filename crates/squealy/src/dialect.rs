@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use crate::{OrderNulls, RowLock, SqlType};
+use crate::{OrderNulls, RowLock, SqlType, UnaryStringFunc};
 
 /// The SQL-dialect differences the query renderer needs from a backend.
 ///
@@ -29,6 +29,13 @@ pub trait Dialect {
     /// division (`false`), and casting would change `DECIMAL` results.
     fn integer_division_needs_float_cast(&self) -> bool {
         true
+    }
+
+    /// The SQL name for a scalar string function. The default is the standard spelling
+    /// ([`UnaryStringFunc::sql_name`], shared by PostgreSQL and MySQL); a backend overrides it where its
+    /// builtin differs — e.g. SQLite spells character length `length` rather than `CHAR_LENGTH`.
+    fn unary_string_fn_name(&self, func: UnaryStringFunc) -> &'static str {
+        func.sql_name()
     }
 
     /// Writes a `LIMIT`/`OFFSET` clause. The default is the standard form, with `OFFSET` emittable on
@@ -203,6 +210,39 @@ pub trait Dialect {
     fn update_from_style(&self) -> UpdateFromStyle {
         UpdateFromStyle::PgFrom
     }
+
+    /// How a correlated `DELETE … <source>` renders. The default derives from
+    /// [`update_from_style`](Self::update_from_style), so PostgreSQL/MySQL are unchanged; SQLite
+    /// overrides it, having no join-delete syntax — it rewrites the correlated delete as
+    /// `DELETE FROM t AS a WHERE EXISTS (SELECT 1 FROM other AS b WHERE <correlation>)`.
+    fn delete_using_style(&self) -> DeleteUsingStyle {
+        match self.update_from_style() {
+            UpdateFromStyle::PgFrom => DeleteUsingStyle::PgUsing,
+            UpdateFromStyle::MysqlJoin => DeleteUsingStyle::MysqlJoin,
+        }
+    }
+
+    /// Whether a schema/namespace qualifier is emitted before a table name. Defaults to `true`; SQLite
+    /// has no schemas (tables render unqualified/flattened), so it returns `false`.
+    fn qualify_schema(&self) -> bool {
+        true
+    }
+
+    /// How the operands of a set operation (`UNION`/`INTERSECT`/`EXCEPT`) are wrapped. Defaults to
+    /// [`SetOperandStyle::Parenthesized`] (`(SELECT …)`); SQLite rejects a parenthesized compound
+    /// operand *and* a per-operand `ORDER BY`/`LIMIT`, so it uses [`SetOperandStyle::SubquerySelect`]
+    /// (`SELECT * FROM (SELECT …)`), which stays valid for ordered/limited operands and preserves the
+    /// grouping of a nested compound.
+    fn set_operand_style(&self) -> SetOperandStyle {
+        SetOperandStyle::Parenthesized
+    }
+
+    /// Whether `substring` renders as the comma-argument call `substr(s, start, len)` rather than the
+    /// SQL-standard `SUBSTRING(s FROM start FOR len)`. Defaults to `false`; SQLite has no `FROM`/`FOR`
+    /// substring syntax, so it returns `true`.
+    fn substring_uses_function_call(&self) -> bool {
+        false
+    }
 }
 
 /// The two shapes a correlated `UPDATE … <source>` / `DELETE … <source>` takes across dialects (see
@@ -215,4 +255,29 @@ pub enum UpdateFromStyle {
     /// MySQL: `UPDATE t AS a JOIN other AS b ON <correlation> SET … [WHERE filters]` and
     /// `DELETE a FROM t AS a JOIN other AS b ON <correlation> [WHERE filters]`.
     MysqlJoin,
+}
+
+/// The shapes a correlated `DELETE … <source>` takes across dialects (see
+/// [`Dialect::delete_using_style`]). Decoupled from [`UpdateFromStyle`] because SQLite can render
+/// `UPDATE … FROM` but has no join-delete, so it falls back to a correlated `EXISTS` subquery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeleteUsingStyle {
+    /// PostgreSQL: `DELETE FROM t AS a USING other AS b WHERE <correlation>`.
+    PgUsing,
+    /// MySQL: `DELETE a FROM t AS a JOIN other AS b ON <correlation>`.
+    MysqlJoin,
+    /// SQLite: `DELETE FROM t AS a WHERE EXISTS (SELECT 1 FROM other AS b WHERE <correlation>)`.
+    SqliteExists,
+}
+
+/// How a set-operation operand is wrapped when rendered (see [`Dialect::set_operand_style`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetOperandStyle {
+    /// PostgreSQL/MySQL: `(SELECT …)` — each operand parenthesized.
+    Parenthesized,
+    /// SQLite: `SELECT * FROM (SELECT …)` — each operand wrapped as a sub-select. SQLite's
+    /// compound-select grammar rejects a parenthesized operand and a bare operand's `ORDER BY`/`LIMIT`,
+    /// so the sub-select form is the only one that stays valid for ordered/limited operands and that
+    /// preserves the grouping of a nested compound.
+    SubquerySelect,
 }

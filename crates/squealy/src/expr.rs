@@ -963,7 +963,7 @@ where
 impl<Operand, B> RenderAst<B> for ExtractExprAst<Operand>
 where
     Operand: RenderAst<B>,
-    B: crate::Backend,
+    B: crate::Backend + crate::SupportsExtract,
 {
     fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
@@ -1136,7 +1136,7 @@ where
 impl<Operand, B> RenderAst<B> for ExtractSecondExprAst<Operand>
 where
     Operand: RenderAst<B>,
-    B: crate::Backend,
+    B: crate::Backend + crate::SupportsExtract,
 {
     fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where

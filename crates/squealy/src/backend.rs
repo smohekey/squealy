@@ -180,9 +180,15 @@ pub trait SupportsFullJoin: Backend {}
 
 /// Marker for backends whose dialect supports `date_trunc(unit, ts)` (PostgreSQL). The `date_trunc`
 /// expression's `RenderAst` requires it, so a backend that does not implement it (such as MySQL, which
-/// has no `date_trunc`) rejects `date_trunc` at compile time. (`now`/`extract` need no marker — both
-/// backends support them.)
+/// has no `date_trunc`) rejects `date_trunc` at compile time. (`now` needs no marker — every backend
+/// renders `CURRENT_TIMESTAMP`.)
 pub trait SupportsDateTrunc: Backend {}
+
+/// Marker for backends whose dialect supports `EXTRACT(<field> FROM <ts>)` (PostgreSQL and MySQL).
+/// The `extract`/`extract_second` expressions' `RenderAst` requires it, so a backend that does not
+/// implement it (SQLite, which has no `EXTRACT` syntax — it uses `strftime`) rejects `extract` at
+/// compile time rather than rendering SQL that fails to prepare.
+pub trait SupportsExtract: Backend {}
 
 /// Backend schema-management capabilities that are supported for full DDL/introspection
 /// round-trips.

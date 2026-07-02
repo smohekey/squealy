@@ -462,7 +462,7 @@ pub use backend::{
     Backend, ConstraintCapabilities, DdlExecutor, Decode, DecodeNullable, Encode,
     IndexCapabilities, ParamWriter, RowReader, SchemaBackend, SchemaCapabilities, SchemaConnect,
     SchemaIntrospect, SchemaMetadataStore, SchemaPublishHistoryStore, SchemaPublishRecord,
-    SchemaRefactorStore, SupportsDateTrunc, SupportsFullJoin, SupportsReturning,
+    SchemaRefactorStore, SupportsDateTrunc, SupportsExtract, SupportsFullJoin, SupportsReturning,
 };
 pub use column::{
     Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullability,
@@ -475,7 +475,7 @@ pub use cte::{
     recursive_cte_definition_dependencies,
 };
 pub use database::Database;
-pub use dialect::{Dialect, UpdateFromStyle};
+pub use dialect::{DeleteUsingStyle, Dialect, SetOperandStyle, UpdateFromStyle};
 pub use expr::{
     AddExpr, AggregateExprAst, AggregateFunc, AggregateScalar, AndPredicate, AnyPredicate,
     AppendArm, AppendCoalesceArg, AppendOrder, AppendPartition, AppendSimpleArm, ArithmeticOp,
@@ -561,10 +561,11 @@ pub use query::{
     RootSource, RowLock, RowsAffected, RuntimeAssignmentValue, ScalarSubquery, SelectAst,
     SelectQuery, SelectSink, Selected, SetArm, SetGroup, SetLeaf, SetNode, SetOp, SetOperand,
     SetOperations, SetOrder, SetSelectModifiers, SetTail, SourceQuery, SourceSpec,
-    StaticAssignmentValue, Subqueries, Subquery, SubquerySelect, ToColumns, UpdateAssignment,
+    StaticAssignmentValue, Subqueries, Subquery, SubquerySelect, SupportsColumnlessUpsert,
+    SupportsDefaultKeyword, SupportsIntersectExceptAll, ToColumns, UpdateAssignment,
     UpdateAssignmentNode, UpdateAssignments, UpdateColumnKey, UpdateColumnValues,
-    UpdateFromBuilder, UpdateFromColumns, UpdateFromQuery, UpdateQuery, Upsert, Where,
-    assert_distinct_insert_select_columns, default,
+    UpdateFromBuilder, UpdateFromColumns, UpdateFromQuery, UpdateQuery, Upsert, ValidUpsertColumns,
+    Where, assert_distinct_insert_select_columns, default,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_macros::{CTE, ColumnType, Database, RecursiveCTE, Schema, Table, View};

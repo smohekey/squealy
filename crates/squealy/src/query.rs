@@ -213,6 +213,14 @@ pub struct StaticAssignmentValue<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DefaultAssignmentValue;
 
+/// Marker for backends that can render the `DEFAULT` keyword as an assignment value — i.e. `VALUES
+/// (DEFAULT)` in an insert or `SET col = DEFAULT` in an update, produced by [`default()`](default).
+/// Postgres and MySQL can; SQLite rejects `DEFAULT` in both positions (it takes a default only by
+/// omitting the column or via a whole-row `DEFAULT VALUES`), so it does **not** implement this — which
+/// makes an insert/update that uses `default()` a compile error for SQLite (the
+/// [`RenderAssignmentValue`] impl for [`DefaultAssignmentValue`] is bounded on this marker).
+pub trait SupportsDefaultKeyword {}
+
 #[doc(hidden)]
 #[derive(Debug, PartialEq)]
 pub struct ExprAssignmentValue<'scope, K, Ast>
@@ -360,7 +368,7 @@ impl AssignmentValueNode for DefaultAssignmentValue {
 
 impl<B> RenderAssignmentValue<B> for DefaultAssignmentValue
 where
-    B: Backend,
+    B: Backend + SupportsDefaultKeyword,
 {
     fn visit_value<V>(&self, visitor: &mut V) -> Result<(), V::Error>
     where
@@ -1795,10 +1803,18 @@ where
     fn into_set_parts(self) -> (&'conn Conn, Self::Arm);
 }
 
+/// Marker for backends whose compound-select grammar supports the `ALL` quantifier on `INTERSECT`
+/// and `EXCEPT`. Postgres and MySQL do; SQLite only allows `ALL` after `UNION`, so it does **not**
+/// implement this, which makes [`SetOperations::intersect_all`]/[`SetOperations::except_all`] absent
+/// (a compile error) for SQLite rather than rendering SQL that fails to prepare.
+pub trait SupportsIntersectExceptAll {}
+
 /// The set-operation builder methods (`union`/`union_all`/`intersect`/`intersect_all`/`except`/
 /// `except_all`), shared across backends. Implemented per-backend on both the select and set-select
 /// query objects via the single [`make_set_select`](Self::make_set_select) hook; the six methods are
 /// defaulted. Each combines `self` with a row-compatible `other` into a new set-select query object.
+/// `intersect_all`/`except_all` are additionally bounded on [`SupportsIntersectExceptAll`], so they
+/// are unavailable for backends (SQLite) whose grammar lacks those operators.
 pub trait SetOperations<'conn, 'scope, Conn>: SetOperand<'conn, 'scope, Conn> + Sized
 where
     Conn: QueryBuilder + 'conn,
@@ -1841,6 +1857,7 @@ where
     where
         O: SetOperand<'conn, 'scope, Conn, Row = Self::Row>,
         SetNode<Self::Arm, O::Arm>: SetArm<'conn, 'scope, Conn>,
+        Conn::Backend: SupportsIntersectExceptAll,
     {
         self.set_op(other, SetOp::IntersectAll)
     }
@@ -1857,6 +1874,7 @@ where
     where
         O: SetOperand<'conn, 'scope, Conn, Row = Self::Row>,
         SetNode<Self::Arm, O::Arm>: SetArm<'conn, 'scope, Conn>,
+        Conn::Backend: SupportsIntersectExceptAll,
     {
         self.set_op(other, SetOp::ExceptAll)
     }
@@ -2441,6 +2459,22 @@ pub trait OnConflictQueryBuilder: QueryBuilder {
         Returning: Projectable;
 }
 
+/// Marker for backends that can render a *columnless* upsert — an all-default-row insert (`DEFAULT
+/// VALUES`, or the MySQL `() VALUES ()` form) followed by a conflict clause. Postgres and MySQL can;
+/// SQLite rejects `ON CONFLICT` after `DEFAULT VALUES` (a syntax error) and has no valid rewrite, so
+/// it does **not** implement this — making a columnless upsert a compile error for SQLite.
+pub trait SupportsColumnlessUpsert {}
+
+/// Whether an insert-column list is a valid upsert payload for backend `B`. A non-empty list
+/// ([`HCons`](crate::HCons)) always is; the empty list ([`HNil`](crate::HNil), a columnless
+/// all-default row) is valid only when the backend implements [`SupportsColumnlessUpsert`]. This is the
+/// bound that makes `on_conflict(...).do_nothing()/do_update()` reject a columnless upsert for SQLite.
+pub trait ValidUpsertColumns<B> {}
+
+impl<Head, Tail, B> ValidUpsertColumns<B> for HCons<Head, Tail> {}
+
+impl<B: SupportsColumnlessUpsert> ValidUpsertColumns<B> for HNil {}
+
 /// Upsert builder produced by `on_conflict(target)` — choose `do_nothing()` or `do_update()`.
 #[doc(hidden)]
 pub struct OnConflict<'conn, Conn, S, InsertColumns> {
@@ -2466,7 +2500,14 @@ impl<'conn, Conn, S, InsertColumns> OnConflict<'conn, Conn, S, InsertColumns> {
     }
 
     /// `ON CONFLICT (<target>) DO NOTHING`.
-    pub fn do_nothing(self) -> Upsert<'conn, Conn, S, InsertColumns> {
+    ///
+    /// A columnless (all-default-row) upsert is rejected at compile time for backends that cannot
+    /// express it — see [`ValidUpsertColumns`]/[`SupportsColumnlessUpsert`] (SQLite).
+    pub fn do_nothing(self) -> Upsert<'conn, Conn, S, InsertColumns>
+    where
+        Conn: QueryBuilder,
+        InsertColumns: ValidUpsertColumns<Conn::Backend>,
+    {
         Upsert::new(
             self.connection,
             self.insert_columns,
@@ -2479,7 +2520,14 @@ impl<'conn, Conn, S, InsertColumns> OnConflict<'conn, Conn, S, InsertColumns> {
 
     /// `ON CONFLICT (<target>) DO UPDATE SET <col> = EXCLUDED.<col>` for every inserted column (replace
     /// the existing row with the values being inserted).
-    pub fn do_update(self) -> Upsert<'conn, Conn, S, InsertColumns> {
+    ///
+    /// A columnless (all-default-row) upsert is rejected at compile time for backends that cannot
+    /// express it — see [`ValidUpsertColumns`]/[`SupportsColumnlessUpsert`] (SQLite).
+    pub fn do_update(self) -> Upsert<'conn, Conn, S, InsertColumns>
+    where
+        Conn: QueryBuilder,
+        InsertColumns: ValidUpsertColumns<Conn::Backend>,
+    {
         Upsert::new(
             self.connection,
             self.insert_columns,
