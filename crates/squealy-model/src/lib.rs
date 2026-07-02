@@ -259,6 +259,9 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
     let default_method = connection.default_index_method();
     let mut model = model.clone();
     for schema in &mut model.schemas {
+        // Flatten the namespace for a backend without schemas (SQLite), so a `#[schema(App)]` model does
+        // not diff as a wholesale move of every table into the default namespace after each publish.
+        schema.name = connection.canonical_schema_name(schema.name.as_deref());
         for table in &mut schema.tables {
             for column in &mut table.columns {
                 column.ty = connection.canonical_sql_type(&column.ty);
@@ -268,6 +271,16 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
             }
             if let Some(primary_key) = &mut table.primary_key {
                 primary_key.name = connection.canonical_primary_key_name(&primary_key.name);
+            }
+            for unique in &mut table.uniques {
+                unique.name = connection.canonical_unique_name(unique);
+            }
+            for foreign_key in &mut table.foreign_keys {
+                // Flatten a cross-schema reference the same way the referenced table's own schema name is
+                // flattened, then canonicalize the (possibly non-round-tripping) constraint name.
+                foreign_key.references_schema =
+                    connection.canonical_schema_name(foreign_key.references_schema.as_deref());
+                foreign_key.name = connection.canonical_foreign_key_name(foreign_key);
             }
             for index in &mut table.indexes {
                 canonicalize_index(index, &default_method);
@@ -778,6 +791,47 @@ mod tests {
         fn canonical_primary_key_name(&self, _name: &str) -> String {
             "PRIMARY".to_owned()
         }
+
+        // A schema-less backend (like SQLite) flattens every namespace and derives constraint names
+        // from their columns, since it does not round-trip the declared name.
+        fn canonical_schema_name(&self, _name: Option<&str>) -> Option<String> {
+            None
+        }
+
+        fn canonical_unique_name(&self, unique: &Constraint) -> String {
+            format!("unique:{}", unique.columns.join(","))
+        }
+
+        fn canonical_foreign_key_name(&self, foreign_key: &ForeignKeyModel) -> String {
+            format!("foreign_key:{}", foreign_key.columns.join(","))
+        }
+    }
+
+    #[test]
+    fn canonicalize_model_flattens_schema_and_constraint_names() {
+        let mut model = table_with_constraints(foreign_key(), check());
+        model.schemas[0].name = Some("app".to_owned());
+        model.schemas[0].tables[0].foreign_keys[0].references_schema = Some("app".to_owned());
+        model.schemas[0].tables[0].uniques.push(Constraint {
+            name: "uq_memberships_tenant_id".to_owned(),
+            columns: vec!["tenant_id".to_owned()],
+        });
+
+        let canonical = canonicalize_model(&CanonBackend, &model);
+        let schema = &canonical.schemas[0];
+
+        // The namespace is flattened on the schema and on the cross-schema foreign-key reference.
+        assert_eq!(schema.name, None);
+        let table = &schema.tables[0];
+        assert_eq!(table.foreign_keys[0].references_schema, None);
+
+        // Constraint names are rewritten to the column-derived canonical form.
+        assert_eq!(table.uniques[0].name, "unique:tenant_id");
+        assert_eq!(table.foreign_keys[0].name, "foreign_key:tenant_id");
+
+        // Two applications are stable (idempotent), so a re-plan against the canonical form is empty.
+        assert_eq!(canonicalize_model(&CanonBackend, &canonical), canonical);
+        assert!(diff_models(&canonical, &canonical).is_empty());
     }
 
     #[test]

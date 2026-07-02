@@ -408,8 +408,9 @@ fn write_create_index(table: &str, index: &IndexModel, writer: &mut impl Write) 
 }
 
 /// The SQLite type affinity for a neutral [`SqlType`]. SQLite is dynamically typed, so the column type
-/// only assigns one of five affinities; this is reused by [`SqliteDialect::write_cast_type`].
-fn sqlite_affinity(ty: &SqlType) -> &str {
+/// only assigns one of five affinities; this is reused by [`SqliteDialect::write_cast_type`] and by
+/// introspection's `canonical_sql_type` (to collapse a desired type to the same affinity read back).
+pub(crate) fn sqlite_affinity(ty: &SqlType) -> &str {
     match ty {
         SqlType::Bool
         | SqlType::I8
