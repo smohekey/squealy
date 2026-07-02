@@ -1761,7 +1761,10 @@ where
     B: Backend,
     Writer: SqlWriter<B>,
 {
-    write_projection::<B, _>(returning, writer, renderer, false)
+    // An UPDATE/DELETE aliases its target, so its RETURNING columns are alias-qualified by default
+    // (PostgreSQL); SQLite cannot resolve that alias in RETURNING and renders them bare instead.
+    let unqualified = renderer.dialect.returning_omits_target_alias();
+    write_projection::<B, _>(returning, writer, renderer, unqualified)
 }
 
 fn write_insert_returning<B, Writer>(
@@ -1773,6 +1776,7 @@ where
     B: Backend,
     Writer: SqlWriter<B>,
 {
+    // An INSERT has no target alias, so its RETURNING columns are always unqualified.
     write_projection::<B, _>(returning, writer, renderer, true)
 }
 
@@ -1780,7 +1784,7 @@ fn write_projection<B, Writer>(
     projection: &impl RenderProjectable<B>,
     writer: &mut Writer,
     renderer: &mut Renderer,
-    insert_returning: bool,
+    unqualified_returning: bool,
 ) -> io::Result<()>
 where
     B: Backend,
@@ -1790,7 +1794,7 @@ where
         writer,
         renderer,
         index: 0,
-        insert_returning,
+        unqualified_returning,
         _backend: PhantomData::<B>,
     })
 }
@@ -1799,7 +1803,7 @@ struct WriteProjection<'writer, 'renderer, B, Writer> {
     writer: &'writer mut Writer,
     renderer: &'renderer mut Renderer,
     index: usize,
-    insert_returning: bool,
+    unqualified_returning: bool,
     _backend: PhantomData<B>,
 }
 
@@ -1837,7 +1841,7 @@ where
         Ast: RenderAst<B>,
     {
         self.write_prefix()?;
-        write_expr_value_node(expr, self.writer, self.renderer, self.insert_returning)?;
+        write_expr_value_node(expr, self.writer, self.renderer, self.unqualified_returning)?;
         self.writer.write_all(b" AS ")?;
         self.renderer
             .dialect
@@ -1853,7 +1857,12 @@ where
         K: ExprKind,
     {
         self.write_prefix()?;
-        write_column_value_node(column, self.writer, self.renderer, self.insert_returning)?;
+        write_column_value_node(
+            column,
+            self.writer,
+            self.renderer,
+            self.unqualified_returning,
+        )?;
         self.writer.write_all(b" AS ")?;
         self.renderer
             .dialect
@@ -1943,7 +1952,7 @@ fn write_expr_value_node<K, Ast, B, Writer>(
     expr: &Expr<'_, K, Ast>,
     writer: &mut Writer,
     renderer: &mut Renderer,
-    insert_returning: bool,
+    unqualified_returning: bool,
 ) -> io::Result<()>
 where
     K: ExprKind,
@@ -1951,7 +1960,7 @@ where
     B: Backend,
     Writer: SqlWriter<B>,
 {
-    write_ast::<B, _>(writer, renderer, insert_returning, |visitor| {
+    write_ast::<B, _>(writer, renderer, unqualified_returning, |visitor| {
         expr.visit(visitor)
     })
 }
@@ -1960,14 +1969,14 @@ fn write_column_value_node<K, B, Writer>(
     column: ColumnRef<'_, K>,
     writer: &mut Writer,
     renderer: &mut Renderer,
-    insert_returning: bool,
+    unqualified_returning: bool,
 ) -> io::Result<()>
 where
     K: ExprKind,
     B: Backend,
     Writer: SqlWriter<B>,
 {
-    write_ast::<B, _>(writer, renderer, insert_returning, |visitor| {
+    write_ast::<B, _>(writer, renderer, unqualified_returning, |visitor| {
         column.visit(visitor)
     })
 }
@@ -2104,7 +2113,7 @@ where
 fn write_ast<B, Writer>(
     writer: &mut Writer,
     renderer: &mut Renderer,
-    insert_returning: bool,
+    unqualified_returning: bool,
     render: impl FnOnce(&mut RenderExpr<'_, '_, B, Writer>) -> io::Result<()>,
 ) -> io::Result<()>
 where
@@ -2114,7 +2123,7 @@ where
     let mut visitor = RenderExpr {
         writer,
         renderer,
-        insert_returning,
+        unqualified_returning,
         _backend: PhantomData::<B>,
     };
     render(&mut visitor)
@@ -2123,7 +2132,7 @@ where
 struct RenderExpr<'writer, 'renderer, B, Writer> {
     writer: &'writer mut Writer,
     renderer: &'renderer mut Renderer,
-    insert_returning: bool,
+    unqualified_returning: bool,
     _backend: PhantomData<B>,
 }
 
@@ -2136,7 +2145,7 @@ where
     type Backend = B;
 
     fn visit_column(&mut self, alias: SourceAlias, column: &str) -> Result<(), Self::Error> {
-        if self.insert_returning {
+        if self.unqualified_returning {
             self.renderer
                 .dialect
                 .write_quoted_ident(column, &mut *self.writer)

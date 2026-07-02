@@ -533,6 +533,12 @@ impl squealy::Dialect for SqliteDialect {
         false
     }
 
+    fn returning_omits_target_alias(&self) -> bool {
+        // SQLite's UPDATE/DELETE `RETURNING` cannot resolve the target-table alias (`no such column:
+        // q0_0.col`); a single-table statement is unambiguous, so the columns render bare.
+        true
+    }
+
     fn set_operand_style(&self) -> squealy::SetOperandStyle {
         // SQLite rejects a parenthesized compound operand and a per-operand `ORDER BY`/`LIMIT`, so an
         // operand is wrapped as `SELECT * FROM (SELECT …)` (valid for ordered/limited/nested operands).
