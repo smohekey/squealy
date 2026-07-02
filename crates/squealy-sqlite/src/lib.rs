@@ -195,10 +195,7 @@ impl ConnectionWithTransaction for SqliteConnection {
             + 'conn,
     {
         let mut transaction = SqliteTransaction::new(self.conn.clone());
-        self.conn
-            .call(|conn| conn.execute_batch("BEGIN"))
-            .await
-            .map_err(SqliteError::Query)?;
+        begin(&self.conn, &mut transaction).await?;
         let result = f(&mut transaction).await;
         finish_transaction(&self.conn, &mut transaction, result).await
     }
@@ -213,13 +210,26 @@ impl ConnectionWithTransaction for SqliteConnection {
             + 'conn,
     {
         let mut transaction = SqliteTransaction::new(self.conn.clone());
-        self.conn
-            .call(|conn| conn.execute_batch("BEGIN"))
-            .await
-            .map_err(SqliteError::Query)?;
+        begin(&self.conn, &mut transaction).await?;
         let result = f(&mut transaction).await;
         finish_transaction(&self.conn, &mut transaction, result).await
     }
+}
+
+/// Issues `BEGIN`. On failure — e.g. the connection is already inside a transaction (another
+/// `SqliteConnection` over a clone of the same handle started one) — the guard is disarmed before the
+/// error propagates, so its drop does not roll back a transaction this call never started. If instead
+/// the future is *cancelled* while `BEGIN` is in flight, the guard stays armed and rolls back any
+/// transaction that did begin.
+async fn begin(
+    conn: &tokio_rusqlite::Connection,
+    transaction: &mut SqliteTransaction<'_>,
+) -> Result<(), SqliteError> {
+    if let Err(error) = conn.call(|conn| conn.execute_batch("BEGIN")).await {
+        transaction.finalize();
+        return Err(SqliteError::Query(error));
+    }
+    Ok(())
 }
 
 /// Commits (on `Ok`) or rolls back (on `Err`) and propagates the body's result, disarming the
