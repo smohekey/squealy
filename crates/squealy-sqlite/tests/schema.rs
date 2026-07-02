@@ -7,7 +7,7 @@
 
 use squealy::{
     ColumnExpr, ColumnMode, ColumnModel, ColumnName, Constraint, Database, DatabaseModel,
-    ForeignKeyModel, IdentityMode, IdentityModel, IndexModel, Schema, SchemaConnect,
+    DdlExecutor, ForeignKeyModel, IdentityMode, IdentityModel, IndexModel, Schema, SchemaConnect,
     SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore, SchemaRefactorStore, SqlType,
     Table, TableModel,
 };
@@ -385,6 +385,110 @@ async fn coalesces_flattened_schemas_on_replan() {
     assert!(
         plan.steps.is_empty(),
         "flattened schemas should not churn, got: {:?}",
+        plan.steps
+    );
+}
+
+#[tokio::test]
+async fn resolves_foreign_key_with_omitted_parent_columns() {
+    // A foreign key written `REFERENCES parent` (no column list) references the parent's primary key;
+    // `PRAGMA foreign_key_list` reports NULL for the parent column, which introspection resolves to the
+    // parent's primary key so a valid SQLite schema not created by this renderer still introspects.
+    let mut connection = connect().await;
+    connection
+        .execute_ddl(
+            "CREATE TABLE parent (id INTEGER PRIMARY KEY);\
+             CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent)",
+        )
+        .await
+        .expect("create tables");
+
+    let actual = squealy_model::introspect(&mut connection).await.unwrap();
+    let child = actual.schemas[0]
+        .tables
+        .iter()
+        .find(|table| table.name == "child")
+        .expect("child table");
+    assert_eq!(child.foreign_keys.len(), 1);
+    assert_eq!(child.foreign_keys[0].references_table, "parent");
+    assert_eq!(
+        child.foreign_keys[0].references_columns,
+        vec!["id".to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn honors_schema_qualified_table_rename_refactor() {
+    use squealy::DatabasePlanStep;
+    use squealy_model::{RefactorLog, RefactorOperation, RenameTable};
+
+    let table = |name: &str| TableModel {
+        name: name.to_owned(),
+        comment: None,
+        columns: vec![ColumnModel {
+            name: "label".to_owned(),
+            comment: None,
+            ty: SqlType::Text,
+            collation: None,
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+        }],
+        primary_key: None,
+        foreign_keys: Vec::new(),
+        uniques: Vec::new(),
+        checks: Vec::new(),
+        indexes: Vec::new(),
+    };
+    let model = |table_name: &str| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            views: Vec::new(),
+            tables: vec![table(table_name)],
+        }],
+    };
+
+    let mut connection = connect().await;
+    squealy_model::publish(&model("events_old"), &Sqlite, &mut connection)
+        .await
+        .expect("publish baseline");
+
+    // The refactor carries the crate's schema (`Some("app")`); SQLite introspects the table under the
+    // flattened (`None`) namespace, so without canonicalizing the refactor it would not match and the
+    // plan would drop+recreate instead of renaming.
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::RenameTable(RenameTable {
+            id: "rename-events".to_owned(),
+            schema: Some("app".to_owned()),
+            from: "events_old".to_owned(),
+            to: "events_new".to_owned(),
+        })],
+    };
+
+    let plan = squealy_model::plan_from_database_with_refactors(
+        &model("events_new"),
+        &refactors,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("plan with rename refactor");
+
+    assert!(
+        plan.steps.iter().any(|step| matches!(
+            step,
+            DatabasePlanStep::RenameTable { from, to, .. } if from == "events_old" && to == "events_new"
+        )),
+        "expected a RenameTable step, got: {:?}",
+        plan.steps
+    );
+    assert!(
+        !plan
+            .steps
+            .iter()
+            .any(|step| matches!(step, DatabasePlanStep::DropTable { .. })),
+        "rename must not drop the table, got: {:?}",
         plan.steps
     );
 }

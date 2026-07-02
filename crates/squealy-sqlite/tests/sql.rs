@@ -350,6 +350,36 @@ fn rejects_index_name_collision_across_tables() {
 }
 
 #[test]
+fn rejects_reserved_object_name_prefix() {
+    // A user table using the `__squealy_` prefix would collide with the schema-management bookkeeping
+    // tables and be filtered out by introspection (churning create/drop), so rendering must reject it.
+    use squealy::{DatabaseModel, SchemaModel, TableModel};
+    let model = |table_name: &str| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![TableModel {
+                name: table_name.to_owned(),
+                comment: None,
+                columns: Vec::new(),
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+            views: Vec::new(),
+        }],
+    };
+    for reserved in ["__squealy_refactors", "sqlite_stat1"] {
+        let mut sql = Vec::new();
+        let error = Sqlite
+            .render_create(&model(reserved), &mut sql)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported, "{reserved}");
+    }
+}
+
+#[test]
 fn render_create_rejects_views_for_now() {
     // View rendering is deferred (the shared view-body renderer emits schema-qualified sources and
     // non-SQLite scalar-function spellings); a model carrying a view errors rather than emit broken

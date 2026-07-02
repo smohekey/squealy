@@ -205,6 +205,8 @@ async fn foreign_keys(
                 id: row.get(0)?,
                 references_table: row.get(1)?,
                 column: row.get(2)?,
+                // `to` is NULL when the foreign key omits the parent column list (`REFERENCES parent`),
+                // meaning it references the parent's primary key; resolved below.
                 references_column: row.get(3)?,
                 on_update: row.get(4)?,
                 on_delete: row.get(5)?,
@@ -213,34 +215,53 @@ async fn foreign_keys(
     )
     .await?;
 
-    // Preserve first-seen `id` order while grouping (a `BTreeMap<i64, _>` keyed by `id` keeps it).
-    let mut grouped = BTreeMap::<i64, ForeignKeyModel>::new();
+    // Preserve first-seen `id` order while grouping (a `BTreeMap<i64, _>` keyed by `id` keeps it). Track
+    // the referenced columns separately as they may be NULL (an omitted parent column list).
+    let mut grouped = BTreeMap::<i64, (ForeignKeyModel, Vec<Option<String>>)>::new();
     for row in rows {
-        let foreign_key = grouped.entry(row.id).or_insert_with(|| ForeignKeyModel {
-            // Unnamed by SQLite; the name is derived from the columns during canonicalization.
-            name: String::new(),
-            columns: Vec::new(),
-            references_schema: None,
-            references_table: row.references_table,
-            references_columns: Vec::new(),
-            match_type: None,
-            deferrability: None,
-            validation: None,
-            enforcement: None,
-            on_delete: action(&row.on_delete),
-            on_update: action(&row.on_update),
+        let entry = grouped.entry(row.id).or_insert_with(|| {
+            (
+                ForeignKeyModel {
+                    // Unnamed by SQLite; the name is derived from the columns during canonicalization.
+                    name: String::new(),
+                    columns: Vec::new(),
+                    references_schema: None,
+                    references_table: row.references_table,
+                    references_columns: Vec::new(),
+                    match_type: None,
+                    deferrability: None,
+                    validation: None,
+                    enforcement: None,
+                    on_delete: action(&row.on_delete),
+                    on_update: action(&row.on_update),
+                },
+                Vec::new(),
+            )
         });
-        foreign_key.columns.push(row.column);
-        foreign_key.references_columns.push(row.references_column);
+        entry.0.columns.push(row.column);
+        entry.1.push(row.references_column);
     }
-    Ok(grouped.into_values().collect())
+
+    let mut foreign_keys = Vec::with_capacity(grouped.len());
+    for (mut foreign_key, references_columns) in grouped.into_values() {
+        foreign_key.references_columns = if references_columns.iter().any(Option::is_none) {
+            // An omitted parent column list references the parent's primary key: resolve it (in key
+            // order) so the introspected model matches a model that names the columns explicitly.
+            let parent_columns = columns(connection, &foreign_key.references_table).await?;
+            primary_key(&parent_columns).map_or_else(Vec::new, |pk| pk.columns)
+        } else {
+            references_columns.into_iter().flatten().collect()
+        };
+        foreign_keys.push(foreign_key);
+    }
+    Ok(foreign_keys)
 }
 
 struct ForeignKeyRow {
     id: i64,
     references_table: String,
     column: String,
-    references_column: String,
+    references_column: Option<String>,
     on_update: String,
     on_delete: String,
 }

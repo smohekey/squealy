@@ -230,7 +230,10 @@ where
         .applied_refactor_ids()
         .await
         .map_err(PlanFromDatabaseError::ReadAppliedRefactors)?;
-    let pending_refactors = pending_refactors(refactors, &applied_ids, &actual)
+    // Canonicalize the refactor schema names so they match the live model a schema-less backend reads
+    // back (introspected under the flattened namespace), and the flattened diff the steps drive.
+    let refactors = canonicalize_refactors(connection, refactors);
+    let pending_refactors = pending_refactors(&refactors, &applied_ids, &actual)
         .map_err(PlanFromDatabaseError::AppliedRefactor)?;
     // Canonicalize both sides for the diff (after refactor matching, which reads the raw schema).
     let actual = canonicalize_model(connection, &actual);
@@ -336,6 +339,39 @@ fn coalesce_schemas_by_name(schemas: &mut Vec<SchemaModel>) {
     *schemas = coalesced;
 }
 
+/// Returns a copy of `refactors` with each operation's schema name canonicalized the same way
+/// [`canonicalize_model`] flattens namespaces, so refactor matching against the live model and the
+/// rename/cast steps it drives line up with a schema-less backend's flattened schema. A no-op for a
+/// backend with real schemas (the default [`SchemaIntrospect::canonical_schema_name`] is the identity).
+fn canonicalize_refactors<C: SchemaIntrospect>(
+    connection: &C,
+    refactors: &RefactorLog,
+) -> RefactorLog {
+    let operations = refactors
+        .operations
+        .iter()
+        .map(|operation| match operation {
+            RefactorOperation::RenameTable(operation) => {
+                RefactorOperation::RenameTable(RenameTable {
+                    schema: connection.canonical_schema_name(operation.schema.as_deref()),
+                    ..operation.clone()
+                })
+            }
+            RefactorOperation::RenameColumn(operation) => {
+                RefactorOperation::RenameColumn(RenameColumn {
+                    schema: connection.canonical_schema_name(operation.schema.as_deref()),
+                    ..operation.clone()
+                })
+            }
+            RefactorOperation::CastColumn(operation) => RefactorOperation::CastColumn(CastColumn {
+                schema: connection.canonical_schema_name(operation.schema.as_deref()),
+                ..operation.clone()
+            }),
+        })
+        .collect();
+    RefactorLog { operations }
+}
+
 /// Fills an index's absent method / directions with the backend defaults so a plain crate-declared
 /// index matches the explicit metadata introspection reads back.
 ///
@@ -372,6 +408,9 @@ where
         .applied_refactor_ids()
         .await
         .map_err(RepairRefactorMetadataError::ReadAppliedRefactors)?;
+    // Match the refactors against the live model under the same (possibly flattened) namespace it was
+    // introspected in, so a schema-qualified refactor is validated against a schema-less backend.
+    let refactors = &canonicalize_refactors(connection, refactors);
     // Casts are idempotent rendering hints, never recorded as applied refactors — recording one
     // would make `pending_refactors` filter it out and silently drop its `USING` clause.
     let package_ids = refactors

@@ -39,11 +39,13 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
     // duplicate `CREATE TABLE`/`CREATE INDEX` statements. Tables are checked first so an index that
     // collides with a table is reported as the index.
     let tables = || model.schemas.iter().flat_map(|schema| schema.tables.iter());
-    check_object_name_uniqueness(
-        tables().map(|table| table.name.as_str()).chain(
-            tables().flat_map(|table| table.indexes.iter().map(|index| index.name.as_str())),
-        ),
-    )?;
+    let object_names = || {
+        tables()
+            .map(|table| table.name.as_str())
+            .chain(tables().flat_map(|table| table.indexes.iter().map(|index| index.name.as_str())))
+    };
+    check_reserved_object_names(object_names())?;
+    check_object_name_uniqueness(object_names())?;
 
     let mut first = true;
 
@@ -92,6 +94,27 @@ fn object_name_collision(name: &str) -> io::Error {
     )
 }
 
+/// Rejects any object name using a reserved prefix. SQLite forbids the `sqlite_` prefix for user
+/// objects, and this backend keeps its schema-management bookkeeping in `__squealy_`-prefixed tables
+/// that introspection filters out — so a user object with either prefix must be rejected before it is
+/// created, or the next introspection would treat it as absent and churn a create/drop (or collide with
+/// the metadata stores). The comparison is ASCII case-folded, matching how SQLite compares identifiers.
+fn check_reserved_object_names<'a>(names: impl Iterator<Item = &'a str>) -> io::Result<()> {
+    for name in names {
+        let folded = name.to_ascii_lowercase();
+        if folded.starts_with("sqlite_") || folded.starts_with("__squealy_") {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "`{name}` uses a reserved object-name prefix: SQLite reserves `sqlite_`, and \
+                     squealy reserves `__squealy_` for its schema-management bookkeeping tables"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Renders a `CREATE TABLE` (plus any secondary indexes) for a query-builder [`squealy::Table`], used
 /// by the `to::<T>()` create path and `Backend::write_table`. It lowers the table to a `TableModel` and
 /// reuses the model renderer, so this single-table path is identical to `render_create` for that table
@@ -101,12 +124,14 @@ pub(crate) fn write_table(
     writer: &mut impl Write,
 ) -> io::Result<()> {
     let model = squealy::table_from_dyn(table);
-    // Same single-namespace guard as `write_database`: the table name and its index names must be
-    // unique (an index whose name matches the table would collide in SQLite).
-    check_object_name_uniqueness(
+    // Same guards as `write_database`: reject reserved object-name prefixes, and require the table name
+    // and its index names to be unique (an index whose name matches the table would collide in SQLite).
+    let object_names = || {
         std::iter::once(model.name.as_str())
-            .chain(model.indexes.iter().map(|index| index.name.as_str())),
-    )?;
+            .chain(model.indexes.iter().map(|index| index.name.as_str()))
+    };
+    check_reserved_object_names(object_names())?;
+    check_object_name_uniqueness(object_names())?;
     write_create_table(&model, writer)?;
     for index in &model.indexes {
         writer.write_all(b";\n")?;
