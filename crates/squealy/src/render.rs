@@ -17,14 +17,14 @@ use std::io::{self, Write};
 
 use crate::{
     AggregateFunc, ArithmeticOp, AssignmentValueVisitor, AssignmentVisitor, Backend, ColumnRef,
-    CompareOp, ConflictAction, ConflictClause, DateField, Dialect, Encode, Expr, ExprKind,
-    ExprVisitor, InsertRow, InsertRowVisitor, InsertableTable, Order, OrderDirection, Predicate,
-    PredicateAstVisitor, PredicateKind, PredicateVisitor, ProjectionShape, ProjectionVisitor,
-    QueryBuilder, RenderAssignment, RenderAst, RenderCaseArms, RenderCoalesceArgs,
-    RenderInsertAssignments, RenderInsertRows, RenderPredicateAst, RenderPredicateNodes,
-    RenderProjectable, RenderSelectAst, RenderSimpleCaseArms, RenderUpdateAssignments, SchemaTable,
-    SelectSink, Selected, SourceAlias, SqlType, TableProjection, UnaryStringFunc, UpdateFromStyle,
-    UpdateableTable,
+    CompareOp, ConflictAction, ConflictClause, DateField, DeleteUsingStyle, Dialect, Encode, Expr,
+    ExprKind, ExprVisitor, InsertRow, InsertRowVisitor, InsertableTable, Order, OrderDirection,
+    Predicate, PredicateAstVisitor, PredicateKind, PredicateVisitor, ProjectionShape,
+    ProjectionVisitor, QueryBuilder, RenderAssignment, RenderAst, RenderCaseArms,
+    RenderCoalesceArgs, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst,
+    RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderSimpleCaseArms,
+    RenderUpdateAssignments, SchemaTable, SelectSink, Selected, SetOperandStyle, SourceAlias,
+    SqlType, TableProjection, UnaryStringFunc, UpdateFromStyle, UpdateableTable,
 };
 use std::marker::PhantomData;
 
@@ -749,13 +749,20 @@ where
     where
         Writer: SqlWriter<B>,
     {
-        writer.write_all(b"(")?;
+        // A set operand is wrapped so its `ORDER BY`/`LIMIT` (and, for a nested compound, its grouping)
+        // binds to the operand and not the enclosing set. Postgres/MySQL use `(SELECT …)`; SQLite
+        // rejects a parenthesized compound operand, so it uses `SELECT * FROM (SELECT …)` instead.
+        let (open, close): (&[u8], &[u8]) = match renderer.dialect.set_operand_style() {
+            SetOperandStyle::Parenthesized => (b"(", b")"),
+            SetOperandStyle::SubquerySelect => (b"SELECT * FROM (", b")"),
+        };
+        writer.write_all(open)?;
         {
             let mut sink = SelectRenderSink::<B, Writer>::new(writer, renderer)?;
             self.selected.lower_into::<Conn, _>(&mut sink)?;
             sink.finish()?;
         }
-        writer.write_all(b")")
+        writer.write_all(close)
     }
 
     fn render_insert_source<Writer>(
@@ -790,9 +797,16 @@ where
     where
         Writer: SqlWriter<B>,
     {
-        writer.write_all(b"(")?;
+        // See `SetLeaf::render_operand`. A nested compound is wrapped so its operators group correctly
+        // under the enclosing set: `(a UNION b)` for Postgres/MySQL, `SELECT * FROM (a UNION b)` for
+        // SQLite (which rejects a parenthesized compound operand).
+        let (open, close): (&[u8], &[u8]) = match renderer.dialect.set_operand_style() {
+            SetOperandStyle::Parenthesized => (b"(", b")"),
+            SetOperandStyle::SubquerySelect => (b"SELECT * FROM (", b")"),
+        };
+        writer.write_all(open)?;
         self.render_root(writer, renderer)?;
-        writer.write_all(b")")
+        writer.write_all(close)
     }
 
     fn render_root<Writer>(&self, writer: &mut Writer, renderer: &mut Renderer) -> io::Result<()>
@@ -820,12 +834,17 @@ where
     where
         Writer: SqlWriter<B>,
     {
-        // A nested set renders its trailing modifiers inside its own parentheses, so they bind to this
-        // operand and not the enclosing set.
-        writer.write_all(b"(")?;
+        // A nested set renders its trailing modifiers inside its own wrapper, so they bind to this
+        // operand and not the enclosing set. Postgres/MySQL wrap in `(…)`; SQLite rejects a
+        // parenthesized compound operand, so it uses `SELECT * FROM (…)` (see `SetLeaf::render_operand`).
+        let (open, close): (&[u8], &[u8]) = match renderer.dialect.set_operand_style() {
+            SetOperandStyle::Parenthesized => (b"(", b")"),
+            SetOperandStyle::SubquerySelect => (b"SELECT * FROM (", b")"),
+        };
+        writer.write_all(open)?;
         self.tree.render_root(writer, renderer)?;
         write_set_tail(renderer.dialect, &self.tail, writer)?;
-        writer.write_all(b")")
+        writer.write_all(close)
     }
 
     fn render_insert_source<Writer>(
@@ -1006,7 +1025,9 @@ fn write_table_ref<S>(dialect: &dyn Dialect, writer: &mut impl Write) -> io::Res
 where
     S: TableProjection,
 {
-    if let Some(schema) = <S as TableProjection>::schema_name() {
+    if dialect.qualify_schema()
+        && let Some(schema) = <S as TableProjection>::schema_name()
+    {
         dialect.write_quoted_ident(schema, writer)?;
         writer.write_all(b".")?;
     }
@@ -1018,7 +1039,9 @@ fn write_schema_table_ref<S>(dialect: &dyn Dialect, writer: &mut impl Write) -> 
 where
     S: SchemaTable,
 {
-    if let Some(schema) = <S as SchemaTable>::schema_name() {
+    if dialect.qualify_schema()
+        && let Some(schema) = <S as SchemaTable>::schema_name()
+    {
         dialect.write_quoted_ident(schema, writer)?;
         writer.write_all(b".")?;
     }
@@ -1654,8 +1677,8 @@ where
     Writer: SqlWriter<B>,
 {
     let mut renderer = Renderer::new(dialect);
-    match dialect.update_from_style() {
-        UpdateFromStyle::PgFrom => {
+    match dialect.delete_using_style() {
+        DeleteUsingStyle::PgUsing => {
             writer.write_all(b"DELETE FROM ")?;
             write_table_ref::<S>(renderer.dialect, writer)?;
             write!(writer, " AS {target_alias} USING ")?;
@@ -1663,7 +1686,7 @@ where
             write!(writer, " AS {source_alias}")?;
             write_filters::<B, _>(filters, writer, &mut renderer)?;
         }
-        UpdateFromStyle::MysqlJoin => {
+        DeleteUsingStyle::MysqlJoin => {
             write!(writer, "DELETE {target_alias} FROM ")?;
             write_table_ref::<S>(renderer.dialect, writer)?;
             write!(writer, " AS {target_alias} JOIN ")?;
@@ -1676,6 +1699,24 @@ where
                 _backend: PhantomData::<B>,
             };
             filters.try_visit(&mut predicates)?;
+        }
+        DeleteUsingStyle::SqliteExists => {
+            // SQLite has no join-delete, so the correlated delete becomes a correlated `EXISTS`
+            // subquery: `DELETE FROM t AS a WHERE EXISTS (SELECT 1 FROM other AS b WHERE <correlation>)`
+            // (SQLite's `DELETE` target allows an alias, and the subquery may reference it).
+            writer.write_all(b"DELETE FROM ")?;
+            write_table_ref::<S>(renderer.dialect, writer)?;
+            write!(writer, " AS {target_alias} WHERE EXISTS (SELECT 1 FROM ")?;
+            write_table_ref::<O>(renderer.dialect, writer)?;
+            write!(writer, " AS {source_alias} WHERE ")?;
+            let mut predicates = WritePredicateFilters {
+                writer,
+                renderer: &mut renderer,
+                index: 0,
+                _backend: PhantomData::<B>,
+            };
+            filters.try_visit(&mut predicates)?;
+            writer.write_all(b")")?;
         }
     }
     write_returning::<B, _>(returning, writer, &mut renderer)?;
@@ -2366,7 +2407,8 @@ where
     where
         O: FnOnce(&mut Self) -> Result<(), Self::Error>,
     {
-        self.writer.write_all(func.sql_name().as_bytes())?;
+        let name = self.renderer.dialect.unary_string_fn_name(func);
+        self.writer.write_all(name.as_bytes())?;
         self.writer.write_all(b"(")?;
         operand(self)?;
         self.writer.write_all(b")")
@@ -2411,6 +2453,18 @@ where
         // regex `substring(text FROM pattern FOR escape)` overload. MySQL binds `?` by value (no
         // inference, no regex overload), so it needs no cast. The text operand is anchored by the
         // function and is never cast.
+        // SQLite has no `SUBSTRING(s FROM start FOR len)` syntax — it spells it as the comma-argument
+        // call `substr(s, start, len)` (1-based `start`, same as the standard form), and binds `?` by
+        // value so the bounds need no cast.
+        if self.renderer.dialect.substring_uses_function_call() {
+            self.writer.write_all(b"substr(")?;
+            string(self)?;
+            self.writer.write_all(b", ")?;
+            start(self)?;
+            self.writer.write_all(b", ")?;
+            len(self)?;
+            return self.writer.write_all(b")");
+        }
         let bound_cast = if self.renderer.dialect.substring_bounds_need_cast() {
             Some(SqlType::I32)
         } else {

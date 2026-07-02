@@ -519,6 +519,41 @@ impl squealy::Dialect for SqliteDialect {
         // `CAST(expr AS <type>)` uses SQLite's affinity names, the same mapping as the column type.
         writer.write_all(sqlite_affinity(ty).as_bytes())
     }
+
+    fn unary_string_fn_name(&self, func: squealy::UnaryStringFunc) -> &'static str {
+        match func {
+            // SQLite has no `CHAR_LENGTH`; `length()` counts characters for TEXT values.
+            squealy::UnaryStringFunc::Length => "length",
+            other => other.sql_name(),
+        }
+    }
+
+    fn qualify_schema(&self) -> bool {
+        // SQLite has no schemas; table names render unqualified (matching the flattened DDL).
+        false
+    }
+
+    fn set_operand_style(&self) -> squealy::SetOperandStyle {
+        // SQLite rejects a parenthesized compound operand and a per-operand `ORDER BY`/`LIMIT`, so an
+        // operand is wrapped as `SELECT * FROM (SELECT …)` (valid for ordered/limited/nested operands).
+        squealy::SetOperandStyle::SubquerySelect
+    }
+
+    fn substring_uses_function_call(&self) -> bool {
+        // SQLite spells substring as `substr(s, start, len)`, not `SUBSTRING(s FROM start FOR len)`.
+        true
+    }
+
+    fn concat_uses_pipe_operator(&self) -> bool {
+        // SQLite has no null-propagating `CONCAT`; `||` returns NULL if either operand is NULL,
+        // matching squealy's concat expression (nullable iff either operand is nullable).
+        true
+    }
+
+    fn delete_using_style(&self) -> squealy::DeleteUsingStyle {
+        // SQLite has no join-delete; a correlated delete becomes `DELETE … WHERE EXISTS (SELECT …)`.
+        squealy::DeleteUsingStyle::SqliteExists
+    }
 }
 
 #[cfg(test)]
