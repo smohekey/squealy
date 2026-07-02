@@ -17,9 +17,6 @@ thiserror.workspace = true
 # `libsqlite3` is required. `tokio-rusqlite` owns the `!Send` `rusqlite::Connection` on a dedicated
 # thread and exposes `Send` futures via `.call(|conn| …)`, fitting the executor's `Send` future shape.
 tokio-rusqlite = { version = "0.7", features = ["bundled"] }
-# `rt` gives `runtime::Handle`, captured when a transaction begins so its drop guard can schedule a
-# best-effort `ROLLBACK` if the transaction future is cancelled before it commits or rolls back.
-tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
 squealy-model.workspace = true

@@ -120,6 +120,18 @@ async fn returning_yields_inserted_and_updated_rows() {
         .await
         .expect("update returning");
     assert_eq!(updated, "second");
+
+    // Invoking a RETURNING mutation via `.execute()` (instead of fetch) drains the returned rows and
+    // still reports the affected count — `rusqlite::Connection::execute` alone would reject the rows.
+    let affected = connection
+        .to::<RuntimeAccount>()
+        .slug("beta")
+        .label("b")
+        .insert_returning(|account| account.id)
+        .execute()
+        .await
+        .expect("execute returning insert");
+    assert_eq!(affected, 1);
 }
 
 #[tokio::test]

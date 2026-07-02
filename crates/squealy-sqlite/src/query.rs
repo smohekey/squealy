@@ -9,7 +9,7 @@
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 use futures_core::Stream;
 use squealy::{
@@ -442,7 +442,9 @@ fn run_query_on(
     })
 }
 
-/// Runs an effect-only statement on `conn`, returning the affected-row count.
+/// Runs an effect-only statement on `conn`, returning the affected-row count. Any rows the statement
+/// produces are drained and discarded, so a `RETURNING` mutation invoked via `.execute()` (which
+/// `rusqlite::Connection::execute` would reject with `ExecuteReturnedResults`) still yields its count.
 fn run_execute_on(
     conn: &tokio_rusqlite::Connection,
     sql: String,
@@ -450,11 +452,12 @@ fn run_execute_on(
 ) -> ExecFuture<'_, u64> {
     Box::pin(async move {
         conn.call(move |conn| {
-            let affected = conn.execute(
-                &sql,
-                params_from_iter(params.into_iter().map(RusqliteValue::from)),
-            )?;
-            Ok::<_, rusqlite::Error>(affected as u64)
+            let mut statement = conn.prepare(&sql)?;
+            let mut rows = statement.query(params_from_iter(
+                params.into_iter().map(RusqliteValue::from),
+            ))?;
+            while rows.next()?.is_some() {}
+            Ok::<_, rusqlite::Error>(conn.changes())
         })
         .await
         .map_err(SqliteError::Query)
@@ -479,13 +482,11 @@ impl SqliteExecutor for SqliteConnection {
 /// cannot outlive the connection.
 ///
 /// If the transaction future is dropped before it commits or rolls back (e.g. cancelled by
-/// `tokio::time::timeout` or `select!`), the drop guard schedules a best-effort `ROLLBACK` on the
-/// runtime captured when the transaction began, so the connection is not left mid-transaction.
+/// `tokio::time::timeout` or `select!`), a drop guard submits a `ROLLBACK` so the connection is not
+/// left mid-transaction — and does so in a way that stays *ordered* ahead of any later use of the
+/// connection (see the [`Drop`] impl).
 pub struct SqliteTransaction<'conn> {
     conn: tokio_rusqlite::Connection,
-    // The runtime to schedule the drop-guard rollback on. Captured at `BEGIN`, so `Some` in practice;
-    // `None` only if somehow constructed outside a runtime, in which case the guard cannot roll back.
-    runtime: Option<tokio::runtime::Handle>,
     // Set once the transaction has been finalized (committed or rolled back) on the normal path, so the
     // drop guard fires only on cancellation.
     finalized: bool,
@@ -496,7 +497,6 @@ impl SqliteTransaction<'_> {
     pub(crate) fn new(conn: tokio_rusqlite::Connection) -> Self {
         Self {
             conn,
-            runtime: tokio::runtime::Handle::try_current().ok(),
             finalized: false,
             _connection: PhantomData,
         }
@@ -514,15 +514,17 @@ impl Drop for SqliteTransaction<'_> {
         if self.finalized {
             return;
         }
-        // Cancelled mid-transaction: schedule a best-effort `ROLLBACK` so the connection does not stay
-        // inside the abandoned transaction. It is fire-and-forget (a sync `Drop` cannot await); if the
-        // runtime is gone the connection is being torn down anyway.
-        if let Some(runtime) = &self.runtime {
-            let conn = self.conn.clone();
-            runtime.spawn(async move {
-                let _ = conn.call(|conn| conn.execute_batch("ROLLBACK")).await;
-            });
-        }
+        // Cancelled mid-transaction: submit a `ROLLBACK` so the connection does not stay inside the
+        // abandoned transaction. `tokio-rusqlite` sends the closure to its worker thread via a
+        // synchronous channel *before* the future's first await, so polling the call future once here
+        // enqueues the `ROLLBACK` into the connection's FIFO before `Drop` returns — ordered ahead of
+        // any statement the caller runs after regaining the connection. A sync `Drop` cannot await the
+        // result, so it is discarded (best-effort), but the ordering guarantee is what matters: a later
+        // query cannot slip in front of the rollback and observe the abandoned transaction.
+        let mut rollback = Box::pin(self.conn.call(|conn| conn.execute_batch("ROLLBACK")));
+        let _ = rollback
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()));
     }
 }
 
