@@ -126,8 +126,14 @@ impl SchemaConnect for Sqlite {
     /// this backend renders are enforced at runtime.
     async fn connect(&self, url: &str) -> Result<SqliteConnection, SqliteError> {
         let conn = if url.starts_with("file:") {
-            // A native SQLite URI: pass it through unchanged so its `?`-parameters are honored.
-            tokio_rusqlite::Connection::open(url).await
+            // A native SQLite URI: open with URI parsing explicitly enabled so its `?`-parameters are
+            // honored. (`open` already enables it via `OpenFlags::default`, but spelling out the flag
+            // documents the intent and is robust to a future default change.)
+            tokio_rusqlite::Connection::open_with_flags(
+                url,
+                tokio_rusqlite::OpenFlags::default() | tokio_rusqlite::OpenFlags::SQLITE_OPEN_URI,
+            )
+            .await
         } else {
             let path = url.strip_prefix("sqlite://").unwrap_or(url);
             if path.is_empty() || path == ":memory:" {
