@@ -115,20 +115,26 @@ impl SchemaConnect for Sqlite {
     type Connection = SqliteConnection;
     type Error = SqliteError;
 
-    /// Opens a SQLite database. `url` is a filesystem path, or `":memory:"` for a private in-memory
-    /// database; an optional `sqlite://` or `file:` scheme prefix is stripped. Foreign-key enforcement
-    /// is enabled on the fresh connection (`PRAGMA foreign_keys = ON`) — it is off by default in SQLite
-    /// and must be set outside any transaction — so the inline foreign keys this backend renders are
-    /// enforced at runtime.
+    /// Opens a SQLite database. `url` may be:
+    /// - a native SQLite `file:` URI (e.g. `file:app.db?mode=ro`, `file::memory:?cache=shared`), passed
+    ///   through verbatim so SQLite parses its parameters (rusqlite enables URI parsing by default);
+    /// - `":memory:"` (or an empty string, or `sqlite://`) for a private in-memory database;
+    /// - otherwise a filesystem path, with an optional `sqlite://` convenience prefix stripped.
+    ///
+    /// Foreign-key enforcement is enabled on the fresh connection (`PRAGMA foreign_keys = ON`) — it is
+    /// off by default in SQLite and must be set outside any transaction — so the inline foreign keys
+    /// this backend renders are enforced at runtime.
     async fn connect(&self, url: &str) -> Result<SqliteConnection, SqliteError> {
-        let target = url
-            .strip_prefix("sqlite://")
-            .or_else(|| url.strip_prefix("file:"))
-            .unwrap_or(url);
-        let conn = if target == ":memory:" || target.is_empty() {
-            tokio_rusqlite::Connection::open_in_memory().await
+        let conn = if url.starts_with("file:") {
+            // A native SQLite URI: pass it through unchanged so its `?`-parameters are honored.
+            tokio_rusqlite::Connection::open(url).await
         } else {
-            tokio_rusqlite::Connection::open(target).await
+            let path = url.strip_prefix("sqlite://").unwrap_or(url);
+            if path.is_empty() || path == ":memory:" {
+                tokio_rusqlite::Connection::open_in_memory().await
+            } else {
+                tokio_rusqlite::Connection::open(path).await
+            }
         }
         .map_err(SqliteError::Connect)?;
         // Foreign keys are off by default and the setting is a no-op inside a transaction, so enable it
