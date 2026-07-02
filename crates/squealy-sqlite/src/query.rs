@@ -477,8 +477,18 @@ impl SqliteExecutor for SqliteConnection {
 /// [`ConnectionWithTransaction::transaction`](squealy::ConnectionWithTransaction::transaction) on
 /// [`SqliteConnection`](crate::SqliteConnection). The `'conn` marker ties it to that borrow so it
 /// cannot outlive the connection.
+///
+/// If the transaction future is dropped before it commits or rolls back (e.g. cancelled by
+/// `tokio::time::timeout` or `select!`), the drop guard schedules a best-effort `ROLLBACK` on the
+/// runtime captured when the transaction began, so the connection is not left mid-transaction.
 pub struct SqliteTransaction<'conn> {
     conn: tokio_rusqlite::Connection,
+    // The runtime to schedule the drop-guard rollback on. Captured at `BEGIN`, so `Some` in practice;
+    // `None` only if somehow constructed outside a runtime, in which case the guard cannot roll back.
+    runtime: Option<tokio::runtime::Handle>,
+    // Set once the transaction has been finalized (committed or rolled back) on the normal path, so the
+    // drop guard fires only on cancellation.
+    finalized: bool,
     _connection: PhantomData<&'conn ()>,
 }
 
@@ -486,7 +496,32 @@ impl SqliteTransaction<'_> {
     pub(crate) fn new(conn: tokio_rusqlite::Connection) -> Self {
         Self {
             conn,
+            runtime: tokio::runtime::Handle::try_current().ok(),
+            finalized: false,
             _connection: PhantomData,
+        }
+    }
+
+    /// Disarms the drop-guard rollback: the caller has committed or rolled back explicitly.
+    pub(crate) fn finalize(&mut self) {
+        self.finalized = true;
+    }
+}
+
+impl Drop for SqliteTransaction<'_> {
+    fn drop(&mut self) {
+        // Normal path: already committed/rolled back, nothing to do.
+        if self.finalized {
+            return;
+        }
+        // Cancelled mid-transaction: schedule a best-effort `ROLLBACK` so the connection does not stay
+        // inside the abandoned transaction. It is fire-and-forget (a sync `Drop` cannot await); if the
+        // runtime is gone the connection is being torn down anyway.
+        if let Some(runtime) = &self.runtime {
+            let conn = self.conn.clone();
+            runtime.spawn(async move {
+                let _ = conn.call(|conn| conn.execute_batch("ROLLBACK")).await;
+            });
         }
     }
 }

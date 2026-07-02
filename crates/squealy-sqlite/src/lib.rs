@@ -184,7 +184,9 @@ impl ConnectionWithTransaction for SqliteConnection {
             .map_err(SqliteError::Query)?;
         let mut transaction = SqliteTransaction::new(self.conn.clone());
         let result = f(&mut transaction).await;
-        commit_or_rollback(&self.conn, result).await
+        let outcome = commit_or_rollback(&self.conn, result).await;
+        transaction.finalize(); // committed/rolled back explicitly; disarm the drop-guard rollback.
+        outcome
     }
 
     async fn transaction_scoped<'conn, T, F>(&'conn mut self, f: F) -> Result<T, SqliteError>
@@ -202,7 +204,9 @@ impl ConnectionWithTransaction for SqliteConnection {
             .map_err(SqliteError::Query)?;
         let mut transaction = SqliteTransaction::new(self.conn.clone());
         let result = f(&mut transaction).await;
-        commit_or_rollback(&self.conn, result).await
+        let outcome = commit_or_rollback(&self.conn, result).await;
+        transaction.finalize(); // committed/rolled back explicitly; disarm the drop-guard rollback.
+        outcome
     }
 }
 
