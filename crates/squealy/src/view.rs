@@ -108,6 +108,9 @@ impl crate::SupportsFullJoin for ModelBackend {}
 // Likewise `date_trunc`: a view carrying it is lowered against the model backend; rendering to MySQL
 // (which has no `date_trunc`) fails at DDL exec, as with a `full_join` view.
 impl crate::SupportsDateTrunc for ModelBackend {}
+// Likewise `EXTRACT`: a view may carry `extract`/`extract_second`, lowered against the model backend;
+// rendering to SQLite (which has no `EXTRACT`) fails at DDL exec, as with a `date_trunc` view.
+impl crate::SupportsExtract for ModelBackend {}
 
 // ---------------------------------------------------------------------------
 // Literal encoding: every value becomes its SQL-literal text

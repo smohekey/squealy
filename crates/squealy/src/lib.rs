@@ -462,7 +462,7 @@ pub use backend::{
     Backend, ConstraintCapabilities, DdlExecutor, Decode, DecodeNullable, Encode,
     IndexCapabilities, ParamWriter, RowReader, SchemaBackend, SchemaCapabilities, SchemaConnect,
     SchemaIntrospect, SchemaMetadataStore, SchemaPublishHistoryStore, SchemaPublishRecord,
-    SchemaRefactorStore, SupportsDateTrunc, SupportsFullJoin, SupportsReturning,
+    SchemaRefactorStore, SupportsDateTrunc, SupportsExtract, SupportsFullJoin, SupportsReturning,
 };
 pub use column::{
     Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullability,

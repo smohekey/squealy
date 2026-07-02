@@ -33,6 +33,9 @@ impl squealy::SupportsColumnlessUpsert for TestBackend {}
 // The test backend mirrors Postgres/MySQL, which accept the `DEFAULT` keyword as an assignment value.
 impl squealy::SupportsDefaultKeyword for TestBackend {}
 
+// The test backend mirrors Postgres/MySQL, which support `EXTRACT(<field> FROM <ts>)`.
+impl squealy::SupportsExtract for TestBackend {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TestError {
     NoRows,

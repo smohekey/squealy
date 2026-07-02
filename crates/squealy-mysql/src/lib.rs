@@ -39,6 +39,9 @@ impl squealy::SupportsColumnlessUpsert for Mysql {}
 // MySQL accepts the `DEFAULT` keyword as an assignment value (`VALUES (DEFAULT)`, `SET c = DEFAULT`).
 impl squealy::SupportsDefaultKeyword for Mysql {}
 
+// MySQL supports `EXTRACT(<field> FROM <ts>)` (and the `SECOND_MICROSECOND` unit for fractional seconds).
+impl squealy::SupportsExtract for Mysql {}
+
 impl SchemaBackend for Mysql {
     fn capabilities(&self) -> squealy::SchemaCapabilities {
         squealy::SchemaCapabilities {
