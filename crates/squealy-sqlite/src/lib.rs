@@ -255,6 +255,19 @@ impl SchemaIntrospect for SqliteConnection {
                 DefaultValue::Int(value) => DefaultValue::Float(*value as f64),
                 other => other.clone(),
             },
+            // A NUMERIC-affinity column (`Decimal`/`Raw("NUMERIC")`) has no structured numeric literal:
+            // the renderer writes the value verbatim and introspection reads it back as `Raw(text)`
+            // (SQLite does not preserve the logical numeric type), so collapse a structured numeric
+            // default to the same rendered text.
+            introspect::Affinity::Numeric => match default {
+                DefaultValue::Int(value) => DefaultValue::Raw(value.to_string()),
+                DefaultValue::UInt(value) => DefaultValue::Raw(value.to_string()),
+                DefaultValue::Float(value) => DefaultValue::Raw(value.to_string()),
+                DefaultValue::Bool(value) => {
+                    DefaultValue::Raw(if *value { "1" } else { "0" }.to_owned())
+                }
+                other => other.clone(),
+            },
             _ => default.clone(),
         }
     }

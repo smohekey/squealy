@@ -14,8 +14,9 @@
 //!   declared name (the backing auto-index is `sqlite_autoindex_…`; foreign keys are positional).
 //! - **`CHECK` constraints, column comments, collations and generated columns are not read** — SQLite
 //!   exposes checks only inside the `CREATE TABLE` text (no PRAGMA), and has no column comments; these
-//!   are left empty (a documented limitation, revisited when the incremental plan lands). A partial
-//!   index's `WHERE` predicate, which is likewise only in the DDL text, *is* recovered (see
+//!   are left empty (a documented limitation, revisited when the incremental plan lands). Because a
+//!   dropped check would churn, the renderer rejects a model carrying one until it can be introspected.
+//!   A partial index's `WHERE` predicate, which is likewise only in the DDL text, *is* recovered (see
 //!   [`partial_predicate`]).
 
 use std::collections::BTreeMap;
@@ -107,7 +108,8 @@ async fn table(connection: &SqliteConnection, name: &str) -> Result<TableModel, 
         foreign_keys: foreign_keys(connection, name).await?,
         uniques,
         // SQLite exposes `CHECK` constraints only in the `CREATE TABLE` text; reading them needs a SQL
-        // parser, so they are left empty for now (revisited with the incremental plan).
+        // parser, so they are left empty for now (the renderer rejects a model carrying a check, so a
+        // published schema has none to miss — revisited with the incremental plan).
         checks: Vec::new(),
         indexes,
     })
@@ -180,12 +182,80 @@ async fn table_sql(
     .flatten())
 }
 
-/// Whether the stored `CREATE TABLE` text declares `AUTOINCREMENT`. SQLite stores the statement as
-/// written, so the keyword is present iff this backend rendered an identity column; a case-insensitive
-/// substring match is enough (the keyword is a reserved word that cannot appear inside an identifier or
-/// a bare literal in the rendered DDL).
+/// Whether the stored `CREATE TABLE` text declares `AUTOINCREMENT` (no PRAGMA reports it, and
+/// `sqlite_sequence` only gains a row after the first insert). SQLite stores the statement as written,
+/// so the keyword is present iff an identity column was declared — but a plain substring scan would
+/// misfire on a table named `autoincrements`, a quoted identifier, or a text default/comment containing
+/// the word, so match it as a standalone unquoted keyword token (see [`contains_keyword`]).
 fn declares_autoincrement(sql: Option<&str>) -> bool {
-    sql.is_some_and(|sql| sql.to_ascii_uppercase().contains("AUTOINCREMENT"))
+    sql.is_some_and(|sql| contains_keyword(sql, "AUTOINCREMENT"))
+}
+
+/// Whether `keyword` (ASCII, matched case-insensitively) appears in `sql` as a standalone token in
+/// SQL code — outside string literals (`'…'`), quoted identifiers (`"…"`, `` `…` ``, `[…]`) and
+/// comments (`-- …`, `/* … */`), and not as a substring of a longer identifier. This keeps the
+/// `AUTOINCREMENT` keyword distinct from an identifier like `autoincrements` or a literal that merely
+/// contains the word.
+fn contains_keyword(sql: &str, keyword: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            // String literal or quoted identifier: skip to the matching close quote, treating a doubled
+            // quote as an escape.
+            quote @ (b'\'' | b'"' | b'`') => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == quote {
+                        if bytes.get(index + 1) == Some(&quote) {
+                            index += 2;
+                            continue;
+                        }
+                        index += 1;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            // Bracketed identifier `[ident]` (no escape form in SQLite).
+            b'[' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b']' {
+                    index += 1;
+                }
+                index += 1;
+            }
+            // Line comment `-- …` to end of line.
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            // Block comment `/* … */`.
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index < bytes.len()
+                    && !(bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/'))
+                {
+                    index += 1;
+                }
+                index += 2;
+            }
+            byte if is_word(byte) => {
+                let start = index;
+                while index < bytes.len() && is_word(bytes[index]) {
+                    index += 1;
+                }
+                if sql[start..index].eq_ignore_ascii_case(keyword) {
+                    return true;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    false
 }
 
 async fn foreign_keys(
@@ -596,6 +666,34 @@ mod tests {
             None
         );
         assert_eq!(partial_predicate(None), None);
+    }
+
+    #[test]
+    fn contains_keyword_matches_only_standalone_unquoted_tokens() {
+        assert!(contains_keyword(
+            "CREATE TABLE \"t\" (\"id\" INTEGER PRIMARY KEY AUTOINCREMENT)",
+            "AUTOINCREMENT"
+        ));
+        // An identifier that merely contains the word is not a match.
+        assert!(!contains_keyword(
+            "CREATE TABLE autoincrements (id INTEGER)",
+            "AUTOINCREMENT"
+        ));
+        // A quoted identifier is not code.
+        assert!(!contains_keyword(
+            "CREATE TABLE \"t\" (\"autoincrement\" INTEGER)",
+            "AUTOINCREMENT"
+        ));
+        // A string-literal default is not code.
+        assert!(!contains_keyword(
+            "CREATE TABLE \"t\" (\"note\" TEXT DEFAULT 'has AUTOINCREMENT')",
+            "AUTOINCREMENT"
+        ));
+        // A comment is not code.
+        assert!(!contains_keyword(
+            "CREATE TABLE \"t\" (\"id\" INTEGER) -- AUTOINCREMENT here",
+            "AUTOINCREMENT"
+        ));
     }
 
     #[test]

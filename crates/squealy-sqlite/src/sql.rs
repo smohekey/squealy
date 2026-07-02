@@ -306,21 +306,21 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
     Ok(())
 }
 
-fn write_check(check: &CheckModel, writer: &mut impl Write) -> io::Result<()> {
-    if check.validation.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "SQLite does not support constraint validation metadata",
-        ));
-    }
-    if check.enforcement.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "SQLite does not support check constraint enforcement metadata",
-        ));
-    }
-    // Rendered unnamed: SQLite does not round-trip user constraint names.
-    write!(writer, "CHECK ({})", check.expression)
+fn write_check(check: &CheckModel, _writer: &mut impl Write) -> io::Result<()> {
+    // Table `CHECK` constraints are not supported for SQLite schema management yet: introspection
+    // cannot read them back (SQLite exposes checks only inside the `CREATE TABLE` text, with no PRAGMA),
+    // so a published check would diff as a never-settling add on every plan. Reject rather than emit DDL
+    // that cannot round-trip; full support lands with introspection parsing + incremental plan
+    // rendering. (The fixed-width `[u8; N]` column check is rendered inline in `write_column`, not here,
+    // so it is unaffected.)
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "SQLite CHECK constraints are not supported for schema management yet (constraint `{}`): \
+             SQLite does not expose them to introspection, so a published check would churn every plan",
+            check.name
+        ),
+    ))
 }
 
 fn write_foreign_key(foreign_key: &ForeignKeyModel, writer: &mut impl Write) -> io::Result<()> {

@@ -307,6 +307,15 @@ async fn round_trips_bool_and_unsigned_defaults() {
                 columns: vec![
                     column("active", SqlType::Bool, DefaultValue::Bool(true)),
                     column("seats", SqlType::U32, DefaultValue::UInt(5)),
+                    // A NUMERIC-affinity column: the structured `Int` default reads back as `Raw("0")`.
+                    column(
+                        "balance",
+                        SqlType::Decimal {
+                            precision: 10,
+                            scale: 2,
+                        },
+                        DefaultValue::Int(0),
+                    ),
                 ],
                 primary_key: None,
                 foreign_keys: Vec::new(),

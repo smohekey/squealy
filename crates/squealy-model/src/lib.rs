@@ -290,6 +290,11 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 foreign_key.references_schema =
                     connection.canonical_schema_name(foreign_key.references_schema.as_deref());
                 foreign_key.name = connection.canonical_foreign_key_name(foreign_key);
+                // `NO ACTION` is the SQL default referential action; introspectors report an unset
+                // action as `None`, so normalize an explicit `Some(NoAction)` to `None` on both sides so
+                // a foreign key that spells out the default does not churn as an `AlterForeignKey`.
+                normalize_no_action(&mut foreign_key.on_delete);
+                normalize_no_action(&mut foreign_key.on_update);
             }
             for index in &mut table.indexes {
                 canonicalize_index(index, &default_method);
@@ -370,6 +375,14 @@ fn canonicalize_refactors<C: SchemaIntrospect>(
         })
         .collect();
     RefactorLog { operations }
+}
+
+/// Normalizes an explicit `Some(ForeignKeyAction::NoAction)` to `None` (the referential-action default,
+/// which every backend's introspection reports as an unset action).
+fn normalize_no_action(action: &mut Option<ForeignKeyAction>) {
+    if matches!(action, Some(ForeignKeyAction::NoAction)) {
+        *action = None;
+    }
 }
 
 /// Fills an index's absent method / directions with the backend defaults so a plain crate-declared
@@ -929,6 +942,22 @@ mod tests {
             .map(|table| table.name.as_str())
             .collect();
         assert_eq!(names, vec!["users", "logs"]);
+    }
+
+    #[test]
+    fn canonicalize_model_normalizes_explicit_no_action() {
+        // `NO ACTION` is the referential-action default; introspection reports it as `None`, so an
+        // explicit `Some(NoAction)` on the desired side must normalize to `None` (a real action like
+        // `Cascade` is preserved). This is backend-neutral, so the trait-default backend applies it.
+        let mut foreign_key = foreign_key();
+        foreign_key.on_delete = Some(ForeignKeyAction::NoAction);
+        foreign_key.on_update = Some(ForeignKeyAction::Cascade);
+        let model = table_with_constraints(foreign_key, check());
+
+        let canonical = canonicalize_model(&DefaultBackend, &model);
+        let foreign_key = &canonical.schemas[0].tables[0].foreign_keys[0];
+        assert_eq!(foreign_key.on_delete, None);
+        assert_eq!(foreign_key.on_update, Some(ForeignKeyAction::Cascade));
     }
 
     #[test]
