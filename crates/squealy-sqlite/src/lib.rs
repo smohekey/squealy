@@ -165,28 +165,30 @@ impl ConnectionWithTransaction for SqliteConnection {
     where
         Self: 'conn;
 
-    // Both entry points share the same `BEGIN` / body / `COMMIT`-or-`ROLLBACK` shape; they differ only
-    // in how the body closure is called (`AsyncFnOnce` vs a boxed-future `FnOnce`), and the body future
-    // borrows the transaction, so the two cannot be unified behind one generic helper. The transaction
-    // handle owns its own clone of the connection (a handle to the *same* underlying database), so
-    // `&mut self` is not frozen for the duration; correctness rests on `tokio-rusqlite` running every
-    // submitted closure FIFO on the one owned thread, and on this method holding the connection
-    // exclusively, so no statement interleaves between the `BEGIN` and the `COMMIT`/`ROLLBACK`.
+    // Both entry points share the same `BEGIN` / body / finish shape; they differ only in how the body
+    // closure is called (`AsyncFnOnce` vs a boxed-future `FnOnce`), and the body future borrows the
+    // transaction, so the two cannot be unified behind one generic helper. The transaction handle owns
+    // its own clone of the connection (a handle to the *same* underlying database), so `&mut self` is
+    // not frozen for the duration; correctness rests on `tokio-rusqlite` running every submitted closure
+    // FIFO on the one owned thread, and on this method holding the connection exclusively.
+    //
+    // The drop-guard transaction is constructed *before* `BEGIN`: if the future is cancelled while
+    // `BEGIN` is in flight, the guard still exists and rolls back (a no-op if `BEGIN` never ran). The
+    // guard is only disarmed (via `finish_transaction`) after a `COMMIT`/`ROLLBACK` actually succeeds,
+    // so a failed `COMMIT` leaves it armed to clean up.
     async fn transaction<'conn, T, F>(&'conn mut self, f: F) -> Result<T, SqliteError>
     where
         T: 'conn,
         F: for<'tx> AsyncFnOnce(&'tx mut Self::Transaction<'conn>) -> Result<T, SqliteError>
             + 'conn,
     {
+        let mut transaction = SqliteTransaction::new(self.conn.clone());
         self.conn
             .call(|conn| conn.execute_batch("BEGIN"))
             .await
             .map_err(SqliteError::Query)?;
-        let mut transaction = SqliteTransaction::new(self.conn.clone());
         let result = f(&mut transaction).await;
-        let outcome = commit_or_rollback(&self.conn, result).await;
-        transaction.finalize(); // committed/rolled back explicitly; disarm the drop-guard rollback.
-        outcome
+        finish_transaction(&self.conn, &mut transaction, result).await
     }
 
     async fn transaction_scoped<'conn, T, F>(&'conn mut self, f: F) -> Result<T, SqliteError>
@@ -198,22 +200,24 @@ impl ConnectionWithTransaction for SqliteConnection {
                 -> Pin<Box<dyn Future<Output = Result<T, SqliteError>> + Send + 'tx>>
             + 'conn,
     {
+        let mut transaction = SqliteTransaction::new(self.conn.clone());
         self.conn
             .call(|conn| conn.execute_batch("BEGIN"))
             .await
             .map_err(SqliteError::Query)?;
-        let mut transaction = SqliteTransaction::new(self.conn.clone());
         let result = f(&mut transaction).await;
-        let outcome = commit_or_rollback(&self.conn, result).await;
-        transaction.finalize(); // committed/rolled back explicitly; disarm the drop-guard rollback.
-        outcome
+        finish_transaction(&self.conn, &mut transaction, result).await
     }
 }
 
-/// Commits on success or rolls back on error, then propagates the body's result. A failure to issue
-/// the `COMMIT`/`ROLLBACK` itself surfaces as [`SqliteError::Query`].
-async fn commit_or_rollback<T>(
+/// Commits (on `Ok`) or rolls back (on `Err`) and propagates the body's result, disarming the
+/// transaction's drop guard **only** when the `COMMIT`/`ROLLBACK` actually succeeds:
+/// - A failed `COMMIT` (e.g. `SQLITE_BUSY`, which can leave the transaction open) returns the commit
+///   error with the guard still armed, so the drop guard rolls back.
+/// - A failed `ROLLBACK` keeps the original body error and leaves the guard armed to retry on drop.
+async fn finish_transaction<T>(
     conn: &tokio_rusqlite::Connection,
+    transaction: &mut SqliteTransaction<'_>,
     result: Result<T, SqliteError>,
 ) -> Result<T, SqliteError> {
     match result {
@@ -221,12 +225,17 @@ async fn commit_or_rollback<T>(
             conn.call(|conn| conn.execute_batch("COMMIT"))
                 .await
                 .map_err(SqliteError::Query)?;
+            transaction.finalize();
             Ok(value)
         }
         Err(error) => {
-            conn.call(|conn| conn.execute_batch("ROLLBACK"))
+            if conn
+                .call(|conn| conn.execute_batch("ROLLBACK"))
                 .await
-                .map_err(SqliteError::Query)?;
+                .is_ok()
+            {
+                transaction.finalize();
+            }
             Err(error)
         }
     }
