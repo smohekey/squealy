@@ -23,7 +23,7 @@ use std::io::{self, Write};
 use std::pin::Pin;
 
 use squealy::{
-    ConnectionWithTransaction, Constraint, DatabaseModel, DatabasePlan, DdlExecutor,
+    ConnectionWithTransaction, Constraint, DatabaseModel, DatabasePlan, DdlExecutor, DefaultValue,
     ForeignKeyModel, IdentityMode, SchemaBackend, SchemaConnect, SchemaIntrospect,
     SchemaMetadataStore, SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore,
     SqlType,
@@ -236,6 +236,27 @@ impl SchemaIntrospect for SqliteConnection {
             foreign_key.references_table,
             foreign_key.references_columns.join(","),
         )
+    }
+
+    /// SQLite has no boolean or unsigned literal, so a `bool`/unsigned default on an `INTEGER`-affinity
+    /// column is rendered as a plain integer and reads back as [`DefaultValue::Int`]; likewise an integer
+    /// default on a `REAL`-affinity column reads back as a float. Collapse the desired default the same
+    /// way (using the already-canonicalized column type) so a defaulted column does not churn.
+    fn canonical_default(&self, ty: &SqlType, default: &DefaultValue) -> DefaultValue {
+        match introspect::affinity_of_sql_type(ty) {
+            introspect::Affinity::Integer => match default {
+                DefaultValue::Bool(value) => DefaultValue::Int(i128::from(*value)),
+                DefaultValue::UInt(value) => i128::try_from(*value)
+                    .map(DefaultValue::Int)
+                    .unwrap_or_else(|_| default.clone()),
+                other => other.clone(),
+            },
+            introspect::Affinity::Real => match default {
+                DefaultValue::Int(value) => DefaultValue::Float(*value as f64),
+                other => other.clone(),
+            },
+            _ => default.clone(),
+        }
     }
 }
 

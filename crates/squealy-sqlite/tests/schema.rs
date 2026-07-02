@@ -217,6 +217,179 @@ fn expected_introspected_model() -> DatabaseModel {
 }
 
 #[tokio::test]
+async fn round_trips_a_partial_index_predicate() {
+    // A partial index's `WHERE` predicate is not reported by any PRAGMA; introspection recovers it from
+    // the stored `CREATE INDEX` text, so it round-trips (and re-plans to an empty diff).
+    let column = |name: &str, ty: SqlType, nullable: bool| ColumnModel {
+        name: name.to_owned(),
+        comment: None,
+        ty,
+        collation: None,
+        nullable,
+        default: None,
+        identity: None,
+        generated: None,
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "docs".to_owned(),
+                comment: None,
+                columns: vec![
+                    column("id", SqlType::I64, false),
+                    column("deleted_at", SqlType::Text, true),
+                ],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_docs_active".to_owned(),
+                    columns: vec!["id".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: None,
+                    directions: Vec::new(),
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    predicate: Some("\"deleted_at\" IS NULL".to_owned()),
+                }],
+            }],
+        }],
+    };
+
+    let mut connection = connect().await;
+    squealy_model::publish(&model, &Sqlite, &mut connection)
+        .await
+        .expect("publish partial index");
+
+    let actual = squealy_model::introspect(&mut connection).await.unwrap();
+    let index = &actual.schemas[0].tables[0].indexes[0];
+    assert_eq!(index.predicate.as_deref(), Some("\"deleted_at\" IS NULL"));
+
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan partial index");
+    assert!(plan.steps.is_empty(), "got: {:?}", plan.steps);
+}
+
+#[tokio::test]
+async fn round_trips_bool_and_unsigned_defaults() {
+    // SQLite has no boolean or unsigned literal: a `bool`/unsigned default renders as an integer and
+    // reads back as `Int`. The default canonicalizer collapses the desired side the same way, so a
+    // defaulted column re-plans to an empty diff instead of a never-settling `AlterColumn`.
+    use squealy::DefaultValue;
+    let column = |name: &str, ty: SqlType, default: DefaultValue| ColumnModel {
+        name: name.to_owned(),
+        comment: None,
+        ty,
+        collation: None,
+        nullable: false,
+        default: Some(default),
+        identity: None,
+        generated: None,
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "flags".to_owned(),
+                comment: None,
+                columns: vec![
+                    column("active", SqlType::Bool, DefaultValue::Bool(true)),
+                    column("seats", SqlType::U32, DefaultValue::UInt(5)),
+                ],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    };
+
+    let mut connection = connect().await;
+    squealy_model::publish(&model, &Sqlite, &mut connection)
+        .await
+        .expect("publish defaults");
+
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan defaults");
+    assert!(plan.steps.is_empty(), "got: {:?}", plan.steps);
+}
+
+#[tokio::test]
+async fn coalesces_flattened_schemas_on_replan() {
+    // A two-schema model publishes into SQLite's single namespace; canonicalization must coalesce the
+    // flattened schemas so the re-plan does not drop the tables of all but one of them.
+    let table = |name: &str| TableModel {
+        name: name.to_owned(),
+        comment: None,
+        columns: vec![ColumnModel {
+            name: "id".to_owned(),
+            comment: None,
+            ty: SqlType::I64,
+            collation: None,
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+        }],
+        primary_key: None,
+        foreign_keys: Vec::new(),
+        uniques: Vec::new(),
+        checks: Vec::new(),
+        indexes: Vec::new(),
+    };
+    let model = DatabaseModel {
+        schemas: vec![
+            SchemaModel {
+                name: Some("app".to_owned()),
+                views: Vec::new(),
+                tables: vec![table("users")],
+            },
+            SchemaModel {
+                name: Some("archive".to_owned()),
+                views: Vec::new(),
+                tables: vec![table("logs")],
+            },
+        ],
+    };
+
+    let mut connection = connect().await;
+    squealy_model::publish(&model, &Sqlite, &mut connection)
+        .await
+        .expect("publish two schemas");
+
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan two schemas");
+    assert!(
+        plan.steps.is_empty(),
+        "flattened schemas should not churn, got: {:?}",
+        plan.steps
+    );
+}
+
+#[tokio::test]
 async fn refactor_store_records_and_reads_ids() {
     let mut connection = connect().await;
     // A read before any write returns empty (the bookkeeping table does not exist yet).

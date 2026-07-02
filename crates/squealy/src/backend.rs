@@ -2,8 +2,8 @@ use std::future::Future;
 use std::io::{self, Write};
 
 use crate::{
-    Constraint, DatabaseModel, DatabasePlan, ForeignKeyModel, IdentityMode, IndexMethod, SqlType,
-    Table,
+    Constraint, DatabaseModel, DatabasePlan, DefaultValue, ForeignKeyModel, IdentityMode,
+    IndexMethod, SqlType, Table,
 };
 
 /// Backend-specific row cursor used while decoding a projected row.
@@ -434,6 +434,22 @@ pub trait SchemaIntrospect {
     /// declared name (PostgreSQL, MySQL).
     fn canonical_foreign_key_name(&self, foreign_key: &ForeignKeyModel) -> String {
         foreign_key.name.clone()
+    }
+
+    /// Canonicalizes a column default to the form this backend's introspection reads back, given the
+    /// column's (already-canonicalized) type.
+    ///
+    /// A backend whose column type collapses to an affinity also collapses a default's *representation*:
+    /// SQLite has no boolean or unsigned literal, so it renders a [`DefaultValue::Bool`]/[`DefaultValue::UInt`]
+    /// on an `INTEGER`-affinity column as a plain integer, which introspects back as
+    /// [`DefaultValue::Int`]. Without aligning the desired default the same way, a published `bool`
+    /// column with a default would diff as a never-settling `AlterColumn` after every publish. This is
+    /// applied — to **both** the desired and introspected model before diffing — to each
+    /// [`ColumnModel::default`](crate::ColumnModel). The default is the identity, which suits backends
+    /// that render each default in a distinct, round-tripping form (PostgreSQL, MySQL).
+    fn canonical_default(&self, ty: &SqlType, default: &DefaultValue) -> DefaultValue {
+        let _ = ty;
+        default.clone()
     }
 }
 

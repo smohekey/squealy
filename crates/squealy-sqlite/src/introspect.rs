@@ -14,7 +14,9 @@
 //!   declared name (the backing auto-index is `sqlite_autoindex_…`; foreign keys are positional).
 //! - **`CHECK` constraints, column comments, collations and generated columns are not read** — SQLite
 //!   exposes checks only inside the `CREATE TABLE` text (no PRAGMA), and has no column comments; these
-//!   are left empty (a documented limitation, revisited when the incremental plan lands).
+//!   are left empty (a documented limitation, revisited when the incremental plan lands). A partial
+//!   index's `WHERE` predicate, which is likewise only in the DDL text, *is* recovered (see
+//!   [`partial_predicate`]).
 
 use std::collections::BTreeMap;
 
@@ -280,25 +282,62 @@ async fn indexes(
             // The primary key's backing index — already reconstructed from `PRAGMA table_info`.
             "pk" => {}
             // A `CREATE INDEX`, whose name SQLite *does* round-trip.
-            _ => indexes.push(IndexModel {
-                name: index.name,
-                columns,
-                expressions: Vec::new(),
-                include_columns: Vec::new(),
-                unique: index.unique,
-                // SQLite has a single index method; the model leaves it unset (matching the renderer).
-                method: None,
-                directions,
-                nulls: Vec::new(),
-                collations: Vec::new(),
-                operator_classes: Vec::new(),
-                // A partial index's `WHERE` predicate lives only in the `CREATE INDEX` text (no PRAGMA
-                // reports it); reading it needs a SQL parser, so it is left unset for now.
-                predicate: index.partial.then(String::new),
-            }),
+            _ => {
+                // A partial index's `WHERE` predicate is not reported by any PRAGMA; SQLite stores the
+                // `CREATE INDEX` text verbatim, so recover it from there (only when the index is partial).
+                let predicate = if index.partial {
+                    partial_predicate(index_sql(connection, &index.name).await?.as_deref())
+                } else {
+                    None
+                };
+                indexes.push(IndexModel {
+                    name: index.name,
+                    columns,
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: index.unique,
+                    // SQLite has a single index method; the model leaves it unset (matching the renderer).
+                    method: None,
+                    directions,
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    predicate,
+                });
+            }
         }
     }
     Ok((uniques, indexes))
+}
+
+/// The `CREATE INDEX` text SQLite stored verbatim for a named index.
+async fn index_sql(
+    connection: &SqliteConnection,
+    index: &str,
+) -> Result<Option<String>, SqliteError> {
+    Ok(query(
+        connection,
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1",
+        Some(index.to_owned()),
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .await?
+    .into_iter()
+    .next()
+    .flatten())
+}
+
+/// Extracts a partial index's predicate — the text after the trailing `WHERE` — from its stored
+/// `CREATE INDEX` statement. SQLite stores the statement as written and a `CREATE INDEX` has exactly one
+/// `WHERE`, so the predicate round-trips verbatim (matching the renderer's `WHERE <predicate>` output).
+fn partial_predicate(index_sql: Option<&str>) -> Option<String> {
+    let sql = index_sql?;
+    // `to_ascii_uppercase` preserves byte offsets (it only rewrites ASCII letters), so the match index
+    // is valid in the original string; take the first ` WHERE ` (the only one in a `CREATE INDEX`).
+    let keyword = " WHERE ";
+    let start = sql.to_ascii_uppercase().find(keyword)? + keyword.len();
+    let predicate = sql[start..].trim();
+    (!predicate.is_empty()).then(|| predicate.to_owned())
 }
 
 struct IndexListRow {
@@ -520,6 +559,22 @@ mod tests {
             default_value("TIMESTAMP", "CURRENT_TIMESTAMP"),
             DefaultValue::CurrentTimestamp
         );
+    }
+
+    #[test]
+    fn partial_predicate_extracts_where_clause() {
+        assert_eq!(
+            partial_predicate(Some(
+                "CREATE INDEX \"i\" ON \"t\" (\"a\") WHERE \"deleted_at\" IS NULL"
+            )),
+            Some("\"deleted_at\" IS NULL".to_owned())
+        );
+        // A non-partial index has no `WHERE`.
+        assert_eq!(
+            partial_predicate(Some("CREATE INDEX \"i\" ON \"t\" (\"a\")")),
+            None
+        );
+        assert_eq!(partial_predicate(None), None);
     }
 
     #[test]

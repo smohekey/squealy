@@ -265,6 +265,12 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
         for table in &mut schema.tables {
             for column in &mut table.columns {
                 column.ty = connection.canonical_sql_type(&column.ty);
+                if let Some(default) = &mut column.default {
+                    // Canonicalize the default against the (already-canonicalized) column type, so a
+                    // default whose representation collapses with the type (SQLite renders a `bool`
+                    // default as an integer) does not churn as an `AlterColumn` after publish.
+                    *default = connection.canonical_default(&column.ty, default);
+                }
                 if let Some(identity) = &mut column.identity {
                     identity.mode = connection.canonical_identity_mode(&identity.mode);
                 }
@@ -302,7 +308,32 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
             }
         }
     }
+    // A schema-less backend flattens every namespace to the same (default) name, so two source schemas
+    // can now share a name. `diff_models` keys schemas by name in a `BTreeMap`, which would drop the
+    // tables/views of all but one same-named schema; coalesce them here (concatenating in first-seen
+    // order) so the flattened model keeps every object. This is a no-op when names stay distinct.
+    coalesce_schemas_by_name(&mut model.schemas);
     model
+}
+
+/// Merges schemas that share a name (after canonicalization) into the first one seen, concatenating
+/// their tables and views. Needed for a schema-less backend, whose `canonical_schema_name` flattens
+/// every namespace to `None`; a no-op when every schema name is already distinct.
+fn coalesce_schemas_by_name(schemas: &mut Vec<SchemaModel>) {
+    let mut coalesced: Vec<SchemaModel> = Vec::with_capacity(schemas.len());
+    for schema in std::mem::take(schemas) {
+        match coalesced
+            .iter_mut()
+            .find(|existing| existing.name == schema.name)
+        {
+            Some(existing) => {
+                existing.tables.extend(schema.tables);
+                existing.views.extend(schema.views);
+            }
+            None => coalesced.push(schema),
+        }
+    }
+    *schemas = coalesced;
 }
 
 /// Fills an index's absent method / directions with the backend defaults so a plain crate-declared
@@ -805,6 +836,79 @@ mod tests {
         fn canonical_foreign_key_name(&self, foreign_key: &ForeignKeyModel) -> String {
             format!("foreign_key:{}", foreign_key.columns.join(","))
         }
+
+        fn canonical_default(
+            &self,
+            _ty: &SqlType,
+            default: &squealy::DefaultValue,
+        ) -> squealy::DefaultValue {
+            match default {
+                squealy::DefaultValue::Bool(value) => {
+                    squealy::DefaultValue::Int(i128::from(*value))
+                }
+                other => other.clone(),
+            }
+        }
+    }
+
+    #[test]
+    fn canonicalize_model_coalesces_flattened_schemas() {
+        // Two source schemas both flatten to `None`; their tables must be merged into one schema, not
+        // dropped (a `BTreeMap`-keyed diff would otherwise keep only one same-named schema).
+        let table = |name: &str| TableModel {
+            name: name.to_owned(),
+            comment: None,
+            columns: vec![],
+            primary_key: None,
+            foreign_keys: vec![],
+            uniques: vec![],
+            checks: vec![],
+            indexes: vec![],
+        };
+        let model = DatabaseModel {
+            schemas: vec![
+                SchemaModel {
+                    name: Some("app".to_owned()),
+                    views: Vec::new(),
+                    tables: vec![table("users")],
+                },
+                SchemaModel {
+                    name: Some("archive".to_owned()),
+                    views: Vec::new(),
+                    tables: vec![table("logs")],
+                },
+            ],
+        };
+
+        let canonical = canonicalize_model(&CanonBackend, &model);
+
+        assert_eq!(canonical.schemas.len(), 1);
+        assert_eq!(canonical.schemas[0].name, None);
+        let names: Vec<&str> = canonical.schemas[0]
+            .tables
+            .iter()
+            .map(|table| table.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["users", "logs"]);
+    }
+
+    #[test]
+    fn canonicalize_model_applies_default_hook() {
+        let mut model = table_with_index(index());
+        model.schemas[0].tables[0].columns.push(ColumnModel {
+            name: "active".to_owned(),
+            comment: None,
+            ty: SqlType::Bool,
+            collation: None,
+            nullable: false,
+            default: Some(squealy::DefaultValue::Bool(true)),
+            identity: None,
+            generated: None,
+        });
+
+        let canonical = canonicalize_model(&CanonBackend, &model);
+        let column = &canonical.schemas[0].tables[0].columns[0];
+        assert_eq!(column.default, Some(squealy::DefaultValue::Int(1)));
     }
 
     #[test]
