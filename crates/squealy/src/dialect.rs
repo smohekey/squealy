@@ -228,6 +228,18 @@ pub trait Dialect {
         true
     }
 
+    /// Whether an `UPDATE`/`DELETE … RETURNING` clause references columns *unqualified* (bare column
+    /// names) rather than qualified by the statement's target-table alias.
+    ///
+    /// Defaults to `false`: PostgreSQL aliases the target (`UPDATE t AS q0_0 … RETURNING q0_0.col`) and
+    /// resolves the alias in `RETURNING`. SQLite also aliases the target but its `RETURNING` clause
+    /// cannot resolve that alias (`no such column: q0_0.col`), so it returns `true` and — since an
+    /// `UPDATE`/`DELETE` targets a single table, leaving the columns unambiguous — renders them bare.
+    /// (An `INSERT … RETURNING` has no alias and is always unqualified, independently of this.)
+    fn returning_omits_target_alias(&self) -> bool {
+        false
+    }
+
     /// How the operands of a set operation (`UNION`/`INTERSECT`/`EXCEPT`) are wrapped. Defaults to
     /// [`SetOperandStyle::Parenthesized`] (`(SELECT …)`); SQLite rejects a parenthesized compound
     /// operand *and* a per-operand `ORDER BY`/`LIMIT`, so it uses [`SetOperandStyle::SubquerySelect`]

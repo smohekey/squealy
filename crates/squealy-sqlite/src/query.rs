@@ -6,19 +6,26 @@
 //! trivially. This slice is driver-free: encoding is exercised by unit tests, and decoding reads from
 //! an in-memory row of `SqliteValue`s.
 
+use std::future::Future;
 use std::marker::PhantomData;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
+use futures_core::Stream;
 use squealy::{
-    Backend, Connection, Decode, DeleteQuery, DeleteUsingQuery, Encode, HNil, InsertQuery,
-    InsertRows, InsertableTable, IntoInsertSelect, ParamWriter, PredicateNodes, Projectable,
-    ProjectionShape, QueryBuilder, RenderInsertRows, RenderPredicateNodes, RenderProjectable,
-    RenderSelectAst, RenderUpdateAssignments, RowReader, SchemaTable, SelectAst, SelectQuery,
-    Selected, SetArm, SetLeaf, SetOperand, SetOperations, SetSelectModifiers, SetTail, SourceAlias,
-    Table, TableProjection, UpdateAssignments, UpdateFromQuery, UpdateQuery, UpdateableTable,
-    render,
+    Backend, Connection, Decode, DeleteQuery, DeleteUsingQuery, Encode, ExecutableDeleteQuery,
+    ExecutableDeleteUsingQuery, ExecutableInsertQuery, ExecutableSelectQuery,
+    ExecutableSetSelectQuery, ExecutableUpdateFromQuery, ExecutableUpdateQuery, HNil, InsertQuery,
+    InsertRows, InsertableTable, IntoInsertSelect, NoRuntimeParams, ParamWriter, PredicateNodes,
+    Projectable, ProjectionShape, QueryBuilder, RenderInsertRows, RenderPredicateNodes,
+    RenderProjectable, RenderSelectAst, RenderUpdateAssignments, RowReader, RowsAffected,
+    SchemaTable, SelectAst, SelectQuery, Selected, SetArm, SetLeaf, SetOperand, SetOperations,
+    SetSelectModifiers, SetTail, SourceAlias, Table, TableProjection, UpdateAssignments,
+    UpdateFromQuery, UpdateQuery, UpdateableTable, render,
 };
+use tokio_rusqlite::rusqlite::{self, params_from_iter, types::Value as RusqliteValue};
 
-use crate::{Sqlite, SqliteError};
+use crate::{Sqlite, SqliteConnection, SqliteError};
 
 /// SQLite's native value, one of the five storage classes. This is [`Backend::Param`] and the unit a
 /// row is decoded from; it mirrors `rusqlite::types::Value`.
@@ -43,6 +50,32 @@ impl SqliteValue {
     }
 }
 
+// `SqliteValue` and `rusqlite::types::Value` are the same five storage classes; these conversions
+// bridge the driver-neutral codec to the driver at bind time (params) and read time (result columns).
+impl From<SqliteValue> for RusqliteValue {
+    fn from(value: SqliteValue) -> Self {
+        match value {
+            SqliteValue::Null => RusqliteValue::Null,
+            SqliteValue::Integer(integer) => RusqliteValue::Integer(integer),
+            SqliteValue::Real(real) => RusqliteValue::Real(real),
+            SqliteValue::Text(text) => RusqliteValue::Text(text),
+            SqliteValue::Blob(blob) => RusqliteValue::Blob(blob),
+        }
+    }
+}
+
+impl From<RusqliteValue> for SqliteValue {
+    fn from(value: RusqliteValue) -> Self {
+        match value {
+            RusqliteValue::Null => SqliteValue::Null,
+            RusqliteValue::Integer(integer) => SqliteValue::Integer(integer),
+            RusqliteValue::Real(real) => SqliteValue::Real(real),
+            RusqliteValue::Text(text) => SqliteValue::Text(text),
+            RusqliteValue::Blob(blob) => SqliteValue::Blob(blob),
+        }
+    }
+}
+
 /// Reads columns positionally out of a decoded row (a slice of [`SqliteValue`]s) while a projected row
 /// is decoded. Each [`read`](squealy::RowReader::read) consumes the next column, mirroring the order
 /// the projection rendered them into the `SELECT` list.
@@ -52,8 +85,7 @@ pub struct SqliteRowReader<'row> {
 }
 
 impl<'row> SqliteRowReader<'row> {
-    // Wired up by the executable query impls (a later slice), which decode each result row.
-    #[allow(dead_code)]
+    /// Wraps one decoded result row; the executable query impls call it per row via [`SqliteRows`].
     pub(crate) fn new(values: &'row [SqliteValue]) -> Self {
         Self { values, index: 0 }
     }
@@ -354,6 +386,217 @@ fn rendered_sql(write: impl FnOnce(&mut Vec<u8>) -> std::io::Result<()>) -> Stri
     let mut buffer = Vec::new();
     write(&mut buffer).expect("render SQL");
     String::from_utf8(buffer).expect("renderer emits UTF-8")
+}
+
+/// All result rows (each an owned `Vec<SqliteValue>`) plus the affected-row count. Rows are owned
+/// because a `rusqlite::Row` is `!Send` and cannot cross the `tokio-rusqlite` thread boundary, so each
+/// column is converted to an owned [`SqliteValue`] inside the driver closure.
+type BufferedRows = (Vec<Vec<SqliteValue>>, u64);
+
+/// A boxed, `Send` future produced by the executor — the shape the query objects consume regardless of
+/// where they run (a connection or a transaction).
+type ExecFuture<'query, T> = Pin<Box<dyn Future<Output = Result<T, SqliteError>> + Send + 'query>>;
+
+/// Runs rendered SQL against a SQLite connection. Implemented for [`SqliteConnection`] and
+/// [`SqliteTransaction`] so the query objects can be generic over where they execute (mirroring the
+/// MySQL backend's executor trait). Each method submits one closure to the `tokio-rusqlite` thread.
+pub trait SqliteExecutor: Connection<Backend = Sqlite> {
+    /// Runs `sql` with `params`, buffering all result rows and the affected-row count.
+    fn run_query(&self, sql: String, params: Vec<SqliteValue>) -> ExecFuture<'_, BufferedRows>;
+
+    /// Runs `sql` with `params` for its effect only, returning the affected-row count.
+    fn run_execute(&self, sql: String, params: Vec<SqliteValue>) -> ExecFuture<'_, u64>;
+}
+
+/// Runs a row-returning statement on `conn`, buffering every row as owned [`SqliteValue`]s. Shared by
+/// the [`SqliteExecutor`] impls for the connection and the transaction (both hold a handle to the same
+/// underlying database).
+fn run_query_on(
+    conn: &tokio_rusqlite::Connection,
+    sql: String,
+    params: Vec<SqliteValue>,
+) -> ExecFuture<'_, BufferedRows> {
+    Box::pin(async move {
+        conn.call(move |conn| {
+            let mut statement = conn.prepare(&sql)?;
+            let column_count = statement.column_count();
+            let mut buffered: Vec<Vec<SqliteValue>> = Vec::new();
+            {
+                let mut rows = statement.query(params_from_iter(
+                    params.into_iter().map(RusqliteValue::from),
+                ))?;
+                while let Some(row) = rows.next()? {
+                    let mut values = Vec::with_capacity(column_count);
+                    for index in 0..column_count {
+                        values.push(SqliteValue::from(row.get::<usize, RusqliteValue>(index)?));
+                    }
+                    buffered.push(values);
+                }
+            }
+            // `changes()` reports the most recent mutation's row count — meaningful for a
+            // `RETURNING` insert/update/delete, and unused for a plain `SELECT`.
+            Ok::<_, rusqlite::Error>((buffered, conn.changes()))
+        })
+        .await
+        .map_err(SqliteError::Query)
+    })
+}
+
+/// Runs an effect-only statement on `conn`, returning the affected-row count.
+fn run_execute_on(
+    conn: &tokio_rusqlite::Connection,
+    sql: String,
+    params: Vec<SqliteValue>,
+) -> ExecFuture<'_, u64> {
+    Box::pin(async move {
+        conn.call(move |conn| {
+            let affected = conn.execute(
+                &sql,
+                params_from_iter(params.into_iter().map(RusqliteValue::from)),
+            )?;
+            Ok::<_, rusqlite::Error>(affected as u64)
+        })
+        .await
+        .map_err(SqliteError::Query)
+    })
+}
+
+impl SqliteExecutor for SqliteConnection {
+    fn run_query(&self, sql: String, params: Vec<SqliteValue>) -> ExecFuture<'_, BufferedRows> {
+        run_query_on(&self.conn, sql, params)
+    }
+
+    fn run_execute(&self, sql: String, params: Vec<SqliteValue>) -> ExecFuture<'_, u64> {
+        run_execute_on(&self.conn, sql, params)
+    }
+}
+
+/// A live transaction, driving statements against the same underlying database as the connection that
+/// opened it. It owns a cheap [`Clone`] of the connection handle (rather than borrowing the connection)
+/// so the `BEGIN`/`COMMIT` scope does not freeze `&mut connection`; see
+/// [`ConnectionWithTransaction::transaction`](squealy::ConnectionWithTransaction::transaction) on
+/// [`SqliteConnection`](crate::SqliteConnection). The `'conn` marker ties it to that borrow so it
+/// cannot outlive the connection.
+pub struct SqliteTransaction<'conn> {
+    conn: tokio_rusqlite::Connection,
+    _connection: PhantomData<&'conn ()>,
+}
+
+impl SqliteTransaction<'_> {
+    pub(crate) fn new(conn: tokio_rusqlite::Connection) -> Self {
+        Self {
+            conn,
+            _connection: PhantomData,
+        }
+    }
+}
+
+impl std::fmt::Debug for SqliteTransaction<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("SqliteTransaction").finish()
+    }
+}
+
+impl SqliteExecutor for SqliteTransaction<'_> {
+    fn run_query(&self, sql: String, params: Vec<SqliteValue>) -> ExecFuture<'_, BufferedRows> {
+        run_query_on(&self.conn, sql, params)
+    }
+
+    fn run_execute(&self, sql: String, params: Vec<SqliteValue>) -> ExecFuture<'_, u64> {
+        run_execute_on(&self.conn, sql, params)
+    }
+}
+
+/// Executes a rendered statement and yields its result rows, decoded.
+///
+/// The `tokio-rusqlite` closure cannot borrow the connection past its own scope, so rows are collected
+/// up front (into owned [`SqliteValue`]s) and then decoded one at a time from the buffer. This also
+/// carries the affected-row count, so the same type backs both selects and mutations (mirroring the
+/// MySQL backend's `MysqlRows`).
+pub struct SqliteRows<'query, Row, Conn = SqliteConnection> {
+    state: SqliteRowsState<'query>,
+    affected_rows: Option<u64>,
+    _row: PhantomData<Row>,
+    _connection: PhantomData<fn() -> Conn>,
+}
+
+enum SqliteRowsState<'query> {
+    Pending(ExecFuture<'query, BufferedRows>),
+    Rows(std::vec::IntoIter<Vec<SqliteValue>>),
+    Done,
+}
+
+impl<'query, Row, Conn> SqliteRows<'query, Row, Conn>
+where
+    Conn: SqliteExecutor,
+{
+    fn query(connection: &'query Conn, sql: String, params: Vec<SqliteValue>) -> Self {
+        Self {
+            state: SqliteRowsState::Pending(connection.run_query(sql, params)),
+            affected_rows: None,
+            _row: PhantomData,
+            _connection: PhantomData,
+        }
+    }
+
+    fn error(error: SqliteError) -> Self {
+        Self {
+            state: SqliteRowsState::Pending(Box::pin(std::future::ready(Err(error)))),
+            affected_rows: None,
+            _row: PhantomData,
+            _connection: PhantomData,
+        }
+    }
+}
+
+impl<Row, Conn> Stream for SqliteRows<'_, Row, Conn>
+where
+    Row: Decode<Sqlite>,
+{
+    type Item = Result<Row, SqliteError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            match &mut this.state {
+                SqliteRowsState::Pending(future) => match future.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok((rows, affected))) => {
+                        this.affected_rows = Some(affected);
+                        this.state = SqliteRowsState::Rows(rows.into_iter());
+                    }
+                    Poll::Ready(Err(error)) => {
+                        this.state = SqliteRowsState::Done;
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                },
+                SqliteRowsState::Rows(iter) => match iter.next() {
+                    Some(row) => {
+                        let mut reader = SqliteRowReader::new(&row);
+                        return Poll::Ready(Some(Row::decode(&mut reader)));
+                    }
+                    None => {
+                        this.state = SqliteRowsState::Done;
+                        return Poll::Ready(None);
+                    }
+                },
+                SqliteRowsState::Done => return Poll::Ready(None),
+            }
+        }
+    }
+}
+
+impl<Row, Conn> Unpin for SqliteRows<'_, Row, Conn> {}
+
+impl<Row, Conn> RowsAffected for SqliteRows<'_, Row, Conn> {
+    fn rows_affected(&self) -> Option<u64> {
+        self.affected_rows
+    }
+}
+
+/// Builds an already-failed execution future, so a param-encoding error surfaces on `await`.
+fn execute_error<'query>(error: SqliteError) -> ExecFuture<'query, u64> {
+    Box::pin(std::future::ready(Err(error)))
 }
 
 include!("query_objects.rs");

@@ -356,6 +356,30 @@ where
     }
 }
 
+impl<'conn, 'scope, Shape, Base, Projection, Conn>
+    ExecutableSelectQuery<'conn, 'scope, Base, Projection>
+    for SqliteSelect<'conn, 'scope, Shape, Base, Projection, Conn>
+where
+    Shape: ProjectionShape,
+    Conn: SqliteExecutor + 'conn,
+    Shape::Row: Decode<Sqlite>,
+    Base: RenderSelectAst<'conn, 'scope, Conn, Sqlite>,
+    Base::Params: NoRuntimeParams,
+    Projection: RenderProjectable<Sqlite>,
+{
+    type RowStream<'query>
+        = SqliteRows<'query, Self::Row, Conn>
+    where
+        Self: 'query;
+
+    fn fetch(&self) -> Self::RowStream<'_> {
+        match self.collect_params() {
+            Ok(params) => SqliteRows::query(self.connection, self.to_sql(), params),
+            Err(error) => SqliteRows::error(error),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Set operations
 // ---------------------------------------------------------------------------
@@ -406,6 +430,31 @@ where
         let mut params = Vec::new();
         render::write_set_params::<Conn, Tree>(&SqliteDialect, &self.tree, &self.tail, &mut params)?;
         Ok(params)
+    }
+}
+
+impl<'conn, 'scope, Tree, Conn> ExecutableSetSelectQuery<'conn>
+    for SqliteSetSelect<'conn, 'scope, Tree, Conn>
+where
+    Conn: SqliteExecutor + 'conn,
+    Tree: render::RenderSetArm<'conn, 'scope, Conn, Sqlite>,
+    <Tree as SetArm<'conn, 'scope, Conn>>::Row: Decode<Sqlite> + Send,
+    // Executing inlines literals (no prepared path), so reject runtime params in any arm.
+    <Tree as SetArm<'conn, 'scope, Conn>>::Params: NoRuntimeParams,
+{
+    type Builder = Conn;
+    type Row = <Tree as SetArm<'conn, 'scope, Conn>>::Row;
+
+    type RowStream<'query>
+        = SqliteRows<'query, Self::Row, Conn>
+    where
+        Self: 'query;
+
+    fn fetch(&self) -> Self::RowStream<'_> {
+        match self.collect_params() {
+            Ok(params) => SqliteRows::query(self.connection, self.to_sql(), params),
+            Err(error) => SqliteRows::error(error),
+        }
     }
 }
 
@@ -562,6 +611,19 @@ where
         )?;
         Ok(params)
     }
+
+    /// Execute the insert, returning the number of rows affected.
+    pub fn insert(&self) -> impl Future<Output = Result<u64, SqliteError>> + Send + '_
+    where
+        Conn: SqliteExecutor,
+        // One-shot execution collects only static binds, so the source must be free of runtime `param`s.
+        <Tree as SetArm<'conn, 'scope, Conn>>::Params: NoRuntimeParams,
+    {
+        match self.collect_params() {
+            Ok(params) => self.connection.run_execute(self.to_sql(), params),
+            Err(error) => execute_error(error),
+        }
+    }
 }
 
 impl<'conn, 'scope, Shape, Base, Projection, Conn> SetOperations<'conn, 'scope, Conn>
@@ -652,6 +714,41 @@ where
     }
 }
 
+impl<'conn, S, Shape, Rows, Returning, Conn> ExecutableInsertQuery<'conn, Rows, Returning>
+    for SqliteInsert<'conn, S, Shape, Rows, Returning, Conn>
+where
+    S: InsertableTable,
+    Shape: ProjectionShape,
+    Conn: SqliteExecutor + 'conn,
+    Shape::Row: Decode<Sqlite>,
+    Rows: RenderInsertRows<Sqlite>,
+    Rows::Params: NoRuntimeParams,
+    Returning: RenderProjectable<Sqlite>,
+{
+    type RowStream<'query>
+        = SqliteRows<'query, Self::Row, Conn>
+    where
+        Self: 'query;
+
+    fn execute(
+        &self,
+    ) -> impl Future<Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>>
+    + Send
+    + '_ {
+        match self.collect_params() {
+            Ok(params) => self.connection.run_execute(self.to_sql(), params),
+            Err(error) => execute_error(error),
+        }
+    }
+
+    fn fetch(&self) -> Self::RowStream<'_> {
+        match self.collect_params() {
+            Ok(params) => SqliteRows::query(self.connection, self.to_sql(), params),
+            Err(error) => SqliteRows::error(error),
+        }
+    }
+}
+
 impl<'conn, S, Shape, Filters, Returning, Conn> DeleteQuery<'conn, Filters, Returning>
     for SqliteDelete<'conn, S, Shape, Filters, Returning, Conn>
 where
@@ -674,6 +771,41 @@ where
         returning: Returning,
     ) -> Self {
         Self::new(connection, alias, filters, returning)
+    }
+}
+
+impl<'conn, S, Shape, Filters, Returning, Conn> ExecutableDeleteQuery<'conn, Filters, Returning>
+    for SqliteDelete<'conn, S, Shape, Filters, Returning, Conn>
+where
+    S: TableProjection,
+    Shape: ProjectionShape,
+    Conn: SqliteExecutor + 'conn,
+    Shape::Row: Decode<Sqlite>,
+    Filters: RenderPredicateNodes<Sqlite>,
+    Filters::Params: NoRuntimeParams,
+    Returning: RenderProjectable<Sqlite>,
+{
+    type RowStream<'query>
+        = SqliteRows<'query, Self::Row, Conn>
+    where
+        Self: 'query;
+
+    fn execute(
+        &self,
+    ) -> impl Future<Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>>
+    + Send
+    + '_ {
+        match self.collect_params() {
+            Ok(params) => self.connection.run_execute(self.to_sql(), params),
+            Err(error) => execute_error(error),
+        }
+    }
+
+    fn fetch(&self) -> Self::RowStream<'_> {
+        match self.collect_params() {
+            Ok(params) => SqliteRows::query(self.connection, self.to_sql(), params),
+            Err(error) => SqliteRows::error(error),
+        }
     }
 }
 
@@ -702,6 +834,44 @@ where
         returning: Returning,
     ) -> Self {
         Self::new(connection, alias, columns, filters, returning)
+    }
+}
+
+impl<'conn, S, Shape, Columns, Filters, Returning, Conn>
+    ExecutableUpdateQuery<'conn, Columns, Filters, Returning>
+    for SqliteUpdate<'conn, S, Shape, Columns, Filters, Returning, Conn>
+where
+    S: UpdateableTable,
+    Shape: ProjectionShape,
+    Conn: SqliteExecutor + 'conn,
+    Shape::Row: Decode<Sqlite>,
+    Columns: RenderUpdateAssignments<Sqlite>,
+    Columns::Params: NoRuntimeParams,
+    Filters: RenderPredicateNodes<Sqlite>,
+    Filters::Params: NoRuntimeParams,
+    Returning: RenderProjectable<Sqlite>,
+{
+    type RowStream<'query>
+        = SqliteRows<'query, Self::Row, Conn>
+    where
+        Self: 'query;
+
+    fn execute(
+        &self,
+    ) -> impl Future<Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>>
+    + Send
+    + '_ {
+        match self.collect_params() {
+            Ok(params) => self.connection.run_execute(self.to_sql(), params),
+            Err(error) => execute_error(error),
+        }
+    }
+
+    fn fetch(&self) -> Self::RowStream<'_> {
+        match self.collect_params() {
+            Ok(params) => SqliteRows::query(self.connection, self.to_sql(), params),
+            Err(error) => SqliteRows::error(error),
+        }
     }
 }
 
@@ -785,6 +955,25 @@ where
     }
 }
 
+impl<'conn, S, O, Columns, Filters, Conn> ExecutableUpdateFromQuery<'conn, S, O, Columns, Filters>
+    for SqliteUpdateFrom<'conn, S, O, Columns, Filters, Conn>
+where
+    S: UpdateableTable,
+    O: SchemaTable,
+    Columns: RenderUpdateAssignments<Sqlite>,
+    Columns::Params: NoRuntimeParams,
+    Filters: RenderPredicateNodes<Sqlite>,
+    Filters::Params: NoRuntimeParams,
+    Conn: SqliteExecutor + 'conn,
+{
+    fn execute(&self) -> impl Future<Output = Result<u64, SqliteError>> + Send + '_ {
+        match self.collect_params() {
+            Ok(params) => self.connection.run_execute(self.to_sql(), params),
+            Err(error) => execute_error(error),
+        }
+    }
+}
+
 // --- DELETE … USING (correlated delete from a second source) ---
 
 /// Correlated `DELETE … USING` query object (SQLite).
@@ -858,88 +1047,126 @@ where
     }
 }
 
-// The `QueryBuilder`/`Connection` wiring is for the `Sqlite` marker only in this slice: there is no
-// connection type yet (execution is a later slice), so the query objects default `Conn = Sqlite`.
-impl QueryBuilder for Sqlite {
-    type Backend = Sqlite;
-
-    type Select<'conn, 'scope, Base, Shape, Projection>
-        = SqliteSelect<'conn, 'scope, Shape, Base, Projection, Self>
-    where
-        Self: 'conn,
-        Base: SelectAst<'conn, 'scope, Self> + 'conn,
-        Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>,
-        Projection: Projectable;
-
-    type Insert<'conn, S, Shape, Rows, Returning>
-        = SqliteInsert<'conn, S, Shape, Rows, Returning, Self>
-    where
-        Self: 'conn,
-        S: InsertableTable,
-        Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>,
-        Rows: InsertRows,
-        Returning: Projectable;
-
-    type Update<'conn, S, Shape, Columns, Filters, Returning>
-        = SqliteUpdate<'conn, S, Shape, Columns, Filters, Returning, Self>
-    where
-        Self: 'conn,
-        S: UpdateableTable,
-        Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>,
-        Columns: UpdateAssignments,
-        Filters: PredicateNodes,
-        Returning: Projectable;
-
-    type Delete<'conn, S, Shape, Filters, Returning>
-        = SqliteDelete<'conn, S, Shape, Filters, Returning, Self>
-    where
-        Self: 'conn,
-        S: TableProjection,
-        Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>,
-        Filters: PredicateNodes,
-        Returning: Projectable;
-
-    type UpdateFrom<'conn, S, O, Columns, Filters>
-        = SqliteUpdateFrom<'conn, S, O, Columns, Filters, Self>
-    where
-        Self: 'conn,
-        S: UpdateableTable,
-        O: squealy::SchemaTable,
-        Columns: UpdateAssignments,
-        Filters: PredicateNodes;
-
-    type DeleteUsing<'conn, S, O, Filters>
-        = SqliteDeleteUsing<'conn, S, O, Filters, Self>
-    where
-        Self: 'conn,
-        S: TableProjection,
-        O: TableProjection,
-        Filters: PredicateNodes;
-}
-
-// Upsert (`INSERT … ON CONFLICT DO UPDATE/NOTHING`): the conflict clause is a runtime field on the
-// existing `SqliteInsert` query object, so `build_upsert` just constructs it with the clause attached.
-impl squealy::OnConflictQueryBuilder for Sqlite {
-    fn build_upsert<'conn, S, Shape, Rows, Returning>(
-        &'conn self,
-        rows: Rows,
-        returning: Returning,
-        conflict: squealy::ConflictClause,
-    ) -> Self::Insert<'conn, S, Shape, Rows, Returning>
-    where
-        Self: 'conn,
-        S: InsertableTable,
-        Shape: ProjectionShape,
-        Shape::Row: Decode<Self::Backend>,
-        Rows: InsertRows,
-        Returning: Projectable,
-    {
-        SqliteInsert::new_upsert(self, rows, returning, conflict)
+impl<'conn, S, O, Filters, Conn> ExecutableDeleteUsingQuery<'conn, S, O, Filters>
+    for SqliteDeleteUsing<'conn, S, O, Filters, Conn>
+where
+    S: TableProjection + UpdateableTable,
+    O: TableProjection,
+    Filters: RenderPredicateNodes<Sqlite>,
+    Filters::Params: NoRuntimeParams,
+    Conn: SqliteExecutor + 'conn,
+{
+    fn execute(&self) -> impl Future<Output = Result<u64, SqliteError>> + Send + '_ {
+        match self.collect_params() {
+            Ok(params) => self.connection.run_execute(self.to_sql(), params),
+            Err(error) => execute_error(error),
+        }
     }
 }
 
+// `QueryBuilder` is implemented for the `Sqlite` marker (so query objects can be built and rendered
+// driver-free, e.g. in render tests) and for the two runtime executors, `SqliteConnection` and
+// `SqliteTransaction`, which additionally satisfy `SqliteExecutor` so the `Executable*` impls fire.
+macro_rules! impl_query_builder_for {
+    ($ty:ty) => {
+        impl QueryBuilder for $ty {
+            type Backend = Sqlite;
+
+            type Select<'conn, 'scope, Base, Shape, Projection>
+                = SqliteSelect<'conn, 'scope, Shape, Base, Projection, Self>
+            where
+                Self: 'conn,
+                Base: SelectAst<'conn, 'scope, Self> + 'conn,
+                Shape: ProjectionShape,
+                Shape::Row: Decode<Self::Backend>,
+                Projection: Projectable;
+
+            type Insert<'conn, S, Shape, Rows, Returning>
+                = SqliteInsert<'conn, S, Shape, Rows, Returning, Self>
+            where
+                Self: 'conn,
+                S: InsertableTable,
+                Shape: ProjectionShape,
+                Shape::Row: Decode<Self::Backend>,
+                Rows: InsertRows,
+                Returning: Projectable;
+
+            type Update<'conn, S, Shape, Columns, Filters, Returning>
+                = SqliteUpdate<'conn, S, Shape, Columns, Filters, Returning, Self>
+            where
+                Self: 'conn,
+                S: UpdateableTable,
+                Shape: ProjectionShape,
+                Shape::Row: Decode<Self::Backend>,
+                Columns: UpdateAssignments,
+                Filters: PredicateNodes,
+                Returning: Projectable;
+
+            type Delete<'conn, S, Shape, Filters, Returning>
+                = SqliteDelete<'conn, S, Shape, Filters, Returning, Self>
+            where
+                Self: 'conn,
+                S: TableProjection,
+                Shape: ProjectionShape,
+                Shape::Row: Decode<Self::Backend>,
+                Filters: PredicateNodes,
+                Returning: Projectable;
+
+            type UpdateFrom<'conn, S, O, Columns, Filters>
+                = SqliteUpdateFrom<'conn, S, O, Columns, Filters, Self>
+            where
+                Self: 'conn,
+                S: UpdateableTable,
+                O: squealy::SchemaTable,
+                Columns: UpdateAssignments,
+                Filters: PredicateNodes;
+
+            type DeleteUsing<'conn, S, O, Filters>
+                = SqliteDeleteUsing<'conn, S, O, Filters, Self>
+            where
+                Self: 'conn,
+                S: TableProjection,
+                O: TableProjection,
+                Filters: PredicateNodes;
+        }
+    };
+}
+impl_query_builder_for!(Sqlite);
+impl_query_builder_for!(SqliteConnection);
+impl_query_builder_for!(SqliteTransaction<'_>);
+
+// Upsert (`INSERT … ON CONFLICT DO UPDATE/NOTHING`): the conflict clause is a runtime field on the
+// existing `SqliteInsert` query object, so `build_upsert` just constructs it with the clause attached.
+macro_rules! impl_on_conflict_query_builder_for {
+    ($ty:ty) => {
+        impl squealy::OnConflictQueryBuilder for $ty {
+            fn build_upsert<'conn, S, Shape, Rows, Returning>(
+                &'conn self,
+                rows: Rows,
+                returning: Returning,
+                conflict: squealy::ConflictClause,
+            ) -> Self::Insert<'conn, S, Shape, Rows, Returning>
+            where
+                Self: 'conn,
+                S: InsertableTable,
+                Shape: ProjectionShape,
+                Shape::Row: Decode<Self::Backend>,
+                Rows: InsertRows,
+                Returning: Projectable,
+            {
+                SqliteInsert::new_upsert(self, rows, returning, conflict)
+            }
+        }
+    };
+}
+impl_on_conflict_query_builder_for!(Sqlite);
+impl_on_conflict_query_builder_for!(SqliteConnection);
+impl_on_conflict_query_builder_for!(SqliteTransaction<'_>);
+
+// SQLite (3.35+) supports `RETURNING` on INSERT/UPDATE/DELETE; the bundled library is well past that,
+// so the `.returning(...)` builder methods (gated on `Backend: SupportsReturning`) are available.
+impl squealy::SupportsReturning for Sqlite {}
+
 impl Connection for Sqlite {}
+impl Connection for SqliteConnection {}
+impl Connection for SqliteTransaction<'_> {}
