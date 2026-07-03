@@ -480,9 +480,11 @@ struct IndexListRow {
 }
 
 /// The key columns of an index and their sort directions, via `PRAGMA index_xinfo`. Only true key
-/// terms are kept (`key = 1` drops the trailing rowid SQLite appends), in `seqno` order. Directions are
-/// reported only when at least one column is `DESC`; an all-ascending index (the common case, and what
-/// the renderer produces) reports empty directions to match a crate-declared index.
+/// terms are kept (`key = 1` drops the trailing rowid SQLite appends), in `seqno` order. Trailing
+/// ascending directions are dropped: `ASC` is the default sort order, so the renderer omits it for a
+/// column the model leaves at the default, and a model that specifies only a non-default prefix (e.g.
+/// `[Desc]` for two columns) must compare equal to the read-back `[Desc, Asc]`. `canonicalize_index`
+/// trims the desired side the same way.
 async fn index_columns(
     connection: &SqliteConnection,
     index: &str,
@@ -512,8 +514,8 @@ async fn index_columns(
             IndexDirection::Asc
         });
     }
-    if directions.iter().all(|d| *d == IndexDirection::Asc) {
-        directions.clear();
+    while directions.last() == Some(&IndexDirection::Asc) {
+        directions.pop();
     }
     Ok((columns, directions))
 }

@@ -659,6 +659,65 @@ async fn round_trips_an_explicit_ascending_index_direction() {
 }
 
 #[tokio::test]
+async fn round_trips_a_partial_descending_index_direction() {
+    // A multi-column index that specifies only a non-default prefix (`[Desc]` for two columns) renders
+    // `"slug" DESC, "rank"` and reads back as `[Desc, Asc]`; trimming the trailing implicit `Asc` on
+    // both sides makes it re-plan empty.
+    let column = |name: &str| ColumnModel {
+        name: name.to_owned(),
+        comment: None,
+        ty: SqlType::Text,
+        collation: None,
+        nullable: false,
+        default: None,
+        identity: None,
+        generated: None,
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "docs".to_owned(),
+                comment: None,
+                columns: vec![column("slug"), column("rank")],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_docs_slug_rank".to_owned(),
+                    columns: vec!["slug".to_owned(), "rank".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: None,
+                    directions: vec![squealy::IndexDirection::Desc],
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut connection = connect().await;
+    squealy_model::publish(&model, &Sqlite, &mut connection)
+        .await
+        .expect("publish partial-descending index");
+
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan partial-descending index");
+    assert!(plan.steps.is_empty(), "got: {:?}", plan.steps);
+}
+
+#[tokio::test]
 async fn introspects_empty_database_as_no_schemas() {
     // SQLite has no namespace object, so an empty database introspects to `schemas: []` — not a phantom
     // default schema that would diff as a spurious DropSchema against an empty model.
