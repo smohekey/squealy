@@ -316,6 +316,13 @@ async fn round_trips_bool_and_unsigned_defaults() {
                         },
                         DefaultValue::Int(0),
                     ),
+                    // An unsigned default beyond `i128::MAX` reads back as `Raw(text)` (its `parse::<i128>`
+                    // overflows), so canonicalization must produce the same raw decimal.
+                    column(
+                        "huge",
+                        SqlType::U128,
+                        DefaultValue::UInt((i128::MAX as u128) + 1),
+                    ),
                 ],
                 primary_key: None,
                 foreign_keys: Vec::new(),

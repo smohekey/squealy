@@ -260,9 +260,12 @@ impl SchemaIntrospect for SqliteConnection {
         match introspect::affinity_of_sql_type(ty) {
             introspect::Affinity::Integer => match default {
                 DefaultValue::Bool(value) => DefaultValue::Int(i128::from(*value)),
+                // A `UInt` beyond `i128::MAX` (a large `u128`) has no `Int` representation; the renderer
+                // writes it as a decimal literal and the introspector — whose `parse::<i128>()` also
+                // overflows — reads it back as `Raw(text)`, so canonicalize to that same text.
                 DefaultValue::UInt(value) => i128::try_from(*value)
                     .map(DefaultValue::Int)
-                    .unwrap_or_else(|_| default.clone()),
+                    .unwrap_or_else(|_| DefaultValue::Raw(value.to_string())),
                 other => other.clone(),
             },
             introspect::Affinity::Real => match default {
