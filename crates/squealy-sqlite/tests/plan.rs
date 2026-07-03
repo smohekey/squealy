@@ -1043,3 +1043,113 @@ async fn applies_an_index_name_swap_between_tables() {
         replan.steps
     );
 }
+
+#[tokio::test]
+async fn rebuild_replacing_all_columns_preserves_rows() {
+    // When every column is dropped and replaced, the rebuild has no column to copy — but the rows must
+    // still survive, each taking the new columns' defaults.
+    let (mut connection, raw) = setup().await;
+    let v1 = one_table(table("t", vec![column("old", SqlType::Text, false)]));
+    publish(&v1, &Sqlite, &mut connection)
+        .await
+        .expect("publish v1");
+    exec(
+        &raw,
+        "INSERT INTO \"t\" (\"old\") VALUES ('a'), ('b'), ('c')",
+    )
+    .await;
+
+    // Drop `old`, add `new INTEGER DEFAULT 0`: a full rebuild with no carried column.
+    let mut v2 = introspect(&mut connection).await.expect("introspect");
+    let mut new_column = column("new", SqlType::I64, false);
+    new_column.default = Some(squealy::DefaultValue::Int(0));
+    v2.schemas[0].tables[0].columns = vec![new_column];
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan v2");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply v2");
+    assert_eq!(
+        count(&raw, "t").await,
+        3,
+        "rows must survive replacing every column"
+    );
+    let defaulted: i64 = raw
+        .call(|conn| {
+            conn.query_row("SELECT count(*) FROM \"t\" WHERE \"new\" = 0", [], |row| {
+                row.get(0)
+            })
+        })
+        .await
+        .expect("count defaulted");
+    assert_eq!(
+        defaulted, 3,
+        "each surviving row takes the new column's default"
+    );
+
+    let replan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("re-plan");
+    assert!(
+        replan.steps.is_empty(),
+        "must converge, got: {:?}",
+        replan.steps
+    );
+}
+
+#[tokio::test]
+async fn drops_a_table_before_reusing_its_name_for_an_index() {
+    // SQLite's table and index names share one namespace, so an index taking a dropped table's name is
+    // valid only if the table is dropped first.
+    let index = |name: &str, column_name: &str| IndexModel {
+        name: name.to_owned(),
+        columns: vec![column_name.to_owned()],
+        expressions: Vec::new(),
+        include_columns: Vec::new(),
+        unique: false,
+        method: None,
+        directions: Vec::new(),
+        nulls: Vec::new(),
+        collations: Vec::new(),
+        operator_classes: Vec::new(),
+        predicate: None,
+    };
+    let (mut connection, raw) = setup().await;
+    let v1 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            views: Vec::new(),
+            tables: vec![
+                table("keep", vec![column("x", SqlType::Text, false)]),
+                table("zzz", vec![column("y", SqlType::Text, false)]),
+            ],
+        }],
+    };
+    publish(&v1, &Sqlite, &mut connection)
+        .await
+        .expect("publish v1");
+
+    // Drop table `zzz`, and add an index *named* `zzz` on the surviving table.
+    let mut v2 = introspect(&mut connection).await.expect("introspect");
+    v2.schemas[0].tables.retain(|table| table.name == "keep");
+    v2.schemas[0].tables[0].indexes = vec![index("zzz", "x")];
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan v2");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("dropping the table frees its name for the index");
+    assert_eq!(index_table(&raw, "zzz").await, "keep");
+
+    let replan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("re-plan");
+    assert!(
+        replan.steps.is_empty(),
+        "must converge, got: {:?}",
+        replan.steps
+    );
+}

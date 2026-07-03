@@ -190,23 +190,32 @@ pub(crate) fn write_plan(
         write_create_refactor_log_table(writer)?;
     }
 
-    // Free every index name the plan drops or redefines, up front, before any create runs. SQLite's
-    // index namespace is database-wide, so a name moved or swapped between tables must be released
-    // before a table recreates it; doing all drops first prevents a later per-table `DropIndex` from
-    // destroying a replacement index another table already created for the same name. Genuine removals
-    // (a name not recreated) are handled here too, so `DropIndex` emits nothing in the per-table pass.
+    // Free every table and index name the plan drops or redefines, up front, before any create runs.
+    // SQLite keeps tables and indexes in one database-wide namespace, so a dropped name may be reused
+    // by a later create (an index moved between tables, or an index taking a dropped table's name);
+    // doing all drops first releases those names and prevents a later per-table drop from destroying a
+    // replacement another table already created. Genuine removals are handled here too, so `DropTable`
+    // and `DropIndex` emit nothing in the main pass.
     for step in &plan.steps {
-        if let DatabasePlanStep::AlterTable { change, .. } = step {
-            let dropped_name = match change.as_ref() {
-                TablePlanStep::DropIndex { index } => Some(index.name.as_str()),
-                TablePlanStep::AlterIndex { before, .. } => Some(before.name.as_str()),
-                _ => None,
-            };
-            if let Some(name) = dropped_name {
+        match step {
+            DatabasePlanStep::DropTable { table, .. } => {
                 statement(writer, &mut first)?;
-                writer.write_all(b"DROP INDEX IF EXISTS ")?;
-                write_quoted_ident(name, writer)?;
+                writer.write_all(b"DROP TABLE IF EXISTS ")?;
+                write_quoted_ident(&table.name, writer)?;
             }
+            DatabasePlanStep::AlterTable { change, .. } => {
+                let dropped_index = match change.as_ref() {
+                    TablePlanStep::DropIndex { index } => Some(index.name.as_str()),
+                    TablePlanStep::AlterIndex { before, .. } => Some(before.name.as_str()),
+                    _ => None,
+                };
+                if let Some(name) = dropped_index {
+                    statement(writer, &mut first)?;
+                    writer.write_all(b"DROP INDEX IF EXISTS ")?;
+                    write_quoted_ident(name, writer)?;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -227,11 +236,8 @@ pub(crate) fn write_plan(
             DatabasePlanStep::CreateTable { table, .. } => {
                 write_create_table_step(table, writer, &mut first)?;
             }
-            DatabasePlanStep::DropTable { table, .. } => {
-                statement(writer, &mut first)?;
-                writer.write_all(b"DROP TABLE ")?;
-                write_quoted_ident(&table.name, writer)?;
-            }
+            // The table was already dropped by the drop pre-pass above; nothing to emit here.
+            DatabasePlanStep::DropTable { .. } => {}
             DatabasePlanStep::RenameTable {
                 refactor_id,
                 from,
@@ -548,7 +554,16 @@ fn write_table_rebuild(
         })
         .collect();
 
-    if !carried.is_empty() {
+    if carried.is_empty() {
+        // Every target column is newly added, but the rows must still survive: selecting no columns
+        // would copy zero rows and silently drop the whole table. Insert one default-filled row per old
+        // row, carrying `rowid` so row count (and rowid identity) is preserved.
+        statement(writer, first)?;
+        writer.write_all(b"INSERT INTO ")?;
+        write_quoted_ident(&temp_name, writer)?;
+        writer.write_all(b" (rowid)\nSELECT rowid FROM ")?;
+        write_quoted_ident(table, writer)?;
+    } else {
         statement(writer, first)?;
         writer.write_all(b"INSERT INTO ")?;
         write_quoted_ident(&temp_name, writer)?;
