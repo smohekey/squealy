@@ -230,7 +230,10 @@ where
         .applied_refactor_ids()
         .await
         .map_err(PlanFromDatabaseError::ReadAppliedRefactors)?;
-    let pending_refactors = pending_refactors(refactors, &applied_ids, &actual)
+    // Canonicalize the refactor schema names so they match the live model a schema-less backend reads
+    // back (introspected under the flattened namespace), and the flattened diff the steps drive.
+    let refactors = canonicalize_refactors(connection, refactors);
+    let pending_refactors = pending_refactors(&refactors, &applied_ids, &actual)
         .map_err(PlanFromDatabaseError::AppliedRefactor)?;
     // Canonicalize both sides for the diff (after refactor matching, which reads the raw schema).
     let actual = canonicalize_model(connection, &actual);
@@ -259,15 +262,39 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
     let default_method = connection.default_index_method();
     let mut model = model.clone();
     for schema in &mut model.schemas {
+        // Flatten the namespace for a backend without schemas (SQLite), so a `#[schema(App)]` model does
+        // not diff as a wholesale move of every table into the default namespace after each publish.
+        schema.name = connection.canonical_schema_name(schema.name.as_deref());
         for table in &mut schema.tables {
             for column in &mut table.columns {
                 column.ty = connection.canonical_sql_type(&column.ty);
+                if let Some(default) = &mut column.default {
+                    // Canonicalize the default against the (already-canonicalized) column type, so a
+                    // default whose representation collapses with the type (SQLite renders a `bool`
+                    // default as an integer) does not churn as an `AlterColumn` after publish.
+                    *default = connection.canonical_default(&column.ty, default);
+                }
                 if let Some(identity) = &mut column.identity {
                     identity.mode = connection.canonical_identity_mode(&identity.mode);
                 }
             }
             if let Some(primary_key) = &mut table.primary_key {
                 primary_key.name = connection.canonical_primary_key_name(&primary_key.name);
+            }
+            for unique in &mut table.uniques {
+                unique.name = connection.canonical_unique_name(unique);
+            }
+            for foreign_key in &mut table.foreign_keys {
+                // Flatten a cross-schema reference the same way the referenced table's own schema name is
+                // flattened, then canonicalize the (possibly non-round-tripping) constraint name.
+                foreign_key.references_schema =
+                    connection.canonical_schema_name(foreign_key.references_schema.as_deref());
+                foreign_key.name = connection.canonical_foreign_key_name(foreign_key);
+                // `NO ACTION` is the SQL default referential action; introspectors report an unset
+                // action as `None`, so normalize an explicit `Some(NoAction)` to `None` on both sides so
+                // a foreign key that spells out the default does not churn as an `AlterForeignKey`.
+                normalize_no_action(&mut foreign_key.on_delete);
+                normalize_no_action(&mut foreign_key.on_update);
             }
             for index in &mut table.indexes {
                 canonicalize_index(index, &default_method);
@@ -289,25 +316,110 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
             }
         }
     }
+    // A schema-less backend flattens every namespace to the same (default) name, so two source schemas
+    // can now share a name. `diff_models` keys schemas by name in a `BTreeMap`, which would drop the
+    // tables/views of all but one same-named schema; coalesce them here (concatenating in first-seen
+    // order) so the flattened model keeps every object. This is a no-op when names stay distinct.
+    coalesce_schemas_by_name(&mut model.schemas);
+    // A backend without namespace objects (SQLite) reports no schema for an empty database, so drop a
+    // schema left with no tables or views — otherwise a desired model carrying an empty namespace diffs
+    // as a spurious `CreateSchema` on every run. A backend with real schemas keeps them.
+    if !connection.has_namespaces() {
+        model
+            .schemas
+            .retain(|schema| !schema.tables.is_empty() || !schema.views.is_empty());
+    }
     model
 }
 
-/// Fills an index's absent method / directions with the backend defaults so a plain crate-declared
-/// index matches the explicit metadata introspection reads back.
-///
-/// Only runs when the backend reports a default index method. A backend that leaves default index
-/// metadata unset (the trait default, `None`) also introspects directions as empty, so filling either
-/// here would itself create a never-settling `AlterIndex` against that backend.
-fn canonicalize_index(index: &mut IndexModel, default_method: &Option<IndexMethod>) {
-    let Some(default_method) = default_method else {
-        return;
-    };
-    if index.method.is_none() {
-        index.method = Some(default_method.clone());
+/// Merges schemas that share a name (after canonicalization) into the first one seen, concatenating
+/// their tables and views. Needed for a schema-less backend, whose `canonical_schema_name` flattens
+/// every namespace to `None`; a no-op when every schema name is already distinct.
+fn coalesce_schemas_by_name(schemas: &mut Vec<SchemaModel>) {
+    let mut coalesced: Vec<SchemaModel> = Vec::with_capacity(schemas.len());
+    for schema in std::mem::take(schemas) {
+        match coalesced
+            .iter_mut()
+            .find(|existing| existing.name == schema.name)
+        {
+            Some(existing) => {
+                existing.tables.extend(schema.tables);
+                existing.views.extend(schema.views);
+            }
+            None => coalesced.push(schema),
+        }
     }
-    if index.directions.is_empty() {
-        let terms = index.columns.len() + index.expressions.len();
-        index.directions = vec![IndexDirection::Asc; terms];
+    *schemas = coalesced;
+}
+
+/// Returns a copy of `refactors` with each operation's schema name canonicalized the same way
+/// [`canonicalize_model`] flattens namespaces, so refactor matching against the live model and the
+/// rename/cast steps it drives line up with a schema-less backend's flattened schema. A no-op for a
+/// backend with real schemas (the default [`SchemaIntrospect::canonical_schema_name`] is the identity).
+fn canonicalize_refactors<C: SchemaIntrospect>(
+    connection: &C,
+    refactors: &RefactorLog,
+) -> RefactorLog {
+    let operations = refactors
+        .operations
+        .iter()
+        .map(|operation| match operation {
+            RefactorOperation::RenameTable(operation) => {
+                RefactorOperation::RenameTable(RenameTable {
+                    schema: connection.canonical_schema_name(operation.schema.as_deref()),
+                    ..operation.clone()
+                })
+            }
+            RefactorOperation::RenameColumn(operation) => {
+                RefactorOperation::RenameColumn(RenameColumn {
+                    schema: connection.canonical_schema_name(operation.schema.as_deref()),
+                    ..operation.clone()
+                })
+            }
+            RefactorOperation::CastColumn(operation) => RefactorOperation::CastColumn(CastColumn {
+                schema: connection.canonical_schema_name(operation.schema.as_deref()),
+                ..operation.clone()
+            }),
+        })
+        .collect();
+    RefactorLog { operations }
+}
+
+/// Normalizes an explicit `Some(ForeignKeyAction::NoAction)` to `None` (the referential-action default,
+/// which every backend's introspection reports as an unset action).
+fn normalize_no_action(action: &mut Option<ForeignKeyAction>) {
+    if matches!(action, Some(ForeignKeyAction::NoAction)) {
+        *action = None;
+    }
+}
+
+/// Aligns an index's method / directions with the form the backend's introspection reads back, so a
+/// plain crate-declared index does not churn as a never-settling `AlterIndex`.
+///
+/// The two directions are symmetric, keyed on whether the backend fills default index metadata:
+/// - A backend that reports a default method (PostgreSQL, MySQL) also reads an unset index back with an
+///   explicit method and all-ascending directions, so an index declared without them is *filled*.
+/// - A backend that leaves the method unset (SQLite, the trait default) omits the default (`ASC`) sort
+///   order, so trailing `Asc` directions are *trimmed*: an all-ascending list becomes empty, and a list
+///   that specifies only a non-default prefix (e.g. `[Desc]` for two columns) matches the read-back
+///   `[Desc, Asc]` trimmed back to `[Desc]`. A non-default direction (or one before a non-default) is
+///   kept.
+fn canonicalize_index(index: &mut IndexModel, default_method: &Option<IndexMethod>) {
+    match default_method {
+        Some(default_method) => {
+            if index.method.is_none() {
+                index.method = Some(default_method.clone());
+            }
+            if index.directions.is_empty() {
+                let terms = index.columns.len() + index.expressions.len();
+                index.directions = vec![IndexDirection::Asc; terms];
+            }
+        }
+        None => {
+            while index.directions.last() == Some(&IndexDirection::Asc) {
+                index.directions.pop();
+            }
+        }
     }
 }
 
@@ -328,6 +440,9 @@ where
         .applied_refactor_ids()
         .await
         .map_err(RepairRefactorMetadataError::ReadAppliedRefactors)?;
+    // Match the refactors against the live model under the same (possibly flattened) namespace it was
+    // introspected in, so a schema-qualified refactor is validated against a schema-less backend.
+    let refactors = &canonicalize_refactors(connection, refactors);
     // Casts are idempotent rendering hints, never recorded as applied refactors — recording one
     // would make `pending_refactors` filter it out and silently drop its `USING` clause.
     let package_ids = refactors
@@ -778,6 +893,178 @@ mod tests {
         fn canonical_primary_key_name(&self, _name: &str) -> String {
             "PRIMARY".to_owned()
         }
+
+        // A schema-less backend (like SQLite) flattens every namespace and derives constraint names
+        // from their columns, since it does not round-trip the declared name.
+        fn canonical_schema_name(&self, _name: Option<&str>) -> Option<String> {
+            None
+        }
+
+        fn has_namespaces(&self) -> bool {
+            false
+        }
+
+        fn canonical_unique_name(&self, unique: &Constraint) -> String {
+            format!("unique:{}", unique.columns.join(","))
+        }
+
+        fn canonical_foreign_key_name(&self, foreign_key: &ForeignKeyModel) -> String {
+            format!("foreign_key:{}", foreign_key.columns.join(","))
+        }
+
+        fn canonical_default(
+            &self,
+            _ty: &SqlType,
+            default: &squealy::DefaultValue,
+        ) -> squealy::DefaultValue {
+            match default {
+                squealy::DefaultValue::Bool(value) => {
+                    squealy::DefaultValue::Int(i128::from(*value))
+                }
+                other => other.clone(),
+            }
+        }
+    }
+
+    #[test]
+    fn canonicalize_model_drops_empty_schemas_without_namespaces() {
+        // A schema-less backend reports no schema for an empty database, so a desired empty namespace
+        // must be dropped (it would otherwise diff as a spurious CreateSchema). A schema with objects is
+        // kept. A backend with real schemas keeps the empty schema.
+        let model = DatabaseModel {
+            schemas: vec![
+                SchemaModel {
+                    name: Some("empty".to_owned()),
+                    views: Vec::new(),
+                    tables: Vec::new(),
+                },
+                SchemaModel {
+                    name: Some("app".to_owned()),
+                    views: Vec::new(),
+                    tables: vec![TableModel {
+                        name: "widgets".to_owned(),
+                        comment: None,
+                        columns: vec![],
+                        primary_key: None,
+                        foreign_keys: vec![],
+                        uniques: vec![],
+                        checks: vec![],
+                        indexes: vec![],
+                    }],
+                },
+            ],
+        };
+
+        let schema_less = canonicalize_model(&CanonBackend, &model);
+        assert_eq!(schema_less.schemas.len(), 1);
+        assert_eq!(schema_less.schemas[0].tables[0].name, "widgets");
+
+        // A backend with real schemas (DefaultBackend uses the trait defaults) keeps the empty schema.
+        let with_schemas = canonicalize_model(&DefaultBackend, &model);
+        assert_eq!(with_schemas.schemas.len(), 2);
+    }
+
+    #[test]
+    fn canonicalize_model_coalesces_flattened_schemas() {
+        // Two source schemas both flatten to `None`; their tables must be merged into one schema, not
+        // dropped (a `BTreeMap`-keyed diff would otherwise keep only one same-named schema).
+        let table = |name: &str| TableModel {
+            name: name.to_owned(),
+            comment: None,
+            columns: vec![],
+            primary_key: None,
+            foreign_keys: vec![],
+            uniques: vec![],
+            checks: vec![],
+            indexes: vec![],
+        };
+        let model = DatabaseModel {
+            schemas: vec![
+                SchemaModel {
+                    name: Some("app".to_owned()),
+                    views: Vec::new(),
+                    tables: vec![table("users")],
+                },
+                SchemaModel {
+                    name: Some("archive".to_owned()),
+                    views: Vec::new(),
+                    tables: vec![table("logs")],
+                },
+            ],
+        };
+
+        let canonical = canonicalize_model(&CanonBackend, &model);
+
+        assert_eq!(canonical.schemas.len(), 1);
+        assert_eq!(canonical.schemas[0].name, None);
+        let names: Vec<&str> = canonical.schemas[0]
+            .tables
+            .iter()
+            .map(|table| table.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["users", "logs"]);
+    }
+
+    #[test]
+    fn canonicalize_model_normalizes_explicit_no_action() {
+        // `NO ACTION` is the referential-action default; introspection reports it as `None`, so an
+        // explicit `Some(NoAction)` on the desired side must normalize to `None` (a real action like
+        // `Cascade` is preserved). This is backend-neutral, so the trait-default backend applies it.
+        let mut foreign_key = foreign_key();
+        foreign_key.on_delete = Some(ForeignKeyAction::NoAction);
+        foreign_key.on_update = Some(ForeignKeyAction::Cascade);
+        let model = table_with_constraints(foreign_key, check());
+
+        let canonical = canonicalize_model(&DefaultBackend, &model);
+        let foreign_key = &canonical.schemas[0].tables[0].foreign_keys[0];
+        assert_eq!(foreign_key.on_delete, None);
+        assert_eq!(foreign_key.on_update, Some(ForeignKeyAction::Cascade));
+    }
+
+    #[test]
+    fn canonicalize_model_applies_default_hook() {
+        let mut model = table_with_index(index());
+        model.schemas[0].tables[0].columns.push(ColumnModel {
+            name: "active".to_owned(),
+            comment: None,
+            ty: SqlType::Bool,
+            collation: None,
+            nullable: false,
+            default: Some(squealy::DefaultValue::Bool(true)),
+            identity: None,
+            generated: None,
+        });
+
+        let canonical = canonicalize_model(&CanonBackend, &model);
+        let column = &canonical.schemas[0].tables[0].columns[0];
+        assert_eq!(column.default, Some(squealy::DefaultValue::Int(1)));
+    }
+
+    #[test]
+    fn canonicalize_model_flattens_schema_and_constraint_names() {
+        let mut model = table_with_constraints(foreign_key(), check());
+        model.schemas[0].name = Some("app".to_owned());
+        model.schemas[0].tables[0].foreign_keys[0].references_schema = Some("app".to_owned());
+        model.schemas[0].tables[0].uniques.push(Constraint {
+            name: "uq_memberships_tenant_id".to_owned(),
+            columns: vec!["tenant_id".to_owned()],
+        });
+
+        let canonical = canonicalize_model(&CanonBackend, &model);
+        let schema = &canonical.schemas[0];
+
+        // The namespace is flattened on the schema and on the cross-schema foreign-key reference.
+        assert_eq!(schema.name, None);
+        let table = &schema.tables[0];
+        assert_eq!(table.foreign_keys[0].references_schema, None);
+
+        // Constraint names are rewritten to the column-derived canonical form.
+        assert_eq!(table.uniques[0].name, "unique:tenant_id");
+        assert_eq!(table.foreign_keys[0].name, "foreign_key:tenant_id");
+
+        // Two applications are stable (idempotent), so a re-plan against the canonical form is empty.
+        assert_eq!(canonicalize_model(&CanonBackend, &canonical), canonical);
+        assert!(diff_models(&canonical, &canonical).is_empty());
     }
 
     #[test]
@@ -845,6 +1132,32 @@ mod tests {
         assert!(canonical_index.directions.is_empty());
         // The desired index is unchanged, so it still matches what such a backend introspects.
         assert!(diff_models(&canonical, &model).is_empty());
+    }
+
+    #[test]
+    fn canonicalize_model_trims_trailing_ascending_directions_for_no_default_method() {
+        // A backend that leaves index metadata unset (e.g. SQLite) omits the default (ASC) sort order,
+        // so trailing `Asc` directions are trimmed to match what it introspects.
+        let canonicalized = |directions: Vec<IndexDirection>| {
+            let mut index = index();
+            index.directions = directions;
+            canonicalize_model(&DefaultBackend, &table_with_index(index)).schemas[0].tables[0]
+                .indexes[0]
+                .directions
+                .clone()
+        };
+        // All-ascending collapses to empty.
+        assert!(canonicalized(vec![IndexDirection::Asc, IndexDirection::Asc]).is_empty());
+        // A non-default prefix keeps the prefix but drops the trailing implicit `Asc`.
+        assert_eq!(
+            canonicalized(vec![IndexDirection::Desc, IndexDirection::Asc]),
+            vec![IndexDirection::Desc]
+        );
+        // An `Asc` before a non-default `Desc` is kept (only trailing `Asc` is implicit).
+        assert_eq!(
+            canonicalized(vec![IndexDirection::Asc, IndexDirection::Desc]),
+            vec![IndexDirection::Asc, IndexDirection::Desc]
+        );
     }
 
     #[test]
