@@ -600,6 +600,65 @@ async fn preserves_nullability_of_non_rowid_primary_key_columns() {
 }
 
 #[tokio::test]
+async fn round_trips_an_explicit_ascending_index_direction() {
+    // A model that spells out an all-ascending index direction (`ASC`) must re-plan empty: SQLite
+    // introspects an all-ascending index with empty directions, and canonicalization collapses the
+    // explicit `Asc` list to match.
+    let index = IndexModel {
+        name: "idx_docs_slug".to_owned(),
+        columns: vec!["slug".to_owned()],
+        expressions: Vec::new(),
+        include_columns: Vec::new(),
+        unique: false,
+        method: None,
+        directions: vec![squealy::IndexDirection::Asc],
+        nulls: Vec::new(),
+        collations: Vec::new(),
+        operator_classes: Vec::new(),
+        predicate: None,
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "docs".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    comment: None,
+                    ty: SqlType::Text,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![index],
+            }],
+        }],
+    };
+
+    let mut connection = connect().await;
+    squealy_model::publish(&model, &Sqlite, &mut connection)
+        .await
+        .expect("publish explicit ASC index");
+
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan explicit ASC index");
+    assert!(plan.steps.is_empty(), "got: {:?}", plan.steps);
+}
+
+#[tokio::test]
 async fn introspects_empty_database_as_no_schemas() {
     // SQLite has no namespace object, so an empty database introspects to `schemas: []` — not a phantom
     // default schema that would diff as a spurious DropSchema against an empty model.

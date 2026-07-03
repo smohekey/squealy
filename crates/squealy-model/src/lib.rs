@@ -385,22 +385,36 @@ fn normalize_no_action(action: &mut Option<ForeignKeyAction>) {
     }
 }
 
-/// Fills an index's absent method / directions with the backend defaults so a plain crate-declared
-/// index matches the explicit metadata introspection reads back.
+/// Aligns an index's method / directions with the form the backend's introspection reads back, so a
+/// plain crate-declared index does not churn as a never-settling `AlterIndex`.
 ///
-/// Only runs when the backend reports a default index method. A backend that leaves default index
-/// metadata unset (the trait default, `None`) also introspects directions as empty, so filling either
-/// here would itself create a never-settling `AlterIndex` against that backend.
+/// The two directions are symmetric, keyed on whether the backend fills default index metadata:
+/// - A backend that reports a default method (PostgreSQL, MySQL) also reads an unset index back with an
+///   explicit method and all-ascending directions, so an index declared without them is *filled*.
+/// - A backend that leaves the method unset (SQLite, the trait default) reads an all-ascending index
+///   back with *empty* directions, so an explicit all-`Asc` directions list is *collapsed* to empty
+///   (`ASC` is the default sort order, and a mixed list keeps its non-default directions).
 fn canonicalize_index(index: &mut IndexModel, default_method: &Option<IndexMethod>) {
-    let Some(default_method) = default_method else {
-        return;
-    };
-    if index.method.is_none() {
-        index.method = Some(default_method.clone());
-    }
-    if index.directions.is_empty() {
-        let terms = index.columns.len() + index.expressions.len();
-        index.directions = vec![IndexDirection::Asc; terms];
+    match default_method {
+        Some(default_method) => {
+            if index.method.is_none() {
+                index.method = Some(default_method.clone());
+            }
+            if index.directions.is_empty() {
+                let terms = index.columns.len() + index.expressions.len();
+                index.directions = vec![IndexDirection::Asc; terms];
+            }
+        }
+        None => {
+            if !index.directions.is_empty()
+                && index
+                    .directions
+                    .iter()
+                    .all(|direction| *direction == IndexDirection::Asc)
+            {
+                index.directions.clear();
+            }
+        }
     }
 }
 
@@ -1071,6 +1085,29 @@ mod tests {
         assert!(canonical_index.directions.is_empty());
         // The desired index is unchanged, so it still matches what such a backend introspects.
         assert!(diff_models(&canonical, &model).is_empty());
+    }
+
+    #[test]
+    fn canonicalize_model_collapses_all_ascending_directions_for_no_default_method() {
+        // A backend that leaves index metadata unset (e.g. SQLite) introspects an all-ascending index
+        // with empty directions, so an explicit all-`Asc` desired list must collapse to empty to match;
+        // a non-default direction is preserved.
+        let mut ascending = index();
+        ascending.directions = vec![IndexDirection::Asc];
+        let ascending = canonicalize_model(&DefaultBackend, &table_with_index(ascending));
+        assert!(
+            ascending.schemas[0].tables[0].indexes[0]
+                .directions
+                .is_empty()
+        );
+
+        let mut descending = index();
+        descending.directions = vec![IndexDirection::Desc];
+        let descending = canonicalize_model(&DefaultBackend, &table_with_index(descending));
+        assert_eq!(
+            descending.schemas[0].tables[0].indexes[0].directions,
+            vec![IndexDirection::Desc]
+        );
     }
 
     #[test]

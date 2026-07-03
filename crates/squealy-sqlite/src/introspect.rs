@@ -213,11 +213,17 @@ fn declares_autoincrement(sql: Option<&str>) -> bool {
 }
 
 /// Whether `keyword` (ASCII, matched case-insensitively) appears in `sql` as a standalone token in
-/// SQL code — outside string literals (`'…'`), quoted identifiers (`"…"`, `` `…` ``, `[…]`) and
-/// comments (`-- …`, `/* … */`), and not as a substring of a longer identifier. This keeps the
-/// `AUTOINCREMENT` keyword distinct from an identifier like `autoincrements` or a literal that merely
-/// contains the word.
+/// SQL code — see [`keyword_token_end`].
 fn contains_keyword(sql: &str, keyword: &str) -> bool {
+    keyword_token_end(sql, keyword).is_some()
+}
+
+/// The byte offset just past the first occurrence of `keyword` (ASCII, matched case-insensitively) as a
+/// standalone token in SQL code — outside string literals (`'…'`), quoted identifiers (`"…"`, `` `…` ``,
+/// `[…]`) and comments (`-- …`, `/* … */`), and not as a substring of a longer identifier. Returns
+/// `None` if the keyword does not appear in code. This keeps a keyword distinct from an identifier that
+/// merely contains it (e.g. `autoincrements`) or a `WHERE` inside a quoted name.
+fn keyword_token_end(sql: &str, keyword: &str) -> Option<usize> {
     let bytes = sql.as_bytes();
     let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
     let mut index = 0;
@@ -270,13 +276,13 @@ fn contains_keyword(sql: &str, keyword: &str) -> bool {
                     index += 1;
                 }
                 if sql[start..index].eq_ignore_ascii_case(keyword) {
-                    return true;
+                    return Some(index);
                 }
             }
             _ => index += 1,
         }
     }
-    false
+    None
 }
 
 async fn foreign_keys(
@@ -454,15 +460,14 @@ fn fixed_bytes_width(create_sql: &str, column: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Extracts a partial index's predicate — the text after the trailing `WHERE` — from its stored
-/// `CREATE INDEX` statement. SQLite stores the statement as written and a `CREATE INDEX` has exactly one
-/// `WHERE`, so the predicate round-trips verbatim (matching the renderer's `WHERE <predicate>` output).
+/// Extracts a partial index's predicate — the text after the `WHERE` — from its stored `CREATE INDEX`
+/// statement. SQLite stores the statement as written and a `CREATE INDEX` has exactly one `WHERE`
+/// (SQLite forbids subqueries in a partial-index predicate), so the predicate round-trips verbatim
+/// (matching the renderer's `WHERE <predicate>` output). The `WHERE` token is located outside quoted
+/// identifiers, so an index/table/column name containing the word does not misfire.
 fn partial_predicate(index_sql: Option<&str>) -> Option<String> {
     let sql = index_sql?;
-    // `to_ascii_uppercase` preserves byte offsets (it only rewrites ASCII letters), so the match index
-    // is valid in the original string; take the first ` WHERE ` (the only one in a `CREATE INDEX`).
-    let keyword = " WHERE ";
-    let start = sql.to_ascii_uppercase().find(keyword)? + keyword.len();
+    let start = keyword_token_end(sql, "WHERE")?;
     let predicate = sql[start..].trim();
     (!predicate.is_empty()).then(|| predicate.to_owned())
 }
@@ -702,6 +707,13 @@ mod tests {
             None
         );
         assert_eq!(partial_predicate(None), None);
+        // A quoted identifier containing ` WHERE ` must not be mistaken for the predicate delimiter.
+        assert_eq!(
+            partial_predicate(Some(
+                "CREATE INDEX \"idx WHERE trap\" ON \"t\" (\"a\") WHERE \"a\" IS NOT NULL"
+            )),
+            Some("\"a\" IS NOT NULL".to_owned())
+        );
     }
 
     #[test]
