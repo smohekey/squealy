@@ -62,7 +62,7 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
         for table in &schema.tables {
             for index in &table.indexes {
                 statement(writer, &mut first)?;
-                write_create_index(&table.name, index, writer)?;
+                write_create_index(&table.name, index, false, writer)?;
             }
         }
     }
@@ -137,7 +137,7 @@ pub(crate) fn write_table(
     write_create_table(&model, writer)?;
     for index in &model.indexes {
         writer.write_all(b";\n")?;
-        write_create_index(&model.name, index, writer)?;
+        write_create_index(&model.name, index, false, writer)?;
     }
     Ok(())
 }
@@ -248,7 +248,7 @@ fn write_create_table_step(
     write_create_table(table, writer)?;
     for index in &table.indexes {
         statement(writer, first)?;
-        write_create_index(&table.name, index, writer)?;
+        write_create_index(&table.name, index, true, writer)?;
     }
     Ok(())
 }
@@ -380,7 +380,7 @@ fn write_native_table_change(
         }
         TablePlanStep::AddIndex { index } => {
             statement(writer, first)?;
-            write_create_index(table, index, writer)?;
+            write_create_index(table, index, true, writer)?;
         }
         TablePlanStep::DropIndex { index } => {
             statement(writer, first)?;
@@ -392,7 +392,7 @@ fn write_native_table_change(
             writer.write_all(b"DROP INDEX ")?;
             write_quoted_ident(&before.name, writer)?;
             statement(writer, first)?;
-            write_create_index(table, after, writer)?;
+            write_create_index(table, after, true, writer)?;
         }
         other => {
             // Unreachable: `write_table_alterations` routes every rebuild-requiring change through
@@ -433,6 +433,10 @@ fn write_table_rebuild(
                 ),
             )
         })?;
+
+    // Whether the target keeps an `AUTOINCREMENT` high-water mark to carry over (see below).
+    // `write_create_table` re-validates the same identity rules, so an invalid identity still surfaces.
+    let has_autoincrement = autoincrement_column(target)?.is_some();
 
     // A temporary name that never persists (it is renamed to the real name within the same batch). The
     // `__squealy_` prefix is reserved for this backend's bookkeeping, so it cannot collide with a user
@@ -494,6 +498,29 @@ fn write_table_rebuild(
         write_quoted_ident(table, writer)?;
     }
 
+    // Carry the AUTOINCREMENT high-water mark. Dropping the old table removes its `sqlite_sequence`
+    // row, and copying rows only advances the new table's sequence to the highest *surviving* id — so a
+    // row deleted before the rebuild could have its id handed out again, which AUTOINCREMENT promises
+    // never to do. While both tables' `sqlite_sequence` rows still exist (the new table's is created
+    // lazily, so ensure it), raise the new table's mark to the old table's; the later rename carries it
+    // onto the real name.
+    if has_autoincrement {
+        statement(writer, first)?;
+        writer.write_all(b"INSERT INTO \"sqlite_sequence\" (\"name\", \"seq\") SELECT ")?;
+        write_quoted_text(&temp_name, writer)?;
+        writer.write_all(
+            b", 0 WHERE NOT EXISTS (SELECT 1 FROM \"sqlite_sequence\" WHERE \"name\" = ",
+        )?;
+        write_quoted_text(&temp_name, writer)?;
+        writer.write_all(b")")?;
+
+        statement(writer, first)?;
+        writer.write_all(b"UPDATE \"sqlite_sequence\" SET \"seq\" = max(\"seq\", coalesce((SELECT \"seq\" FROM \"sqlite_sequence\" WHERE \"name\" = ")?;
+        write_quoted_text(table, writer)?;
+        writer.write_all(b"), 0)) WHERE \"name\" = ")?;
+        write_quoted_text(&temp_name, writer)?;
+    }
+
     statement(writer, first)?;
     writer.write_all(b"DROP TABLE ")?;
     write_quoted_ident(table, writer)?;
@@ -506,7 +533,7 @@ fn write_table_rebuild(
 
     for index in &target.indexes {
         statement(writer, first)?;
-        write_create_index(table, index, writer)?;
+        write_create_index(table, index, true, writer)?;
     }
     Ok(())
 }
@@ -792,7 +819,16 @@ fn write_foreign_key(foreign_key: &ForeignKeyModel, writer: &mut impl Write) -> 
     Ok(())
 }
 
-fn write_create_index(table: &str, index: &IndexModel, writer: &mut impl Write) -> io::Result<()> {
+/// Renders a `CREATE INDEX`. `if_not_exists` adds `IF NOT EXISTS` for plan-applied index creation, so
+/// a table rebuild (which recreates the target's indexes) and a separately-applied `AddIndex` step for
+/// the same index — as `apply_plan_with_options`'s concurrent-index split produces — converge instead
+/// of colliding on a duplicate. Create-from-scratch passes `false` so a genuine name clash still errors.
+fn write_create_index(
+    table: &str,
+    index: &IndexModel,
+    if_not_exists: bool,
+    writer: &mut impl Write,
+) -> io::Result<()> {
     if !index.expressions.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -835,6 +871,9 @@ fn write_create_index(table: &str, index: &IndexModel, writer: &mut impl Write) 
         writer.write_all(b"UNIQUE ")?;
     }
     writer.write_all(b"INDEX ")?;
+    if if_not_exists {
+        writer.write_all(b"IF NOT EXISTS ")?;
+    }
     write_quoted_ident(&index.name, writer)?;
     writer.write_all(b" ON ")?;
     write_quoted_ident(table, writer)?;

@@ -10,8 +10,9 @@ use squealy::{
     IdentityMode, IdentityModel, IndexModel, SchemaBackend, SchemaModel, SqlType, TableModel,
 };
 use squealy_model::{
-    DiffPolicy, RefactorLog, RefactorOperation, RenameColumn, apply_plan, introspect,
-    plan_from_database, plan_models, plan_models_with_refactors, publish,
+    DiffPolicy, PlanApplyOptions, RefactorLog, RefactorOperation, RenameColumn, apply_plan,
+    apply_plan_with_options, introspect, plan_from_database, plan_models,
+    plan_models_with_refactors, publish,
 };
 use squealy_sqlite::{Sqlite, SqliteConnection};
 use tokio_rusqlite::Connection as RawConnection;
@@ -235,8 +236,8 @@ fn rebuild_recreates_the_target_indexes() {
     let sql = render(&plan, &one_table(desired_table));
     assert!(sql.contains("CREATE TABLE \"__squealy_new_t\""), "{sql}");
     assert!(
-        sql.contains("CREATE INDEX \"idx_t_slug\" ON \"t\" (\"slug\")"),
-        "the rebuild recreates the index: {sql}"
+        sql.contains("CREATE INDEX IF NOT EXISTS \"idx_t_slug\" ON \"t\" (\"slug\")"),
+        "the rebuild recreates the index idempotently: {sql}"
     );
 }
 
@@ -656,4 +657,147 @@ async fn foreign_key_check_rejects_a_violating_change() {
         "{error}"
     );
     assert_eq!(count(&raw, "children").await, 1);
+}
+
+#[tokio::test]
+async fn rebuild_preserves_the_autoincrement_high_water_mark() {
+    // A rebuild drops the old table, discarding its `sqlite_sequence` high-water mark. Without carrying
+    // it over, AUTOINCREMENT would reuse an id from a row deleted before the rebuild.
+    let (mut connection, raw) = setup().await;
+    let mut widgets = table(
+        "widgets",
+        vec![autoincrement_id(), column("v", SqlType::Text, false)],
+    );
+    widgets.primary_key = Some(Constraint {
+        name: String::new(),
+        columns: vec!["id".to_owned()],
+    });
+    publish(&one_table(widgets), &Sqlite, &mut connection)
+        .await
+        .expect("publish v1");
+    // Generate ids 1, 2, 3, then delete the top two: the high-water mark is 3 but only id 1 survives.
+    exec(
+        &raw,
+        "INSERT INTO \"widgets\" (\"v\") VALUES ('a'), ('b'), ('c')",
+    )
+    .await;
+    exec(&raw, "DELETE FROM \"widgets\" WHERE \"id\" IN (2, 3)").await;
+
+    // Rebuild by adding a UNIQUE constraint.
+    let mut v2 = introspect(&mut connection).await.expect("introspect");
+    v2.schemas[0].tables[0].uniques.push(Constraint {
+        name: String::new(),
+        columns: vec!["v".to_owned()],
+    });
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan v2");
+    assert!(
+        render(&plan, &v2).contains("__squealy_new_widgets"),
+        "expected rebuild"
+    );
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply v2");
+
+    // A fresh AUTOINCREMENT insert must not reuse a deleted id (2 or 3): it must be 4.
+    exec(&raw, "INSERT INTO \"widgets\" (\"v\") VALUES ('d')").await;
+    let new_id: i64 = raw
+        .call(|conn| {
+            conn.query_row(
+                "SELECT \"id\" FROM \"widgets\" WHERE \"v\" = 'd'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .await
+        .expect("read new id");
+    assert_eq!(
+        new_id, 4,
+        "AUTOINCREMENT must not reuse an id from a deleted row"
+    );
+}
+
+#[tokio::test]
+async fn rebuild_with_concurrent_index_option_does_not_double_create() {
+    // With `concurrent_indexes`, an `AddIndex` step is split out of the transactional plan, but a
+    // rebuild in that plan still recreates every target index — so the index would be created twice. The
+    // idempotent `CREATE INDEX IF NOT EXISTS` lets both converge instead of failing on a duplicate.
+    let (mut connection, raw) = setup().await;
+    let v1 = one_table(table(
+        "gauges",
+        vec![
+            column("id", SqlType::I64, false),
+            column("val", SqlType::I64, false),
+        ],
+    ));
+    publish(&v1, &Sqlite, &mut connection)
+        .await
+        .expect("publish v1");
+    exec(
+        &raw,
+        "INSERT INTO \"gauges\" (\"id\", \"val\") VALUES (1, 10)",
+    )
+    .await;
+
+    // v2 changes `val`'s type (forces a rebuild) *and* adds an index on it.
+    let mut v2 = introspect(&mut connection).await.expect("introspect");
+    let gauges = &mut v2.schemas[0].tables[0];
+    gauges
+        .columns
+        .iter_mut()
+        .find(|column| column.name == "val")
+        .expect("val column")
+        .ty = SqlType::Text;
+    gauges.indexes.push(IndexModel {
+        name: "idx_gauges_val".to_owned(),
+        columns: vec!["val".to_owned()],
+        expressions: Vec::new(),
+        include_columns: Vec::new(),
+        unique: false,
+        method: None,
+        directions: Vec::new(),
+        nulls: Vec::new(),
+        collations: Vec::new(),
+        operator_classes: Vec::new(),
+        predicate: None,
+    });
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan v2");
+    apply_plan_with_options(
+        &plan,
+        &v2,
+        &Sqlite,
+        &mut connection,
+        PlanApplyOptions {
+            concurrent_indexes: true,
+        },
+    )
+    .await
+    .expect("apply with concurrent indexes must not double-create the rebuilt index");
+    assert_eq!(count(&raw, "gauges").await, 1, "row survives");
+
+    // The index exists exactly once.
+    let index_count: i64 = raw
+        .call(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_gauges_val'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .await
+        .expect("count index");
+    assert_eq!(index_count, 1);
+
+    let replan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("re-plan");
+    assert!(
+        replan.steps.is_empty(),
+        "must converge, got: {:?}",
+        replan.steps
+    );
 }
