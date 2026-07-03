@@ -36,14 +36,21 @@ pub(crate) async fn database(connection: &SqliteConnection) -> Result<DatabaseMo
     for name in table_names(connection).await? {
         tables.push(table(connection, &name).await?);
     }
-    Ok(DatabaseModel {
-        schemas: vec![SchemaModel {
+    // SQLite has no namespace object: an empty database has no schema to report. Emitting an empty
+    // default schema would diff against a genuinely empty model (`schemas: []`) as a spurious
+    // `DropSchema`, so only include the schema once there is at least one object in it. (Views are not
+    // introspected in this slice — SQLite view rendering is itself deferred — so a table is the only
+    // object that can populate it.)
+    let schemas = if tables.is_empty() {
+        Vec::new()
+    } else {
+        vec![SchemaModel {
             name: None,
             tables,
-            // Views are not introspected in this slice (SQLite view rendering is itself deferred).
             views: Vec::new(),
-        }],
-    })
+        }]
+    };
+    Ok(DatabaseModel { schemas })
 }
 
 /// User table names in a deterministic order, excluding SQLite's internal objects (`sqlite_*`, which
@@ -78,10 +85,20 @@ async fn table(connection: &SqliteConnection, name: &str) -> Result<TableModel, 
             && primary_key
                 .as_ref()
                 .is_some_and(|pk| pk.columns[0] == column.name);
+        // A `[u8; N]` column renders as `BLOB` plus a generated width `CHECK`; recover the width from
+        // that check (which no PRAGMA reports) so a `FixedBytes(N)` column round-trips rather than
+        // collapsing to `Bytes` (its BLOB affinity) and leaving a stale width check on a size change.
+        let ty = match sql_type(&column.declared_type) {
+            SqlType::Bytes => create_sql
+                .as_deref()
+                .and_then(|sql| fixed_bytes_width(sql, &column.name))
+                .map_or(SqlType::Bytes, SqlType::FixedBytes),
+            other => other,
+        };
         columns.push(ColumnModel {
             name: column.name.clone(),
             comment: None,
-            ty: sql_type(&column.declared_type),
+            ty,
             collation: None,
             // A column in the primary key is never nullable, even though `PRAGMA table_info` reports
             // `notnull = 0` for the `INTEGER PRIMARY KEY` rowid alias.
@@ -418,6 +435,21 @@ async fn index_sql(
     .flatten())
 }
 
+/// Recovers the width `N` of a `FixedBytes(N)` column from the generated length `CHECK` in its stored
+/// `CREATE TABLE` statement (`length(CAST("col" AS BLOB)) = N`), or `None` if the column carries no such
+/// check (a plain `Bytes`/`BLOB` column). This matches the exact form the renderer emits in
+/// `write_column`; a differently-spelled equivalent check on an external database is not recovered (the
+/// column then reads back as `Bytes`, a documented limitation).
+fn fixed_bytes_width(create_sql: &str, column: &str) -> Option<u32> {
+    // The `CAST` argument is the column name quoted the same way the renderer quotes identifiers
+    // (double-quoted, internal quotes doubled).
+    let quoted = format!("\"{}\"", column.replace('"', "\"\""));
+    let prefix = format!("length(CAST({quoted} AS BLOB)) = ");
+    let rest = &create_sql[create_sql.find(&prefix)? + prefix.len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
 /// Extracts a partial index's predicate — the text after the trailing `WHERE` — from its stored
 /// `CREATE INDEX` statement. SQLite stores the statement as written and a `CREATE INDEX` has exactly one
 /// `WHERE`, so the predicate round-trips verbatim (matching the renderer's `WHERE <predicate>` output).
@@ -666,6 +698,17 @@ mod tests {
             None
         );
         assert_eq!(partial_predicate(None), None);
+    }
+
+    #[test]
+    fn fixed_bytes_width_recovers_generated_check() {
+        let sql = "CREATE TABLE \"t\" (\"hash\" BLOB NOT NULL CHECK (length(CAST(\"hash\" AS BLOB)) = 16))";
+        assert_eq!(fixed_bytes_width(sql, "hash"), Some(16));
+        // A plain BLOB column has no width check.
+        assert_eq!(
+            fixed_bytes_width("CREATE TABLE \"t\" (\"data\" BLOB)", "data"),
+            None
+        );
     }
 
     #[test]

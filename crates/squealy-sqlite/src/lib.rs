@@ -193,6 +193,13 @@ impl SchemaIntrospect for SqliteConnection {
     /// all read back as their affinity's type). Collapse a desired type to the same representative so it
     /// does not churn as an ambiguous type change against the live schema.
     fn canonical_sql_type(&self, ty: &SqlType) -> SqlType {
+        // A fixed-width byte column keeps its width: SQLite enforces `[u8; N]` with a generated length
+        // `CHECK` that introspection recovers as `FixedBytes(N)`, so — unlike other types — it must not
+        // collapse to its `BLOB` affinity (`Bytes`), or a width change (or `FixedBytes` vs `Bytes`) would
+        // not diff and would leave a stale check.
+        if matches!(ty, SqlType::FixedBytes(_)) {
+            return ty.clone();
+        }
         introspect::representative_type(introspect::affinity_of_sql_type(ty))
     }
 

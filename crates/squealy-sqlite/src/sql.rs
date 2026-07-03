@@ -279,13 +279,23 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
             ),
         ));
     }
+    if column.collation.is_some() {
+        // A column collation is not reported by any PRAGMA (it lives only in the `CREATE TABLE` text),
+        // so introspection cannot read it back yet; a published `COLLATE` would diff as a never-settling
+        // `AlterColumn`. Reject rather than emit DDL that cannot round-trip (support lands with the
+        // introspection parsing + incremental plan slice).
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite column collations are not supported for schema management yet (column `{}`): \
+                 they cannot be introspected, so a published collation would churn every plan",
+                column.name
+            ),
+        ));
+    }
     write_quoted_ident(&column.name, writer)?;
     writer.write_all(b" ")?;
     writer.write_all(sqlite_affinity(&column.ty).as_bytes())?;
-    if let Some(collation) = &column.collation {
-        writer.write_all(b" COLLATE ")?;
-        writer.write_all(collation.as_bytes())?;
-    }
     if !column.nullable {
         writer.write_all(b" NOT NULL")?;
     }

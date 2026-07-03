@@ -503,6 +503,86 @@ async fn honors_schema_qualified_table_rename_refactor() {
 }
 
 #[tokio::test]
+async fn round_trips_fixed_bytes_width() {
+    // A `[u8; N]` column renders as BLOB + a generated width check; introspection recovers the width so
+    // `FixedBytes(N)` round-trips (empty re-plan) and a size change still diffs.
+    let model = |width: u32| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "blobs".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "digest".to_owned(),
+                    comment: None,
+                    ty: SqlType::FixedBytes(width),
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    };
+
+    let mut connection = connect().await;
+    squealy_model::publish(&model(16), &Sqlite, &mut connection)
+        .await
+        .expect("publish fixed bytes");
+
+    let actual = squealy_model::introspect(&mut connection).await.unwrap();
+    assert_eq!(
+        actual.schemas[0].tables[0].columns[0].ty,
+        SqlType::FixedBytes(16)
+    );
+
+    // Same width re-plans empty.
+    let plan = squealy_model::plan_from_database(
+        &model(16),
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan same width");
+    assert!(plan.steps.is_empty(), "got: {:?}", plan.steps);
+
+    // A different width is a real change (not silently equal).
+    let plan = squealy_model::plan_from_database(
+        &model(32),
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan different width");
+    assert!(!plan.steps.is_empty(), "width change must diff");
+}
+
+#[tokio::test]
+async fn introspects_empty_database_as_no_schemas() {
+    // SQLite has no namespace object, so an empty database introspects to `schemas: []` — not a phantom
+    // default schema that would diff as a spurious DropSchema against an empty model.
+    let mut connection = connect().await;
+    let actual = squealy_model::introspect(&mut connection).await.unwrap();
+    assert!(actual.schemas.is_empty(), "got: {:?}", actual.schemas);
+
+    let plan = squealy_model::plan_from_database(
+        &DatabaseModel { schemas: vec![] },
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan empty vs empty");
+    assert!(plan.steps.is_empty(), "got: {:?}", plan.steps);
+}
+
+#[tokio::test]
 async fn refactor_store_records_and_reads_ids() {
     let mut connection = connect().await;
     // A read before any write returns empty (the bookkeeping table does not exist yet).

@@ -392,6 +392,41 @@ fn rejects_table_check_constraints_for_now() {
 }
 
 #[test]
+fn rejects_column_collations_for_now() {
+    // A column collation lives only in the CREATE TABLE text (no PRAGMA), so introspection cannot read
+    // it back yet; rendering rejects a model that carries one rather than churn every plan.
+    use squealy::{ColumnModel, DatabaseModel, SchemaModel, SqlType, TableModel};
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![TableModel {
+                name: "t".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "name".to_owned(),
+                    comment: None,
+                    ty: SqlType::Text,
+                    collation: Some("NOCASE".to_owned()),
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+            views: Vec::new(),
+        }],
+    };
+    let mut sql = Vec::new();
+    let error = Sqlite.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
 fn rejects_reserved_object_name_prefix() {
     // A user table using the `__squealy_` prefix would collide with the schema-management bookkeeping
     // tables and be filtered out by introspection (churning create/drop), so rendering must reject it.
