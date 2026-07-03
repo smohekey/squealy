@@ -12,9 +12,11 @@
 
 use std::io::{self, Write};
 
+use std::collections::{HashMap, HashSet};
+
 use squealy::{
-    CheckModel, ColumnModel, DatabaseModel, DefaultValue, ForeignKeyModel, IndexDirection,
-    IndexModel, SqlType, TableModel,
+    CheckModel, ColumnModel, DatabaseModel, DatabasePlan, DatabasePlanStep, DefaultValue,
+    ForeignKeyModel, IndexDirection, IndexModel, SqlType, TableModel, TablePlanStep,
 };
 
 /// Renders ordered create-from-scratch DDL for a whole model. Statements are `;`-terminated and
@@ -138,6 +140,420 @@ pub(crate) fn write_table(
         write_create_index(&model.name, index, writer)?;
     }
     Ok(())
+}
+
+/// Renders an ordered incremental DDL plan. Statements are `;`-terminated and newline-separated,
+/// matching [`write_database`].
+///
+/// SQLite's `ALTER TABLE` only adds/drops/renames columns and renames tables, so a change it cannot
+/// express in place — a type change, or adding/dropping/altering a primary key, unique, foreign key or
+/// check (all of which SQLite carries only inline in `CREATE TABLE`) — is applied by rebuilding the
+/// whole table: create a new table with the target shape, copy the surviving data, drop the old table,
+/// and rename the new one into its place. The rebuilt table's *unchanged* columns are not in the plan,
+/// so its full shape comes from `desired`, the target model the plan was diffed to reach.
+///
+/// Referential integrity across the drop-and-recreate is the executor's responsibility: `DROP TABLE`
+/// fires `ON DELETE` actions on child rows while foreign keys are enforced, so
+/// [`DdlExecutor::execute_ddl`](squealy::DdlExecutor::execute_ddl) applies the whole batch with
+/// enforcement disabled (which SQLite only allows outside a transaction) and re-validates with
+/// `PRAGMA foreign_key_check` before committing. This renderer therefore emits no transaction control
+/// or foreign-key pragmas, matching how the schema-aware backends leave the transaction to the executor.
+pub(crate) fn write_plan(
+    plan: &DatabasePlan,
+    desired: &DatabaseModel,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let mut first = true;
+
+    // Create the refactor bookkeeping table once, up front, if any rename in the plan carries a
+    // refactor id to record (mirrors the schema-aware backends' inline refactor log).
+    if plan.steps.iter().any(plan_step_has_refactor_id) {
+        statement(writer, &mut first)?;
+        write_create_refactor_log_table(writer)?;
+    }
+
+    // A rebuild subsumes *all* of a table's alterations, so a table's `AlterTable` steps are handled
+    // together at the first one seen; later steps for the same table are skipped.
+    let mut altered_tables = HashSet::new();
+
+    for step in &plan.steps {
+        match step {
+            // SQLite has no schemas; creating or dropping the flattened (`None`) namespace is a no-op.
+            // A named schema cannot be represented — canonicalization flattens names to `None`, so this
+            // should not occur, but reject it rather than silently ignore a real name.
+            DatabasePlanStep::CreateSchema { schema } | DatabasePlanStep::DropSchema { schema } => {
+                if let Some(name) = schema {
+                    return Err(named_schema_unsupported(name));
+                }
+            }
+            DatabasePlanStep::CreateTable { table, .. } => {
+                write_create_table_step(table, writer, &mut first)?;
+            }
+            DatabasePlanStep::DropTable { table, .. } => {
+                statement(writer, &mut first)?;
+                writer.write_all(b"DROP TABLE ")?;
+                write_quoted_ident(&table.name, writer)?;
+            }
+            DatabasePlanStep::RenameTable {
+                refactor_id,
+                from,
+                to,
+                ..
+            } => {
+                statement(writer, &mut first)?;
+                writer.write_all(b"ALTER TABLE ")?;
+                write_quoted_ident(from, writer)?;
+                writer.write_all(b" RENAME TO ")?;
+                write_quoted_ident(to, writer)?;
+                if let Some(refactor_id) = refactor_id {
+                    write_record_refactor(refactor_id, writer, &mut first)?;
+                }
+            }
+            DatabasePlanStep::AlterTable { table, .. } => {
+                if altered_tables.insert(table.clone()) {
+                    write_table_alterations(table, plan, desired, writer, &mut first)?;
+                }
+            }
+            // Views are not rendered yet (they need SQLite-specific `Dialect` seams); reject rather than
+            // emit broken DDL, matching `write_database`.
+            DatabasePlanStep::CreateView { .. } | DatabasePlanStep::DropView { .. } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "SQLite view rendering is not supported yet",
+                ));
+            }
+        }
+    }
+
+    if !first {
+        writer.write_all(b";")?;
+    }
+    Ok(())
+}
+
+/// Renders a plan's `CreateTable` step: the table (with inline constraints) plus its secondary indexes,
+/// guarding the reserved object-name prefixes exactly as the create-from-scratch path does.
+fn write_create_table_step(
+    table: &TableModel,
+    writer: &mut impl Write,
+    first: &mut bool,
+) -> io::Result<()> {
+    let object_names = || {
+        std::iter::once(table.name.as_str())
+            .chain(table.indexes.iter().map(|index| index.name.as_str()))
+    };
+    check_reserved_object_names(object_names())?;
+    check_object_name_uniqueness(object_names())?;
+    statement(writer, first)?;
+    write_create_table(table, writer)?;
+    for index in &table.indexes {
+        statement(writer, first)?;
+        write_create_index(&table.name, index, writer)?;
+    }
+    Ok(())
+}
+
+/// Renders every alteration of one table. If any change is one SQLite's `ALTER TABLE` cannot express in
+/// place, the whole table is rebuilt from `desired`; otherwise each change is emitted as a native
+/// `ALTER TABLE`/`CREATE INDEX`/`DROP INDEX`. In both cases a renamed column's refactor id is recorded
+/// afterwards (the rename itself happens natively or via the rebuild's copy mapping).
+fn write_table_alterations(
+    table: &str,
+    plan: &DatabasePlan,
+    desired: &DatabaseModel,
+    writer: &mut impl Write,
+    first: &mut bool,
+) -> io::Result<()> {
+    let changes: Vec<&TablePlanStep> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            DatabasePlanStep::AlterTable {
+                table: altered,
+                change,
+                ..
+            } if altered == table => Some(change.as_ref()),
+            _ => None,
+        })
+        .collect();
+
+    if changes.iter().any(|change| change_needs_rebuild(change)) {
+        write_table_rebuild(table, &changes, desired, writer, first)?;
+    } else {
+        for change in &changes {
+            write_native_table_change(table, change, writer, first)?;
+        }
+    }
+
+    for change in &changes {
+        if let TablePlanStep::RenameColumn {
+            refactor_id: Some(refactor_id),
+            ..
+        } = change
+        {
+            write_record_refactor(refactor_id, writer, first)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether a table change is one SQLite's `ALTER TABLE` cannot express in place, forcing a table
+/// rebuild. Primary keys, uniques, foreign keys and checks live only inline in `CREATE TABLE`, and
+/// there is no `ALTER COLUMN`; column drops are also rebuilt because SQLite refuses to drop a column
+/// used by a constraint or index and the plan step does not carry the table's other constraints.
+fn change_needs_rebuild(change: &TablePlanStep) -> bool {
+    match change {
+        // SQLite has no table comments; the change is a no-op, not a rebuild.
+        TablePlanStep::SetTableComment { .. } => false,
+        // Natively expressible.
+        TablePlanStep::RenameColumn { .. }
+        | TablePlanStep::AddIndex { .. }
+        | TablePlanStep::DropIndex { .. }
+        | TablePlanStep::AlterIndex { .. } => false,
+        TablePlanStep::AddColumn { column } => !native_addable(column),
+        TablePlanStep::DropColumn { .. }
+        | TablePlanStep::AlterColumn { .. }
+        | TablePlanStep::AddPrimaryKey { .. }
+        | TablePlanStep::DropPrimaryKey { .. }
+        | TablePlanStep::AlterPrimaryKey { .. }
+        | TablePlanStep::AddUnique { .. }
+        | TablePlanStep::DropUnique { .. }
+        | TablePlanStep::AlterUnique { .. }
+        | TablePlanStep::AddForeignKey { .. }
+        | TablePlanStep::DropForeignKey { .. }
+        | TablePlanStep::AlterForeignKey { .. }
+        | TablePlanStep::AddCheck { .. }
+        | TablePlanStep::DropCheck { .. }
+        | TablePlanStep::AlterCheck { .. } => true,
+    }
+}
+
+/// Whether a column can be added with a native `ALTER TABLE … ADD COLUMN` (rather than a rebuild).
+/// SQLite rejects adding a `PRIMARY KEY`/`UNIQUE` column (those arrive as separate constraint steps, so
+/// a bare `AddColumn` is never one), an identity, generated or collated column, a `NOT NULL` column
+/// without a non-null constant default, or any column with a non-constant default (`CURRENT_*` / a raw
+/// expression).
+fn native_addable(column: &ColumnModel) -> bool {
+    if column.identity.is_some() || column.generated.is_some() || column.collation.is_some() {
+        return false;
+    }
+    match &column.default {
+        Some(
+            DefaultValue::CurrentTimestamp
+            | DefaultValue::CurrentDate
+            | DefaultValue::CurrentTime
+            | DefaultValue::Raw(_),
+        ) => false,
+        // A `NOT NULL` column needs a non-null constant default; an absent or `NULL` default is rejected.
+        None | Some(DefaultValue::Null) => column.nullable,
+        Some(_) => true,
+    }
+}
+
+/// Renders a single natively-expressible table change. Only the variants
+/// [`change_needs_rebuild`] classifies as non-rebuild reach here.
+fn write_native_table_change(
+    table: &str,
+    change: &TablePlanStep,
+    writer: &mut impl Write,
+    first: &mut bool,
+) -> io::Result<()> {
+    match change {
+        // SQLite has no table comments; nothing to emit.
+        TablePlanStep::SetTableComment { .. } => {}
+        TablePlanStep::AddColumn { column } => {
+            statement(writer, first)?;
+            writer.write_all(b"ALTER TABLE ")?;
+            write_quoted_ident(table, writer)?;
+            writer.write_all(b" ADD COLUMN ")?;
+            write_column(column, writer)?;
+        }
+        // The refactor id (if any) is recorded by the caller.
+        TablePlanStep::RenameColumn { from, to, .. } => {
+            statement(writer, first)?;
+            writer.write_all(b"ALTER TABLE ")?;
+            write_quoted_ident(table, writer)?;
+            writer.write_all(b" RENAME COLUMN ")?;
+            write_quoted_ident(from, writer)?;
+            writer.write_all(b" TO ")?;
+            write_quoted_ident(to, writer)?;
+        }
+        TablePlanStep::AddIndex { index } => {
+            statement(writer, first)?;
+            write_create_index(table, index, writer)?;
+        }
+        TablePlanStep::DropIndex { index } => {
+            statement(writer, first)?;
+            writer.write_all(b"DROP INDEX ")?;
+            write_quoted_ident(&index.name, writer)?;
+        }
+        TablePlanStep::AlterIndex { before, after } => {
+            statement(writer, first)?;
+            writer.write_all(b"DROP INDEX ")?;
+            write_quoted_ident(&before.name, writer)?;
+            statement(writer, first)?;
+            write_create_index(table, after, writer)?;
+        }
+        other => {
+            // Unreachable: `write_table_alterations` routes every rebuild-requiring change through
+            // `write_table_rebuild`. Guard defensively rather than panic in a renderer.
+            return Err(io::Error::other(format!(
+                "internal error: {other:?} is not a native SQLite table change"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Rebuilds a table whose change SQLite's `ALTER TABLE` cannot express in place: create the new shape
+/// under a temporary name, copy the surviving data, drop the old table, rename the new one into place,
+/// and recreate the target's indexes (dropping the old table dropped them). Data is carried column by
+/// column: an added column takes its default (omitted from the copy) and a renamed column is copied
+/// from its old name.
+fn write_table_rebuild(
+    table: &str,
+    changes: &[&TablePlanStep],
+    desired: &DatabaseModel,
+    writer: &mut impl Write,
+    first: &mut bool,
+) -> io::Result<()> {
+    // The full target table. SQLite has no schemas, so the (flattened) table name is unique across the
+    // model; find it wherever it sits.
+    let target = desired
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.tables)
+        .find(|candidate| candidate.name == table)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "cannot render a SQLite rebuild of `{table}`: the target table is not in the \
+                     desired model passed to render_plan"
+                ),
+            )
+        })?;
+
+    // A temporary name that never persists (it is renamed to the real name within the same batch). The
+    // `__squealy_` prefix is reserved for this backend's bookkeeping, so it cannot collide with a user
+    // table (and two rebuilt tables get distinct temp names).
+    let temp_name = format!("__squealy_new_{table}");
+    let mut temp_table = target.clone();
+    temp_table.name = temp_name.clone();
+    statement(writer, first)?;
+    write_create_table(&temp_table, writer)?;
+
+    // Copy the surviving data. A target column is copied from the old table unless it is newly added
+    // (it takes its default) or renamed (copied from its old name).
+    let added: HashSet<&str> = changes
+        .iter()
+        .filter_map(|change| match change {
+            TablePlanStep::AddColumn { column } => Some(column.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let renamed_from: HashMap<&str, &str> = changes
+        .iter()
+        .filter_map(|change| match change {
+            TablePlanStep::RenameColumn { from, to, .. } => Some((to.as_str(), from.as_str())),
+            _ => None,
+        })
+        .collect();
+    let carried: Vec<(&str, &str)> = target
+        .columns
+        .iter()
+        .filter(|column| !added.contains(column.name.as_str()))
+        .map(|column| {
+            let source = renamed_from
+                .get(column.name.as_str())
+                .copied()
+                .unwrap_or(column.name.as_str());
+            (column.name.as_str(), source)
+        })
+        .collect();
+
+    if !carried.is_empty() {
+        statement(writer, first)?;
+        writer.write_all(b"INSERT INTO ")?;
+        write_quoted_ident(&temp_name, writer)?;
+        writer.write_all(b" (")?;
+        for (position, (target_column, _)) in carried.iter().enumerate() {
+            if position > 0 {
+                writer.write_all(b", ")?;
+            }
+            write_quoted_ident(target_column, writer)?;
+        }
+        writer.write_all(b")\nSELECT ")?;
+        for (position, (_, source_column)) in carried.iter().enumerate() {
+            if position > 0 {
+                writer.write_all(b", ")?;
+            }
+            write_quoted_ident(source_column, writer)?;
+        }
+        writer.write_all(b" FROM ")?;
+        write_quoted_ident(table, writer)?;
+    }
+
+    statement(writer, first)?;
+    writer.write_all(b"DROP TABLE ")?;
+    write_quoted_ident(table, writer)?;
+
+    statement(writer, first)?;
+    writer.write_all(b"ALTER TABLE ")?;
+    write_quoted_ident(&temp_name, writer)?;
+    writer.write_all(b" RENAME TO ")?;
+    write_quoted_ident(table, writer)?;
+
+    for index in &target.indexes {
+        statement(writer, first)?;
+        write_create_index(table, index, writer)?;
+    }
+    Ok(())
+}
+
+/// Whether a plan step carries a refactor id that must be recorded in the bookkeeping table.
+fn plan_step_has_refactor_id(step: &DatabasePlanStep) -> bool {
+    match step {
+        DatabasePlanStep::RenameTable { refactor_id, .. } => refactor_id.is_some(),
+        DatabasePlanStep::AlterTable { change, .. } => matches!(
+            change.as_ref(),
+            TablePlanStep::RenameColumn {
+                refactor_id: Some(_),
+                ..
+            }
+        ),
+        _ => false,
+    }
+}
+
+/// Creates the refactor bookkeeping table if absent. Its shape matches
+/// [`SchemaRefactorStore`](squealy::SchemaRefactorStore)'s so a plan-recorded id reads back through the
+/// store.
+fn write_create_refactor_log_table(writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(
+        b"CREATE TABLE IF NOT EXISTS \"__squealy_refactors\" (\
+\"id\" TEXT NOT NULL PRIMARY KEY, \
+\"applied_at\" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    )
+}
+
+/// Records an applied refactor id (idempotent: `INSERT OR IGNORE`).
+fn write_record_refactor(
+    refactor_id: &str,
+    writer: &mut impl Write,
+    first: &mut bool,
+) -> io::Result<()> {
+    statement(writer, first)?;
+    writer.write_all(b"INSERT OR IGNORE INTO \"__squealy_refactors\" (\"id\") VALUES (")?;
+    write_quoted_text(refactor_id, writer)?;
+    writer.write_all(b")")
+}
+
+fn named_schema_unsupported(name: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("SQLite has no schemas, so the namespace `{name}` cannot be created or dropped"),
+    )
 }
 
 fn statement(writer: &mut impl Write, first: &mut bool) -> io::Result<()> {

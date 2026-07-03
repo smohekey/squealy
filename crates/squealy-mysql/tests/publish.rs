@@ -206,7 +206,7 @@ async fn incremental_publish_applies_changed_column_definitions() {
     .expect("plan changed columns");
     assert_eq!(plan.steps.len(), 2);
 
-    squealy_model::apply_plan(&plan, &Mysql, &mut connection)
+    squealy_model::apply_plan(&plan, &desired, &Mysql, &mut connection)
         .await
         .expect("apply changed columns");
 

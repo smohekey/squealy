@@ -57,6 +57,9 @@ impl SchemaBackend for Mysql {
     fn render_plan(
         &self,
         plan: &squealy::DatabasePlan,
+        // MySQL renders each step's delta in place (`ALTER TABLE … MODIFY COLUMN …`), so it does not
+        // need the full target model that table-rebuild backends (SQLite) rely on.
+        _desired: &DatabaseModel,
         writer: &mut impl Write,
     ) -> std::io::Result<()> {
         sql::write_plan(plan, writer)

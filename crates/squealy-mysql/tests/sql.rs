@@ -149,7 +149,9 @@ fn mysql_renders_incremental_schema_plan() {
     };
 
     let mut sql = Vec::new();
-    Mysql.render_plan(&plan, &mut sql).unwrap();
+    Mysql
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert_eq!(
@@ -282,7 +284,9 @@ fn mysql_renders_changed_constraints_and_indexes_in_schema_plan() {
     };
 
     let mut sql = Vec::new();
-    Mysql.render_plan(&plan, &mut sql).unwrap();
+    Mysql
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert_eq!(
@@ -362,7 +366,9 @@ fn mysql_renders_changed_columns_in_schema_plan() {
     };
 
     let mut sql = Vec::new();
-    Mysql.render_plan(&plan, &mut sql).unwrap();
+    Mysql
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert_eq!(
@@ -396,7 +402,9 @@ fn mysql_renders_rename_steps_in_schema_plan() {
     };
 
     let mut sql = Vec::new();
-    Mysql.render_plan(&plan, &mut sql).unwrap();
+    Mysql
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert_eq!(
@@ -430,7 +438,9 @@ fn mysql_records_refactor_ids_for_rename_steps() {
     };
 
     let mut sql = Vec::new();
-    Mysql.render_plan(&plan, &mut sql).unwrap();
+    Mysql
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert_eq!(
@@ -462,7 +472,9 @@ fn mysql_rejects_unsupported_changed_column_definitions() {
         }],
     };
 
-    let error = Mysql.render_plan(&plan, &mut Vec::new()).unwrap_err();
+    let error = Mysql
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut Vec::new())
+        .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
 }
 
@@ -497,7 +509,9 @@ fn mysql_renders_identity_and_generated_transitions() {
     };
 
     let mut sql = Vec::new();
-    Mysql.render_plan(&plan, &mut sql).unwrap();
+    Mysql
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert_eq!(
@@ -1182,7 +1196,9 @@ fn mysql_defers_foreign_keys_until_all_tables_are_created() {
     };
 
     let mut sql = Vec::new();
-    Mysql.render_plan(&plan, &mut sql).unwrap();
+    Mysql
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     let comments_create = sql.find("CREATE TABLE `shop`.`comments`").unwrap();
@@ -1399,7 +1415,9 @@ fn mysql_renders_view_plan_steps() {
     };
 
     let mut sql = Vec::new();
-    Mysql.render_plan(&plan, &mut sql).unwrap();
+    Mysql
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert!(

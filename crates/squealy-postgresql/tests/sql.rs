@@ -195,7 +195,9 @@ fn postgres_renders_incremental_schema_plan() {
     };
 
     let mut sql = Vec::new();
-    Postgres.render_plan(&plan, &mut sql).unwrap();
+    Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert_eq!(
@@ -331,7 +333,9 @@ fn postgres_renders_changed_constraints_and_indexes_in_schema_plan() {
     };
 
     let mut sql = Vec::new();
-    Postgres.render_plan(&plan, &mut sql).unwrap();
+    Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert_eq!(
@@ -411,7 +415,9 @@ fn postgres_renders_changed_columns_in_schema_plan() {
     };
 
     let mut sql = Vec::new();
-    Postgres.render_plan(&plan, &mut sql).unwrap();
+    Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert_eq!(
@@ -478,7 +484,9 @@ fn postgres_renders_identity_and_generated_transitions() {
     };
 
     let mut sql = Vec::new();
-    Postgres.render_plan(&plan, &mut sql).unwrap();
+    Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert_eq!(
@@ -521,7 +529,9 @@ fn postgres_rejects_adding_a_generated_column_in_place() {
         }],
     };
 
-    let error = Postgres.render_plan(&plan, &mut Vec::new()).unwrap_err();
+    let error = Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut Vec::new())
+        .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
 }
 
@@ -555,7 +565,9 @@ fn postgres_renames_fixed_bytes_check_with_the_column() {
         }],
     };
     let mut sql = Vec::new();
-    Postgres.render_plan(&plan, &mut sql).unwrap();
+    Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
     assert!(
         sql.contains("RENAME COLUMN \"old_key\" TO \"new_key\""),
@@ -588,7 +600,9 @@ fn postgres_drops_fixed_bytes_check_before_changing_type() {
         }],
     };
     let mut sql = Vec::new();
-    Postgres.render_plan(&plan, &mut sql).unwrap();
+    Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
     let drop_pos = sql
         .find("DROP CONSTRAINT")
@@ -620,7 +634,9 @@ fn postgres_fixed_bytes_width_change_drops_then_adds_check() {
         }],
     };
     let mut sql = Vec::new();
-    Postgres.render_plan(&plan, &mut sql).unwrap();
+    Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
     // The old check is dropped, then the new width is added (`octet_length(...) = 8`).
     let drop_pos = sql
@@ -670,7 +686,9 @@ fn postgres_drops_identity_before_setting_a_default() {
     };
 
     let mut sql = Vec::new();
-    Postgres.render_plan(&plan, &mut sql).unwrap();
+    Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert_eq!(
@@ -704,7 +722,9 @@ fn postgres_renders_rename_steps_in_schema_plan() {
     };
 
     let mut sql = Vec::new();
-    Postgres.render_plan(&plan, &mut sql).unwrap();
+    Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert_eq!(
@@ -738,7 +758,9 @@ fn postgres_records_refactor_ids_for_rename_steps() {
     };
 
     let mut sql = Vec::new();
-    Postgres.render_plan(&plan, &mut sql).unwrap();
+    Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert_eq!(
@@ -778,7 +800,9 @@ fn postgres_rejects_unsupported_changed_column_definitions() {
         };
 
         let mut sql = Vec::new();
-        let error = Postgres.render_plan(&plan, &mut sql).unwrap_err();
+        let error = Postgres
+            .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+            .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
     }
 }
@@ -2453,7 +2477,9 @@ fn postgres_defers_foreign_keys_until_all_tables_are_created() {
     };
 
     let mut sql = Vec::new();
-    Postgres.render_plan(&plan, &mut sql).unwrap();
+    Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     let comments_create = sql.find("CREATE TABLE \"public\".\"comments\"").unwrap();
@@ -2696,7 +2722,9 @@ fn postgres_renders_view_plan_steps() {
     };
 
     let mut sql = Vec::new();
-    Postgres.render_plan(&plan, &mut sql).unwrap();
+    Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert!(
@@ -2755,7 +2783,9 @@ fn postgres_renders_distinct_view_body() {
     };
 
     let mut sql = Vec::new();
-    Postgres.render_plan(&plan, &mut sql).unwrap();
+    Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert!(
@@ -2820,7 +2850,9 @@ fn postgres_renders_case_view_body() {
     };
 
     let mut sql = Vec::new();
-    Postgres.render_plan(&plan, &mut sql).unwrap();
+    Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
     assert!(

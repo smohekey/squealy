@@ -64,12 +64,16 @@ pub fn render_create_sql<B: SchemaBackend>(
 }
 
 /// Renders incremental DDL for a policy-checked [`DatabasePlan`].
+///
+/// `desired` is the target model the plan reaches; backends that rebuild whole tables (SQLite) need it
+/// to render a rebuilt table's unchanged columns, which the per-change plan steps do not carry.
 pub fn render_plan_sql<B: SchemaBackend>(
     plan: &DatabasePlan,
+    desired: &DatabaseModel,
     backend: &B,
 ) -> std::io::Result<String> {
     let mut buffer = Vec::new();
-    backend.render_plan(plan, &mut buffer)?;
+    backend.render_plan(plan, desired, &mut buffer)?;
     bytes_to_sql(buffer)
 }
 
@@ -82,22 +86,23 @@ pub fn render_plan_sql<B: SchemaBackend>(
 /// statements run outside the transaction — matching what `apply_plan_with_options` actually applies.
 pub fn render_plan_with_options<B: SchemaBackend>(
     plan: &DatabasePlan,
+    desired: &DatabaseModel,
     backend: &B,
     options: PlanApplyOptions,
 ) -> std::io::Result<String> {
     if !options.concurrent_indexes {
-        return render_plan_sql(plan, backend);
+        return render_plan_sql(plan, desired, backend);
     }
 
     let (transactional, concurrent) = split_concurrent_index_steps(plan);
     let mut sql = if transactional.is_empty() {
         String::new()
     } else {
-        render_plan_sql(&transactional, backend)?
+        render_plan_sql(&transactional, desired, backend)?
     };
     if !concurrent.is_empty() {
         let mut buffer = Vec::new();
-        backend.render_plan_concurrent(&concurrent, &mut buffer)?;
+        backend.render_plan_concurrent(&concurrent, desired, &mut buffer)?;
         let concurrent_sql = bytes_to_sql(buffer)?;
         if !sql.is_empty() {
             sql.push('\n');
@@ -492,8 +497,13 @@ pub struct PlanApplyOptions {
 }
 
 /// Renders `plan` using `backend` and executes it against `connection`.
+///
+/// `desired` is the target model the plan reaches; it is forwarded to
+/// [`render_plan_sql`] so table-rebuild backends (SQLite) can render a rebuilt table's unchanged
+/// columns.
 pub async fn apply_plan<B, C>(
     plan: &DatabasePlan,
+    desired: &DatabaseModel,
     backend: &B,
     connection: &mut C,
 ) -> Result<(), PublishError<C::Error>>
@@ -501,7 +511,14 @@ where
     B: SchemaBackend,
     C: DdlExecutor,
 {
-    apply_plan_with_options(plan, backend, connection, PlanApplyOptions::default()).await
+    apply_plan_with_options(
+        plan,
+        desired,
+        backend,
+        connection,
+        PlanApplyOptions::default(),
+    )
+    .await
 }
 
 /// Renders and executes `plan`, honouring [`PlanApplyOptions`].
@@ -512,6 +529,7 @@ where
 /// drop and retry) for not locking the table against writes while the index builds.
 pub async fn apply_plan_with_options<B, C>(
     plan: &DatabasePlan,
+    desired: &DatabaseModel,
     backend: &B,
     connection: &mut C,
     options: PlanApplyOptions,
@@ -524,7 +542,7 @@ where
         return Ok(());
     }
     if !options.concurrent_indexes {
-        let sql = render_plan_sql(plan, backend).map_err(PublishError::Render)?;
+        let sql = render_plan_sql(plan, desired, backend).map_err(PublishError::Render)?;
         return connection
             .execute_ddl(&sql)
             .await
@@ -533,7 +551,8 @@ where
 
     let (transactional, concurrent) = split_concurrent_index_steps(plan);
     if !transactional.is_empty() {
-        let sql = render_plan_sql(&transactional, backend).map_err(PublishError::Render)?;
+        let sql =
+            render_plan_sql(&transactional, desired, backend).map_err(PublishError::Render)?;
         connection
             .execute_ddl(&sql)
             .await
@@ -542,7 +561,7 @@ where
     if !concurrent.is_empty() {
         let mut buffer = Vec::new();
         backend
-            .render_plan_concurrent(&concurrent, &mut buffer)
+            .render_plan_concurrent(&concurrent, desired, &mut buffer)
             .map_err(PublishError::Render)?;
         let sql = bytes_to_sql(buffer).map_err(PublishError::Render)?;
         connection

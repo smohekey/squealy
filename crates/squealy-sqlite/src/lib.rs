@@ -12,9 +12,14 @@
 //! `sqlite_master` and the PRAGMA table-valued functions (see [`introspect`]), and the backend-owned
 //! schema-management bookkeeping ([`SchemaRefactorStore`]/[`SchemaMetadataStore`]/
 //! [`SchemaPublishHistoryStore`]) lives in `__squealy_`-prefixed tables (SQLite has no schemas to put
-//! them in). Incremental plan rendering ([`SchemaBackend::render_plan`]) is not yet supported: SQLite's
-//! `ALTER TABLE` only adds/drops/renames columns and renames tables, so most changes need the "create
-//! new table, copy, drop, rename" rebuild — a future slice.
+//! them in). Incremental plan rendering ([`SchemaBackend::render_plan`]) applies the changes SQLite's
+//! `ALTER TABLE` supports natively (add/drop/rename column, rename table, create/drop index) directly,
+//! and every other change — a column type change, or adding/dropping/altering a primary key, unique,
+//! foreign key or check, which SQLite carries only inline in `CREATE TABLE` — by rebuilding the whole
+//! table (create new, copy, drop, rename). Because dropping a table fires `ON DELETE` actions while
+//! foreign keys are enforced, [`DdlExecutor::execute_ddl`] applies a plan with enforcement disabled and
+//! re-checks it before committing (SQLite only lets foreign-key enforcement be toggled outside a
+//! transaction, so the executor — not the rendered SQL — owns that envelope).
 
 #![forbid(unsafe_code)]
 
@@ -84,13 +89,13 @@ impl SchemaBackend for Sqlite {
         sql::write_database(model, writer)
     }
 
-    fn render_plan(&self, _plan: &DatabasePlan, _writer: &mut impl Write) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "SQLite incremental schema plan rendering is not supported yet: SQLite's ALTER TABLE \
-             cannot change a column's type or add/drop most constraints, so changes require a \
-             create-copy-drop-rename table rebuild (a future slice)",
-        ))
+    fn render_plan(
+        &self,
+        plan: &DatabasePlan,
+        desired: &DatabaseModel,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        sql::write_plan(plan, desired, writer)
     }
 }
 
@@ -168,17 +173,50 @@ impl DdlExecutor for SqliteConnection {
     /// Runs the whole DDL batch **atomically** inside a transaction. Unlike MySQL, SQLite has
     /// transactional DDL, so a mid-batch failure rolls the whole batch back — there is no
     /// partially-applied-schema state to report.
+    ///
+    /// Foreign-key enforcement is disabled for the batch and restored afterwards. An incremental plan
+    /// rebuilds a changed table by dropping and recreating it, and a `DROP TABLE` fires `ON DELETE`
+    /// actions on child rows while enforcement is on (a rebuild of a table with `ON DELETE CASCADE`
+    /// children would delete those rows). SQLite only allows `PRAGMA foreign_keys` to be toggled
+    /// **outside** a transaction (it is a no-op within one), so enforcement is turned off before `BEGIN`
+    /// and back on after the transaction ends; `PRAGMA foreign_key_check` re-validates referential
+    /// integrity before the commit, so a genuine violation (e.g. a newly added or tightened foreign key
+    /// whose existing data no longer satisfies it) still fails the batch instead of committing silently.
     async fn execute_ddl(&mut self, sql: &str) -> Result<(), SqliteError> {
         let sql = sql.to_owned();
         self.conn
             .call(move |conn| {
-                let transaction = conn.transaction()?;
-                transaction.execute_batch(&sql)?;
-                transaction.commit()
+                // Toggled outside any transaction (a no-op inside one).
+                conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+                let result = apply_ddl_batch(conn, &sql);
+                // Restore enforcement whatever happened (a failed batch has already rolled back).
+                let restored = conn.execute_batch("PRAGMA foreign_keys = ON");
+                result.and(restored)
             })
             .await
             .map_err(SqliteError::Execute)
     }
+}
+
+/// Applies a DDL batch inside a transaction, re-validating foreign keys before committing. The caller
+/// disables enforcement for the batch (see [`DdlExecutor::execute_ddl`]), so referential integrity is
+/// not checked statement-by-statement; `PRAGMA foreign_key_check` verifies it before the commit, and
+/// any violation aborts the batch (the transaction rolls back on the early return).
+fn apply_ddl_batch(conn: &mut rusqlite::Connection, sql: &str) -> rusqlite::Result<()> {
+    let transaction = conn.transaction()?;
+    transaction.execute_batch(sql)?;
+    let has_violation = {
+        let mut check = transaction.prepare("PRAGMA foreign_key_check")?;
+        let mut rows = check.query([])?;
+        rows.next()?.is_some()
+    };
+    if has_violation {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+            Some("foreign key constraint violation after applying the schema change".to_owned()),
+        ));
+    }
+    transaction.commit()
 }
 
 impl SchemaIntrospect for SqliteConnection {
