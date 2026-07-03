@@ -565,6 +565,41 @@ async fn round_trips_fixed_bytes_width() {
 }
 
 #[tokio::test]
+async fn preserves_nullability_of_non_rowid_primary_key_columns() {
+    // Only a single-column INTEGER primary key (the rowid alias) is implicitly NOT NULL; a TEXT primary
+    // key and a composite key allow NULLs unless declared NOT NULL, so introspection must not force them.
+    let mut connection = connect().await;
+    connection
+        .execute_ddl(
+            "CREATE TABLE rowid_pk (id INTEGER PRIMARY KEY, label TEXT);\
+             CREATE TABLE text_pk (slug TEXT PRIMARY KEY, label TEXT);\
+             CREATE TABLE composite_pk (a INTEGER, b INTEGER, PRIMARY KEY (a, b))",
+        )
+        .await
+        .expect("create tables");
+
+    let actual = squealy_model::introspect(&mut connection).await.unwrap();
+    let column = |table: &str, name: &str| -> bool {
+        actual.schemas[0]
+            .tables
+            .iter()
+            .find(|t| t.name == table)
+            .unwrap()
+            .columns
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap()
+            .nullable
+    };
+    // The rowid alias is not nullable (table_info reports notnull=0, but SQLite enforces NOT NULL).
+    assert!(!column("rowid_pk", "id"));
+    // A TEXT primary key and composite-key columns genuinely allow NULLs.
+    assert!(column("text_pk", "slug"));
+    assert!(column("composite_pk", "a"));
+    assert!(column("composite_pk", "b"));
+}
+
+#[tokio::test]
 async fn introspects_empty_database_as_no_schemas() {
     // SQLite has no namespace object, so an empty database introspects to `schemas: []` — not a phantom
     // default schema that would diff as a spurious DropSchema against an empty model.

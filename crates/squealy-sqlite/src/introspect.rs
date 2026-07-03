@@ -81,10 +81,16 @@ async fn table(connection: &SqliteConnection, name: &str) -> Result<TableModel, 
 
     let mut columns = Vec::with_capacity(column_rows.len());
     for column in &column_rows {
-        let is_sole_pk = autoincrement
-            && primary_key
-                .as_ref()
-                .is_some_and(|pk| pk.columns[0] == column.name);
+        let is_sole_pk_column = primary_key
+            .as_ref()
+            .is_some_and(|pk| pk.columns.len() == 1 && pk.columns[0] == column.name);
+        // A single-column `INTEGER` primary key is the rowid alias, which is always `NOT NULL` even
+        // though `PRAGMA table_info` reports `notnull = 0` for it. Every *other* primary-key column
+        // (a `TEXT` key, a non-`INTEGER` type, or a composite key) genuinely allows NULLs in SQLite
+        // unless declared `NOT NULL`, so its `notnull` flag is respected rather than forced.
+        let is_rowid_alias =
+            is_sole_pk_column && column.declared_type.eq_ignore_ascii_case("INTEGER");
+        let is_sole_pk = autoincrement && is_sole_pk_column;
         // A `[u8; N]` column renders as `BLOB` plus a generated width `CHECK`; recover the width from
         // that check (which no PRAGMA reports) so a `FixedBytes(N)` column round-trips rather than
         // collapsing to `Bytes` (its BLOB affinity) and leaving a stale width check on a size change.
@@ -100,9 +106,7 @@ async fn table(connection: &SqliteConnection, name: &str) -> Result<TableModel, 
             comment: None,
             ty,
             collation: None,
-            // A column in the primary key is never nullable, even though `PRAGMA table_info` reports
-            // `notnull = 0` for the `INTEGER PRIMARY KEY` rowid alias.
-            nullable: column.notnull == 0 && column.pk == 0,
+            nullable: column.notnull == 0 && !is_rowid_alias,
             default: column
                 .default
                 .as_deref()
