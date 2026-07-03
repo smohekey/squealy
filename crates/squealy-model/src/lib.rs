@@ -321,6 +321,14 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
     // tables/views of all but one same-named schema; coalesce them here (concatenating in first-seen
     // order) so the flattened model keeps every object. This is a no-op when names stay distinct.
     coalesce_schemas_by_name(&mut model.schemas);
+    // A backend without namespace objects (SQLite) reports no schema for an empty database, so drop a
+    // schema left with no tables or views — otherwise a desired model carrying an empty namespace diffs
+    // as a spurious `CreateSchema` on every run. A backend with real schemas keeps them.
+    if !connection.has_namespaces() {
+        model
+            .schemas
+            .retain(|schema| !schema.tables.is_empty() || !schema.views.is_empty());
+    }
     model
 }
 
@@ -892,6 +900,10 @@ mod tests {
             None
         }
 
+        fn has_namespaces(&self) -> bool {
+            false
+        }
+
         fn canonical_unique_name(&self, unique: &Constraint) -> String {
             format!("unique:{}", unique.columns.join(","))
         }
@@ -912,6 +924,44 @@ mod tests {
                 other => other.clone(),
             }
         }
+    }
+
+    #[test]
+    fn canonicalize_model_drops_empty_schemas_without_namespaces() {
+        // A schema-less backend reports no schema for an empty database, so a desired empty namespace
+        // must be dropped (it would otherwise diff as a spurious CreateSchema). A schema with objects is
+        // kept. A backend with real schemas keeps the empty schema.
+        let model = DatabaseModel {
+            schemas: vec![
+                SchemaModel {
+                    name: Some("empty".to_owned()),
+                    views: Vec::new(),
+                    tables: Vec::new(),
+                },
+                SchemaModel {
+                    name: Some("app".to_owned()),
+                    views: Vec::new(),
+                    tables: vec![TableModel {
+                        name: "widgets".to_owned(),
+                        comment: None,
+                        columns: vec![],
+                        primary_key: None,
+                        foreign_keys: vec![],
+                        uniques: vec![],
+                        checks: vec![],
+                        indexes: vec![],
+                    }],
+                },
+            ],
+        };
+
+        let schema_less = canonicalize_model(&CanonBackend, &model);
+        assert_eq!(schema_less.schemas.len(), 1);
+        assert_eq!(schema_less.schemas[0].tables[0].name, "widgets");
+
+        // A backend with real schemas (DefaultBackend uses the trait defaults) keeps the empty schema.
+        let with_schemas = canonicalize_model(&DefaultBackend, &model);
+        assert_eq!(with_schemas.schemas.len(), 2);
     }
 
     #[test]

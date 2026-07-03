@@ -408,6 +408,18 @@ pub trait SchemaIntrospect {
         name.map(str::to_owned)
     }
 
+    /// Whether this backend has namespace (schema) objects.
+    ///
+    /// A backend without them (SQLite) has no `CREATE SCHEMA`: an empty namespace is not a thing that can
+    /// exist, so its introspection reports no schema at all for an empty database. Canonicalization
+    /// therefore drops a schema left with no tables or views (after names are flattened and same-named
+    /// schemas coalesced), so a desired model carrying an empty namespace does not diff as a spurious
+    /// `CreateSchema` on every run. The default is `true` — a backend with real schemas (PostgreSQL,
+    /// MySQL) keeps an empty schema, which is a genuine object it introspects and can create or drop.
+    fn has_namespaces(&self) -> bool {
+        true
+    }
+
     /// Canonicalizes a unique constraint's name to a stable, name-independent form for backends whose
     /// introspection does not round-trip the declared name.
     ///

@@ -217,6 +217,13 @@ impl SchemaIntrospect for SqliteConnection {
         None
     }
 
+    /// SQLite has no `CREATE SCHEMA`, so an empty namespace has nothing to create and introspection
+    /// reports no schema for an empty database; canonicalization drops an empty flattened schema to
+    /// match.
+    fn has_namespaces(&self) -> bool {
+        false
+    }
+
     /// SQLite does not name a primary key; introspection reports it with an empty name, so flatten a
     /// crate-declared `pk_<table>` to match. A table has at most one primary key, so an empty name never
     /// collides.

@@ -718,6 +718,34 @@ async fn round_trips_a_partial_descending_index_direction() {
 }
 
 #[tokio::test]
+async fn replans_empty_for_a_desired_model_with_only_empty_schemas() {
+    // A desired model whose (schema-qualified) namespace has no tables publishes no DDL, and the empty
+    // database introspects to `schemas: []`. Canonicalization drops the empty flattened schema, so the
+    // re-plan is clean rather than a spurious CreateSchema.
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            views: Vec::new(),
+            tables: Vec::new(),
+        }],
+    };
+
+    let mut connection = connect().await;
+    squealy_model::publish(&model, &Sqlite, &mut connection)
+        .await
+        .expect("publish empty-schema model");
+
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan empty-schema model");
+    assert!(plan.steps.is_empty(), "got: {:?}", plan.steps);
+}
+
+#[tokio::test]
 async fn introspects_empty_database_as_no_schemas() {
     // SQLite has no namespace object, so an empty database introspects to `schemas: []` — not a phantom
     // default schema that would diff as a spurious DropSchema against an empty model.
