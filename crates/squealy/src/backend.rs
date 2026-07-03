@@ -1,7 +1,10 @@
 use std::future::Future;
 use std::io::{self, Write};
 
-use crate::{DatabaseModel, DatabasePlan, IdentityMode, IndexMethod, SqlType, Table};
+use crate::{
+    Constraint, DatabaseModel, DatabasePlan, DefaultValue, ForeignKeyModel, IdentityMode,
+    IndexMethod, SqlType, Table,
+};
 
 /// Backend-specific row cursor used while decoding a projected row.
 pub trait RowReader: Sized {
@@ -388,6 +391,77 @@ pub trait SchemaIntrospect {
     /// introspected model are canonicalized through this before diffing. The default is the identity.
     fn canonical_check_expression(&self, expression: &str) -> String {
         expression.to_owned()
+    }
+
+    /// Canonicalizes a schema (namespace) name to the form this backend's introspection reports.
+    ///
+    /// A backend with no namespaces flattens every table into one unqualified namespace: SQLite has no
+    /// `CREATE SCHEMA`, so it renders and introspects tables unqualified and reads every table back under
+    /// the default (`None`) namespace. A desired model declared `#[schema(App)]` would otherwise diff as
+    /// a wholesale drop-and-recreate of every table (from schema `app` into schema `None`) after each
+    /// publish. This is applied — to **both** the desired and introspected model before diffing — to each
+    /// [`SchemaModel::name`](crate::SchemaModel) and to every
+    /// [`ForeignKeyModel::references_schema`](crate::ForeignKeyModel) so a cross-schema reference
+    /// flattens the same way. The default is the identity, which suits backends with real schemas
+    /// (PostgreSQL, MySQL).
+    fn canonical_schema_name(&self, name: Option<&str>) -> Option<String> {
+        name.map(str::to_owned)
+    }
+
+    /// Whether this backend has namespace (schema) objects.
+    ///
+    /// A backend without them (SQLite) has no `CREATE SCHEMA`: an empty namespace is not a thing that can
+    /// exist, so its introspection reports no schema at all for an empty database. Canonicalization
+    /// therefore drops a schema left with no tables or views (after names are flattened and same-named
+    /// schemas coalesced), so a desired model carrying an empty namespace does not diff as a spurious
+    /// `CreateSchema` on every run. The default is `true` — a backend with real schemas (PostgreSQL,
+    /// MySQL) keeps an empty schema, which is a genuine object it introspects and can create or drop.
+    fn has_namespaces(&self) -> bool {
+        true
+    }
+
+    /// Canonicalizes a unique constraint's name to a stable, name-independent form for backends whose
+    /// introspection does not round-trip the declared name.
+    ///
+    /// SQLite renders a `UNIQUE` constraint inline and unnamed; its backing auto-index is reported as
+    /// `sqlite_autoindex_<table>_<n>`, so a crate-declared `uq_<table>_<cols>` never matches on the way
+    /// back. Because the diff keys uniques by name, a desired unique would diff as a
+    /// drop-`sqlite_autoindex`/add-`uq_…` churn after every publish. Deriving the canonical name from the
+    /// constraint's columns (identical on both the desired and introspected side, which agree on the
+    /// column list) makes equivalent uniques compare equal while staying distinct when a table carries
+    /// more than one. This is applied to **both** models before diffing. The default preserves the
+    /// declared name, which suits backends that round-trip it (PostgreSQL, MySQL).
+    fn canonical_unique_name(&self, unique: &Constraint) -> String {
+        unique.name.clone()
+    }
+
+    /// Canonicalizes a foreign key's name to a stable, name-independent form, the foreign-key analogue
+    /// of [`canonical_unique_name`](Self::canonical_unique_name).
+    ///
+    /// SQLite renders foreign keys inline and unnamed and reports them positionally
+    /// (`PRAGMA foreign_key_list` has no name), so a crate-declared `fk_<table>_<cols>` cannot round-trip
+    /// and would diff as a drop/add after every publish. Deriving the canonical name from the referencing
+    /// columns and the referenced table/columns (identical on both sides) makes equivalent foreign keys
+    /// compare equal. This is applied to **both** models before diffing. The default preserves the
+    /// declared name (PostgreSQL, MySQL).
+    fn canonical_foreign_key_name(&self, foreign_key: &ForeignKeyModel) -> String {
+        foreign_key.name.clone()
+    }
+
+    /// Canonicalizes a column default to the form this backend's introspection reads back, given the
+    /// column's (already-canonicalized) type.
+    ///
+    /// A backend whose column type collapses to an affinity also collapses a default's *representation*:
+    /// SQLite has no boolean or unsigned literal, so it renders a [`DefaultValue::Bool`]/[`DefaultValue::UInt`]
+    /// on an `INTEGER`-affinity column as a plain integer, which introspects back as
+    /// [`DefaultValue::Int`]. Without aligning the desired default the same way, a published `bool`
+    /// column with a default would diff as a never-settling `AlterColumn` after every publish. This is
+    /// applied — to **both** the desired and introspected model before diffing — to each
+    /// [`ColumnModel::default`](crate::ColumnModel). The default is the identity, which suits backends
+    /// that render each default in a distinct, round-tripping form (PostgreSQL, MySQL).
+    fn canonical_default(&self, ty: &SqlType, default: &DefaultValue) -> DefaultValue {
+        let _ = ty;
+        default.clone()
     }
 }
 
