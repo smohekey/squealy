@@ -190,6 +190,26 @@ pub(crate) fn write_plan(
         write_create_refactor_log_table(writer)?;
     }
 
+    // Free every index name the plan drops or redefines, up front, before any create runs. SQLite's
+    // index namespace is database-wide, so a name moved or swapped between tables must be released
+    // before a table recreates it; doing all drops first prevents a later per-table `DropIndex` from
+    // destroying a replacement index another table already created for the same name. Genuine removals
+    // (a name not recreated) are handled here too, so `DropIndex` emits nothing in the per-table pass.
+    for step in &plan.steps {
+        if let DatabasePlanStep::AlterTable { change, .. } = step {
+            let dropped_name = match change.as_ref() {
+                TablePlanStep::DropIndex { index } => Some(index.name.as_str()),
+                TablePlanStep::AlterIndex { before, .. } => Some(before.name.as_str()),
+                _ => None,
+            };
+            if let Some(name) = dropped_name {
+                statement(writer, &mut first)?;
+                writer.write_all(b"DROP INDEX IF EXISTS ")?;
+                write_quoted_ident(name, writer)?;
+            }
+        }
+    }
+
     // A rebuild subsumes *all* of a table's alterations, so a table's `AlterTable` steps are handled
     // together at the first one seen; later steps for the same table are skipped.
     let mut altered_tables = HashSet::new();
@@ -265,8 +285,7 @@ fn write_create_table_step(
     statement(writer, first)?;
     write_create_table(table, writer)?;
     for index in &table.indexes {
-        statement(writer, first)?;
-        write_create_index(&table.name, index, writer)?;
+        write_plan_create_index(&table.name, index, writer, first)?;
     }
     Ok(())
 }
@@ -410,20 +429,14 @@ fn write_native_table_change(
             write_quoted_ident(to, writer)?;
         }
         TablePlanStep::AddIndex { index } => {
-            statement(writer, first)?;
-            write_create_index(table, index, writer)?;
+            write_plan_create_index(table, index, writer, first)?;
         }
-        TablePlanStep::DropIndex { index } => {
-            statement(writer, first)?;
-            writer.write_all(b"DROP INDEX ")?;
-            write_quoted_ident(&index.name, writer)?;
-        }
-        TablePlanStep::AlterIndex { before, after } => {
-            statement(writer, first)?;
-            writer.write_all(b"DROP INDEX ")?;
-            write_quoted_ident(&before.name, writer)?;
-            statement(writer, first)?;
-            write_create_index(table, after, writer)?;
+        // The name was already freed by the drop pre-pass in `write_plan`; nothing to emit here.
+        TablePlanStep::DropIndex { .. } => {}
+        // The old definition was dropped by the pre-pass (a diff keys indexes by name, so
+        // `before.name == after.name`); recreate the new definition.
+        TablePlanStep::AlterIndex { after, .. } => {
+            write_plan_create_index(table, after, writer, first)?;
         }
         other => {
             // Unreachable: `write_table_alterations` routes every rebuild-requiring change through
@@ -594,8 +607,7 @@ fn write_table_rebuild(
     write_quoted_ident(table, writer)?;
 
     for index in &target.indexes {
-        statement(writer, first)?;
-        write_create_index(table, index, writer)?;
+        write_plan_create_index(table, index, writer, first)?;
     }
     Ok(())
 }
@@ -907,6 +919,27 @@ fn write_foreign_key(foreign_key: &ForeignKeyModel, writer: &mut impl Write) -> 
         write!(writer, " ON UPDATE {}", on_update.as_sql())?;
     }
     Ok(())
+}
+
+/// Renders a plan-applied index creation: `DROP INDEX IF EXISTS "name"` then `CREATE INDEX …`.
+///
+/// SQLite's index names are database-wide, so a name may still be held by an obsolete index on another
+/// table when this runs — the plan's per-table drops and adds interleave, and a name can even be moved
+/// or swapped between tables (`a.idx`/`b.idy` → `a.idy`/`b.idx`). Freeing the name first lets the create
+/// succeed instead of failing on a stale duplicate. The up-front target object-name uniqueness check
+/// guarantees the name's current holder is obsolete (the target uses each name once), so dropping it is
+/// always correct. Create-from-scratch uses [`write_create_index`] directly (nothing pre-exists).
+fn write_plan_create_index(
+    table: &str,
+    index: &IndexModel,
+    writer: &mut impl Write,
+    first: &mut bool,
+) -> io::Result<()> {
+    statement(writer, first)?;
+    writer.write_all(b"DROP INDEX IF EXISTS ")?;
+    write_quoted_ident(&index.name, writer)?;
+    statement(writer, first)?;
+    write_create_index(table, index, writer)
 }
 
 fn write_create_index(table: &str, index: &IndexModel, writer: &mut impl Write) -> io::Result<()> {

@@ -390,6 +390,19 @@ async fn count(raw: &RawConnection, table: &'static str) -> i64 {
         .expect("count rows")
 }
 
+/// The table an index is defined on, per `sqlite_master`.
+async fn index_table(raw: &RawConnection, index: &'static str) -> String {
+    raw.call(move |conn| {
+        conn.query_row(
+            "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            [index],
+            |row| row.get(0),
+        )
+    })
+    .await
+    .expect("index table")
+}
+
 #[tokio::test]
 async fn applies_a_native_add_column_and_converges() {
     let (mut connection, raw) = setup().await;
@@ -964,4 +977,69 @@ fn rejects_a_target_with_a_duplicate_index_name() {
         .render_plan(&plan, &desired, &mut buffer)
         .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[tokio::test]
+async fn applies_an_index_name_swap_between_tables() {
+    // SQLite's index namespace is database-wide, so swapping two tables' index names is only valid if
+    // each name is freed before its replacement is created (the per-table drops and adds interleave).
+    let index = |name: &str, column_name: &str| IndexModel {
+        name: name.to_owned(),
+        columns: vec![column_name.to_owned()],
+        expressions: Vec::new(),
+        include_columns: Vec::new(),
+        unique: false,
+        method: None,
+        directions: Vec::new(),
+        nulls: Vec::new(),
+        collations: Vec::new(),
+        operator_classes: Vec::new(),
+        predicate: None,
+    };
+    let (mut connection, raw) = setup().await;
+    let mut left = table("t_left", vec![column("a", SqlType::Text, false)]);
+    left.indexes = vec![index("idx_one", "a")];
+    let mut right = table("t_right", vec![column("b", SqlType::Text, false)]);
+    right.indexes = vec![index("idx_two", "b")];
+    let v1 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            views: Vec::new(),
+            tables: vec![left, right],
+        }],
+    };
+    publish(&v1, &Sqlite, &mut connection)
+        .await
+        .expect("publish v1");
+
+    // Swap the two index names between the tables.
+    let mut v2 = introspect(&mut connection).await.expect("introspect");
+    for table in &mut v2.schemas[0].tables {
+        for index in &mut table.indexes {
+            index.name = if index.name == "idx_one" {
+                "idx_two".to_owned()
+            } else {
+                "idx_one".to_owned()
+            };
+        }
+    }
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan v2");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("the index-name swap applies");
+
+    assert_eq!(index_table(&raw, "idx_two").await, "t_left");
+    assert_eq!(index_table(&raw, "idx_one").await, "t_right");
+
+    let replan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("re-plan");
+    assert!(
+        replan.steps.is_empty(),
+        "must converge, got: {:?}",
+        replan.steps
+    );
 }
