@@ -236,8 +236,8 @@ fn rebuild_recreates_the_target_indexes() {
     let sql = render(&plan, &one_table(desired_table));
     assert!(sql.contains("CREATE TABLE \"__squealy_new_t\""), "{sql}");
     assert!(
-        sql.contains("CREATE INDEX IF NOT EXISTS \"idx_t_slug\" ON \"t\" (\"slug\")"),
-        "the rebuild recreates the index idempotently: {sql}"
+        sql.contains("CREATE INDEX \"idx_t_slug\" ON \"t\" (\"slug\")"),
+        "the rebuild recreates the index: {sql}"
     );
 }
 
@@ -720,9 +720,11 @@ async fn rebuild_preserves_the_autoincrement_high_water_mark() {
 
 #[tokio::test]
 async fn rebuild_with_concurrent_index_option_does_not_double_create() {
-    // With `concurrent_indexes`, an `AddIndex` step is split out of the transactional plan, but a
-    // rebuild in that plan still recreates every target index — so the index would be created twice. The
-    // idempotent `CREATE INDEX IF NOT EXISTS` lets both converge instead of failing on a duplicate.
+    // SQLite has no concurrent index build (`supports_concurrent_index_creation` is false), so
+    // `concurrent_indexes` is ignored and the plan applies transactionally. That matters when a plan
+    // both rebuilds a table and adds an index: were the index-add split into a separate phase, the
+    // rebuild would recreate the index and the split-out add would create it again. Applying it all in
+    // one batch means the rebuild creates the index exactly once.
     let (mut connection, raw) = setup().await;
     let v1 = one_table(table(
         "gauges",

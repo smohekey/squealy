@@ -90,7 +90,7 @@ pub fn render_plan_with_options<B: SchemaBackend>(
     backend: &B,
     options: PlanApplyOptions,
 ) -> std::io::Result<String> {
-    if !options.concurrent_indexes {
+    if !options.concurrent_indexes || !backend.supports_concurrent_index_creation() {
         return render_plan_sql(plan, desired, backend);
     }
 
@@ -541,7 +541,7 @@ where
     if plan.is_empty() {
         return Ok(());
     }
-    if !options.concurrent_indexes {
+    if !options.concurrent_indexes || !backend.supports_concurrent_index_creation() {
         let sql = render_plan_sql(plan, desired, backend).map_err(PublishError::Render)?;
         return connection
             .execute_ddl(&sql)

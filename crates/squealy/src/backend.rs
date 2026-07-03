@@ -290,6 +290,19 @@ pub trait SchemaBackend {
     ) -> io::Result<()> {
         self.render_plan(plan, desired, writer)
     }
+
+    /// Whether the backend can build indexes concurrently, outside the plan transaction (PostgreSQL
+    /// `CREATE INDEX CONCURRENTLY`).
+    ///
+    /// The default is `false`: only a backend with a genuine non-locking form should opt in. Callers
+    /// (`apply_plan_with_options` / `render_plan_with_options`) only honour
+    /// [`PlanApplyOptions::concurrent_indexes`](crate) when this is `true` — splitting index creation
+    /// out of the transactional batch is pointless for a backend that has no concurrent form, and
+    /// harmful for one that rebuilds whole tables (SQLite): the transactional rebuild recreates the
+    /// index and the split-out index-add would then create it again.
+    fn supports_concurrent_index_creation(&self) -> bool {
+        false
+    }
 }
 
 /// Executes already-rendered DDL against a live connection.

@@ -62,7 +62,7 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
         for table in &schema.tables {
             for index in &table.indexes {
                 statement(writer, &mut first)?;
-                write_create_index(&table.name, index, false, writer)?;
+                write_create_index(&table.name, index, writer)?;
             }
         }
     }
@@ -137,7 +137,7 @@ pub(crate) fn write_table(
     write_create_table(&model, writer)?;
     for index in &model.indexes {
         writer.write_all(b";\n")?;
-        write_create_index(&model.name, index, false, writer)?;
+        write_create_index(&model.name, index, writer)?;
     }
     Ok(())
 }
@@ -163,12 +163,10 @@ pub(crate) fn write_plan(
     desired: &DatabaseModel,
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    // Validate the target object namespace up front, exactly as create-from-scratch does. Incremental
-    // index creation uses `CREATE INDEX IF NOT EXISTS` (so a rebuild and a split-out index-add
-    // converge); that form silently skips when the name already exists anywhere in SQLite's single
-    // table+index namespace, so a target model whose object names are not unique would leave the
-    // intended index missing and re-plan forever. Rejecting a non-unique target here keeps
-    // `IF NOT EXISTS` safe. Tables are checked before indexes so a collision is reported as the index.
+    // Validate the target object namespace up front, exactly as create-from-scratch does. SQLite keeps
+    // tables and indexes in one database-wide namespace, so a target whose object names are not unique
+    // cannot be represented; reject it here rather than emit a plan that fails partway (or leaves the
+    // schema wrong). Tables are checked before indexes so a collision is reported as the index.
     let tables = || {
         desired
             .schemas
@@ -268,7 +266,7 @@ fn write_create_table_step(
     write_create_table(table, writer)?;
     for index in &table.indexes {
         statement(writer, first)?;
-        write_create_index(&table.name, index, true, writer)?;
+        write_create_index(&table.name, index, writer)?;
     }
     Ok(())
 }
@@ -413,7 +411,7 @@ fn write_native_table_change(
         }
         TablePlanStep::AddIndex { index } => {
             statement(writer, first)?;
-            write_create_index(table, index, true, writer)?;
+            write_create_index(table, index, writer)?;
         }
         TablePlanStep::DropIndex { index } => {
             statement(writer, first)?;
@@ -425,7 +423,7 @@ fn write_native_table_change(
             writer.write_all(b"DROP INDEX ")?;
             write_quoted_ident(&before.name, writer)?;
             statement(writer, first)?;
-            write_create_index(table, after, true, writer)?;
+            write_create_index(table, after, writer)?;
         }
         other => {
             // Unreachable: `write_table_alterations` routes every rebuild-requiring change through
@@ -597,7 +595,7 @@ fn write_table_rebuild(
 
     for index in &target.indexes {
         statement(writer, first)?;
-        write_create_index(table, index, true, writer)?;
+        write_create_index(table, index, writer)?;
     }
     Ok(())
 }
@@ -911,16 +909,7 @@ fn write_foreign_key(foreign_key: &ForeignKeyModel, writer: &mut impl Write) -> 
     Ok(())
 }
 
-/// Renders a `CREATE INDEX`. `if_not_exists` adds `IF NOT EXISTS` for plan-applied index creation, so
-/// a table rebuild (which recreates the target's indexes) and a separately-applied `AddIndex` step for
-/// the same index — as `apply_plan_with_options`'s concurrent-index split produces — converge instead
-/// of colliding on a duplicate. Create-from-scratch passes `false` so a genuine name clash still errors.
-fn write_create_index(
-    table: &str,
-    index: &IndexModel,
-    if_not_exists: bool,
-    writer: &mut impl Write,
-) -> io::Result<()> {
+fn write_create_index(table: &str, index: &IndexModel, writer: &mut impl Write) -> io::Result<()> {
     if !index.expressions.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -963,9 +952,6 @@ fn write_create_index(
         writer.write_all(b"UNIQUE ")?;
     }
     writer.write_all(b"INDEX ")?;
-    if if_not_exists {
-        writer.write_all(b"IF NOT EXISTS ")?;
-    }
     write_quoted_ident(&index.name, writer)?;
     writer.write_all(b" ON ")?;
     write_quoted_ident(table, writer)?;

@@ -165,6 +165,11 @@ impl squealy::SchemaBackend for Postgres {
     ) -> std::io::Result<()> {
         sql::ddl::write_plan_concurrent(plan, writer)
     }
+
+    fn supports_concurrent_index_creation(&self) -> bool {
+        // PostgreSQL builds indexes without locking writes via `CREATE INDEX CONCURRENTLY`.
+        true
+    }
 }
 
 #[cfg(feature = "schema")]
