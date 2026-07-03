@@ -908,3 +908,58 @@ async fn rebuild_evaluates_a_cast_column_conversion() {
         replan.steps
     );
 }
+
+#[test]
+fn rejects_a_table_comment_change() {
+    // SQLite has no table comment and introspection cannot read one back, so a `SetTableComment` step
+    // could never converge; it is rejected rather than silently applied as a no-op.
+    let actual = one_table(table("t", vec![column("id", SqlType::I64, false)]));
+    let mut desired_table = table("t", vec![column("id", SqlType::I64, false)]);
+    desired_table.comment = Some("a note".to_owned());
+    let desired = one_table(desired_table);
+    let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan");
+
+    let mut buffer = Vec::new();
+    let error = Sqlite
+        .render_plan(&plan, &desired, &mut buffer)
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
+fn rejects_a_target_with_a_duplicate_index_name() {
+    // Two indexes sharing a name collide in SQLite's single object namespace; incremental index
+    // creation uses `IF NOT EXISTS`, which would silently skip one, so the target namespace is
+    // validated up front (as create-from-scratch does).
+    let index = |name: &str, column_name: &str| IndexModel {
+        name: name.to_owned(),
+        columns: vec![column_name.to_owned()],
+        expressions: Vec::new(),
+        include_columns: Vec::new(),
+        unique: false,
+        method: None,
+        directions: Vec::new(),
+        nulls: Vec::new(),
+        collations: Vec::new(),
+        operator_classes: Vec::new(),
+        predicate: None,
+    };
+    let mut target = table(
+        "t",
+        vec![
+            column("a", SqlType::Text, false),
+            column("b", SqlType::Text, false),
+        ],
+    );
+    target.indexes = vec![index("dup", "a"), index("dup", "b")];
+    let desired = one_table(target);
+    // Any non-empty plan reaches the up-front namespace check; a create-from-empty is the simplest.
+    let plan =
+        plan_models(&desired, &DatabaseModel::default(), DiffPolicy::ALLOW_ALL).expect("plan");
+
+    let mut buffer = Vec::new();
+    let error = Sqlite
+        .render_plan(&plan, &desired, &mut buffer)
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}

@@ -163,6 +163,26 @@ pub(crate) fn write_plan(
     desired: &DatabaseModel,
     writer: &mut impl Write,
 ) -> io::Result<()> {
+    // Validate the target object namespace up front, exactly as create-from-scratch does. Incremental
+    // index creation uses `CREATE INDEX IF NOT EXISTS` (so a rebuild and a split-out index-add
+    // converge); that form silently skips when the name already exists anywhere in SQLite's single
+    // table+index namespace, so a target model whose object names are not unique would leave the
+    // intended index missing and re-plan forever. Rejecting a non-unique target here keeps
+    // `IF NOT EXISTS` safe. Tables are checked before indexes so a collision is reported as the index.
+    let tables = || {
+        desired
+            .schemas
+            .iter()
+            .flat_map(|schema| schema.tables.iter())
+    };
+    let object_names = || {
+        tables()
+            .map(|table| table.name.as_str())
+            .chain(tables().flat_map(|table| table.indexes.iter().map(|index| index.name.as_str())))
+    };
+    check_reserved_object_names(object_names())?;
+    check_object_name_uniqueness(object_names())?;
+
     let mut first = true;
 
     // Create the refactor bookkeeping table once, up front, if any rename in the plan carries a
@@ -303,7 +323,8 @@ fn write_table_alterations(
 /// used by a constraint or index and the plan step does not carry the table's other constraints.
 fn change_needs_rebuild(change: &TablePlanStep) -> bool {
     match change {
-        // SQLite has no table comments; the change is a no-op, not a rebuild.
+        // SQLite has no table comment: a comment change is rejected (in the native path or, alongside a
+        // rebuild, by `write_create_table`), not a rebuild trigger of its own.
         TablePlanStep::SetTableComment { .. } => false,
         // Natively expressible.
         TablePlanStep::RenameColumn { .. }
@@ -359,8 +380,20 @@ fn write_native_table_change(
     first: &mut bool,
 ) -> io::Result<()> {
     match change {
-        // SQLite has no table comments; nothing to emit.
-        TablePlanStep::SetTableComment { .. } => {}
+        // SQLite has no table comment (see `write_create_table`). Setting one is rejected — it cannot
+        // round-trip and would churn every plan; clearing one (`after: None`) has nothing to emit.
+        TablePlanStep::SetTableComment { after, .. } => {
+            if after.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "SQLite table comments are not supported for schema management (table \
+                         `{table}`): SQLite has no table comment and introspection cannot read one \
+                         back, so a published comment would churn every plan"
+                    ),
+                ));
+            }
+        }
         TablePlanStep::AddColumn { column } => {
             statement(writer, first)?;
             writer.write_all(b"ALTER TABLE ")?;
@@ -624,6 +657,22 @@ fn statement(writer: &mut impl Write, first: &mut bool) -> io::Result<()> {
 }
 
 fn write_create_table(table: &TableModel, writer: &mut impl Write) -> io::Result<()> {
+    // SQLite has no table comment and introspection cannot read one back (there is no PRAGMA for it),
+    // so a published comment would diff as a never-settling `SetTableComment` on every plan. Reject it
+    // rather than silently drop it, matching how table CHECK constraints and column collations are
+    // handled — a rebuild goes through here too, so a commented target is rejected there as well.
+    if table.comment.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite table comments are not supported for schema management (table `{}`): SQLite \
+                 has no table comment and introspection cannot read one back, so a published comment \
+                 would churn every plan",
+                table.name
+            ),
+        ));
+    }
+
     // SQLite carries auto-increment as `INTEGER PRIMARY KEY AUTOINCREMENT` on a single column (the
     // rowid alias), so it must be the sole, single-column primary key — and the table-level primary
     // key constraint is then omitted.
@@ -763,6 +812,18 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
             format!(
                 "SQLite column collations are not supported for schema management yet (column `{}`): \
                  they cannot be introspected, so a published collation would churn every plan",
+                column.name
+            ),
+        ));
+    }
+    if column.comment.is_some() {
+        // Like a table comment, a column comment is not introspectable, so it would churn every plan.
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite column comments are not supported for schema management (column `{}`): SQLite \
+                 has no column comment and introspection cannot read one back, so a published comment \
+                 would churn every plan",
                 column.name
             ),
         ));
