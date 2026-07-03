@@ -10,9 +10,9 @@ use squealy::{
     IdentityMode, IdentityModel, IndexModel, SchemaBackend, SchemaModel, SqlType, TableModel,
 };
 use squealy_model::{
-    DiffPolicy, PlanApplyOptions, RefactorLog, RefactorOperation, RenameColumn, apply_plan,
-    apply_plan_with_options, introspect, plan_from_database, plan_models,
-    plan_models_with_refactors, publish,
+    CastColumn, DiffPolicy, PlanApplyOptions, RefactorLog, RefactorOperation, RenameColumn,
+    apply_plan, apply_plan_with_options, introspect, plan_from_database,
+    plan_from_database_with_refactors, plan_models, plan_models_with_refactors, publish,
 };
 use squealy_sqlite::{Sqlite, SqliteConnection};
 use tokio_rusqlite::Connection as RawConnection;
@@ -798,6 +798,113 @@ async fn rebuild_with_concurrent_index_option_does_not_double_create() {
     assert!(
         replan.steps.is_empty(),
         "must converge, got: {:?}",
+        replan.steps
+    );
+}
+
+#[test]
+fn rebuild_applies_a_cast_column_expression_in_the_copy() {
+    // A `cast-column` refactor supplies a conversion for a column's type change; the rebuild copy must
+    // evaluate it, not copy the old value verbatim.
+    let actual = one_table(table(
+        "t",
+        vec![
+            column("id", SqlType::I64, false),
+            column("amount", SqlType::Text, false),
+        ],
+    ));
+    let desired = one_table(table(
+        "t",
+        vec![
+            column("id", SqlType::I64, false),
+            column("amount", SqlType::F64, false),
+        ],
+    ));
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::CastColumn(CastColumn {
+            id: "cast-amount".to_owned(),
+            schema: None,
+            table: "t".to_owned(),
+            column: "amount".to_owned(),
+            using: "CAST(\"amount\" AS REAL)".to_owned(),
+        })],
+    };
+    let plan = plan_models_with_refactors(&desired, &actual, &refactors, DiffPolicy::ALLOW_ALL)
+        .expect("plan");
+
+    let sql = render(&plan, &desired);
+    assert!(
+        sql.contains("__squealy_new_t"),
+        "a type change rebuilds: {sql}"
+    );
+    assert!(
+        sql.contains("SELECT \"id\", CAST(\"amount\" AS REAL) FROM \"t\""),
+        "the copy evaluates the cast expression: {sql}"
+    );
+}
+
+#[tokio::test]
+async fn rebuild_evaluates_a_cast_column_conversion() {
+    let (mut connection, raw) = setup().await;
+    let v1 = one_table(table(
+        "money",
+        vec![
+            column("id", SqlType::I64, false),
+            column("amount", SqlType::Text, false),
+        ],
+    ));
+    publish(&v1, &Sqlite, &mut connection)
+        .await
+        .expect("publish v1");
+    exec(
+        &raw,
+        "INSERT INTO \"money\" (\"id\", \"amount\") VALUES (1, '12.5')",
+    )
+    .await;
+
+    // v2 changes `amount` from text to a real, with a cast-column conversion.
+    let mut v2 = introspect(&mut connection).await.expect("introspect");
+    v2.schemas[0].tables[0]
+        .columns
+        .iter_mut()
+        .find(|column| column.name == "amount")
+        .expect("amount column")
+        .ty = SqlType::F64;
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::CastColumn(CastColumn {
+            id: "cast-amount".to_owned(),
+            schema: None,
+            table: "money".to_owned(),
+            column: "amount".to_owned(),
+            using: "CAST(\"amount\" AS REAL)".to_owned(),
+        })],
+    };
+
+    let plan =
+        plan_from_database_with_refactors(&v2, &refactors, &mut connection, DiffPolicy::ALLOW_ALL)
+            .await
+            .expect("plan v2");
+    assert!(
+        render(&plan, &v2).contains("CAST(\"amount\" AS REAL)"),
+        "the plan carries the cast"
+    );
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply v2");
+
+    // The stored value was converted to a real number, not left as the original text.
+    let amount: f64 = raw
+        .call(|conn| conn.query_row("SELECT \"amount\" FROM \"money\"", [], |row| row.get(0)))
+        .await
+        .expect("read amount");
+    assert_eq!(amount, 12.5);
+
+    let replan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("re-plan");
+    assert!(
+        replan.steps.is_empty(),
+        "cast migration must converge, got: {:?}",
         replan.steps
     );
 }

@@ -405,6 +405,13 @@ fn write_native_table_change(
     Ok(())
 }
 
+/// How a rebuilt table's column is populated from the old table: a source column (copied verbatim,
+/// possibly under a different name after a rename) or a `cast-column` conversion expression.
+enum CopySource<'a> {
+    Column(&'a str),
+    Expression(&'a str),
+}
+
 /// Rebuilds a table whose change SQLite's `ALTER TABLE` cannot express in place: create the new shape
 /// under a temporary name, copy the surviving data, drop the old table, rename the new one into place,
 /// and recreate the target's indexes (dropping the old table dropped them). Data is carried column by
@@ -463,15 +470,36 @@ fn write_table_rebuild(
             _ => None,
         })
         .collect();
-    let carried: Vec<(&str, &str)> = target
+    // A `cast-column` refactor supplies a conversion expression on the column's type change, carried on
+    // the `AlterColumn` step. It replaces the plain copy so the migration actually evaluates the
+    // conversion (the expression is backend-specific SQL, emitted verbatim, and references the old
+    // table's columns).
+    let type_casts: HashMap<&str, &str> = changes
+        .iter()
+        .filter_map(|change| match change {
+            TablePlanStep::AlterColumn {
+                after,
+                type_cast: Some(expression),
+                ..
+            } => Some((after.name.as_str(), expression.as_str())),
+            _ => None,
+        })
+        .collect();
+    let carried: Vec<(&str, CopySource)> = target
         .columns
         .iter()
         .filter(|column| !added.contains(column.name.as_str()))
         .map(|column| {
-            let source = renamed_from
-                .get(column.name.as_str())
-                .copied()
-                .unwrap_or(column.name.as_str());
+            let source = if let Some(expression) = type_casts.get(column.name.as_str()) {
+                CopySource::Expression(expression)
+            } else {
+                CopySource::Column(
+                    renamed_from
+                        .get(column.name.as_str())
+                        .copied()
+                        .unwrap_or(column.name.as_str()),
+                )
+            };
             (column.name.as_str(), source)
         })
         .collect();
@@ -488,11 +516,14 @@ fn write_table_rebuild(
             write_quoted_ident(target_column, writer)?;
         }
         writer.write_all(b")\nSELECT ")?;
-        for (position, (_, source_column)) in carried.iter().enumerate() {
+        for (position, (_, source)) in carried.iter().enumerate() {
             if position > 0 {
                 writer.write_all(b", ")?;
             }
-            write_quoted_ident(source_column, writer)?;
+            match source {
+                CopySource::Column(name) => write_quoted_ident(name, writer)?,
+                CopySource::Expression(expression) => writer.write_all(expression.as_bytes())?,
+            }
         }
         writer.write_all(b" FROM ")?;
         write_quoted_ident(table, writer)?;
