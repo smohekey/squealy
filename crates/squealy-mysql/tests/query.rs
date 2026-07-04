@@ -165,6 +165,46 @@ fn mysql_correlated_in_subquery_renders_in_its_dialect() {
 }
 
 #[test]
+fn mysql_scalar_subquery_as_comparison_operand() {
+    // A scalar subquery used as a comparison operand renders as a parenthesized SELECT, with MySQL
+    // backtick-quoted identifiers.
+    let query = Mysql
+        .from::<Widget>()
+        .where_correlated(|(widget,), sub| {
+            widget.id.equals(scalar_subquery(
+                sub.from::<Gadget>()
+                    .where_(|gadget| gadget.widget_id.equals(widget.id))
+                    .select_subquery(|(gadget,)| gadget.widget_id),
+            ))
+        })
+        .select(|(widget,)| widget.id);
+
+    assert_eq!(
+        query.to_sql(),
+        "SELECT q0_0.`id` AS `id` FROM `widgets` AS q0_0 WHERE (q0_0.`id` = (SELECT \
+         q1_0.`widget_id` AS `widget_id` FROM `gadgets` AS q1_0 WHERE (q1_0.`widget_id` = q0_0.`id`)))"
+    );
+}
+
+#[test]
+fn mysql_scalar_subquery_in_projection() {
+    // A scalar subquery in the projection renders as a parenthesized SELECT in the select list.
+    let query = Mysql.from::<Widget>().select_correlated(|(widget,), sub| {
+        scalar_subquery(
+            sub.from::<Gadget>()
+                .where_(|gadget| gadget.widget_id.equals(widget.id))
+                .select_subquery(|(gadget,)| gadget.id),
+        )
+    });
+
+    assert_eq!(
+        query.to_sql(),
+        "SELECT (SELECT q1_0.`id` AS `id` FROM `gadgets` AS q1_0 WHERE (q1_0.`widget_id` = q0_0.`id`)) \
+         AS `expr` FROM `widgets` AS q0_0"
+    );
+}
+
+#[test]
 fn mysql_exists_subquery_uses_question_mark_placeholders() {
     let query = Mysql
         .from::<Widget>()
