@@ -545,9 +545,18 @@ fn sql_type(data_type: &str, column_type: &str) -> SqlType {
             decimal_type(&column_type).unwrap_or_else(|| SqlType::Raw(column_type.to_uppercase()))
         }
         "date" => SqlType::Date,
-        "time" => SqlType::Time { tz: false },
-        "datetime" => SqlType::Timestamp { tz: false },
-        "timestamp" => SqlType::Timestamp { tz: true },
+        "time" => SqlType::Time {
+            tz: false,
+            precision: temporal_precision(&column_type, "time"),
+        },
+        "datetime" => SqlType::Timestamp {
+            tz: false,
+            precision: temporal_precision(&column_type, "datetime"),
+        },
+        "timestamp" => SqlType::Timestamp {
+            tz: true,
+            precision: temporal_precision(&column_type, "timestamp"),
+        },
         "json" => SqlType::Json,
         "blob" => SqlType::Bytes,
         // Fixed-width binary `BINARY(N)` -> `[u8; N]` (the width is in the type, so it round-trips
@@ -578,6 +587,19 @@ fn generated_model(extra: &str, expression: Option<String>) -> Option<GeneratedC
 fn single_arg_type(column_type: &str, kind: &str) -> Option<u32> {
     let args = type_args(column_type, kind)?;
     args.trim().parse().ok()
+}
+
+/// The fractional-seconds precision of a `time`/`timestamp`/`datetime` column, read from its
+/// `COLUMN_TYPE` (e.g. `timestamp(6)`). A bare form has no parenthesized argument and is fsp 0. Always
+/// returns `Some` — a MySQL temporal column always has a definite precision — so an introspected column
+/// carries an explicit precision the desired side is canonicalized to match (see
+/// [`Sqlite`-style `canonical_sql_type`](crate::Mysql::canonical_sql_type)).
+fn temporal_precision(column_type: &str, kind: &str) -> Option<u8> {
+    Some(
+        type_args(column_type, kind)
+            .and_then(|args| args.trim().parse().ok())
+            .unwrap_or(0),
+    )
 }
 
 fn decimal_type(column_type: &str) -> Option<SqlType> {
@@ -683,14 +705,34 @@ mod tests {
         assert_eq!(sql_type("double", "double"), SqlType::F64);
         assert_eq!(sql_type("text", "text"), SqlType::Text);
         assert_eq!(sql_type("date", "date"), SqlType::Date);
-        assert_eq!(sql_type("time", "time"), SqlType::Time { tz: false });
+        // A bare temporal column is fsp 0; `time(n)`/`timestamp(n)` recover the precision.
         assert_eq!(
-            sql_type("datetime", "datetime"),
-            SqlType::Timestamp { tz: false }
+            sql_type("time", "time"),
+            SqlType::Time {
+                tz: false,
+                precision: Some(0)
+            }
+        );
+        assert_eq!(
+            sql_type("datetime", "datetime(3)"),
+            SqlType::Timestamp {
+                tz: false,
+                precision: Some(3)
+            }
+        );
+        assert_eq!(
+            sql_type("timestamp", "timestamp(6)"),
+            SqlType::Timestamp {
+                tz: true,
+                precision: Some(6)
+            }
         );
         assert_eq!(
             sql_type("timestamp", "timestamp"),
-            SqlType::Timestamp { tz: true }
+            SqlType::Timestamp {
+                tz: true,
+                precision: Some(0)
+            }
         );
         assert_eq!(sql_type("json", "json"), SqlType::Json);
         assert_eq!(sql_type("blob", "blob"), SqlType::Bytes);
@@ -741,7 +783,13 @@ mod tests {
         assert_eq!(default_value(&SqlType::Bool, "1"), DefaultValue::Bool(true));
         assert_eq!(default_value(&SqlType::U32, "42"), DefaultValue::UInt(42));
         assert_eq!(
-            default_value(&SqlType::Timestamp { tz: true }, "current_timestamp()"),
+            default_value(
+                &SqlType::Timestamp {
+                    tz: true,
+                    precision: Some(6)
+                },
+                "current_timestamp()"
+            ),
             DefaultValue::CurrentTimestamp
         );
         assert_eq!(

@@ -1670,16 +1670,16 @@ fn postgres_renders_timestamp_columns_from_systemtime_fields() {
     Postgres.render_create(&model, &mut sql).unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
-    // A bare `SystemTime` field maps to a timezone-aware timestamp column with no `db_type` override,
-    // nullable or not.
+    // A bare `SystemTime` field maps to a timezone-aware microsecond timestamp column with no `db_type`
+    // override, nullable or not.
     assert!(
-        sql.contains("\"created_at\" timestamp with time zone NOT NULL"),
-        "expected non-null timestamptz column in: {sql}"
+        sql.contains("\"created_at\" timestamp(6) with time zone NOT NULL"),
+        "expected non-null timestamptz(6) column in: {sql}"
     );
     // The nullable column renders the same type with no `NOT NULL`.
     assert!(
-        sql.contains("\"deleted_at\" timestamp with time zone,"),
-        "expected nullable timestamptz column in: {sql}"
+        sql.contains("\"deleted_at\" timestamp(6) with time zone,"),
+        "expected nullable timestamptz(6) column in: {sql}"
     );
 }
 

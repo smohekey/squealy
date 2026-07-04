@@ -294,15 +294,17 @@ pub(crate) fn parse_db_type(db_type: &str) -> proc_macro2::TokenStream {
     let simple = match lower.as_str() {
         "text" => Some(quote::quote! { ::squealy::ColumnType::Text }),
         "date" => Some(quote::quote! { ::squealy::ColumnType::Date }),
-        "time" => Some(quote::quote! { ::squealy::ColumnType::Time { tz: false } }),
+        "time" => {
+            Some(quote::quote! { ::squealy::ColumnType::Time { tz: false, precision: None } })
+        }
         "time with time zone" | "timetz" => {
-            Some(quote::quote! { ::squealy::ColumnType::Time { tz: true } })
+            Some(quote::quote! { ::squealy::ColumnType::Time { tz: true, precision: None } })
         }
         "timestamp" | "datetime" => {
-            Some(quote::quote! { ::squealy::ColumnType::Timestamp { tz: false } })
+            Some(quote::quote! { ::squealy::ColumnType::Timestamp { tz: false, precision: None } })
         }
         "timestamp with time zone" | "timestamptz" => {
-            Some(quote::quote! { ::squealy::ColumnType::Timestamp { tz: true } })
+            Some(quote::quote! { ::squealy::ColumnType::Timestamp { tz: true, precision: None } })
         }
         "uuid" => Some(quote::quote! { ::squealy::ColumnType::Uuid }),
         "json" => Some(quote::quote! { ::squealy::ColumnType::Json }),
@@ -335,6 +337,19 @@ pub(crate) fn parse_db_type(db_type: &str) -> proc_macro2::TokenStream {
                 {
                     return quote::quote! {
                         ::squealy::ColumnType::Decimal { precision: #precision, scale: #scale }
+                    };
+                }
+            }
+            // `time(n)` / `timestamp(n)` and their aliases: a fractional-seconds precision. (The
+            // `... with time zone` spellings don't end in `)`, so use `timetz`/`timestamptz` for a
+            // precise tz-aware column.)
+            "time" | "timetz" | "timestamp" | "timestamptz" | "datetime" => {
+                if let Ok(precision) = args.trim().parse::<u8>() {
+                    let tz = matches!(kind, "timetz" | "timestamptz");
+                    return if matches!(kind, "time" | "timetz") {
+                        quote::quote! { ::squealy::ColumnType::Time { tz: #tz, precision: Some(#precision) } }
+                    } else {
+                        quote::quote! { ::squealy::ColumnType::Timestamp { tz: #tz, precision: Some(#precision) } }
                     };
                 }
             }

@@ -460,7 +460,7 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
     }
     if let Some(default) = &column.default {
         writer.write_all(b" DEFAULT ")?;
-        write_default_value(default, writer)?;
+        write_default_value(default, &column.ty, writer)?;
     }
     if column.identity.is_some() {
         writer.write_all(b" AUTO_INCREMENT")?;
@@ -526,11 +526,17 @@ fn write_mysql_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()>
             return write!(writer, "DECIMAL({precision},{scale})");
         }
         SqlType::Date => "DATE",
-        SqlType::Time { .. } => "TIME",
-        // Bare `TIMESTAMP`/`DATETIME` (fractional precision 0). The neutral model carries no timestamp
-        // precision, so the timestamp codecs normalize to whole seconds to match these columns.
-        SqlType::Timestamp { tz: true } => "TIMESTAMP",
-        SqlType::Timestamp { tz: false } => "DATETIME",
+        // `TIME(n)`/`TIMESTAMP(n)`/`DATETIME(n)` when the model carries a fractional-seconds precision;
+        // a bare form (fsp 0) when it does not. `TIMESTAMP` is timezone-aware, `DATETIME` is not.
+        SqlType::Time { precision, .. } => return write_mysql_temporal(writer, "TIME", *precision),
+        SqlType::Timestamp {
+            tz: true,
+            precision,
+        } => return write_mysql_temporal(writer, "TIMESTAMP", *precision),
+        SqlType::Timestamp {
+            tz: false,
+            precision,
+        } => return write_mysql_temporal(writer, "DATETIME", *precision),
         SqlType::Uuid => "CHAR(36)",
         SqlType::Json | SqlType::Jsonb => "JSON",
         SqlType::Bytes => "BLOB",
@@ -551,7 +557,42 @@ fn write_mysql_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()>
     writer.write_all(name.as_bytes())
 }
 
-fn write_default_value(default: &DefaultValue, writer: &mut impl Write) -> io::Result<()> {
+/// Renders a `TIME`/`TIMESTAMP`/`DATETIME` type with its optional fractional-seconds precision.
+fn write_mysql_temporal(
+    writer: &mut impl Write,
+    base: &str,
+    precision: Option<u8>,
+) -> io::Result<()> {
+    writer.write_all(base.as_bytes())?;
+    if let Some(precision) = precision {
+        write!(writer, "({precision})")?;
+    }
+    Ok(())
+}
+
+/// The fractional-seconds precision to attach to a `CURRENT_TIMESTAMP` default so it matches its
+/// column: MySQL rejects `DEFAULT CURRENT_TIMESTAMP` on a `TIMESTAMP(n)` column unless the default is
+/// spelled `CURRENT_TIMESTAMP(n)`. Only a non-zero precision needs the suffix (`TIMESTAMP`/`TIMESTAMP(0)`
+/// both take the bare `CURRENT_TIMESTAMP`).
+fn current_timestamp_precision(ty: &SqlType) -> Option<u8> {
+    match ty {
+        SqlType::Timestamp {
+            precision: Some(precision),
+            ..
+        }
+        | SqlType::Time {
+            precision: Some(precision),
+            ..
+        } if *precision > 0 => Some(*precision),
+        _ => None,
+    }
+}
+
+fn write_default_value(
+    default: &DefaultValue,
+    column_ty: &SqlType,
+    writer: &mut impl Write,
+) -> io::Result<()> {
     match default {
         DefaultValue::Null => writer.write_all(b"NULL"),
         DefaultValue::Int(value) => write!(writer, "{value}"),
@@ -560,7 +601,13 @@ fn write_default_value(default: &DefaultValue, writer: &mut impl Write) -> io::R
         DefaultValue::Text(value) => write_quoted_text(value, writer),
         DefaultValue::Bool(true) => writer.write_all(b"TRUE"),
         DefaultValue::Bool(false) => writer.write_all(b"FALSE"),
-        DefaultValue::CurrentTimestamp => writer.write_all(b"CURRENT_TIMESTAMP"),
+        DefaultValue::CurrentTimestamp => {
+            writer.write_all(b"CURRENT_TIMESTAMP")?;
+            if let Some(precision) = current_timestamp_precision(column_ty) {
+                write!(writer, "({precision})")?;
+            }
+            Ok(())
+        }
         DefaultValue::CurrentDate => writer.write_all(b"(CURRENT_DATE)"),
         DefaultValue::CurrentTime => writer.write_all(b"(CURRENT_TIME)"),
         DefaultValue::Raw(value) => writer.write_all(value.as_bytes()),
@@ -1221,9 +1268,49 @@ mod tests {
             "DECIMAL(10,2)"
         );
         assert_eq!(render_type(SqlType::Date), "DATE");
-        assert_eq!(render_type(SqlType::Time { tz: false }), "TIME");
-        assert_eq!(render_type(SqlType::Timestamp { tz: false }), "DATETIME");
-        assert_eq!(render_type(SqlType::Timestamp { tz: true }), "TIMESTAMP");
+        assert_eq!(
+            render_type(SqlType::Time {
+                tz: false,
+                precision: None
+            }),
+            "TIME"
+        );
+        assert_eq!(
+            render_type(SqlType::Timestamp {
+                tz: false,
+                precision: None
+            }),
+            "DATETIME"
+        );
+        assert_eq!(
+            render_type(SqlType::Timestamp {
+                tz: true,
+                precision: None
+            }),
+            "TIMESTAMP"
+        );
+        // A fractional-seconds precision renders `TIMESTAMP(n)`/`DATETIME(n)`/`TIME(n)`.
+        assert_eq!(
+            render_type(SqlType::Timestamp {
+                tz: true,
+                precision: Some(6)
+            }),
+            "TIMESTAMP(6)"
+        );
+        assert_eq!(
+            render_type(SqlType::Timestamp {
+                tz: false,
+                precision: Some(3)
+            }),
+            "DATETIME(3)"
+        );
+        assert_eq!(
+            render_type(SqlType::Time {
+                tz: false,
+                precision: Some(6)
+            }),
+            "TIME(6)"
+        );
         assert_eq!(render_type(SqlType::Uuid), "CHAR(36)");
         assert_eq!(render_type(SqlType::Json), "JSON");
         assert_eq!(render_type(SqlType::Jsonb), "JSON");
