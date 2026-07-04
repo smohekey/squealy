@@ -13,7 +13,7 @@ use squealy::{
 };
 use squealy_model::{
     CastColumn, DiffPolicy, PlanApplyOptions, RefactorLog, RefactorOperation, RenameColumn,
-    apply_plan, apply_plan_with_options, introspect, plan_from_database,
+    RenameTable, apply_plan, apply_plan_with_options, introspect, plan_from_database,
     plan_from_database_with_refactors, plan_models, plan_models_with_refactors, publish,
 };
 use squealy_sqlite::{Sqlite, SqliteConnection};
@@ -1609,5 +1609,77 @@ async fn replacing_a_view_with_a_same_named_table_succeeds() {
         count(&raw, "active_widgets").await,
         1,
         "the same-named table exists and accepts rows after replacing the view",
+    );
+}
+
+#[tokio::test]
+async fn renaming_a_table_and_reusing_its_name_for_a_view_succeeds() {
+    // A refactor renames table `x`→`y`, and a new view named `x` reuses the freed name. The view
+    // pre-pass must not emit `DROP VIEW IF EXISTS "x"` while `x` is still a table — the rename frees the
+    // name later, in the main pass, and SQLite rejects `DROP VIEW` on a table ("use DROP TABLE").
+    let (mut connection, raw) = setup().await;
+    let v1 = one_table(table(
+        "x",
+        vec![
+            column("id", SqlType::I64, false),
+            column("active", SqlType::I64, false),
+        ],
+    ));
+    publish(&v1, &Sqlite, &mut connection)
+        .await
+        .expect("publish v1 (table x)");
+    exec(
+        &raw,
+        "INSERT INTO \"x\" (\"id\", \"active\") VALUES (1, 1), (2, 0)",
+    )
+    .await;
+
+    // v2 renames x→y and adds a view `x` over the renamed table `y`.
+    let mut view_x = active_widgets_view();
+    view_x.name = "x".to_owned();
+    view_x.query.from = Some(SourceRef {
+        schema: None,
+        name: "y".to_owned(),
+        alias: "q0_0".to_owned(),
+    });
+    let v2 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![table(
+                "y",
+                vec![
+                    column("id", SqlType::I64, false),
+                    column("active", SqlType::I64, false),
+                ],
+            )],
+            views: vec![view_x],
+        }],
+    };
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::RenameTable(RenameTable {
+            id: "rename-x-y".to_owned(),
+            schema: None,
+            from: "x".to_owned(),
+            to: "y".to_owned(),
+        })],
+    };
+
+    let plan =
+        plan_from_database_with_refactors(&v2, &refactors, &mut connection, DiffPolicy::ALLOW_ALL)
+            .await
+            .expect("plan the rename + same-named view");
+    assert!(
+        !render(&plan, &v2).contains("DROP VIEW IF EXISTS \"x\""),
+        "must not pre-drop a name a table still owns: {}",
+        render(&plan, &v2),
+    );
+
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply the rename + same-named view");
+    assert_eq!(
+        count(&raw, "x").await,
+        1,
+        "the new view x (over renamed table y) resolves and filters",
     );
 }

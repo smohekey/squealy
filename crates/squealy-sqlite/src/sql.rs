@@ -225,18 +225,30 @@ pub(crate) fn write_plan(
         }
     }
 
-    // Drop every view the plan touches, after the table/index drops above but before any table is
-    // created, rebuilt or renamed. SQLite reparses a view when a table it references is renamed — a
-    // table rebuild renames the new table into place — and errors ("no such table") if that table is
-    // momentarily absent, so a live view over a rebuilt table must be gone before the rebuild. This runs
-    // *after* the table-drop pass so a table replaced by a same-named view has already released the name:
-    // `DROP VIEW IF EXISTS "x"` errors with "use DROP TABLE" while a table `x` still exists. Views the
-    // plan keeps are recreated by their `CreateView` step in the main pass (in dependency order, after
-    // every table exists); removed views stay dropped. `IF EXISTS` covers a brand-new view (nothing to
-    // drop) and a name that a plan both drops and recreates.
+    // Drop every view the plan touches, before any table is created, rebuilt or renamed. SQLite reparses
+    // a view when a table it references is renamed — a table rebuild renames the new table into place —
+    // and errors ("no such table") if that table is momentarily absent, so a live view over a rebuilt
+    // table must be gone before the rebuild. Views the plan keeps are recreated by their `CreateView`
+    // step in the main pass (in dependency order, after every table exists); removed views stay dropped.
+    // `IF EXISTS` covers a brand-new view (nothing to drop) and a name a plan both drops and recreates.
+    //
+    // Skip a name a table still owns: a view that reuses a table's name (the table is dropped or renamed
+    // away in this plan) is brand-new — it does not exist yet, so it needs no pre-drop — and
+    // `DROP VIEW IF EXISTS "x"` errors with "use DROP TABLE" while `x` is still a table. A dropped table
+    // was already freed by the pass above, but a rename happens later in the main pass, so exclude both.
+    let table_owned_names: HashSet<&str> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            DatabasePlanStep::DropTable { table, .. } => Some(table.name.as_str()),
+            DatabasePlanStep::RenameTable { from, .. } => Some(from.as_str()),
+            _ => None,
+        })
+        .collect();
     for step in &plan.steps {
         if let DatabasePlanStep::CreateView { view, .. } | DatabasePlanStep::DropView { view, .. } =
             step
+            && !table_owned_names.contains(view.name.as_str())
         {
             statement(writer, &mut first)?;
             writer.write_all(b"DROP VIEW IF EXISTS ")?;
