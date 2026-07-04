@@ -92,7 +92,9 @@
 //! These behave correctly but render differently from PostgreSQL; the dialect seam handles them, so no
 //! call-site change is needed:
 //!
-//! - `NULLS FIRST/LAST` is emulated with a leading `(<expr> IS NULL)` sort key.
+//! - `NULLS FIRST/LAST` in an executable query `ORDER BY` is emulated with a leading `(<expr> IS NULL)`
+//!   sort key. In **view DDL**, by contrast, the explicit modifier is dropped, so a view carrying
+//!   `OrderNulls::First`/`Last` renders with MySQL's default NULL ordering rather than emulation.
 //! - `FOR SHARE` renders as `LOCK IN SHARE MODE`.
 //! - case-insensitive `LIKE` (`ILIKE`) relies on MySQL's default case-insensitive collation (plain
 //!   `LIKE`).
