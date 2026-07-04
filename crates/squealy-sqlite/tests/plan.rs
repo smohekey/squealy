@@ -239,7 +239,7 @@ fn adds_a_collated_column_natively() {
 
     let sql = render(&plan, &desired);
     assert!(
-        sql.contains("ALTER TABLE \"t\" ADD COLUMN \"name\" TEXT COLLATE NOCASE"),
+        sql.contains("ALTER TABLE \"t\" ADD COLUMN \"name\" TEXT COLLATE \"NOCASE\""),
         "{sql}"
     );
     assert!(

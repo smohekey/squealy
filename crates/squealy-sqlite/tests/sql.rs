@@ -487,8 +487,9 @@ fn renders_column_collation() {
     let mut sql = Vec::new();
     Sqlite.render_create(&model, &mut sql).unwrap();
     let sql = String::from_utf8(sql).unwrap();
+    // The collation name is quoted like any identifier (so a name needing quoting still parses).
     assert!(
-        sql.contains("\"name\" TEXT COLLATE NOCASE NOT NULL"),
+        sql.contains("\"name\" TEXT COLLATE \"NOCASE\" NOT NULL"),
         "{sql}"
     );
 }

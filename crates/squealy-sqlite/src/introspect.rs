@@ -1117,14 +1117,17 @@ mod tests {
     #[test]
     fn column_collations_recovers_collate_clauses() {
         let sql = "CREATE TABLE \"t\" (\n  \"name\" TEXT COLLATE NOCASE NOT NULL,\n  \"code\" TEXT \
-                   COLLATE \"RTRIM\",\n  \"plain\" TEXT,\n  CHECK (\"plain\" <> '' COLLATE NOCASE)\n)";
+                   COLLATE \"RTRIM\",\n  \"weird\" TEXT COLLATE \"a-b c\",\n  \"plain\" TEXT,\n  \
+                   CHECK (\"plain\" <> '' COLLATE NOCASE)\n)";
         let collations = column_collations(sql);
         assert_eq!(collations.get("name"), Some(&"NOCASE".to_owned()));
         // A quoted collation name is unquoted.
         assert_eq!(collations.get("code"), Some(&"RTRIM".to_owned()));
+        // A collation name that needs identifier quoting (the renderer emits it quoted) round-trips.
+        assert_eq!(collations.get("weird"), Some(&"a-b c".to_owned()));
         // A column with no COLLATE, and a COLLATE inside a table constraint, contribute nothing.
         assert_eq!(collations.get("plain"), None);
-        assert_eq!(collations.len(), 2);
+        assert_eq!(collations.len(), 3);
     }
 
     #[test]

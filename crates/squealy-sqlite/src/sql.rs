@@ -922,11 +922,13 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
     writer.write_all(sqlite_affinity(&column.ty).as_bytes())?;
     // A `COLLATE` clause is a column constraint that carries the collating sequence for text comparison.
     // SQLite exposes it only in the `CREATE TABLE` text (no PRAGMA reports it), so introspection recovers
-    // it by parsing that text; the name is emitted verbatim as a bare identifier (SQLite's built-ins —
-    // `BINARY`/`NOCASE`/`RTRIM` — and user-registered collations are simple identifiers).
+    // it by parsing that text. The name is quoted like any identifier so a registered collation whose
+    // name needs quoting (spaces, `-`, an embedded quote) still parses; SQLite accepts a quoted collation
+    // name, and the introspector unquotes it back (SQLite's built-ins `BINARY`/`NOCASE`/`RTRIM` quote
+    // harmlessly).
     if let Some(collation) = &column.collation {
         writer.write_all(b" COLLATE ")?;
-        writer.write_all(collation.as_bytes())?;
+        write_quoted_ident(collation, writer)?;
     }
     if !column.nullable {
         writer.write_all(b" NOT NULL")?;
