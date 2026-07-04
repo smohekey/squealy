@@ -40,8 +40,9 @@
 //!   session. A caller using it with the timestamp codecs must run `SET time_zone = '+00:00'` itself,
 //!   or stored instants shift by the session offset.
 //!
-//! Instants outside MySQL's `TIMESTAMP` range (`1970-01-01`..`2038-01-19` UTC) are rejected at bind
-//! time rather than silently wrapped.
+//! Instants outside MySQL's `TIMESTAMP` range — `1970-01-01 00:00:01` through
+//! `2038-01-19 03:14:07` UTC (Unix seconds `1..=2_147_483_647`; the zero/epoch timestamp is *not*
+//! accepted) — are rejected at bind time rather than silently wrapped.
 //!
 //! ## Compile-time-gated PostgreSQL-only features
 //!
@@ -68,7 +69,8 @@
 //!   unique indexes"*.
 //! - **expression indexes** — *"MySQL expression indexes are not supported by squealy yet"*.
 //!
-//! Both are PostgreSQL-only.
+//! (PostgreSQL supports both; SQLite renders partial indexes but not expression indexes. These
+//! rejections are specific to the MySQL backend.)
 //!
 //! ## Prepared statements
 //!
