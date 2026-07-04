@@ -9,7 +9,8 @@ use std::io::{self, Write};
 
 use crate::{
     AggregateFunc, ArithmeticOp, DatabaseModel, DateField, Dialect, ExprNode, JoinKind, LogicalOp,
-    OrderDirection, ScalarFunc, SourceRef, SqlType, ViewModel, ViewQueryModel, WindowFunc,
+    OrderDirection, ScalarFunc, SourceRef, SqlType, UnaryStringFunc, ViewModel, ViewQueryModel,
+    WindowFunc,
 };
 
 /// Renders `CREATE [OR REPLACE] VIEW <qualified> [(<cols>)] AS <select>` for the given dialect.
@@ -164,7 +165,12 @@ fn render_qualified(
     dialect: &dyn Dialect,
     writer: &mut dyn Write,
 ) -> io::Result<()> {
-    if let Some(schema) = schema {
+    // A backend without namespaces (SQLite) suppresses the schema qualifier — a qualified name there is
+    // read as `"attached_db"."table"`, not `"schema"."table"`. The query-side `write_table_ref` honors
+    // the same seam, so view sources and query sources render alike.
+    if dialect.qualify_schema()
+        && let Some(schema) = schema
+    {
         dialect.write_quoted_ident(schema, writer)?;
         writer.write_all(b".")?;
     }
@@ -581,6 +587,17 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
                 }
                 writer.write_all(b")")
             }
+            // SQLite spells substring as the comma-argument call `substr(s, start, len)` — it has no
+            // `SUBSTRING(s FROM start FOR len)` syntax (same 1-based `start` as the standard form).
+            ScalarFunc::Substring if args.len() == 3 && dialect.substring_uses_function_call() => {
+                writer.write_all(b"substr(")?;
+                render_expr(&args[0], dialect, writer)?;
+                writer.write_all(b", ")?;
+                render_expr(&args[1], dialect, writer)?;
+                writer.write_all(b", ")?;
+                render_expr(&args[2], dialect, writer)?;
+                writer.write_all(b")")
+            }
             // The SQL-standard `SUBSTRING(s FROM start FOR len)` form (unambiguous; the comma form can
             // resolve to PostgreSQL's regex overload).
             ScalarFunc::Substring if args.len() == 3 => {
@@ -593,7 +610,7 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
                 writer.write_all(b")")
             }
             _ => {
-                writer.write_all(scalar_func_name(*func).as_bytes())?;
+                writer.write_all(scalar_func_name(*func, dialect).as_bytes())?;
                 writer.write_all(b"(")?;
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -704,13 +721,17 @@ fn render_operand_at_time_zone(
     }
 }
 
-/// SQL name for a [`ScalarFunc`] (identical across backends; `Length` -> `CHAR_LENGTH`).
-fn scalar_func_name(func: ScalarFunc) -> &'static str {
+/// SQL name for a [`ScalarFunc`] builtin in `dialect`'s spelling. The four unary string functions route
+/// through the same [`Dialect::unary_string_fn_name`] seam the query renderer uses, so a backend that
+/// respells one (e.g. SQLite `Length` -> `length`, not `CHAR_LENGTH`) fixes it once for both paths.
+/// `Concat`/`Substring` reach here only in their default form (a pipe-`||` concat and a function-call
+/// substring are handled by their own seams above), so their standard names suffice.
+fn scalar_func_name(func: ScalarFunc, dialect: &dyn Dialect) -> &'static str {
     match func {
-        ScalarFunc::Lower => "LOWER",
-        ScalarFunc::Upper => "UPPER",
-        ScalarFunc::Length => "CHAR_LENGTH",
-        ScalarFunc::Trim => "TRIM",
+        ScalarFunc::Lower => dialect.unary_string_fn_name(UnaryStringFunc::Lower),
+        ScalarFunc::Upper => dialect.unary_string_fn_name(UnaryStringFunc::Upper),
+        ScalarFunc::Length => dialect.unary_string_fn_name(UnaryStringFunc::Length),
+        ScalarFunc::Trim => dialect.unary_string_fn_name(UnaryStringFunc::Trim),
         ScalarFunc::Concat => "CONCAT",
         ScalarFunc::Substring => "SUBSTRING",
     }

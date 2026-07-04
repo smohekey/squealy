@@ -38,9 +38,11 @@ pub(crate) async fn database(connection: &SqliteConnection) -> Result<DatabaseMo
     }
     // SQLite has no namespace object: an empty database has no schema to report. Emitting an empty
     // default schema would diff against a genuinely empty model (`schemas: []`) as a spurious
-    // `DropSchema`, so only include the schema once there is at least one object in it. (Views are not
-    // introspected in this slice — SQLite view rendering is itself deferred — so a table is the only
-    // object that can populate it.)
+    // `DropSchema`, so only include the schema once there is at least one object in it. (Views are
+    // rendered but not yet introspected back — reading a live view's name/columns from `sqlite_master`
+    // is a separate slice — so a table is the only object that can populate the schema here. A
+    // desired-model view therefore re-applies as a non-destructive `DROP VIEW IF EXISTS`/`CREATE VIEW`
+    // on every plan, exactly as an introspected PostgreSQL/MySQL view re-applies as `CREATE OR REPLACE`.)
     let schemas = if tables.is_empty() {
         Vec::new()
     } else {

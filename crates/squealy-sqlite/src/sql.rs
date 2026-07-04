@@ -23,28 +23,19 @@ use squealy::{
 /// newline-separated: tables (with inline PK/unique/check/foreign-keys), then indexes, then views in
 /// dependency order. SQLite has no schemas, so schema names are dropped and all tables are flattened.
 pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> io::Result<()> {
-    // View rendering is deferred. The shared view-body renderer emits schema-qualified source names
-    // (`"app"."users"`) and PostgreSQL/MySQL scalar-function spellings (e.g. `CHAR_LENGTH`) that SQLite
-    // rejects; rendering views correctly needs SQLite-specific `Dialect` seams (schema suppression +
-    // scalar-function names) — a later slice. Error rather than emit broken DDL.
-    if model.schemas.iter().any(|schema| !schema.views.is_empty()) {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "SQLite view rendering is not supported yet",
-        ));
-    }
-
-    // SQLite keeps tables and indexes in one database-wide object namespace (there are no schemas), so
-    // once schemas are flattened every table and index name must be unique — including a table name
-    // that matches an index name. A model that relies on schema/table scoping for those names is valid
-    // for the schema-aware backends but cannot be represented in SQLite; reject it before rendering
-    // duplicate `CREATE TABLE`/`CREATE INDEX` statements. Tables are checked first so an index that
-    // collides with a table is reported as the index.
+    // SQLite keeps tables, indexes and views in one database-wide object namespace (there are no
+    // schemas), so once schemas are flattened every table, index and view name must be unique —
+    // including a table name that matches an index or a view. A model that relies on schema/table
+    // scoping for those names is valid for the schema-aware backends but cannot be represented in
+    // SQLite; reject it before rendering duplicate `CREATE …` statements. Tables are checked first, then
+    // indexes, then views, so a collision is reported against the later-created object.
     let tables = || model.schemas.iter().flat_map(|schema| schema.tables.iter());
+    let views = || model.schemas.iter().flat_map(|schema| schema.views.iter());
     let object_names = || {
         tables()
             .map(|table| table.name.as_str())
             .chain(tables().flat_map(|table| table.indexes.iter().map(|index| index.name.as_str())))
+            .chain(views().map(|view| view.name.as_str()))
     };
     check_reserved_object_names(object_names())?;
     check_object_name_uniqueness(object_names())?;
@@ -65,6 +56,13 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
                 write_create_index(&table.name, index, writer)?;
             }
         }
+    }
+
+    // Views are created last (all tables exist) and in dependency order, so a view that selects from
+    // another view is created after it. The schema qualifier is suppressed by `SqliteDialect`.
+    for (schema_name, view) in squealy::ordered_views(model) {
+        statement(writer, &mut first)?;
+        squealy::render_create_view(schema_name, view, false, &SqliteDialect, writer)?;
     }
 
     if !first {
@@ -164,19 +162,27 @@ pub(crate) fn write_plan(
     writer: &mut impl Write,
 ) -> io::Result<()> {
     // Validate the target object namespace up front, exactly as create-from-scratch does. SQLite keeps
-    // tables and indexes in one database-wide namespace, so a target whose object names are not unique
-    // cannot be represented; reject it here rather than emit a plan that fails partway (or leaves the
-    // schema wrong). Tables are checked before indexes so a collision is reported as the index.
+    // tables, indexes and views in one database-wide namespace, so a target whose object names are not
+    // unique cannot be represented; reject it here rather than emit a plan that fails partway (or leaves
+    // the schema wrong). Tables are checked before indexes before views so a collision is reported
+    // against the later-created object.
     let tables = || {
         desired
             .schemas
             .iter()
             .flat_map(|schema| schema.tables.iter())
     };
+    let views = || {
+        desired
+            .schemas
+            .iter()
+            .flat_map(|schema| schema.views.iter())
+    };
     let object_names = || {
         tables()
             .map(|table| table.name.as_str())
             .chain(tables().flat_map(|table| table.indexes.iter().map(|index| index.name.as_str())))
+            .chain(views().map(|view| view.name.as_str()))
     };
     check_reserved_object_names(object_names())?;
     check_object_name_uniqueness(object_names())?;
@@ -258,13 +264,25 @@ pub(crate) fn write_plan(
                     write_table_alterations(table, plan, desired, writer, &mut first)?;
                 }
             }
-            // Views are not rendered yet (they need SQLite-specific `Dialect` seams); reject rather than
-            // emit broken DDL, matching `write_database`.
-            DatabasePlanStep::CreateView { .. } | DatabasePlanStep::DropView { .. } => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "SQLite view rendering is not supported yet",
-                ));
+            DatabasePlanStep::CreateView { schema, view } => {
+                // SQLite has no `CREATE OR REPLACE VIEW`, so a body-only change (which the diff emits as
+                // a bare `CreateView`, no preceding `DropView`) is applied by dropping first. `IF EXISTS`
+                // makes it a no-op for a brand-new view and idempotent when a `DropView` already ran.
+                statement(writer, &mut first)?;
+                writer.write_all(b"DROP VIEW IF EXISTS ")?;
+                write_quoted_ident(&view.name, writer)?;
+                statement(writer, &mut first)?;
+                squealy::render_create_view(
+                    schema.as_deref(),
+                    view,
+                    false,
+                    &SqliteDialect,
+                    writer,
+                )?;
+            }
+            DatabasePlanStep::DropView { schema, view } => {
+                statement(writer, &mut first)?;
+                squealy::render_drop_view(schema.as_deref(), &view.name, &SqliteDialect, writer)?;
             }
         }
     }
@@ -1144,13 +1162,12 @@ fn write_delimited(value: &str, delimiter: char, writer: &mut impl Write) -> io:
 }
 
 /// SQLite's [`Dialect`](squealy::Dialect): `?` placeholders, double-quoted identifiers, and SQLite
-/// `CAST` affinity names. Everything else uses the trait defaults, which already match SQLite —
-/// integer division needs a float cast, `DEFAULT VALUES` empty inserts, `NULLS FIRST`/`LAST`,
-/// `ON CONFLICT … DO UPDATE/NOTHING` upserts, and `UPDATE … FROM`. The query layer (a later slice)
-/// renders queries through this; it is defined now so the dialect mapping lives with the DDL renderer.
-// Wired up by the SQLite query layer (a later slice); view-body rendering is deferred until the
-// SQLite-specific scalar-function / schema-suppression seams exist.
-#[allow(dead_code)]
+/// `CAST` affinity names, plus the SQLite spellings for the seams the schema-aware backends default
+/// differently — schema suppression (`qualify_schema`), `length`/`substr`/`||` builtins, `RETURNING`
+/// without a target alias, and the `SELECT * FROM (…)` set-operand wrapper. Everything else uses the
+/// trait defaults, which already match SQLite (integer-division float cast, `DEFAULT VALUES` empty
+/// inserts, `NULLS FIRST`/`LAST`, `ON CONFLICT` upserts, `UPDATE … FROM`). Both the query renderer and
+/// the shared view-body renderer render through this.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SqliteDialect;
 

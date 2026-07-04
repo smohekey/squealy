@@ -458,25 +458,186 @@ fn rejects_reserved_object_name_prefix() {
     }
 }
 
+/// A `q0_0.<column>` reference, the alias every single-source view body uses.
+fn view_col(column: &str) -> squealy::ExprNode {
+    squealy::ExprNode::Column {
+        alias: "q0_0".to_owned(),
+        column: column.to_owned(),
+    }
+}
+
+/// A single-`id`-column view selecting `id` from `app.<from>`, with an optional `WHERE`.
+fn id_view(name: &str, from: &str, filter: Option<squealy::ExprNode>) -> squealy::ViewModel {
+    squealy::ViewModel {
+        name: name.to_owned(),
+        comment: None,
+        columns: vec![squealy::ViewColumnModel {
+            name: "id".to_owned(),
+            ty: squealy::SqlType::I32,
+            nullable: false,
+        }],
+        query: squealy::ViewQueryModel {
+            dependencies: Vec::new(),
+            distinct: false,
+            projection: vec![squealy::ProjectionItem {
+                output_name: "id".to_owned(),
+                expr: view_col("id"),
+            }],
+            from: Some(squealy::SourceRef {
+                schema: Some("app".to_owned()),
+                name: from.to_owned(),
+                alias: "q0_0".to_owned(),
+            }),
+            joins: Vec::new(),
+            filter,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        },
+    }
+}
+
+/// A `TableModel` with a single non-null `id` column.
+fn id_table(name: &str) -> squealy::TableModel {
+    squealy::TableModel {
+        name: name.to_owned(),
+        comment: None,
+        columns: vec![squealy::ColumnModel {
+            name: "id".to_owned(),
+            comment: None,
+            ty: squealy::SqlType::I32,
+            collation: None,
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+        }],
+        primary_key: None,
+        foreign_keys: Vec::new(),
+        uniques: Vec::new(),
+        checks: Vec::new(),
+        indexes: Vec::new(),
+    }
+}
+
+/// `id > 0`, a simple view `WHERE` predicate.
+fn id_gt_zero() -> squealy::ExprNode {
+    squealy::ExprNode::Compare {
+        op: squealy::CompareOp::GreaterThan,
+        left: Box::new(view_col("id")),
+        right: Box::new(squealy::ExprNode::Literal("0".to_owned())),
+    }
+}
+
 #[test]
-fn render_create_rejects_views_for_now() {
-    // View rendering is deferred (the shared view-body renderer emits schema-qualified sources and
-    // non-SQLite scalar-function spellings); a model carrying a view errors rather than emit broken
-    // DDL. Build a minimal model with a single (empty) view to exercise the guard.
-    use squealy::{DatabaseModel, SchemaModel, ViewModel, ViewQueryModel};
+fn render_create_renders_views_unqualified_in_dependency_order() {
+    // SQLite has no schemas, so a view over `app.users` renders the source unqualified — `FROM "users"`,
+    // not `FROM "app"."users"`, which SQLite would read as an attached database. Views are created after
+    // tables and in dependency order: a view-on-view is created after the view it selects from, even
+    // when it is declared first.
+    use squealy::{DatabaseModel, SchemaModel};
+
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![id_table("users")],
+            views: vec![
+                id_view("active_user_ids", "active_users", None),
+                id_view("active_users", "users", Some(id_gt_zero())),
+            ],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Sqlite.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE VIEW \"active_users\" (\"id\") AS \
+SELECT q0_0.\"id\" FROM \"users\" AS q0_0 WHERE (q0_0.\"id\" > 0)"
+        ),
+        "missing unqualified active_users view: {sql}"
+    );
+    assert!(
+        sql.contains(
+            "CREATE VIEW \"active_user_ids\" (\"id\") AS \
+SELECT q0_0.\"id\" FROM \"active_users\" AS q0_0"
+        ),
+        "missing active_user_ids view: {sql}"
+    );
+
+    let table_pos = sql.find("CREATE TABLE").unwrap();
+    let active_users_pos = sql.find("\"active_users\" (").unwrap();
+    let active_ids_pos = sql.find("\"active_user_ids\" (").unwrap();
+    assert!(table_pos < active_users_pos, "tables precede views: {sql}");
+    assert!(
+        active_users_pos < active_ids_pos,
+        "a view is created after the view it depends on: {sql}"
+    );
+    // No schema qualifier leaks anywhere (SQLite reads `"app"."x"` as an attached database).
+    assert!(!sql.contains("\"app\""), "schema qualifier leaked: {sql}");
+}
+
+#[test]
+fn render_create_renders_view_expression_ir_in_sqlite_dialect() {
+    // The shared view-body renderer spells builtins in SQLite's dialect through the same `Dialect` seams
+    // the query layer uses: `length` (not `CHAR_LENGTH`), `substr(s, start, len)` (not the standard
+    // `SUBSTRING(s FROM start FOR len)`), and `||` concat (not `CONCAT`).
+    use squealy::{
+        DatabaseModel, ExprNode, ProjectionItem, ScalarFunc, SchemaModel, SourceRef, SqlType,
+        ViewColumnModel, ViewModel, ViewQueryModel,
+    };
+
+    let scalar = |func: ScalarFunc, args: Vec<ExprNode>| ExprNode::ScalarFn { func, args };
+    let column = |name: &str| ViewColumnModel {
+        name: name.to_owned(),
+        ty: SqlType::I32,
+        nullable: false,
+    };
+
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("app".to_owned()),
             tables: Vec::new(),
             views: vec![ViewModel {
-                name: "v".to_owned(),
+                name: "labels".to_owned(),
                 comment: None,
-                columns: Vec::new(),
+                columns: vec![column("namelen"), column("greeting"), column("prefix")],
                 query: ViewQueryModel {
                     dependencies: Vec::new(),
                     distinct: false,
-                    projection: Vec::new(),
-                    from: None,
+                    projection: vec![
+                        ProjectionItem {
+                            output_name: "namelen".to_owned(),
+                            expr: scalar(ScalarFunc::Length, vec![view_col("name")]),
+                        },
+                        ProjectionItem {
+                            output_name: "greeting".to_owned(),
+                            expr: scalar(
+                                ScalarFunc::Concat,
+                                vec![view_col("name"), ExprNode::Literal("'!'".to_owned())],
+                            ),
+                        },
+                        ProjectionItem {
+                            output_name: "prefix".to_owned(),
+                            expr: scalar(
+                                ScalarFunc::Substring,
+                                vec![
+                                    view_col("name"),
+                                    ExprNode::Literal("1".to_owned()),
+                                    ExprNode::Literal("3".to_owned()),
+                                ],
+                            ),
+                        },
+                    ],
+                    from: Some(SourceRef {
+                        schema: Some("app".to_owned()),
+                        name: "users".to_owned(),
+                        alias: "q0_0".to_owned(),
+                    }),
                     joins: Vec::new(),
                     filter: None,
                     group_by: Vec::new(),
@@ -488,6 +649,97 @@ fn render_create_rejects_views_for_now() {
             }],
         }],
     };
+
+    let mut sql = Vec::new();
+    Sqlite.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains("length(q0_0.\"name\")"),
+        "expected SQLite length(): {sql}"
+    );
+    assert!(!sql.contains("CHAR_LENGTH"), "CHAR_LENGTH leaked: {sql}");
+    assert!(
+        sql.contains("(q0_0.\"name\" || '!')"),
+        "expected `||` concat: {sql}"
+    );
+    assert!(!sql.contains("CONCAT("), "CONCAT leaked: {sql}");
+    assert!(
+        sql.contains("substr(q0_0.\"name\", 1, 3)"),
+        "expected substr(): {sql}"
+    );
+    assert!(
+        !sql.contains("SUBSTRING"),
+        "SUBSTRING FROM/FOR leaked: {sql}"
+    );
+}
+
+#[test]
+fn render_plan_renders_view_steps() {
+    // SQLite has no `CREATE OR REPLACE VIEW`, so a `CreateView` step drops first (`DROP VIEW IF EXISTS`,
+    // a no-op for a brand-new view) then creates — idempotent whether the view is new or replaced. A
+    // `DropView` step renders a plain `DROP VIEW`. Names render unqualified.
+    use squealy::{DatabaseModel, DatabasePlan, DatabasePlanStep};
+
+    let view = id_view("active_users", "users", Some(id_gt_zero()));
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::CreateView {
+                schema: Some("app".to_owned()),
+                view: Box::new(view.clone()),
+            },
+            DatabasePlanStep::DropView {
+                schema: Some("app".to_owned()),
+                view: Box::new(view),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Sqlite
+        .render_plan(&plan, &DatabaseModel::default(), &mut sql)
+        .unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains("DROP VIEW IF EXISTS \"active_users\""),
+        "the create step must drop first (SQLite has no OR REPLACE): {sql}"
+    );
+    assert!(
+        sql.contains(
+            "CREATE VIEW \"active_users\" (\"id\") AS \
+SELECT q0_0.\"id\" FROM \"users\" AS q0_0 WHERE (q0_0.\"id\" > 0)"
+        ),
+        "missing create view: {sql}"
+    );
+    assert!(
+        !sql.contains("OR REPLACE"),
+        "SQLite has no CREATE OR REPLACE VIEW: {sql}"
+    );
+    // The `DropView` step (plain `DROP VIEW`, no `IF EXISTS`) is emitted after the create step.
+    let create_pos = sql.find("CREATE VIEW").unwrap();
+    let drop_step_pos = sql.rfind("DROP VIEW \"active_users\"").unwrap();
+    assert!(
+        create_pos < drop_step_pos,
+        "the drop-view step comes after the create step: {sql}"
+    );
+}
+
+#[test]
+fn render_create_rejects_view_name_colliding_with_table() {
+    // Tables, indexes and views share one object namespace in SQLite, so a view named like a table is a
+    // collision once schemas are flattened — rejected rather than rendered as a duplicate name.
+    use squealy::{DatabaseModel, SchemaModel};
+
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![id_table("users")],
+            // A view sharing the `users` table's name.
+            views: vec![id_view("users", "users", None)],
+        }],
+    };
+
     let mut sql = Vec::new();
     let error = Sqlite.render_create(&model, &mut sql).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
