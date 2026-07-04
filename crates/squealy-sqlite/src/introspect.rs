@@ -103,16 +103,24 @@ async fn view_names(connection: &SqliteConnection) -> Result<Vec<String>, Sqlite
 /// is re-applied non-destructively. The columns also let a removed or renamed view produce a `DropView`
 /// (a view invisible to introspection would otherwise linger) and take part in the one-namespace check.
 async fn view(connection: &SqliteConnection, name: &str) -> Result<ViewModel, SqliteError> {
+    // A view whose body cannot be analyzed — it references a dropped table, or calls a function this
+    // connection has not registered — makes `PRAGMA table_info` error when it reparses the view. Fall
+    // back to a name-only view so introspection still succeeds and the diff can drop (or recreate) the
+    // broken view, rather than failing the whole introspection and stranding a database that contains
+    // one. The name comes from `sqlite_master` and always reads back; only the column probe can fail.
     let columns = columns(connection, name)
-        .await?
-        .into_iter()
-        .map(|column| ViewColumnModel {
-            name: column.name,
-            // SQLite cannot type a view output; use one sentinel so the diff compares by name only.
-            ty: SqlType::Bytes,
-            nullable: false,
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|column| ViewColumnModel {
+                    name: column.name,
+                    // SQLite cannot type a view output; use one sentinel so the diff compares by name.
+                    ty: SqlType::Bytes,
+                    nullable: false,
+                })
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
     Ok(ViewModel {
         name: name.to_owned(),
         comment: None,

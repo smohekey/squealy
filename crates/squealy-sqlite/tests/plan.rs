@@ -1792,3 +1792,59 @@ async fn renaming_a_table_and_reusing_its_name_for_a_view_case_insensitively_suc
         "the view resolves after the case-differing rename",
     );
 }
+
+#[tokio::test]
+async fn introspects_and_drops_a_view_whose_table_was_removed() {
+    // A view left dangling by an out-of-band `DROP TABLE` makes `PRAGMA table_info` error. Introspection
+    // must still succeed (reporting the view name-only) so a plan can drop the broken view, instead of
+    // failing outright and stranding the whole database.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+    exec(&raw, "DROP TABLE \"widgets\"").await;
+
+    let actual = introspect(&mut connection)
+        .await
+        .expect("introspection must not fail on a broken view");
+    let views: Vec<_> = actual
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.views)
+        .collect();
+    assert_eq!(
+        views.len(),
+        1,
+        "the broken view is still reported: {actual:?}"
+    );
+    assert_eq!(views[0].name, "active_widgets");
+    assert!(
+        views[0].columns.is_empty(),
+        "a body-unanalyzable view is name-only: {:?}",
+        views[0].columns,
+    );
+
+    // A model that no longer wants the view drops it, and the drop applies.
+    let empty = DatabaseModel::default();
+    let plan = plan_from_database(&empty, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan dropping the broken view");
+    assert!(
+        plan.steps.iter().any(|step| matches!(
+            step,
+            DatabasePlanStep::DropView { view, .. } if view.name == "active_widgets"
+        )),
+        "expected a DropView for the broken view: {:?}",
+        plan.steps,
+    );
+    apply_plan(&plan, &empty, &Sqlite, &mut connection)
+        .await
+        .expect("apply the drop of the broken view");
+    let after = introspect(&mut connection)
+        .await
+        .expect("introspect after drop");
+    assert!(
+        after.schemas.iter().all(|schema| schema.views.is_empty()),
+        "the broken view must be gone: {after:?}",
+    );
+}
