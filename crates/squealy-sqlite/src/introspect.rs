@@ -12,12 +12,15 @@
 //!   `Varchar`/`Uuid`/`Timestamp`/`Bool` etc. all read back as their affinity's representative type.
 //! - **Unnamed constraints** — a `UNIQUE`/foreign-key/primary-key constraint does not round-trip its
 //!   declared name (the backing auto-index is `sqlite_autoindex_…`; foreign keys are positional).
-//! - **`CHECK` constraints, column comments, collations and generated columns are not read** — SQLite
-//!   exposes checks only inside the `CREATE TABLE` text (no PRAGMA), and has no column comments; these
-//!   are left empty (a documented limitation, revisited when the incremental plan lands). Because a
-//!   dropped check would churn, the renderer rejects a model carrying one until it can be introspected.
-//!   A partial index's `WHERE` predicate, which is likewise only in the DDL text, *is* recovered (see
-//!   [`partial_predicate`]).
+//! - **`CHECK` constraints and column collations** live only in the `CREATE TABLE` text (no PRAGMA
+//!   reports either), so they are recovered by parsing the stored statement — table checks by
+//!   [`table_checks`] and per-column `COLLATE` clauses by [`column_collations`]. A check has no
+//!   round-tripping name, so the diff matches it by a name derived from its expression (see
+//!   [`Sqlite::canonical_check_name`](crate::Sqlite)). A partial index's `WHERE` predicate, likewise only
+//!   in the DDL text, is recovered the same way (see [`partial_predicate`]).
+//! - **Column comments and generated columns are not read** — SQLite has no column comments, and
+//!   generated columns are not yet modelled; these are left empty (a documented limitation), and the
+//!   renderer rejects a model carrying a column comment so a published schema has none to miss.
 
 use std::collections::BTreeMap;
 
@@ -137,6 +140,12 @@ async fn table(connection: &SqliteConnection, name: &str) -> Result<TableModel, 
     let autoincrement = primary_key
         .as_ref()
         .is_some_and(|pk| pk.columns.len() == 1 && declares_autoincrement(create_sql.as_deref()));
+    // A column's `COLLATE` clause and the table's `CHECK` constraints live only in the `CREATE TABLE`
+    // text (no PRAGMA reports either), so recover them by parsing the stored statement.
+    let collations = create_sql
+        .as_deref()
+        .map(column_collations)
+        .unwrap_or_default();
 
     let mut columns = Vec::with_capacity(column_rows.len());
     for column in &column_rows {
@@ -164,7 +173,7 @@ async fn table(connection: &SqliteConnection, name: &str) -> Result<TableModel, 
             name: column.name.clone(),
             comment: None,
             ty,
-            collation: None,
+            collation: collations.get(&column.name).cloned(),
             nullable: column.notnull == 0 && !is_rowid_alias,
             default: column
                 .default
@@ -187,10 +196,9 @@ async fn table(connection: &SqliteConnection, name: &str) -> Result<TableModel, 
         primary_key,
         foreign_keys: foreign_keys(connection, name).await?,
         uniques,
-        // SQLite exposes `CHECK` constraints only in the `CREATE TABLE` text; reading them needs a SQL
-        // parser, so they are left empty for now (the renderer rejects a model carrying a check, so a
-        // published schema has none to miss — revisited with the incremental plan).
-        checks: Vec::new(),
+        // SQLite exposes table `CHECK` constraints only in the `CREATE TABLE` text (no PRAGMA), so they
+        // are recovered by parsing the stored statement (see [`table_checks`]).
+        checks: create_sql.as_deref().map(table_checks).unwrap_or_default(),
         indexes,
     })
 }
@@ -277,66 +285,319 @@ fn contains_keyword(sql: &str, keyword: &str) -> bool {
     keyword_token_end(sql, keyword).is_some()
 }
 
+/// If `bytes[index]` begins a token that is not SQL code — a string literal (`'…'`), a quoted identifier
+/// (`"…"`, `` `…` ``, `[…]`) or a comment (`-- …`, `/* … */`) — returns the byte offset just past it (a
+/// doubled quote inside a `'…'`/`"…"`/`` `…` `` literal is treated as an escape, not a close). Returns
+/// `None` if `index` sits on ordinary code, so a caller advances by one. Both the keyword scanner and the
+/// `CREATE TABLE`-body splitter use this so parentheses/commas/keywords inside quotes or comments are not
+/// mistaken for code.
+fn skip_noncode(bytes: &[u8], index: usize) -> Option<usize> {
+    match bytes[index] {
+        quote @ (b'\'' | b'"' | b'`') => {
+            let mut cursor = index + 1;
+            while cursor < bytes.len() {
+                if bytes[cursor] == quote {
+                    if bytes.get(cursor + 1) == Some(&quote) {
+                        cursor += 2;
+                        continue;
+                    }
+                    return Some(cursor + 1);
+                }
+                cursor += 1;
+            }
+            Some(cursor)
+        }
+        // Bracketed identifier `[ident]` (no escape form in SQLite).
+        b'[' => {
+            let mut cursor = index + 1;
+            while cursor < bytes.len() && bytes[cursor] != b']' {
+                cursor += 1;
+            }
+            Some((cursor + 1).min(bytes.len()))
+        }
+        // Line comment `-- …` to end of line.
+        b'-' if bytes.get(index + 1) == Some(&b'-') => {
+            let mut cursor = index + 2;
+            while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                cursor += 1;
+            }
+            Some(cursor)
+        }
+        // Block comment `/* … */`.
+        b'/' if bytes.get(index + 1) == Some(&b'*') => {
+            let mut cursor = index + 2;
+            while cursor < bytes.len()
+                && !(bytes[cursor] == b'*' && bytes.get(cursor + 1) == Some(&b'/'))
+            {
+                cursor += 1;
+            }
+            Some((cursor + 2).min(bytes.len()))
+        }
+        _ => None,
+    }
+}
+
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
 /// The byte offset just past the first occurrence of `keyword` (ASCII, matched case-insensitively) as a
-/// standalone token in SQL code — outside string literals (`'…'`), quoted identifiers (`"…"`, `` `…` ``,
-/// `[…]`) and comments (`-- …`, `/* … */`), and not as a substring of a longer identifier. Returns
-/// `None` if the keyword does not appear in code. This keeps a keyword distinct from an identifier that
-/// merely contains it (e.g. `autoincrements`) or a `WHERE` inside a quoted name.
+/// standalone token in SQL code — outside string literals, quoted identifiers and comments (see
+/// [`skip_noncode`]), and not as a substring of a longer identifier. Returns `None` if the keyword does
+/// not appear in code. This keeps a keyword distinct from an identifier that merely contains it (e.g.
+/// `autoincrements`) or a `WHERE` inside a quoted name.
 fn keyword_token_end(sql: &str, keyword: &str) -> Option<usize> {
     let bytes = sql.as_bytes();
-    let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
     let mut index = 0;
     while index < bytes.len() {
+        if let Some(next) = skip_noncode(bytes, index) {
+            index = next;
+        } else if is_word_byte(bytes[index]) {
+            let start = index;
+            while index < bytes.len() && is_word_byte(bytes[index]) {
+                index += 1;
+            }
+            if sql[start..index].eq_ignore_ascii_case(keyword) {
+                return Some(index);
+            }
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+/// Splits the column-definition / table-constraint list inside the outermost parentheses of a
+/// `CREATE TABLE` statement into its top-level (depth-1) comma-separated entries, each trimmed. A comma
+/// or parenthesis inside a nested parenthesis, string literal, quoted identifier or comment is not a
+/// split point (see [`skip_noncode`]), so a column's own inline `CHECK (…)`/`DEFAULT (…)` and a
+/// multi-column constraint's column list stay within their entry. Returns an empty vec when the
+/// statement has no parenthesized body (e.g. `CREATE TABLE t AS SELECT …`).
+fn table_entries(create_sql: &str) -> Vec<&str> {
+    let bytes = create_sql.as_bytes();
+    let mut entries = Vec::new();
+    let mut depth = 0usize;
+    let mut index = 0;
+    // The start of the current depth-1 entry, set once the outermost `(` is entered.
+    let mut entry_start = None;
+    while index < bytes.len() {
+        if let Some(next) = skip_noncode(bytes, index) {
+            index = next;
+            continue;
+        }
         match bytes[index] {
-            // String literal or quoted identifier: skip to the matching close quote, treating a doubled
-            // quote as an escape.
-            quote @ (b'\'' | b'"' | b'`') => {
+            b'(' => {
+                depth += 1;
                 index += 1;
-                while index < bytes.len() {
-                    if bytes[index] == quote {
-                        if bytes.get(index + 1) == Some(&quote) {
-                            index += 2;
-                            continue;
-                        }
-                        index += 1;
-                        break;
+                if depth == 1 {
+                    entry_start = Some(index);
+                }
+            }
+            b')' => {
+                if depth == 1 {
+                    if let Some(start) = entry_start.take() {
+                        push_entry(&mut entries, &create_sql[start..index]);
                     }
-                    index += 1;
+                    return entries;
                 }
-            }
-            // Bracketed identifier `[ident]` (no escape form in SQLite).
-            b'[' => {
-                index += 1;
-                while index < bytes.len() && bytes[index] != b']' {
-                    index += 1;
-                }
+                depth = depth.saturating_sub(1);
                 index += 1;
             }
-            // Line comment `-- …` to end of line.
-            b'-' if bytes.get(index + 1) == Some(&b'-') => {
-                index += 2;
-                while index < bytes.len() && bytes[index] != b'\n' {
-                    index += 1;
+            b',' if depth == 1 => {
+                if let Some(start) = entry_start {
+                    push_entry(&mut entries, &create_sql[start..index]);
                 }
+                index += 1;
+                entry_start = Some(index);
             }
-            // Block comment `/* … */`.
-            b'/' if bytes.get(index + 1) == Some(&b'*') => {
-                index += 2;
-                while index < bytes.len()
-                    && !(bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/'))
-                {
-                    index += 1;
-                }
-                index += 2;
+            _ => index += 1,
+        }
+    }
+    // A malformed (unterminated) statement: emit whatever the last open entry captured.
+    if let Some(start) = entry_start {
+        push_entry(&mut entries, &create_sql[start..]);
+    }
+    entries
+}
+
+fn push_entry<'a>(entries: &mut Vec<&'a str>, entry: &'a str) {
+    let trimmed = entry.trim();
+    if !trimmed.is_empty() {
+        entries.push(trimmed);
+    }
+}
+
+/// The table-level `CHECK` expressions of a stored `CREATE TABLE` statement, in declaration order. Only
+/// entries that *are* a table check are returned: a leading `CONSTRAINT <name>` label is skipped, and
+/// `PRIMARY KEY`/`UNIQUE`/`FOREIGN KEY` constraints and column definitions (whose own inline `CHECK` is
+/// not at the entry's start) are not checks. The recovered name is left empty — the diff matches checks
+/// by a name derived from the expression (see [`Sqlite::canonical_check_name`](crate::Sqlite)). The
+/// generated `[u8; N]` width check lives inline in its column definition, not as a top-level entry, so
+/// it is not returned here.
+fn table_checks(create_sql: &str) -> Vec<squealy::CheckModel> {
+    table_entries(create_sql)
+        .into_iter()
+        .filter_map(|entry| {
+            table_check_expression(entry).map(|expression| squealy::CheckModel {
+                name: String::new(),
+                expression,
+                validation: None,
+                enforcement: None,
+            })
+        })
+        .collect()
+}
+
+/// The `CHECK` expression of a table-constraint entry, or `None` if the entry is not a table-level check.
+fn table_check_expression(entry: &str) -> Option<String> {
+    let (keyword, rest) = leading_keyword(entry)?;
+    let body = if keyword.eq_ignore_ascii_case("CONSTRAINT") {
+        // `CONSTRAINT <name> CHECK (…)`: skip the name token, then require the `CHECK` keyword.
+        let (_, after_name) = leading_token(rest)?;
+        let (constraint_kind, after_kind) = leading_keyword(after_name)?;
+        constraint_kind
+            .eq_ignore_ascii_case("CHECK")
+            .then_some(after_kind)?
+    } else if keyword.eq_ignore_ascii_case("CHECK") {
+        rest
+    } else {
+        // A column definition (leading token is a column name) or another constraint kind.
+        return None;
+    };
+    parenthesized(body)
+}
+
+/// Maps each column's (unquoted) name to its `COLLATE` collation name, parsed from the `CREATE TABLE`
+/// text — no PRAGMA reports a table column's collation. Only column-definition entries are scanned; a
+/// `COLLATE` inside a table constraint is ignored. A `COLLATE` inside a column's own check expression is
+/// not distinguished (the renderer never emits one there), matching the "recover exactly what the
+/// renderer wrote" approach of [`fixed_bytes_width`] and [`partial_predicate`].
+fn column_collations(create_sql: &str) -> BTreeMap<String, String> {
+    let mut collations = BTreeMap::new();
+    for entry in table_entries(create_sql) {
+        // A table constraint (its leading token is a constraint keyword) is not a column definition.
+        if leading_keyword(entry).is_some_and(|(keyword, _)| is_constraint_keyword(keyword)) {
+            continue;
+        }
+        if let Some((name, rest)) = column_name(entry)
+            && let Some(collation) = collate_clause(rest)
+        {
+            collations.insert(name, collation);
+        }
+    }
+    collations
+}
+
+/// Whether `keyword` introduces a table-level constraint (rather than a column definition).
+fn is_constraint_keyword(keyword: &str) -> bool {
+    ["CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN"]
+        .iter()
+        .any(|candidate| keyword.eq_ignore_ascii_case(candidate))
+}
+
+/// The leading bare-word token of `entry` (skipping leading whitespace) and the remainder after it, or
+/// `None` if `entry` does not start with a word character (e.g. it starts with a quoted identifier).
+fn leading_keyword(entry: &str) -> Option<(&str, &str)> {
+    let trimmed = entry.trim_start();
+    let bytes = trimmed.as_bytes();
+    if !is_word_byte(*bytes.first()?) || bytes[0].is_ascii_digit() {
+        return None;
+    }
+    let end = bytes
+        .iter()
+        .position(|&byte| !is_word_byte(byte))
+        .unwrap_or(bytes.len());
+    Some((&trimmed[..end], &trimmed[end..]))
+}
+
+/// The leading token of `entry` (skipping leading whitespace) — a quoted identifier, a bare word, or a
+/// single punctuation byte — and the remainder after it. Used to step over a `CONSTRAINT <name>` label.
+fn leading_token(entry: &str) -> Option<(&str, &str)> {
+    let trimmed = entry.trim_start();
+    let bytes = trimmed.as_bytes();
+    let first = *bytes.first()?;
+    let end = if let Some(quoted_end) = skip_noncode(bytes, 0) {
+        quoted_end
+    } else if is_word_byte(first) {
+        bytes
+            .iter()
+            .position(|&byte| !is_word_byte(byte))
+            .unwrap_or(bytes.len())
+    } else {
+        1
+    };
+    Some((&trimmed[..end], &trimmed[end..]))
+}
+
+/// The first token of a column-definition entry as its unquoted column name (matching how
+/// `PRAGMA table_info` reports it), and the remainder after it. `None` if the entry does not begin with
+/// an identifier.
+fn column_name(entry: &str) -> Option<(String, &str)> {
+    let (token, rest) = leading_token(entry)?;
+    let name = unquote_ident(token)?;
+    Some((name, rest))
+}
+
+/// The collation name of a column definition's `COLLATE` clause (the token after the `COLLATE` keyword),
+/// unquoted, or `None` if the column has none.
+fn collate_clause(column_rest: &str) -> Option<String> {
+    let after_keyword = keyword_token_end(column_rest, "COLLATE")?;
+    let (token, _) = leading_token(&column_rest[after_keyword..])?;
+    unquote_ident(token)
+}
+
+/// Unquotes a SQL identifier token: strips a matching pair of `"…"`, `` `…` `` or `[…]` delimiters
+/// (collapsing a doubled `"`/`` ` `` escape), or returns a bare identifier as-is. `None` if the token is
+/// not an identifier (e.g. a punctuation byte).
+fn unquote_ident(token: &str) -> Option<String> {
+    let bytes = token.as_bytes();
+    match bytes.first()? {
+        quote @ (b'"' | b'`') => {
+            let quote = *quote as char;
+            let inner = token
+                .strip_prefix(quote)
+                .and_then(|rest| rest.strip_suffix(quote))
+                .unwrap_or(token);
+            Some(inner.replace(&format!("{quote}{quote}"), &quote.to_string()))
+        }
+        b'[' => Some(
+            token
+                .strip_prefix('[')
+                .and_then(|rest| rest.strip_suffix(']'))
+                .unwrap_or(token)
+                .to_owned(),
+        ),
+        &first if is_word_byte(first) && !first.is_ascii_digit() => Some(token.to_owned()),
+        _ => None,
+    }
+}
+
+/// Requires `rest` (after leading whitespace) to begin with `(`, and returns the text inside the
+/// matching close parenthesis, trimmed. Nested parentheses, quotes and comments are respected.
+fn parenthesized(rest: &str) -> Option<String> {
+    let trimmed = rest.trim_start();
+    let bytes = trimmed.as_bytes();
+    if bytes.first()? != &b'(' {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some(next) = skip_noncode(bytes, index) {
+            index = next;
+            continue;
+        }
+        match bytes[index] {
+            b'(' => {
+                depth += 1;
+                index += 1;
             }
-            byte if is_word(byte) => {
-                let start = index;
-                while index < bytes.len() && is_word(bytes[index]) {
-                    index += 1;
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(trimmed[1..index].trim().to_owned());
                 }
-                if sql[start..index].eq_ignore_ascii_case(keyword) {
-                    return Some(index);
-                }
+                index += 1;
             }
             _ => index += 1,
         }
@@ -822,5 +1083,57 @@ mod tests {
         assert_eq!(action(""), None);
         assert_eq!(action("CASCADE"), Some(ForeignKeyAction::Cascade));
         assert_eq!(action("SET NULL"), Some(ForeignKeyAction::SetNull));
+    }
+
+    #[test]
+    fn table_entries_split_on_top_level_commas_only() {
+        // Commas inside a column's inline check, a multi-column constraint's list, a string default, a
+        // quoted identifier and a comment are not split points.
+        let sql = "CREATE TABLE \"t\" (\n  \"a\" INTEGER CHECK (\"a\" IN (1, 2)),\n  \"b, c\" TEXT \
+                   DEFAULT 'x, y',\n  UNIQUE (\"a\", \"b, c\") -- trailing, comment\n)";
+        let entries = table_entries(sql);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0], "\"a\" INTEGER CHECK (\"a\" IN (1, 2))");
+        assert_eq!(entries[1], "\"b, c\" TEXT DEFAULT 'x, y'");
+        assert_eq!(entries[2], "UNIQUE (\"a\", \"b, c\") -- trailing, comment");
+        // A statement with no parenthesized body yields nothing.
+        assert!(table_entries("CREATE TABLE t AS SELECT 1").is_empty());
+    }
+
+    #[test]
+    fn table_checks_recovers_table_level_checks_only() {
+        // Bare and CONSTRAINT-named table checks are recovered; a column's inline check (the generated
+        // `[u8; N]` width check) and other constraint kinds are not.
+        let sql = "CREATE TABLE \"t\" (\n  \"hash\" BLOB CHECK (length(CAST(\"hash\" AS BLOB)) = 16),\n \
+                   \"n\" INTEGER,\n  PRIMARY KEY (\"n\"),\n  CHECK (\"n\" >= 0),\n  CONSTRAINT \"c2\" \
+                   CHECK (\"n\" < 100)\n)";
+        let checks = table_checks(sql);
+        let expressions: Vec<&str> = checks.iter().map(|c| c.expression.as_str()).collect();
+        assert_eq!(expressions, vec!["\"n\" >= 0", "\"n\" < 100"]);
+        // The recovered name is empty (matched by a derived name, not the DDL name).
+        assert!(checks.iter().all(|c| c.name.is_empty()));
+    }
+
+    #[test]
+    fn column_collations_recovers_collate_clauses() {
+        let sql = "CREATE TABLE \"t\" (\n  \"name\" TEXT COLLATE NOCASE NOT NULL,\n  \"code\" TEXT \
+                   COLLATE \"RTRIM\",\n  \"plain\" TEXT,\n  CHECK (\"plain\" <> '' COLLATE NOCASE)\n)";
+        let collations = column_collations(sql);
+        assert_eq!(collations.get("name"), Some(&"NOCASE".to_owned()));
+        // A quoted collation name is unquoted.
+        assert_eq!(collations.get("code"), Some(&"RTRIM".to_owned()));
+        // A column with no COLLATE, and a COLLATE inside a table constraint, contribute nothing.
+        assert_eq!(collations.get("plain"), None);
+        assert_eq!(collations.len(), 2);
+    }
+
+    #[test]
+    fn parenthesized_extracts_balanced_body() {
+        assert_eq!(
+            parenthesized(" (a AND (b OR c))"),
+            Some("a AND (b OR c)".to_owned())
+        );
+        // Not starting with a parenthesis.
+        assert_eq!(parenthesized(" INTEGER"), None);
     }
 }

@@ -352,11 +352,11 @@ fn rejects_index_name_collision_across_tables() {
 }
 
 #[test]
-fn rejects_table_check_constraints_for_now() {
-    // SQLite exposes CHECK constraints only in the CREATE TABLE text (no PRAGMA), so introspection
-    // cannot read them back yet; rendering rejects a model that carries one rather than publish a check
-    // that would churn every plan. (The inline `[u8; N]` width check is separate — see the FixedBytes
-    // test above — and is unaffected.)
+fn renders_table_check_constraint() {
+    // A table-level CHECK renders inline and unnamed (`CHECK (expr)`): SQLite exposes it only in the
+    // CREATE TABLE text, so introspection recovers it by parsing that text and matches it by a name
+    // derived from the expression — the rendered name is redundant. (The inline `[u8; N]` width check is
+    // separate — see the FixedBytes test above.)
     use squealy::{CheckModel, ColumnModel, DatabaseModel, SchemaModel, SqlType, TableModel};
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
@@ -378,6 +378,7 @@ fn rejects_table_check_constraints_for_now() {
                 foreign_keys: Vec::new(),
                 uniques: Vec::new(),
                 checks: vec![CheckModel {
+                    // The declared name is not rendered (SQLite checks are unnamed inline).
                     name: "ck_balance".to_owned(),
                     expression: "balance >= 0".to_owned(),
                     validation: None,
@@ -389,14 +390,17 @@ fn rejects_table_check_constraints_for_now() {
         }],
     };
     let mut sql = Vec::new();
-    let error = Sqlite.render_create(&model, &mut sql).unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    Sqlite.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+    assert!(sql.contains("CHECK (balance >= 0)"), "{sql}");
+    // Rendered unnamed — the constraint name never reaches the DDL.
+    assert!(!sql.contains("ck_balance"), "{sql}");
 }
 
 #[test]
-fn rejects_column_collations_for_now() {
-    // A column collation lives only in the CREATE TABLE text (no PRAGMA), so introspection cannot read
-    // it back yet; rendering rejects a model that carries one rather than churn every plan.
+fn renders_column_collation() {
+    // A column's COLLATE clause renders after its type: SQLite exposes it only in the CREATE TABLE text,
+    // so introspection recovers it by parsing that text.
     use squealy::{ColumnModel, DatabaseModel, SchemaModel, SqlType, TableModel};
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
@@ -424,8 +428,12 @@ fn rejects_column_collations_for_now() {
         }],
     };
     let mut sql = Vec::new();
-    let error = Sqlite.render_create(&model, &mut sql).unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    Sqlite.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+    assert!(
+        sql.contains("\"name\" TEXT COLLATE NOCASE NOT NULL"),
+        "{sql}"
+    );
 }
 
 #[test]
