@@ -2912,6 +2912,47 @@ fn postgres_exists_correlated_subquery_renders() {
     );
 }
 
+#[test]
+fn postgres_scalar_subquery_as_comparison_operand() {
+    // A scalar subquery used as a comparison operand renders as a parenthesized SELECT, with the
+    // PostgreSQL `"`-quoted identifiers.
+    let q = Postgres
+        .from::<User>()
+        .where_correlated(|(user,), sub| {
+            user.id.equals(scalar_subquery(
+                sub.from::<Post>()
+                    .where_(|post| post.user_id.equals(user.id))
+                    .select_subquery(|(post,)| post.user_id),
+            ))
+        })
+        .select(|(user,)| user.id);
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT q0_0.\"id\" AS \"id\" FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"id\" = \
+         (SELECT q1_0.\"user_id\" AS \"user_id\" FROM \"public\".\"posts\" AS q1_0 WHERE \
+         (q1_0.\"user_id\" = q0_0.\"id\")))"
+    );
+}
+
+#[test]
+fn postgres_scalar_subquery_in_projection() {
+    // A scalar subquery in the projection renders as a parenthesized SELECT in the select list.
+    let q = Postgres.from::<User>().select_correlated(|(user,), sub| {
+        scalar_subquery(
+            sub.from::<Post>()
+                .where_(|post| post.user_id.equals(user.id))
+                .select_subquery(|(post,)| post.id),
+        )
+    });
+
+    assert_eq!(
+        q.to_sql(),
+        "SELECT (SELECT q1_0.\"id\" AS \"id\" FROM \"public\".\"posts\" AS q1_0 WHERE \
+         (q1_0.\"user_id\" = q0_0.\"id\")) AS \"expr\" FROM \"public\".\"users\" AS q0_0"
+    );
+}
+
 // The structural expression IR is rendered per-dialect: PostgreSQL keeps the fractional-division
 // float casts and precise integer cast types that a single canonical fragment could not express.
 #[test]

@@ -44,6 +44,27 @@ UNION ALL \
 }
 
 #[test]
+fn mysql_intersect_and_intersect_all() {
+    let intersect = Mysql
+        .from::<User>()
+        .select(|(u,)| (u.id, u.name))
+        .intersect(Mysql.from::<Admin>().select(|(a,)| (a.id, a.name)));
+
+    assert_eq!(
+        intersect.to_sql(),
+        "(SELECT q0_0.`id` AS `t0_id`, q0_0.`name` AS `t1_name` FROM `shop`.`users` AS q0_0) \
+INTERSECT \
+(SELECT q0_0.`id` AS `t0_id`, q0_0.`name` AS `t1_name` FROM `shop`.`admins` AS q0_0)"
+    );
+
+    let intersect_all = Mysql
+        .from::<User>()
+        .select(|(u,)| (u.id, u.name))
+        .intersect_all(Mysql.from::<Admin>().select(|(a,)| (a.id, a.name)));
+    assert!(intersect_all.to_sql().contains(") INTERSECT ALL ("));
+}
+
+#[test]
 fn mysql_except_with_trailing_order_limit() {
     let query = Mysql
         .from::<User>()
