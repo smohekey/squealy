@@ -337,8 +337,12 @@ fn skip_noncode(bytes: &[u8], index: usize) -> Option<usize> {
     }
 }
 
+/// Whether `byte` can be part of an unquoted SQL identifier/keyword token. A non-ASCII byte (a
+/// continuation or lead byte of a multi-byte UTF-8 identifier such as `é`) counts as a word byte, so a
+/// Unicode identifier is scanned as one whole token — this keeps token boundaries on `char` boundaries,
+/// avoiding a mid-`char` slice (and its panic) in the token helpers.
 fn is_word_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
+    byte.is_ascii_alphanumeric() || byte == b'_' || !byte.is_ascii()
 }
 
 /// The byte offset just past the first occurrence of `keyword` (ASCII, matched case-insensitively) as a
@@ -1128,6 +1132,26 @@ mod tests {
         // A column with no COLLATE, and a COLLATE inside a table constraint, contribute nothing.
         assert_eq!(collations.get("plain"), None);
         assert_eq!(collations.len(), 3);
+    }
+
+    #[test]
+    fn parsers_handle_non_ascii_unquoted_identifiers() {
+        // A valid SQLite table can start a column with an unquoted non-ASCII identifier. The token
+        // helpers must scan it on `char` boundaries rather than slice at byte 1 (which would panic).
+        let sql = "CREATE TABLE t (é TEXT COLLATE NOCASE, CHECK (é <> ''))";
+        assert_eq!(column_collations(sql).get("é"), Some(&"NOCASE".to_owned()));
+        assert_eq!(
+            table_checks(sql)
+                .iter()
+                .map(|c| c.expression.as_str())
+                .collect::<Vec<_>>(),
+            vec!["é <> ''"]
+        );
+        // A non-ASCII collation name round-trips too.
+        assert_eq!(
+            column_collations("CREATE TABLE t (a TEXT COLLATE crédit)").get("a"),
+            Some(&"crédit".to_owned())
+        );
     }
 
     #[test]
