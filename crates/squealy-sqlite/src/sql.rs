@@ -236,19 +236,21 @@ pub(crate) fn write_plan(
     // away in this plan) is brand-new — it does not exist yet, so it needs no pre-drop — and
     // `DROP VIEW IF EXISTS "x"` errors with "use DROP TABLE" while `x` is still a table. A dropped table
     // was already freed by the pass above, but a rename happens later in the main pass, so exclude both.
-    let table_owned_names: HashSet<&str> = plan
+    // The comparison is ASCII case-folded, matching how SQLite resolves identifiers (and the namespace
+    // uniqueness check above): a view `x` reusing a table renamed from `X` must still be skipped.
+    let table_owned_names: HashSet<String> = plan
         .steps
         .iter()
         .filter_map(|step| match step {
-            DatabasePlanStep::DropTable { table, .. } => Some(table.name.as_str()),
-            DatabasePlanStep::RenameTable { from, .. } => Some(from.as_str()),
+            DatabasePlanStep::DropTable { table, .. } => Some(table.name.to_ascii_lowercase()),
+            DatabasePlanStep::RenameTable { from, .. } => Some(from.to_ascii_lowercase()),
             _ => None,
         })
         .collect();
     for step in &plan.steps {
         if let DatabasePlanStep::CreateView { view, .. } | DatabasePlanStep::DropView { view, .. } =
             step
-            && !table_owned_names.contains(view.name.as_str())
+            && !table_owned_names.contains(&view.name.to_ascii_lowercase())
         {
             statement(writer, &mut first)?;
             writer.write_all(b"DROP VIEW IF EXISTS ")?;

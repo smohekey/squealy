@@ -1727,3 +1727,68 @@ async fn a_view_column_set_change_is_a_blocked_destructive_change() {
         plan.steps,
     );
 }
+
+#[tokio::test]
+async fn renaming_a_table_and_reusing_its_name_for_a_view_case_insensitively_succeeds() {
+    // Same as the rename+view case, but the new view reuses the table name with different casing
+    // (`Thing` renamed away, view `thing` created). SQLite folds identifiers, so the pre-drop skip must
+    // fold too — otherwise `DROP VIEW IF EXISTS "thing"` would hit the still-present table `Thing`.
+    let (mut connection, raw) = setup().await;
+    let v1 = one_table(table(
+        "Thing",
+        vec![
+            column("id", SqlType::I64, false),
+            column("active", SqlType::I64, false),
+        ],
+    ));
+    publish(&v1, &Sqlite, &mut connection)
+        .await
+        .expect("publish v1 (table Thing)");
+    exec(
+        &raw,
+        "INSERT INTO \"Thing\" (\"id\", \"active\") VALUES (1, 1), (2, 0)",
+    )
+    .await;
+
+    let mut view_thing = active_widgets_view();
+    view_thing.name = "thing".to_owned();
+    view_thing.query.from = Some(SourceRef {
+        schema: None,
+        name: "renamed".to_owned(),
+        alias: "q0_0".to_owned(),
+    });
+    let v2 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![table(
+                "renamed",
+                vec![
+                    column("id", SqlType::I64, false),
+                    column("active", SqlType::I64, false),
+                ],
+            )],
+            views: vec![view_thing],
+        }],
+    };
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::RenameTable(RenameTable {
+            id: "rename-thing".to_owned(),
+            schema: None,
+            from: "Thing".to_owned(),
+            to: "renamed".to_owned(),
+        })],
+    };
+
+    let plan =
+        plan_from_database_with_refactors(&v2, &refactors, &mut connection, DiffPolicy::ALLOW_ALL)
+            .await
+            .expect("plan the case-differing rename + view");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply the case-differing rename + view");
+    assert_eq!(
+        count(&raw, "thing").await,
+        1,
+        "the view resolves after the case-differing rename",
+    );
+}
