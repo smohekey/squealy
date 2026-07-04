@@ -462,6 +462,32 @@ enum CopySource<'a> {
     Expression(&'a str),
 }
 
+/// A rowid alias (`rowid` / `_rowid_` / `oid`) not shadowed by a user column of `table`. SQLite
+/// resolves a bare rowid name to a real column of that name if one exists, so a full-column-replace
+/// rebuild — which binds the hidden rowid to carry the row count — must pick an alias the table does
+/// not define. Errors only if the table defines columns shadowing all three (which would also make the
+/// rowid unaddressable in ordinary SQL).
+fn unshadowed_rowid_alias(table: &TableModel) -> io::Result<&'static str> {
+    let shadowed: HashSet<String> = table
+        .columns
+        .iter()
+        .map(|column| column.name.to_ascii_lowercase())
+        .collect();
+    ["rowid", "_rowid_", "oid"]
+        .into_iter()
+        .find(|alias| !shadowed.contains(*alias))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "cannot rebuild `{}` while preserving its rows: it defines columns shadowing every \
+                     rowid alias (rowid, _rowid_, oid)",
+                    table.name
+                ),
+            )
+        })
+}
+
 /// Rebuilds a table whose change SQLite's `ALTER TABLE` cannot express in place: create the new shape
 /// under a temporary name, copy the surviving data, drop the old table, rename the new one into place,
 /// and recreate the target's indexes (dropping the old table dropped them). Data is carried column by
@@ -556,12 +582,18 @@ fn write_table_rebuild(
 
     if carried.is_empty() {
         // Every target column is newly added, but the rows must still survive: selecting no columns
-        // would copy zero rows and silently drop the whole table. Insert one default-filled row per old
-        // row, carrying `rowid` so row count (and rowid identity) is preserved.
+        // would copy zero rows and silently drop the whole table. Insert one row per old row, binding
+        // only the hidden rowid (auto-assigned via `NULL`) — no user column on either side, so every
+        // real column takes its default. A bare rowid name resolves to a user column that shadows it,
+        // so bind an alias the target does not define, and select from the old table without naming any
+        // of its columns (its rowid may be shadowed too).
+        let rowid_alias = unshadowed_rowid_alias(target)?;
         statement(writer, first)?;
         writer.write_all(b"INSERT INTO ")?;
         write_quoted_ident(&temp_name, writer)?;
-        writer.write_all(b" (rowid)\nSELECT rowid FROM ")?;
+        writer.write_all(b" (")?;
+        write_quoted_ident(rowid_alias, writer)?;
+        writer.write_all(b")\nSELECT NULL FROM ")?;
         write_quoted_ident(table, writer)?;
     } else {
         statement(writer, first)?;

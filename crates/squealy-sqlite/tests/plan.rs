@@ -1100,6 +1100,58 @@ async fn rebuild_replacing_all_columns_preserves_rows() {
 }
 
 #[tokio::test]
+async fn rebuild_preserves_rows_when_a_column_shadows_rowid() {
+    // A full-column-replace rebuild carries rows via the hidden rowid; if the new table defines a
+    // column literally named `rowid`, the renderer must bind an unshadowed alias so the user column
+    // still takes its default rather than the old row ids.
+    let (mut connection, raw) = setup().await;
+    let v1 = one_table(table("t", vec![column("old", SqlType::Text, false)]));
+    publish(&v1, &Sqlite, &mut connection)
+        .await
+        .expect("publish v1");
+    exec(&raw, "INSERT INTO \"t\" (\"old\") VALUES ('a'), ('b')").await;
+
+    // Replace the column with one named `rowid` (shadowing the hidden rowid), with a default.
+    let mut v2 = introspect(&mut connection).await.expect("introspect");
+    let mut shadow = column("rowid", SqlType::Text, false);
+    shadow.default = Some(squealy::DefaultValue::Text("d".to_owned()));
+    v2.schemas[0].tables[0].columns = vec![shadow];
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan v2");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply v2");
+    assert_eq!(
+        count(&raw, "t").await,
+        2,
+        "rows survive despite the rowid-shadowing column"
+    );
+    // The user `rowid` column got its default, not the old hidden row ids.
+    let defaulted: i64 = raw
+        .call(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM \"t\" WHERE \"rowid\" = 'd'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .await
+        .expect("count defaulted");
+    assert_eq!(defaulted, 2);
+
+    let replan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("re-plan");
+    assert!(
+        replan.steps.is_empty(),
+        "must converge, got: {:?}",
+        replan.steps
+    );
+}
+
+#[tokio::test]
 async fn drops_a_table_before_reusing_its_name_for_an_index() {
     // SQLite's table and index names share one namespace, so an index taking a dropped table's name is
     // valid only if the table is dropped first.
