@@ -301,7 +301,7 @@ async fn incremental_publish_applies_changed_column_definitions() {
     .expect("plan changed columns");
     assert_eq!(plan.steps.len(), 2);
 
-    squealy_model::apply_plan(&plan, &Postgres, &mut connection)
+    squealy_model::apply_plan(&plan, &desired, &Postgres, &mut connection)
         .await
         .expect("apply changed columns");
 
@@ -340,7 +340,7 @@ async fn incremental_publish_changes_fixed_bytes_width() {
         "a fixed-bytes width change should produce a plan"
     );
 
-    squealy_model::apply_plan(&plan, &Postgres, &mut connection)
+    squealy_model::apply_plan(&plan, &desired, &Postgres, &mut connection)
         .await
         .expect("apply fixed-bytes width change");
 

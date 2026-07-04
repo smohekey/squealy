@@ -145,11 +145,13 @@ fn no_schema_qualification() {
 }
 
 #[test]
-fn render_plan_is_unsupported() {
+fn render_plan_of_empty_plan_is_empty() {
     let plan = squealy::DatabasePlan::default();
     let mut sql = Vec::new();
-    let error = Sqlite.render_plan(&plan, &mut sql).unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    Sqlite
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .expect("an empty plan renders");
+    assert!(sql.is_empty(), "{}", String::from_utf8_lossy(&sql));
 }
 
 #[test]

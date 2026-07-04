@@ -21,3 +21,6 @@ tokio-rusqlite = { version = "0.7", features = ["bundled"] }
 [dev-dependencies]
 squealy-model.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# The incremental-plan tests seed and read table rows directly (bypassing the query layer) to assert a
+# table rebuild preserves data — including a foreign-key child's rows — over a shared in-memory handle.
+tokio-rusqlite = { version = "0.7", features = ["bundled"] }

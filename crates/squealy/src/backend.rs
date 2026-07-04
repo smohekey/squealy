@@ -255,7 +255,19 @@ pub trait SchemaBackend {
     ///
     /// Backends own the SQL generation for these neutral plan steps. The default is conservative so
     /// backend crates can opt into incremental planning deliberately.
-    fn render_plan(&self, _plan: &DatabasePlan, _writer: &mut impl Write) -> io::Result<()> {
+    ///
+    /// `desired` is the target [`DatabaseModel`] the plan was built to reach (the same model diffed
+    /// against the live schema to produce `plan`). Most backends render each step's delta in isolation
+    /// and ignore it, but a backend whose `ALTER TABLE` cannot express a change in place — SQLite, which
+    /// rebuilds the whole table (create new, copy, drop, rename) for any type or constraint change —
+    /// needs the complete target table, including its *unchanged* columns, which the per-change plan
+    /// steps do not carry.
+    fn render_plan(
+        &self,
+        _plan: &DatabasePlan,
+        _desired: &DatabaseModel,
+        _writer: &mut impl Write,
+    ) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "backend does not support incremental schema plan rendering",
@@ -268,13 +280,28 @@ pub trait SchemaBackend {
     /// The default delegates to [`render_plan`](Self::render_plan), so backends without a concurrent
     /// form render identically. Callers pair this with
     /// [`DdlExecutor::execute_ddl_unmanaged`](DdlExecutor::execute_ddl_unmanaged), since the
-    /// concurrent form usually cannot run inside a transaction.
+    /// concurrent form usually cannot run inside a transaction. `desired` is the target model, as for
+    /// [`render_plan`](Self::render_plan).
     fn render_plan_concurrent(
         &self,
         plan: &DatabasePlan,
+        desired: &DatabaseModel,
         writer: &mut impl Write,
     ) -> io::Result<()> {
-        self.render_plan(plan, writer)
+        self.render_plan(plan, desired, writer)
+    }
+
+    /// Whether the backend can build indexes concurrently, outside the plan transaction (PostgreSQL
+    /// `CREATE INDEX CONCURRENTLY`).
+    ///
+    /// The default is `false`: only a backend with a genuine non-locking form should opt in. Callers
+    /// (`apply_plan_with_options` / `render_plan_with_options`) only honour
+    /// [`PlanApplyOptions::concurrent_indexes`](crate) when this is `true` — splitting index creation
+    /// out of the transactional batch is pointless for a backend that has no concurrent form, and
+    /// harmful for one that rebuilds whole tables (SQLite): the transactional rebuild recreates the
+    /// index and the split-out index-add would then create it again.
+    fn supports_concurrent_index_creation(&self) -> bool {
+        false
     }
 }
 

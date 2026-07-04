@@ -458,8 +458,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 plan_models_with_refactors(&desired.model, &actual, &desired.refactors, policy)
                     .map_err(|error| policy_blocked_error(&error.blocked))?;
             let sql = match backend.backend {
-                BackendKind::Postgres => render_plan_sql(&plan, &Postgres),
-                BackendKind::Mysql => render_plan_sql(&plan, &Mysql),
+                BackendKind::Postgres => render_plan_sql(&plan, &desired.model, &Postgres),
+                BackendKind::Mysql => render_plan_sql(&plan, &desired.model, &Mysql),
             }
             .map_err(|error| CliError::Message(format!("render plan: {error}")))?;
             print!("{sql}");
@@ -622,16 +622,20 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                             .await,
                         )?;
                         if report {
-                            let sql = render_plan_with_options(&plan, &Postgres, apply_options)
-                                .map_err(|error| {
-                                    CliError::Message(format!("render plan: {error}"))
-                                })?;
+                            let sql = render_plan_with_options(
+                                &plan,
+                                &loaded.model,
+                                &Postgres,
+                                apply_options,
+                            )
+                            .map_err(|error| CliError::Message(format!("render plan: {error}")))?;
                             print!("{sql}");
                             Ok(())
                         } else {
                             confirm_destructive(&plan, yes)?;
                             apply_plan_with_options(
                                 &plan,
+                                &loaded.model,
                                 &Postgres,
                                 &mut connection,
                                 apply_options,
@@ -679,17 +683,26 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                             .await,
                         )?;
                         if report {
-                            let sql = render_plan_with_options(&plan, &Mysql, apply_options)
-                                .map_err(|error| {
-                                    CliError::Message(format!("render plan: {error}"))
-                                })?;
+                            let sql = render_plan_with_options(
+                                &plan,
+                                &loaded.model,
+                                &Mysql,
+                                apply_options,
+                            )
+                            .map_err(|error| CliError::Message(format!("render plan: {error}")))?;
                             print!("{sql}");
                             Ok(())
                         } else {
                             confirm_destructive(&plan, yes)?;
-                            apply_plan_with_options(&plan, &Mysql, &mut connection, apply_options)
-                                .await
-                                .map_err(|error| CliError::Message(format!("publish: {error}")))?;
+                            apply_plan_with_options(
+                                &plan,
+                                &loaded.model,
+                                &Mysql,
+                                &mut connection,
+                                apply_options,
+                            )
+                            .await
+                            .map_err(|error| CliError::Message(format!("publish: {error}")))?;
                             record_publish_metadata(&loaded, "incremental", &mut connection).await
                         }
                     } else {
