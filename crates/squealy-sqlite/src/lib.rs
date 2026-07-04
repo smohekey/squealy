@@ -28,8 +28,8 @@ use std::io::{self, Write};
 use std::pin::Pin;
 
 use squealy::{
-    ConnectionWithTransaction, Constraint, DatabaseModel, DatabasePlan, DdlExecutor, DefaultValue,
-    ForeignKeyModel, IdentityMode, SchemaBackend, SchemaConnect, SchemaIntrospect,
+    CheckModel, ConnectionWithTransaction, Constraint, DatabaseModel, DatabasePlan, DdlExecutor,
+    DefaultValue, ForeignKeyModel, IdentityMode, SchemaBackend, SchemaConnect, SchemaIntrospect,
     SchemaMetadataStore, SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore,
     SqlType,
 };
@@ -310,6 +310,21 @@ impl SchemaIntrospect for SqliteConnection {
             foreign_key.references_table,
             foreign_key.references_columns.join(","),
         )
+    }
+
+    /// SQLite renders a `CHECK` constraint inline and unnamed, and introspection recovers it by parsing
+    /// the `CREATE TABLE` text — which yields only the expression, not a name. Derive a stable name from
+    /// the expression (identical on the desired and introspected side) so equivalent checks compare equal
+    /// while a table's several checks stay distinct.
+    fn canonical_check_name(&self, check: &CheckModel) -> String {
+        format!("check:{}", check.expression)
+    }
+
+    /// SQLite stores a `CHECK` expression verbatim in the `CREATE TABLE` text, so introspection recovers
+    /// it exactly as rendered — trim only surrounding whitespace on both sides so a desired expression
+    /// authored with incidental padding matches the parenthesized text read back.
+    fn canonical_check_expression(&self, expression: &str) -> String {
+        expression.trim().to_owned()
     }
 
     /// SQLite has no boolean or unsigned literal, so a `bool`/unsigned default on an `INTEGER`-affinity
