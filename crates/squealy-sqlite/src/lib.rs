@@ -251,6 +251,18 @@ impl SchemaIntrospect for SqliteConnection {
         introspect::representative_type(introspect::affinity_of_sql_type(ty))
     }
 
+    /// SQLite cannot type a view's output columns: `PRAGMA table_info` reports no type for a computed
+    /// output (`length(x)`, `a || b`), so introspection cannot recover a view column's type at all (it
+    /// reads views back by name only). Collapse every desired view column to a single sentinel type so it
+    /// matches what introspection produces — the diff then compares view columns by name alone. A
+    /// column-set change (add/remove/rename) still differs and forces a destructive `DropView` +
+    /// re-create; a pure output-type change (same names) is a no-op, which is correct for a view (it holds
+    /// no data). Table columns keep their affinity via [`canonical_sql_type`](Self::canonical_sql_type);
+    /// only view columns collapse this far.
+    fn canonical_view_column_type(&self, _ty: &SqlType) -> SqlType {
+        SqlType::Bytes
+    }
+
     /// SQLite's only identity mechanism is `AUTOINCREMENT`, which introspects back as
     /// [`IdentityMode::AutoIncrement`]. Map every declared mode to it so a crate-declared
     /// `auto_increment` column (which enters the model as `ByDefault`) does not churn as an ambiguous

@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 use squealy::{
     ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyModel,
     IdentityMode, IdentityModel, IndexDirection, IndexModel, SchemaModel, SqlType, TableModel,
+    ViewColumnModel, ViewModel, ViewQueryModel,
 };
 use tokio_rusqlite::rusqlite::{self, Row};
 
@@ -36,18 +37,22 @@ pub(crate) async fn database(connection: &SqliteConnection) -> Result<DatabaseMo
     for name in table_names(connection).await? {
         tables.push(table(connection, &name).await?);
     }
+    let mut views = Vec::new();
+    for name in view_names(connection).await? {
+        views.push(view(connection, &name).await?);
+    }
     // SQLite has no namespace object: an empty database has no schema to report. Emitting an empty
     // default schema would diff against a genuinely empty model (`schemas: []`) as a spurious
-    // `DropSchema`, so only include the schema once there is at least one object in it. (Views are not
-    // introspected in this slice — SQLite view rendering is itself deferred — so a table is the only
-    // object that can populate it.)
-    let schemas = if tables.is_empty() {
+    // `DropSchema`, so only include the schema once there is at least one object in it. Both tables and
+    // views can populate it; a view is recovered by name only (see [`view`]), which is enough for the
+    // diff to drop a removed or renamed view and to detect name collisions.
+    let schemas = if tables.is_empty() && views.is_empty() {
         Vec::new()
     } else {
         vec![SchemaModel {
             name: None,
             tables,
-            views: Vec::new(),
+            views,
         }]
     };
     Ok(DatabaseModel { schemas })
@@ -68,6 +73,60 @@ async fn table_names(connection: &SqliteConnection) -> Result<Vec<String>, Sqlit
         |row| row.get::<_, String>(0),
     )
     .await
+}
+
+/// User view names in a deterministic order, excluding SQLite's internal objects and this backend's
+/// bookkeeping tables — the same prefix filter as [`table_names`].
+async fn view_names(connection: &SqliteConnection) -> Result<Vec<String>, SqliteError> {
+    query(
+        connection,
+        "SELECT name FROM sqlite_master \
+         WHERE type = 'view' \
+           AND name NOT GLOB 'sqlite_*' \
+           AND name NOT GLOB '__squealy_*' \
+         ORDER BY name",
+        None,
+        |row| row.get::<_, String>(0),
+    )
+    .await
+}
+
+/// Introspects one view — its name and output column names. SQLite stores a view as its verbatim
+/// `CREATE VIEW` text, which cannot be reconstructed into the structural [`ViewQueryModel`] body, so the
+/// body (and its projection) stays empty: the "introspected, body unknown" marker the diff keys on to
+/// re-apply the desired definition rather than compare bodies. `PRAGMA table_info` does report a view's
+/// column *names*, but not a usable type for a computed output (`length(x)`, `a || b` come back with an
+/// empty type), so every column is recorded as a single sentinel type ([`SqlType::Bytes`]) — the same
+/// type a desired view column canonicalizes to (see `Sqlite::canonical_view_column_type`). The diff then
+/// compares view columns by name: a column-set change (add/remove/rename) differs and forces a
+/// destructive `DropView` + re-create, while an unchanged view (including computed columns) matches and
+/// is re-applied non-destructively. The columns also let a removed or renamed view produce a `DropView`
+/// (a view invisible to introspection would otherwise linger) and take part in the one-namespace check.
+async fn view(connection: &SqliteConnection, name: &str) -> Result<ViewModel, SqliteError> {
+    // A view whose body cannot be analyzed — it references a dropped table, or calls a function this
+    // connection has not registered — makes `PRAGMA table_info` error when it reparses the view. Fall
+    // back to a name-only view so introspection still succeeds and the diff can drop (or recreate) the
+    // broken view, rather than failing the whole introspection and stranding a database that contains
+    // one. The name comes from `sqlite_master` and always reads back; only the column probe can fail.
+    let columns = columns(connection, name)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|column| ViewColumnModel {
+                    name: column.name,
+                    // SQLite cannot type a view output; use one sentinel so the diff compares by name.
+                    ty: SqlType::Bytes,
+                    nullable: false,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ViewModel {
+        name: name.to_owned(),
+        comment: None,
+        columns,
+        query: ViewQueryModel::default(),
+    })
 }
 
 async fn table(connection: &SqliteConnection, name: &str) -> Result<TableModel, SqliteError> {

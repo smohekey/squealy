@@ -6,13 +6,14 @@
 //! foreign-key child's rows, which a naive drop-and-recreate would cascade-delete.
 
 use squealy::{
-    ColumnModel, Constraint, DatabaseModel, DatabasePlan, DdlExecutor, ForeignKeyAction,
-    ForeignKeyModel, IdentityMode, IdentityModel, IndexModel, SchemaBackend, SchemaModel, SqlType,
-    TableModel,
+    ColumnModel, CompareOp, Constraint, DatabaseModel, DatabasePlan, DatabasePlanStep, DdlExecutor,
+    ExprNode, ForeignKeyAction, ForeignKeyModel, IdentityMode, IdentityModel, IndexModel,
+    ProjectionItem, SchemaBackend, SchemaModel, SourceRef, SqlType, TableModel, ViewColumnModel,
+    ViewModel, ViewQueryModel,
 };
 use squealy_model::{
     CastColumn, DiffPolicy, PlanApplyOptions, RefactorLog, RefactorOperation, RenameColumn,
-    apply_plan, apply_plan_with_options, introspect, plan_from_database,
+    RenameTable, apply_plan, apply_plan_with_options, introspect, plan_from_database,
     plan_from_database_with_refactors, plan_models, plan_models_with_refactors, publish,
 };
 use squealy_sqlite::{Sqlite, SqliteConnection};
@@ -63,6 +64,69 @@ fn one_table(table: TableModel) -> DatabaseModel {
             name: None,
             views: Vec::new(),
             tables: vec![table],
+        }],
+    }
+}
+
+/// A `widgets(id, active)` table whose introspected shape re-plans to an empty diff (no PK/identity).
+fn widget_table() -> TableModel {
+    table(
+        "widgets",
+        vec![
+            column("id", SqlType::I64, false),
+            column("active", SqlType::I64, false),
+        ],
+    )
+}
+
+/// An `active_widgets` view over `widgets` — `SELECT id FROM widgets WHERE active > 0`.
+fn active_widgets_view() -> ViewModel {
+    let widget_col = |column: &str| ExprNode::Column {
+        alias: "q0_0".to_owned(),
+        column: column.to_owned(),
+    };
+    ViewModel {
+        name: "active_widgets".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "id".to_owned(),
+            ty: SqlType::I64,
+            nullable: false,
+        }],
+        query: ViewQueryModel {
+            dependencies: Vec::new(),
+            distinct: false,
+            projection: vec![ProjectionItem {
+                output_name: "id".to_owned(),
+                expr: widget_col("id"),
+            }],
+            from: Some(SourceRef {
+                schema: None,
+                name: "widgets".to_owned(),
+                alias: "q0_0".to_owned(),
+            }),
+            joins: Vec::new(),
+            filter: Some(ExprNode::Compare {
+                op: CompareOp::GreaterThan,
+                left: Box::new(widget_col("active")),
+                right: Box::new(ExprNode::Literal("0".to_owned())),
+            }),
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        },
+    }
+}
+
+/// The `widgets` table plus the `active_widgets` view over it.
+fn table_and_view() -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![widget_table()],
+            views: vec![active_widgets_view()],
         }],
     }
 }
@@ -1248,5 +1312,539 @@ async fn execute_ddl_restores_the_prior_foreign_keys_setting() {
     assert!(
         foreign_keys_enabled(&raw).await,
         "an enabled setting is preserved"
+    );
+}
+
+#[tokio::test]
+async fn introspects_a_published_view_by_name() {
+    // A published view is read back so the diff can see it. SQLite can't recover a view's structural body
+    // (empty projection — the "body unknown" marker) or type its columns, so each column carries the
+    // sentinel `Bytes` type and only the column *names* are meaningful.
+    let (mut connection, _raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+
+    let actual = introspect(&mut connection).await.expect("introspect");
+    let views: Vec<_> = actual
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.views)
+        .collect();
+    assert_eq!(
+        views.len(),
+        1,
+        "expected the view to be introspected: {actual:?}"
+    );
+    assert_eq!(views[0].name, "active_widgets");
+    assert_eq!(
+        views[0]
+            .columns
+            .iter()
+            .map(|column| (column.name.as_str(), &column.ty))
+            .collect::<Vec<_>>(),
+        vec![("id", &SqlType::Bytes)],
+    );
+    assert!(
+        views[0].query.projection.is_empty(),
+        "an introspected view is body-unknown: {:?}",
+        views[0].query,
+    );
+}
+
+#[tokio::test]
+async fn replanning_an_unchanged_view_is_not_destructive() {
+    // A view whose computed output (`length(name)`) SQLite cannot type must not force a destructive
+    // `DropView` on an unchanged replan. The desired view columns canonicalize to the same sentinel type
+    // introspection reads back, so they match by name and the diff re-applies the view without a drop —
+    // the default `BLOCK_RISKY` policy (which blocks destructive changes) still succeeds.
+    let (mut connection, _raw) = setup().await;
+    let mut model = one_table(table(
+        "people",
+        vec![
+            column("id", SqlType::I64, false),
+            column("name", SqlType::Text, false),
+        ],
+    ));
+    model.schemas[0].views.push(ViewModel {
+        name: "name_lengths".to_owned(),
+        comment: None,
+        columns: vec![
+            ViewColumnModel {
+                name: "id".to_owned(),
+                ty: SqlType::I64,
+                nullable: false,
+            },
+            // A computed output SQLite reports no type for — the case that used to churn a `DropView`.
+            ViewColumnModel {
+                name: "name_length".to_owned(),
+                ty: SqlType::I64,
+                nullable: false,
+            },
+        ],
+        query: ViewQueryModel {
+            dependencies: Vec::new(),
+            distinct: false,
+            projection: vec![
+                ProjectionItem {
+                    output_name: "id".to_owned(),
+                    expr: ExprNode::Column {
+                        alias: "q0_0".to_owned(),
+                        column: "id".to_owned(),
+                    },
+                },
+                ProjectionItem {
+                    output_name: "name_length".to_owned(),
+                    expr: ExprNode::ScalarFn {
+                        func: squealy::ScalarFunc::Length,
+                        args: vec![ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: "name".to_owned(),
+                        }],
+                    },
+                },
+            ],
+            from: Some(SourceRef {
+                schema: None,
+                name: "people".to_owned(),
+                alias: "q0_0".to_owned(),
+            }),
+            joins: Vec::new(),
+            filter: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        },
+    });
+
+    publish(&model, &Sqlite, &mut connection)
+        .await
+        .expect("publish table + computed view");
+
+    // Under the default (risk-blocking) policy, the unchanged replan must succeed and carry no drop.
+    let plan = plan_from_database(&model, &mut connection, DiffPolicy::BLOCK_RISKY)
+        .await
+        .expect("re-plan the unchanged view under the default policy");
+    assert!(
+        !plan
+            .steps
+            .iter()
+            .any(|step| matches!(step, DatabasePlanStep::DropView { .. })),
+        "an unchanged view must not force a destructive DropView: {:?}",
+        plan.steps,
+    );
+}
+
+#[tokio::test]
+async fn removing_a_view_drops_it() {
+    // Removing a view from the desired model must drop the live view. Before views were introspected the
+    // view was invisible to the diff, so no `DropView` was emitted and the stale view lingered (and could
+    // block a later object reusing its name).
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+
+    // The rendered `CREATE VIEW` is valid SQLite: the view exists and filters to the active rows.
+    exec(
+        &raw,
+        "INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (1, 1), (2, 0)",
+    )
+    .await;
+    assert_eq!(
+        count(&raw, "active_widgets").await,
+        1,
+        "view filters active rows"
+    );
+
+    let table_only = one_table(widget_table());
+    let plan = plan_from_database(&table_only, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan table-only");
+    assert!(
+        plan.steps.iter().any(|step| matches!(
+            step,
+            DatabasePlanStep::DropView { view, .. } if view.name == "active_widgets"
+        )),
+        "expected a DropView for the removed view, got: {:?}",
+        plan.steps,
+    );
+
+    apply_plan(&plan, &table_only, &Sqlite, &mut connection)
+        .await
+        .expect("apply the drop");
+    let actual = introspect(&mut connection)
+        .await
+        .expect("introspect after drop");
+    assert!(
+        actual.schemas.iter().all(|schema| schema.views.is_empty()),
+        "the view must be gone after the drop: {actual:?}",
+    );
+}
+
+#[tokio::test]
+async fn rebuilding_a_table_under_an_existing_view_succeeds() {
+    // A rebuild drops the old table and renames the new one into place; a live view over that table is
+    // reparsed at the rename. This must not error, and the view must still resolve afterward.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+    exec(
+        &raw,
+        "INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (1, 1), (2, 0)",
+    )
+    .await;
+
+    // v2 adds a UNIQUE (inline-only in SQLite → forces a create-copy-drop-rename rebuild of widgets),
+    // with the active_widgets view over widgets still present.
+    let mut widgets = widget_table();
+    widgets.uniques.push(Constraint {
+        name: String::new(),
+        columns: vec!["id".to_owned()],
+    });
+    let v2 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![widgets],
+            views: vec![active_widgets_view()],
+        }],
+    };
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan v2");
+    assert!(
+        render(&plan, &v2).contains("__squealy_new_widgets"),
+        "expected a rebuild of widgets",
+    );
+
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply the rebuild under an existing view");
+    assert_eq!(
+        count(&raw, "active_widgets").await,
+        1,
+        "the view still resolves and filters after the rebuild",
+    );
+}
+
+#[tokio::test]
+async fn replacing_a_table_with_a_same_named_view_succeeds() {
+    // A plan that drops a table and creates a view of the same name must free the table name (via
+    // `DROP TABLE`) before the view pre-pass runs `DROP VIEW IF EXISTS <name>` — SQLite errors ("use
+    // DROP TABLE …") if a table still owns the name. The view pre-pass therefore runs after table drops.
+    let (mut connection, raw) = setup().await;
+    let v1 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![
+                widget_table(),
+                table("summary", vec![column("id", SqlType::I64, false)]),
+            ],
+            views: Vec::new(),
+        }],
+    };
+    publish(&v1, &Sqlite, &mut connection)
+        .await
+        .expect("publish v1 (two tables)");
+    exec(
+        &raw,
+        "INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (1, 1), (2, 0)",
+    )
+    .await;
+
+    // v2 removes the `summary` table and adds a `summary` view (same name) over `widgets`.
+    let mut summary_view = active_widgets_view();
+    summary_view.name = "summary".to_owned();
+    let v2 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![widget_table()],
+            views: vec![summary_view],
+        }],
+    };
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan the table→view replacement");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply the table→view replacement");
+    assert_eq!(
+        count(&raw, "summary").await,
+        1,
+        "the same-named view resolves after replacing the table",
+    );
+}
+
+#[tokio::test]
+async fn replacing_a_view_with_a_same_named_table_succeeds() {
+    // The symmetric transition: a view is dropped and a table of the same name is created. The view
+    // pre-pass drops the view (freeing the name) before the main pass creates the table.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish widgets + active_widgets view");
+
+    // v2 removes the active_widgets view and adds a table of the same name.
+    let v2 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![
+                widget_table(),
+                table("active_widgets", vec![column("id", SqlType::I64, false)]),
+            ],
+            views: Vec::new(),
+        }],
+    };
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan the view→table replacement");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply the view→table replacement");
+    exec(&raw, "INSERT INTO \"active_widgets\" (\"id\") VALUES (7)").await;
+    assert_eq!(
+        count(&raw, "active_widgets").await,
+        1,
+        "the same-named table exists and accepts rows after replacing the view",
+    );
+}
+
+#[tokio::test]
+async fn renaming_a_table_and_reusing_its_name_for_a_view_succeeds() {
+    // A refactor renames table `x`→`y`, and a new view named `x` reuses the freed name. The view
+    // pre-pass must not emit `DROP VIEW IF EXISTS "x"` while `x` is still a table — the rename frees the
+    // name later, in the main pass, and SQLite rejects `DROP VIEW` on a table ("use DROP TABLE").
+    let (mut connection, raw) = setup().await;
+    let v1 = one_table(table(
+        "x",
+        vec![
+            column("id", SqlType::I64, false),
+            column("active", SqlType::I64, false),
+        ],
+    ));
+    publish(&v1, &Sqlite, &mut connection)
+        .await
+        .expect("publish v1 (table x)");
+    exec(
+        &raw,
+        "INSERT INTO \"x\" (\"id\", \"active\") VALUES (1, 1), (2, 0)",
+    )
+    .await;
+
+    // v2 renames x→y and adds a view `x` over the renamed table `y`.
+    let mut view_x = active_widgets_view();
+    view_x.name = "x".to_owned();
+    view_x.query.from = Some(SourceRef {
+        schema: None,
+        name: "y".to_owned(),
+        alias: "q0_0".to_owned(),
+    });
+    let v2 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![table(
+                "y",
+                vec![
+                    column("id", SqlType::I64, false),
+                    column("active", SqlType::I64, false),
+                ],
+            )],
+            views: vec![view_x],
+        }],
+    };
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::RenameTable(RenameTable {
+            id: "rename-x-y".to_owned(),
+            schema: None,
+            from: "x".to_owned(),
+            to: "y".to_owned(),
+        })],
+    };
+
+    let plan =
+        plan_from_database_with_refactors(&v2, &refactors, &mut connection, DiffPolicy::ALLOW_ALL)
+            .await
+            .expect("plan the rename + same-named view");
+    assert!(
+        !render(&plan, &v2).contains("DROP VIEW IF EXISTS \"x\""),
+        "must not pre-drop a name a table still owns: {}",
+        render(&plan, &v2),
+    );
+
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply the rename + same-named view");
+    assert_eq!(
+        count(&raw, "x").await,
+        1,
+        "the new view x (over renamed table y) resolves and filters",
+    );
+}
+
+#[tokio::test]
+async fn a_view_column_set_change_is_a_blocked_destructive_change() {
+    // Renaming a view's output column changes its column set. The diff sees this (via the column names it
+    // reads back) and emits a destructive `DropView` + re-create — so the default `BLOCK_RISKY` policy
+    // blocks it, matching how a table-column drop (or a PostgreSQL view column change) is gated.
+    let (mut connection, _raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+
+    // v2 renames the view's `id` output column to `widget_id` (same body, different column set).
+    let mut renamed = active_widgets_view();
+    renamed.columns[0].name = "widget_id".to_owned();
+    renamed.query.projection[0].output_name = "widget_id".to_owned();
+    let v2 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![widget_table()],
+            views: vec![renamed],
+        }],
+    };
+
+    // The destructive drop blocks the plan under the default policy.
+    plan_from_database(&v2, &mut connection, DiffPolicy::BLOCK_RISKY)
+        .await
+        .expect_err("a view column-set change must be blocked under BLOCK_RISKY");
+
+    // With destructive changes allowed, the plan drops and recreates the view.
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan under ALLOW_ALL");
+    assert!(
+        plan.steps.iter().any(|step| matches!(
+            step,
+            DatabasePlanStep::DropView { view, .. } if view.name == "active_widgets"
+        )),
+        "expected a DropView for the column-set change: {:?}",
+        plan.steps,
+    );
+}
+
+#[tokio::test]
+async fn renaming_a_table_and_reusing_its_name_for_a_view_case_insensitively_succeeds() {
+    // Same as the rename+view case, but the new view reuses the table name with different casing
+    // (`Thing` renamed away, view `thing` created). SQLite folds identifiers, so the pre-drop skip must
+    // fold too — otherwise `DROP VIEW IF EXISTS "thing"` would hit the still-present table `Thing`.
+    let (mut connection, raw) = setup().await;
+    let v1 = one_table(table(
+        "Thing",
+        vec![
+            column("id", SqlType::I64, false),
+            column("active", SqlType::I64, false),
+        ],
+    ));
+    publish(&v1, &Sqlite, &mut connection)
+        .await
+        .expect("publish v1 (table Thing)");
+    exec(
+        &raw,
+        "INSERT INTO \"Thing\" (\"id\", \"active\") VALUES (1, 1), (2, 0)",
+    )
+    .await;
+
+    let mut view_thing = active_widgets_view();
+    view_thing.name = "thing".to_owned();
+    view_thing.query.from = Some(SourceRef {
+        schema: None,
+        name: "renamed".to_owned(),
+        alias: "q0_0".to_owned(),
+    });
+    let v2 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![table(
+                "renamed",
+                vec![
+                    column("id", SqlType::I64, false),
+                    column("active", SqlType::I64, false),
+                ],
+            )],
+            views: vec![view_thing],
+        }],
+    };
+    let refactors = RefactorLog {
+        operations: vec![RefactorOperation::RenameTable(RenameTable {
+            id: "rename-thing".to_owned(),
+            schema: None,
+            from: "Thing".to_owned(),
+            to: "renamed".to_owned(),
+        })],
+    };
+
+    let plan =
+        plan_from_database_with_refactors(&v2, &refactors, &mut connection, DiffPolicy::ALLOW_ALL)
+            .await
+            .expect("plan the case-differing rename + view");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply the case-differing rename + view");
+    assert_eq!(
+        count(&raw, "thing").await,
+        1,
+        "the view resolves after the case-differing rename",
+    );
+}
+
+#[tokio::test]
+async fn introspects_and_drops_a_view_whose_table_was_removed() {
+    // A view left dangling by an out-of-band `DROP TABLE` makes `PRAGMA table_info` error. Introspection
+    // must still succeed (reporting the view name-only) so a plan can drop the broken view, instead of
+    // failing outright and stranding the whole database.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+    exec(&raw, "DROP TABLE \"widgets\"").await;
+
+    let actual = introspect(&mut connection)
+        .await
+        .expect("introspection must not fail on a broken view");
+    let views: Vec<_> = actual
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.views)
+        .collect();
+    assert_eq!(
+        views.len(),
+        1,
+        "the broken view is still reported: {actual:?}"
+    );
+    assert_eq!(views[0].name, "active_widgets");
+    assert!(
+        views[0].columns.is_empty(),
+        "a body-unanalyzable view is name-only: {:?}",
+        views[0].columns,
+    );
+
+    // A model that no longer wants the view drops it, and the drop applies.
+    let empty = DatabaseModel::default();
+    let plan = plan_from_database(&empty, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan dropping the broken view");
+    assert!(
+        plan.steps.iter().any(|step| matches!(
+            step,
+            DatabasePlanStep::DropView { view, .. } if view.name == "active_widgets"
+        )),
+        "expected a DropView for the broken view: {:?}",
+        plan.steps,
+    );
+    apply_plan(&plan, &empty, &Sqlite, &mut connection)
+        .await
+        .expect("apply the drop of the broken view");
+    let after = introspect(&mut connection)
+        .await
+        .expect("introspect after drop");
+    assert!(
+        after.schemas.iter().all(|schema| schema.views.is_empty()),
+        "the broken view must be gone: {after:?}",
     );
 }
