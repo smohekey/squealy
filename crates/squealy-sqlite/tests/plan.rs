@@ -6,8 +6,9 @@
 //! foreign-key child's rows, which a naive drop-and-recreate would cascade-delete.
 
 use squealy::{
-    ColumnModel, Constraint, DatabaseModel, DatabasePlan, ForeignKeyAction, ForeignKeyModel,
-    IdentityMode, IdentityModel, IndexModel, SchemaBackend, SchemaModel, SqlType, TableModel,
+    ColumnModel, Constraint, DatabaseModel, DatabasePlan, DdlExecutor, ForeignKeyAction,
+    ForeignKeyModel, IdentityMode, IdentityModel, IndexModel, SchemaBackend, SchemaModel, SqlType,
+    TableModel,
 };
 use squealy_model::{
     CastColumn, DiffPolicy, PlanApplyOptions, RefactorLog, RefactorOperation, RenameColumn,
@@ -388,6 +389,13 @@ async fn count(raw: &RawConnection, table: &'static str) -> i64 {
     raw.call(move |conn| conn.query_row(&sql, [], |row| row.get(0)))
         .await
         .expect("count rows")
+}
+
+async fn foreign_keys_enabled(raw: &RawConnection) -> bool {
+    raw.call(|conn| conn.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0)))
+        .await
+        .expect("read foreign_keys")
+        != 0
 }
 
 /// The table an index is defined on, per `sqlite_master`.
@@ -1203,5 +1211,42 @@ async fn drops_a_table_before_reusing_its_name_for_an_index() {
         replan.steps.is_empty(),
         "must converge, got: {:?}",
         replan.steps
+    );
+}
+
+#[tokio::test]
+async fn execute_ddl_restores_the_prior_foreign_keys_setting() {
+    // `execute_ddl` disables foreign-key enforcement for the batch (a rebuild's DROP TABLE would
+    // otherwise cascade), but it must restore the *prior* setting, not force enforcement on: a handle
+    // built via `SqliteConnection::new` that left enforcement off should keep it off.
+    let raw = RawConnection::open_in_memory()
+        .await
+        .expect("open in-memory db");
+    // `SqliteConnection::new` does not manage the setting (unlike `connect`); disable it explicitly.
+    raw.call(|conn| conn.execute_batch("PRAGMA foreign_keys = OFF"))
+        .await
+        .expect("disable foreign keys");
+    assert!(!foreign_keys_enabled(&raw).await);
+    let mut connection = SqliteConnection::new(raw.clone());
+    connection
+        .execute_ddl("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        .await
+        .expect("execute ddl");
+    assert!(
+        !foreign_keys_enabled(&raw).await,
+        "execute_ddl must not force foreign_keys on for a handle that left them off"
+    );
+
+    // With enforcement on, it stays on after the batch.
+    raw.call(|conn| conn.execute_batch("PRAGMA foreign_keys = ON"))
+        .await
+        .expect("enable foreign keys");
+    connection
+        .execute_ddl("CREATE TABLE u (id INTEGER PRIMARY KEY)")
+        .await
+        .expect("execute ddl");
+    assert!(
+        foreign_keys_enabled(&raw).await,
+        "an enabled setting is preserved"
     );
 }

@@ -174,23 +174,33 @@ impl DdlExecutor for SqliteConnection {
     /// transactional DDL, so a mid-batch failure rolls the whole batch back — there is no
     /// partially-applied-schema state to report.
     ///
-    /// Foreign-key enforcement is disabled for the batch and restored afterwards. An incremental plan
-    /// rebuilds a changed table by dropping and recreating it, and a `DROP TABLE` fires `ON DELETE`
-    /// actions on child rows while enforcement is on (a rebuild of a table with `ON DELETE CASCADE`
-    /// children would delete those rows). SQLite only allows `PRAGMA foreign_keys` to be toggled
-    /// **outside** a transaction (it is a no-op within one), so enforcement is turned off before `BEGIN`
-    /// and back on after the transaction ends; `PRAGMA foreign_key_check` re-validates referential
-    /// integrity before the commit, so a genuine violation (e.g. a newly added or tightened foreign key
-    /// whose existing data no longer satisfies it) still fails the batch instead of committing silently.
+    /// Foreign-key enforcement is disabled for the batch and restored to its previous setting
+    /// afterwards. An incremental plan rebuilds a changed table by dropping and recreating it, and a
+    /// `DROP TABLE` fires `ON DELETE` actions on child rows while enforcement is on (a rebuild of a table
+    /// with `ON DELETE CASCADE` children would delete those rows). SQLite only allows `PRAGMA
+    /// foreign_keys` to be toggled **outside** a transaction (it is a no-op within one), so enforcement
+    /// is turned off before `BEGIN` and restored after the transaction ends; `PRAGMA foreign_key_check`
+    /// re-validates referential integrity before the commit, so a genuine violation (e.g. a newly added
+    /// or tightened foreign key whose existing data no longer satisfies it) still fails the batch
+    /// instead of committing silently. The prior setting is read and restored (rather than forced on) so
+    /// a caller that left enforcement off on a [`new`](SqliteConnection::new)-built handle keeps it off.
     async fn execute_ddl(&mut self, sql: &str) -> Result<(), SqliteError> {
         let sql = sql.to_owned();
         self.conn
             .call(move |conn| {
-                // Toggled outside any transaction (a no-op inside one).
+                // Read the current setting so it can be restored, then disable enforcement for the batch
+                // (both toggled outside any transaction, where the pragma is a no-op).
+                let was_on: bool =
+                    conn.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))? != 0;
                 conn.execute_batch("PRAGMA foreign_keys = OFF")?;
                 let result = apply_ddl_batch(conn, &sql);
-                // Restore enforcement whatever happened (a failed batch has already rolled back).
-                let restored = conn.execute_batch("PRAGMA foreign_keys = ON");
+                // Restore the prior setting whatever happened (a failed batch has already rolled back).
+                let restore = if was_on {
+                    "PRAGMA foreign_keys = ON"
+                } else {
+                    "PRAGMA foreign_keys = OFF"
+                };
+                let restored = conn.execute_batch(restore);
                 result.and(restored)
             })
             .await
