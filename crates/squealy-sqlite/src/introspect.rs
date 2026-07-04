@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use squealy::{
     ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyModel,
     IdentityMode, IdentityModel, IndexDirection, IndexModel, SchemaModel, SqlType, TableModel,
-    ViewModel, ViewQueryModel,
+    ViewColumnModel, ViewModel, ViewQueryModel,
 };
 use tokio_rusqlite::rusqlite::{self, Row};
 
@@ -91,21 +91,32 @@ async fn view_names(connection: &SqliteConnection) -> Result<Vec<String>, Sqlite
     .await
 }
 
-/// Introspects one view — its name only. SQLite stores a view as its verbatim `CREATE VIEW` text, which
-/// cannot be reconstructed into the structural [`ViewQueryModel`] body, so the body (and its projection)
-/// stays empty: the "introspected, body unknown" marker the diff keys on to re-apply the desired
-/// definition rather than compare bodies. The columns are left empty too, and deliberately: `PRAGMA
-/// table_info` reports no type for a computed output (e.g. `length(x)`, `a || b`), so a column set read
-/// back here would not match the typed desired columns and would force a destructive `DropView` on every
-/// unchanged replan (blocked under the default policy). Leaving them empty signals "column set unknown",
-/// which the diff treats as non-destructively recreatable. The name alone is enough to drop a removed or
-/// renamed view (a view invisible to introspection would otherwise linger) and to take part in the
-/// one-namespace collision check.
-async fn view(_connection: &SqliteConnection, name: &str) -> Result<ViewModel, SqliteError> {
+/// Introspects one view — its name and output column names. SQLite stores a view as its verbatim
+/// `CREATE VIEW` text, which cannot be reconstructed into the structural [`ViewQueryModel`] body, so the
+/// body (and its projection) stays empty: the "introspected, body unknown" marker the diff keys on to
+/// re-apply the desired definition rather than compare bodies. `PRAGMA table_info` does report a view's
+/// column *names*, but not a usable type for a computed output (`length(x)`, `a || b` come back with an
+/// empty type), so every column is recorded as a single sentinel type ([`SqlType::Bytes`]) — the same
+/// type a desired view column canonicalizes to (see `Sqlite::canonical_view_column_type`). The diff then
+/// compares view columns by name: a column-set change (add/remove/rename) differs and forces a
+/// destructive `DropView` + re-create, while an unchanged view (including computed columns) matches and
+/// is re-applied non-destructively. The columns also let a removed or renamed view produce a `DropView`
+/// (a view invisible to introspection would otherwise linger) and take part in the one-namespace check.
+async fn view(connection: &SqliteConnection, name: &str) -> Result<ViewModel, SqliteError> {
+    let columns = columns(connection, name)
+        .await?
+        .into_iter()
+        .map(|column| ViewColumnModel {
+            name: column.name,
+            // SQLite cannot type a view output; use one sentinel so the diff compares by name only.
+            ty: SqlType::Bytes,
+            nullable: false,
+        })
+        .collect();
     Ok(ViewModel {
         name: name.to_owned(),
         comment: None,
-        columns: Vec::new(),
+        columns,
         query: ViewQueryModel::default(),
     })
 }

@@ -1317,9 +1317,9 @@ async fn execute_ddl_restores_the_prior_foreign_keys_setting() {
 
 #[tokio::test]
 async fn introspects_a_published_view_by_name() {
-    // A published view is read back by introspection so the diff can see it. SQLite cannot recover a
-    // view's structural body or reliably type its columns, so only the name is recovered: an empty
-    // projection (the "body unknown" marker) and empty columns ("column set unknown").
+    // A published view is read back so the diff can see it. SQLite can't recover a view's structural body
+    // (empty projection — the "body unknown" marker) or type its columns, so each column carries the
+    // sentinel `Bytes` type and only the column *names* are meaningful.
     let (mut connection, _raw) = setup().await;
     publish(&table_and_view(), &Sqlite, &mut connection)
         .await
@@ -1337,10 +1337,13 @@ async fn introspects_a_published_view_by_name() {
         "expected the view to be introspected: {actual:?}"
     );
     assert_eq!(views[0].name, "active_widgets");
-    assert!(
-        views[0].columns.is_empty(),
-        "columns: {:?}",
-        views[0].columns
+    assert_eq!(
+        views[0]
+            .columns
+            .iter()
+            .map(|column| (column.name.as_str(), &column.ty))
+            .collect::<Vec<_>>(),
+        vec![("id", &SqlType::Bytes)],
     );
     assert!(
         views[0].query.projection.is_empty(),
@@ -1352,9 +1355,9 @@ async fn introspects_a_published_view_by_name() {
 #[tokio::test]
 async fn replanning_an_unchanged_view_is_not_destructive() {
     // A view whose computed output (`length(name)`) SQLite cannot type must not force a destructive
-    // `DropView` on an unchanged replan. Because the introspected column set is unknown (empty), the diff
-    // re-applies the view without a drop, so the default `BLOCK_RISKY` policy — which blocks destructive
-    // changes — still succeeds (the re-apply itself is an idempotent, non-destructive `CreateView`).
+    // `DropView` on an unchanged replan. The desired view columns canonicalize to the same sentinel type
+    // introspection reads back, so they match by name and the diff re-applies the view without a drop —
+    // the default `BLOCK_RISKY` policy (which blocks destructive changes) still succeeds.
     let (mut connection, _raw) = setup().await;
     let mut model = one_table(table(
         "people",
@@ -1681,5 +1684,46 @@ async fn renaming_a_table_and_reusing_its_name_for_a_view_succeeds() {
         count(&raw, "x").await,
         1,
         "the new view x (over renamed table y) resolves and filters",
+    );
+}
+
+#[tokio::test]
+async fn a_view_column_set_change_is_a_blocked_destructive_change() {
+    // Renaming a view's output column changes its column set. The diff sees this (via the column names it
+    // reads back) and emits a destructive `DropView` + re-create — so the default `BLOCK_RISKY` policy
+    // blocks it, matching how a table-column drop (or a PostgreSQL view column change) is gated.
+    let (mut connection, _raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+
+    // v2 renames the view's `id` output column to `widget_id` (same body, different column set).
+    let mut renamed = active_widgets_view();
+    renamed.columns[0].name = "widget_id".to_owned();
+    renamed.query.projection[0].output_name = "widget_id".to_owned();
+    let v2 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![widget_table()],
+            views: vec![renamed],
+        }],
+    };
+
+    // The destructive drop blocks the plan under the default policy.
+    plan_from_database(&v2, &mut connection, DiffPolicy::BLOCK_RISKY)
+        .await
+        .expect_err("a view column-set change must be blocked under BLOCK_RISKY");
+
+    // With destructive changes allowed, the plan drops and recreates the view.
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan under ALLOW_ALL");
+    assert!(
+        plan.steps.iter().any(|step| matches!(
+            step,
+            DatabasePlanStep::DropView { view, .. } if view.name == "active_widgets"
+        )),
+        "expected a DropView for the column-set change: {:?}",
+        plan.steps,
     );
 }
