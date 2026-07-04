@@ -1,6 +1,16 @@
 use proc_macro::{Group, Literal as ProcLiteral, TokenStream, TokenTree};
 use proc_macro2::{Literal, Span};
 
+/// Whether an outer attribute on a derived struct or field is one the derives should ignore rather
+/// than interpret as (or reject as an unknown) schema attribute.
+///
+/// A `///` doc comment desugars to `#[doc = "..."]`, so the derives see it among the field/struct
+/// attributes. It is documentation, not schema metadata — every hand-rolled attribute parser skips it
+/// here instead of erroring, so a doc comment on a derived struct or field compiles.
+pub(crate) fn is_ignored_attribute(name: &str) -> bool {
+    name == "doc"
+}
+
 pub(crate) struct StructField {
     pub ident: proc_macro::Ident,
     pub ty: proc_macro2::TokenStream,
@@ -23,7 +33,12 @@ pub(crate) fn struct_fields(
             if let Some(TokenTree::Group(group)) = tokens.get(index + 1)
                 && let Some(TokenTree::Ident(name)) = group.stream().into_iter().next()
             {
-                pending_attributes.push(name.to_string());
+                let name = name.to_string();
+                // A `///` doc comment (`#[doc = "..."]`) is documentation, not a schema marker; don't
+                // record it as a field attribute (so a doc-commented schema field is not misread).
+                if !is_ignored_attribute(&name) {
+                    pending_attributes.push(name);
+                }
             }
             index += 2;
             continue;
