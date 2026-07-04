@@ -2712,6 +2712,14 @@ fn apply_attribute(group: &Group, attrs: &mut FieldAttrs) -> Result<(), String> 
         return Ok(());
     };
     let attr_name = attr_name.to_string();
+
+    // A `///` doc comment desugars to `#[doc = "..."]`; it is documentation, not schema metadata, so
+    // ignore it rather than rejecting it as an unknown field attribute. Without this a doc comment on a
+    // field is a compile error.
+    if crate::common::is_ignored_attribute(&attr_name) {
+        return Ok(());
+    }
+
     let rest = tokens.collect::<Vec<_>>();
 
     if attr_name == "column" {
