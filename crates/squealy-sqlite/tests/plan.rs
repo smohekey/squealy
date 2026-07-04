@@ -1316,9 +1316,10 @@ async fn execute_ddl_restores_the_prior_foreign_keys_setting() {
 }
 
 #[tokio::test]
-async fn introspects_a_published_view() {
-    // A published view is read back by introspection (name + columns) so the diff can see it. Only the
-    // structural body is unrecoverable, so its projection is empty — the "body unknown" marker.
+async fn introspects_a_published_view_by_name() {
+    // A published view is read back by introspection so the diff can see it. SQLite cannot recover a
+    // view's structural body or reliably type its columns, so only the name is recovered: an empty
+    // projection (the "body unknown" marker) and empty columns ("column set unknown").
     let (mut connection, _raw) = setup().await;
     publish(&table_and_view(), &Sqlite, &mut connection)
         .await
@@ -1336,18 +1337,100 @@ async fn introspects_a_published_view() {
         "expected the view to be introspected: {actual:?}"
     );
     assert_eq!(views[0].name, "active_widgets");
-    assert_eq!(
-        views[0]
-            .columns
-            .iter()
-            .map(|column| column.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["id"],
+    assert!(
+        views[0].columns.is_empty(),
+        "columns: {:?}",
+        views[0].columns
     );
     assert!(
         views[0].query.projection.is_empty(),
         "an introspected view is body-unknown: {:?}",
         views[0].query,
+    );
+}
+
+#[tokio::test]
+async fn replanning_an_unchanged_view_is_not_destructive() {
+    // A view whose computed output (`length(name)`) SQLite cannot type must not force a destructive
+    // `DropView` on an unchanged replan. Because the introspected column set is unknown (empty), the diff
+    // re-applies the view without a drop, so the default `BLOCK_RISKY` policy — which blocks destructive
+    // changes — still succeeds (the re-apply itself is an idempotent, non-destructive `CreateView`).
+    let (mut connection, _raw) = setup().await;
+    let mut model = one_table(table(
+        "people",
+        vec![
+            column("id", SqlType::I64, false),
+            column("name", SqlType::Text, false),
+        ],
+    ));
+    model.schemas[0].views.push(ViewModel {
+        name: "name_lengths".to_owned(),
+        comment: None,
+        columns: vec![
+            ViewColumnModel {
+                name: "id".to_owned(),
+                ty: SqlType::I64,
+                nullable: false,
+            },
+            // A computed output SQLite reports no type for — the case that used to churn a `DropView`.
+            ViewColumnModel {
+                name: "name_length".to_owned(),
+                ty: SqlType::I64,
+                nullable: false,
+            },
+        ],
+        query: ViewQueryModel {
+            dependencies: Vec::new(),
+            distinct: false,
+            projection: vec![
+                ProjectionItem {
+                    output_name: "id".to_owned(),
+                    expr: ExprNode::Column {
+                        alias: "q0_0".to_owned(),
+                        column: "id".to_owned(),
+                    },
+                },
+                ProjectionItem {
+                    output_name: "name_length".to_owned(),
+                    expr: ExprNode::ScalarFn {
+                        func: squealy::ScalarFunc::Length,
+                        args: vec![ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: "name".to_owned(),
+                        }],
+                    },
+                },
+            ],
+            from: Some(SourceRef {
+                schema: None,
+                name: "people".to_owned(),
+                alias: "q0_0".to_owned(),
+            }),
+            joins: Vec::new(),
+            filter: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        },
+    });
+
+    publish(&model, &Sqlite, &mut connection)
+        .await
+        .expect("publish table + computed view");
+
+    // Under the default (risk-blocking) policy, the unchanged replan must succeed and carry no drop.
+    let plan = plan_from_database(&model, &mut connection, DiffPolicy::BLOCK_RISKY)
+        .await
+        .expect("re-plan the unchanged view under the default policy");
+    assert!(
+        !plan
+            .steps
+            .iter()
+            .any(|step| matches!(step, DatabasePlanStep::DropView { .. })),
+        "an unchanged view must not force a destructive DropView: {:?}",
+        plan.steps,
     );
 }
 

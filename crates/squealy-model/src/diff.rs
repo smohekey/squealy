@@ -419,10 +419,21 @@ fn diff_views_global(
                 // An introspected view has no projection (only its name, columns, and dependencies are
                 // recovered), so an empty projection is the marker for "introspected, body unknown".
                 if actual_view.query.projection.is_empty() {
-                    if view_columns_differ_ignoring_nullability(
-                        &desired_view.columns,
-                        &actual_view.columns,
-                    ) {
+                    // The drop-before-recreate is only for a genuine column-set change (a plain
+                    // `CREATE OR REPLACE VIEW` cannot alter the column set). It is only justified when the
+                    // live column set is actually known: a backend that cannot introspect a view's
+                    // columns leaves them empty (SQLite can't type a computed output like `length(x)`),
+                    // and comparing a known desired set against an empty one would always "differ" and
+                    // force a destructive `DropView` on every unchanged replan — blocked under the default
+                    // policy. When the actual columns are unknown, re-apply the definition without the
+                    // drop (SQLite recreates by dropping-if-exists inside its `CreateView`); a real
+                    // removal still drops via the `(None, Some)` arm above.
+                    if !actual_view.columns.is_empty()
+                        && view_columns_differ_ignoring_nullability(
+                            &desired_view.columns,
+                            &actual_view.columns,
+                        )
+                    {
                         drops.push(DatabaseDiffChange::DropView {
                             schema: schema.clone(),
                             view: (*actual_view).clone(),

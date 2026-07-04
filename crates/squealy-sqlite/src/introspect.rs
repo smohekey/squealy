@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use squealy::{
     ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyModel,
     IdentityMode, IdentityModel, IndexDirection, IndexModel, SchemaModel, SqlType, TableModel,
-    ViewColumnModel, ViewModel, ViewQueryModel,
+    ViewModel, ViewQueryModel,
 };
 use tokio_rusqlite::rusqlite::{self, Row};
 
@@ -44,9 +44,8 @@ pub(crate) async fn database(connection: &SqliteConnection) -> Result<DatabaseMo
     // SQLite has no namespace object: an empty database has no schema to report. Emitting an empty
     // default schema would diff against a genuinely empty model (`schemas: []`) as a spurious
     // `DropSchema`, so only include the schema once there is at least one object in it. Both tables and
-    // views can populate it; a view carries only its name and columns (the structural body cannot be
-    // reconstructed from the stored `CREATE VIEW` text), which is enough for the diff to drop a removed
-    // or renamed view and to detect name collisions.
+    // views can populate it; a view is recovered by name only (see [`view`]), which is enough for the
+    // diff to drop a removed or renamed view and to detect name collisions.
     let schemas = if tables.is_empty() && views.is_empty() {
         Vec::new()
     } else {
@@ -92,28 +91,21 @@ async fn view_names(connection: &SqliteConnection) -> Result<Vec<String>, Sqlite
     .await
 }
 
-/// Introspects one view. Only its name and output columns are recovered: SQLite stores a view as its
-/// verbatim `CREATE VIEW` text, which cannot be reconstructed into the structural [`ViewQueryModel`]
-/// body, so the body (and its projection) stays empty — the "introspected, body unknown" marker the diff
-/// keys on to re-apply the desired definition every run rather than compare bodies. `PRAGMA table_info`
-/// reports a view's columns just like a table's (each output's affinity, empty for a computed column);
-/// nullability is not meaningful for a view output, and the diff ignores it. Recovering the name and
-/// columns is what lets a removed or renamed view produce a `DropView` (a view invisible to
-/// introspection would otherwise linger) and lets a view take part in the one-namespace collision check.
-async fn view(connection: &SqliteConnection, name: &str) -> Result<ViewModel, SqliteError> {
-    let columns = columns(connection, name)
-        .await?
-        .into_iter()
-        .map(|column| ViewColumnModel {
-            name: column.name,
-            ty: sql_type(&column.declared_type),
-            nullable: column.notnull == 0,
-        })
-        .collect();
+/// Introspects one view — its name only. SQLite stores a view as its verbatim `CREATE VIEW` text, which
+/// cannot be reconstructed into the structural [`ViewQueryModel`] body, so the body (and its projection)
+/// stays empty: the "introspected, body unknown" marker the diff keys on to re-apply the desired
+/// definition rather than compare bodies. The columns are left empty too, and deliberately: `PRAGMA
+/// table_info` reports no type for a computed output (e.g. `length(x)`, `a || b`), so a column set read
+/// back here would not match the typed desired columns and would force a destructive `DropView` on every
+/// unchanged replan (blocked under the default policy). Leaving them empty signals "column set unknown",
+/// which the diff treats as non-destructively recreatable. The name alone is enough to drop a removed or
+/// renamed view (a view invisible to introspection would otherwise linger) and to take part in the
+/// one-namespace collision check.
+async fn view(_connection: &SqliteConnection, name: &str) -> Result<ViewModel, SqliteError> {
     Ok(ViewModel {
         name: name.to_owned(),
         comment: None,
-        columns,
+        columns: Vec::new(),
         query: ViewQueryModel::default(),
     })
 }
