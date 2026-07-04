@@ -196,23 +196,6 @@ pub(crate) fn write_plan(
         write_create_refactor_log_table(writer)?;
     }
 
-    // Drop every view the plan touches up front, before any table is dropped, rebuilt or renamed.
-    // SQLite reparses a view when a table it references is renamed — a table rebuild renames the new
-    // table into place — and errors ("no such table") if that table is momentarily absent, so a live
-    // view over a rebuilt table must be gone before the rebuild. Views the plan keeps are recreated by
-    // their `CreateView` step in the main pass (in dependency order, after every table exists); removed
-    // views stay dropped. `IF EXISTS` covers a brand-new view (nothing to drop) and a name that a plan
-    // both drops and recreates.
-    for step in &plan.steps {
-        if let DatabasePlanStep::CreateView { view, .. } | DatabasePlanStep::DropView { view, .. } =
-            step
-        {
-            statement(writer, &mut first)?;
-            writer.write_all(b"DROP VIEW IF EXISTS ")?;
-            write_quoted_ident(&view.name, writer)?;
-        }
-    }
-
     // Free every table and index name the plan drops or redefines, up front, before any create runs.
     // SQLite keeps tables and indexes in one database-wide namespace, so a dropped name may be reused
     // by a later create (an index moved between tables, or an index taking a dropped table's name);
@@ -239,6 +222,25 @@ pub(crate) fn write_plan(
                 }
             }
             _ => {}
+        }
+    }
+
+    // Drop every view the plan touches, after the table/index drops above but before any table is
+    // created, rebuilt or renamed. SQLite reparses a view when a table it references is renamed — a
+    // table rebuild renames the new table into place — and errors ("no such table") if that table is
+    // momentarily absent, so a live view over a rebuilt table must be gone before the rebuild. This runs
+    // *after* the table-drop pass so a table replaced by a same-named view has already released the name:
+    // `DROP VIEW IF EXISTS "x"` errors with "use DROP TABLE" while a table `x` still exists. Views the
+    // plan keeps are recreated by their `CreateView` step in the main pass (in dependency order, after
+    // every table exists); removed views stay dropped. `IF EXISTS` covers a brand-new view (nothing to
+    // drop) and a name that a plan both drops and recreates.
+    for step in &plan.steps {
+        if let DatabasePlanStep::CreateView { view, .. } | DatabasePlanStep::DropView { view, .. } =
+            step
+        {
+            statement(writer, &mut first)?;
+            writer.write_all(b"DROP VIEW IF EXISTS ")?;
+            write_quoted_ident(&view.name, writer)?;
         }
     }
 

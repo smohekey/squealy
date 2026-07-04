@@ -1527,3 +1527,87 @@ async fn rebuilding_a_table_under_an_existing_view_succeeds() {
         "the view still resolves and filters after the rebuild",
     );
 }
+
+#[tokio::test]
+async fn replacing_a_table_with_a_same_named_view_succeeds() {
+    // A plan that drops a table and creates a view of the same name must free the table name (via
+    // `DROP TABLE`) before the view pre-pass runs `DROP VIEW IF EXISTS <name>` — SQLite errors ("use
+    // DROP TABLE …") if a table still owns the name. The view pre-pass therefore runs after table drops.
+    let (mut connection, raw) = setup().await;
+    let v1 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![
+                widget_table(),
+                table("summary", vec![column("id", SqlType::I64, false)]),
+            ],
+            views: Vec::new(),
+        }],
+    };
+    publish(&v1, &Sqlite, &mut connection)
+        .await
+        .expect("publish v1 (two tables)");
+    exec(
+        &raw,
+        "INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (1, 1), (2, 0)",
+    )
+    .await;
+
+    // v2 removes the `summary` table and adds a `summary` view (same name) over `widgets`.
+    let mut summary_view = active_widgets_view();
+    summary_view.name = "summary".to_owned();
+    let v2 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![widget_table()],
+            views: vec![summary_view],
+        }],
+    };
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan the table→view replacement");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply the table→view replacement");
+    assert_eq!(
+        count(&raw, "summary").await,
+        1,
+        "the same-named view resolves after replacing the table",
+    );
+}
+
+#[tokio::test]
+async fn replacing_a_view_with_a_same_named_table_succeeds() {
+    // The symmetric transition: a view is dropped and a table of the same name is created. The view
+    // pre-pass drops the view (freeing the name) before the main pass creates the table.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish widgets + active_widgets view");
+
+    // v2 removes the active_widgets view and adds a table of the same name.
+    let v2 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![
+                widget_table(),
+                table("active_widgets", vec![column("id", SqlType::I64, false)]),
+            ],
+            views: Vec::new(),
+        }],
+    };
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan the view→table replacement");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply the view→table replacement");
+    exec(&raw, "INSERT INTO \"active_widgets\" (\"id\") VALUES (7)").await;
+    assert_eq!(
+        count(&raw, "active_widgets").await,
+        1,
+        "the same-named table exists and accepts rows after replacing the view",
+    );
+}
