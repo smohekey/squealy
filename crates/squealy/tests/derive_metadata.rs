@@ -288,6 +288,9 @@ struct RawTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
     happened_at: C::Type<'scope, String>,
     #[column(db_type = "time(0)")]
     at: C::Type<'scope, String>,
+    // The zone-suffixed PostgreSQL spelling (which does not end in `)`) also parses structurally.
+    #[column(db_type = "timestamp(3) with time zone")]
+    zoned_at: C::Type<'scope, String>,
     // A bare timestamp keeps `precision: None` (the backend renders its default form).
     #[column(db_type = "timestamp")]
     plain_ts: C::Type<'scope, String>,
@@ -478,16 +481,24 @@ fn derive_table_parses_db_type_into_structured_column_type() {
             precision: Some(0)
         }
     );
-    // A bare `timestamp` has no explicit precision.
+    // The zone-suffixed spelling `timestamp(3) with time zone` parses to a tz-aware precise timestamp.
     assert_eq!(
         columns[8].column_type(),
+        ColumnType::Timestamp {
+            tz: true,
+            precision: Some(3)
+        }
+    );
+    // A bare `timestamp` has no explicit precision.
+    assert_eq!(
+        columns[9].column_type(),
         ColumnType::Timestamp {
             tz: false,
             precision: None
         }
     );
     // Unrecognized db_type stays verbatim.
-    assert_eq!(columns[9].column_type(), ColumnType::Raw("citext"));
+    assert_eq!(columns[10].column_type(), ColumnType::Raw("citext"));
 }
 
 #[cfg(feature = "uuid")]

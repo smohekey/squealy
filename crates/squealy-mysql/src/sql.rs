@@ -987,7 +987,8 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
         }
         write_quoted_ident(column.name(), writer)?;
         writer.write_all(b" ")?;
-        write_mysql_sql_type(&column.column_type().into(), writer)?;
+        let ty: SqlType = column.column_type().into();
+        write_mysql_sql_type(&ty, writer)?;
         if !column.nullable() {
             writer.write_all(b" NOT NULL")?;
         }
@@ -999,7 +1000,7 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
         }
         if let Some(default) = column.default() {
             writer.write_all(b" DEFAULT ")?;
-            write_column_default(default, writer)?;
+            write_column_default(default, &ty, writer)?;
         }
     }
     for column in table.columns() {
@@ -1104,7 +1105,11 @@ fn write_quoted_idents(values: &[&'static str], writer: &mut impl Write) -> io::
     Ok(())
 }
 
-fn write_column_default(default: ColumnDefault, writer: &mut impl Write) -> io::Result<()> {
+fn write_column_default(
+    default: ColumnDefault,
+    column_ty: &SqlType,
+    writer: &mut impl Write,
+) -> io::Result<()> {
     match default {
         ColumnDefault::Null => writer.write_all(b"NULL"),
         ColumnDefault::Int(value) => write!(writer, "{value}"),
@@ -1113,7 +1118,14 @@ fn write_column_default(default: ColumnDefault, writer: &mut impl Write) -> io::
         ColumnDefault::Text(value) => write_quoted_text(value, writer),
         ColumnDefault::Bool(true) => writer.write_all(b"TRUE"),
         ColumnDefault::Bool(false) => writer.write_all(b"FALSE"),
-        ColumnDefault::CurrentTimestamp => writer.write_all(b"CURRENT_TIMESTAMP"),
+        // Match the column's precision so MySQL accepts the default (see `write_default_value`).
+        ColumnDefault::CurrentTimestamp => {
+            writer.write_all(b"CURRENT_TIMESTAMP")?;
+            if let Some(precision) = current_timestamp_precision(column_ty) {
+                write!(writer, "({precision})")?;
+            }
+            Ok(())
+        }
         ColumnDefault::CurrentDate => writer.write_all(b"(CURRENT_DATE)"),
         ColumnDefault::CurrentTime => writer.write_all(b"(CURRENT_TIME)"),
         ColumnDefault::Raw(value) => writer.write_all(value.as_bytes()),

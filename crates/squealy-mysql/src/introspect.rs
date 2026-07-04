@@ -623,14 +623,34 @@ fn type_args<'a>(column_type: &'a str, kind: &str) -> Option<&'a str> {
     Some(&column_type[open + 1..close])
 }
 
+/// Whether a lowercased default expression is the current-time function `name`, in any of the forms
+/// MySQL reports: bare (`name`), empty-call (`name()`), or with a fractional-seconds precision
+/// (`name(6)`, as reported for a `TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)` column).
+fn is_current_function(value: &str, name: &str) -> bool {
+    let Some(rest) = value.strip_prefix(name) else {
+        return false;
+    };
+    rest.is_empty()
+        || rest == "()"
+        || (rest.starts_with('(')
+            && rest.ends_with(')')
+            && rest[1..rest.len() - 1].trim().parse::<u8>().is_ok())
+}
+
 fn default_value(ty: &SqlType, value: &str) -> DefaultValue {
     let trimmed = value.trim();
-    match trimmed.to_ascii_lowercase().as_str() {
-        "null" => return DefaultValue::Null,
-        "current_timestamp" | "current_timestamp()" => return DefaultValue::CurrentTimestamp,
-        "current_date" | "current_date()" => return DefaultValue::CurrentDate,
-        "current_time" | "current_time()" => return DefaultValue::CurrentTime,
-        _ => {}
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == "null" {
+        return DefaultValue::Null;
+    }
+    if is_current_function(&lower, "current_timestamp") {
+        return DefaultValue::CurrentTimestamp;
+    }
+    if is_current_function(&lower, "current_date") {
+        return DefaultValue::CurrentDate;
+    }
+    if is_current_function(&lower, "current_time") {
+        return DefaultValue::CurrentTime;
     }
 
     match ty {
@@ -789,6 +809,18 @@ mod tests {
                     precision: Some(6)
                 },
                 "current_timestamp()"
+            ),
+            DefaultValue::CurrentTimestamp
+        );
+        // A precise column reports its default with the fsp suffix (`CURRENT_TIMESTAMP(6)`); recognize
+        // it so a `DEFAULT CURRENT_TIMESTAMP(6)` column re-plans empty rather than churning.
+        assert_eq!(
+            default_value(
+                &SqlType::Timestamp {
+                    tz: true,
+                    precision: Some(6)
+                },
+                "current_timestamp(6)"
             ),
             DefaultValue::CurrentTimestamp
         );

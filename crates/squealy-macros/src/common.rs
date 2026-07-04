@@ -291,21 +291,16 @@ pub(crate) fn parse_db_type(db_type: &str) -> proc_macro2::TokenStream {
     let original = db_type.trim();
     let lower = original.to_ascii_lowercase();
 
+    // `time`/`timestamp` in all their spellings (with/without an optional `(n)` precision and a
+    // `with/without time zone` suffix) — parsed first because the suffixed precise forms
+    // (`timestamp(3) with time zone`) don't end in `)` and so would miss the parametric branch below.
+    if let Some(tokens) = parse_temporal_db_type(&lower) {
+        return tokens;
+    }
+
     let simple = match lower.as_str() {
         "text" => Some(quote::quote! { ::squealy::ColumnType::Text }),
         "date" => Some(quote::quote! { ::squealy::ColumnType::Date }),
-        "time" => {
-            Some(quote::quote! { ::squealy::ColumnType::Time { tz: false, precision: None } })
-        }
-        "time with time zone" | "timetz" => {
-            Some(quote::quote! { ::squealy::ColumnType::Time { tz: true, precision: None } })
-        }
-        "timestamp" | "datetime" => {
-            Some(quote::quote! { ::squealy::ColumnType::Timestamp { tz: false, precision: None } })
-        }
-        "timestamp with time zone" | "timestamptz" => {
-            Some(quote::quote! { ::squealy::ColumnType::Timestamp { tz: true, precision: None } })
-        }
         "uuid" => Some(quote::quote! { ::squealy::ColumnType::Uuid }),
         "json" => Some(quote::quote! { ::squealy::ColumnType::Json }),
         "jsonb" => Some(quote::quote! { ::squealy::ColumnType::Jsonb }),
@@ -340,24 +335,53 @@ pub(crate) fn parse_db_type(db_type: &str) -> proc_macro2::TokenStream {
                     };
                 }
             }
-            // `time(n)` / `timestamp(n)` and their aliases: a fractional-seconds precision. (The
-            // `... with time zone` spellings don't end in `)`, so use `timetz`/`timestamptz` for a
-            // precise tz-aware column.)
-            "time" | "timetz" | "timestamp" | "timestamptz" | "datetime" => {
-                if let Ok(precision) = args.trim().parse::<u8>() {
-                    let tz = matches!(kind, "timetz" | "timestamptz");
-                    return if matches!(kind, "time" | "timetz") {
-                        quote::quote! { ::squealy::ColumnType::Time { tz: #tz, precision: Some(#precision) } }
-                    } else {
-                        quote::quote! { ::squealy::ColumnType::Timestamp { tz: #tz, precision: Some(#precision) } }
-                    };
-                }
-            }
             _ => {}
         }
     }
 
     quote::quote! { ::squealy::ColumnType::Raw(#original) }
+}
+
+/// Parses a `time`/`timestamp` `db_type` in any spelling: an optional `(n)` fractional-seconds
+/// precision and an optional `with/without time zone` suffix (or the `timetz`/`timestamptz` aliases).
+/// Returns `None` for a non-temporal type.
+fn parse_temporal_db_type(lower: &str) -> Option<proc_macro2::TokenStream> {
+    // Strip the zone suffix (which sits *after* the `(n)` in PostgreSQL's spelling), then the `(n)`.
+    let (rest, suffix_tz) = if let Some(rest) = lower.strip_suffix(" with time zone") {
+        (rest.trim_end(), Some(true))
+    } else if let Some(rest) = lower.strip_suffix(" without time zone") {
+        (rest.trim_end(), Some(false))
+    } else {
+        (lower, None)
+    };
+    let (base, precision) = match rest.find('(') {
+        Some(open) => {
+            let close = rest.rfind(')')?;
+            if close + 1 != rest.len() {
+                return None;
+            }
+            let precision: u8 = rest[open + 1..close].trim().parse().ok()?;
+            (rest[..open].trim(), Some(precision))
+        }
+        None => (rest, None),
+    };
+    // `timetz`/`timestamptz` carry the zone in the name; otherwise take it from the suffix (default no).
+    let (is_time, tz) = match base {
+        "time" => (true, suffix_tz.unwrap_or(false)),
+        "timetz" => (true, true),
+        "timestamp" | "datetime" => (false, suffix_tz.unwrap_or(false)),
+        "timestamptz" => (false, true),
+        _ => return None,
+    };
+    let precision = match precision {
+        Some(precision) => quote::quote! { Some(#precision) },
+        None => quote::quote! { None },
+    };
+    Some(if is_time {
+        quote::quote! { ::squealy::ColumnType::Time { tz: #tz, precision: #precision } }
+    } else {
+        quote::quote! { ::squealy::ColumnType::Timestamp { tz: #tz, precision: #precision } }
+    })
 }
 
 /// Splits `"name(args)"` into `(name, args)`, trimming the name. Returns `None` if there is no
