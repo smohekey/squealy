@@ -955,6 +955,30 @@ fn write_check(check: &CheckModel, writer: &mut impl Write) -> io::Result<()> {
     // rendered name redundant. The expression is written verbatim between parentheses, trimmed so it
     // round-trips against the trimmed form introspection reads back (see `canonical_check_expression`).
     // (The fixed-width `[u8; N]` column check is rendered inline in `write_column`, not here.)
+    //
+    // SQLite has no `NOT VALID`/`NOT ENFORCED` for a check: rendering one silently would turn a package
+    // model's validation/enforcement metadata into a plain, immediately-enforced constraint (or fail the
+    // migration on existing rows). Reject it instead — as `write_foreign_key` rejects the same metadata —
+    // rather than drop it. (A crate `#[check]` always leaves both `None`; this guards hand-written or
+    // packaged models. The render path does not run `check_create`, so the guard belongs here.)
+    if check.validation.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite does not support CHECK constraint validation metadata (constraint `{}`)",
+                check.name
+            ),
+        ));
+    }
+    if check.enforcement.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite does not support CHECK constraint enforcement metadata (constraint `{}`)",
+                check.name
+            ),
+        ));
+    }
     writer.write_all(b"CHECK (")?;
     writer.write_all(check.expression.trim().as_bytes())?;
     writer.write_all(b")")

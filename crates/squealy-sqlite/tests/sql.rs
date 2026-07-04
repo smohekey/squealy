@@ -398,6 +398,63 @@ fn renders_table_check_constraint() {
 }
 
 #[test]
+fn rejects_check_constraint_validation_or_enforcement_metadata() {
+    // SQLite has no `NOT VALID`/`NOT ENFORCED` for a check, so a (hand-written / packaged) model whose
+    // check carries that metadata is rejected rather than rendered as a plain, immediately-enforced
+    // constraint that silently drops it — matching how `write_foreign_key` rejects the same metadata.
+    use squealy::{
+        CheckModel, ColumnModel, ConstraintEnforcement, ConstraintValidation, DatabaseModel,
+        SchemaModel, SqlType, TableModel,
+    };
+    let model = |check: CheckModel| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![TableModel {
+                name: "accounts".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "balance".to_owned(),
+                    comment: None,
+                    ty: SqlType::I64,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: vec![check],
+                indexes: Vec::new(),
+            }],
+            views: Vec::new(),
+        }],
+    };
+    let base = || CheckModel {
+        name: "ck_accounts_balance".to_owned(),
+        expression: "balance >= 0".to_owned(),
+        validation: None,
+        enforcement: None,
+    };
+
+    for check in [
+        CheckModel {
+            validation: Some(ConstraintValidation::NotValidated),
+            ..base()
+        },
+        CheckModel {
+            enforcement: Some(ConstraintEnforcement::NotEnforced),
+            ..base()
+        },
+    ] {
+        let mut sql = Vec::new();
+        let error = Sqlite.render_create(&model(check), &mut sql).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    }
+}
+
+#[test]
 fn renders_column_collation() {
     // A column's COLLATE clause renders after its type: SQLite exposes it only in the CREATE TABLE text,
     // so introspection recovers it by parsing that text.
