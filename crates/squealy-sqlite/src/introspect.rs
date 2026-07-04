@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 use squealy::{
     ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyModel,
     IdentityMode, IdentityModel, IndexDirection, IndexModel, SchemaModel, SqlType, TableModel,
+    ViewColumnModel, ViewModel, ViewQueryModel,
 };
 use tokio_rusqlite::rusqlite::{self, Row};
 
@@ -36,20 +37,23 @@ pub(crate) async fn database(connection: &SqliteConnection) -> Result<DatabaseMo
     for name in table_names(connection).await? {
         tables.push(table(connection, &name).await?);
     }
+    let mut views = Vec::new();
+    for name in view_names(connection).await? {
+        views.push(view(connection, &name).await?);
+    }
     // SQLite has no namespace object: an empty database has no schema to report. Emitting an empty
     // default schema would diff against a genuinely empty model (`schemas: []`) as a spurious
-    // `DropSchema`, so only include the schema once there is at least one object in it. (Views are
-    // rendered but not yet introspected back — reading a live view's name/columns from `sqlite_master`
-    // is a separate slice — so a table is the only object that can populate the schema here. A
-    // desired-model view therefore re-applies as a non-destructive `DROP VIEW IF EXISTS`/`CREATE VIEW`
-    // on every plan, exactly as an introspected PostgreSQL/MySQL view re-applies as `CREATE OR REPLACE`.)
-    let schemas = if tables.is_empty() {
+    // `DropSchema`, so only include the schema once there is at least one object in it. Both tables and
+    // views can populate it; a view carries only its name and columns (the structural body cannot be
+    // reconstructed from the stored `CREATE VIEW` text), which is enough for the diff to drop a removed
+    // or renamed view and to detect name collisions.
+    let schemas = if tables.is_empty() && views.is_empty() {
         Vec::new()
     } else {
         vec![SchemaModel {
             name: None,
             tables,
-            views: Vec::new(),
+            views,
         }]
     };
     Ok(DatabaseModel { schemas })
@@ -70,6 +74,48 @@ async fn table_names(connection: &SqliteConnection) -> Result<Vec<String>, Sqlit
         |row| row.get::<_, String>(0),
     )
     .await
+}
+
+/// User view names in a deterministic order, excluding SQLite's internal objects and this backend's
+/// bookkeeping tables — the same prefix filter as [`table_names`].
+async fn view_names(connection: &SqliteConnection) -> Result<Vec<String>, SqliteError> {
+    query(
+        connection,
+        "SELECT name FROM sqlite_master \
+         WHERE type = 'view' \
+           AND name NOT GLOB 'sqlite_*' \
+           AND name NOT GLOB '__squealy_*' \
+         ORDER BY name",
+        None,
+        |row| row.get::<_, String>(0),
+    )
+    .await
+}
+
+/// Introspects one view. Only its name and output columns are recovered: SQLite stores a view as its
+/// verbatim `CREATE VIEW` text, which cannot be reconstructed into the structural [`ViewQueryModel`]
+/// body, so the body (and its projection) stays empty — the "introspected, body unknown" marker the diff
+/// keys on to re-apply the desired definition every run rather than compare bodies. `PRAGMA table_info`
+/// reports a view's columns just like a table's (each output's affinity, empty for a computed column);
+/// nullability is not meaningful for a view output, and the diff ignores it. Recovering the name and
+/// columns is what lets a removed or renamed view produce a `DropView` (a view invisible to
+/// introspection would otherwise linger) and lets a view take part in the one-namespace collision check.
+async fn view(connection: &SqliteConnection, name: &str) -> Result<ViewModel, SqliteError> {
+    let columns = columns(connection, name)
+        .await?
+        .into_iter()
+        .map(|column| ViewColumnModel {
+            name: column.name,
+            ty: sql_type(&column.declared_type),
+            nullable: column.notnull == 0,
+        })
+        .collect();
+    Ok(ViewModel {
+        name: name.to_owned(),
+        comment: None,
+        columns,
+        query: ViewQueryModel::default(),
+    })
 }
 
 async fn table(connection: &SqliteConnection, name: &str) -> Result<TableModel, SqliteError> {

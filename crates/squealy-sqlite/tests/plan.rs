@@ -6,9 +6,10 @@
 //! foreign-key child's rows, which a naive drop-and-recreate would cascade-delete.
 
 use squealy::{
-    ColumnModel, Constraint, DatabaseModel, DatabasePlan, DdlExecutor, ForeignKeyAction,
-    ForeignKeyModel, IdentityMode, IdentityModel, IndexModel, SchemaBackend, SchemaModel, SqlType,
-    TableModel,
+    ColumnModel, CompareOp, Constraint, DatabaseModel, DatabasePlan, DatabasePlanStep, DdlExecutor,
+    ExprNode, ForeignKeyAction, ForeignKeyModel, IdentityMode, IdentityModel, IndexModel,
+    ProjectionItem, SchemaBackend, SchemaModel, SourceRef, SqlType, TableModel, ViewColumnModel,
+    ViewModel, ViewQueryModel,
 };
 use squealy_model::{
     CastColumn, DiffPolicy, PlanApplyOptions, RefactorLog, RefactorOperation, RenameColumn,
@@ -63,6 +64,69 @@ fn one_table(table: TableModel) -> DatabaseModel {
             name: None,
             views: Vec::new(),
             tables: vec![table],
+        }],
+    }
+}
+
+/// A `widgets(id, active)` table whose introspected shape re-plans to an empty diff (no PK/identity).
+fn widget_table() -> TableModel {
+    table(
+        "widgets",
+        vec![
+            column("id", SqlType::I64, false),
+            column("active", SqlType::I64, false),
+        ],
+    )
+}
+
+/// An `active_widgets` view over `widgets` — `SELECT id FROM widgets WHERE active > 0`.
+fn active_widgets_view() -> ViewModel {
+    let widget_col = |column: &str| ExprNode::Column {
+        alias: "q0_0".to_owned(),
+        column: column.to_owned(),
+    };
+    ViewModel {
+        name: "active_widgets".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "id".to_owned(),
+            ty: SqlType::I64,
+            nullable: false,
+        }],
+        query: ViewQueryModel {
+            dependencies: Vec::new(),
+            distinct: false,
+            projection: vec![ProjectionItem {
+                output_name: "id".to_owned(),
+                expr: widget_col("id"),
+            }],
+            from: Some(SourceRef {
+                schema: None,
+                name: "widgets".to_owned(),
+                alias: "q0_0".to_owned(),
+            }),
+            joins: Vec::new(),
+            filter: Some(ExprNode::Compare {
+                op: CompareOp::GreaterThan,
+                left: Box::new(widget_col("active")),
+                right: Box::new(ExprNode::Literal("0".to_owned())),
+            }),
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        },
+    }
+}
+
+/// The `widgets` table plus the `active_widgets` view over it.
+fn table_and_view() -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![widget_table()],
+            views: vec![active_widgets_view()],
         }],
     }
 }
@@ -1248,5 +1312,88 @@ async fn execute_ddl_restores_the_prior_foreign_keys_setting() {
     assert!(
         foreign_keys_enabled(&raw).await,
         "an enabled setting is preserved"
+    );
+}
+
+#[tokio::test]
+async fn introspects_a_published_view() {
+    // A published view is read back by introspection (name + columns) so the diff can see it. Only the
+    // structural body is unrecoverable, so its projection is empty — the "body unknown" marker.
+    let (mut connection, _raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+
+    let actual = introspect(&mut connection).await.expect("introspect");
+    let views: Vec<_> = actual
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.views)
+        .collect();
+    assert_eq!(
+        views.len(),
+        1,
+        "expected the view to be introspected: {actual:?}"
+    );
+    assert_eq!(views[0].name, "active_widgets");
+    assert_eq!(
+        views[0]
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id"],
+    );
+    assert!(
+        views[0].query.projection.is_empty(),
+        "an introspected view is body-unknown: {:?}",
+        views[0].query,
+    );
+}
+
+#[tokio::test]
+async fn removing_a_view_drops_it() {
+    // Removing a view from the desired model must drop the live view. Before views were introspected the
+    // view was invisible to the diff, so no `DropView` was emitted and the stale view lingered (and could
+    // block a later object reusing its name).
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+
+    // The rendered `CREATE VIEW` is valid SQLite: the view exists and filters to the active rows.
+    exec(
+        &raw,
+        "INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (1, 1), (2, 0)",
+    )
+    .await;
+    assert_eq!(
+        count(&raw, "active_widgets").await,
+        1,
+        "view filters active rows"
+    );
+
+    let table_only = one_table(widget_table());
+    let plan = plan_from_database(&table_only, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan table-only");
+    assert!(
+        plan.steps.iter().any(|step| matches!(
+            step,
+            DatabasePlanStep::DropView { view, .. } if view.name == "active_widgets"
+        )),
+        "expected a DropView for the removed view, got: {:?}",
+        plan.steps,
+    );
+
+    apply_plan(&plan, &table_only, &Sqlite, &mut connection)
+        .await
+        .expect("apply the drop");
+    let actual = introspect(&mut connection)
+        .await
+        .expect("introspect after drop");
+    assert!(
+        actual.schemas.iter().all(|schema| schema.views.is_empty()),
+        "the view must be gone after the drop: {actual:?}",
     );
 }
