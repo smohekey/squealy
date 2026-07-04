@@ -676,21 +676,23 @@ fn render_create_renders_view_expression_ir_in_sqlite_dialect() {
 
 #[test]
 fn render_plan_renders_view_steps() {
-    // SQLite has no `CREATE OR REPLACE VIEW`, so a `CreateView` step drops first (`DROP VIEW IF EXISTS`,
-    // a no-op for a brand-new view) then creates — idempotent whether the view is new or replaced. A
-    // `DropView` step renders a plain `DROP VIEW`. Names render unqualified.
+    // Every view the plan touches is dropped up front (`DROP VIEW IF EXISTS`, before any table work,
+    // since a rebuild's rename reparses a live view over the rebuilt table). A kept view is then
+    // recreated after the drops (SQLite has no `CREATE OR REPLACE VIEW`); a removed view stays dropped.
+    // Names render unqualified.
     use squealy::{DatabaseModel, DatabasePlan, DatabasePlanStep};
 
-    let view = id_view("active_users", "users", Some(id_gt_zero()));
+    let kept = id_view("active_users", "users", Some(id_gt_zero()));
+    let removed = id_view("legacy_users", "users", None);
     let plan = DatabasePlan {
         steps: vec![
-            DatabasePlanStep::CreateView {
-                schema: Some("app".to_owned()),
-                view: Box::new(view.clone()),
-            },
             DatabasePlanStep::DropView {
                 schema: Some("app".to_owned()),
-                view: Box::new(view),
+                view: Box::new(removed),
+            },
+            DatabasePlanStep::CreateView {
+                schema: Some("app".to_owned()),
+                view: Box::new(kept),
             },
         ],
     };
@@ -701,27 +703,37 @@ fn render_plan_renders_view_steps() {
         .unwrap();
     let sql = String::from_utf8(sql).unwrap();
 
+    // Both views are dropped up front.
     assert!(
         sql.contains("DROP VIEW IF EXISTS \"active_users\""),
-        "the create step must drop first (SQLite has no OR REPLACE): {sql}"
+        "kept view must be dropped before recreate: {sql}"
     );
+    assert!(
+        sql.contains("DROP VIEW IF EXISTS \"legacy_users\""),
+        "removed view must be dropped: {sql}"
+    );
+    // The kept view is recreated (SQLite spells no `OR REPLACE`); the removed one is not.
     assert!(
         sql.contains(
             "CREATE VIEW \"active_users\" (\"id\") AS \
 SELECT q0_0.\"id\" FROM \"users\" AS q0_0 WHERE (q0_0.\"id\" > 0)"
         ),
-        "missing create view: {sql}"
+        "missing recreate of the kept view: {sql}"
     );
     assert!(
         !sql.contains("OR REPLACE"),
-        "SQLite has no CREATE OR REPLACE VIEW: {sql}"
+        "SQLite has no OR REPLACE: {sql}"
     );
-    // The `DropView` step (plain `DROP VIEW`, no `IF EXISTS`) is emitted after the create step.
-    let create_pos = sql.find("CREATE VIEW").unwrap();
-    let drop_step_pos = sql.rfind("DROP VIEW \"active_users\"").unwrap();
     assert!(
-        create_pos < drop_step_pos,
-        "the drop-view step comes after the create step: {sql}"
+        !sql.contains("CREATE VIEW \"legacy_users\""),
+        "the removed view must not be recreated: {sql}"
+    );
+    // The recreate comes after every up-front drop.
+    let last_drop = sql.rfind("DROP VIEW IF EXISTS").unwrap();
+    let create_pos = sql.find("CREATE VIEW").unwrap();
+    assert!(
+        last_drop < create_pos,
+        "views are dropped before any recreate: {sql}"
     );
 }
 

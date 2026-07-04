@@ -1480,3 +1480,50 @@ async fn removing_a_view_drops_it() {
         "the view must be gone after the drop: {actual:?}",
     );
 }
+
+#[tokio::test]
+async fn rebuilding_a_table_under_an_existing_view_succeeds() {
+    // A rebuild drops the old table and renames the new one into place; a live view over that table is
+    // reparsed at the rename. This must not error, and the view must still resolve afterward.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+    exec(
+        &raw,
+        "INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (1, 1), (2, 0)",
+    )
+    .await;
+
+    // v2 adds a UNIQUE (inline-only in SQLite → forces a create-copy-drop-rename rebuild of widgets),
+    // with the active_widgets view over widgets still present.
+    let mut widgets = widget_table();
+    widgets.uniques.push(Constraint {
+        name: String::new(),
+        columns: vec!["id".to_owned()],
+    });
+    let v2 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![widgets],
+            views: vec![active_widgets_view()],
+        }],
+    };
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan v2");
+    assert!(
+        render(&plan, &v2).contains("__squealy_new_widgets"),
+        "expected a rebuild of widgets",
+    );
+
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply the rebuild under an existing view");
+    assert_eq!(
+        count(&raw, "active_widgets").await,
+        1,
+        "the view still resolves and filters after the rebuild",
+    );
+}

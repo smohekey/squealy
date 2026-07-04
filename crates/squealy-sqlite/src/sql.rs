@@ -196,6 +196,23 @@ pub(crate) fn write_plan(
         write_create_refactor_log_table(writer)?;
     }
 
+    // Drop every view the plan touches up front, before any table is dropped, rebuilt or renamed.
+    // SQLite reparses a view when a table it references is renamed — a table rebuild renames the new
+    // table into place — and errors ("no such table") if that table is momentarily absent, so a live
+    // view over a rebuilt table must be gone before the rebuild. Views the plan keeps are recreated by
+    // their `CreateView` step in the main pass (in dependency order, after every table exists); removed
+    // views stay dropped. `IF EXISTS` covers a brand-new view (nothing to drop) and a name that a plan
+    // both drops and recreates.
+    for step in &plan.steps {
+        if let DatabasePlanStep::CreateView { view, .. } | DatabasePlanStep::DropView { view, .. } =
+            step
+        {
+            statement(writer, &mut first)?;
+            writer.write_all(b"DROP VIEW IF EXISTS ")?;
+            write_quoted_ident(&view.name, writer)?;
+        }
+    }
+
     // Free every table and index name the plan drops or redefines, up front, before any create runs.
     // SQLite keeps tables and indexes in one database-wide namespace, so a dropped name may be reused
     // by a later create (an index moved between tables, or an index taking a dropped table's name);
@@ -265,12 +282,9 @@ pub(crate) fn write_plan(
                 }
             }
             DatabasePlanStep::CreateView { schema, view } => {
-                // SQLite has no `CREATE OR REPLACE VIEW`, so a body-only change (which the diff emits as
-                // a bare `CreateView`, no preceding `DropView`) is applied by dropping first. `IF EXISTS`
-                // makes it a no-op for a brand-new view and idempotent when a `DropView` already ran.
-                statement(writer, &mut first)?;
-                writer.write_all(b"DROP VIEW IF EXISTS ")?;
-                write_quoted_ident(&view.name, writer)?;
+                // The view was already dropped in the up-front view pre-pass (SQLite has no
+                // `CREATE OR REPLACE VIEW`); recreate it here, after all table work, so it binds to the
+                // final table shapes. Views are ordered so a view-on-view is created after its source.
                 statement(writer, &mut first)?;
                 squealy::render_create_view(
                     schema.as_deref(),
@@ -280,10 +294,8 @@ pub(crate) fn write_plan(
                     writer,
                 )?;
             }
-            DatabasePlanStep::DropView { schema, view } => {
-                statement(writer, &mut first)?;
-                squealy::render_drop_view(schema.as_deref(), &view.name, &SqliteDialect, writer)?;
-            }
+            // The view was already dropped in the up-front view pre-pass; nothing to emit here.
+            DatabasePlanStep::DropView { .. } => {}
         }
     }
 
