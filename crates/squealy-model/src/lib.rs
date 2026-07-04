@@ -253,7 +253,8 @@ where
 /// method / directions has them filled to the backend default (see
 /// [`SchemaIntrospect::default_index_method`], empty directions becoming all-ASC), partial-index
 /// predicates go through [`SchemaIntrospect::canonical_index_predicate`] and CHECK expressions
-/// through [`SchemaIntrospect::canonical_check_expression`].
+/// through [`SchemaIntrospect::canonical_check_expression`] (then names through
+/// [`SchemaIntrospect::canonical_check_name`]).
 ///
 /// The type/identity/method steps align a *desired* model with the form introspection produces; the
 /// predicate/CHECK steps put an expression into a backend-neutral canonical form. [`plan_from_database`]
@@ -309,6 +310,9 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
             }
             for check in &mut table.checks {
                 check.expression = connection.canonical_check_expression(&check.expression);
+                // Derive the canonical name from the now-canonicalized expression, so a backend that
+                // does not round-trip a check's name (SQLite) matches equivalent checks by expression.
+                check.name = connection.canonical_check_name(check);
             }
         }
         // A view's declared output columns are compared against introspected ones (which come back in

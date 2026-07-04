@@ -6,10 +6,10 @@
 //! bookkeeping stores.
 
 use squealy::{
-    ColumnExpr, ColumnMode, ColumnModel, ColumnName, Constraint, Database, DatabaseModel,
-    DdlExecutor, ForeignKeyModel, IdentityMode, IdentityModel, IndexModel, Schema, SchemaConnect,
-    SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore, SchemaRefactorStore, SqlType,
-    Table, TableModel,
+    CheckModel, ColumnExpr, ColumnMode, ColumnModel, ColumnName, Constraint, Database,
+    DatabaseModel, DdlExecutor, ForeignKeyModel, IdentityMode, IdentityModel, IndexModel, Schema,
+    SchemaConnect, SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore,
+    SchemaRefactorStore, SqlType, Table, TableModel,
 };
 use squealy_sqlite::{Sqlite, SqliteConnection};
 
@@ -855,4 +855,136 @@ async fn publish_history_store_appends_newest_first() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn round_trips_a_table_check_constraint() {
+    // A table `CHECK` lives only in the `CREATE TABLE` text; introspection recovers the expression and
+    // matches it by a name derived from that expression, so a checked table re-plans empty. A changed
+    // expression is still a real diff.
+    let model = |expression: &str| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "accounts".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "balance".to_owned(),
+                    comment: None,
+                    ty: SqlType::I64,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: vec![CheckModel {
+                    name: "ck_accounts_balance".to_owned(),
+                    expression: expression.to_owned(),
+                    validation: None,
+                    enforcement: None,
+                }],
+                indexes: Vec::new(),
+            }],
+        }],
+    };
+
+    let mut connection = connect().await;
+    squealy_model::publish(&model("balance >= 0"), &Sqlite, &mut connection)
+        .await
+        .expect("publish checked table");
+
+    // The check is read back with its expression (unnamed).
+    let actual = squealy_model::introspect(&mut connection).await.unwrap();
+    let checks = &actual.schemas[0].tables[0].checks;
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].expression, "balance >= 0");
+    assert!(checks[0].name.is_empty());
+
+    // Same expression re-plans empty.
+    let plan = squealy_model::plan_from_database(
+        &model("balance >= 0"),
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan same check");
+    assert!(plan.steps.is_empty(), "got: {:?}", plan.steps);
+
+    // A different expression is a real change (a table rebuild, since checks are inline-only).
+    let plan = squealy_model::plan_from_database(
+        &model("balance > 0"),
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan changed check");
+    assert!(!plan.steps.is_empty(), "check change must diff");
+}
+
+#[tokio::test]
+async fn round_trips_a_column_collation() {
+    // A column `COLLATE` clause lives only in the `CREATE TABLE` text; introspection recovers it by
+    // parsing that text, so a collated column re-plans empty. A changed collation is still a real diff.
+    let model = |collation: &str| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "people".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "name".to_owned(),
+                    comment: None,
+                    ty: SqlType::Text,
+                    collation: Some(collation.to_owned()),
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    };
+
+    let mut connection = connect().await;
+    squealy_model::publish(&model("NOCASE"), &Sqlite, &mut connection)
+        .await
+        .expect("publish collated column");
+
+    // The collation is read back.
+    let actual = squealy_model::introspect(&mut connection).await.unwrap();
+    assert_eq!(
+        actual.schemas[0].tables[0].columns[0].collation,
+        Some("NOCASE".to_owned())
+    );
+
+    // Same collation re-plans empty.
+    let plan = squealy_model::plan_from_database(
+        &model("NOCASE"),
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan same collation");
+    assert!(plan.steps.is_empty(), "got: {:?}", plan.steps);
+
+    // A different collation is a real change (a rebuild, since a column collation is inline-only).
+    let plan = squealy_model::plan_from_database(
+        &model("RTRIM"),
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan changed collation");
+    assert!(!plan.steps.is_empty(), "collation change must diff");
 }

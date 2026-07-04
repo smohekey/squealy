@@ -420,11 +420,11 @@ fn change_needs_rebuild(change: &TablePlanStep) -> bool {
 
 /// Whether a column can be added with a native `ALTER TABLE … ADD COLUMN` (rather than a rebuild).
 /// SQLite rejects adding a `PRIMARY KEY`/`UNIQUE` column (those arrive as separate constraint steps, so
-/// a bare `AddColumn` is never one), an identity, generated or collated column, a `NOT NULL` column
-/// without a non-null constant default, or any column with a non-constant default (`CURRENT_*` / a raw
-/// expression).
+/// a bare `AddColumn` is never one), an identity or generated column, a `NOT NULL` column without a
+/// non-null constant default, or any column with a non-constant default (`CURRENT_*` / a raw
+/// expression). A `COLLATE` clause is fine — `ALTER TABLE … ADD COLUMN … COLLATE …` is accepted.
 fn native_addable(column: &ColumnModel) -> bool {
-    if column.identity.is_some() || column.generated.is_some() || column.collation.is_some() {
+    if column.identity.is_some() || column.generated.is_some() {
         return false;
     }
     match &column.default {
@@ -905,20 +905,6 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
             ),
         ));
     }
-    if column.collation.is_some() {
-        // A column collation is not reported by any PRAGMA (it lives only in the `CREATE TABLE` text),
-        // so introspection cannot read it back yet; a published `COLLATE` would diff as a never-settling
-        // `AlterColumn`. Reject rather than emit DDL that cannot round-trip (support lands with the
-        // introspection parsing + incremental plan slice).
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "SQLite column collations are not supported for schema management yet (column `{}`): \
-                 they cannot be introspected, so a published collation would churn every plan",
-                column.name
-            ),
-        ));
-    }
     if column.comment.is_some() {
         // Like a table comment, a column comment is not introspectable, so it would churn every plan.
         return Err(io::Error::new(
@@ -934,6 +920,16 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
     write_quoted_ident(&column.name, writer)?;
     writer.write_all(b" ")?;
     writer.write_all(sqlite_affinity(&column.ty).as_bytes())?;
+    // A `COLLATE` clause is a column constraint that carries the collating sequence for text comparison.
+    // SQLite exposes it only in the `CREATE TABLE` text (no PRAGMA reports it), so introspection recovers
+    // it by parsing that text. The name is quoted like any identifier so a registered collation whose
+    // name needs quoting (spaces, `-`, an embedded quote) still parses; SQLite accepts a quoted collation
+    // name, and the introspector unquotes it back (SQLite's built-ins `BINARY`/`NOCASE`/`RTRIM` quote
+    // harmlessly).
+    if let Some(collation) = &column.collation {
+        writer.write_all(b" COLLATE ")?;
+        write_quoted_ident(collation, writer)?;
+    }
     if !column.nullable {
         writer.write_all(b" NOT NULL")?;
     }
@@ -954,21 +950,40 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
     Ok(())
 }
 
-fn write_check(check: &CheckModel, _writer: &mut impl Write) -> io::Result<()> {
-    // Table `CHECK` constraints are not supported for SQLite schema management yet: introspection
-    // cannot read them back (SQLite exposes checks only inside the `CREATE TABLE` text, with no PRAGMA),
-    // so a published check would diff as a never-settling add on every plan. Reject rather than emit DDL
-    // that cannot round-trip; full support lands with introspection parsing + incremental plan
-    // rendering. (The fixed-width `[u8; N]` column check is rendered inline in `write_column`, not here,
-    // so it is unaffected.)
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        format!(
-            "SQLite CHECK constraints are not supported for schema management yet (constraint `{}`): \
-             SQLite does not expose them to introspection, so a published check would churn every plan",
-            check.name
-        ),
-    ))
+fn write_check(check: &CheckModel, writer: &mut impl Write) -> io::Result<()> {
+    // Rendered inline and unnamed: SQLite exposes a `CHECK` only in the `CREATE TABLE` text (no PRAGMA),
+    // so introspection recovers the expression but not a name — the desired and introspected sides are
+    // matched by a name derived from the expression (see `Sqlite::canonical_check_name`), making the
+    // rendered name redundant. The expression is written verbatim between parentheses, trimmed so it
+    // round-trips against the trimmed form introspection reads back (see `canonical_check_expression`).
+    // (The fixed-width `[u8; N]` column check is rendered inline in `write_column`, not here.)
+    //
+    // SQLite has no `NOT VALID`/`NOT ENFORCED` for a check: rendering one silently would turn a package
+    // model's validation/enforcement metadata into a plain, immediately-enforced constraint (or fail the
+    // migration on existing rows). Reject it instead — as `write_foreign_key` rejects the same metadata —
+    // rather than drop it. (A crate `#[check]` always leaves both `None`; this guards hand-written or
+    // packaged models. The render path does not run `check_create`, so the guard belongs here.)
+    if check.validation.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite does not support CHECK constraint validation metadata (constraint `{}`)",
+                check.name
+            ),
+        ));
+    }
+    if check.enforcement.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite does not support CHECK constraint enforcement metadata (constraint `{}`)",
+                check.name
+            ),
+        ));
+    }
+    writer.write_all(b"CHECK (")?;
+    writer.write_all(check.expression.trim().as_bytes())?;
+    writer.write_all(b")")
 }
 
 fn write_foreign_key(foreign_key: &ForeignKeyModel, writer: &mut impl Write) -> io::Result<()> {

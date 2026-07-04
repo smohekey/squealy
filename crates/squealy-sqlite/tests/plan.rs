@@ -225,6 +225,30 @@ fn adds_a_not_null_column_with_a_constant_default_natively() {
 }
 
 #[test]
+fn adds_a_collated_column_natively() {
+    // SQLite accepts `ALTER TABLE … ADD COLUMN … COLLATE …`, so a collated column is added in place
+    // rather than forcing a whole-table rebuild.
+    let actual = one_table(table("t", vec![column("id", SqlType::I64, false)]));
+    let mut collated = column("name", SqlType::Text, true);
+    collated.collation = Some("NOCASE".to_owned());
+    let desired = one_table(table(
+        "t",
+        vec![column("id", SqlType::I64, false), collated],
+    ));
+    let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan");
+
+    let sql = render(&plan, &desired);
+    assert!(
+        sql.contains("ALTER TABLE \"t\" ADD COLUMN \"name\" TEXT COLLATE \"NOCASE\""),
+        "{sql}"
+    );
+    assert!(
+        !sql.contains("__squealy_new_"),
+        "no rebuild expected: {sql}"
+    );
+}
+
+#[test]
 fn adds_a_unique_constraint_via_rebuild() {
     // A `UNIQUE` constraint is inline-only in SQLite (there is no `ALTER TABLE … ADD CONSTRAINT`), so
     // adding one rebuilds the table.
