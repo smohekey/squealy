@@ -72,9 +72,11 @@
 //!
 //! ## Prepared statements
 //!
-//! Prepared statements (and `RETURNING`) are **intentionally not implemented** for MySQL: only the
-//! directly-executable query forms are provided, and those execute with their literals inlined. Normal
-//! parameterized execution still binds values positionally through the driver.
+//! Squealy's prepared-statement API (`prepare()`) — and `RETURNING` — are **intentionally not
+//! implemented** for MySQL: only the directly-executable query forms are provided. This is *not* an
+//! inlining/safety difference — one-shot `fetch`/`execute` still render `?` placeholders and bind their
+//! values positionally through the driver (`mysql_async` `Params::Positional`); what is absent is the
+//! reusable prepared-query object, so a query built with runtime bind slots is rejected on this backend.
 //!
 //! ## Schema-diff expression fidelity
 //!
@@ -95,7 +97,8 @@
 //! - string concatenation uses `CONCAT(...)`, not `||`.
 //! - integer `/` is already float division (MySQL spells integer division `DIV`), so no float-cast
 //!   wrapping is emitted.
-//! - `EXTRACT(SECOND FROM ...)` uses the composite `SECOND_MICROSECOND` unit.
+//! - the fractional-seconds `extract_second(...)` helper uses the composite `SECOND_MICROSECOND` unit
+//!   (a plain `extract(Second, ...)` still renders `EXTRACT(SECOND FROM ...)`, whole seconds).
 //! - `UPDATE ... FROM` and `DELETE ... USING` render as MySQL multi-table `JOIN` forms.
 //! - upsert renders as `ON DUPLICATE KEY UPDATE`, with `VALUES(col)` for an excluded value.
 
