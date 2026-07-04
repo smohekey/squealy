@@ -16,7 +16,7 @@ use crate::{
 };
 
 /// An owned, backend-neutral model of a whole database.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct DatabaseModel {
     pub schemas: Vec<SchemaModel>,
 }

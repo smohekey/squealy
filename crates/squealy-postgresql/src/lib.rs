@@ -149,6 +149,9 @@ impl squealy::SchemaBackend for Postgres {
     fn render_plan(
         &self,
         plan: &squealy::DatabasePlan,
+        // PostgreSQL renders each step's delta in place (`ALTER TABLE … ALTER COLUMN …`), so it does
+        // not need the full target model that table-rebuild backends (SQLite) rely on.
+        _desired: &squealy::DatabaseModel,
         writer: &mut impl std::io::Write,
     ) -> std::io::Result<()> {
         sql::ddl::write_plan(plan, writer)
@@ -157,9 +160,15 @@ impl squealy::SchemaBackend for Postgres {
     fn render_plan_concurrent(
         &self,
         plan: &squealy::DatabasePlan,
+        _desired: &squealy::DatabaseModel,
         writer: &mut impl std::io::Write,
     ) -> std::io::Result<()> {
         sql::ddl::write_plan_concurrent(plan, writer)
+    }
+
+    fn supports_concurrent_index_creation(&self) -> bool {
+        // PostgreSQL builds indexes without locking writes via `CREATE INDEX CONCURRENTLY`.
+        true
     }
 }
 

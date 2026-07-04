@@ -332,7 +332,7 @@ fn render_plan_sql_delegates_to_backend_plan_renderer() {
     let actual = DatabaseModel { schemas: vec![] };
     let plan = plan_models(&desired, &actual, DiffPolicy::ALLOW_ALL).expect("plan diff");
 
-    let sql = render_plan_sql(&plan, &Postgres).expect("render plan");
+    let sql = render_plan_sql(&plan, &desired, &Postgres).expect("render plan");
 
     assert_eq!(
         sql,
@@ -477,7 +477,7 @@ async fn apply_plan_renders_with_backend_and_executes_sql() {
         executed: Vec::new(),
     };
 
-    apply_plan(&plan, &Postgres, &mut connection)
+    apply_plan(&plan, &desired, &Postgres, &mut connection)
         .await
         .expect("apply plan");
 
@@ -504,6 +504,7 @@ async fn apply_plan_does_not_execute_empty_plans() {
 
     apply_plan(
         &squealy_model::DatabasePlan::default(),
+        &DatabaseModel::default(),
         &Postgres,
         &mut connection,
     )
@@ -555,6 +556,7 @@ async fn apply_plan_with_concurrent_indexes_splits_index_creation() {
 
     apply_plan_with_options(
         &plan,
+        &DatabaseModel::default(),
         &Postgres,
         &mut connection,
         PlanApplyOptions {
@@ -616,6 +618,7 @@ fn render_plan_with_options_reports_the_concurrent_form_it_will_apply() {
     // built `CONCURRENTLY` outside the transaction, after the transactional `ADD COLUMN`.
     let concurrent = render_plan_with_options(
         &plan,
+        &DatabaseModel::default(),
         &Postgres,
         PlanApplyOptions {
             concurrent_indexes: true,
@@ -632,9 +635,17 @@ fn render_plan_with_options_reports_the_concurrent_form_it_will_apply() {
     );
 
     // Without the option it stays byte-identical to the plain renderer (plain, transactional index).
-    let plain = render_plan_with_options(&plan, &Postgres, PlanApplyOptions::default())
-        .expect("render plain report");
-    assert_eq!(plain, render_plan_sql(&plan, &Postgres).unwrap());
+    let plain = render_plan_with_options(
+        &plan,
+        &DatabaseModel::default(),
+        &Postgres,
+        PlanApplyOptions::default(),
+    )
+    .expect("render plain report");
+    assert_eq!(
+        plain,
+        render_plan_sql(&plan, &DatabaseModel::default(), &Postgres).unwrap()
+    );
     assert!(!plain.contains("CONCURRENTLY"), "plain report: {plain}");
 }
 
@@ -896,15 +907,16 @@ fn cast_column_refactor_renders_using_clause_on_a_type_change() {
         })],
     };
 
+    let desired_model = model_with_tables("public", vec![desired]);
     let plan = plan_models_with_refactors(
-        &model_with_tables("public", vec![desired]),
+        &desired_model,
         &model_with_tables("public", vec![actual]),
         &refactors,
         DiffPolicy::ALLOW_ALL,
     )
     .expect("type change is allowed by ALLOW_ALL");
 
-    let sql = render_plan_sql(&plan, &Postgres).expect("render");
+    let sql = render_plan_sql(&plan, &desired_model, &Postgres).expect("render");
     assert!(
         sql.contains("ALTER COLUMN \"total\" TYPE numeric(12,2) USING total::numeric"),
         "{sql}"
@@ -945,15 +957,16 @@ fn cast_column_applies_after_rename_regardless_of_log_order() {
         ],
     };
 
+    let desired_model = model_with_tables("public", vec![desired]);
     let plan = plan_models_with_refactors(
-        &model_with_tables("public", vec![desired]),
+        &desired_model,
         &model_with_tables("public", vec![actual]),
         &refactors,
         DiffPolicy::ALLOW_ALL,
     )
     .expect("rename + cast allowed by ALLOW_ALL");
 
-    let sql = render_plan_sql(&plan, &Postgres).expect("render");
+    let sql = render_plan_sql(&plan, &desired_model, &Postgres).expect("render");
     assert!(sql.contains("RENAME COLUMN"), "expected a rename: {sql}");
     assert!(
         sql.contains("USING old_total::numeric"),
