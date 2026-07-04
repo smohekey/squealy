@@ -5,6 +5,99 @@
 //! `DatabaseModel`) and query execution. The query runtime lives in [`query`]; the single driver
 //! `Conn` is held behind a [`tokio::sync::Mutex`] so the `&self` execution API can obtain the
 //! `&mut Conn` that `mysql_async` requires.
+//!
+//! # MySQL backend: differences & limitations
+//!
+//! A consolidated, user-facing reference for choosing and operating this backend. Where PostgreSQL
+//! and MySQL legitimately differ, the difference is expressed through the `Dialect`/`Backend` seams
+//! rather than leaking into the core model, so most divergences are invisible at the call site. The
+//! points below are the ones worth knowing.
+//!
+//! ## Type codecs (feature-gated)
+//!
+//! Each optional codec is behind a Cargo feature and encodes/decodes against one column type:
+//!
+//! - **`uuid`** — `uuid::Uuid` against `CHAR(36)` (hyphenated lowercase text). A bare `Uuid` column
+//!   canonicalizes to `Char(36)`, so it does not churn a schema diff on re-publish.
+//! - **`serde`** — `Json<T>` (the wrapper is defined in this crate) for any
+//!   `T: Serialize + DeserializeOwned`, against a `JSON` column via `serde_json`. No core feature is
+//!   needed — only the serde crates.
+//! - **`time`**, **`chrono`**, **`systemtime`** — `time::OffsetDateTime`, `chrono::DateTime<Utc>`, and
+//!   `std::time::SystemTime` respectively, each against a bare `TIMESTAMP` column.
+//! - **`bytes`** — `bytes::Bytes` against a `BLOB` column.
+//!
+//! ## Timestamps: UTC, whole-second, 1970–2038
+//!
+//! The datetime codecs store and return **UTC** values at **whole-second** resolution (a bare
+//! `TIMESTAMP`, fractional-seconds precision 0). Sub-second precision needs the neutral model to carry
+//! fractional precision and is planned, not yet supported.
+//!
+//! Because MySQL interprets a `TIMESTAMP` in the session time zone, the session must be UTC:
+//!
+//! - `Mysql::connect` (the `SchemaConnect` impl) runs `SET time_zone = '+00:00'` for you — but only
+//!   when a timestamp codec feature (`time`/`chrono`/`systemtime`) is compiled in.
+//! - `MysqlConnection::new`, which adopts an already-open `mysql_async::Conn`, does **not** touch the
+//!   session. A caller using it with the timestamp codecs must run `SET time_zone = '+00:00'` itself,
+//!   or stored instants shift by the session offset.
+//!
+//! Instants outside MySQL's `TIMESTAMP` range (`1970-01-01`..`2038-01-19` UTC) are rejected at bind
+//! time rather than silently wrapped.
+//!
+//! ## Compile-time-gated PostgreSQL-only features
+//!
+//! A few PostgreSQL query features are gated behind marker traits that `Mysql` does not implement, so
+//! code using them **fails to compile** against a MySQL connection — there is no silent runtime
+//! fallback:
+//!
+//! - `RETURNING` (`SupportsReturning`)
+//! - `FULL JOIN` (`SupportsFullJoin`)
+//! - `date_trunc` / `AT TIME ZONE` (`SupportsDateTrunc`)
+//!
+//! MySQL *does* implement the other capability traits: `EXTRACT` (`SupportsExtract`),
+//! `INTERSECT ALL` / `EXCEPT ALL` (`SupportsIntersectExceptAll`, MySQL 8.0.31+), columnless upsert
+//! (`SupportsColumnlessUpsert`), and the `DEFAULT` keyword as an assignment value
+//! (`SupportsDefaultKeyword`).
+//!
+//! ## Cleanly rejected DDL
+//!
+//! Index shapes MySQL cannot express are rejected with an `io::Error` at render time (never silently
+//! dropped):
+//!
+//! - **partial / filtered indexes** (a `where = ...` predicate on a `#[unique]`/`#[index]`) — e.g.
+//!   *"MySQL does not support partial index predicates"* / *"MySQL does not support partial (filtered)
+//!   unique indexes"*.
+//! - **expression indexes** — *"MySQL expression indexes are not supported by squealy yet"*.
+//!
+//! Both are PostgreSQL-only.
+//!
+//! ## Prepared statements
+//!
+//! Prepared statements (and `RETURNING`) are **intentionally not implemented** for MySQL: only the
+//! directly-executable query forms are provided, and those execute with their literals inlined. Normal
+//! parameterized execution still binds values positionally through the driver.
+//!
+//! ## Schema-diff expression fidelity
+//!
+//! MySQL has no expression-canonicalization pass (there is no `canonical.rs`, unlike the PostgreSQL
+//! backend). It inherits the identity `canonical_check_expression` / `canonical_index_predicate`, so a
+//! `CHECK` or partial-index predicate that the server's catalog stores in a re-spelled form can diff as
+//! a spurious change. Tightening this is planned.
+//!
+//! ## Dialect divergences (transparent)
+//!
+//! These behave correctly but render differently from PostgreSQL; the dialect seam handles them, so no
+//! call-site change is needed:
+//!
+//! - `NULLS FIRST/LAST` is emulated with a leading `(<expr> IS NULL)` sort key.
+//! - `FOR SHARE` renders as `LOCK IN SHARE MODE`.
+//! - case-insensitive `LIKE` (`ILIKE`) relies on MySQL's default case-insensitive collation (plain
+//!   `LIKE`).
+//! - string concatenation uses `CONCAT(...)`, not `||`.
+//! - integer `/` is already float division (MySQL spells integer division `DIV`), so no float-cast
+//!   wrapping is emitted.
+//! - `EXTRACT(SECOND FROM ...)` uses the composite `SECOND_MICROSECOND` unit.
+//! - `UPDATE ... FROM` and `DELETE ... USING` render as MySQL multi-table `JOIN` forms.
+//! - upsert renders as `ON DUPLICATE KEY UPDATE`, with `VALUES(col)` for an excluded value.
 
 #![forbid(unsafe_code)]
 
