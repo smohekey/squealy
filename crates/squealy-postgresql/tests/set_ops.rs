@@ -50,6 +50,27 @@ UNION \
 }
 
 #[test]
+fn postgres_except_and_except_all() {
+    let except = Postgres
+        .from::<User>()
+        .select(|(u,)| (u.id, u.name))
+        .except(Postgres.from::<Admin>().select(|(a,)| (a.id, a.name)));
+
+    assert_eq!(
+        except.to_sql(),
+        "(SELECT q0_0.\"id\" AS \"t0_id\", q0_0.\"name\" AS \"t1_name\" FROM \"public\".\"users\" AS q0_0) \
+EXCEPT \
+(SELECT q0_0.\"id\" AS \"t0_id\", q0_0.\"name\" AS \"t1_name\" FROM \"public\".\"admins\" AS q0_0)"
+    );
+
+    let except_all = Postgres
+        .from::<User>()
+        .select(|(u,)| (u.id, u.name))
+        .except_all(Postgres.from::<Admin>().select(|(a,)| (a.id, a.name)));
+    assert!(except_all.to_sql().contains(") EXCEPT ALL ("));
+}
+
+#[test]
 fn postgres_continuous_placeholders_across_arms() {
     let query = Postgres
         .from::<User>()
