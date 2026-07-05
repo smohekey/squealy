@@ -513,6 +513,21 @@ async fn trigger_exists(raw: &RawConnection, name: &'static str) -> bool {
         != 0
 }
 
+/// Whether a `TEMP` trigger of the given name exists, per `sqlite_temp_master` (per-connection; `raw`
+/// and the schema-management handle share one physical connection, so they see the same temp schema).
+async fn temp_trigger_exists(raw: &RawConnection, name: &'static str) -> bool {
+    raw.call(move |conn| {
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_temp_master WHERE type = 'trigger' AND name = ?1",
+            [name],
+            |row| row.get::<_, i64>(0),
+        )
+    })
+    .await
+    .expect("temp trigger count")
+        != 0
+}
+
 #[tokio::test]
 async fn applies_a_native_add_column_and_converges() {
     let (mut connection, raw) = setup().await;
@@ -1682,6 +1697,51 @@ async fn a_view_recreated_with_only_its_name_casing_changed_preserves_its_trigge
     assert!(
         trigger_exists(&raw, "active_widgets_insert").await,
         "the trigger must be preserved across a case-only recreation of its target view",
+    );
+}
+
+#[tokio::test]
+async fn republishing_a_view_preserves_a_temp_instead_of_trigger() {
+    // A `TEMP` INSTEAD OF trigger (in `sqlite_temp_master`) also makes a view writeable, and `DROP VIEW`
+    // drops it too. Capture must span the temp schema and replay must recreate it AS temp (SQLite strips
+    // `TEMP` from the stored SQL) — not resurrect it as a persistent trigger.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+    exec(
+        &raw,
+        "CREATE TEMP TRIGGER \"active_widgets_temp_ins\" INSTEAD OF INSERT ON \"active_widgets\" \
+         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
+    )
+    .await;
+    exec(&raw, "INSERT INTO \"active_widgets\" (\"id\") VALUES (1)").await;
+    assert_eq!(
+        count(&raw, "widgets").await,
+        1,
+        "the temp trigger wrote through"
+    );
+
+    let plan = plan_from_database(&table_and_view(), &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan the unchanged re-publish");
+    apply_plan(&plan, &table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("re-apply the unchanged model");
+
+    assert!(
+        temp_trigger_exists(&raw, "active_widgets_temp_ins").await,
+        "the TEMP INSTEAD OF trigger must survive the view re-apply, still as a temp trigger",
+    );
+    assert!(
+        !trigger_exists(&raw, "active_widgets_temp_ins").await,
+        "it must not be resurrected as a persistent trigger",
+    );
+    exec(&raw, "INSERT INTO \"active_widgets\" (\"id\") VALUES (2)").await;
+    assert_eq!(
+        count(&raw, "widgets").await,
+        2,
+        "writes through the view still work after the re-publish",
     );
 }
 

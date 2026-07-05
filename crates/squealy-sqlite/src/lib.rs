@@ -243,19 +243,25 @@ fn apply_ddl_batch(conn: &mut rusqlite::Connection, sql: &str) -> rusqlite::Resu
     transaction.commit()
 }
 
-/// A user-defined trigger captured from `sqlite_master` before a DDL batch runs, so it can be replayed
-/// if the batch drops it out from under a surviving object.
+/// A user-defined trigger captured before a DDL batch runs (from `sqlite_master` or, for a `TEMP`
+/// trigger, `sqlite_temp_master`), so it can be replayed if the batch drops it out from under a
+/// surviving object.
 struct CapturedTrigger {
-    /// The trigger's name (unique across the schema; how we detect whether the batch dropped it).
+    /// The trigger's name (unique within its schema; how we detect whether the batch dropped it).
     name: String,
-    /// The table or view the trigger fires on (`sqlite_master.tbl_name`).
+    /// The table or view the trigger fires on (`tbl_name`).
     target: String,
     /// The target's object type (`"table"` or `"view"`) when captured. A same-named replacement of the
     /// other type (a supported table↔view swap) must not receive the trigger — an `AFTER`/`BEFORE`
     /// trigger cannot live on a view, nor an `INSTEAD OF` on a table.
     target_type: String,
-    /// The stored `CREATE TRIGGER …` text, replayed verbatim to recreate it.
+    /// The stored `CREATE TRIGGER …` text (SQLite strips `TEMP` from it; [`replay_dropped_triggers`]
+    /// re-injects it when `is_temp`).
     sql: String,
+    /// Whether the trigger lived in `sqlite_temp_master` (a `TEMP` trigger) rather than `sqlite_master`.
+    /// A `DROP VIEW`/`DROP TABLE` drops a temp trigger on that object too, so it must be recaptured and
+    /// recreated as `TEMP` (else replay would resurrect it as a persistent trigger).
+    is_temp: bool,
 }
 
 /// Snapshots every user-defined trigger before a DDL batch runs.
@@ -266,18 +272,24 @@ struct CapturedTrigger {
 /// `DROP TABLE` in a table rebuild) silently drops the triggers attached to it. Capturing here lets
 /// [`replay_dropped_triggers`] restore any that the batch removes but whose target still exists.
 ///
-/// The join matches `tbl_name` to the target object `COLLATE NOCASE`: SQLite resolves object names
-/// case-insensitively but stores `sqlite_master.tbl_name` with the `CREATE TRIGGER` statement's casing,
-/// so a trigger created `ON activewidgets` for view `ActiveWidgets` must still find its target. Object
-/// names are unique case-insensitively, so the match is unambiguous; `target.name` (the canonical
-/// casing) is captured so replay's later exact-name lookups resolve.
+/// Both persistent (`sqlite_master`) and `TEMP` (`sqlite_temp_master`) triggers are captured, since a
+/// `DROP VIEW`/`DROP TABLE` drops a temp trigger on that object as well. The join matches `tbl_name` to
+/// the target object `COLLATE NOCASE`: SQLite resolves object names case-insensitively but stores
+/// `tbl_name` with the `CREATE TRIGGER` statement's casing, so a trigger created `ON activewidgets` for
+/// view `ActiveWidgets` must still find its target. Object names are unique case-insensitively, so the
+/// match is unambiguous.
 fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<CapturedTrigger>> {
     let mut statement = conn.prepare(
-        "SELECT trigger.name, target.name, target.type, trigger.sql \
-         FROM sqlite_master AS trigger \
-         JOIN sqlite_master AS target ON target.name = trigger.tbl_name COLLATE NOCASE \
-         WHERE trigger.type = 'trigger' AND trigger.sql IS NOT NULL \
-         AND target.type IN ('table', 'view')",
+        "SELECT trigger.name, target.name, target.type, trigger.sql, trigger.is_temp \
+         FROM (SELECT name, tbl_name, sql, 0 AS is_temp FROM sqlite_master WHERE type = 'trigger' \
+               UNION ALL \
+               SELECT name, tbl_name, sql, 1 AS is_temp FROM sqlite_temp_master WHERE type = 'trigger') \
+              AS trigger \
+         JOIN (SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') \
+               UNION ALL \
+               SELECT name, type FROM sqlite_temp_master WHERE type IN ('table', 'view')) AS target \
+              ON target.name = trigger.tbl_name COLLATE NOCASE \
+         WHERE trigger.sql IS NOT NULL",
     )?;
     let triggers = statement
         .query_map([], |row| {
@@ -286,6 +298,7 @@ fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Capture
                 target: row.get(1)?,
                 target_type: row.get(2)?,
                 sql: row.get(3)?,
+                is_temp: row.get::<_, i64>(4)? != 0,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -294,18 +307,22 @@ fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Capture
 
 /// Recreates any captured trigger that the batch dropped but whose target object survives.
 ///
-/// A trigger still present in `sqlite_master` survived the batch (its object was untouched) and is left
+/// A trigger still present (in its schema) survived the batch (its object was untouched) and is left
 /// alone. A trigger now missing was dropped with its object; it is replayed only if an object of the
 /// **same type** still holds its name — a view re-created under the same name is the churn case this
 /// fixes. If the name is gone (the user removed the object) or now holds the other object type (a
 /// supported table↔view swap — an `AFTER`/`BEFORE` trigger cannot recreate on a view, nor an
 /// `INSTEAD OF` on a table), the trigger is legitimately gone and is not resurrected. Replaying the
-/// stored `CREATE TRIGGER` text verbatim reproduces the trigger exactly, and the missing-name guard
-/// means it never collides with a survivor.
+/// stored text reproduces the trigger exactly (re-injecting `TEMP` for a temp trigger, which SQLite
+/// strips from the stored SQL), and the missing-name guard means it never collides with a survivor.
 ///
 /// A trigger the batch **explicitly** dropped (`DROP TRIGGER`, in `explicitly_dropped`) is honored — its
 /// disappearance is the caller's intent, not a side effect of dropping its target — so it is never
 /// replayed even though its target survives.
+///
+/// Both name/target lookups use `COLLATE NOCASE` (SQLite resolves identifiers case-insensitively) and
+/// span both the main and temp schemas (a temp trigger, or a temp target object, lives in
+/// `sqlite_temp_master`).
 fn replay_dropped_triggers(
     conn: &rusqlite::Connection,
     triggers: &[CapturedTrigger],
@@ -318,33 +335,49 @@ fn replay_dropped_triggers(
         {
             continue;
         }
-        // Both name lookups use `COLLATE NOCASE` to match SQLite's case-insensitive identifier
-        // resolution: a batch that recreates an object (or trigger) under a differently-cased spelling of
-        // the same name is still the same object, so the captured casing must not cause a miss.
+        // A temp trigger lives in `sqlite_temp_master`; look for the survivor in the schema it came from.
+        let still_present_query = if trigger.is_temp {
+            "SELECT 1 FROM sqlite_temp_master WHERE type = 'trigger' AND name = ?1 COLLATE NOCASE"
+        } else {
+            "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?1 COLLATE NOCASE"
+        };
         let still_present = conn
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?1 COLLATE NOCASE",
-                [&trigger.name],
-                |_| Ok(()),
-            )
+            .query_row(still_present_query, [&trigger.name], |_| Ok(()))
             .optional()?
             .is_some();
         if still_present {
             continue;
         }
+        // The target object may be persistent or temp, so search both schemas.
         let target_type: Option<String> = conn
             .query_row(
-                "SELECT type FROM sqlite_master WHERE name = ?1 COLLATE NOCASE \
-                 AND type IN ('table', 'view')",
+                "SELECT type FROM (SELECT name, type FROM sqlite_master \
+                 UNION ALL SELECT name, type FROM sqlite_temp_master) \
+                 WHERE name = ?1 COLLATE NOCASE AND type IN ('table', 'view')",
                 [&trigger.target],
                 |row| row.get(0),
             )
             .optional()?;
         if target_type.as_deref() == Some(trigger.target_type.as_str()) {
-            conn.execute_batch(&trigger.sql)?;
+            let statement = if trigger.is_temp {
+                as_temp_create_trigger(&trigger.sql)
+            } else {
+                trigger.sql.clone()
+            };
+            conn.execute_batch(&statement)?;
         }
     }
     Ok(())
+}
+
+/// Re-inserts the `TEMP` keyword SQLite strips from a temp trigger's stored `CREATE TRIGGER …` text, so
+/// replaying it recreates a temporary (not persistent) trigger. SQLite normalizes the stored prefix to
+/// exactly `CREATE TRIGGER`; if that prefix is not present (unexpected), the text is returned unchanged.
+fn as_temp_create_trigger(sql: &str) -> String {
+    match sql.strip_prefix("CREATE TRIGGER") {
+        Some(rest) => format!("CREATE TEMP TRIGGER{rest}"),
+        None => sql.to_owned(),
+    }
 }
 
 /// One lexical token of a DDL batch, as far as [`explicitly_dropped_trigger_names`] cares: an unquoted
@@ -877,7 +910,22 @@ async fn finish_transaction<T>(
 
 #[cfg(test)]
 mod tests {
-    use super::explicitly_dropped_trigger_names;
+    use super::{as_temp_create_trigger, explicitly_dropped_trigger_names};
+
+    #[test]
+    fn re_injects_temp_into_a_stored_temp_trigger_statement() {
+        // SQLite strips `TEMP` from a temp trigger's stored SQL, normalizing the prefix to
+        // `CREATE TRIGGER`; replay must put it back so the trigger is recreated as temporary.
+        assert_eq!(
+            as_temp_create_trigger("CREATE TRIGGER x INSTEAD OF INSERT ON v BEGIN SELECT 1; END"),
+            "CREATE TEMP TRIGGER x INSTEAD OF INSERT ON v BEGIN SELECT 1; END",
+        );
+        // An unexpected prefix is left unchanged rather than mangled.
+        assert_eq!(
+            as_temp_create_trigger("create trigger x begin select 1; end"),
+            "create trigger x begin select 1; end",
+        );
+    }
 
     #[test]
     fn scans_drop_trigger_names_across_quoting_and_qualification() {
