@@ -499,6 +499,20 @@ async fn index_table(raw: &RawConnection, index: &'static str) -> String {
     .expect("index table")
 }
 
+/// Whether a trigger of the given name exists, per `sqlite_master`.
+async fn trigger_exists(raw: &RawConnection, name: &'static str) -> bool {
+    raw.call(move |conn| {
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            [name],
+            |row| row.get::<_, i64>(0),
+        )
+    })
+    .await
+    .expect("trigger count")
+        != 0
+}
+
 #[tokio::test]
 async fn applies_a_native_add_column_and_converges() {
     let (mut connection, raw) = setup().await;
@@ -1552,6 +1566,59 @@ async fn rebuilding_a_table_under_an_existing_view_succeeds() {
         count(&raw, "active_widgets").await,
         1,
         "the view still resolves and filters after the rebuild",
+    );
+}
+
+#[tokio::test]
+async fn republishing_a_view_preserves_its_instead_of_trigger() {
+    // squealy has no trigger model, and a body-unknown (introspected) view re-emits `CreateView` every
+    // publish. SQLite has no `CREATE OR REPLACE VIEW`, so that renders `DROP VIEW … ; CREATE VIEW …`, and
+    // `DROP VIEW` silently drops the view's `INSTEAD OF` triggers — the mechanism that makes a view
+    // writeable. The executor captures triggers before the batch and replays any it drops out from under
+    // a surviving object, so a no-op re-publish must leave a user-attached trigger (and writes through the
+    // view) intact.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+
+    // A user attaches an INSTEAD OF INSERT trigger out of band so `active_widgets` is writeable.
+    exec(
+        &raw,
+        "CREATE TRIGGER \"active_widgets_insert\" INSTEAD OF INSERT ON \"active_widgets\" \
+         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
+    )
+    .await;
+    exec(&raw, "INSERT INTO \"active_widgets\" (\"id\") VALUES (1)").await;
+    assert_eq!(count(&raw, "widgets").await, 1, "the trigger wrote through");
+
+    // Re-planning the same model against the live DB re-emits `CreateView` for the body-unknown view
+    // (the churn this bug documents), which SQLite renders as DROP VIEW + CREATE VIEW.
+    let plan = plan_from_database(&table_and_view(), &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan the unchanged re-publish");
+    assert!(
+        plan.steps.iter().any(|step| matches!(
+            step,
+            DatabasePlanStep::CreateView { view, .. } if view.name == "active_widgets"
+        )),
+        "expected the view to re-apply (drop + create), got: {:?}",
+        plan.steps,
+    );
+    apply_plan(&plan, &table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("re-apply the unchanged model");
+
+    assert!(
+        trigger_exists(&raw, "active_widgets_insert").await,
+        "the INSTEAD OF trigger must survive the view re-apply",
+    );
+    // The trigger still fires, so writes through the view keep working.
+    exec(&raw, "INSERT INTO \"active_widgets\" (\"id\") VALUES (2)").await;
+    assert_eq!(
+        count(&raw, "widgets").await,
+        2,
+        "writes through the view still work after the re-publish",
     );
 }
 

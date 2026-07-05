@@ -187,6 +187,11 @@ impl DdlExecutor for SqliteConnection {
     /// or tightened foreign key whose existing data no longer satisfies it) still fails the batch
     /// instead of committing silently. The prior setting is read and restored (rather than forced on) so
     /// a caller that left enforcement off on a [`new`](SqliteConnection::new)-built handle keeps it off.
+    ///
+    /// User-defined triggers dropped by the batch (a `DROP VIEW`/`DROP TABLE` cascades to its triggers,
+    /// and SQLite has no `CREATE OR REPLACE VIEW`) are captured beforehand and replayed if their target
+    /// object survives, so re-applying a view preserves the `INSTEAD OF` triggers that make it writeable
+    /// (see [`capture_triggers`]/[`replay_dropped_triggers`]).
     async fn execute_ddl(&mut self, sql: &str) -> Result<(), SqliteError> {
         let sql = sql.to_owned();
         self.conn
@@ -215,9 +220,14 @@ impl DdlExecutor for SqliteConnection {
 /// disables enforcement for the batch (see [`DdlExecutor::execute_ddl`]), so referential integrity is
 /// not checked statement-by-statement; `PRAGMA foreign_key_check` verifies it before the commit, and
 /// any violation aborts the batch (the transaction rolls back on the early return).
+///
+/// User-defined triggers are captured before the batch and any that the batch drops — but whose target
+/// object survives — are replayed afterwards (see [`replay_dropped_triggers`]).
 fn apply_ddl_batch(conn: &mut rusqlite::Connection, sql: &str) -> rusqlite::Result<()> {
     let transaction = conn.transaction()?;
+    let triggers = capture_triggers(&transaction)?;
     transaction.execute_batch(sql)?;
+    replay_dropped_triggers(&transaction, &triggers)?;
     let has_violation = {
         let mut check = transaction.prepare("PRAGMA foreign_key_check")?;
         let mut rows = check.query([])?;
@@ -230,6 +240,79 @@ fn apply_ddl_batch(conn: &mut rusqlite::Connection, sql: &str) -> rusqlite::Resu
         ));
     }
     transaction.commit()
+}
+
+/// A user-defined trigger captured from `sqlite_master` before a DDL batch runs, so it can be replayed
+/// if the batch drops it out from under a surviving object.
+struct CapturedTrigger {
+    /// The trigger's name (unique across the schema; how we detect whether the batch dropped it).
+    name: String,
+    /// The table or view the trigger fires on (`sqlite_master.tbl_name`).
+    target: String,
+    /// The stored `CREATE TRIGGER …` text, replayed verbatim to recreate it.
+    sql: String,
+}
+
+/// Snapshots every user-defined trigger before a DDL batch runs.
+///
+/// squealy has no trigger model, so any trigger present is user-managed out of band — most importantly
+/// the `INSTEAD OF` triggers that make a view writeable. SQLite has no `CREATE OR REPLACE VIEW`, so the
+/// diff re-applies a present view as `DROP VIEW … ; CREATE VIEW …`, and a `DROP VIEW` (like a
+/// `DROP TABLE` in a table rebuild) silently drops the triggers attached to it. Capturing here lets
+/// [`replay_dropped_triggers`] restore any that the batch removes but whose target still exists.
+fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<CapturedTrigger>> {
+    let mut statement = conn.prepare(
+        "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL",
+    )?;
+    let triggers = statement
+        .query_map([], |row| {
+            Ok(CapturedTrigger {
+                name: row.get(0)?,
+                target: row.get(1)?,
+                sql: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(triggers)
+}
+
+/// Recreates any captured trigger that the batch dropped but whose target object survives.
+///
+/// A trigger still present in `sqlite_master` survived the batch (its object was untouched) and is left
+/// alone. A trigger now missing was dropped with its object; it is replayed only if that object (table
+/// or view) still exists — a view re-created under the same name is the churn case this fixes. If the
+/// object is gone (the user removed it from the model), the trigger is legitimately gone and is not
+/// resurrected. Replaying the stored `CREATE TRIGGER` text verbatim reproduces the trigger exactly, and
+/// the missing-name guard means it never collides with a survivor.
+fn replay_dropped_triggers(
+    conn: &rusqlite::Connection,
+    triggers: &[CapturedTrigger],
+) -> rusqlite::Result<()> {
+    for trigger in triggers {
+        let still_present = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+                [&trigger.name],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if still_present {
+            continue;
+        }
+        let target_exists = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?1",
+                [&trigger.target],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if target_exists {
+            conn.execute_batch(&trigger.sql)?;
+        }
+    }
+    Ok(())
 }
 
 impl SchemaIntrospect for SqliteConnection {
