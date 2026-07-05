@@ -4670,6 +4670,27 @@ where
         order.visit_expr(self)
     }
 
+    fn push_named_window<Parts, Ords>(
+        &mut self,
+        _index: usize,
+        partitions: &Parts,
+        orders: &Ords,
+        _frame: Option<crate::FrameSpec>,
+    ) -> Result<(), Self::Error>
+    where
+        Parts: crate::RenderWindowList<B>,
+        Ords: crate::RenderWindowList<B>,
+    {
+        // A named window's `PARTITION BY`/`ORDER BY` expressions may embed a scalar subquery that reads
+        // from a CTE, so walk them (as `visit_scalar_subquery` collects each `CteDef`); otherwise the
+        // `WINDOW` clause would render `FROM <cte>` without the matching `WITH` prefix. Frame bounds are
+        // literals and reference no CTE. Mirrors the inline path in `visit_window`.
+        let mut first = true;
+        partitions.render(self, &mut first)?;
+        let mut first = true;
+        orders.render(self, &mut first)
+    }
+
     fn set_limit(&mut self, _rows: usize) -> Result<(), Self::Error> {
         Ok(())
     }

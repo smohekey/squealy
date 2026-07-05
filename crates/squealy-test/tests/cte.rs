@@ -299,3 +299,30 @@ fn distinct_ctes_with_colliding_names_are_rejected() {
     // Both CTEs derive the bare name "summaries"; rendering must fail loudly rather than emit one body.
     let _ = query.to_sql();
 }
+
+// Regression: a scalar subquery that reads from a CTE, placed inside a named window's `PARTITION BY`,
+// must still pull that CTE into the `WITH` prefix — the CTE collector walks the `WINDOW`-clause lists,
+// not just the projection/filter. Without that, the `WINDOW` clause would render `FROM active_users`
+// with no matching `WITH active_users …`.
+#[test]
+fn named_window_partition_by_scalar_subquery_pulls_in_cte() {
+    let query = TestConnection
+        .from::<Order>()
+        .window(|(_order,)| {
+            Window::new().partition_by(scalar_subquery(
+                TestConnection
+                    .from::<ActiveUser>()
+                    .select_subquery(|(au,)| au.id),
+            ))
+        })
+        .select_over(|(order,), w| order.total.sum().over_ref(w));
+    let sql = query.to_sql();
+    assert!(
+        sql.starts_with("WITH active_users (id, name) AS ("),
+        "the CTE must be emitted in the WITH prefix: {sql}"
+    );
+    assert!(
+        sql.contains("WINDOW w0 AS (PARTITION BY (SELECT q0_0.id AS id FROM active_users AS q0_0"),
+        "{sql}"
+    );
+}
