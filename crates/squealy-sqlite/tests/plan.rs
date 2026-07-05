@@ -1672,6 +1672,66 @@ async fn replacing_a_table_with_a_same_named_view_succeeds() {
 }
 
 #[tokio::test]
+async fn replacing_a_triggered_table_with_a_same_named_view_does_not_replay_the_trigger() {
+    // A table→view swap keeps the name but changes the object type. Trigger replay keys on the target's
+    // captured type, so a table's `AFTER` trigger is NOT replayed onto the replacement view (SQLite only
+    // allows `INSTEAD OF` on views — a blind name-only replay would fail and roll back this supported
+    // migration). The trigger is legitimately gone with its table.
+    let (mut connection, raw) = setup().await;
+    let v1 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![
+                widget_table(),
+                table("summary", vec![column("id", SqlType::I64, false)]),
+            ],
+            views: Vec::new(),
+        }],
+    };
+    publish(&v1, &Sqlite, &mut connection)
+        .await
+        .expect("publish v1 (two tables)");
+    exec(
+        &raw,
+        "INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (1, 1), (2, 0)",
+    )
+    .await;
+    // A user attaches an AFTER INSERT trigger to the `summary` table — invalid on a view.
+    exec(
+        &raw,
+        "CREATE TRIGGER \"summary_after_insert\" AFTER INSERT ON \"summary\" \
+         BEGIN SELECT 1; END",
+    )
+    .await;
+
+    // v2 swaps the `summary` table for a same-named view over `widgets`.
+    let mut summary_view = active_widgets_view();
+    summary_view.name = "summary".to_owned();
+    let v2 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![widget_table()],
+            views: vec![summary_view],
+        }],
+    };
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan the table→view replacement");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("the table→view swap must not roll back on trigger replay");
+    assert_eq!(
+        count(&raw, "summary").await,
+        1,
+        "the same-named view resolves after replacing the triggered table",
+    );
+    assert!(
+        !trigger_exists(&raw, "summary_after_insert").await,
+        "the table's AFTER trigger must not be resurrected onto the replacement view",
+    );
+}
+
+#[tokio::test]
 async fn replacing_a_view_with_a_same_named_table_succeeds() {
     // The symmetric transition: a view is dropped and a table of the same name is created. The view
     // pre-pass drops the view (freeing the name) before the main pass creates the table.

@@ -249,6 +249,10 @@ struct CapturedTrigger {
     name: String,
     /// The table or view the trigger fires on (`sqlite_master.tbl_name`).
     target: String,
+    /// The target's object type (`"table"` or `"view"`) when captured. A same-named replacement of the
+    /// other type (a supported table↔view swap) must not receive the trigger — an `AFTER`/`BEFORE`
+    /// trigger cannot live on a view, nor an `INSTEAD OF` on a table.
+    target_type: String,
     /// The stored `CREATE TRIGGER …` text, replayed verbatim to recreate it.
     sql: String,
 }
@@ -262,14 +266,19 @@ struct CapturedTrigger {
 /// [`replay_dropped_triggers`] restore any that the batch removes but whose target still exists.
 fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<CapturedTrigger>> {
     let mut statement = conn.prepare(
-        "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL",
+        "SELECT trigger.name, target.name, target.type, trigger.sql \
+         FROM sqlite_master AS trigger \
+         JOIN sqlite_master AS target ON target.name = trigger.tbl_name \
+         WHERE trigger.type = 'trigger' AND trigger.sql IS NOT NULL \
+         AND target.type IN ('table', 'view')",
     )?;
     let triggers = statement
         .query_map([], |row| {
             Ok(CapturedTrigger {
                 name: row.get(0)?,
                 target: row.get(1)?,
-                sql: row.get(2)?,
+                target_type: row.get(2)?,
+                sql: row.get(3)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -279,11 +288,13 @@ fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Capture
 /// Recreates any captured trigger that the batch dropped but whose target object survives.
 ///
 /// A trigger still present in `sqlite_master` survived the batch (its object was untouched) and is left
-/// alone. A trigger now missing was dropped with its object; it is replayed only if that object (table
-/// or view) still exists — a view re-created under the same name is the churn case this fixes. If the
-/// object is gone (the user removed it from the model), the trigger is legitimately gone and is not
-/// resurrected. Replaying the stored `CREATE TRIGGER` text verbatim reproduces the trigger exactly, and
-/// the missing-name guard means it never collides with a survivor.
+/// alone. A trigger now missing was dropped with its object; it is replayed only if an object of the
+/// **same type** still holds its name — a view re-created under the same name is the churn case this
+/// fixes. If the name is gone (the user removed the object) or now holds the other object type (a
+/// supported table↔view swap — an `AFTER`/`BEFORE` trigger cannot recreate on a view, nor an
+/// `INSTEAD OF` on a table), the trigger is legitimately gone and is not resurrected. Replaying the
+/// stored `CREATE TRIGGER` text verbatim reproduces the trigger exactly, and the missing-name guard
+/// means it never collides with a survivor.
 fn replay_dropped_triggers(
     conn: &rusqlite::Connection,
     triggers: &[CapturedTrigger],
@@ -300,15 +311,14 @@ fn replay_dropped_triggers(
         if still_present {
             continue;
         }
-        let target_exists = conn
+        let target_type: Option<String> = conn
             .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?1",
+                "SELECT type FROM sqlite_master WHERE name = ?1 AND type IN ('table', 'view')",
                 [&trigger.target],
-                |_| Ok(()),
+                |row| row.get(0),
             )
-            .optional()?
-            .is_some();
-        if target_exists {
+            .optional()?;
+        if target_type.as_deref() == Some(trigger.target_type.as_str()) {
             conn.execute_batch(&trigger.sql)?;
         }
     }
