@@ -291,7 +291,7 @@ fn contains_keyword(sql: &str, keyword: &str) -> bool {
 /// `None` if `index` sits on ordinary code, so a caller advances by one. Both the keyword scanner and the
 /// `CREATE TABLE`-body splitter use this so parentheses/commas/keywords inside quotes or comments are not
 /// mistaken for code.
-fn skip_noncode(bytes: &[u8], index: usize) -> Option<usize> {
+pub(crate) fn skip_noncode(bytes: &[u8], index: usize) -> Option<usize> {
     match bytes[index] {
         quote @ (b'\'' | b'"' | b'`') => {
             let mut cursor = index + 1;
@@ -341,7 +341,7 @@ fn skip_noncode(bytes: &[u8], index: usize) -> Option<usize> {
 /// continuation or lead byte of a multi-byte UTF-8 identifier such as `é`) counts as a word byte, so a
 /// Unicode identifier is scanned as one whole token — this keeps token boundaries on `char` boundaries,
 /// avoiding a mid-`char` slice (and its panic) in the token helpers.
-fn is_word_byte(byte: u8) -> bool {
+pub(crate) fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || !byte.is_ascii()
 }
 

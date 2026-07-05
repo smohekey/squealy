@@ -226,8 +226,9 @@ impl DdlExecutor for SqliteConnection {
 fn apply_ddl_batch(conn: &mut rusqlite::Connection, sql: &str) -> rusqlite::Result<()> {
     let transaction = conn.transaction()?;
     let triggers = capture_triggers(&transaction)?;
+    let explicitly_dropped = explicitly_dropped_trigger_names(sql);
     transaction.execute_batch(sql)?;
-    replay_dropped_triggers(&transaction, &triggers)?;
+    replay_dropped_triggers(&transaction, &triggers, &explicitly_dropped)?;
     let has_violation = {
         let mut check = transaction.prepare("PRAGMA foreign_key_check")?;
         let mut rows = check.query([])?;
@@ -295,11 +296,22 @@ fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Capture
 /// `INSTEAD OF` on a table), the trigger is legitimately gone and is not resurrected. Replaying the
 /// stored `CREATE TRIGGER` text verbatim reproduces the trigger exactly, and the missing-name guard
 /// means it never collides with a survivor.
+///
+/// A trigger the batch **explicitly** dropped (`DROP TRIGGER`, in `explicitly_dropped`) is honored — its
+/// disappearance is the caller's intent, not a side effect of dropping its target — so it is never
+/// replayed even though its target survives.
 fn replay_dropped_triggers(
     conn: &rusqlite::Connection,
     triggers: &[CapturedTrigger],
+    explicitly_dropped: &[String],
 ) -> rusqlite::Result<()> {
     for trigger in triggers {
+        if explicitly_dropped
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&trigger.name))
+        {
+            continue;
+        }
         let still_present = conn
             .query_row(
                 "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
@@ -323,6 +335,92 @@ fn replay_dropped_triggers(
         }
     }
     Ok(())
+}
+
+/// One lexical token of a DDL batch, as far as [`explicitly_dropped_trigger_names`] cares: an unquoted
+/// word (keyword or identifier), a quoted identifier's decoded content, or a `.` (schema qualifier).
+/// String literals and comments are dropped entirely so a `DROP TRIGGER` inside them is not mistaken for
+/// a statement; all other punctuation is ignored (it never separates a `DROP TRIGGER <name>` sequence).
+enum DdlToken {
+    Word(String),
+    Ident(String),
+    Dot,
+}
+
+/// Lexes a DDL batch into [`DdlToken`]s, reusing the introspection scanner's quote/comment handling so a
+/// keyword or identifier inside a string literal, quoted identifier or comment is never read as code.
+fn tokenize_ddl(sql: &str) -> Vec<DdlToken> {
+    let bytes = sql.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(next) = introspect::skip_noncode(bytes, index) {
+            // A quoted identifier is a name token; a string literal (`'…'`) or comment is not.
+            match byte {
+                b'"' | b'`' => {
+                    let quote = byte as char;
+                    let inner = &sql[index + 1..next - 1];
+                    let decoded = inner.replace(&format!("{quote}{quote}"), &quote.to_string());
+                    tokens.push(DdlToken::Ident(decoded));
+                }
+                b'[' => tokens.push(DdlToken::Ident(sql[index + 1..next - 1].to_owned())),
+                _ => {}
+            }
+            index = next;
+        } else if introspect::is_word_byte(byte) {
+            let start = index;
+            while index < bytes.len() && introspect::is_word_byte(bytes[index]) {
+                index += 1;
+            }
+            tokens.push(DdlToken::Word(sql[start..index].to_owned()));
+        } else {
+            if byte == b'.' {
+                tokens.push(DdlToken::Dot);
+            }
+            index += 1;
+        }
+    }
+    tokens
+}
+
+/// The trigger names a batch explicitly drops via `DROP TRIGGER [IF EXISTS] [schema.]name`.
+///
+/// squealy renders no `DROP TRIGGER` of its own (it has no trigger model), so any such statement is the
+/// caller's deliberate removal; [`replay_dropped_triggers`] excludes these names so an explicit drop is
+/// not silently undone by trigger replay. Names are returned decoded (unquoted) and compared
+/// case-insensitively, matching SQLite identifier resolution.
+fn explicitly_dropped_trigger_names(sql: &str) -> Vec<String> {
+    let tokens = tokenize_ddl(sql);
+    let word_is = |token: Option<&DdlToken>, keyword: &str| matches!(token, Some(DdlToken::Word(word)) if word.eq_ignore_ascii_case(keyword));
+    let ident_of = |token: Option<&DdlToken>| match token {
+        Some(DdlToken::Word(word)) => Some(word.clone()),
+        Some(DdlToken::Ident(word)) => Some(word.clone()),
+        _ => None,
+    };
+    let mut names = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if word_is(tokens.get(index), "drop") && word_is(tokens.get(index + 1), "trigger") {
+            let mut cursor = index + 2;
+            if word_is(tokens.get(cursor), "if") && word_is(tokens.get(cursor + 1), "exists") {
+                cursor += 2;
+            }
+            if let Some(first) = ident_of(tokens.get(cursor)) {
+                // `schema.name` — the identifier after the dot is the trigger name.
+                let name = if matches!(tokens.get(cursor + 1), Some(DdlToken::Dot)) {
+                    ident_of(tokens.get(cursor + 2)).unwrap_or(first)
+                } else {
+                    first
+                };
+                names.push(name);
+            }
+            index = cursor + 1;
+            continue;
+        }
+        index += 1;
+    }
+    names
 }
 
 impl SchemaIntrospect for SqliteConnection {
@@ -742,5 +840,53 @@ async fn finish_transaction<T>(
             }
             Err(error)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::explicitly_dropped_trigger_names;
+
+    #[test]
+    fn scans_drop_trigger_names_across_quoting_and_qualification() {
+        // Plain, IF EXISTS, quoted, bracketed, backtick, and schema-qualified forms all yield the bare
+        // (decoded) trigger name.
+        assert_eq!(
+            explicitly_dropped_trigger_names("DROP TRIGGER foo"),
+            vec!["foo".to_owned()],
+        );
+        assert_eq!(
+            explicitly_dropped_trigger_names("drop trigger if exists foo"),
+            vec!["foo".to_owned()],
+        );
+        assert_eq!(
+            explicitly_dropped_trigger_names("DROP TRIGGER \"a \"\"quoted\"\" trig\""),
+            vec!["a \"quoted\" trig".to_owned()],
+        );
+        assert_eq!(
+            explicitly_dropped_trigger_names("DROP TRIGGER [bracketed]"),
+            vec!["bracketed".to_owned()],
+        );
+        assert_eq!(
+            explicitly_dropped_trigger_names(
+                "DROP TRIGGER `back`; DROP TRIGGER main.\"qualified\""
+            ),
+            vec!["back".to_owned(), "qualified".to_owned()],
+        );
+    }
+
+    #[test]
+    fn ignores_drop_trigger_inside_strings_and_comments_and_other_statements() {
+        // A `DROP TRIGGER` in a string literal or comment is not a statement, and a `DROP VIEW`/`DROP
+        // TABLE` never names a trigger.
+        assert!(
+            explicitly_dropped_trigger_names("INSERT INTO t VALUES ('DROP TRIGGER foo')")
+                .is_empty(),
+        );
+        assert!(
+            explicitly_dropped_trigger_names("-- DROP TRIGGER foo\n/* DROP TRIGGER bar */")
+                .is_empty(),
+        );
+        assert!(explicitly_dropped_trigger_names("DROP VIEW v; DROP TABLE t").is_empty());
     }
 }

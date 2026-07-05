@@ -1623,6 +1623,38 @@ async fn republishing_a_view_preserves_its_instead_of_trigger() {
 }
 
 #[tokio::test]
+async fn an_explicit_drop_trigger_through_the_executor_is_honored() {
+    // Trigger replay must not undo an intentional removal: a caller that runs `DROP TRIGGER` through the
+    // DDL executor (leaving the target view in place) means the trigger to be gone. The batch scan marks
+    // it explicitly dropped, so it is not resurrected even though its target survives.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+    exec(
+        &raw,
+        "CREATE TRIGGER \"active_widgets_insert\" INSTEAD OF INSERT ON \"active_widgets\" \
+         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
+    )
+    .await;
+
+    connection
+        .execute_ddl("DROP TRIGGER \"active_widgets_insert\"")
+        .await
+        .expect("drop the trigger through the executor");
+
+    assert!(
+        !trigger_exists(&raw, "active_widgets_insert").await,
+        "an explicit DROP TRIGGER must not be undone by trigger replay",
+    );
+    assert_eq!(
+        count(&raw, "active_widgets").await,
+        0,
+        "the view itself is untouched by the trigger drop",
+    );
+}
+
+#[tokio::test]
 async fn replacing_a_table_with_a_same_named_view_succeeds() {
     // A plan that drops a table and creates a view of the same name must free the table name (via
     // `DROP TABLE`) before the view pre-pass runs `DROP VIEW IF EXISTS <name>` — SQLite errors ("use
