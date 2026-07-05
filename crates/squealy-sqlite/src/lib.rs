@@ -262,6 +262,10 @@ struct CapturedTrigger {
     /// A `DROP VIEW`/`DROP TABLE` drops a temp trigger on that object too, so it must be recaptured and
     /// recreated as `TEMP` (else replay would resurrect it as a persistent trigger).
     is_temp: bool,
+    /// Whether the trigger's target object lived in the temp schema (resolved with SQLite's
+    /// temp-shadows-main precedence at capture). Replay only treats *that* schema as the surviving target,
+    /// so a dropped temp object is not confused with a same-named `main` object.
+    target_is_temp: bool,
 }
 
 /// Snapshots every user-defined trigger before a DDL batch runs.
@@ -276,20 +280,33 @@ struct CapturedTrigger {
 /// `DROP VIEW`/`DROP TABLE` drops a temp trigger on that object as well. The join matches `tbl_name` to
 /// the target object `COLLATE NOCASE`: SQLite resolves object names case-insensitively but stores
 /// `tbl_name` with the `CREATE TRIGGER` statement's casing, so a trigger created `ON activewidgets` for
-/// view `ActiveWidgets` must still find its target. Object names are unique case-insensitively, so the
-/// match is unambiguous.
+/// view `ActiveWidgets` must still find its target. Object names are unique case-insensitively within a
+/// schema, so the match is unambiguous once the target schema is fixed.
+///
+/// The `WHERE` clause resolves each trigger to a single target with SQLite's own scoping: a persistent
+/// trigger's target is in `main`; a temp trigger's target is the temp object of that name if one exists
+/// (temp shadows main), else the `main` object. `target.is_temp` records which, so replay only treats
+/// that schema as the surviving target and never confuses a dropped temp object with a same-named
+/// `main` one.
 fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<CapturedTrigger>> {
     let mut statement = conn.prepare(
-        "SELECT trigger.name, target.name, target.type, trigger.sql, trigger.is_temp \
+        "SELECT trigger.name, target.name, target.type, trigger.sql, trigger.is_temp, target.is_temp \
          FROM (SELECT name, tbl_name, sql, 0 AS is_temp FROM sqlite_master WHERE type = 'trigger' \
                UNION ALL \
                SELECT name, tbl_name, sql, 1 AS is_temp FROM sqlite_temp_master WHERE type = 'trigger') \
               AS trigger \
-         JOIN (SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') \
+         JOIN (SELECT name, type, 0 AS is_temp FROM sqlite_master WHERE type IN ('table', 'view') \
                UNION ALL \
-               SELECT name, type FROM sqlite_temp_master WHERE type IN ('table', 'view')) AS target \
+               SELECT name, type, 1 AS is_temp FROM sqlite_temp_master WHERE type IN ('table', 'view')) \
+              AS target \
               ON target.name = trigger.tbl_name COLLATE NOCASE \
-         WHERE trigger.sql IS NOT NULL",
+         WHERE trigger.sql IS NOT NULL AND ( \
+               (trigger.is_temp = 0 AND target.is_temp = 0) \
+               OR (trigger.is_temp = 1 AND target.is_temp = 1) \
+               OR (trigger.is_temp = 1 AND target.is_temp = 0 AND NOT EXISTS ( \
+                     SELECT 1 FROM sqlite_temp_master AS shadow \
+                     WHERE shadow.type IN ('table', 'view') \
+                     AND shadow.name = trigger.tbl_name COLLATE NOCASE)))",
     )?;
     let triggers = statement
         .query_map([], |row| {
@@ -299,6 +316,7 @@ fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Capture
                 target_type: row.get(2)?,
                 sql: row.get(3)?,
                 is_temp: row.get::<_, i64>(4)? != 0,
+                target_is_temp: row.get::<_, i64>(5)? != 0,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -320,9 +338,10 @@ fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Capture
 /// disappearance is the caller's intent, not a side effect of dropping its target — so it is never
 /// replayed even though its target survives.
 ///
-/// Both name/target lookups use `COLLATE NOCASE` (SQLite resolves identifiers case-insensitively) and
-/// span both the main and temp schemas (a temp trigger, or a temp target object, lives in
-/// `sqlite_temp_master`).
+/// Lookups use `COLLATE NOCASE` (SQLite resolves identifiers case-insensitively) and are scoped to the
+/// captured schema: the survivor check runs against the trigger's own schema, and the surviving-target
+/// check against the target's schema (both recorded at capture), so temp and `main` objects that share a
+/// name are never conflated.
 fn replay_dropped_triggers(
     conn: &rusqlite::Connection,
     triggers: &[CapturedTrigger],
@@ -348,15 +367,17 @@ fn replay_dropped_triggers(
         if still_present {
             continue;
         }
-        // The target object may be persistent or temp, so search both schemas.
+        // Look for the surviving target only in the schema the trigger was attached to, so a dropped temp
+        // object is never confused with a same-named `main` object (and vice versa).
+        let target_query = if trigger.target_is_temp {
+            "SELECT type FROM sqlite_temp_master WHERE name = ?1 COLLATE NOCASE \
+             AND type IN ('table', 'view')"
+        } else {
+            "SELECT type FROM sqlite_master WHERE name = ?1 COLLATE NOCASE \
+             AND type IN ('table', 'view')"
+        };
         let target_type: Option<String> = conn
-            .query_row(
-                "SELECT type FROM (SELECT name, type FROM sqlite_master \
-                 UNION ALL SELECT name, type FROM sqlite_temp_master) \
-                 WHERE name = ?1 COLLATE NOCASE AND type IN ('table', 'view')",
-                [&trigger.target],
-                |row| row.get(0),
-            )
+            .query_row(target_query, [&trigger.target], |row| row.get(0))
             .optional()?;
         if target_type.as_deref() == Some(trigger.target_type.as_str()) {
             let statement = if trigger.is_temp {

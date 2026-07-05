@@ -1746,6 +1746,44 @@ async fn republishing_a_view_preserves_a_temp_instead_of_trigger() {
 }
 
 #[tokio::test]
+async fn dropping_a_temp_target_does_not_reattach_its_trigger_to_a_same_named_main_object() {
+    // A temp object can shadow a same-named `main` object. Replay must scope the surviving-target check to
+    // the schema the trigger was attached to: dropping the temp view (and its trigger) must NOT reattach
+    // that trigger to the still-present `main` view of the same name.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish widgets + the main active_widgets view");
+    // A temp view shadows the main `active_widgets`, with a temp INSTEAD OF trigger on the temp view.
+    exec(
+        &raw,
+        "CREATE TEMP VIEW \"active_widgets\" AS SELECT \"id\" FROM \"widgets\" WHERE \"active\" > 0",
+    )
+    .await;
+    exec(
+        &raw,
+        "CREATE TEMP TRIGGER \"shadow_ins\" INSTEAD OF INSERT ON \"active_widgets\" \
+         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
+    )
+    .await;
+
+    // Intentionally drop the temp view (which also drops its temp trigger) through the executor.
+    connection
+        .execute_ddl("DROP VIEW temp.\"active_widgets\"")
+        .await
+        .expect("drop the temp view");
+
+    assert!(
+        !temp_trigger_exists(&raw, "shadow_ins").await,
+        "the temp trigger stays gone with its dropped temp view",
+    );
+    assert!(
+        !trigger_exists(&raw, "shadow_ins").await,
+        "and must not be reattached to the same-named main view",
+    );
+}
+
+#[tokio::test]
 async fn an_explicit_drop_trigger_through_the_executor_is_honored() {
     // Trigger replay must not undo an intentional removal: a caller that runs `DROP TRIGGER` through the
     // DDL executor (leaving the target view in place) means the trigger to be gone. The batch scan marks
