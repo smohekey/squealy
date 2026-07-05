@@ -1623,6 +1623,48 @@ async fn republishing_a_view_preserves_its_instead_of_trigger() {
 }
 
 #[tokio::test]
+async fn a_view_redefined_with_different_columns_does_not_replay_its_old_trigger() {
+    // A migration that changes a view's output columns (same name) is a destructive DropView+CreateView.
+    // The old INSTEAD OF trigger's body may reference a now-removed column, so it must NOT be replayed —
+    // SQLite would recreate it cleanly and then fail writes at runtime. Replay compares captured vs
+    // recreated view columns and skips on a shape change.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish widgets + active_widgets(id) view");
+    exec(
+        &raw,
+        "CREATE TRIGGER \"active_widgets_insert\" INSTEAD OF INSERT ON \"active_widgets\" \
+         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
+    )
+    .await;
+
+    // v2 redefines active_widgets to output a differently-named column (a column-set change → destructive
+    // DropView + CreateView).
+    let mut renamed_view = active_widgets_view();
+    renamed_view.columns[0].name = "widget_id".to_owned();
+    renamed_view.query.projection[0].output_name = "widget_id".to_owned();
+    let v2 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![widget_table()],
+            views: vec![renamed_view],
+        }],
+    };
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan the view redefinition");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply the view redefinition");
+
+    assert!(
+        !trigger_exists(&raw, "active_widgets_insert").await,
+        "an INSTEAD OF trigger must not be replayed onto a view redefined with a different shape",
+    );
+}
+
+#[tokio::test]
 async fn a_trigger_declared_with_different_target_casing_is_preserved() {
     // SQLite resolves object names case-insensitively but stores `sqlite_master.tbl_name` with the
     // trigger statement's casing. A trigger declared `ON active_widgets` for a view the model spells
