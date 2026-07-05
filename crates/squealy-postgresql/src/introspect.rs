@@ -628,6 +628,12 @@ fn temporal_sql_type(db_type: &str) -> Option<SqlType> {
     let (base, precision) = match rest.find('(') {
         Some(open) => {
             let close = rest.rfind(')')?;
+            // The `(n)` must terminate `rest`; anything trailing (e.g. the `[]` of a temporal *array*
+            // like `timestamp(3) without time zone[]`) means this is not a scalar temporal type, so fall
+            // through to `Raw` rather than mis-reading it as one.
+            if close + 1 != rest.len() {
+                return None;
+            }
             let precision = rest[open + 1..close].trim().parse().ok()?;
             (rest[..open].trim(), Some(precision))
         }
@@ -883,6 +889,13 @@ mod tests {
                 precision: Some(0)
             }
         );
+        // A temporal *array* is not a scalar temporal type: it must not be mis-parsed (trailing `[]`
+        // after the `(n)`), falling through to `Raw` like `numeric(10,2)[]` does.
+        assert_eq!(
+            sql_type("timestamp(3) without time zone[]"),
+            SqlType::Raw("timestamp(3) without time zone[]".to_owned())
+        );
+        assert_eq!(sql_type("time(0)[]"), SqlType::Raw("time(0)[]".to_owned()));
         assert_eq!(sql_type("uuid"), SqlType::Uuid);
         assert_eq!(sql_type("json"), SqlType::Json);
         assert_eq!(sql_type("jsonb"), SqlType::Jsonb);
