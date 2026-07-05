@@ -338,9 +338,11 @@ fn replay_dropped_triggers(
 }
 
 /// One lexical token of a DDL batch, as far as [`explicitly_dropped_trigger_names`] cares: an unquoted
-/// word (keyword or identifier), a quoted identifier's decoded content, or a `.` (schema qualifier).
-/// String literals and comments are dropped entirely so a `DROP TRIGGER` inside them is not mistaken for
-/// a statement; all other punctuation is ignored (it never separates a `DROP TRIGGER <name>` sequence).
+/// word (keyword or identifier), a quoted identifier's decoded content, or a `.` (schema qualifier). A
+/// quoted run — `"…"`, `` `…` ``, `[…]`, or a single-quoted `'…'` (which SQLite accepts as an identifier
+/// in a name position) — is one `Ident`, so `DROP TRIGGER` text *inside* a literal stays a single token
+/// and is never read as two keywords. Comments are dropped, and all other punctuation is ignored (it
+/// never separates a `DROP TRIGGER <name>` sequence).
 enum DdlToken {
     Word(String),
     Ident(String),
@@ -356,9 +358,10 @@ fn tokenize_ddl(sql: &str) -> Vec<DdlToken> {
     while index < bytes.len() {
         let byte = bytes[index];
         if let Some(next) = introspect::skip_noncode(bytes, index) {
-            // A quoted identifier is a name token; a string literal (`'…'`) or comment is not.
+            // A quoted run is one name token; a comment is not. A single-quoted `'…'` is included because
+            // SQLite treats it as an identifier where one is expected, e.g. `DROP TRIGGER 'name'`.
             match byte {
-                b'"' | b'`' => {
+                b'"' | b'`' | b'\'' => {
                     let quote = byte as char;
                     let inner = &sql[index + 1..next - 1];
                     let decoded = inner.replace(&format!("{quote}{quote}"), &quote.to_string());
@@ -872,6 +875,15 @@ mod tests {
                 "DROP TRIGGER `back`; DROP TRIGGER main.\"qualified\""
             ),
             vec!["back".to_owned(), "qualified".to_owned()],
+        );
+        // SQLite accepts a single-quoted name in this identifier position (with `''` escaping).
+        assert_eq!(
+            explicitly_dropped_trigger_names("DROP TRIGGER 'single'"),
+            vec!["single".to_owned()],
+        );
+        assert_eq!(
+            explicitly_dropped_trigger_names("DROP TRIGGER 'a''b'"),
+            vec!["a'b".to_owned()],
         );
     }
 

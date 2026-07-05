@@ -1655,6 +1655,33 @@ async fn an_explicit_drop_trigger_through_the_executor_is_honored() {
 }
 
 #[tokio::test]
+async fn an_explicit_single_quoted_drop_trigger_is_honored() {
+    // SQLite accepts a single-quoted trigger name in `DROP TRIGGER 'x'` (treating the string as an
+    // identifier). The batch scan must recognize that form too, or replay would resurrect the trigger the
+    // caller just dropped.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+    exec(
+        &raw,
+        "CREATE TRIGGER \"active_widgets_insert\" INSTEAD OF INSERT ON \"active_widgets\" \
+         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
+    )
+    .await;
+
+    connection
+        .execute_ddl("DROP TRIGGER 'active_widgets_insert'")
+        .await
+        .expect("drop the trigger via single-quoted name");
+
+    assert!(
+        !trigger_exists(&raw, "active_widgets_insert").await,
+        "a single-quoted explicit DROP TRIGGER must not be undone by trigger replay",
+    );
+}
+
+#[tokio::test]
 async fn replacing_a_table_with_a_same_named_view_succeeds() {
     // A plan that drops a table and creates a view of the same name must free the table name (via
     // `DROP TABLE`) before the view pre-pass runs `DROP VIEW IF EXISTS <name>` — SQLite errors ("use
