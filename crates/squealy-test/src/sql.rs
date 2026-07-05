@@ -769,19 +769,11 @@ fn write_test_cast_type(ty: &SqlType, writer: &mut dyn Write) -> io::Result<()> 
             return write!(writer, "numeric({precision},{scale})");
         }
         SqlType::Date => "date",
-        SqlType::Time { tz } => {
-            if *tz {
-                "time with time zone"
-            } else {
-                "time"
-            }
+        SqlType::Time { tz, precision } => {
+            return write_temporal_type(writer, "time", *tz, *precision);
         }
-        SqlType::Timestamp { tz } => {
-            if *tz {
-                "timestamp with time zone"
-            } else {
-                "timestamp"
-            }
+        SqlType::Timestamp { tz, precision } => {
+            return write_temporal_type(writer, "timestamp", *tz, *precision);
         }
         SqlType::Uuid => "uuid",
         SqlType::Json => "json",
@@ -790,6 +782,24 @@ fn write_test_cast_type(ty: &SqlType, writer: &mut dyn Write) -> io::Result<()> 
         SqlType::FixedBytes(length) => return write!(writer, "binary({length})"),
     };
     writer.write_all(name.as_bytes())
+}
+
+/// Renders a `time`/`timestamp` type with its optional fractional-seconds precision and `with time
+/// zone` suffix (the reference dialect, mirroring PostgreSQL's spelling).
+fn write_temporal_type(
+    writer: &mut dyn Write,
+    base: &str,
+    tz: bool,
+    precision: Option<u8>,
+) -> io::Result<()> {
+    writer.write_all(base.as_bytes())?;
+    if let Some(precision) = precision {
+        write!(writer, "({precision})")?;
+    }
+    if tz {
+        writer.write_all(b" with time zone")?;
+    }
+    Ok(())
 }
 
 fn write_test_column_type(column_type: ColumnType, writer: &mut impl Write) -> io::Result<()> {
@@ -813,19 +823,11 @@ fn write_test_column_type(column_type: ColumnType, writer: &mut impl Write) -> i
             return write!(writer, "numeric({precision},{scale})");
         }
         ColumnType::Date => "date",
-        ColumnType::Time { tz } => {
-            if tz {
-                "time with time zone"
-            } else {
-                "time"
-            }
+        ColumnType::Time { tz, precision } => {
+            return write_temporal_type(writer, "time", tz, precision);
         }
-        ColumnType::Timestamp { tz } => {
-            if tz {
-                "timestamp with time zone"
-            } else {
-                "timestamp"
-            }
+        ColumnType::Timestamp { tz, precision } => {
+            return write_temporal_type(writer, "timestamp", tz, precision);
         }
         ColumnType::Uuid => "uuid",
         ColumnType::Json => "json",

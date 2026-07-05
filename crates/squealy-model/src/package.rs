@@ -1269,8 +1269,16 @@ fn write_sql_type(node: &mut KdlNode, ty: &SqlType) {
                 KdlValue::Integer(*scale as i128),
             ));
         }
-        SqlType::Time { tz: true } | SqlType::Timestamp { tz: true } => {
-            node.push(KdlEntry::new_prop("tz", KdlValue::Bool(true)));
+        SqlType::Time { tz, precision } | SqlType::Timestamp { tz, precision } => {
+            if *tz {
+                node.push(KdlEntry::new_prop("tz", KdlValue::Bool(true)));
+            }
+            if let Some(precision) = precision {
+                node.push(KdlEntry::new_prop(
+                    "precision",
+                    KdlValue::Integer(*precision as i128),
+                ));
+            }
         }
         SqlType::Raw(raw) => {
             node.push(KdlEntry::new_prop("raw", raw.clone()));
@@ -1929,9 +1937,11 @@ fn sql_type_from_node(node: &KdlNode) -> Result<SqlType, PackageError> {
         "date" => SqlType::Date,
         "time" => SqlType::Time {
             tz: prop_bool(node, "tz"),
+            precision: optional_u8(node, "precision")?,
         },
         "timestamp" => SqlType::Timestamp {
             tz: prop_bool(node, "tz"),
+            precision: optional_u8(node, "precision")?,
         },
         "uuid" => SqlType::Uuid,
         "json" => SqlType::Json,
@@ -1941,6 +1951,25 @@ fn sql_type_from_node(node: &KdlNode) -> Result<SqlType, PackageError> {
         "raw" => SqlType::Raw(required_prop(node, "raw")?),
         other => return Err(malformed(format!("unknown column type `{other}`"))),
     })
+}
+
+/// Reads an optional `u8` integer property (a timestamp/time fractional-seconds precision), returning
+/// `None` when the property is absent and erroring when it is present but out of range.
+fn optional_u8(node: &KdlNode, key: &str) -> Result<Option<u8>, PackageError> {
+    let Some(entry) = node
+        .entries()
+        .iter()
+        .find(|entry| entry.name().map(|name| name.value()) == Some(key))
+    else {
+        return Ok(None);
+    };
+    let value = entry
+        .value()
+        .as_integer()
+        .ok_or_else(|| malformed(format!("`{key}` must be an integer")))?;
+    u8::try_from(value)
+        .map(Some)
+        .map_err(|_| malformed(format!("`{key}` is out of range for u8")))
 }
 
 /// Reads a required `u32` integer property (length/precision/scale).
@@ -3040,10 +3069,22 @@ mod tests {
                 scale: 2,
             },
             SqlType::Date,
-            SqlType::Time { tz: false },
-            SqlType::Time { tz: true },
-            SqlType::Timestamp { tz: false },
-            SqlType::Timestamp { tz: true },
+            SqlType::Time {
+                tz: false,
+                precision: None,
+            },
+            SqlType::Time {
+                tz: true,
+                precision: Some(3),
+            },
+            SqlType::Timestamp {
+                tz: false,
+                precision: Some(0),
+            },
+            SqlType::Timestamp {
+                tz: true,
+                precision: Some(6),
+            },
             SqlType::Uuid,
             SqlType::Json,
             SqlType::Jsonb,

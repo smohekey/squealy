@@ -281,6 +281,19 @@ struct RawTypeRecord<'scope, C: ColumnMode = ColumnExpr> {
     labels: C::Type<'scope, String>,
     #[column(db_type = "decimal(10,2) unsigned")]
     unsigned_amount: C::Type<'scope, String>,
+    // Fractional-seconds precision: `timestamp(n)` / `timestamptz(n)` / `time(n)` parse structurally.
+    #[column(db_type = "timestamp(3)")]
+    logged_at: C::Type<'scope, String>,
+    #[column(db_type = "timestamptz(6)")]
+    happened_at: C::Type<'scope, String>,
+    #[column(db_type = "time(0)")]
+    at: C::Type<'scope, String>,
+    // The zone-suffixed PostgreSQL spelling (which does not end in `)`) also parses structurally.
+    #[column(db_type = "timestamp(3) with time zone")]
+    zoned_at: C::Type<'scope, String>,
+    // A bare timestamp keeps `precision: None` (the backend renders its default form).
+    #[column(db_type = "timestamp")]
+    plain_ts: C::Type<'scope, String>,
     // Unrecognized db_type falls back to verbatim Raw.
     #[column(db_type = "citext")]
     custom: C::Type<'scope, String>,
@@ -446,8 +459,46 @@ fn derive_table_parses_db_type_into_structured_column_type() {
         columns[4].column_type(),
         ColumnType::Raw("decimal(10,2) unsigned")
     );
+    // `timestamp(n)` / `timestamptz(n)` / `time(n)` carry their fractional-seconds precision.
+    assert_eq!(
+        columns[5].column_type(),
+        ColumnType::Timestamp {
+            tz: false,
+            precision: Some(3)
+        }
+    );
+    assert_eq!(
+        columns[6].column_type(),
+        ColumnType::Timestamp {
+            tz: true,
+            precision: Some(6)
+        }
+    );
+    assert_eq!(
+        columns[7].column_type(),
+        ColumnType::Time {
+            tz: false,
+            precision: Some(0)
+        }
+    );
+    // The zone-suffixed spelling `timestamp(3) with time zone` parses to a tz-aware precise timestamp.
+    assert_eq!(
+        columns[8].column_type(),
+        ColumnType::Timestamp {
+            tz: true,
+            precision: Some(3)
+        }
+    );
+    // A bare `timestamp` has no explicit precision.
+    assert_eq!(
+        columns[9].column_type(),
+        ColumnType::Timestamp {
+            tz: false,
+            precision: None
+        }
+    );
     // Unrecognized db_type stays verbatim.
-    assert_eq!(columns[5].column_type(), ColumnType::Raw("citext"));
+    assert_eq!(columns[10].column_type(), ColumnType::Raw("citext"));
 }
 
 #[cfg(feature = "uuid")]
@@ -494,12 +545,21 @@ fn uuid_columns_map_and_build_queries() {
 #[cfg(feature = "systemtime")]
 #[test]
 fn system_time_columns_map_and_build_queries() {
-    // HasColumnType: a bare `SystemTime` field maps to a `timestamptz` column.
+    // HasColumnType: a bare `SystemTime` field maps to a `timestamptz(6)` column (microseconds).
     let columns = <Timestamped as SchemaTable>::columns();
-    assert_eq!(columns[1].column_type(), ColumnType::Timestamp { tz: true });
+    assert_eq!(
+        columns[1].column_type(),
+        ColumnType::Timestamp {
+            tz: true,
+            precision: Some(6)
+        }
+    );
     assert_eq!(
         <std::time::SystemTime as HasColumnType>::COLUMN_TYPE,
-        ColumnType::Timestamp { tz: true }
+        ColumnType::Timestamp {
+            tz: true,
+            precision: Some(6)
+        }
     );
 
     // ExprKind + nullable assignment: a `SystemTime` value works as a predicate operand and a

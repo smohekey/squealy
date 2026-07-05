@@ -261,9 +261,27 @@ impl squealy::SchemaIntrospect for PostgresConnection {
 
     /// PostgreSQL renders both `String` and `Text` as `text`, which introspects back as `String`;
     /// map `Text` to `String` so a desired model using `Text` does not churn against the live schema.
+    ///
+    /// A `Time`/`Timestamp` with no explicit precision (`None`) renders as the bare form, which
+    /// PostgreSQL stores at its microsecond default and introspection reads back as `Some(6)`;
+    /// canonicalize `None` to `Some(6)` so the two sides compare equal.
     fn canonical_sql_type(&self, ty: &squealy::SqlType) -> squealy::SqlType {
         match ty {
             squealy::SqlType::Text => squealy::SqlType::String,
+            squealy::SqlType::Timestamp {
+                tz,
+                precision: None,
+            } => squealy::SqlType::Timestamp {
+                tz: *tz,
+                precision: Some(6),
+            },
+            squealy::SqlType::Time {
+                tz,
+                precision: None,
+            } => squealy::SqlType::Time {
+                tz: *tz,
+                precision: Some(6),
+            },
             other => other.clone(),
         }
     }

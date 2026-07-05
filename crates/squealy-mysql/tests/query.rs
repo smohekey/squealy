@@ -489,6 +489,23 @@ struct TimedEvent<'scope, C: ColumnMode = ColumnExpr> {
 
 #[cfg(feature = "systemtime")]
 #[test]
+fn mysql_now_renders_with_microsecond_precision() {
+    // MySQL's bare `CURRENT_TIMESTAMP` is fsp 0; `now()` renders `CURRENT_TIMESTAMP(6)` so the
+    // microsecond value survives into a `TIMESTAMP(6)` column.
+    let q = Mysql
+        .from::<TimedEvent>()
+        .where_(|e| e.created.equals(now::<std::time::SystemTime>()))
+        .select(|(e,)| e.id);
+    assert!(
+        q.to_sql().contains("CURRENT_TIMESTAMP(6)"),
+        "{}",
+        q.to_sql()
+    );
+    assert!(!q.to_sql().contains("CURRENT_TIMESTAMP)"), "{}", q.to_sql());
+}
+
+#[cfg(feature = "systemtime")]
+#[test]
 fn mysql_extract_renders() {
     // `extract` -> EXTRACT wrapped in a CAST to SIGNED (MySQL's CAST integer target).
     let q = Mysql

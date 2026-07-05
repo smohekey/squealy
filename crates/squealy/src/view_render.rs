@@ -621,7 +621,15 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
                 writer.write_all(b")")
             }
         },
-        ExprNode::Now => writer.write_all(b"CURRENT_TIMESTAMP"),
+        ExprNode::Now => {
+            // Match the query renderer: MySQL needs `CURRENT_TIMESTAMP(6)` so a `now()` in a view/CTE
+            // body keeps its microseconds (see `Dialect::now_fractional_digits`).
+            writer.write_all(b"CURRENT_TIMESTAMP")?;
+            if let Some(digits) = dialect.now_fractional_digits() {
+                write!(writer, "({digits})")?;
+            }
+            Ok(())
+        }
         ExprNode::Extract {
             field,
             operand,

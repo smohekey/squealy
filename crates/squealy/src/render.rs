@@ -2493,7 +2493,13 @@ where
     }
 
     fn visit_now(&mut self) -> Result<(), Self::Error> {
-        self.writer.write_all(b"CURRENT_TIMESTAMP")
+        self.writer.write_all(b"CURRENT_TIMESTAMP")?;
+        // MySQL's bare `CURRENT_TIMESTAMP` is fsp 0; render `CURRENT_TIMESTAMP(6)` so a `now()` value
+        // keeps its microseconds into a `TIMESTAMP(6)` column (PostgreSQL's is already microsecond).
+        if let Some(digits) = self.renderer.dialect.now_fractional_digits() {
+            write!(self.writer, "({digits})")?;
+        }
+        Ok(())
     }
 
     fn visit_extract<O>(

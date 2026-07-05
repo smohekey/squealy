@@ -26,11 +26,14 @@
 //!   `std::time::SystemTime` respectively, each against a bare `TIMESTAMP` column.
 //! - **`bytes`** — `bytes::Bytes` against a `BLOB` column.
 //!
-//! ## Timestamps: UTC, whole-second, 1970–2038
+//! ## Timestamps: UTC, microsecond, 1970–2038
 //!
-//! The datetime codecs store and return **UTC** values at **whole-second** resolution (a bare
-//! `TIMESTAMP`, fractional-seconds precision 0). Sub-second precision needs the neutral model to carry
-//! fractional precision and is planned, not yet supported.
+//! The datetime codecs store and return **UTC** values at **microsecond** resolution: the native
+//! datetime types map to a `TIMESTAMP(6)` column (see `HasColumnType`) and the codecs bind the full
+//! sub-second component. A column declared with an explicit lower precision — `db_type = "timestamp(3)"`
+//! or a bare `db_type = "timestamp"` (fsp 0) — is honoured (MySQL rounds the value on store), and a
+//! precision change (e.g. an existing fsp-0 column vs a desired `TIMESTAMP(6)`) migrates via a normal
+//! column `ALTER` on the next publish.
 //!
 //! Because MySQL interprets a `TIMESTAMP` in the session time zone, the session must be UTC:
 //!
@@ -344,10 +347,27 @@ impl SchemaIntrospect for MysqlConnection {
 ///   `VARCHAR(255)`.
 /// - MySQL has no native `uuid` type: a `uuid::Uuid` column is rendered as `CHAR(36)`, which
 ///   introspects back as `Char(36)`.
+/// - A `Time`/`Timestamp` with no explicit precision (`None`) renders as a bare `TIME`/`TIMESTAMP`
+///   (fsp 0), which introspects back as `Some(0)`; canonicalize `None` to `Some(0)` so the two sides
+///   compare equal instead of churning.
 fn canonical_sql_type(ty: &squealy::SqlType) -> squealy::SqlType {
     match ty {
         squealy::SqlType::String => squealy::SqlType::Varchar(255),
         squealy::SqlType::Uuid => squealy::SqlType::Char(36),
+        squealy::SqlType::Timestamp {
+            tz,
+            precision: None,
+        } => squealy::SqlType::Timestamp {
+            tz: *tz,
+            precision: Some(0),
+        },
+        squealy::SqlType::Time {
+            tz,
+            precision: None,
+        } => squealy::SqlType::Time {
+            tz: *tz,
+            precision: Some(0),
+        },
         other => other.clone(),
     }
 }

@@ -806,3 +806,106 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
         ],
     }
 }
+
+/// A one-table `catalog_ts` model whose `at` column is a `TIMESTAMP` at the given fractional-seconds
+/// precision. Used to prove precision round-trips (churn-free) and that a precision change migrates.
+fn timestamp_precision_model(precision: Option<u8>) -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog_ts".to_owned()),
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "events".to_owned(),
+                comment: None,
+                columns: vec![
+                    ColumnModel {
+                        name: "id".to_owned(),
+                        comment: None,
+                        ty: SqlType::I32,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: Some(IdentityModel {
+                            mode: IdentityMode::ByDefault,
+                        }),
+                        generated: None,
+                    },
+                    ColumnModel {
+                        name: "at".to_owned(),
+                        comment: None,
+                        ty: SqlType::Timestamp {
+                            tz: true,
+                            precision,
+                        },
+                        collation: None,
+                        nullable: false,
+                        default: Some(DefaultValue::CurrentTimestamp),
+                        identity: None,
+                        generated: None,
+                    },
+                ],
+                primary_key: Some(Constraint {
+                    name: "PRIMARY".to_owned(),
+                    columns: vec!["id".to_owned()],
+                }),
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn timestamp_precision_round_trips_and_migrates() {
+    let _db_guard = db_lock().lock().await;
+    let mut connection = Mysql
+        .connect(&database_url())
+        .await
+        .expect("connect to MySQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog_ts`")
+        .await
+        .expect("drop schema");
+
+    // Publish a `TIMESTAMP(6)` column (with a matching `DEFAULT CURRENT_TIMESTAMP(6)`), then re-plan:
+    // introspection must recover the precision so the replan is empty (no churn).
+    let micros = timestamp_precision_model(Some(6));
+    squealy_model::publish(&micros, &Mysql, &mut connection)
+        .await
+        .expect("publish timestamp(6)");
+    let replan = squealy_model::plan_from_database(
+        &micros,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan timestamp(6)");
+    assert!(
+        replan.steps.is_empty(),
+        "timestamp(6) must re-plan empty, got: {:?}",
+        replan.steps
+    );
+
+    // Narrowing the model to a bare `TIMESTAMP` (fsp 0) and back to `TIMESTAMP(6)` is a real precision
+    // change: it must produce a column ALTER (auto-widening on publish), not a silent no-op.
+    let seconds = timestamp_precision_model(None);
+    let narrow = squealy_model::plan_from_database(
+        &seconds,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("plan narrowing precision");
+    assert!(
+        !narrow.steps.is_empty(),
+        "a precision change must diff (fsp 6 -> fsp 0)"
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog_ts`")
+        .await
+        .expect("cleanup");
+}

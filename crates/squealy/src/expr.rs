@@ -935,7 +935,10 @@ where
 /// cast is only *emitted* when the dialect needs it (see `Dialect::timestamp_operand_needs_cast`).
 fn timestamp_operand_cast<A: ExprAst>() -> Option<crate::SqlType> {
     if A::NEEDS_CAST_ANCHOR {
-        Some(crate::SqlType::Timestamp { tz: true })
+        Some(crate::SqlType::Timestamp {
+            tz: true,
+            precision: None,
+        })
     } else {
         None
     }

@@ -118,9 +118,14 @@ pub enum ColumnType {
     Date,
     Time {
         tz: bool,
+        /// Fractional-seconds precision (`TIME(n)`). `None` renders the bare, backend-default form.
+        precision: Option<u8>,
     },
     Timestamp {
         tz: bool,
+        /// Fractional-seconds precision (`TIMESTAMP(n)`). `None` renders the bare, backend-default form
+        /// (MySQL fsp 0, PostgreSQL microseconds).
+        precision: Option<u8>,
     },
     Uuid,
     Json,
@@ -257,26 +262,36 @@ impl HasColumnType for bytes::Bytes {
 #[cfg(feature = "bytes")]
 crate::impl_non_null_column!(bytes::Bytes);
 
-/// Native timestamp columns. Each maps to a timezone-aware `timestamptz` column, so no
+/// Native timestamp columns. Each maps to a timezone-aware `timestamptz(6)` column (microsecond
+/// precision — what these Rust types carry and what PostgreSQL already stores), so no
 /// `#[column(db_type = "...")]` override is needed. The matching `Encode`/`Decode` lives in each
 /// backend crate behind the same feature.
 #[cfg(feature = "systemtime")]
 impl HasColumnType for std::time::SystemTime {
-    const COLUMN_TYPE: ColumnType = ColumnType::Timestamp { tz: true };
+    const COLUMN_TYPE: ColumnType = ColumnType::Timestamp {
+        tz: true,
+        precision: Some(6),
+    };
 }
 #[cfg(feature = "systemtime")]
 crate::impl_non_null_column!(std::time::SystemTime);
 
 #[cfg(feature = "time")]
 impl HasColumnType for time::OffsetDateTime {
-    const COLUMN_TYPE: ColumnType = ColumnType::Timestamp { tz: true };
+    const COLUMN_TYPE: ColumnType = ColumnType::Timestamp {
+        tz: true,
+        precision: Some(6),
+    };
 }
 #[cfg(feature = "time")]
 crate::impl_non_null_column!(time::OffsetDateTime);
 
 #[cfg(feature = "chrono")]
 impl HasColumnType for chrono::DateTime<chrono::Utc> {
-    const COLUMN_TYPE: ColumnType = ColumnType::Timestamp { tz: true };
+    const COLUMN_TYPE: ColumnType = ColumnType::Timestamp {
+        tz: true,
+        precision: Some(6),
+    };
 }
 #[cfg(feature = "chrono")]
 crate::impl_non_null_column!(chrono::DateTime<chrono::Utc>);

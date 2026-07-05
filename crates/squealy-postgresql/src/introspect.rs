@@ -600,15 +600,50 @@ fn sql_type(db_type: &str) -> SqlType {
         "double precision" => SqlType::F64,
         "text" => SqlType::String,
         "date" => SqlType::Date,
-        "time without time zone" => SqlType::Time { tz: false },
-        "time with time zone" => SqlType::Time { tz: true },
-        "timestamp without time zone" => SqlType::Timestamp { tz: false },
-        "timestamp with time zone" => SqlType::Timestamp { tz: true },
         "uuid" => SqlType::Uuid,
         "json" => SqlType::Json,
         "jsonb" => SqlType::Jsonb,
         "bytea" => SqlType::Bytes,
-        other => parametric_sql_type(other).unwrap_or_else(|| SqlType::Raw(other.to_owned())),
+        // `time`/`timestamp` (with the optional `(n)` precision and `with/without time zone` suffix that
+        // `format_type` emits) are recovered structurally, then the remaining parametric types.
+        other => temporal_sql_type(other)
+            .or_else(|| parametric_sql_type(other))
+            .unwrap_or_else(|| SqlType::Raw(other.to_owned())),
+    }
+}
+
+/// Recovers a `time`/`timestamp` type from a `format_type` string — `timestamp with time zone`,
+/// `timestamp(3) without time zone`, `time(6)`, etc. The `(n)` fractional-seconds precision sits between
+/// the base name and the `with/without time zone` suffix, so it is not a trailing argument (unlike
+/// `varchar(n)`). A form with no explicit `(n)` uses PostgreSQL's microsecond default, which round-trips
+/// against a desired column canonicalized to `Some(6)`.
+fn temporal_sql_type(db_type: &str) -> Option<SqlType> {
+    let (rest, tz) = if let Some(rest) = db_type.strip_suffix(" without time zone") {
+        (rest.trim_end(), false)
+    } else if let Some(rest) = db_type.strip_suffix(" with time zone") {
+        (rest.trim_end(), true)
+    } else {
+        (db_type, false)
+    };
+    let (base, precision) = match rest.find('(') {
+        Some(open) => {
+            let close = rest.rfind(')')?;
+            // The `(n)` must terminate `rest`; anything trailing (e.g. the `[]` of a temporal *array*
+            // like `timestamp(3) without time zone[]`) means this is not a scalar temporal type, so fall
+            // through to `Raw` rather than mis-reading it as one.
+            if close + 1 != rest.len() {
+                return None;
+            }
+            let precision = rest[open + 1..close].trim().parse().ok()?;
+            (rest[..open].trim(), Some(precision))
+        }
+        // A bare `timestamp`/`time` is PostgreSQL's microsecond default (`format_type` omits `(6)`).
+        None => (rest, Some(6)),
+    };
+    match base {
+        "timestamp" => Some(SqlType::Timestamp { tz, precision }),
+        "time" => Some(SqlType::Time { tz, precision }),
+        _ => None,
     }
 }
 
@@ -810,19 +845,57 @@ mod tests {
         assert_eq!(sql_type("double precision"), SqlType::F64);
         assert_eq!(sql_type("text"), SqlType::String);
         assert_eq!(sql_type("date"), SqlType::Date);
+        // A bare temporal form uses PostgreSQL's microsecond default (`Some(6)`); an explicit `(n)`
+        // (which `format_type` emits between the base and the `with/without time zone` suffix) is read.
         assert_eq!(
             sql_type("time without time zone"),
-            SqlType::Time { tz: false }
+            SqlType::Time {
+                tz: false,
+                precision: Some(6)
+            }
         );
-        assert_eq!(sql_type("time with time zone"), SqlType::Time { tz: true });
+        assert_eq!(
+            sql_type("time with time zone"),
+            SqlType::Time {
+                tz: true,
+                precision: Some(6)
+            }
+        );
         assert_eq!(
             sql_type("timestamp without time zone"),
-            SqlType::Timestamp { tz: false }
+            SqlType::Timestamp {
+                tz: false,
+                precision: Some(6)
+            }
         );
         assert_eq!(
             sql_type("timestamp with time zone"),
-            SqlType::Timestamp { tz: true }
+            SqlType::Timestamp {
+                tz: true,
+                precision: Some(6)
+            }
         );
+        assert_eq!(
+            sql_type("timestamp(3) with time zone"),
+            SqlType::Timestamp {
+                tz: true,
+                precision: Some(3)
+            }
+        );
+        assert_eq!(
+            sql_type("time(0) without time zone"),
+            SqlType::Time {
+                tz: false,
+                precision: Some(0)
+            }
+        );
+        // A temporal *array* is not a scalar temporal type: it must not be mis-parsed (trailing `[]`
+        // after the `(n)`), falling through to `Raw` like `numeric(10,2)[]` does.
+        assert_eq!(
+            sql_type("timestamp(3) without time zone[]"),
+            SqlType::Raw("timestamp(3) without time zone[]".to_owned())
+        );
+        assert_eq!(sql_type("time(0)[]"), SqlType::Raw("time(0)[]".to_owned()));
         assert_eq!(sql_type("uuid"), SqlType::Uuid);
         assert_eq!(sql_type("json"), SqlType::Json);
         assert_eq!(sql_type("jsonb"), SqlType::Jsonb);
@@ -963,7 +1036,13 @@ mod tests {
             DefaultValue::Bool(true)
         );
         assert_eq!(
-            default_value(&SqlType::Timestamp { tz: true }, "now()"),
+            default_value(
+                &SqlType::Timestamp {
+                    tz: true,
+                    precision: Some(6)
+                },
+                "now()"
+            ),
             DefaultValue::CurrentTimestamp
         );
         assert_eq!(
