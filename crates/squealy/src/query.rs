@@ -5938,6 +5938,13 @@ impl_having_predicates_tuple!(
 pub trait OrderByTerms<'scope, Base> {
     type Output;
 
+    /// Whether any order term is (or wraps) a named-window reference. Query-level `ORDER BY` runs before
+    /// `select_over`, so a native named-window key is impossible — a `true` here can only be an escaped
+    /// `over_ref` expression, which [`SourceQuery::order_by`] rejects (it would render `… OVER w0` with
+    /// no `WINDOW` clause). Defaults to `false`; the [`Order`] term reads its AST's
+    /// [`ExprAst::IS_NAMED_WINDOW_REF`] and tuples fold across terms.
+    const CONTAINS_NAMED_WINDOW: bool = false;
+
     fn apply(self, base: Base) -> Self::Output;
 }
 
@@ -5956,6 +5963,8 @@ where
     Ast: ExprAst,
 {
     type Output = OrderBy<'scope, Base, K, Ast>;
+
+    const CONTAINS_NAMED_WINDOW: bool = Ast::IS_NAMED_WINDOW_REF;
 
     fn apply(self, base: Base) -> Self::Output {
         OrderBy { base, order: self }
@@ -5991,6 +6000,13 @@ macro_rules! impl_order_by_terms_tuple {
                 'scope,
                 <$head as OrderByTerms<'scope, Base>>::Output,
             >>::Output;
+
+            const CONTAINS_NAMED_WINDOW: bool =
+                <$head as OrderByTerms<'scope, Base>>::CONTAINS_NAMED_WINDOW
+                || <($($tail,)*) as OrderByTerms<
+                    'scope,
+                    <$head as OrderByTerms<'scope, Base>>::Output,
+                >>::CONTAINS_NAMED_WINDOW;
 
             #[allow(non_snake_case)]
             fn apply(self, base: Base) -> Self::Output {
@@ -7811,6 +7827,15 @@ where
     where
         Orders: OrderByTerms<'scope, Self>,
     {
+        // A named-window reference cannot legitimately appear in a query-level `ORDER BY` (the handle
+        // only exists inside a later `select_over`), so a `true` here is an escaped `over_ref`
+        // expression that would render `… OVER w0` with no `WINDOW` clause. See the guard macro.
+        const {
+            assert!(
+                !<Orders as OrderByTerms<'scope, Self>>::CONTAINS_NAMED_WINDOW,
+                "a named-window reference (`.over_ref(w)`) cannot be used in `order_by`; it is only valid inside the `select_over` projection that declares the `WINDOW` clause"
+            )
+        };
         orders(self.exprs().to_tuple()).apply(self)
     }
 
