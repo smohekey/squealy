@@ -9,8 +9,9 @@ use squealy::{
     ProjectionVisitor, QueryBuilder, RenderAssignment, RenderAst, RenderCaseArms,
     RenderCoalesceArgs, RenderInsertAssignments, RenderInsertRows, RenderPredicateAst,
     RenderPredicateNodes, RenderProjectable, RenderSelectAst, RenderSimpleCaseArms, RenderSubquery,
-    RenderUpdateAssignments, RowLock, SchemaTable, SelectSink, Selected, SourceAlias, SqlType,
-    Table, TableProjection, UnaryStringFunc, UpdateableTable, WindowFunc,
+    RenderUpdateAssignments, RenderWindowList, RowLock, SchemaTable, SelectSink, Selected,
+    SourceAlias, SqlType, Table, TableProjection, UnaryStringFunc, UpdateableTable, WindowFunc,
+    named_window_alias,
 };
 
 use crate::query::{TestParam, TestParamWriter};
@@ -105,6 +106,7 @@ struct TestSelectSink<'writer, Writer> {
     filters: usize,
     groups: usize,
     havings: usize,
+    windows: usize,
     orders: usize,
     limit: Option<usize>,
     offset: Option<usize>,
@@ -125,6 +127,7 @@ where
             filters: 0,
             groups: 0,
             havings: 0,
+            windows: 0,
             orders: 0,
             limit: None,
             offset: None,
@@ -285,6 +288,28 @@ where
         }
         self.orders += 1;
         write_order_value(&order, self.writer)
+    }
+
+    fn push_named_window<Parts, Ords>(
+        &mut self,
+        index: usize,
+        partitions: &Parts,
+        orders: &Ords,
+        frame: Option<FrameSpec>,
+    ) -> io::Result<()>
+    where
+        Parts: RenderWindowList<crate::TestBackend>,
+        Ords: RenderWindowList<crate::TestBackend>,
+    {
+        if self.windows == 0 {
+            self.writer.write_all(b" WINDOW ")?;
+        } else {
+            self.writer.write_all(b", ")?;
+        }
+        self.windows += 1;
+        write!(self.writer, "{} AS (", named_window_alias(index))?;
+        write_named_window_body(partitions, orders, frame, self.writer)?;
+        self.writer.write_all(b")")
     }
 
     fn set_limit(&mut self, rows: usize) -> io::Result<()> {
@@ -1253,6 +1278,45 @@ where
     sink.finish()
 }
 
+/// Render a named window definition's interior — `PARTITION BY … ORDER BY … <frame>` — between the
+/// `WINDOW w<n> AS (` and closing `)` written by `TestSelectSink::push_named_window`. Mirrors the
+/// `OVER (…)` body of `RenderExpr::visit_window` minus the function call.
+fn write_named_window_body<Parts, Ords>(
+    partitions: &Parts,
+    orders: &Ords,
+    frame: Option<FrameSpec>,
+    writer: &mut impl SqlWriter,
+) -> io::Result<()>
+where
+    Parts: RenderWindowList<crate::TestBackend>,
+    Ords: RenderWindowList<crate::TestBackend>,
+{
+    let mut visitor = RenderExpr { writer };
+    let mut wrote = false;
+    if <Parts as RenderWindowList<crate::TestBackend>>::NON_EMPTY {
+        visitor.writer.write_all(b"PARTITION BY ")?;
+        let mut first = true;
+        partitions.render(&mut visitor, &mut first)?;
+        wrote = true;
+    }
+    if <Ords as RenderWindowList<crate::TestBackend>>::NON_EMPTY {
+        if wrote {
+            visitor.writer.write_all(b" ")?;
+        }
+        visitor.writer.write_all(b"ORDER BY ")?;
+        let mut first = true;
+        orders.render(&mut visitor, &mut first)?;
+        wrote = true;
+    }
+    if let Some(frame) = frame {
+        if wrote {
+            visitor.writer.write_all(b" ")?;
+        }
+        frame.render(&mut visitor.writer)?;
+    }
+    Ok(())
+}
+
 fn write_order_value<K, Ast>(
     order: &Order<'_, K, Ast>,
     writer: &mut impl SqlWriter,
@@ -1464,6 +1528,23 @@ where
             frame.render(&mut self.writer)?;
         }
         self.writer.write_all(b")")
+    }
+
+    fn visit_named_window<Operand>(
+        &mut self,
+        func: WindowFunc,
+        _cast: Option<&SqlType>,
+        operand: Operand,
+        window_index: usize,
+    ) -> Result<(), Self::Error>
+    where
+        Operand: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        // Like `visit_window`, the test backend renders the bare call (no dialect cast); the window
+        // specification lives in the `WINDOW` clause, so this only references it by alias.
+        write!(self.writer, "{}(", render_window_func(func))?;
+        operand(self)?;
+        write!(self.writer, ") OVER {}", named_window_alias(window_index))
     }
 
     fn visit_window_separator(&mut self) -> Result<(), Self::Error> {

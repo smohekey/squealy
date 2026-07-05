@@ -1458,6 +1458,84 @@ fn test_window_frame_without_partition_or_order() {
 }
 
 #[test]
+fn test_named_window_shared_by_multiple_aggregates() {
+    // The DRY case a named window exists for: one definition referenced by several projected
+    // expressions, rendered once as a `WINDOW w0 AS (…)` clause after the source.
+    let q = TestConnection
+        .from::<Post>()
+        .window(|(post,)| {
+            Window::new()
+                .partition_by(post.user_id)
+                .order_by(post.id.asc())
+        })
+        .select_over(|(post,), w| {
+            (
+                post.user_id.sum().over_ref(w),
+                post.user_id.avg().over_ref(w),
+            )
+        });
+    assert_eq!(
+        q.to_sql(),
+        "SELECT SUM(q0_0.user_id) OVER w0 AS t0_expr, AVG(q0_0.user_id) OVER w0 AS t1_expr \
+         FROM posts AS q0_0 WINDOW w0 AS (PARTITION BY q0_0.user_id ORDER BY q0_0.id ASC)"
+    );
+    // The window definition (columns/literal offsets only) binds no params.
+    assert!(q.collect_params().unwrap().is_empty());
+}
+
+#[test]
+fn test_named_window_with_ranking_function() {
+    let q = TestConnection
+        .from::<Post>()
+        .window(|(post,)| {
+            Window::new()
+                .partition_by(post.user_id)
+                .order_by(post.id.desc())
+        })
+        .select_over(|(_post,), w| row_number().over_ref(w));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT ROW_NUMBER() OVER w0 AS expr FROM posts AS q0_0 \
+         WINDOW w0 AS (PARTITION BY q0_0.user_id ORDER BY q0_0.id DESC)"
+    );
+}
+
+#[test]
+fn test_named_window_carries_a_frame() {
+    let q = TestConnection
+        .from::<Post>()
+        .window(|(post,)| {
+            Window::new()
+                .partition_by(post.user_id)
+                .order_by(post.id.asc())
+                .rows(unbounded_preceding(), current_row())
+        })
+        .select_over(|(post,), w| post.user_id.sum().over_ref(w));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT SUM(q0_0.user_id) OVER w0 AS expr FROM posts AS q0_0 WINDOW w0 AS \
+         (PARTITION BY q0_0.user_id ORDER BY q0_0.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
+    );
+}
+
+#[test]
+fn test_named_window_renders_after_having_before_order_by() {
+    // Clause position: the `WINDOW` clause lands after `HAVING` and before `ORDER BY`/`LIMIT`, even
+    // though `.window()` is chained after `.order_by()`/`.limit()` in builder order.
+    let q = TestConnection
+        .from::<Post>()
+        .order_by(|(post,)| post.id.asc())
+        .limit(5)
+        .window(|(post,)| Window::new().partition_by(post.user_id))
+        .select_over(|(post,), w| post.user_id.sum().over_ref(w));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT SUM(q0_0.user_id) OVER w0 AS expr FROM posts AS q0_0 \
+         WINDOW w0 AS (PARTITION BY q0_0.user_id) ORDER BY q0_0.id ASC LIMIT 5"
+    );
+}
+
+#[test]
 fn test_window_lag_over_left_joined_column_flattens_nullable() {
     // LAG over a left-joined (already-nullable) column must flatten to a single `Option<T>`, not
     // `Option<Option<T>>`. This compiles only because the result row type is `Option<i32>`.

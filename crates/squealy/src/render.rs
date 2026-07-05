@@ -305,6 +305,7 @@ struct SelectRenderSink<'writer, 'renderer, B, Writer> {
     filters: usize,
     groups: usize,
     havings: usize,
+    windows: usize,
     orders: usize,
     limit: Option<usize>,
     offset: Option<usize>,
@@ -331,6 +332,7 @@ where
             filters: 0,
             groups: 0,
             havings: 0,
+            windows: 0,
             orders: 0,
             limit: None,
             offset: None,
@@ -548,6 +550,34 @@ where
         }
         self.orders += 1;
         write_order_value(&order, self.writer, &mut *self.renderer)
+    }
+
+    fn push_named_window<Parts, Ords>(
+        &mut self,
+        index: usize,
+        partitions: &Parts,
+        orders: &Ords,
+        frame: Option<crate::FrameSpec>,
+    ) -> io::Result<()>
+    where
+        Parts: crate::RenderWindowList<B>,
+        Ords: crate::RenderWindowList<B>,
+    {
+        if self.windows == 0 {
+            self.writer.write_all(b" WINDOW ")?;
+        } else {
+            self.writer.write_all(b", ")?;
+        }
+        self.windows += 1;
+        write!(self.writer, "{} AS (", crate::named_window_alias(index))?;
+        write_named_window_body::<Parts, Ords, B, _>(
+            partitions,
+            orders,
+            frame,
+            self.writer,
+            &mut *self.renderer,
+        )?;
+        self.writer.write_all(b")")
     }
 
     fn set_limit(&mut self, rows: usize) -> io::Result<()> {
@@ -2053,6 +2083,49 @@ where
     }
 }
 
+/// Render a named window definition's interior — `PARTITION BY … ORDER BY … <frame>` — between the
+/// `WINDOW w<n> AS (` and closing `)` written by [`SelectRenderSink::push_named_window`]. Mirrors the
+/// `OVER (…)` body of [`RenderExpr::visit_window`] minus the function call.
+fn write_named_window_body<Parts, Ords, B, Writer>(
+    partitions: &Parts,
+    orders: &Ords,
+    frame: Option<crate::FrameSpec>,
+    writer: &mut Writer,
+    renderer: &mut Renderer,
+) -> io::Result<()>
+where
+    Parts: crate::RenderWindowList<B>,
+    Ords: crate::RenderWindowList<B>,
+    B: Backend,
+    Writer: SqlWriter<B>,
+{
+    write_ast::<B, _>(writer, renderer, false, |visitor| {
+        let mut wrote = false;
+        if <Parts as crate::RenderWindowList<B>>::NON_EMPTY {
+            visitor.writer.write_all(b"PARTITION BY ")?;
+            let mut first = true;
+            partitions.render(visitor, &mut first)?;
+            wrote = true;
+        }
+        if <Ords as crate::RenderWindowList<B>>::NON_EMPTY {
+            if wrote {
+                visitor.writer.write_all(b" ")?;
+            }
+            visitor.writer.write_all(b"ORDER BY ")?;
+            let mut first = true;
+            orders.render(visitor, &mut first)?;
+            wrote = true;
+        }
+        if let Some(frame) = frame {
+            if wrote {
+                visitor.writer.write_all(b" ")?;
+            }
+            frame.render(&mut visitor.writer)?;
+        }
+        Ok(())
+    })
+}
+
 fn write_assignment_value<B, Value>(
     value: &Value,
     writer: &mut impl SqlWriter<B>,
@@ -2336,6 +2409,36 @@ where
             frame.render(&mut self.writer)?;
         }
         self.writer.write_all(b")")?;
+        if let Some(ty) = cast {
+            self.writer.write_all(b" AS ")?;
+            self.renderer
+                .dialect
+                .write_cast_type(ty, &mut *self.writer)?;
+            self.writer.write_all(b")")?;
+        }
+        Ok(())
+    }
+
+    fn visit_named_window<Operand>(
+        &mut self,
+        func: crate::WindowFunc,
+        cast: Option<&SqlType>,
+        operand: Operand,
+        window_index: usize,
+    ) -> Result<(), Self::Error>
+    where
+        Operand: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        if cast.is_some() {
+            self.writer.write_all(b"CAST(")?;
+        }
+        write!(self.writer, "{}(", render_window_func(func))?;
+        operand(self)?;
+        write!(
+            self.writer,
+            ") OVER {}",
+            crate::named_window_alias(window_index)
+        )?;
         if let Some(ty) = cast {
             self.writer.write_all(b" AS ")?;
             self.renderer

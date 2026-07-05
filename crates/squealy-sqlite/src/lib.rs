@@ -45,6 +45,9 @@ pub use query::{SqliteRowReader, SqliteTransaction, SqliteValue};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Sqlite;
 
+// SQLite (3.25+) supports window functions and the query-level named `WINDOW` clause.
+impl squealy::SupportsNamedWindow for Sqlite {}
+
 /// An error connecting to, executing DDL against, decoding a result column, encoding a bind
 /// parameter, or querying SQLite.
 #[derive(Debug, thiserror::Error)]

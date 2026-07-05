@@ -300,6 +300,29 @@ fn mysql_window_frame_clause_renders() {
 }
 
 #[test]
+fn mysql_named_window_clause_renders() {
+    // MySQL 8.0+ shares the named `WINDOW` clause syntax with PostgreSQL (only the identifier quoting
+    // differs). One `WINDOW w0 AS (…)` shared by several `OVER w0` references; the definition binds
+    // no `?` placeholders.
+    let q = Mysql
+        .from::<Widget>()
+        .window(|(widget,)| {
+            Window::new()
+                .partition_by(widget.name)
+                .order_by(widget.id.asc())
+        })
+        .select_over(|(widget,), w| (widget.id.sum().over_ref(w), row_number().over_ref(w)));
+    let sql = q.to_sql();
+    assert!(
+        sql.ends_with("WINDOW w0 AS (PARTITION BY q0_0.`name` ORDER BY q0_0.`id` ASC)"),
+        "{sql}"
+    );
+    assert!(sql.contains("SUM(q0_0.`id`) OVER w0"), "{sql}");
+    assert!(sql.contains("ROW_NUMBER() OVER w0"), "{sql}");
+    assert!(q.collect_params().unwrap().is_empty());
+}
+
+#[test]
 fn mysql_distinct_renders_after_select() {
     let query = Mysql
         .from::<Widget>()

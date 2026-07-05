@@ -113,6 +113,9 @@ impl Backend for Postgres {
 // PostgreSQL renders a `RETURNING` clause, so it can support the `*_returning` query builders.
 impl squealy::SupportsReturning for Postgres {}
 impl squealy::SupportsFullJoin for Postgres {}
+
+// Postgres supports the query-level named `WINDOW` clause.
+impl squealy::SupportsNamedWindow for Postgres {}
 impl squealy::SupportsDateTrunc for Postgres {}
 
 #[cfg(feature = "schema")]

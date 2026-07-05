@@ -3022,6 +3022,76 @@ impl<Operand, Parts, Ords, Frame> AstProjectionClass
 // evaluated after grouping, so the backends reject it in any of those clauses. Normal `SELECT`/
 // `ORDER BY` classify via `AstProjectionClass` above, so they are unaffected.
 
+/// A compile-time proof that a named window was declared with [`.window()`](crate::SourceQuery::window).
+/// It is zero-sized and can only be obtained as the second argument of a
+/// [`select_over`](crate::WindowScope::select_over) projection closure, so a window reference
+/// ([`over_ref`](Expr::over_ref)) can never name a window that was not declared.
+#[derive(Clone, Copy, Debug)]
+pub struct WindowRef {
+    // Private: mintable only by `select_over`. The index of the window it refers to in the query's
+    // `WINDOW` clause (currently always the sole window, `w0`).
+    index: usize,
+}
+
+impl WindowRef {
+    /// Mint a handle for the window at `index`. Crate-private so a reference cannot be forged.
+    pub(crate) fn new(index: usize) -> Self {
+        Self { index }
+    }
+}
+
+/// A window function that references a query-level named window (`func(operand) OVER w0`) rather than
+/// inlining its `OVER (…)` specification. Built by [`Expr::over_ref`] / [`PendingWindow::over_ref`] from
+/// a [`WindowRef`] handle; the window definition itself is emitted once in the query's `WINDOW` clause.
+/// Like [`WindowExprAst`] it is a per-row scalar ([`ColumnTerm`]) and — deliberately not [`NonWindowAst`]
+/// — is rejected in `RETURNING`/`WHERE`/`GROUP BY`/`HAVING`.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct NamedWindowExprAst<Operand> {
+    func: WindowFunc,
+    cast: Option<crate::SqlType>,
+    operand: Operand,
+    window_index: usize,
+}
+
+impl<Operand> ExprAst for NamedWindowExprAst<Operand>
+where
+    Operand: ExprAst,
+{
+    // The window definition lives in the `WINDOW` clause (param-free), so a named-window reference
+    // contributes exactly the operand's params (e.g. the `x` of `SUM(x) OVER w`).
+    type Params = Operand::Params;
+}
+
+impl<Operand, B> RenderAst<B> for NamedWindowExprAst<Operand>
+where
+    Operand: RenderAst<B>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_named_window(
+            self.func,
+            self.cast.as_ref(),
+            |visitor| self.operand.visit(visitor),
+            self.window_index,
+        )
+    }
+}
+
+impl<Operand> AstProjectionClass for NamedWindowExprAst<Operand> {
+    type Class = ColumnTerm;
+}
+
+/// The SQL alias for the `index`-th named window (`w0`, `w1`, …). Shared by the `WINDOW w<n> AS (…)`
+/// clause renderer and the `OVER w<n>` reference so the definition and its uses always agree.
+#[doc(hidden)]
+pub fn named_window_alias(index: usize) -> String {
+    format!("w{index}")
+}
+
 /// Marker for an expression AST that is not a window function (recursive through [`BinaryExprAst`]).
 /// Window functions are evaluated after the result rows are produced, so they are invalid in a
 /// `RETURNING` clause; this marker (via [`ReturnableProjection`]) gates them out while still allowing
@@ -3169,13 +3239,31 @@ pub struct Window<'scope, Parts = WindowNil, Ords = WindowNil, Frame = NoFrame> 
 }
 
 impl<'scope> Window<'scope, WindowNil, WindowNil, NoFrame> {
-    fn new() -> Self {
+    /// Start building a window specification for a named `WINDOW` clause:
+    /// `Window::new().partition_by(…).order_by(…)`, passed to
+    /// [`.window(|cols| …)`](crate::SourceQuery::window). (Inline `.over(|w| …)` supplies its own fresh
+    /// `Window`, so this constructor is only needed for the named form.)
+    pub fn new() -> Self {
         Self {
             partitions: WindowNil,
             orders: WindowNil,
             frame: NoFrame,
             _scope: PhantomData,
         }
+    }
+}
+
+impl<'scope> Default for Window<'scope, WindowNil, WindowNil, NoFrame> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'scope, Parts, Ords, Frame> Window<'scope, Parts, Ords, Frame> {
+    /// Decompose a built window into its `PARTITION BY` / `ORDER BY` / frame parts. Crate-private:
+    /// used by the named-`WINDOW`-clause builder to store a window definition on the query chain.
+    pub(crate) fn into_parts(self) -> (Parts, Ords, Frame) {
+        (self.partitions, self.orders, self.frame)
     }
 }
 
@@ -3310,6 +3398,23 @@ where
             _phantom: PhantomData,
         }
     }
+
+    /// Turn this aggregate into a window function over a query-level *named* window: `SUM(x) OVER w`.
+    /// Takes a [`WindowRef`] handle (from a [`select_over`](crate::WindowScope::select_over) closure),
+    /// so it can only reference a window that was actually declared with `.window(…)`. The window's
+    /// `PARTITION BY`/`ORDER BY`/frame is emitted once in the query's `WINDOW` clause instead of inline.
+    pub fn over_ref(self, window: WindowRef) -> Expr<'scope, K, NamedWindowExprAst<Operand>> {
+        Expr {
+            ast: NamedWindowExprAst {
+                func: WindowFunc::Aggregate(self.ast.func),
+                cast: self.ast.cast,
+                operand: self.ast.operand,
+                window_index: window.index,
+            },
+            project_alias: Cow::Borrowed("expr"),
+            _phantom: PhantomData,
+        }
+    }
 }
 
 /// A dedicated window function awaiting its `OVER (…)` clause (`OVER` is mandatory for a window
@@ -3348,6 +3453,23 @@ where
                 partitions: window.partitions,
                 orders: window.orders,
                 frame: window.frame,
+            },
+            project_alias: Cow::Borrowed("expr"),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Complete this window function against a query-level *named* window: `ROW_NUMBER() OVER w`. Takes
+    /// a [`WindowRef`] handle (from a [`select_over`](crate::WindowScope::select_over) closure), so it
+    /// can only reference a window declared with `.window(…)`; the definition is emitted once in the
+    /// query's `WINDOW` clause instead of inline.
+    pub fn over_ref(self, window: WindowRef) -> Expr<'scope, K, NamedWindowExprAst<Operand>> {
+        Expr {
+            ast: NamedWindowExprAst {
+                func: self.func,
+                cast: self.cast,
+                operand: self.operand,
+                window_index: window.index,
             },
             project_alias: Cow::Borrowed("expr"),
             _phantom: PhantomData,
@@ -4463,6 +4585,21 @@ pub trait ExprVisitor {
         Operand: FnOnce(&mut Self) -> Result<(), Self::Error>,
         Partitions: FnOnce(&mut Self) -> Result<(), Self::Error>,
         Orders: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
+    /// Render a *named*-window reference: `func(operand) OVER w<window_index>`, optionally wrapped in
+    /// `CAST(… AS cast)`. Unlike [`visit_window`](Self::visit_window), the `PARTITION BY`/`ORDER BY`/
+    /// frame specification is not inlined here — it is emitted once in the query's `WINDOW` clause (see
+    /// [`SelectSink::push_named_window`](crate::SelectSink::push_named_window)) and this expression only
+    /// references it by index. `operand` renders the function arguments (nothing for `ROW_NUMBER()`).
+    fn visit_named_window<Operand>(
+        &mut self,
+        func: WindowFunc,
+        cast: Option<&crate::SqlType>,
+        operand: Operand,
+        window_index: usize,
+    ) -> Result<(), Self::Error>
+    where
+        Operand: FnOnce(&mut Self) -> Result<(), Self::Error>;
 
     /// Render the separator (`, `) between elements of a window `PARTITION BY` / `ORDER BY` list.
     fn visit_window_separator(&mut self) -> Result<(), Self::Error>;
