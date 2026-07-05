@@ -1551,14 +1551,21 @@ fn named_window_reference_sets_contains_named_window_flag() {
 
     let named = RefCell::new(None);
     let inline = RefCell::new(None);
+    let wrapped = RefCell::new(None);
+    let plain_case = RefCell::new(None);
     let _q = TestConnection
         .from::<Post>()
         .window(|(post,)| Window::new().partition_by(post.user_id))
         .select_over(|(post,), w| {
-            *named.borrow_mut() = Some(post.user_id.sum().over_ref(w));
+            *named.borrow_mut() = Some(row_number().over_ref(w));
             *inline.borrow_mut() =
                 Some(post.user_id.sum().over(|w2| w2.partition_by(post.user_id)));
-            post.user_id.sum().over_ref(w)
+            // A named reference wrapped in arithmetic must still flag (propagation through wrappers).
+            *wrapped.borrow_mut() = Some(row_number().over_ref(w) + 1i64);
+            // A CASE with no window must not flag.
+            *plain_case.borrow_mut() =
+                Some(case().when(post.id.greater_than(0), 1i64).otherwise(0i64));
+            row_number().over_ref(w)
         });
 
     assert!(
@@ -1568,6 +1575,14 @@ fn named_window_reference_sets_contains_named_window_flag() {
     assert!(
         !contains(&inline.borrow().clone().unwrap()),
         "an inline window is self-contained and must not flag CONTAINS_NAMED_WINDOW"
+    );
+    assert!(
+        contains(&wrapped.borrow().clone().unwrap()),
+        "a named reference wrapped in arithmetic must still flag CONTAINS_NAMED_WINDOW"
+    );
+    assert!(
+        !contains(&plain_case.borrow().clone().unwrap()),
+        "a CASE with no named window must not flag CONTAINS_NAMED_WINDOW"
     );
 }
 
