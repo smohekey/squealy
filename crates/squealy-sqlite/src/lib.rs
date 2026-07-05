@@ -265,11 +265,17 @@ struct CapturedTrigger {
 /// diff re-applies a present view as `DROP VIEW … ; CREATE VIEW …`, and a `DROP VIEW` (like a
 /// `DROP TABLE` in a table rebuild) silently drops the triggers attached to it. Capturing here lets
 /// [`replay_dropped_triggers`] restore any that the batch removes but whose target still exists.
+///
+/// The join matches `tbl_name` to the target object `COLLATE NOCASE`: SQLite resolves object names
+/// case-insensitively but stores `sqlite_master.tbl_name` with the `CREATE TRIGGER` statement's casing,
+/// so a trigger created `ON activewidgets` for view `ActiveWidgets` must still find its target. Object
+/// names are unique case-insensitively, so the match is unambiguous; `target.name` (the canonical
+/// casing) is captured so replay's later exact-name lookups resolve.
 fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<CapturedTrigger>> {
     let mut statement = conn.prepare(
         "SELECT trigger.name, target.name, target.type, trigger.sql \
          FROM sqlite_master AS trigger \
-         JOIN sqlite_master AS target ON target.name = trigger.tbl_name \
+         JOIN sqlite_master AS target ON target.name = trigger.tbl_name COLLATE NOCASE \
          WHERE trigger.type = 'trigger' AND trigger.sql IS NOT NULL \
          AND target.type IN ('table', 'view')",
     )?;

@@ -1623,6 +1623,37 @@ async fn republishing_a_view_preserves_its_instead_of_trigger() {
 }
 
 #[tokio::test]
+async fn a_trigger_declared_with_different_target_casing_is_preserved() {
+    // SQLite resolves object names case-insensitively but stores `sqlite_master.tbl_name` with the
+    // trigger statement's casing. A trigger declared `ON active_widgets` for a view the model spells
+    // `active_widgets` matches directly, so exercise the mismatch: declare the trigger against an
+    // upper-cased target. The capture join is `COLLATE NOCASE`, so the trigger is still found and
+    // replayed across the view re-apply.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+    exec(
+        &raw,
+        "CREATE TRIGGER \"active_widgets_insert\" INSTEAD OF INSERT ON \"ACTIVE_WIDGETS\" \
+         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
+    )
+    .await;
+
+    let plan = plan_from_database(&table_and_view(), &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan the unchanged re-publish");
+    apply_plan(&plan, &table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("re-apply the unchanged model");
+
+    assert!(
+        trigger_exists(&raw, "active_widgets_insert").await,
+        "a trigger whose target casing differs must still be preserved across the view re-apply",
+    );
+}
+
+#[tokio::test]
 async fn an_explicit_drop_trigger_through_the_executor_is_honored() {
     // Trigger replay must not undo an intentional removal: a caller that runs `DROP TRIGGER` through the
     // DDL executor (leaving the target view in place) means the trigger to be gone. The batch scan marks
