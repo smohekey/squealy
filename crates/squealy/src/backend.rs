@@ -181,6 +181,13 @@ pub trait SupportsReturning: Backend {}
 /// `RIGHT JOIN` needs no marker — both backends support it.
 pub trait SupportsFullJoin: Backend {}
 
+/// Marker for backends whose dialect supports a query-level named `WINDOW` clause
+/// (`SELECT … OVER w … WINDOW w AS (…)`) — every real backend (PostgreSQL, MySQL 8.0+, SQLite 3.25+).
+/// The [`.window()`](crate::SourceQuery::window) builder requires it. It is deliberately *not*
+/// implemented for the view-model backend (`ModelBackend`), so named windows in a view body are a
+/// compile error: the view model does not yet carry window definitions (a query-only first cut).
+pub trait SupportsNamedWindow: Backend {}
+
 /// Marker for backends whose dialect supports `date_trunc(unit, ts)` (PostgreSQL). The `date_trunc`
 /// expression's `RenderAst` requires it, so a backend that does not implement it (such as MySQL, which
 /// has no `date_trunc`) rejects `date_trunc` at compile time. (`now` needs no marker — every backend

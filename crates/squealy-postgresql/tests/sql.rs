@@ -3110,6 +3110,28 @@ fn postgres_window_frame_clause_renders() {
     );
 }
 
+#[test]
+fn postgres_named_window_clause_renders() {
+    // One `WINDOW w0 AS (…)` shared by several `OVER w0` references, rendered after the source. The
+    // aggregate-over keeps its `CAST(… AS bigint)` wrapper around each reference (as the inline form
+    // does); the window definition itself binds no `$n` placeholders.
+    let q = Postgres
+        .from::<Post>()
+        .window(|(post,)| {
+            Window::new()
+                .partition_by(post.user_id)
+                .order_by(post.id.asc())
+        })
+        .select_over(|(post,), w| (post.user_id.sum().over_ref(w), row_number().over_ref(w)));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT CAST(SUM(q0_0.\"user_id\") OVER w0 AS bigint) AS \"t0_expr\", \
+         ROW_NUMBER() OVER w0 AS \"t1_expr\" FROM \"public\".\"posts\" AS q0_0 \
+         WINDOW w0 AS (PARTITION BY q0_0.\"user_id\" ORDER BY q0_0.\"id\" ASC)"
+    );
+    assert!(q.collect_params().unwrap().is_empty());
+}
+
 // PostgreSQL supports `NULLS FIRST`/`NULLS LAST`, so a view body carrying an explicit null ordering
 // renders it (the counterpart to MySQL dropping it).
 #[test]

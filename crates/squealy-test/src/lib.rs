@@ -36,6 +36,9 @@ impl squealy::SupportsDefaultKeyword for TestBackend {}
 // The test backend mirrors Postgres/MySQL, which support `EXTRACT(<field> FROM <ts>)`.
 impl squealy::SupportsExtract for TestBackend {}
 
+// The test backend mirrors Postgres/MySQL 8.0+, which support the named `WINDOW` clause.
+impl squealy::SupportsNamedWindow for TestBackend {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TestError {
     NoRows,

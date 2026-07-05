@@ -1458,6 +1458,135 @@ fn test_window_frame_without_partition_or_order() {
 }
 
 #[test]
+fn test_named_window_shared_by_multiple_aggregates() {
+    // The DRY case a named window exists for: one definition referenced by several projected
+    // expressions, rendered once as a `WINDOW w0 AS (…)` clause after the source.
+    let q = TestConnection
+        .from::<Post>()
+        .window(|(post,)| {
+            Window::new()
+                .partition_by(post.user_id)
+                .order_by(post.id.asc())
+        })
+        .select_over(|(post,), w| {
+            (
+                post.user_id.sum().over_ref(w),
+                post.user_id.avg().over_ref(w),
+            )
+        });
+    assert_eq!(
+        q.to_sql(),
+        "SELECT SUM(q0_0.user_id) OVER w0 AS t0_expr, AVG(q0_0.user_id) OVER w0 AS t1_expr \
+         FROM posts AS q0_0 WINDOW w0 AS (PARTITION BY q0_0.user_id ORDER BY q0_0.id ASC)"
+    );
+    // The window definition (columns/literal offsets only) binds no params.
+    assert!(q.collect_params().unwrap().is_empty());
+}
+
+#[test]
+fn test_named_window_with_ranking_function() {
+    let q = TestConnection
+        .from::<Post>()
+        .window(|(post,)| {
+            Window::new()
+                .partition_by(post.user_id)
+                .order_by(post.id.desc())
+        })
+        .select_over(|(_post,), w| row_number().over_ref(w));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT ROW_NUMBER() OVER w0 AS expr FROM posts AS q0_0 \
+         WINDOW w0 AS (PARTITION BY q0_0.user_id ORDER BY q0_0.id DESC)"
+    );
+}
+
+#[test]
+fn test_named_window_carries_a_frame() {
+    let q = TestConnection
+        .from::<Post>()
+        .window(|(post,)| {
+            Window::new()
+                .partition_by(post.user_id)
+                .order_by(post.id.asc())
+                .rows(unbounded_preceding(), current_row())
+        })
+        .select_over(|(post,), w| post.user_id.sum().over_ref(w));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT SUM(q0_0.user_id) OVER w0 AS expr FROM posts AS q0_0 WINDOW w0 AS \
+         (PARTITION BY q0_0.user_id ORDER BY q0_0.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
+    );
+}
+
+#[test]
+fn test_named_window_renders_after_having_before_order_by() {
+    // Clause position: the `WINDOW` clause lands after `HAVING` and before `ORDER BY`/`LIMIT`, even
+    // though `.window()` is chained after `.order_by()`/`.limit()` in builder order.
+    let q = TestConnection
+        .from::<Post>()
+        .order_by(|(post,)| post.id.asc())
+        .limit(5)
+        .window(|(post,)| Window::new().partition_by(post.user_id))
+        .select_over(|(post,), w| post.user_id.sum().over_ref(w));
+    assert_eq!(
+        q.to_sql(),
+        "SELECT SUM(q0_0.user_id) OVER w0 AS expr FROM posts AS q0_0 \
+         WINDOW w0 AS (PARTITION BY q0_0.user_id) ORDER BY q0_0.id ASC LIMIT 5"
+    );
+}
+
+// The compile-time guard that keeps an `over_ref` expression out of a plain `select` (which declares
+// no `WINDOW` clause) reads `ProjectionParams::CONTAINS_NAMED_WINDOW`. Lock the wiring of that flag:
+// a *named*-window reference sets it, while a self-contained *inline* window (`.over(...)`, always
+// valid in `select`) does not. (The guard itself is a post-monomorphization `const` assertion in
+// `select`/`project`/`select_subquery`/`select_correlated`, so it can't be a `trybuild` case; this
+// pins the flag those methods depend on.)
+#[test]
+fn named_window_reference_sets_contains_named_window_flag() {
+    use std::cell::RefCell;
+
+    fn contains<P: ProjectionParams>(_: &P) -> bool {
+        P::CONTAINS_NAMED_WINDOW
+    }
+
+    let named = RefCell::new(None);
+    let inline = RefCell::new(None);
+    let wrapped = RefCell::new(None);
+    let plain_case = RefCell::new(None);
+    let _q = TestConnection
+        .from::<Post>()
+        .window(|(post,)| Window::new().partition_by(post.user_id))
+        .select_over(|(post,), w| {
+            *named.borrow_mut() = Some(row_number().over_ref(w));
+            *inline.borrow_mut() =
+                Some(post.user_id.sum().over(|w2| w2.partition_by(post.user_id)));
+            // A named reference wrapped in arithmetic must still flag (propagation through wrappers).
+            *wrapped.borrow_mut() = Some(row_number().over_ref(w) + 1i64);
+            // A CASE with no window must not flag.
+            *plain_case.borrow_mut() =
+                Some(case().when(post.id.greater_than(0), 1i64).otherwise(0i64));
+            row_number().over_ref(w)
+        });
+
+    assert!(
+        contains(&named.borrow().clone().unwrap()),
+        "a named-window reference must flag CONTAINS_NAMED_WINDOW"
+    );
+    assert!(
+        !contains(&inline.borrow().clone().unwrap()),
+        "an inline window is self-contained and must not flag CONTAINS_NAMED_WINDOW"
+    );
+    assert!(
+        contains(&wrapped.borrow().clone().unwrap()),
+        "a named reference wrapped in arithmetic must still flag CONTAINS_NAMED_WINDOW"
+    );
+    assert!(
+        !contains(&plain_case.borrow().clone().unwrap()),
+        "a CASE with no named window must not flag CONTAINS_NAMED_WINDOW"
+    );
+}
+
+#[test]
 fn test_window_lag_over_left_joined_column_flattens_nullable() {
     // LAG over a left-joined (already-nullable) column must flatten to a single `Option<T>`, not
     // `Option<Option<T>>`. This compiles only because the result row type is `Option<i32>`.
