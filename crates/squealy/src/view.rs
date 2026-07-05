@@ -391,6 +391,25 @@ impl ExprVisitor for IrBuilder {
         Ok(())
     }
 
+    fn visit_named_window<Operand>(
+        &mut self,
+        _func: WindowFunc,
+        _cast: Option<&SqlType>,
+        _operand: Operand,
+        _window_index: usize,
+    ) -> io::Result<()>
+    where
+        Operand: FnOnce(&mut Self) -> io::Result<()>,
+    {
+        // Unreachable: a named-window reference can only be built via `.window(…).select_over(…)`, which
+        // is gated to `SupportsNamedWindow` backends. `ModelBackend` deliberately does not implement it,
+        // so a named window can never appear in a view body (the view model carries no window
+        // definitions yet). See `SupportsNamedWindow`.
+        unreachable!(
+            "named windows are not supported in view bodies (no `SupportsNamedWindow` for the view model)"
+        )
+    }
+
     fn visit_window_separator(&mut self) -> io::Result<()> {
         // List elements are already separated as distinct nodes on the stack.
         Ok(())

@@ -274,6 +274,18 @@ pub trait ExprAst: Clone {
     /// to `false` — and must **not** be cast there, since casting a custom-typed column (e.g. a
     /// PostgreSQL `citext` declared via `db_type`) would change the equality semantics.
     const NEEDS_CAST_ANCHOR: bool = false;
+
+    /// Whether this node contains a *named*-window reference (`… OVER w0`, i.e. [`NamedWindowExprAst`])
+    /// anywhere. Such a reference is only valid inside a [`select_over`](crate::WindowScope::select_over)
+    /// projection, which declares the matching `WINDOW` clause; `select`/`select_correlated`/`project`/
+    /// `select_subquery` reject a projection containing one (via
+    /// [`ProjectionParams::CONTAINS_NAMED_WINDOW`]), so an `over_ref` expression cannot be reused in a
+    /// query that declares no window. A named reference *can* nest inside another expression (e.g.
+    /// `over_ref(w) + 1`, or a `CASE`/`NULLIF`/`EXTRACT` over it), so every wrapper AST — and the
+    /// predicate AST reachable through a searched-`CASE` `WHEN` (see
+    /// [`PredicateAst::CONTAINS_NAMED_WINDOW`]) — folds its children's flag here. Defaults to `false`;
+    /// [`NamedWindowExprAst`] sets it `true`.
+    const IS_NAMED_WINDOW_REF: bool = false;
 }
 
 /// Backend-parameterized rendering for an expression AST node.
@@ -422,6 +434,8 @@ where
     Left::Params: crate::HAppend<Right::Params>,
 {
     type Params = <Left::Params as crate::HAppend<Right::Params>>::Output;
+
+    const IS_NAMED_WINDOW_REF: bool = Left::IS_NAMED_WINDOW_REF || Right::IS_NAMED_WINDOW_REF;
 }
 
 impl<Left, Right, B> RenderAst<B> for BinaryExprAst<Left, Right>
@@ -460,6 +474,8 @@ where
     Operand: ExprAst,
 {
     type Params = Operand::Params;
+
+    const IS_NAMED_WINDOW_REF: bool = Operand::IS_NAMED_WINDOW_REF;
 }
 
 impl<Operand, B, const DISTINCT: bool> RenderAst<B> for AggregateExprAst<Operand, DISTINCT>
@@ -519,6 +535,8 @@ where
     Operand: ExprAst,
 {
     type Params = Operand::Params;
+
+    const IS_NAMED_WINDOW_REF: bool = Operand::IS_NAMED_WINDOW_REF;
 }
 
 impl<Operand, B> RenderAst<B> for UnaryFnExprAst<Operand>
@@ -655,6 +673,8 @@ where
     Left::Params: crate::HAppend<Right::Params>,
 {
     type Params = <Left::Params as crate::HAppend<Right::Params>>::Output;
+
+    const IS_NAMED_WINDOW_REF: bool = Left::IS_NAMED_WINDOW_REF || Right::IS_NAMED_WINDOW_REF;
 }
 
 impl<Left, Right, B> RenderAst<B> for ConcatExprAst<Left, Right>
@@ -727,6 +747,9 @@ where
     type Params = <<S::Params as crate::HAppend<Start::Params>>::Output as crate::HAppend<
         Len::Params,
     >>::Output;
+
+    const IS_NAMED_WINDOW_REF: bool =
+        S::IS_NAMED_WINDOW_REF || Start::IS_NAMED_WINDOW_REF || Len::IS_NAMED_WINDOW_REF;
 }
 
 impl<S, Start, Len, B> RenderAst<B> for SubstringExprAst<S, Start, Len>
@@ -961,6 +984,8 @@ where
     Operand: ExprAst,
 {
     type Params = Operand::Params;
+
+    const IS_NAMED_WINDOW_REF: bool = Operand::IS_NAMED_WINDOW_REF;
 }
 
 impl<Operand, B> RenderAst<B> for ExtractExprAst<Operand>
@@ -1047,6 +1072,8 @@ where
     Operand: ExprAst,
 {
     type Params = Operand::Params;
+
+    const IS_NAMED_WINDOW_REF: bool = Operand::IS_NAMED_WINDOW_REF;
 }
 
 impl<Operand, B> RenderAst<B> for ExtractAtExprAst<Operand>
@@ -1134,6 +1161,8 @@ where
     Operand: ExprAst,
 {
     type Params = Operand::Params;
+
+    const IS_NAMED_WINDOW_REF: bool = Operand::IS_NAMED_WINDOW_REF;
 }
 
 impl<Operand, B> RenderAst<B> for ExtractSecondExprAst<Operand>
@@ -1218,6 +1247,8 @@ where
     Operand: ExprAst,
 {
     type Params = Operand::Params;
+
+    const IS_NAMED_WINDOW_REF: bool = Operand::IS_NAMED_WINDOW_REF;
 }
 
 impl<Operand, B> RenderAst<B> for DateTruncExprAst<Operand>
@@ -1750,6 +1781,10 @@ impl<PredAst, ValAst, Rest> NonEmptyArms for CaseWhen<PredAst, ValAst, Rest> {}
 #[doc(hidden)]
 pub trait CaseArmsParams {
     type Params: crate::HList;
+
+    /// Whether any arm (its `WHEN` predicate or `THEN` value) contains a named-window reference. Folded
+    /// into [`CaseExprAst`]'s [`ExprAst::IS_NAMED_WINDOW_REF`]. Defaults to `false` (the `CaseNil` tail).
+    const CONTAINS_NAMED_WINDOW: bool = false;
 }
 impl CaseArmsParams for CaseNil {
     type Params = crate::HNil;
@@ -1765,6 +1800,10 @@ where
     type Params = <<PredAst::Params as crate::HAppend<ValAst::Params>>::Output as crate::HAppend<
         Rest::Params,
     >>::Output;
+
+    const CONTAINS_NAMED_WINDOW: bool = PredAst::CONTAINS_NAMED_WINDOW
+        || ValAst::IS_NAMED_WINDOW_REF
+        || Rest::CONTAINS_NAMED_WINDOW;
 }
 
 /// All arm predicates are aggregate-free and all `THEN` values are aggregate-free — so the whole
@@ -1916,6 +1955,8 @@ where
     Arms::Params: crate::HAppend<Else::Params>,
 {
     type Params = <Arms::Params as crate::HAppend<Else::Params>>::Output;
+
+    const IS_NAMED_WINDOW_REF: bool = Arms::CONTAINS_NAMED_WINDOW || Else::IS_NAMED_WINDOW_REF;
 }
 
 impl<Arms, Else, B> RenderAst<B> for CaseExprAst<Arms, Else>
@@ -2092,6 +2133,8 @@ where
     Left::Params: crate::HAppend<Right::Params>,
 {
     type Params = <Left::Params as crate::HAppend<Right::Params>>::Output;
+
+    const IS_NAMED_WINDOW_REF: bool = Left::IS_NAMED_WINDOW_REF || Right::IS_NAMED_WINDOW_REF;
 }
 
 impl<Left, Right, B> RenderAst<B> for NullifExprAst<Left, Right>
@@ -2224,6 +2267,10 @@ where
 #[doc(hidden)]
 pub trait CoalesceArgsParams {
     type Params: crate::HList;
+
+    /// Whether any `COALESCE` argument contains a named-window reference. Folded into
+    /// [`CoalesceExprAst`]'s [`ExprAst::IS_NAMED_WINDOW_REF`]. Defaults to `false` (the `CoalesceNil` tail).
+    const CONTAINS_NAMED_WINDOW: bool = false;
 }
 impl CoalesceArgsParams for CoalesceNil {
     type Params = crate::HNil;
@@ -2235,6 +2282,8 @@ where
     ValAst::Params: crate::HAppend<Rest::Params>,
 {
     type Params = <ValAst::Params as crate::HAppend<Rest::Params>>::Output;
+
+    const CONTAINS_NAMED_WINDOW: bool = ValAst::IS_NAMED_WINDOW_REF || Rest::CONTAINS_NAMED_WINDOW;
 }
 
 /// Whether *every* argument is a bare literal/param ([`ExprAst::NEEDS_CAST_ANCHOR`]). When true the
@@ -2413,6 +2462,8 @@ where
     Args: CoalesceArgsParams + Clone,
 {
     type Params = Args::Params;
+
+    const IS_NAMED_WINDOW_REF: bool = Args::CONTAINS_NAMED_WINDOW;
 }
 
 impl<Args, B> RenderAst<B> for CoalesceExprAst<Args>
@@ -2573,6 +2624,10 @@ where
 #[doc(hidden)]
 pub trait SimpleCaseArmsParams {
     type Params: crate::HList;
+
+    /// Whether any simple-`CASE` arm (`WHEN`/`THEN` value) contains a named-window reference. Folded
+    /// into [`SimpleCaseExprAst`]'s [`ExprAst::IS_NAMED_WINDOW_REF`]. Defaults to `false` (`SimpleCaseNil`).
+    const CONTAINS_NAMED_WINDOW: bool = false;
 }
 impl SimpleCaseArmsParams for SimpleCaseNil {
     type Params = crate::HNil;
@@ -2589,6 +2644,9 @@ where
         <<WhenAst::Params as crate::HAppend<ThenAst::Params>>::Output as crate::HAppend<
             Rest::Params,
         >>::Output;
+
+    const CONTAINS_NAMED_WINDOW: bool =
+        WhenAst::IS_NAMED_WINDOW_REF || ThenAst::IS_NAMED_WINDOW_REF || Rest::CONTAINS_NAMED_WINDOW;
 }
 
 /// Whether every `WHEN` value is a bare literal/param ([`ExprAst::NEEDS_CAST_ANCHOR`]). Combined with
@@ -2752,6 +2810,9 @@ where
     type Params = <<Operand::Params as crate::HAppend<Arms::Params>>::Output as crate::HAppend<
         Else::Params,
     >>::Output;
+
+    const IS_NAMED_WINDOW_REF: bool =
+        Operand::IS_NAMED_WINDOW_REF || Arms::CONTAINS_NAMED_WINDOW || Else::IS_NAMED_WINDOW_REF;
 }
 
 impl<Operand, Arms, Else, B> RenderAst<B> for SimpleCaseExprAst<Operand, Arms, Else>
@@ -2975,6 +3036,10 @@ where
     type Params = <<Operand::Params as crate::HAppend<Parts::Params>>::Output as crate::HAppend<
         Ords::Params,
     >>::Output;
+
+    // An inline window's PARTITION BY / ORDER BY keys must be `NonAggregateAst` (which a named-window
+    // reference is not), so only the operand could carry one; propagate it for completeness.
+    const IS_NAMED_WINDOW_REF: bool = Operand::IS_NAMED_WINDOW_REF;
 }
 
 impl<Operand, Parts, Ords, Frame, B> RenderAst<B> for WindowExprAst<Operand, Parts, Ords, Frame>
@@ -3021,6 +3086,91 @@ impl<Operand, Parts, Ords, Frame> AstProjectionClass
 // `ExprColumns` (keeps them out of `HAVING`/whole-table-aggregate validity): a window function is
 // evaluated after grouping, so the backends reject it in any of those clauses. Normal `SELECT`/
 // `ORDER BY` classify via `AstProjectionClass` above, so they are unaffected.
+
+/// A compile-time proof that a named window was declared with [`.window()`](crate::SourceQuery::window).
+/// It is zero-sized and can only be obtained as the second argument of a
+/// [`select_over`](crate::WindowScope::select_over) projection closure, so a window reference
+/// ([`over_ref`](Expr::over_ref)) can never name a window that was not declared.
+///
+/// The `'brand` lifetime is an *invariant* brand unique to each `select_over` call (its closure is
+/// `for<'brand>`-quantified). It cannot be named by the caller, so a handle cannot escape the closure
+/// into an outer variable nor be mixed into a different query — that would render `OVER w0` with no
+/// matching `WINDOW w0 AS (…)`.
+#[derive(Clone, Copy, Debug)]
+pub struct WindowRef<'brand> {
+    // Private: mintable only by `select_over`. The index of the window it refers to in the query's
+    // `WINDOW` clause (currently always the sole window, `w0`).
+    index: usize,
+    // Invariant in `'brand` (both argument and return position of the `fn` pointer), so a handle of one
+    // brand never unifies with another and cannot outlive the `for<'brand>` closure that received it.
+    _brand: PhantomData<fn(&'brand ()) -> &'brand ()>,
+}
+
+impl WindowRef<'_> {
+    /// Mint a handle for the window at `index`. Crate-private so a reference cannot be forged.
+    pub(crate) fn new(index: usize) -> Self {
+        Self {
+            index,
+            _brand: PhantomData,
+        }
+    }
+}
+
+/// A window function that references a query-level named window (`func(operand) OVER w0`) rather than
+/// inlining its `OVER (…)` specification. Built by [`Expr::over_ref`] / [`PendingWindow::over_ref`] from
+/// a [`WindowRef`] handle; the window definition itself is emitted once in the query's `WINDOW` clause.
+/// Like [`WindowExprAst`] it is a per-row scalar ([`ColumnTerm`]) and — deliberately not [`NonWindowAst`]
+/// — is rejected in `RETURNING`/`WHERE`/`GROUP BY`/`HAVING`.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct NamedWindowExprAst<Operand> {
+    func: WindowFunc,
+    cast: Option<crate::SqlType>,
+    operand: Operand,
+    window_index: usize,
+}
+
+impl<Operand> ExprAst for NamedWindowExprAst<Operand>
+where
+    Operand: ExprAst,
+{
+    // The window definition lives in the `WINDOW` clause (param-free), so a named-window reference
+    // contributes exactly the operand's params (e.g. the `x` of `SUM(x) OVER w`).
+    type Params = Operand::Params;
+
+    // Referencing a named window is only sound inside `select_over` (which declares the window); the
+    // projection-building methods reject a projection carrying one. See `IS_NAMED_WINDOW_REF`.
+    const IS_NAMED_WINDOW_REF: bool = true;
+}
+
+impl<Operand, B> RenderAst<B> for NamedWindowExprAst<Operand>
+where
+    Operand: RenderAst<B>,
+    B: crate::Backend,
+{
+    fn visit<V>(&self, visitor: &mut V) -> Result<(), V::Error>
+    where
+        V: ExprVisitor<Backend = B>,
+    {
+        visitor.visit_named_window(
+            self.func,
+            self.cast.as_ref(),
+            |visitor| self.operand.visit(visitor),
+            self.window_index,
+        )
+    }
+}
+
+impl<Operand> AstProjectionClass for NamedWindowExprAst<Operand> {
+    type Class = ColumnTerm;
+}
+
+/// The SQL alias for the `index`-th named window (`w0`, `w1`, …). Shared by the `WINDOW w<n> AS (…)`
+/// clause renderer and the `OVER w<n>` reference so the definition and its uses always agree.
+#[doc(hidden)]
+pub fn named_window_alias(index: usize) -> String {
+    format!("w{index}")
+}
 
 /// Marker for an expression AST that is not a window function (recursive through [`BinaryExprAst`]).
 /// Window functions are evaluated after the result rows are produced, so they are invalid in a
@@ -3169,13 +3319,31 @@ pub struct Window<'scope, Parts = WindowNil, Ords = WindowNil, Frame = NoFrame> 
 }
 
 impl<'scope> Window<'scope, WindowNil, WindowNil, NoFrame> {
-    fn new() -> Self {
+    /// Start building a window specification for a named `WINDOW` clause:
+    /// `Window::new().partition_by(…).order_by(…)`, passed to
+    /// [`.window(|cols| …)`](crate::SourceQuery::window). (Inline `.over(|w| …)` supplies its own fresh
+    /// `Window`, so this constructor is only needed for the named form.)
+    pub fn new() -> Self {
         Self {
             partitions: WindowNil,
             orders: WindowNil,
             frame: NoFrame,
             _scope: PhantomData,
         }
+    }
+}
+
+impl<'scope> Default for Window<'scope, WindowNil, WindowNil, NoFrame> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'scope, Parts, Ords, Frame> Window<'scope, Parts, Ords, Frame> {
+    /// Decompose a built window into its `PARTITION BY` / `ORDER BY` / frame parts. Crate-private:
+    /// used by the named-`WINDOW`-clause builder to store a window definition on the query chain.
+    pub(crate) fn into_parts(self) -> (Parts, Ords, Frame) {
+        (self.partitions, self.orders, self.frame)
     }
 }
 
@@ -3310,6 +3478,29 @@ where
             _phantom: PhantomData,
         }
     }
+
+    /// Turn this aggregate into a window function over a query-level *named* window: `SUM(x) OVER w`.
+    /// Takes a [`WindowRef`] handle (from a [`select_over`](crate::WindowScope::select_over) closure),
+    /// so it can only reference a window that was actually declared with `.window(…)`. The window's
+    /// `PARTITION BY`/`ORDER BY`/frame is emitted once in the query's `WINDOW` clause instead of inline.
+    ///
+    /// Use the returned expression *inline* within its `select_over` projection. Deliberately stashing it
+    /// in an outer variable to reuse in a **different** `select_over` is unsupported: the reference is
+    /// positional (`w0`), so it would bind to that query's window rather than the one it was declared
+    /// against (a known limitation of the single named-window form). Reusing it in a query that declares
+    /// no window at all is instead rejected at compile time.
+    pub fn over_ref(self, window: WindowRef<'_>) -> Expr<'scope, K, NamedWindowExprAst<Operand>> {
+        Expr {
+            ast: NamedWindowExprAst {
+                func: WindowFunc::Aggregate(self.ast.func),
+                cast: self.ast.cast,
+                operand: self.ast.operand,
+                window_index: window.index,
+            },
+            project_alias: Cow::Borrowed("expr"),
+            _phantom: PhantomData,
+        }
+    }
 }
 
 /// A dedicated window function awaiting its `OVER (…)` clause (`OVER` is mandatory for a window
@@ -3348,6 +3539,24 @@ where
                 partitions: window.partitions,
                 orders: window.orders,
                 frame: window.frame,
+            },
+            project_alias: Cow::Borrowed("expr"),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Complete this window function against a query-level *named* window: `ROW_NUMBER() OVER w`. Takes
+    /// a [`WindowRef`] handle (from a [`select_over`](crate::WindowScope::select_over) closure), so it
+    /// can only reference a window declared with `.window(…)`; the definition is emitted once in the
+    /// query's `WINDOW` clause instead of inline. Use the result inline in its projection — see
+    /// [`Expr::over_ref`] for the note on reusing it across queries.
+    pub fn over_ref(self, window: WindowRef<'_>) -> Expr<'scope, K, NamedWindowExprAst<Operand>> {
+        Expr {
+            ast: NamedWindowExprAst {
+                func: self.func,
+                cast: self.cast,
+                operand: self.operand,
+                window_index: window.index,
             },
             project_alias: Cow::Borrowed("expr"),
             _phantom: PhantomData,
@@ -3413,6 +3622,8 @@ where
     ValueAst: ExprAst,
 {
     type Params = ValueAst::Params;
+
+    const IS_NAMED_WINDOW_REF: bool = ValueAst::IS_NAMED_WINDOW_REF;
 }
 
 impl<ValueAst, B> RenderAst<B> for LagArgsAst<ValueAst>
@@ -4464,6 +4675,21 @@ pub trait ExprVisitor {
         Partitions: FnOnce(&mut Self) -> Result<(), Self::Error>,
         Orders: FnOnce(&mut Self) -> Result<(), Self::Error>;
 
+    /// Render a *named*-window reference: `func(operand) OVER w<window_index>`, optionally wrapped in
+    /// `CAST(… AS cast)`. Unlike [`visit_window`](Self::visit_window), the `PARTITION BY`/`ORDER BY`/
+    /// frame specification is not inlined here — it is emitted once in the query's `WINDOW` clause (see
+    /// [`SelectSink::push_named_window`](crate::SelectSink::push_named_window)) and this expression only
+    /// references it by index. `operand` renders the function arguments (nothing for `ROW_NUMBER()`).
+    fn visit_named_window<Operand>(
+        &mut self,
+        func: WindowFunc,
+        cast: Option<&crate::SqlType>,
+        operand: Operand,
+        window_index: usize,
+    ) -> Result<(), Self::Error>
+    where
+        Operand: FnOnce(&mut Self) -> Result<(), Self::Error>;
+
     /// Render the separator (`, `) between elements of a window `PARTITION BY` / `ORDER BY` list.
     fn visit_window_separator(&mut self) -> Result<(), Self::Error>;
 
@@ -4867,6 +5093,13 @@ where
 /// subquery uses: a bare column or value carries no params, an expression carries its AST's.
 pub trait ProjectionParams {
     type Params: crate::HList;
+
+    /// Whether this projection contains a *named*-window reference (`… OVER w0`) anywhere. Only
+    /// [`select_over`](crate::WindowScope::select_over) may project one; `select`/`select_correlated`/
+    /// `project`/`select_subquery` `const`-assert this is `false`, so an `over_ref` expression cannot be
+    /// smuggled into a query that declares no `WINDOW` clause. Defaults to `false`; overridden by the
+    /// [`Expr`] impl (from its AST's [`ExprAst::IS_NAMED_WINDOW_REF`]) and folded across tuple elements.
+    const CONTAINS_NAMED_WINDOW: bool = false;
 }
 
 impl<'scope, K, Ast> ProjectionParams for Expr<'scope, K, Ast>
@@ -4874,6 +5107,8 @@ where
     Ast: ExprAst,
 {
     type Params = Ast::Params;
+
+    const CONTAINS_NAMED_WINDOW: bool = Ast::IS_NAMED_WINDOW_REF;
 }
 
 impl<K> ProjectionParams for ColumnRef<'_, K> {
@@ -5173,6 +5408,12 @@ impl<K> PredicateKind for IsNotNullPredicate<K> {}
 #[doc(hidden)]
 pub trait PredicateAst: Clone {
     type Params: crate::HList;
+
+    /// Whether this predicate contains a *named*-window reference (via a comparison/`BETWEEN`/etc.
+    /// operand). Only reachable in a projection through a searched-`CASE` `WHEN` predicate, so it feeds
+    /// [`CaseArmsParams::CONTAINS_NAMED_WINDOW`]. Defaults to `false`; overridden by predicate nodes
+    /// that wrap an [`ExprAst`] operand or another predicate. See [`ExprAst::IS_NAMED_WINDOW_REF`].
+    const CONTAINS_NAMED_WINDOW: bool = false;
 }
 
 /// Backend-parameterized rendering for a predicate AST node (mirror of [`RenderAst`]).
@@ -5230,6 +5471,8 @@ where
     Left::Params: crate::HAppend<Right::Params>,
 {
     type Params = <Left::Params as crate::HAppend<Right::Params>>::Output;
+
+    const CONTAINS_NAMED_WINDOW: bool = Left::IS_NAMED_WINDOW_REF || Right::IS_NAMED_WINDOW_REF;
 }
 
 impl<Left, Right, B> RenderPredicateAst<B> for ComparePredicateAst<Left, Right>
@@ -5258,6 +5501,8 @@ where
     Left::Params: crate::HAppend<Right::Params>,
 {
     type Params = <Left::Params as crate::HAppend<Right::Params>>::Output;
+
+    const CONTAINS_NAMED_WINDOW: bool = Left::CONTAINS_NAMED_WINDOW || Right::CONTAINS_NAMED_WINDOW;
 }
 
 impl<Left, Right, B> RenderPredicateAst<B> for AndPredicateAst<Left, Right>
@@ -5285,6 +5530,8 @@ where
     Left::Params: crate::HAppend<Right::Params>,
 {
     type Params = <Left::Params as crate::HAppend<Right::Params>>::Output;
+
+    const CONTAINS_NAMED_WINDOW: bool = Left::CONTAINS_NAMED_WINDOW || Right::CONTAINS_NAMED_WINDOW;
 }
 
 impl<Left, Right, B> RenderPredicateAst<B> for OrPredicateAst<Left, Right>
@@ -5310,6 +5557,8 @@ where
     Predicate: PredicateAst,
 {
     type Params = Predicate::Params;
+
+    const CONTAINS_NAMED_WINDOW: bool = Predicate::CONTAINS_NAMED_WINDOW;
 }
 
 impl<Predicate, B> RenderPredicateAst<B> for NotPredicateAst<Predicate>
@@ -5330,6 +5579,8 @@ where
     Operand: ExprAst,
 {
     type Params = Operand::Params;
+
+    const CONTAINS_NAMED_WINDOW: bool = Operand::IS_NAMED_WINDOW_REF;
 }
 
 impl<Operand, B> RenderPredicateAst<B> for NullCheckPredicateAst<Operand>
@@ -5364,6 +5615,8 @@ where
     Left::Params: crate::HAppend<Right::Params>,
 {
     type Params = <Left::Params as crate::HAppend<Right::Params>>::Output;
+
+    const CONTAINS_NAMED_WINDOW: bool = Left::IS_NAMED_WINDOW_REF || Right::IS_NAMED_WINDOW_REF;
 }
 
 impl<Left, Right, B> RenderPredicateAst<B> for LikePredicateAst<Left, Right>
@@ -5403,6 +5656,10 @@ where
     V: Clone,
 {
     type Params = Operand::Params;
+
+    // The `IN` value list holds literal values (it contributes no params — see `type Params`), so it
+    // cannot carry a named-window reference; only the operand can.
+    const CONTAINS_NAMED_WINDOW: bool = Operand::IS_NAMED_WINDOW_REF;
 }
 
 impl<Operand, V, B> RenderPredicateAst<B> for InPredicateAst<Operand, V>
@@ -5440,6 +5697,10 @@ where
     Operand::Params: crate::HAppend<Sub::Params>,
 {
     type Params = <Operand::Params as crate::HAppend<Sub::Params>>::Output;
+
+    // The subquery is a separate query that guards its own projection (via `select_subquery`); only the
+    // outer operand can carry a named-window reference from this scope.
+    const CONTAINS_NAMED_WINDOW: bool = Operand::IS_NAMED_WINDOW_REF;
 }
 
 impl<Operand, Sub, B> RenderPredicateAst<B> for InSubqueryPredicateAst<Operand, Sub>
@@ -5606,6 +5867,9 @@ where
     type Params = <<Operand::Params as crate::HAppend<Lo::Params>>::Output as crate::HAppend<
         Hi::Params,
     >>::Output;
+
+    const CONTAINS_NAMED_WINDOW: bool =
+        Operand::IS_NAMED_WINDOW_REF || Lo::IS_NAMED_WINDOW_REF || Hi::IS_NAMED_WINDOW_REF;
 }
 
 impl<Operand, Lo, Hi, B> RenderPredicateAst<B> for BetweenPredicateAst<Operand, Lo, Hi>
@@ -5644,6 +5908,8 @@ where
     Operand: ExprAst,
 {
     type Params = Operand::Params;
+
+    const CONTAINS_NAMED_WINDOW: bool = Operand::IS_NAMED_WINDOW_REF;
 }
 
 impl<Operand, B> RenderPredicateAst<B> for BoolTestPredicateAst<Operand>

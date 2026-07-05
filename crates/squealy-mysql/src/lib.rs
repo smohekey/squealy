@@ -145,6 +145,9 @@ impl squealy::SupportsDefaultKeyword for Mysql {}
 // MySQL supports `EXTRACT(<field> FROM <ts>)` (and the `SECOND_MICROSECOND` unit for fractional seconds).
 impl squealy::SupportsExtract for Mysql {}
 
+// MySQL 8.0+ supports the query-level named `WINDOW` clause.
+impl squealy::SupportsNamedWindow for Mysql {}
+
 impl SchemaBackend for Mysql {
     fn capabilities(&self) -> squealy::SchemaCapabilities {
         squealy::SchemaCapabilities {

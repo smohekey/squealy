@@ -3944,6 +3944,26 @@ pub trait SelectSink {
         K: ExprKind,
         Ast: RenderAst<Self::Backend>;
 
+    /// Push a query-level named `WINDOW` definition: `WINDOW w<index> AS (PARTITION BY … ORDER BY …
+    /// <frame>)`, rendered after `HAVING` and before `ORDER BY`. `partitions`/`orders` render their
+    /// lists (empty lists emit no keyword); `frame` is the optional frame clause. Defaulted to a no-op
+    /// so sinks that never see a named window (the param collector, the view-model sink) need no change
+    /// — only the SQL renderers override it.
+    fn push_named_window<Parts, Ords>(
+        &mut self,
+        index: usize,
+        partitions: &Parts,
+        orders: &Ords,
+        frame: Option<crate::FrameSpec>,
+    ) -> Result<(), Self::Error>
+    where
+        Parts: crate::RenderWindowList<Self::Backend>,
+        Ords: crate::RenderWindowList<Self::Backend>,
+    {
+        let _ = (index, partitions, orders, frame);
+        Ok(())
+    }
+
     fn set_limit(&mut self, rows: usize) -> Result<(), Self::Error>;
 
     fn set_offset(&mut self, rows: usize) -> Result<(), Self::Error>;
@@ -4387,6 +4407,7 @@ where
         self.base.lower_filters_into(sink)?;
         self.base.lower_groups_into(sink)?;
         self.base.lower_havings_into(sink)?;
+        self.base.lower_windows_into(sink)?;
         self.base.lower_orders_into(sink)?;
         self.base.lower_bounds_into(sink)
     }
@@ -4649,6 +4670,27 @@ where
         order.visit_expr(self)
     }
 
+    fn push_named_window<Parts, Ords>(
+        &mut self,
+        _index: usize,
+        partitions: &Parts,
+        orders: &Ords,
+        _frame: Option<crate::FrameSpec>,
+    ) -> Result<(), Self::Error>
+    where
+        Parts: crate::RenderWindowList<B>,
+        Ords: crate::RenderWindowList<B>,
+    {
+        // A named window's `PARTITION BY`/`ORDER BY` expressions may embed a scalar subquery that reads
+        // from a CTE, so walk them (as `visit_scalar_subquery` collects each `CteDef`); otherwise the
+        // `WINDOW` clause would render `FROM <cte>` without the matching `WITH` prefix. Frame bounds are
+        // literals and reference no CTE. Mirrors the inline path in `visit_window`.
+        let mut first = true;
+        partitions.render(self, &mut first)?;
+        let mut first = true;
+        orders.render(self, &mut first)
+    }
+
     fn set_limit(&mut self, _rows: usize) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -4901,6 +4943,21 @@ where
         operand(self)?;
         partitions(self)?;
         orders(self)
+    }
+
+    fn visit_named_window<Operand>(
+        &mut self,
+        _func: crate::WindowFunc,
+        _cast: Option<&crate::SqlType>,
+        operand: Operand,
+        _window_index: usize,
+    ) -> Result<(), Self::Error>
+    where
+        Operand: FnOnce(&mut Self) -> Result<(), Self::Error>,
+    {
+        // The window definition renders in the `WINDOW` clause (walked separately); here only the
+        // operand can reference a CTE (`SUM((SELECT … FROM cte)) OVER w`), so recurse into it.
+        operand(self)
     }
 
     fn visit_window_separator(&mut self) -> Result<(), Self::Error> {
@@ -5282,6 +5339,19 @@ where
     where
         Sink: SelectSink<Backend = B>;
 
+    /// Push any query-level named `WINDOW` definitions (rendered after `HAVING`, before `ORDER BY`).
+    /// Defaulted to a no-op — only the [`WindowBy`] link overrides it — so every existing chain link
+    /// (and its forwarding) is unaffected. Wrapper nodes need not forward it: a [`WindowBy`] is always
+    /// the outermost node of a chain that has one (it is built and consumed by
+    /// [`select_over`](WindowScope::select_over)), so no other link sits above it.
+    fn lower_windows_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        let _ = sink;
+        Ok(())
+    }
+
     fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
     where
         Sink: SelectSink<Backend = B>;
@@ -5304,11 +5374,12 @@ where
     where
         Sink: SelectSink<Backend = B>,
     {
-        // SQL clause order: WHERE → GROUP BY → HAVING → ORDER BY → LIMIT/OFFSET.
+        // SQL clause order: WHERE → GROUP BY → HAVING → WINDOW → ORDER BY → LIMIT/OFFSET.
         self.lower_sources_into(sink)?;
         self.lower_filters_into(sink)?;
         self.lower_groups_into(sink)?;
         self.lower_havings_into(sink)?;
+        self.lower_windows_into(sink)?;
         self.lower_orders_into(sink)?;
         self.lower_bounds_into(sink)
     }
@@ -5867,6 +5938,13 @@ impl_having_predicates_tuple!(
 pub trait OrderByTerms<'scope, Base> {
     type Output;
 
+    /// Whether any order term is (or wraps) a named-window reference. Query-level `ORDER BY` runs before
+    /// `select_over`, so a native named-window key is impossible — a `true` here can only be an escaped
+    /// `over_ref` expression, which [`SourceQuery::order_by`] rejects (it would render `… OVER w0` with
+    /// no `WINDOW` clause). Defaults to `false`; the [`Order`] term reads its AST's
+    /// [`ExprAst::IS_NAMED_WINDOW_REF`] and tuples fold across terms.
+    const CONTAINS_NAMED_WINDOW: bool = false;
+
     fn apply(self, base: Base) -> Self::Output;
 }
 
@@ -5885,6 +5963,8 @@ where
     Ast: ExprAst,
 {
     type Output = OrderBy<'scope, Base, K, Ast>;
+
+    const CONTAINS_NAMED_WINDOW: bool = Ast::IS_NAMED_WINDOW_REF;
 
     fn apply(self, base: Base) -> Self::Output {
         OrderBy { base, order: self }
@@ -5920,6 +6000,13 @@ macro_rules! impl_order_by_terms_tuple {
                 'scope,
                 <$head as OrderByTerms<'scope, Base>>::Output,
             >>::Output;
+
+            const CONTAINS_NAMED_WINDOW: bool =
+                <$head as OrderByTerms<'scope, Base>>::CONTAINS_NAMED_WINDOW
+                || <($($tail,)*) as OrderByTerms<
+                    'scope,
+                    <$head as OrderByTerms<'scope, Base>>::Output,
+                >>::CONTAINS_NAMED_WINDOW;
 
             #[allow(non_snake_case)]
             fn apply(self, base: Base) -> Self::Output {
@@ -6464,6 +6551,241 @@ where
         Sink: SelectSink<Backend = B>,
     {
         self.base.lower_distinct_into(sink)
+    }
+}
+
+// ===== Named `WINDOW` clause =====
+
+/// Compile-time guard: reject a projection carrying a named-window reference (`.over_ref(w)`) in a
+/// query-building method that declares no `WINDOW` clause (rendering `OVER w0` with no matching
+/// `WINDOW w0 AS (…)`). Only `select_over` may project one — it declares the window. Implemented as an
+/// inline `const` assertion over
+/// [`ProjectionParams::CONTAINS_NAMED_WINDOW`](crate::ProjectionParams::CONTAINS_NAMED_WINDOW).
+///
+/// This is a *post-monomorphization* const error: it fires on `cargo build`/`cargo test` and any real
+/// compilation (so CI and every build catch the misuse with the message below), but not on a bare
+/// `cargo check` — a stable-Rust limitation, since a check-time trait bound would need negative impls.
+/// The misuse it guards is contrived (deliberately stashing an `over_ref` expression out of the
+/// `select_over` closure to reuse elsewhere); the un-forgeable [`WindowRef`](crate::WindowRef) brand
+/// already stops the *handle* from escaping.
+macro_rules! assert_projection_has_no_named_window {
+    ($projection:ty) => {
+        const {
+            assert!(
+                !<$projection as crate::ProjectionParams>::CONTAINS_NAMED_WINDOW,
+                "a named-window reference (`.over_ref(w)`) can only be projected by `.select_over(...)`, which declares the matching `WINDOW` clause; it cannot be used in `select`/`select_correlated`/`project`/`select_subquery`"
+            )
+        }
+    };
+}
+
+/// A select chain carrying one query-level named `WINDOW` definition (`… WINDOW w0 AS (PARTITION BY …
+/// ORDER BY … <frame>)`). Wraps the base chain plus the sole window's spec. It is *always the outermost*
+/// node of a chain that has one — [`WindowScope::select_over`] builds it and immediately consumes it into
+/// a `Selected`, so nothing is ever chained on top. That is why its `SelectAst` impl forwards every one
+/// of the base's associated types unchanged and its `RenderSelectAst` need not have any other link
+/// forward `lower_windows_into`: a named window's `PARTITION BY`/`ORDER BY` are param-free (enforced by
+/// [`WindowScope::select_over`]), so it contributes no runtime params and the param buckets are the
+/// base's verbatim.
+#[doc(hidden)]
+pub struct WindowBy<'scope, Base, Parts, Ords, Frame> {
+    base: Base,
+    partitions: Parts,
+    orders: Ords,
+    frame: Frame,
+    _scope: PhantomData<&'scope ()>,
+}
+
+impl<'conn, 'scope, Conn, Base, Parts, Ords, Frame> SelectAst<'conn, 'scope, Conn>
+    for WindowBy<'scope, Base, Parts, Ords, Frame>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: SelectAst<'conn, 'scope, Conn>,
+{
+    type Exprs = Base::Exprs;
+    type Params = Base::Params;
+    type SourceParams = Base::SourceParams;
+    type FilterParams = Base::FilterParams;
+    type GroupParams = Base::GroupParams;
+    type HavingParams = Base::HavingParams;
+    type OrderParams = Base::OrderParams;
+    type OrderClass = Base::OrderClass;
+    type Grouped = Base::Grouped;
+    type Distinctness = Base::Distinctness;
+    type OrderKeys = Base::OrderKeys;
+    type RowLockState = Base::RowLockState;
+    type OuterJoinState = Base::OuterJoinState;
+
+    fn depth(&self) -> usize {
+        self.base.depth()
+    }
+
+    fn connection(&self) -> &'conn Conn {
+        self.base.connection()
+    }
+
+    fn exprs(&self) -> Self::Exprs {
+        self.base.exprs()
+    }
+
+    fn collect_ctes_into(&self, ctes: &mut Vec<&'static dyn crate::CteDef>) {
+        self.base.collect_ctes_into(ctes);
+    }
+}
+
+impl<'conn, 'scope, Conn, Base, Parts, Ords, Frame, B> RenderSelectAst<'conn, 'scope, Conn, B>
+    for WindowBy<'scope, Base, Parts, Ords, Frame>
+where
+    Conn: QueryBuilder + 'conn,
+    Base: RenderSelectAst<'conn, 'scope, Conn, B>,
+    Parts: crate::RenderWindowList<B>,
+    Ords: crate::RenderWindowList<B>,
+    Frame: crate::WindowFrame,
+    B: Backend,
+{
+    fn lower_sources_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_sources_into(sink)
+    }
+
+    fn lower_filters_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_filters_into(sink)
+    }
+
+    fn lower_groups_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_groups_into(sink)
+    }
+
+    fn lower_havings_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_havings_into(sink)
+    }
+
+    fn lower_windows_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        sink.push_named_window(0, &self.partitions, &self.orders, self.frame.spec())
+    }
+
+    fn lower_orders_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_orders_into(sink)
+    }
+
+    fn lower_bounds_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_bounds_into(sink)
+    }
+
+    fn lower_distinct_into<Sink>(&self, sink: &mut Sink) -> Result<(), Sink::Error>
+    where
+        Sink: SelectSink<Backend = B>,
+    {
+        self.base.lower_distinct_into(sink)
+    }
+}
+
+/// A select chain with a declared named window, awaiting its projection. Produced by
+/// [`SourceQuery::window`]; call [`select_over`](Self::select_over) to finish the query — its projection
+/// closure receives a [`WindowRef`](crate::WindowRef) handle for referencing the window via
+/// [`over_ref`](crate::Expr::over_ref).
+pub struct WindowScope<'scope, Base, Parts, Ords, Frame> {
+    base: Base,
+    partitions: Parts,
+    orders: Ords,
+    frame: Frame,
+    _scope: PhantomData<&'scope ()>,
+}
+
+impl<'scope, Base, Parts, Ords, Frame> WindowScope<'scope, Base, Parts, Ords, Frame> {
+    /// Finish the query like [`select`](SourceQuery::select), but the projection closure also receives a
+    /// [`WindowRef`](crate::WindowRef) handle — pass it to
+    /// [`over_ref`](crate::Expr::over_ref)/[`PendingWindow::over_ref`](crate::PendingWindow::over_ref) to
+    /// reference the declared window (`SUM(x) OVER w`). The window definition renders once as `WINDOW w0
+    /// AS (…)` after `HAVING`. The window's `PARTITION BY`/`ORDER BY` must be param-free (they carry no
+    /// bind parameters — columns and literal offsets only).
+    pub fn select_over<'conn, Conn, P, Indices>(
+        self,
+    // `for<'brand>`: the closure must accept a window handle of *any* brand, so the handle it
+    // receives cannot escape into an outer variable or a different query (its brand is a fresh,
+    // un-nameable lifetime). This is what makes `over_ref` a sound proof the window was declared.
+        projection: impl for<'brand> FnOnce(
+            <Base::Exprs as ToTuple>::Tuple,
+            crate::WindowRef<'brand>,
+        ) -> P,
+    ) -> Conn::Select<
+        'conn,
+        'scope,
+        WindowBy<'scope, Base, Parts, Ords, Frame>,
+        <P as ReturningProjection<'scope>>::Shape,
+        P,
+    >
+    where
+        Conn: QueryBuilder + 'conn,
+        Base: SelectAst<'conn, 'scope, Conn>,
+    // A named window's `PARTITION BY`/`ORDER BY` may not carry runtime params (it renders in the
+    // `WINDOW` clause, whose params are not threaded through the chain's param buckets).
+        Parts: crate::WindowListParams<Params = HNil>,
+        Ords: crate::WindowListParams<Params = HNil>,
+        WindowBy<'scope, Base, Parts, Ords, Frame>: SelectAst<'conn, 'scope, Conn>,
+        P: ReturningProjection<'scope> + Projectable + crate::ProjectionParams<Params = HNil>,
+        <WindowBy<'scope, Base, Parts, Ords, Frame> as SelectAst<'conn, 'scope, Conn>>::Grouped:
+            crate::ValidSelect<
+                P,
+                <WindowBy<'scope, Base, Parts, Ords, Frame> as SelectAst<'conn, 'scope, Conn>>::OrderClass,
+            >,
+        <WindowBy<'scope, Base, Parts, Ords, Frame> as SelectAst<'conn, 'scope, Conn>>::Distinctness:
+            crate::DistinctOrderGate<
+                <WindowBy<'scope, Base, Parts, Ords, Frame> as SelectAst<'conn, 'scope, Conn>>::OrderKeys,
+                <P as ReturningProjection<'scope>>::Shape,
+                Indices,
+            >,
+        <WindowBy<'scope, Base, Parts, Ords, Frame> as SelectAst<'conn, 'scope, Conn>>::RowLockState:
+            crate::RowLockSelectValid<
+                <WindowBy<'scope, Base, Parts, Ords, Frame> as SelectAst<'conn, 'scope, Conn>>::Distinctness,
+                <WindowBy<'scope, Base, Parts, Ords, Frame> as SelectAst<'conn, 'scope, Conn>>::Grouped,
+                <WindowBy<'scope, Base, Parts, Ords, Frame> as SelectAst<'conn, 'scope, Conn>>::OuterJoinState,
+                P,
+            >,
+        <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
+        <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
+    {
+        let projection = projection(self.base.exprs().to_tuple(), crate::WindowRef::new(0));
+        let query = WindowBy {
+            base: self.base,
+            partitions: self.partitions,
+            orders: self.orders,
+            frame: self.frame,
+            _scope: PhantomData,
+        };
+        let selected = Selected::<'scope, _, <P as ReturningProjection<'scope>>::Shape, _>::new(
+            query, projection,
+        );
+        let connection = selected.connection::<Conn>();
+        <<Conn as QueryBuilder>::Select<
+            'conn,
+            'scope,
+            WindowBy<'scope, Base, Parts, Ords, Frame>,
+            <P as ReturningProjection<'scope>>::Shape,
+            P,
+        > as SelectQuery<'conn, 'scope, WindowBy<'scope, Base, Parts, Ords, Frame>, P>>::build_selected(
+            connection, selected,
+        )
     }
 }
 
@@ -7505,6 +7827,15 @@ where
     where
         Orders: OrderByTerms<'scope, Self>,
     {
+        // A named-window reference cannot legitimately appear in a query-level `ORDER BY` (the handle
+        // only exists inside a later `select_over`), so a `true` here is an escaped `over_ref`
+        // expression that would render `… OVER w0` with no `WINDOW` clause. See the guard macro.
+        const {
+            assert!(
+                !<Orders as OrderByTerms<'scope, Self>>::CONTAINS_NAMED_WINDOW,
+                "a named-window reference (`.over_ref(w)`) cannot be used in `order_by`; it is only valid inside the `select_over` projection that declares the `WINDOW` clause"
+            )
+        };
         orders(self.exprs().to_tuple()).apply(self)
     }
 
@@ -7534,6 +7865,40 @@ where
         Preds: HavingPredicates<'scope, Self>,
     {
         predicates(self.exprs().to_tuple()).apply(self)
+    }
+
+    /// Declare a query-level named window that projected expressions reference by handle instead of
+    /// inlining the same `OVER (…)`, rendering a single shared `WINDOW w0 AS (…)`. The closure receives
+    /// the source column tuple and returns a [`Window`](crate::Window) (built as in `.over(|w| …)`, e.g.
+    /// `Window::new().partition_by(s.region).order_by(s.day.asc())`). Complete the query with
+    /// [`select_over`](WindowScope::select_over), whose projection closure gets a
+    /// [`WindowRef`](crate::WindowRef) proving the window exists (so `over_ref` cannot name an
+    /// undeclared window). Gated to backends with a named `WINDOW` clause (PostgreSQL, MySQL 8.0+,
+    /// SQLite 3.25+); not available in a view body (the view model has no window definitions yet).
+    ///
+    /// ```ignore
+    /// db.from::<Sales>()
+    ///     .window(|(s,)| Window::new().partition_by(s.region).order_by(s.day.asc()))
+    ///     .select_over(|(s,), w| (s.amount.sum().over_ref(w), s.amount.avg().over_ref(w)));
+    /// // SELECT SUM(amount) OVER w0, AVG(amount) OVER w0
+    /// //   FROM sales AS … WINDOW w0 AS (PARTITION BY region ORDER BY day ASC)
+    /// ```
+    fn window<Parts, Ords, Frame>(
+        self,
+        build: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> crate::Window<'scope, Parts, Ords, Frame>,
+    ) -> WindowScope<'scope, Self, Parts, Ords, Frame>
+    where
+        Conn::Backend: crate::SupportsNamedWindow,
+    {
+        let window = build(self.exprs().to_tuple());
+        let (partitions, orders, frame) = window.into_parts();
+        WindowScope {
+            base: self,
+            partitions,
+            orders,
+            frame,
+            _scope: PhantomData,
+        }
     }
 
     /// Like [`where_`](Self::where_), but the closure also receives a [`Subqueries`] handle for
@@ -7567,7 +7932,7 @@ where
         projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
     ) -> SubquerySelect<'conn, 'scope, Conn, Self, <P as ReturningProjection<'scope>>::Shape, P>
     where
-        P: ReturningProjection<'scope> + Projectable,
+        P: ReturningProjection<'scope> + Projectable + crate::ProjectionParams,
         <Self as SelectAst<'conn, 'scope, Conn>>::Grouped:
             crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
         // Under `DISTINCT`, every `ORDER BY` key must appear in the projection; non-distinct chains are
@@ -7587,6 +7952,7 @@ where
             >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
     {
+        assert_projection_has_no_named_window!(P);
         let exprs = self.exprs();
         let projection = projection(exprs.to_tuple());
         let selected = Selected::<'scope, _, <P as ReturningProjection<'scope>>::Shape, _>::new(
@@ -7756,6 +8122,7 @@ where
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
         <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
     {
+        assert_projection_has_no_named_window!(P);
         let exprs = self.exprs();
         let projection = projection(exprs.to_tuple());
         let selected = Selected::<'scope, _, <P as ReturningProjection<'scope>>::Shape, _>::new(
@@ -7780,7 +8147,7 @@ where
         projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
     ) -> Selected<'scope, Self, <P as ReturningProjection<'scope>>::Shape, P>
     where
-        P: ReturningProjection<'scope> + Projectable,
+        P: ReturningProjection<'scope> + Projectable + crate::ProjectionParams,
         <Self as SelectAst<'conn, 'scope, Conn>>::Grouped:
             crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
         // Under `DISTINCT`, every `ORDER BY` key must appear in the projection; non-distinct chains are
@@ -7800,6 +8167,7 @@ where
             >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
     {
+        assert_projection_has_no_named_window!(P);
         let exprs = self.exprs();
         let projection = projection(exprs.to_tuple());
         Selected::<'scope, _, <P as ReturningProjection<'scope>>::Shape, _>::new(self, projection)
@@ -7839,6 +8207,7 @@ where
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
         <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
     {
+        assert_projection_has_no_named_window!(P);
         let subqueries = Subqueries::new(self.connection(), self.depth() + 1);
         let exprs = self.exprs();
         let projection = projection(exprs.to_tuple(), subqueries);
