@@ -1594,6 +1594,51 @@ fn mysql_renders_view_expression_ir_in_its_dialect() {
     );
 }
 
+#[test]
+fn mysql_view_now_renders_with_microsecond_precision() {
+    // A `now()` (`ExprNode::Now`) in a view body must render `CURRENT_TIMESTAMP(6)` on MySQL too, so a
+    // view result keeps its microseconds (the view renderer is a separate path from the query renderer).
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: vec![ViewModel {
+                name: "clock".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "at".to_owned(),
+                    ty: SqlType::Timestamp {
+                        tz: true,
+                        precision: Some(6),
+                    },
+                    nullable: false,
+                }],
+                query: ViewQueryModel {
+                    dependencies: Vec::new(),
+                    distinct: false,
+                    projection: vec![ProjectionItem {
+                        output_name: "at".to_owned(),
+                        expr: ExprNode::Now,
+                    }],
+                    from: None,
+                    joins: Vec::new(),
+                    filter: None,
+                    group_by: Vec::new(),
+                    having: None,
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                },
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+    assert!(sql.contains("CURRENT_TIMESTAMP(6)"), "{sql}");
+}
+
 // MySQL has no `NULLS FIRST`/`NULLS LAST` syntax, so a view body carrying an explicit null ordering
 // (e.g. from a package or hand-built model) must render without it rather than emitting invalid DDL.
 #[test]
