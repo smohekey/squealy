@@ -318,9 +318,12 @@ fn replay_dropped_triggers(
         {
             continue;
         }
+        // Both name lookups use `COLLATE NOCASE` to match SQLite's case-insensitive identifier
+        // resolution: a batch that recreates an object (or trigger) under a differently-cased spelling of
+        // the same name is still the same object, so the captured casing must not cause a miss.
         let still_present = conn
             .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+                "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?1 COLLATE NOCASE",
                 [&trigger.name],
                 |_| Ok(()),
             )
@@ -331,7 +334,8 @@ fn replay_dropped_triggers(
         }
         let target_type: Option<String> = conn
             .query_row(
-                "SELECT type FROM sqlite_master WHERE name = ?1 AND type IN ('table', 'view')",
+                "SELECT type FROM sqlite_master WHERE name = ?1 COLLATE NOCASE \
+                 AND type IN ('table', 'view')",
                 [&trigger.target],
                 |row| row.get(0),
             )
@@ -355,6 +359,21 @@ enum DdlToken {
     Dot,
 }
 
+/// The exclusive end of a quoted run's inner content, given the open-delimiter offset, the run's end
+/// (`next`, from [`introspect::skip_noncode`]) and the `closing` delimiter byte.
+///
+/// A well-formed run ends with its closing delimiter at `next - 1`, which is stripped. An unterminated
+/// run (end-of-input reached with no close) or a lone delimiter (`next - 1` would point back at the
+/// opening one) has no closing delimiter to strip, so the content runs to `next` — keeping the slice
+/// bounds ordered and on `char` boundaries so malformed DDL cannot panic the scanner.
+fn quoted_inner_end(bytes: &[u8], open: usize, next: usize, closing: u8) -> usize {
+    if next > open + 1 && bytes[next - 1] == closing {
+        next - 1
+    } else {
+        next
+    }
+}
+
 /// Lexes a DDL batch into [`DdlToken`]s, reusing the introspection scanner's quote/comment handling so a
 /// keyword or identifier inside a string literal, quoted identifier or comment is never read as code.
 fn tokenize_ddl(sql: &str) -> Vec<DdlToken> {
@@ -369,11 +388,15 @@ fn tokenize_ddl(sql: &str) -> Vec<DdlToken> {
             match byte {
                 b'"' | b'`' | b'\'' => {
                     let quote = byte as char;
-                    let inner = &sql[index + 1..next - 1];
+                    let inner = &sql[index + 1..quoted_inner_end(bytes, index, next, byte)];
                     let decoded = inner.replace(&format!("{quote}{quote}"), &quote.to_string());
                     tokens.push(DdlToken::Ident(decoded));
                 }
-                b'[' => tokens.push(DdlToken::Ident(sql[index + 1..next - 1].to_owned())),
+                b'[' => {
+                    tokens.push(DdlToken::Ident(
+                        sql[index + 1..quoted_inner_end(bytes, index, next, b']')].to_owned(),
+                    ));
+                }
                 _ => {}
             }
             index = next;
@@ -906,5 +929,22 @@ mod tests {
                 .is_empty(),
         );
         assert!(explicitly_dropped_trigger_names("DROP VIEW v; DROP TABLE t").is_empty());
+    }
+
+    #[test]
+    fn tolerates_unterminated_or_stray_quoted_tokens_without_panicking() {
+        // The scanner runs before `execute_batch`, so malformed DDL (a stray or unterminated quote,
+        // including one that ends mid-UTF-8) must not panic — SQLite surfaces the syntax error instead.
+        for sql in [
+            "DROP TRIGGER \"",
+            "'",
+            "DROP TRIGGER 'unterminated",
+            "junk [",
+            "DROP TRIGGER `",
+            "DROP TRIGGER \"é",
+            "\"\"",
+        ] {
+            let _ = explicitly_dropped_trigger_names(sql);
+        }
     }
 }

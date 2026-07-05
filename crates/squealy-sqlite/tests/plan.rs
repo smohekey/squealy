@@ -1654,6 +1654,38 @@ async fn a_trigger_declared_with_different_target_casing_is_preserved() {
 }
 
 #[tokio::test]
+async fn a_view_recreated_with_only_its_name_casing_changed_preserves_its_trigger() {
+    // The replay's target lookup must be case-insensitive too: if a batch drops a view and recreates it
+    // under a differently-cased spelling of the same name, SQLite treats it as the same object, so the
+    // trigger (captured under the old casing) must still match the survivor and be replayed.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+    exec(
+        &raw,
+        "CREATE TRIGGER \"active_widgets_insert\" INSTEAD OF INSERT ON \"active_widgets\" \
+         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
+    )
+    .await;
+
+    // Drop and recreate the view under a differently-cased name, through the executor (the drop+create
+    // shape SQLite view churn uses), so trigger replay runs around it.
+    connection
+        .execute_ddl(
+            "DROP VIEW \"active_widgets\"; \
+             CREATE VIEW \"Active_Widgets\" AS SELECT \"id\" FROM \"widgets\" WHERE \"active\" > 0",
+        )
+        .await
+        .expect("recreate the view with only its casing changed");
+
+    assert!(
+        trigger_exists(&raw, "active_widgets_insert").await,
+        "the trigger must be preserved across a case-only recreation of its target view",
+    );
+}
+
+#[tokio::test]
 async fn an_explicit_drop_trigger_through_the_executor_is_honored() {
     // Trigger replay must not undo an intentional removal: a caller that runs `DROP TRIGGER` through the
     // DDL executor (leaving the target view in place) means the trigger to be gone. The batch scan marks
