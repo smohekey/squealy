@@ -188,10 +188,10 @@ impl DdlExecutor for SqliteConnection {
     /// instead of committing silently. The prior setting is read and restored (rather than forced on) so
     /// a caller that left enforcement off on a [`new`](SqliteConnection::new)-built handle keeps it off.
     ///
-    /// User-defined triggers dropped by the batch (a `DROP VIEW`/`DROP TABLE` cascades to its triggers,
-    /// and SQLite has no `CREATE OR REPLACE VIEW`) are captured beforehand and replayed if their target
-    /// object survives, so re-applying a view preserves the `INSTEAD OF` triggers that make it writeable
-    /// (see [`capture_triggers`]/[`replay_dropped_triggers`]).
+    /// User-defined triggers **on a view** that the batch drops (a `DROP VIEW` cascades to its triggers,
+    /// and SQLite has no `CREATE OR REPLACE VIEW`) are captured beforehand and replayed if the view
+    /// survives, so re-applying a view preserves the `INSTEAD OF` triggers that make it writeable (see
+    /// [`capture_triggers`]/[`replay_dropped_triggers`]).
     async fn execute_ddl(&mut self, sql: &str) -> Result<(), SqliteError> {
         let sql = sql.to_owned();
         self.conn
@@ -221,8 +221,8 @@ impl DdlExecutor for SqliteConnection {
 /// not checked statement-by-statement; `PRAGMA foreign_key_check` verifies it before the commit, and
 /// any violation aborts the batch (the transaction rolls back on the early return).
 ///
-/// User-defined triggers are captured before the batch and any that the batch drops — but whose target
-/// object survives — are replayed afterwards (see [`replay_dropped_triggers`]).
+/// User-defined triggers on a view are captured before the batch and any that the batch drops — but
+/// whose view survives — are replayed afterwards (see [`replay_dropped_triggers`]).
 fn apply_ddl_batch(conn: &mut rusqlite::Connection, sql: &str) -> rusqlite::Result<()> {
     let transaction = conn.transaction()?;
     let triggers = capture_triggers(&transaction)?;
@@ -243,62 +243,64 @@ fn apply_ddl_batch(conn: &mut rusqlite::Connection, sql: &str) -> rusqlite::Resu
     transaction.commit()
 }
 
-/// A user-defined trigger captured before a DDL batch runs (from `sqlite_master` or, for a `TEMP`
-/// trigger, `sqlite_temp_master`), so it can be replayed if the batch drops it out from under a
-/// surviving object.
+/// A user-defined trigger **on a view** captured before a DDL batch runs (from `sqlite_master` or, for a
+/// `TEMP` trigger, `sqlite_temp_master`), so it can be replayed if the batch drops the view out from
+/// under it.
+///
+/// Only view triggers (`INSTEAD OF`, which make a view writeable — the actual concern of this backend's
+/// view re-apply churn) are captured. Table triggers are left alone: a table rebuild that changes a
+/// column would replay a trigger whose `NEW`/`OLD` body references it, which SQLite accepts at
+/// `CREATE TRIGGER` time and only rejects when the trigger fires — a silent break. (A view's columns are
+/// stable across a churn re-apply — the body is unchanged, and a view column-set change is a blocked
+/// destructive drop — so a view trigger never goes stale this way.)
 struct CapturedTrigger {
     /// The trigger's name (unique within its schema; how we detect whether the batch dropped it).
     name: String,
-    /// The table or view the trigger fires on (`tbl_name`).
+    /// The view the trigger fires on (`tbl_name`).
     target: String,
-    /// The target's object type (`"table"` or `"view"`) when captured. A same-named replacement of the
-    /// other type (a supported table↔view swap) must not receive the trigger — an `AFTER`/`BEFORE`
-    /// trigger cannot live on a view, nor an `INSTEAD OF` on a table.
-    target_type: String,
     /// The stored `CREATE TRIGGER …` text (SQLite strips `TEMP` from it; [`replay_dropped_triggers`]
     /// re-injects it when `is_temp`).
     sql: String,
     /// Whether the trigger lived in `sqlite_temp_master` (a `TEMP` trigger) rather than `sqlite_master`.
-    /// A `DROP VIEW`/`DROP TABLE` drops a temp trigger on that object too, so it must be recaptured and
-    /// recreated as `TEMP` (else replay would resurrect it as a persistent trigger).
+    /// A `DROP VIEW` drops a temp trigger on that view too, so it must be recaptured and recreated as
+    /// `TEMP` (else replay would resurrect it as a persistent trigger).
     is_temp: bool,
-    /// Whether the trigger's target object lived in the temp schema (resolved with SQLite's
+    /// Whether the trigger's target view lived in the temp schema (resolved with SQLite's
     /// temp-shadows-main precedence at capture). Replay only treats *that* schema as the surviving target,
-    /// so a dropped temp object is not confused with a same-named `main` object.
+    /// so a dropped temp view is not confused with a same-named `main` view.
     target_is_temp: bool,
 }
 
-/// Snapshots every user-defined trigger before a DDL batch runs.
+/// Snapshots every user-defined trigger **on a view** before a DDL batch runs.
 ///
 /// squealy has no trigger model, so any trigger present is user-managed out of band — most importantly
 /// the `INSTEAD OF` triggers that make a view writeable. SQLite has no `CREATE OR REPLACE VIEW`, so the
-/// diff re-applies a present view as `DROP VIEW … ; CREATE VIEW …`, and a `DROP VIEW` (like a
-/// `DROP TABLE` in a table rebuild) silently drops the triggers attached to it. Capturing here lets
-/// [`replay_dropped_triggers`] restore any that the batch removes but whose target still exists.
+/// diff re-applies a present view as `DROP VIEW … ; CREATE VIEW …`, and a `DROP VIEW` silently drops the
+/// triggers attached to it. Capturing here lets [`replay_dropped_triggers`] restore any that the batch
+/// removes but whose view still exists. Only view triggers are captured (see [`CapturedTrigger`]).
 ///
-/// Both persistent (`sqlite_master`) and `TEMP` (`sqlite_temp_master`) triggers are captured, since a
-/// `DROP VIEW`/`DROP TABLE` drops a temp trigger on that object as well. The join matches `tbl_name` to
-/// the target object `COLLATE NOCASE`: SQLite resolves object names case-insensitively but stores
-/// `tbl_name` with the `CREATE TRIGGER` statement's casing, so a trigger created `ON activewidgets` for
-/// view `ActiveWidgets` must still find its target. Object names are unique case-insensitively within a
-/// schema, so the match is unambiguous once the target schema is fixed.
+/// Both persistent (`sqlite_master`) and `TEMP` (`sqlite_temp_master`) view triggers are captured, since
+/// a `DROP VIEW` drops a temp trigger on that view as well. The join matches `tbl_name` to the target
+/// view `COLLATE NOCASE`: SQLite resolves object names case-insensitively but stores `tbl_name` with the
+/// `CREATE TRIGGER` statement's casing, so a trigger created `ON activewidgets` for view `ActiveWidgets`
+/// must still find its target. Object names are unique case-insensitively within a schema, so the match
+/// is unambiguous once the target schema is fixed.
 ///
-/// The `WHERE` clause resolves each trigger to a single target with SQLite's own scoping: a persistent
-/// trigger's target is in `main`; a temp trigger's target is the temp object of that name if one exists
-/// (temp shadows main), else the `main` object. `target.is_temp` records which, so replay only treats
-/// that schema as the surviving target and never confuses a dropped temp object with a same-named
-/// `main` one.
+/// The `WHERE` clause resolves each trigger to a single target view with SQLite's own scoping: a
+/// persistent trigger's target is in `main`; a temp trigger's target is the temp view of that name if
+/// one exists (temp shadows main), else the `main` view — but only when no temp object of *any* type
+/// shadows the name (a temp table would capture the resolution and is not a view trigger). `is_temp`
+/// records which schema, so replay only treats that schema as the surviving target.
 fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<CapturedTrigger>> {
     let mut statement = conn.prepare(
-        "SELECT trigger.name, target.name, target.type, trigger.sql, trigger.is_temp, target.is_temp \
+        "SELECT trigger.name, target.name, trigger.sql, trigger.is_temp, target.is_temp \
          FROM (SELECT name, tbl_name, sql, 0 AS is_temp FROM sqlite_master WHERE type = 'trigger' \
                UNION ALL \
                SELECT name, tbl_name, sql, 1 AS is_temp FROM sqlite_temp_master WHERE type = 'trigger') \
               AS trigger \
-         JOIN (SELECT name, type, 0 AS is_temp FROM sqlite_master WHERE type IN ('table', 'view') \
+         JOIN (SELECT name, 0 AS is_temp FROM sqlite_master WHERE type = 'view' \
                UNION ALL \
-               SELECT name, type, 1 AS is_temp FROM sqlite_temp_master WHERE type IN ('table', 'view')) \
-              AS target \
+               SELECT name, 1 AS is_temp FROM sqlite_temp_master WHERE type = 'view') AS target \
               ON target.name = trigger.tbl_name COLLATE NOCASE \
          WHERE trigger.sql IS NOT NULL AND ( \
                (trigger.is_temp = 0 AND target.is_temp = 0) \
@@ -313,34 +315,32 @@ fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Capture
             Ok(CapturedTrigger {
                 name: row.get(0)?,
                 target: row.get(1)?,
-                target_type: row.get(2)?,
-                sql: row.get(3)?,
-                is_temp: row.get::<_, i64>(4)? != 0,
-                target_is_temp: row.get::<_, i64>(5)? != 0,
+                sql: row.get(2)?,
+                is_temp: row.get::<_, i64>(3)? != 0,
+                target_is_temp: row.get::<_, i64>(4)? != 0,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(triggers)
 }
 
-/// Recreates any captured trigger that the batch dropped but whose target object survives.
+/// Recreates any captured view trigger that the batch dropped but whose view survives.
 ///
-/// A trigger still present (in its schema) survived the batch (its object was untouched) and is left
-/// alone. A trigger now missing was dropped with its object; it is replayed only if an object of the
-/// **same type** still holds its name — a view re-created under the same name is the churn case this
-/// fixes. If the name is gone (the user removed the object) or now holds the other object type (a
-/// supported table↔view swap — an `AFTER`/`BEFORE` trigger cannot recreate on a view, nor an
-/// `INSTEAD OF` on a table), the trigger is legitimately gone and is not resurrected. Replaying the
-/// stored text reproduces the trigger exactly (re-injecting `TEMP` for a temp trigger, which SQLite
+/// A trigger still present (in its schema) survived the batch (its view was untouched) and is left
+/// alone. A trigger now missing was dropped with its view; it is replayed only if a **view** of that
+/// name still exists — a view re-created under the same name is the churn case this fixes. If the name is
+/// gone (the user removed the view) or now holds a table (a supported view→table swap — an `INSTEAD OF`
+/// trigger cannot live on a table), the trigger is legitimately gone and is not resurrected. Replaying
+/// the stored text reproduces the trigger exactly (re-injecting `TEMP` for a temp trigger, which SQLite
 /// strips from the stored SQL), and the missing-name guard means it never collides with a survivor.
 ///
 /// A trigger the batch **explicitly** dropped (`DROP TRIGGER`, in `explicitly_dropped`) is honored — its
-/// disappearance is the caller's intent, not a side effect of dropping its target — so it is never
-/// replayed even though its target survives.
+/// disappearance is the caller's intent, not a side effect of dropping its view — so it is never
+/// replayed even though its view survives.
 ///
 /// Lookups use `COLLATE NOCASE` (SQLite resolves identifiers case-insensitively) and are scoped to the
-/// captured schema: the survivor check runs against the trigger's own schema, and the surviving-target
-/// check against the target's schema (both recorded at capture), so temp and `main` objects that share a
+/// captured schema: the survivor check runs against the trigger's own schema, and the surviving-view
+/// check against the view's schema (both recorded at capture), so temp and `main` views that share a
 /// name are never conflated.
 fn replay_dropped_triggers(
     conn: &rusqlite::Connection,
@@ -367,19 +367,19 @@ fn replay_dropped_triggers(
         if still_present {
             continue;
         }
-        // Look for the surviving target only in the schema the trigger was attached to, so a dropped temp
-        // object is never confused with a same-named `main` object (and vice versa).
-        let target_query = if trigger.target_is_temp {
-            "SELECT type FROM sqlite_temp_master WHERE name = ?1 COLLATE NOCASE \
-             AND type IN ('table', 'view')"
+        // Replay only if a view of that name survives in the schema the trigger was attached to, so a
+        // dropped temp view is never confused with a same-named `main` view, and a view→table swap (the
+        // name now holds a table) does not receive the `INSTEAD OF` trigger.
+        let surviving_view_query = if trigger.target_is_temp {
+            "SELECT 1 FROM sqlite_temp_master WHERE name = ?1 COLLATE NOCASE AND type = 'view'"
         } else {
-            "SELECT type FROM sqlite_master WHERE name = ?1 COLLATE NOCASE \
-             AND type IN ('table', 'view')"
+            "SELECT 1 FROM sqlite_master WHERE name = ?1 COLLATE NOCASE AND type = 'view'"
         };
-        let target_type: Option<String> = conn
-            .query_row(target_query, [&trigger.target], |row| row.get(0))
-            .optional()?;
-        if target_type.as_deref() == Some(trigger.target_type.as_str()) {
+        let view_survives = conn
+            .query_row(surviving_view_query, [&trigger.target], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if view_survives {
             let statement = if trigger.is_temp {
                 as_temp_create_trigger(&trigger.sql)
             } else {

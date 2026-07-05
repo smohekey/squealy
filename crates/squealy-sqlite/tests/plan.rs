@@ -1893,10 +1893,9 @@ async fn replacing_a_table_with_a_same_named_view_succeeds() {
 
 #[tokio::test]
 async fn replacing_a_triggered_table_with_a_same_named_view_does_not_replay_the_trigger() {
-    // A table→view swap keeps the name but changes the object type. Trigger replay keys on the target's
-    // captured type, so a table's `AFTER` trigger is NOT replayed onto the replacement view (SQLite only
-    // allows `INSTEAD OF` on views — a blind name-only replay would fail and roll back this supported
-    // migration). The trigger is legitimately gone with its table.
+    // Only view triggers are captured, so a table's `AFTER` trigger is never a replay candidate. A
+    // table→view swap must therefore not roll back trying to recreate that trigger on the replacement
+    // view (SQLite only allows `INSTEAD OF` on views); the trigger is legitimately gone with its table.
     let (mut connection, raw) = setup().await;
     let v1 = DatabaseModel {
         schemas: vec![SchemaModel {
@@ -1948,6 +1947,43 @@ async fn replacing_a_triggered_table_with_a_same_named_view_does_not_replay_the_
     assert!(
         !trigger_exists(&raw, "summary_after_insert").await,
         "the table's AFTER trigger must not be resurrected onto the replacement view",
+    );
+}
+
+#[tokio::test]
+async fn a_table_trigger_is_not_preserved_across_a_rebuild() {
+    // Trigger preservation is scoped to view (`INSTEAD OF`) triggers. A table's `AFTER`/`BEFORE` trigger
+    // is intentionally NOT replayed across a rebuild: a rebuild that drops or renames a column would
+    // otherwise recreate a trigger whose `NEW`/`OLD` body references the old column, which SQLite accepts
+    // at CREATE time and only rejects when it fires — a silent break. A rebuild dropping the table's
+    // trigger (pre-existing SQLite behavior) is preferable to resurrecting a stale one.
+    let (mut connection, raw) = setup().await;
+    publish(&one_table(widget_table()), &Sqlite, &mut connection)
+        .await
+        .expect("publish widgets");
+    exec(
+        &raw,
+        "CREATE TRIGGER \"widgets_after_insert\" AFTER INSERT ON \"widgets\" BEGIN SELECT 1; END",
+    )
+    .await;
+
+    // A UNIQUE is inline-only in SQLite, so adding one forces a create-copy-drop-rename rebuild.
+    let mut widgets = widget_table();
+    widgets.uniques.push(Constraint {
+        name: String::new(),
+        columns: vec!["id".to_owned()],
+    });
+    let v2 = one_table(widgets);
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan the rebuild");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply the rebuild");
+
+    assert!(
+        !trigger_exists(&raw, "widgets_after_insert").await,
+        "a table trigger is not preserved across a rebuild (scoped out to avoid stale-column replay)",
     );
 }
 
