@@ -6661,7 +6661,13 @@ impl<'scope, Base, Parts, Ords, Frame> WindowScope<'scope, Base, Parts, Ords, Fr
     /// bind parameters — columns and literal offsets only).
     pub fn select_over<'conn, Conn, P, Indices>(
         self,
-        projection: impl FnOnce(<Base::Exprs as ToTuple>::Tuple, crate::WindowRef) -> P,
+    // `for<'brand>`: the closure must accept a window handle of *any* brand, so the handle it
+    // receives cannot escape into an outer variable or a different query (its brand is a fresh,
+    // un-nameable lifetime). This is what makes `over_ref` a sound proof the window was declared.
+        projection: impl for<'brand> FnOnce(
+            <Base::Exprs as ToTuple>::Tuple,
+            crate::WindowRef<'brand>,
+        ) -> P,
     ) -> Conn::Select<
         'conn,
         'scope,

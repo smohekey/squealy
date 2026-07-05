@@ -3026,17 +3026,28 @@ impl<Operand, Parts, Ords, Frame> AstProjectionClass
 /// It is zero-sized and can only be obtained as the second argument of a
 /// [`select_over`](crate::WindowScope::select_over) projection closure, so a window reference
 /// ([`over_ref`](Expr::over_ref)) can never name a window that was not declared.
+///
+/// The `'brand` lifetime is an *invariant* brand unique to each `select_over` call (its closure is
+/// `for<'brand>`-quantified). It cannot be named by the caller, so a handle cannot escape the closure
+/// into an outer variable nor be mixed into a different query — that would render `OVER w0` with no
+/// matching `WINDOW w0 AS (…)`.
 #[derive(Clone, Copy, Debug)]
-pub struct WindowRef {
+pub struct WindowRef<'brand> {
     // Private: mintable only by `select_over`. The index of the window it refers to in the query's
     // `WINDOW` clause (currently always the sole window, `w0`).
     index: usize,
+    // Invariant in `'brand` (both argument and return position of the `fn` pointer), so a handle of one
+    // brand never unifies with another and cannot outlive the `for<'brand>` closure that received it.
+    _brand: PhantomData<fn(&'brand ()) -> &'brand ()>,
 }
 
-impl WindowRef {
+impl WindowRef<'_> {
     /// Mint a handle for the window at `index`. Crate-private so a reference cannot be forged.
     pub(crate) fn new(index: usize) -> Self {
-        Self { index }
+        Self {
+            index,
+            _brand: PhantomData,
+        }
     }
 }
 
@@ -3403,7 +3414,7 @@ where
     /// Takes a [`WindowRef`] handle (from a [`select_over`](crate::WindowScope::select_over) closure),
     /// so it can only reference a window that was actually declared with `.window(…)`. The window's
     /// `PARTITION BY`/`ORDER BY`/frame is emitted once in the query's `WINDOW` clause instead of inline.
-    pub fn over_ref(self, window: WindowRef) -> Expr<'scope, K, NamedWindowExprAst<Operand>> {
+    pub fn over_ref(self, window: WindowRef<'_>) -> Expr<'scope, K, NamedWindowExprAst<Operand>> {
         Expr {
             ast: NamedWindowExprAst {
                 func: WindowFunc::Aggregate(self.ast.func),
@@ -3463,7 +3474,7 @@ where
     /// a [`WindowRef`] handle (from a [`select_over`](crate::WindowScope::select_over) closure), so it
     /// can only reference a window declared with `.window(…)`; the definition is emitted once in the
     /// query's `WINDOW` clause instead of inline.
-    pub fn over_ref(self, window: WindowRef) -> Expr<'scope, K, NamedWindowExprAst<Operand>> {
+    pub fn over_ref(self, window: WindowRef<'_>) -> Expr<'scope, K, NamedWindowExprAst<Operand>> {
         Expr {
             ast: NamedWindowExprAst {
                 func: self.func,
