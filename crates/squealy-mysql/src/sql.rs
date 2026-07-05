@@ -559,7 +559,7 @@ fn write_mysql_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()>
 
 /// Renders a `TIME`/`TIMESTAMP`/`DATETIME` type with its optional fractional-seconds precision.
 fn write_mysql_temporal(
-    writer: &mut impl Write,
+    writer: &mut dyn Write,
     base: &str,
     precision: Option<u8>,
 ) -> io::Result<()> {
@@ -875,8 +875,15 @@ impl squealy::Dialect for MysqlDialect {
             SqlType::F32 | SqlType::F64 => "DOUBLE",
             SqlType::Decimal { .. } => "DECIMAL",
             SqlType::Date => "DATE",
-            SqlType::Time { .. } => "TIME",
-            SqlType::Timestamp { .. } => "DATETIME",
+            // A timestamp/time cast carries its fractional-seconds precision (`DATETIME(6)`), so a
+            // `CASE`/`COALESCE` result feeding a `TIMESTAMP(6)` column keeps its microseconds rather than
+            // being truncated to fsp 0. (`TIMESTAMP` is not a valid MySQL cast target — `DATETIME` is.)
+            SqlType::Time { precision, .. } => {
+                return write_mysql_temporal(writer, "TIME", *precision);
+            }
+            SqlType::Timestamp { precision, .. } => {
+                return write_mysql_temporal(writer, "DATETIME", *precision);
+            }
             // Both variable and fixed-width binary cast to `BINARY` so a binary expression operand in
             // `CASE`/`NULLIF`/`COALESCE` stays binary instead of being coerced through the text charset.
             SqlType::Bytes | SqlType::FixedBytes(_) => "BINARY",
@@ -1163,6 +1170,22 @@ mod tests {
         assert_eq!(dialect_cast(SqlType::I128), "DECIMAL(65, 0)");
         assert_eq!(dialect_cast(SqlType::U128), "DECIMAL(65, 0)");
         assert_eq!(dialect_cast(SqlType::String), "CHAR");
+        // A timestamp/time cast carries its precision (`TIMESTAMP` is not a MySQL cast target;
+        // `DATETIME` is), so a `CASE`/`COALESCE` result keeps its microseconds.
+        assert_eq!(
+            dialect_cast(SqlType::Timestamp {
+                tz: true,
+                precision: Some(6)
+            }),
+            "DATETIME(6)"
+        );
+        assert_eq!(
+            dialect_cast(SqlType::Time {
+                tz: false,
+                precision: None
+            }),
+            "TIME"
+        );
 
         assert!(
             !MysqlDialect.integer_division_needs_float_cast(),
