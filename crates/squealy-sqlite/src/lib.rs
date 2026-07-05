@@ -221,12 +221,12 @@ impl DdlExecutor for SqliteConnection {
 /// not checked statement-by-statement; `PRAGMA foreign_key_check` verifies it before the commit, and
 /// any violation aborts the batch (the transaction rolls back on the early return).
 ///
-/// User-defined triggers on a view are captured before the batch and any that the batch drops — but
-/// whose view survives — are replayed afterwards (see [`replay_dropped_triggers`]).
+/// Persistent user-defined triggers on a view are captured before the batch and any that the batch drops
+/// — but whose view survives — are replayed afterwards (see [`replay_dropped_triggers`]).
 fn apply_ddl_batch(conn: &mut rusqlite::Connection, sql: &str) -> rusqlite::Result<()> {
     let transaction = conn.transaction()?;
     let triggers = capture_triggers(&transaction)?;
-    let explicitly_dropped = explicitly_dropped_trigger_names(sql);
+    let explicitly_dropped = explicitly_dropped_triggers(sql);
     transaction.execute_batch(sql)?;
     replay_dropped_triggers(&transaction, &triggers, &explicitly_dropped)?;
     let has_violation = {
@@ -243,72 +243,48 @@ fn apply_ddl_batch(conn: &mut rusqlite::Connection, sql: &str) -> rusqlite::Resu
     transaction.commit()
 }
 
-/// A user-defined trigger **on a view** captured before a DDL batch runs (from `sqlite_master` or, for a
-/// `TEMP` trigger, `sqlite_temp_master`), so it can be replayed if the batch drops the view out from
-/// under it.
+/// A persistent user-defined trigger **on a view** captured before a DDL batch runs, so it can be
+/// replayed if the batch drops the view out from under it.
 ///
-/// Only view triggers (`INSTEAD OF`, which make a view writeable — the actual concern of this backend's
-/// view re-apply churn) are captured. Table triggers are left alone: a table rebuild that changes a
-/// column would replay a trigger whose `NEW`/`OLD` body references it, which SQLite accepts at
-/// `CREATE TRIGGER` time and only rejects when the trigger fires — a silent break. (A view's columns are
-/// stable across a churn re-apply — the body is unchanged, and a view column-set change is a blocked
-/// destructive drop — so a view trigger never goes stale this way.)
+/// Only persistent view triggers (`INSTEAD OF`, which make a view writeable — the actual concern of this
+/// backend's view re-apply churn) are captured:
+/// - **Table triggers** are left alone: a table rebuild that changes a column would replay a trigger
+///   whose `NEW`/`OLD` body references it, which SQLite accepts at `CREATE TRIGGER` time and only rejects
+///   when the trigger fires — a silent break. (A view's columns are stable across a churn re-apply — the
+///   body is unchanged, and a view column-set change is a blocked destructive drop — so a view trigger
+///   never goes stale this way.)
+/// - **`TEMP` triggers** are left alone: they are per-connection and session-scoped (dropped when the
+///   connection closes), so preserving one across a mid-session re-publish has little value, and the
+///   temp/`main` shadowing and qualified-name (`ON main.v`) interactions make correct handling fraught.
 struct CapturedTrigger {
-    /// The trigger's name (unique within its schema; how we detect whether the batch dropped it).
+    /// The trigger's name (unique in the schema; how we detect whether the batch dropped it).
     name: String,
-    /// The view the trigger fires on (`tbl_name`).
+    /// The view the trigger fires on (`sqlite_master.tbl_name`).
     target: String,
-    /// The stored `CREATE TRIGGER …` text (SQLite strips `TEMP` from it; [`replay_dropped_triggers`]
-    /// re-injects it when `is_temp`).
+    /// The stored `CREATE TRIGGER …` text, replayed verbatim to recreate the trigger.
     sql: String,
-    /// Whether the trigger lived in `sqlite_temp_master` (a `TEMP` trigger) rather than `sqlite_master`.
-    /// A `DROP VIEW` drops a temp trigger on that view too, so it must be recaptured and recreated as
-    /// `TEMP` (else replay would resurrect it as a persistent trigger).
-    is_temp: bool,
-    /// Whether the trigger's target view lived in the temp schema (resolved with SQLite's
-    /// temp-shadows-main precedence at capture). Replay only treats *that* schema as the surviving target,
-    /// so a dropped temp view is not confused with a same-named `main` view.
-    target_is_temp: bool,
 }
 
-/// Snapshots every user-defined trigger **on a view** before a DDL batch runs.
+/// Snapshots every persistent user-defined trigger **on a view** before a DDL batch runs.
 ///
 /// squealy has no trigger model, so any trigger present is user-managed out of band — most importantly
 /// the `INSTEAD OF` triggers that make a view writeable. SQLite has no `CREATE OR REPLACE VIEW`, so the
 /// diff re-applies a present view as `DROP VIEW … ; CREATE VIEW …`, and a `DROP VIEW` silently drops the
 /// triggers attached to it. Capturing here lets [`replay_dropped_triggers`] restore any that the batch
-/// removes but whose view still exists. Only view triggers are captured (see [`CapturedTrigger`]).
+/// removes but whose view still exists. Only persistent view triggers are captured (see
+/// [`CapturedTrigger`]).
 ///
-/// Both persistent (`sqlite_master`) and `TEMP` (`sqlite_temp_master`) view triggers are captured, since
-/// a `DROP VIEW` drops a temp trigger on that view as well. The join matches `tbl_name` to the target
-/// view `COLLATE NOCASE`: SQLite resolves object names case-insensitively but stores `tbl_name` with the
-/// `CREATE TRIGGER` statement's casing, so a trigger created `ON activewidgets` for view `ActiveWidgets`
-/// must still find its target. Object names are unique case-insensitively within a schema, so the match
-/// is unambiguous once the target schema is fixed.
-///
-/// The `WHERE` clause resolves each trigger to a single target view with SQLite's own scoping: a
-/// persistent trigger's target is in `main`; a temp trigger's target is the temp view of that name if
-/// one exists (temp shadows main), else the `main` view — but only when no temp object of *any* type
-/// shadows the name (a temp table would capture the resolution and is not a view trigger). `is_temp`
-/// records which schema, so replay only treats that schema as the surviving target.
+/// The join matches `tbl_name` to the target view `COLLATE NOCASE`: SQLite resolves object names
+/// case-insensitively but stores `tbl_name` with the `CREATE TRIGGER` statement's casing, so a trigger
+/// created `ON activewidgets` for view `ActiveWidgets` must still find its target. Object names are
+/// unique case-insensitively within a schema, so the match is unambiguous.
 fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<CapturedTrigger>> {
     let mut statement = conn.prepare(
-        "SELECT trigger.name, target.name, trigger.sql, trigger.is_temp, target.is_temp \
-         FROM (SELECT name, tbl_name, sql, 0 AS is_temp FROM sqlite_master WHERE type = 'trigger' \
-               UNION ALL \
-               SELECT name, tbl_name, sql, 1 AS is_temp FROM sqlite_temp_master WHERE type = 'trigger') \
-              AS trigger \
-         JOIN (SELECT name, 0 AS is_temp FROM sqlite_master WHERE type = 'view' \
-               UNION ALL \
-               SELECT name, 1 AS is_temp FROM sqlite_temp_master WHERE type = 'view') AS target \
-              ON target.name = trigger.tbl_name COLLATE NOCASE \
-         WHERE trigger.sql IS NOT NULL AND ( \
-               (trigger.is_temp = 0 AND target.is_temp = 0) \
-               OR (trigger.is_temp = 1 AND target.is_temp = 1) \
-               OR (trigger.is_temp = 1 AND target.is_temp = 0 AND NOT EXISTS ( \
-                     SELECT 1 FROM sqlite_temp_master AS shadow \
-                     WHERE shadow.type IN ('table', 'view') \
-                     AND shadow.name = trigger.tbl_name COLLATE NOCASE)))",
+        "SELECT trigger.name, target.name, trigger.sql \
+         FROM sqlite_master AS trigger \
+         JOIN sqlite_master AS target \
+              ON target.name = trigger.tbl_name COLLATE NOCASE AND target.type = 'view' \
+         WHERE trigger.type = 'trigger' AND trigger.sql IS NOT NULL",
     )?;
     let triggers = statement
         .query_map([], |row| {
@@ -316,8 +292,6 @@ fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Capture
                 name: row.get(0)?,
                 target: row.get(1)?,
                 sql: row.get(2)?,
-                is_temp: row.get::<_, i64>(3)? != 0,
-                target_is_temp: row.get::<_, i64>(4)? != 0,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -326,82 +300,68 @@ fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Capture
 
 /// Recreates any captured view trigger that the batch dropped but whose view survives.
 ///
-/// A trigger still present (in its schema) survived the batch (its view was untouched) and is left
-/// alone. A trigger now missing was dropped with its view; it is replayed only if a **view** of that
-/// name still exists — a view re-created under the same name is the churn case this fixes. If the name is
-/// gone (the user removed the view) or now holds a table (a supported view→table swap — an `INSTEAD OF`
+/// A trigger still present in `sqlite_master` survived the batch (its view was untouched) and is left
+/// alone. A trigger now missing was dropped with its view; it is replayed only if a **view** of that name
+/// still exists — a view re-created under the same name is the churn case this fixes. If the name is gone
+/// (the user removed the view) or now holds a table (a supported view→table swap — an `INSTEAD OF`
 /// trigger cannot live on a table), the trigger is legitimately gone and is not resurrected. Replaying
-/// the stored text reproduces the trigger exactly (re-injecting `TEMP` for a temp trigger, which SQLite
-/// strips from the stored SQL), and the missing-name guard means it never collides with a survivor.
+/// the stored text reproduces the trigger exactly, and the missing-name guard means it never collides
+/// with a survivor.
 ///
 /// A trigger the batch **explicitly** dropped (`DROP TRIGGER`, in `explicitly_dropped`) is honored — its
-/// disappearance is the caller's intent, not a side effect of dropping its view — so it is never
-/// replayed even though its view survives.
+/// disappearance is the caller's intent, not a side effect of dropping its view — so it is never replayed
+/// even though its view survives. Only an unqualified or `main`-qualified drop suppresses a (persistent)
+/// captured trigger; a `temp.`/attached-schema drop targets a different trigger and is ignored. (A bare
+/// `DROP TRIGGER foo` that SQLite resolves to a shadowing temp trigger is treated here as targeting the
+/// persistent one — an accepted micro-imprecision, since temp triggers are not managed.)
 ///
-/// Lookups use `COLLATE NOCASE` (SQLite resolves identifiers case-insensitively) and are scoped to the
-/// captured schema: the survivor check runs against the trigger's own schema, and the surviving-view
-/// check against the view's schema (both recorded at capture), so temp and `main` views that share a
-/// name are never conflated.
+/// Lookups use `COLLATE NOCASE` to match SQLite's case-insensitive identifier resolution, so a view
+/// re-created under a differently-cased spelling of the same name still matches.
 fn replay_dropped_triggers(
     conn: &rusqlite::Connection,
     triggers: &[CapturedTrigger],
-    explicitly_dropped: &[String],
+    explicitly_dropped: &[DroppedTrigger],
 ) -> rusqlite::Result<()> {
     for trigger in triggers {
-        if explicitly_dropped
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(&trigger.name))
-        {
+        let explicitly_dropped = explicitly_dropped.iter().any(|dropped| {
+            dropped.name.eq_ignore_ascii_case(&trigger.name)
+                && dropped
+                    .schema
+                    .as_deref()
+                    .is_none_or(|schema| schema.eq_ignore_ascii_case("main"))
+        });
+        if explicitly_dropped {
             continue;
         }
-        // A temp trigger lives in `sqlite_temp_master`; look for the survivor in the schema it came from.
-        let still_present_query = if trigger.is_temp {
-            "SELECT 1 FROM sqlite_temp_master WHERE type = 'trigger' AND name = ?1 COLLATE NOCASE"
-        } else {
-            "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?1 COLLATE NOCASE"
-        };
         let still_present = conn
-            .query_row(still_present_query, [&trigger.name], |_| Ok(()))
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?1 COLLATE NOCASE",
+                [&trigger.name],
+                |_| Ok(()),
+            )
             .optional()?
             .is_some();
         if still_present {
             continue;
         }
-        // Replay only if a view of that name survives in the schema the trigger was attached to, so a
-        // dropped temp view is never confused with a same-named `main` view, and a view→table swap (the
-        // name now holds a table) does not receive the `INSTEAD OF` trigger.
-        let surviving_view_query = if trigger.target_is_temp {
-            "SELECT 1 FROM sqlite_temp_master WHERE name = ?1 COLLATE NOCASE AND type = 'view'"
-        } else {
-            "SELECT 1 FROM sqlite_master WHERE name = ?1 COLLATE NOCASE AND type = 'view'"
-        };
+        // Replay only if a view of that name survives, so the trigger is not resurrected onto a table
+        // that replaced the view (a view→table swap — an `INSTEAD OF` trigger cannot live on a table).
         let view_survives = conn
-            .query_row(surviving_view_query, [&trigger.target], |_| Ok(()))
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE name = ?1 COLLATE NOCASE AND type = 'view'",
+                [&trigger.target],
+                |_| Ok(()),
+            )
             .optional()?
             .is_some();
         if view_survives {
-            let statement = if trigger.is_temp {
-                as_temp_create_trigger(&trigger.sql)
-            } else {
-                trigger.sql.clone()
-            };
-            conn.execute_batch(&statement)?;
+            conn.execute_batch(&trigger.sql)?;
         }
     }
     Ok(())
 }
 
-/// Re-inserts the `TEMP` keyword SQLite strips from a temp trigger's stored `CREATE TRIGGER …` text, so
-/// replaying it recreates a temporary (not persistent) trigger. SQLite normalizes the stored prefix to
-/// exactly `CREATE TRIGGER`; if that prefix is not present (unexpected), the text is returned unchanged.
-fn as_temp_create_trigger(sql: &str) -> String {
-    match sql.strip_prefix("CREATE TRIGGER") {
-        Some(rest) => format!("CREATE TEMP TRIGGER{rest}"),
-        None => sql.to_owned(),
-    }
-}
-
-/// One lexical token of a DDL batch, as far as [`explicitly_dropped_trigger_names`] cares: an unquoted
+/// One lexical token of a DDL batch, as far as [`explicitly_dropped_triggers`] cares: an unquoted
 /// word (keyword or identifier), a quoted identifier's decoded content, or a `.` (schema qualifier). A
 /// quoted run — `"…"`, `` `…` ``, `[…]`, or a single-quoted `'…'` (which SQLite accepts as an identifier
 /// in a name position) — is one `Ident`, so `DROP TRIGGER` text *inside* a literal stays a single token
@@ -470,13 +430,22 @@ fn tokenize_ddl(sql: &str) -> Vec<DdlToken> {
     tokens
 }
 
-/// The trigger names a batch explicitly drops via `DROP TRIGGER [IF EXISTS] [schema.]name`.
+/// A trigger a batch explicitly drops via `DROP TRIGGER [IF EXISTS] [schema.]name`, with the optional
+/// schema qualifier preserved so replay can tell a `main`-schema drop from a `temp.`/attached one.
+struct DroppedTrigger {
+    /// The schema qualifier (`Some("temp")`, `Some("main")`, …) or `None` for an unqualified drop.
+    schema: Option<String>,
+    /// The (decoded, unquoted) trigger name.
+    name: String,
+}
+
+/// The triggers a batch explicitly drops via `DROP TRIGGER [IF EXISTS] [schema.]name`.
 ///
 /// squealy renders no `DROP TRIGGER` of its own (it has no trigger model), so any such statement is the
-/// caller's deliberate removal; [`replay_dropped_triggers`] excludes these names so an explicit drop is
-/// not silently undone by trigger replay. Names are returned decoded (unquoted) and compared
-/// case-insensitively, matching SQLite identifier resolution.
-fn explicitly_dropped_trigger_names(sql: &str) -> Vec<String> {
+/// caller's deliberate removal; [`replay_dropped_triggers`] excludes a matching captured trigger so an
+/// explicit drop is not silently undone by replay. The schema qualifier is preserved (and names decoded)
+/// so a `temp.`-qualified drop does not suppress a same-named persistent trigger.
+fn explicitly_dropped_triggers(sql: &str) -> Vec<DroppedTrigger> {
     let tokens = tokenize_ddl(sql);
     let word_is = |token: Option<&DdlToken>, keyword: &str| matches!(token, Some(DdlToken::Word(word)) if word.eq_ignore_ascii_case(keyword));
     let ident_of = |token: Option<&DdlToken>| match token {
@@ -484,7 +453,7 @@ fn explicitly_dropped_trigger_names(sql: &str) -> Vec<String> {
         Some(DdlToken::Ident(word)) => Some(word.clone()),
         _ => None,
     };
-    let mut names = Vec::new();
+    let mut dropped = Vec::new();
     let mut index = 0;
     while index < tokens.len() {
         if word_is(tokens.get(index), "drop") && word_is(tokens.get(index + 1), "trigger") {
@@ -493,20 +462,32 @@ fn explicitly_dropped_trigger_names(sql: &str) -> Vec<String> {
                 cursor += 2;
             }
             if let Some(first) = ident_of(tokens.get(cursor)) {
-                // `schema.name` — the identifier after the dot is the trigger name.
-                let name = if matches!(tokens.get(cursor + 1), Some(DdlToken::Dot)) {
-                    ident_of(tokens.get(cursor + 2)).unwrap_or(first)
+                // `schema.name` — the identifier after the dot is the trigger name; `first` is the schema.
+                let dropped_trigger = if matches!(tokens.get(cursor + 1), Some(DdlToken::Dot)) {
+                    match ident_of(tokens.get(cursor + 2)) {
+                        Some(name) => DroppedTrigger {
+                            schema: Some(first),
+                            name,
+                        },
+                        None => DroppedTrigger {
+                            schema: None,
+                            name: first,
+                        },
+                    }
                 } else {
-                    first
+                    DroppedTrigger {
+                        schema: None,
+                        name: first,
+                    }
                 };
-                names.push(name);
+                dropped.push(dropped_trigger);
             }
             index = cursor + 1;
             continue;
         }
         index += 1;
     }
-    names
+    dropped
 }
 
 impl SchemaIntrospect for SqliteConnection {
@@ -931,57 +912,53 @@ async fn finish_transaction<T>(
 
 #[cfg(test)]
 mod tests {
-    use super::{as_temp_create_trigger, explicitly_dropped_trigger_names};
+    use super::explicitly_dropped_triggers;
 
-    #[test]
-    fn re_injects_temp_into_a_stored_temp_trigger_statement() {
-        // SQLite strips `TEMP` from a temp trigger's stored SQL, normalizing the prefix to
-        // `CREATE TRIGGER`; replay must put it back so the trigger is recreated as temporary.
-        assert_eq!(
-            as_temp_create_trigger("CREATE TRIGGER x INSTEAD OF INSERT ON v BEGIN SELECT 1; END"),
-            "CREATE TEMP TRIGGER x INSTEAD OF INSERT ON v BEGIN SELECT 1; END",
-        );
-        // An unexpected prefix is left unchanged rather than mangled.
-        assert_eq!(
-            as_temp_create_trigger("create trigger x begin select 1; end"),
-            "create trigger x begin select 1; end",
-        );
+    /// The `(schema, name)` pairs a batch explicitly drops, for terse assertions.
+    fn dropped(sql: &str) -> Vec<(Option<String>, String)> {
+        explicitly_dropped_triggers(sql)
+            .into_iter()
+            .map(|dropped| (dropped.schema, dropped.name))
+            .collect()
     }
 
     #[test]
     fn scans_drop_trigger_names_across_quoting_and_qualification() {
         // Plain, IF EXISTS, quoted, bracketed, backtick, and schema-qualified forms all yield the bare
-        // (decoded) trigger name.
+        // (decoded) trigger name, preserving any schema qualifier.
+        assert_eq!(dropped("DROP TRIGGER foo"), vec![(None, "foo".to_owned())]);
         assert_eq!(
-            explicitly_dropped_trigger_names("DROP TRIGGER foo"),
-            vec!["foo".to_owned()],
+            dropped("drop trigger if exists foo"),
+            vec![(None, "foo".to_owned())],
         );
         assert_eq!(
-            explicitly_dropped_trigger_names("drop trigger if exists foo"),
-            vec!["foo".to_owned()],
+            dropped("DROP TRIGGER \"a \"\"quoted\"\" trig\""),
+            vec![(None, "a \"quoted\" trig".to_owned())],
         );
         assert_eq!(
-            explicitly_dropped_trigger_names("DROP TRIGGER \"a \"\"quoted\"\" trig\""),
-            vec!["a \"quoted\" trig".to_owned()],
+            dropped("DROP TRIGGER [bracketed]"),
+            vec![(None, "bracketed".to_owned())],
         );
         assert_eq!(
-            explicitly_dropped_trigger_names("DROP TRIGGER [bracketed]"),
-            vec!["bracketed".to_owned()],
+            dropped("DROP TRIGGER `back`; DROP TRIGGER main.\"qualified\""),
+            vec![
+                (None, "back".to_owned()),
+                (Some("main".to_owned()), "qualified".to_owned()),
+            ],
         );
+        // A `temp.`-qualified drop preserves the schema so replay can ignore it for a persistent trigger.
         assert_eq!(
-            explicitly_dropped_trigger_names(
-                "DROP TRIGGER `back`; DROP TRIGGER main.\"qualified\""
-            ),
-            vec!["back".to_owned(), "qualified".to_owned()],
+            dropped("DROP TRIGGER temp.foo"),
+            vec![(Some("temp".to_owned()), "foo".to_owned())],
         );
         // SQLite accepts a single-quoted name in this identifier position (with `''` escaping).
         assert_eq!(
-            explicitly_dropped_trigger_names("DROP TRIGGER 'single'"),
-            vec!["single".to_owned()],
+            dropped("DROP TRIGGER 'single'"),
+            vec![(None, "single".to_owned())],
         );
         assert_eq!(
-            explicitly_dropped_trigger_names("DROP TRIGGER 'a''b'"),
-            vec!["a'b".to_owned()],
+            dropped("DROP TRIGGER 'a''b'"),
+            vec![(None, "a'b".to_owned())],
         );
     }
 
@@ -989,15 +966,9 @@ mod tests {
     fn ignores_drop_trigger_inside_strings_and_comments_and_other_statements() {
         // A `DROP TRIGGER` in a string literal or comment is not a statement, and a `DROP VIEW`/`DROP
         // TABLE` never names a trigger.
-        assert!(
-            explicitly_dropped_trigger_names("INSERT INTO t VALUES ('DROP TRIGGER foo')")
-                .is_empty(),
-        );
-        assert!(
-            explicitly_dropped_trigger_names("-- DROP TRIGGER foo\n/* DROP TRIGGER bar */")
-                .is_empty(),
-        );
-        assert!(explicitly_dropped_trigger_names("DROP VIEW v; DROP TABLE t").is_empty());
+        assert!(dropped("INSERT INTO t VALUES ('DROP TRIGGER foo')").is_empty());
+        assert!(dropped("-- DROP TRIGGER foo\n/* DROP TRIGGER bar */").is_empty());
+        assert!(dropped("DROP VIEW v; DROP TABLE t").is_empty());
     }
 
     #[test]
@@ -1013,7 +984,7 @@ mod tests {
             "DROP TRIGGER \"é",
             "\"\"",
         ] {
-            let _ = explicitly_dropped_trigger_names(sql);
+            let _ = explicitly_dropped_triggers(sql);
         }
     }
 }

@@ -513,21 +513,6 @@ async fn trigger_exists(raw: &RawConnection, name: &'static str) -> bool {
         != 0
 }
 
-/// Whether a `TEMP` trigger of the given name exists, per `sqlite_temp_master` (per-connection; `raw`
-/// and the schema-management handle share one physical connection, so they see the same temp schema).
-async fn temp_trigger_exists(raw: &RawConnection, name: &'static str) -> bool {
-    raw.call(move |conn| {
-        conn.query_row(
-            "SELECT count(*) FROM sqlite_temp_master WHERE type = 'trigger' AND name = ?1",
-            [name],
-            |row| row.get::<_, i64>(0),
-        )
-    })
-    .await
-    .expect("temp trigger count")
-        != 0
-}
-
 #[tokio::test]
 async fn applies_a_native_add_column_and_converges() {
     let (mut connection, raw) = setup().await;
@@ -1701,85 +1686,35 @@ async fn a_view_recreated_with_only_its_name_casing_changed_preserves_its_trigge
 }
 
 #[tokio::test]
-async fn republishing_a_view_preserves_a_temp_instead_of_trigger() {
-    // A `TEMP` INSTEAD OF trigger (in `sqlite_temp_master`) also makes a view writeable, and `DROP VIEW`
-    // drops it too. Capture must span the temp schema and replay must recreate it AS temp (SQLite strips
-    // `TEMP` from the stored SQL) — not resurrect it as a persistent trigger.
+async fn a_temp_qualified_drop_trigger_does_not_suppress_a_persistent_view_trigger() {
+    // An explicit `DROP TRIGGER temp.foo` targets the temp schema, so it must not suppress replay of a
+    // same-named *persistent* view trigger that the batch's view re-apply cascades. The scan preserves
+    // the schema qualifier; only an unqualified/`main.` drop suppresses the persistent trigger.
     let (mut connection, raw) = setup().await;
     publish(&table_and_view(), &Sqlite, &mut connection)
         .await
         .expect("publish table + view");
     exec(
         &raw,
-        "CREATE TEMP TRIGGER \"active_widgets_temp_ins\" INSTEAD OF INSERT ON \"active_widgets\" \
-         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
-    )
-    .await;
-    exec(&raw, "INSERT INTO \"active_widgets\" (\"id\") VALUES (1)").await;
-    assert_eq!(
-        count(&raw, "widgets").await,
-        1,
-        "the temp trigger wrote through"
-    );
-
-    let plan = plan_from_database(&table_and_view(), &mut connection, DiffPolicy::ALLOW_ALL)
-        .await
-        .expect("plan the unchanged re-publish");
-    apply_plan(&plan, &table_and_view(), &Sqlite, &mut connection)
-        .await
-        .expect("re-apply the unchanged model");
-
-    assert!(
-        temp_trigger_exists(&raw, "active_widgets_temp_ins").await,
-        "the TEMP INSTEAD OF trigger must survive the view re-apply, still as a temp trigger",
-    );
-    assert!(
-        !trigger_exists(&raw, "active_widgets_temp_ins").await,
-        "it must not be resurrected as a persistent trigger",
-    );
-    exec(&raw, "INSERT INTO \"active_widgets\" (\"id\") VALUES (2)").await;
-    assert_eq!(
-        count(&raw, "widgets").await,
-        2,
-        "writes through the view still work after the re-publish",
-    );
-}
-
-#[tokio::test]
-async fn dropping_a_temp_target_does_not_reattach_its_trigger_to_a_same_named_main_object() {
-    // A temp object can shadow a same-named `main` object. Replay must scope the surviving-target check to
-    // the schema the trigger was attached to: dropping the temp view (and its trigger) must NOT reattach
-    // that trigger to the still-present `main` view of the same name.
-    let (mut connection, raw) = setup().await;
-    publish(&table_and_view(), &Sqlite, &mut connection)
-        .await
-        .expect("publish widgets + the main active_widgets view");
-    // A temp view shadows the main `active_widgets`, with a temp INSTEAD OF trigger on the temp view.
-    exec(
-        &raw,
-        "CREATE TEMP VIEW \"active_widgets\" AS SELECT \"id\" FROM \"widgets\" WHERE \"active\" > 0",
-    )
-    .await;
-    exec(
-        &raw,
-        "CREATE TEMP TRIGGER \"shadow_ins\" INSTEAD OF INSERT ON \"active_widgets\" \
+        "CREATE TRIGGER \"active_widgets_insert\" INSTEAD OF INSERT ON \"active_widgets\" \
          BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
     )
     .await;
 
-    // Intentionally drop the temp view (which also drops its temp trigger) through the executor.
+    // One batch: a temp-qualified DROP TRIGGER (of a non-existent temp trigger) plus a view re-apply that
+    // cascades the persistent trigger. The persistent trigger must be replayed, not suppressed.
     connection
-        .execute_ddl("DROP VIEW temp.\"active_widgets\"")
+        .execute_ddl(
+            "DROP TRIGGER IF EXISTS temp.\"active_widgets_insert\"; \
+             DROP VIEW \"active_widgets\"; \
+             CREATE VIEW \"active_widgets\" AS SELECT \"id\" FROM \"widgets\" WHERE \"active\" > 0",
+        )
         .await
-        .expect("drop the temp view");
+        .expect("re-apply the view alongside a temp-qualified trigger drop");
 
     assert!(
-        !temp_trigger_exists(&raw, "shadow_ins").await,
-        "the temp trigger stays gone with its dropped temp view",
-    );
-    assert!(
-        !trigger_exists(&raw, "shadow_ins").await,
-        "and must not be reattached to the same-named main view",
+        trigger_exists(&raw, "active_widgets_insert").await,
+        "a temp-qualified DROP TRIGGER must not suppress the persistent view trigger",
     );
 }
 
