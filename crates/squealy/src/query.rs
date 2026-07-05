@@ -6540,6 +6540,29 @@ where
 
 // ===== Named `WINDOW` clause =====
 
+/// Compile-time guard: reject a projection carrying a named-window reference (`.over_ref(w)`) in a
+/// query-building method that declares no `WINDOW` clause (rendering `OVER w0` with no matching
+/// `WINDOW w0 AS (…)`). Only `select_over` may project one — it declares the window. Implemented as an
+/// inline `const` assertion over
+/// [`ProjectionParams::CONTAINS_NAMED_WINDOW`](crate::ProjectionParams::CONTAINS_NAMED_WINDOW).
+///
+/// This is a *post-monomorphization* const error: it fires on `cargo build`/`cargo test` and any real
+/// compilation (so CI and every build catch the misuse with the message below), but not on a bare
+/// `cargo check` — a stable-Rust limitation, since a check-time trait bound would need negative impls.
+/// The misuse it guards is contrived (deliberately stashing an `over_ref` expression out of the
+/// `select_over` closure to reuse elsewhere); the un-forgeable [`WindowRef`](crate::WindowRef) brand
+/// already stops the *handle* from escaping.
+macro_rules! assert_projection_has_no_named_window {
+    ($projection:ty) => {
+        const {
+            assert!(
+                !<$projection as crate::ProjectionParams>::CONTAINS_NAMED_WINDOW,
+                "a named-window reference (`.over_ref(w)`) can only be projected by `.select_over(...)`, which declares the matching `WINDOW` clause; it cannot be used in `select`/`select_correlated`/`project`/`select_subquery`"
+            )
+        }
+    };
+}
+
 /// A select chain carrying one query-level named `WINDOW` definition (`… WINDOW w0 AS (PARTITION BY …
 /// ORDER BY … <frame>)`). Wraps the base chain plus the sole window's spec. It is *always the outermost*
 /// node of a chain that has one — [`WindowScope::select_over`] builds it and immediately consumes it into
@@ -7884,7 +7907,7 @@ where
         projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
     ) -> SubquerySelect<'conn, 'scope, Conn, Self, <P as ReturningProjection<'scope>>::Shape, P>
     where
-        P: ReturningProjection<'scope> + Projectable,
+        P: ReturningProjection<'scope> + Projectable + crate::ProjectionParams,
         <Self as SelectAst<'conn, 'scope, Conn>>::Grouped:
             crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
         // Under `DISTINCT`, every `ORDER BY` key must appear in the projection; non-distinct chains are
@@ -7904,6 +7927,7 @@ where
             >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
     {
+        assert_projection_has_no_named_window!(P);
         let exprs = self.exprs();
         let projection = projection(exprs.to_tuple());
         let selected = Selected::<'scope, _, <P as ReturningProjection<'scope>>::Shape, _>::new(
@@ -8073,6 +8097,7 @@ where
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
         <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
     {
+        assert_projection_has_no_named_window!(P);
         let exprs = self.exprs();
         let projection = projection(exprs.to_tuple());
         let selected = Selected::<'scope, _, <P as ReturningProjection<'scope>>::Shape, _>::new(
@@ -8097,7 +8122,7 @@ where
         projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
     ) -> Selected<'scope, Self, <P as ReturningProjection<'scope>>::Shape, P>
     where
-        P: ReturningProjection<'scope> + Projectable,
+        P: ReturningProjection<'scope> + Projectable + crate::ProjectionParams,
         <Self as SelectAst<'conn, 'scope, Conn>>::Grouped:
             crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
         // Under `DISTINCT`, every `ORDER BY` key must appear in the projection; non-distinct chains are
@@ -8117,6 +8142,7 @@ where
             >,
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
     {
+        assert_projection_has_no_named_window!(P);
         let exprs = self.exprs();
         let projection = projection(exprs.to_tuple());
         Selected::<'scope, _, <P as ReturningProjection<'scope>>::Shape, _>::new(self, projection)
@@ -8156,6 +8182,7 @@ where
         <P as ReturningProjection<'scope>>::Shape: ProjectionShape,
         <<P as ReturningProjection<'scope>>::Shape as ProjectionShape>::Row: Decode<Conn::Backend>,
     {
+        assert_projection_has_no_named_window!(P);
         let subqueries = Subqueries::new(self.connection(), self.depth() + 1);
         let exprs = self.exprs();
         let projection = projection(exprs.to_tuple(), subqueries);

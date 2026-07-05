@@ -1535,6 +1535,42 @@ fn test_named_window_renders_after_having_before_order_by() {
     );
 }
 
+// The compile-time guard that keeps an `over_ref` expression out of a plain `select` (which declares
+// no `WINDOW` clause) reads `ProjectionParams::CONTAINS_NAMED_WINDOW`. Lock the wiring of that flag:
+// a *named*-window reference sets it, while a self-contained *inline* window (`.over(...)`, always
+// valid in `select`) does not. (The guard itself is a post-monomorphization `const` assertion in
+// `select`/`project`/`select_subquery`/`select_correlated`, so it can't be a `trybuild` case; this
+// pins the flag those methods depend on.)
+#[test]
+fn named_window_reference_sets_contains_named_window_flag() {
+    use std::cell::RefCell;
+
+    fn contains<P: ProjectionParams>(_: &P) -> bool {
+        P::CONTAINS_NAMED_WINDOW
+    }
+
+    let named = RefCell::new(None);
+    let inline = RefCell::new(None);
+    let _q = TestConnection
+        .from::<Post>()
+        .window(|(post,)| Window::new().partition_by(post.user_id))
+        .select_over(|(post,), w| {
+            *named.borrow_mut() = Some(post.user_id.sum().over_ref(w));
+            *inline.borrow_mut() =
+                Some(post.user_id.sum().over(|w2| w2.partition_by(post.user_id)));
+            post.user_id.sum().over_ref(w)
+        });
+
+    assert!(
+        contains(&named.borrow().clone().unwrap()),
+        "a named-window reference must flag CONTAINS_NAMED_WINDOW"
+    );
+    assert!(
+        !contains(&inline.borrow().clone().unwrap()),
+        "an inline window is self-contained and must not flag CONTAINS_NAMED_WINDOW"
+    );
+}
+
 #[test]
 fn test_window_lag_over_left_joined_column_flattens_nullable() {
     // LAG over a left-joined (already-nullable) column must flatten to a single `Option<T>`, not

@@ -725,6 +725,10 @@ fn tuple_projection_shape(arity: usize) -> proc_macro2::TokenStream {
             #(#projection_params_append_bounds)*
         {
             type Params = #projection_params_folded;
+
+            // A tuple projection carries a named-window reference if any element does.
+            const CONTAINS_NAMED_WINDOW: bool =
+                #( <#types as crate::ProjectionParams>::CONTAINS_NAMED_WINDOW )||*;
         }
 
         impl<Backend, #(#types),*> Decode<Backend> for (#(#types,)*)

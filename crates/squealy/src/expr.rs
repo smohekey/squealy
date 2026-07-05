@@ -274,6 +274,16 @@ pub trait ExprAst: Clone {
     /// to `false` — and must **not** be cast there, since casting a custom-typed column (e.g. a
     /// PostgreSQL `citext` declared via `db_type`) would change the equality semantics.
     const NEEDS_CAST_ANCHOR: bool = false;
+
+    /// Whether this node is a *named*-window reference (`… OVER w0`, i.e. [`NamedWindowExprAst`]). Such a
+    /// node is only valid inside a [`select_over`](crate::WindowScope::select_over) projection, which
+    /// declares the matching `WINDOW` clause; `select`/`select_correlated`/`project`/`select_subquery`
+    /// reject a projection containing one (via [`ProjectionParams::CONTAINS_NAMED_WINDOW`]), so an
+    /// `over_ref` expression cannot be reused in a query that declares no window. A window function
+    /// cannot nest inside another expression (arithmetic and friends are unavailable on a window-typed
+    /// `Expr`), so this top-level flag is sufficient. Defaults to `false`; only [`NamedWindowExprAst`]
+    /// overrides it.
+    const IS_NAMED_WINDOW_REF: bool = false;
 }
 
 /// Backend-parameterized rendering for an expression AST node.
@@ -3072,6 +3082,10 @@ where
     // The window definition lives in the `WINDOW` clause (param-free), so a named-window reference
     // contributes exactly the operand's params (e.g. the `x` of `SUM(x) OVER w`).
     type Params = Operand::Params;
+
+    // Referencing a named window is only sound inside `select_over` (which declares the window); the
+    // projection-building methods reject a projection carrying one. See `IS_NAMED_WINDOW_REF`.
+    const IS_NAMED_WINDOW_REF: bool = true;
 }
 
 impl<Operand, B> RenderAst<B> for NamedWindowExprAst<Operand>
@@ -5015,6 +5029,13 @@ where
 /// subquery uses: a bare column or value carries no params, an expression carries its AST's.
 pub trait ProjectionParams {
     type Params: crate::HList;
+
+    /// Whether this projection contains a *named*-window reference (`… OVER w0`) anywhere. Only
+    /// [`select_over`](crate::WindowScope::select_over) may project one; `select`/`select_correlated`/
+    /// `project`/`select_subquery` `const`-assert this is `false`, so an `over_ref` expression cannot be
+    /// smuggled into a query that declares no `WINDOW` clause. Defaults to `false`; overridden by the
+    /// [`Expr`] impl (from its AST's [`ExprAst::IS_NAMED_WINDOW_REF`]) and folded across tuple elements.
+    const CONTAINS_NAMED_WINDOW: bool = false;
 }
 
 impl<'scope, K, Ast> ProjectionParams for Expr<'scope, K, Ast>
@@ -5022,6 +5043,8 @@ where
     Ast: ExprAst,
 {
     type Params = Ast::Params;
+
+    const CONTAINS_NAMED_WINDOW: bool = Ast::IS_NAMED_WINDOW_REF;
 }
 
 impl<K> ProjectionParams for ColumnRef<'_, K> {
