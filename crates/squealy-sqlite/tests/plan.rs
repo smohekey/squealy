@@ -513,6 +513,20 @@ async fn trigger_exists(raw: &RawConnection, name: &'static str) -> bool {
         != 0
 }
 
+/// Whether a view of the given name exists, per `sqlite_master`.
+async fn view_exists(raw: &RawConnection, name: &'static str) -> bool {
+    raw.call(move |conn| {
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'view' AND name = ?1",
+            [name],
+            |row| row.get::<_, i64>(0),
+        )
+    })
+    .await
+    .expect("view count")
+        != 0
+}
+
 #[tokio::test]
 async fn applies_a_native_add_column_and_converges() {
     let (mut connection, raw) = setup().await;
@@ -1661,6 +1675,36 @@ async fn a_view_redefined_with_different_columns_does_not_replay_its_old_trigger
     assert!(
         !trigger_exists(&raw, "active_widgets_insert").await,
         "an INSTEAD OF trigger must not be replayed onto a view redefined with a different shape",
+    );
+}
+
+#[tokio::test]
+async fn a_batch_is_not_aborted_by_a_triggered_view_whose_body_is_broken() {
+    // Capturing a triggered view's columns probes it with `PRAGMA table_info`, which errors when the view
+    // is unanalyzable (its base table dropped out of band). That probe failure must be tolerated, not
+    // propagated — otherwise even a `DROP VIEW` of the broken view would abort and strand the database.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+    exec(
+        &raw,
+        "CREATE TRIGGER \"active_widgets_insert\" INSTEAD OF INSERT ON \"active_widgets\" \
+         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
+    )
+    .await;
+    // Break the view: drop its base table out of band (leaves `active_widgets` unanalyzable).
+    exec(&raw, "DROP TABLE \"widgets\"").await;
+
+    // A `DROP VIEW` of the broken view through the executor must still succeed.
+    connection
+        .execute_ddl("DROP VIEW \"active_widgets\"")
+        .await
+        .expect("dropping a broken triggered view must not abort during pre-capture");
+
+    assert!(
+        !view_exists(&raw, "active_widgets").await,
+        "the broken view was dropped",
     );
 }
 

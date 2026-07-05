@@ -266,9 +266,11 @@ struct CapturedTrigger {
     target: String,
     /// The stored `CREATE TRIGGER …` text, replayed verbatim to recreate the trigger.
     sql: String,
-    /// The target view's output column names, in order, when captured. Replay recreates the trigger only
-    /// if the surviving view has the same columns (a churn re-apply), not a changed shape.
-    target_columns: Vec<String>,
+    /// The target view's output column names, in order, when captured — or `None` if the view could not
+    /// be analyzed (e.g. its base table was dropped out of band, so `PRAGMA table_info` errors). Replay
+    /// recreates the trigger only if the columns were captured *and* the surviving view still has exactly
+    /// them (a churn re-apply); a probe failure at capture skips replay rather than aborting the batch.
+    target_columns: Option<Vec<String>>,
 }
 
 /// The output column names of a view (or table), in order, via `PRAGMA table_info` — used to tell a
@@ -314,10 +316,12 @@ fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Capture
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
     // Capture each target view's columns in a second pass (`pragma_table_info` can't be joined here
-    // while the trigger statement is still borrowed).
+    // while the trigger statement is still borrowed). A probe failure (e.g. a view whose base table was
+    // dropped out of band) is tolerated as `None` so it never aborts the batch — the existing
+    // introspection path likewise tolerates broken views.
     let mut triggers = Vec::with_capacity(rows.len());
     for (name, target, sql) in rows {
-        let target_columns = view_column_names(conn, &target)?;
+        let target_columns = view_column_names(conn, &target).ok();
         triggers.push(CapturedTrigger {
             name,
             target,
@@ -385,9 +389,15 @@ fn replay_dropped_triggers(
             )
             .optional()?
             .is_some();
-        // ...and only if that view has the same output columns, so a view redefined with a different
-        // shape does not get an old trigger whose `NEW`/`OLD` body may reference a now-missing column.
-        if view_survives && view_column_names(conn, &trigger.target)? == trigger.target_columns {
+        // ...and only if the view's output columns were captured and the surviving view still has exactly
+        // them, so a view redefined with a different shape does not get an old trigger whose `NEW`/`OLD`
+        // body may reference a now-missing column. A probe failure at capture or now is tolerated by
+        // simply not replaying (the trigger is a user concern on an unanalyzable view).
+        let columns_unchanged = matches!(
+            (&trigger.target_columns, view_column_names(conn, &trigger.target)),
+            (Some(captured), Ok(current)) if *captured == current
+        );
+        if view_survives && columns_unchanged {
             conn.execute_batch(&trigger.sql)?;
         }
     }
