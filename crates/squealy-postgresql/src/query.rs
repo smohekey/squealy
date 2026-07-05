@@ -3049,7 +3049,10 @@ mod tests {
         let ts = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         assert_eq!(
             <std::time::SystemTime as squealy::HasColumnType>::COLUMN_TYPE,
-            squealy::ColumnType::Timestamp { tz: true }
+            squealy::ColumnType::Timestamp {
+                tz: true,
+                precision: Some(6)
+            }
         );
         assert!(matches!(
             encode_to_param(&ts),
@@ -3067,7 +3070,10 @@ mod tests {
         let ts = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         assert_eq!(
             <time::OffsetDateTime as squealy::HasColumnType>::COLUMN_TYPE,
-            squealy::ColumnType::Timestamp { tz: true }
+            squealy::ColumnType::Timestamp {
+                tz: true,
+                precision: Some(6)
+            }
         );
         assert!(matches!(
             encode_to_param(&ts),
@@ -3083,7 +3089,10 @@ mod tests {
         let ts = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap();
         assert_eq!(
             <chrono::DateTime<chrono::Utc> as squealy::HasColumnType>::COLUMN_TYPE,
-            squealy::ColumnType::Timestamp { tz: true }
+            squealy::ColumnType::Timestamp {
+                tz: true,
+                precision: Some(6)
+            }
         );
         assert!(matches!(
             encode_to_param(&ts),

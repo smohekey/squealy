@@ -545,9 +545,18 @@ fn sql_type(data_type: &str, column_type: &str) -> SqlType {
             decimal_type(&column_type).unwrap_or_else(|| SqlType::Raw(column_type.to_uppercase()))
         }
         "date" => SqlType::Date,
-        "time" => SqlType::Time { tz: false },
-        "datetime" => SqlType::Timestamp { tz: false },
-        "timestamp" => SqlType::Timestamp { tz: true },
+        "time" => SqlType::Time {
+            tz: false,
+            precision: temporal_precision(&column_type, "time"),
+        },
+        "datetime" => SqlType::Timestamp {
+            tz: false,
+            precision: temporal_precision(&column_type, "datetime"),
+        },
+        "timestamp" => SqlType::Timestamp {
+            tz: true,
+            precision: temporal_precision(&column_type, "timestamp"),
+        },
         "json" => SqlType::Json,
         "blob" => SqlType::Bytes,
         // Fixed-width binary `BINARY(N)` -> `[u8; N]` (the width is in the type, so it round-trips
@@ -580,6 +589,19 @@ fn single_arg_type(column_type: &str, kind: &str) -> Option<u32> {
     args.trim().parse().ok()
 }
 
+/// The fractional-seconds precision of a `time`/`timestamp`/`datetime` column, read from its
+/// `COLUMN_TYPE` (e.g. `timestamp(6)`). A bare form has no parenthesized argument and is fsp 0. Always
+/// returns `Some` — a MySQL temporal column always has a definite precision — so an introspected column
+/// carries an explicit precision the desired side is canonicalized to match (see
+/// [`Sqlite`-style `canonical_sql_type`](crate::Mysql::canonical_sql_type)).
+fn temporal_precision(column_type: &str, kind: &str) -> Option<u8> {
+    Some(
+        type_args(column_type, kind)
+            .and_then(|args| args.trim().parse().ok())
+            .unwrap_or(0),
+    )
+}
+
 fn decimal_type(column_type: &str) -> Option<SqlType> {
     let args = type_args(column_type, "decimal")?;
     let parts = args.split(',').map(str::trim).collect::<Vec<_>>();
@@ -601,14 +623,34 @@ fn type_args<'a>(column_type: &'a str, kind: &str) -> Option<&'a str> {
     Some(&column_type[open + 1..close])
 }
 
+/// Whether a lowercased default expression is the current-time function `name`, in any of the forms
+/// MySQL reports: bare (`name`), empty-call (`name()`), or with a fractional-seconds precision
+/// (`name(6)`, as reported for a `TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)` column).
+fn is_current_function(value: &str, name: &str) -> bool {
+    let Some(rest) = value.strip_prefix(name) else {
+        return false;
+    };
+    rest.is_empty()
+        || rest == "()"
+        || (rest.starts_with('(')
+            && rest.ends_with(')')
+            && rest[1..rest.len() - 1].trim().parse::<u8>().is_ok())
+}
+
 fn default_value(ty: &SqlType, value: &str) -> DefaultValue {
     let trimmed = value.trim();
-    match trimmed.to_ascii_lowercase().as_str() {
-        "null" => return DefaultValue::Null,
-        "current_timestamp" | "current_timestamp()" => return DefaultValue::CurrentTimestamp,
-        "current_date" | "current_date()" => return DefaultValue::CurrentDate,
-        "current_time" | "current_time()" => return DefaultValue::CurrentTime,
-        _ => {}
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == "null" {
+        return DefaultValue::Null;
+    }
+    if is_current_function(&lower, "current_timestamp") {
+        return DefaultValue::CurrentTimestamp;
+    }
+    if is_current_function(&lower, "current_date") {
+        return DefaultValue::CurrentDate;
+    }
+    if is_current_function(&lower, "current_time") {
+        return DefaultValue::CurrentTime;
     }
 
     match ty {
@@ -683,14 +725,34 @@ mod tests {
         assert_eq!(sql_type("double", "double"), SqlType::F64);
         assert_eq!(sql_type("text", "text"), SqlType::Text);
         assert_eq!(sql_type("date", "date"), SqlType::Date);
-        assert_eq!(sql_type("time", "time"), SqlType::Time { tz: false });
+        // A bare temporal column is fsp 0; `time(n)`/`timestamp(n)` recover the precision.
         assert_eq!(
-            sql_type("datetime", "datetime"),
-            SqlType::Timestamp { tz: false }
+            sql_type("time", "time"),
+            SqlType::Time {
+                tz: false,
+                precision: Some(0)
+            }
+        );
+        assert_eq!(
+            sql_type("datetime", "datetime(3)"),
+            SqlType::Timestamp {
+                tz: false,
+                precision: Some(3)
+            }
+        );
+        assert_eq!(
+            sql_type("timestamp", "timestamp(6)"),
+            SqlType::Timestamp {
+                tz: true,
+                precision: Some(6)
+            }
         );
         assert_eq!(
             sql_type("timestamp", "timestamp"),
-            SqlType::Timestamp { tz: true }
+            SqlType::Timestamp {
+                tz: true,
+                precision: Some(0)
+            }
         );
         assert_eq!(sql_type("json", "json"), SqlType::Json);
         assert_eq!(sql_type("blob", "blob"), SqlType::Bytes);
@@ -741,7 +803,25 @@ mod tests {
         assert_eq!(default_value(&SqlType::Bool, "1"), DefaultValue::Bool(true));
         assert_eq!(default_value(&SqlType::U32, "42"), DefaultValue::UInt(42));
         assert_eq!(
-            default_value(&SqlType::Timestamp { tz: true }, "current_timestamp()"),
+            default_value(
+                &SqlType::Timestamp {
+                    tz: true,
+                    precision: Some(6)
+                },
+                "current_timestamp()"
+            ),
+            DefaultValue::CurrentTimestamp
+        );
+        // A precise column reports its default with the fsp suffix (`CURRENT_TIMESTAMP(6)`); recognize
+        // it so a `DEFAULT CURRENT_TIMESTAMP(6)` column re-plans empty rather than churning.
+        assert_eq!(
+            default_value(
+                &SqlType::Timestamp {
+                    tz: true,
+                    precision: Some(6)
+                },
+                "current_timestamp(6)"
+            ),
             DefaultValue::CurrentTimestamp
         );
         assert_eq!(

@@ -405,11 +405,9 @@ where
 // reads the same shape back and reattaches UTC. Run the driver session with `time_zone = '+00:00'`
 // (done in `Mysql::connect`) so MySQL stores/returns the `TIMESTAMP` without shifting it.
 //
-// Resolution is **whole seconds**: a bare `TIMESTAMP`/`DATETIME` has fractional precision 0, and the
-// neutral model carries no timestamp precision to render `TIMESTAMP(6)` against (or to migrate an
-// existing column to). So binding normalizes the microseconds to 0 rather than advertising sub-second
-// precision the column silently drops. (Tracked for a follow-up: full sub-second precision needs the
-// core model to carry the fractional precision.)
+// Resolution is **microseconds**: the native datetime types map to a `TIMESTAMP(6)` column (see
+// `HasColumnType`), so the encoders bind the full sub-second component. Against a lower-precision column
+// (`db_type = "timestamp"`, fsp 0) MySQL rounds the value on store, which is the server's own behaviour.
 
 // The civil components of a `Value::Date`: year, month, day, hour, minute, second, microsecond.
 #[cfg(any(feature = "time", feature = "chrono", feature = "systemtime"))]
@@ -465,7 +463,8 @@ impl Encode<Mysql> for chrono::DateTime<chrono::Utc> {
             self.hour() as u8,
             self.minute() as u8,
             self.second() as u8,
-            0, // whole-second resolution (see the codec module comment)
+            // Sub-second microseconds; clamp the leap-second range (`>= 1_000_000`) to the field max.
+            self.timestamp_subsec_micros().min(999_999),
         ));
         Ok(())
     }
@@ -504,7 +503,7 @@ impl Encode<Mysql> for time::OffsetDateTime {
             utc.hour(),
             utc.minute(),
             utc.second(),
-            0, // whole-second resolution (see the codec module comment)
+            utc.microsecond(),
         ));
         Ok(())
     }
@@ -534,13 +533,15 @@ impl Encode<Mysql> for std::time::SystemTime {
             Err(before) => -i64::try_from(before.duration().as_micros())
                 .map_err(|_| MysqlError::Conversion("SystemTime too far in the past"))?,
         };
-        // Whole-second resolution: floor to the second, dropping the sub-second remainder.
+        // Split into whole seconds (for the calendar math + range check) and the sub-second remainder;
+        // `rem_euclid` keeps the microseconds non-negative for instants before the epoch.
         let seconds = total_micros.div_euclid(1_000_000);
+        let micros = total_micros.rem_euclid(1_000_000) as u32;
         check_timestamp_range(seconds)?;
         let (year, month, day, hour, minute, second) = civil_from_unix_seconds(seconds);
         let year = u16::try_from(year)
             .map_err(|_| MysqlError::Conversion("SystemTime year out of range"))?;
-        out.push(Value::Date(year, month, day, hour, minute, second, 0));
+        out.push(Value::Date(year, month, day, hour, minute, second, micros));
         Ok(())
     }
 }
@@ -941,7 +942,7 @@ mod tests {
 
     // 1_700_000_000 Unix seconds is 2023-11-14T22:13:20 UTC — a fixed anchor each timestamp codec must
     // bind as the same civil `Value::Date`, so the conversions are checked for real correctness rather
-    // than mere self-consistency. Resolution is whole seconds, so sub-second input is dropped (micros 0).
+    // than mere self-consistency. The sub-second component is bound as microseconds (fsp 6).
     #[cfg(feature = "chrono")]
     #[test]
     fn chrono_encodes_as_utc_value_date() {
@@ -949,11 +950,14 @@ mod tests {
             chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 123_456_000).unwrap();
         assert_eq!(
             encode_to_value(&ts).unwrap(),
-            Value::Date(2023, 11, 14, 22, 13, 20, 0)
+            Value::Date(2023, 11, 14, 22, 13, 20, 123_456)
         );
         assert_eq!(
             <chrono::DateTime<chrono::Utc> as squealy::HasColumnType>::COLUMN_TYPE,
-            squealy::ColumnType::Timestamp { tz: true }
+            squealy::ColumnType::Timestamp {
+                tz: true,
+                precision: Some(6)
+            }
         );
     }
 
@@ -973,22 +977,28 @@ mod tests {
         );
         assert_eq!(
             <time::OffsetDateTime as squealy::HasColumnType>::COLUMN_TYPE,
-            squealy::ColumnType::Timestamp { tz: true }
+            squealy::ColumnType::Timestamp {
+                tz: true,
+                precision: Some(6)
+            }
         );
     }
 
     #[cfg(feature = "systemtime")]
     #[test]
     fn systemtime_encodes_as_utc_value_date() {
-        // Sub-second input is floored to whole seconds (micros 0).
+        // The sub-second remainder is bound as microseconds (fsp 6).
         let ts = std::time::UNIX_EPOCH + std::time::Duration::from_micros(1_700_000_000_123_456);
         assert_eq!(
             encode_to_value(&ts).unwrap(),
-            Value::Date(2023, 11, 14, 22, 13, 20, 0)
+            Value::Date(2023, 11, 14, 22, 13, 20, 123_456)
         );
         assert_eq!(
             <std::time::SystemTime as squealy::HasColumnType>::COLUMN_TYPE,
-            squealy::ColumnType::Timestamp { tz: true }
+            squealy::ColumnType::Timestamp {
+                tz: true,
+                precision: Some(6)
+            }
         );
     }
 

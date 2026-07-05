@@ -128,9 +128,14 @@ pub enum SqlType {
     Date,
     Time {
         tz: bool,
+        /// Fractional-seconds precision (`TIME(n)`). `None` renders the bare, backend-default form.
+        precision: Option<u8>,
     },
     Timestamp {
         tz: bool,
+        /// Fractional-seconds precision (`TIMESTAMP(n)`). `None` renders the bare, backend-default form
+        /// (MySQL fsp 0, PostgreSQL microseconds).
+        precision: Option<u8>,
     },
     Uuid,
     Json,
@@ -167,8 +172,8 @@ impl From<ColumnType> for SqlType {
             ColumnType::Text => SqlType::Text,
             ColumnType::Decimal { precision, scale } => SqlType::Decimal { precision, scale },
             ColumnType::Date => SqlType::Date,
-            ColumnType::Time { tz } => SqlType::Time { tz },
-            ColumnType::Timestamp { tz } => SqlType::Timestamp { tz },
+            ColumnType::Time { tz, precision } => SqlType::Time { tz, precision },
+            ColumnType::Timestamp { tz, precision } => SqlType::Timestamp { tz, precision },
             ColumnType::Uuid => SqlType::Uuid,
             ColumnType::Json => SqlType::Json,
             ColumnType::Jsonb => SqlType::Jsonb,

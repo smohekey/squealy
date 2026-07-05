@@ -1293,7 +1293,13 @@ mod tests {
         assert_eq!(sqlite_affinity(&SqlType::String), "TEXT");
         assert_eq!(sqlite_affinity(&SqlType::Varchar(64)), "TEXT");
         assert_eq!(sqlite_affinity(&SqlType::Text), "TEXT");
-        assert_eq!(sqlite_affinity(&SqlType::Timestamp { tz: true }), "TEXT");
+        assert_eq!(
+            sqlite_affinity(&SqlType::Timestamp {
+                tz: true,
+                precision: Some(6)
+            }),
+            "TEXT"
+        );
         assert_eq!(sqlite_affinity(&SqlType::Uuid), "TEXT");
         assert_eq!(sqlite_affinity(&SqlType::Json), "TEXT");
         assert_eq!(sqlite_affinity(&SqlType::Bytes), "BLOB");

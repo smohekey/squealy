@@ -31,6 +31,17 @@ pub trait Dialect {
         true
     }
 
+    /// The fractional-seconds precision to render on `CURRENT_TIMESTAMP` for a `now()` expression, or
+    /// `None` to render it bare.
+    ///
+    /// The `now()` value types are microsecond-resolution, and native timestamp columns are
+    /// `TIMESTAMP(6)`; MySQL's bare `CURRENT_TIMESTAMP` is fsp 0, so a value produced by `now()` would
+    /// lose its sub-seconds unless spelled `CURRENT_TIMESTAMP(6)`. The default is `None` — PostgreSQL's
+    /// `CURRENT_TIMESTAMP` is already microsecond.
+    fn now_fractional_digits(&self) -> Option<u8> {
+        None
+    }
+
     /// The SQL name for a scalar string function. The default is the standard spelling
     /// ([`UnaryStringFunc::sql_name`], shared by PostgreSQL and MySQL); a backend overrides it where its
     /// builtin differs — e.g. SQLite spells character length `length` rather than `CHAR_LENGTH`.

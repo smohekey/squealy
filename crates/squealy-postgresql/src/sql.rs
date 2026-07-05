@@ -1333,19 +1333,14 @@ fn write_pg_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()> {
             return write!(writer, "numeric({precision},{scale})");
         }
         SqlType::Date => "date",
-        SqlType::Time { tz } => {
-            if *tz {
-                "time with time zone"
-            } else {
-                "time"
-            }
+        // `time(n)` / `timestamp(n) [with time zone]` — the fractional-seconds precision goes between the
+        // base name and the `with time zone` suffix. `None` renders the bare form (PostgreSQL then uses
+        // its microsecond default, which introspection reads back as `Some(6)`).
+        SqlType::Time { tz, precision } => {
+            return write_pg_temporal(writer, "time", *tz, *precision);
         }
-        SqlType::Timestamp { tz } => {
-            if *tz {
-                "timestamp with time zone"
-            } else {
-                "timestamp"
-            }
+        SqlType::Timestamp { tz, precision } => {
+            return write_pg_temporal(writer, "timestamp", *tz, *precision);
         }
         SqlType::Uuid => "uuid",
         SqlType::Json => "json",
@@ -1357,6 +1352,25 @@ fn write_pg_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()> {
         SqlType::Raw(raw) => raw.as_str(),
     };
     writer.write_all(name.as_bytes())
+}
+
+/// Renders a `time`/`timestamp` type with its optional fractional-seconds precision and the
+/// `with time zone` suffix. PostgreSQL spells the precision *inside* the base name (`timestamp(3) with
+/// time zone`), so it cannot be a trailing modifier.
+fn write_pg_temporal(
+    writer: &mut impl Write,
+    base: &str,
+    tz: bool,
+    precision: Option<u8>,
+) -> io::Result<()> {
+    writer.write_all(base.as_bytes())?;
+    if let Some(precision) = precision {
+        write!(writer, "({precision})")?;
+    }
+    if tz {
+        writer.write_all(b" with time zone")?;
+    }
+    Ok(())
 }
 
 fn write_quoted_idents(values: &[&'static str], writer: &mut impl Write) -> io::Result<()> {
@@ -1545,10 +1559,34 @@ mod tests {
             "numeric(10,2)"
         );
         assert_eq!(render_type(SqlType::Date), "date");
-        assert_eq!(render_type(SqlType::Timestamp { tz: false }), "timestamp");
         assert_eq!(
-            render_type(SqlType::Timestamp { tz: true }),
+            render_type(SqlType::Timestamp {
+                tz: false,
+                precision: None
+            }),
+            "timestamp"
+        );
+        assert_eq!(
+            render_type(SqlType::Timestamp {
+                tz: true,
+                precision: None
+            }),
             "timestamp with time zone"
+        );
+        // A fractional-seconds precision renders inside the base name, before the tz suffix.
+        assert_eq!(
+            render_type(SqlType::Timestamp {
+                tz: true,
+                precision: Some(6)
+            }),
+            "timestamp(6) with time zone"
+        );
+        assert_eq!(
+            render_type(SqlType::Time {
+                tz: false,
+                precision: Some(3)
+            }),
+            "time(3)"
         );
         assert_eq!(render_type(SqlType::Uuid), "uuid");
         assert_eq!(render_type(SqlType::Jsonb), "jsonb");

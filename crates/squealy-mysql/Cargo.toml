@@ -11,7 +11,7 @@ categories.workspace = true
 
 [features]
 # Native timestamp column support: enables the core feature so `SystemTime` maps to a timestamp
-# column, plus Encode/Decode against a `TIMESTAMP` column (UTC, whole-second resolution).
+# column, plus Encode/Decode against a `TIMESTAMP(6)` column (UTC, microsecond resolution).
 systemtime = ["squealy/systemtime"]
 # Native `bytes::Bytes` column support: Encode/Decode for `bytes::Bytes` against a `BLOB` column
 # (via `Vec<u8>`). Enables the core `bytes` feature.
@@ -24,7 +24,7 @@ uuid = ["dep:uuid", "squealy/uuid"]
 # feature is needed — only the serde crates.
 serde = ["dep:serde", "dep:serde_json"]
 # Native UTC timestamp columns: Encode/Decode for the respective crate's UTC datetime type against a
-# `TIMESTAMP` column, at whole-second resolution. Each enables the matching core feature. The value is
+# `TIMESTAMP(6)` column, at microsecond resolution. Each enables the matching core feature. The value is
 # stored in UTC (`Mysql::connect` pins the session to `time_zone = '+00:00'`).
 time = ["dep:time", "squealy/time"]
 chrono = ["dep:chrono", "squealy/chrono"]
