@@ -571,10 +571,10 @@ fn write_mysql_temporal(
 }
 
 /// The fractional-seconds precision to attach to a `CURRENT_TIMESTAMP` default so it matches its
-/// column: MySQL rejects `DEFAULT CURRENT_TIMESTAMP` on a `TIMESTAMP(n)` column unless the default is
-/// spelled `CURRENT_TIMESTAMP(n)`. Only a non-zero precision needs the suffix (`TIMESTAMP`/`TIMESTAMP(0)`
-/// both take the bare `CURRENT_TIMESTAMP`).
-fn current_timestamp_precision(ty: &SqlType) -> Option<u8> {
+/// column: MySQL rejects (or truncates) a `CURRENT_TIMESTAMP`/`CURRENT_TIME` default on a `TIMESTAMP(n)`
+/// / `TIME(n)` column unless the function is spelled with the matching `(n)`. Only a non-zero precision
+/// needs the suffix (fsp 0 takes the bare form).
+fn current_temporal_precision(ty: &SqlType) -> Option<u8> {
     match ty {
         SqlType::Timestamp {
             precision: Some(precision),
@@ -603,13 +603,19 @@ fn write_default_value(
         DefaultValue::Bool(false) => writer.write_all(b"FALSE"),
         DefaultValue::CurrentTimestamp => {
             writer.write_all(b"CURRENT_TIMESTAMP")?;
-            if let Some(precision) = current_timestamp_precision(column_ty) {
+            if let Some(precision) = current_temporal_precision(column_ty) {
                 write!(writer, "({precision})")?;
             }
             Ok(())
         }
         DefaultValue::CurrentDate => writer.write_all(b"(CURRENT_DATE)"),
-        DefaultValue::CurrentTime => writer.write_all(b"(CURRENT_TIME)"),
+        DefaultValue::CurrentTime => {
+            writer.write_all(b"(CURRENT_TIME")?;
+            if let Some(precision) = current_temporal_precision(column_ty) {
+                write!(writer, "({precision})")?;
+            }
+            writer.write_all(b")")
+        }
         DefaultValue::Raw(value) => writer.write_all(value.as_bytes()),
     }
 }
@@ -897,6 +903,12 @@ impl squealy::Dialect for MysqlDialect {
         false
     }
 
+    fn now_fractional_digits(&self) -> Option<u8> {
+        // MySQL's bare `CURRENT_TIMESTAMP` is fsp 0; the microsecond `now()` value types feed
+        // `TIMESTAMP(6)` columns, so render `CURRENT_TIMESTAMP(6)` to keep the sub-seconds.
+        Some(6)
+    }
+
     fn write_limit_offset(
         &self,
         limit: Option<usize>,
@@ -1128,13 +1140,19 @@ fn write_column_default(
         // Match the column's precision so MySQL accepts the default (see `write_default_value`).
         ColumnDefault::CurrentTimestamp => {
             writer.write_all(b"CURRENT_TIMESTAMP")?;
-            if let Some(precision) = current_timestamp_precision(column_ty) {
+            if let Some(precision) = current_temporal_precision(column_ty) {
                 write!(writer, "({precision})")?;
             }
             Ok(())
         }
         ColumnDefault::CurrentDate => writer.write_all(b"(CURRENT_DATE)"),
-        ColumnDefault::CurrentTime => writer.write_all(b"(CURRENT_TIME)"),
+        ColumnDefault::CurrentTime => {
+            writer.write_all(b"(CURRENT_TIME")?;
+            if let Some(precision) = current_temporal_precision(column_ty) {
+                write!(writer, "({precision})")?;
+            }
+            writer.write_all(b")")
+        }
         ColumnDefault::Raw(value) => writer.write_all(value.as_bytes()),
     }
 }
@@ -1288,6 +1306,51 @@ mod tests {
         for (ty, expected) in cases {
             assert_eq!(render_type(ty), expected);
         }
+    }
+
+    fn default_sql(default: DefaultValue, ty: SqlType) -> String {
+        let mut out = Vec::new();
+        write_default_value(&default, &ty, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn mysql_current_temporal_defaults_carry_precision() {
+        // A `CURRENT_TIMESTAMP`/`CURRENT_TIME` default matches its column's fractional precision so
+        // MySQL accepts it and the value keeps its microseconds; fsp 0 / `None` take the bare form.
+        let ts6 = SqlType::Timestamp {
+            tz: true,
+            precision: Some(6),
+        };
+        assert_eq!(
+            default_sql(DefaultValue::CurrentTimestamp, ts6),
+            "CURRENT_TIMESTAMP(6)"
+        );
+        let time3 = SqlType::Time {
+            tz: false,
+            precision: Some(3),
+        };
+        assert_eq!(
+            default_sql(DefaultValue::CurrentTime, time3),
+            "(CURRENT_TIME(3))"
+        );
+        // fsp 0 and unspecified precision take the bare spelling.
+        let ts0 = SqlType::Timestamp {
+            tz: true,
+            precision: Some(0),
+        };
+        assert_eq!(
+            default_sql(DefaultValue::CurrentTimestamp, ts0),
+            "CURRENT_TIMESTAMP"
+        );
+        let time_none = SqlType::Time {
+            tz: false,
+            precision: None,
+        };
+        assert_eq!(
+            default_sql(DefaultValue::CurrentTime, time_none),
+            "(CURRENT_TIME)"
+        );
     }
 
     #[test]
