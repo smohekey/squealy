@@ -434,20 +434,22 @@ fn is_redundant_literal_cast(expr: &Expr, data_type: &DataType) -> bool {
                 is_numeric_type(data_type) && !is_integer_type(data_type)
             }
         }
-        // A string cast to a variable-length text type is a no-op; a fixed-length `char(n)` could pad or
-        // truncate, so it is not treated as redundant.
+        // A string cast to an UNBOUNDED text type is a no-op. A length-bounded `varchar(n)`/`char(n)`
+        // can truncate or pad, so it is NOT redundant (it falls through to `Raw`, where the string
+        // canonicalizer keeps it comparable without dropping the cast).
         Value::SingleQuotedString(_) => matches!(
             data_type,
             DataType::Text
-                | DataType::Varchar(_)
-                | DataType::CharVarying(_)
-                | DataType::CharacterVarying(_)
+                | DataType::Varchar(None)
+                | DataType::CharVarying(None)
+                | DataType::CharacterVarying(None)
         ),
         _ => false,
     }
 }
 
 /// Whether `data_type` is a whole-number integer type (casting a fractional literal to it truncates).
+/// A display-width arg (`int(11)`) does not change the value, so it is accepted.
 fn is_integer_type(data_type: &DataType) -> bool {
     matches!(
         data_type,
@@ -462,19 +464,20 @@ fn is_integer_type(data_type: &DataType) -> bool {
     )
 }
 
-/// Whether `data_type` is any numeric type (integer or fractional).
+/// Whether `data_type` is a numeric type whose cast is a guaranteed no-op on a literal — an integer type,
+/// or an **unbounded** fractional type. A precision-bounded `numeric(p, s)` can round, so it is excluded
+/// (it falls through to `Raw` + string canonicalization rather than being stripped).
 fn is_numeric_type(data_type: &DataType) -> bool {
+    use sqlparser::ast::ExactNumberInfo::None as NoPrecision;
     is_integer_type(data_type)
         || matches!(
             data_type,
-            DataType::Numeric(_)
-                | DataType::Decimal(_)
-                | DataType::Dec(_)
+            DataType::Numeric(NoPrecision)
+                | DataType::Decimal(NoPrecision)
+                | DataType::Dec(NoPrecision)
                 | DataType::Real
                 | DataType::Float4
                 | DataType::Float8
-                | DataType::Float(_)
-                | DataType::Double(_)
                 | DataType::DoublePrecision
         )
 }
@@ -1003,6 +1006,15 @@ mod tests {
             low("(1.5)::numeric", SqlDialect::Postgres).unwrap(),
             low("1.5", SqlDialect::Generic).unwrap()
         );
+        // A LENGTH/PRECISION-bounded cast can truncate/round/pad → not stripped (stays Raw).
+        assert!(matches!(
+            low("('abcdef')::varchar(3)", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low("(1.5)::numeric(2, 0)", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
 
         // `IN` / `NOT IN` → `= ANY (ARRAY[..])` / `<> ALL (ARRAY[..])`.
         assert_eq!(
