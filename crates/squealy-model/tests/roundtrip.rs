@@ -5,19 +5,20 @@
 //! re-render to the same SQL — i.e. re-plan to *empty*. This file stands that spine up over a curated
 //! corpus of models exercising the view-body and expression idioms a reverse parser must invert.
 //!
-//! # What this asserts today (Phase 0)
-//!
-//! The `parse` leg is not yet built (lowering lands in later phases), so this harness currently pins the
-//! two ends the invariant is anchored on:
+//! # What this asserts
 //!
 //! 1. [`renders_the_corpus_to_parseable_sql`] — squealy's own rendered output, for every backend that
 //!    supports each construct, is accepted by the pinned `sqlparser` for the matching dialect. This is
 //!    the precondition for lowering: you cannot invert SQL the parser rejects. Coverage is pinned
 //!    exactly: only the documented backend limitations in `EXPECTED_UNSUPPORTED` (e.g. SQLite has no
 //!    generated columns) are skipped — any other render failure fails the test as a regression.
-//! 2. [`reader_entry_points_parse_but_do_not_yet_lower`] — the [`Reader`] seam is wired end-to-end: it
-//!    parses squealy's output and reaches the lowering step, which reports [`ReadError::NotYetLowered`].
-//!    This documents the current gap the epic closes phase by phase; the test tightens as lowering lands.
+//! 2. [`constraint_expressions_round_trip_through_each_dialect`] — the **full spine** for scalar
+//!    constraint expressions (Phase 1): a neutral node rendered to each dialect and read back through
+//!    the [`Reader`] must lower to the same node and re-render byte-identically. A failure here is the
+//!    churn Phase 1 removes.
+//! 3. [`reader_entry_points_lower_scalars_but_not_yet_view_bodies`] — the [`Reader`] seam behaves per
+//!    entry point: scalar expressions lower structurally; view-body lowering is a later phase and still
+//!    reports [`ReadError::NotYetLowered`]. This test tightens as lowering lands.
 
 use std::io;
 
@@ -35,6 +36,13 @@ fn b(expr: ExprNode) -> Box<ExprNode> {
 fn col(column: &str) -> ExprNode {
     ExprNode::Column {
         alias: ALIAS.to_owned(),
+        column: column.to_owned(),
+    }
+}
+
+/// An unqualified column, as a constraint / generated / index expression names one.
+fn bare(column: &str) -> ExprNode {
+    ExprNode::BareColumn {
         column: column.to_owned(),
     }
 }
@@ -591,17 +599,27 @@ fn renders_the_corpus_to_parseable_sql() {
     );
 }
 
-/// Leg two: the `Reader` seam is wired — it parses squealy's rendered output and reaches the lowering
-/// step. Lowering is unimplemented in Phase 0, so every entry point reports `NotYetLowered` (rather than
-/// a parse error, which would mean the seam is broken). This test tightens as lowering lands.
+/// Leg two: the `Reader` seam behaves per entry point. Scalar expressions (check / generated / index)
+/// now *lower* into an [`ExprNode`]; view-body lowering is a later phase and still reports
+/// `NotYetLowered` (rather than a parse error, which would mean the seam is broken). This test tightens
+/// as lowering lands.
 #[test]
-fn reader_entry_points_parse_but_do_not_yet_lower() {
+fn reader_entry_points_lower_scalars_but_not_yet_view_bodies() {
     let reader = Reader::new(SqlDialect::Postgres);
 
-    // A scalar expression (as a check / generated / index expression would arrive): parses, no lowering.
-    match reader.read_check_expression("length(sku) > 0") {
+    // A scalar expression (as a check / generated / index expression arrives) lowers structurally.
+    match reader.read_check_expression("(CHAR_LENGTH(\"sku\") > 0)") {
+        Ok(ExprNode::Compare {
+            op: CompareOp::GreaterThan,
+            ..
+        }) => {}
+        other => panic!("expected a lowered comparison from read_check_expression, got: {other:?}"),
+    }
+
+    // A scalar shape outside the covered grammar (`%` has no neutral node) is reported, not mislowered.
+    match reader.read_check_expression("(\"a\" % 2)") {
         Err(ReadError::NotYetLowered(_)) => {}
-        other => panic!("expected NotYetLowered from read_check_expression, got: {other:?}"),
+        other => panic!("expected NotYetLowered for modulo, got: {other:?}"),
     }
 
     // A CREATE VIEW: parses to the right statement shape, then reports lowering unimplemented.
@@ -627,4 +645,231 @@ fn reader_entry_points_parse_but_do_not_yet_lower() {
         Err(ReadError::Unexpected(_)) => {}
         other => panic!("expected Unexpected for trailing tokens, got: {other:?}"),
     }
+}
+
+// ---- constraint / generated / index expression round-trip -----------------------------------------
+
+/// Neutral scalar expressions, as a `CHECK` / generated-column / index term would carry (unqualified
+/// columns via [`bare`]). Each must survive `render → parse → lower → render` on every backend: rendered
+/// to that dialect's SQL, read back through [`Reader`], the lowered [`ExprNode`] must equal the original
+/// *and* re-render byte-identically. This exercises the render idioms lowering has to invert — full
+/// parenthesization, the float-cast division form, `||`/`CONCAT`, `SUBSTRING …/substr`, `CHAR_LENGTH`/
+/// `length` — across all three dialects from a single neutral node.
+#[allow(clippy::vec_init_then_push)]
+fn constraint_corpus() -> Vec<(&'static str, ExprNode)> {
+    let mut cases: Vec<(&'static str, ExprNode)> = Vec::new();
+
+    let cmp = |op, left, right| ExprNode::Compare {
+        op,
+        left: b(left),
+        right: b(right),
+    };
+
+    // Comparison against a literal.
+    cases.push((
+        "compare",
+        cmp(CompareOp::GreaterThan, bare("cnt"), lit("0")),
+    ));
+
+    // A conjunction of range bounds (nested, fully parenthesized).
+    cases.push((
+        "logical-range",
+        ExprNode::Logical {
+            op: LogicalOp::And,
+            left: b(cmp(CompareOp::GreaterThanOrEquals, bare("price"), lit("0"))),
+            right: b(cmp(CompareOp::LessThanOrEquals, bare("price"), lit("1000"))),
+        },
+    ));
+
+    // `CHAR_LENGTH` (PostgreSQL/MySQL) vs `length` (SQLite) folding.
+    cases.push((
+        "length",
+        cmp(
+            CompareOp::GreaterThan,
+            ExprNode::ScalarFn {
+                func: ScalarFunc::Length,
+                args: vec![bare("sku")],
+            },
+            lit("0"),
+        ),
+    ));
+
+    // The float-cast division idiom (PostgreSQL `double precision` / SQLite `REAL` casts; MySQL none).
+    cases.push((
+        "division",
+        cmp(
+            CompareOp::GreaterThan,
+            ExprNode::Binary {
+                op: ArithmeticOp::Divide,
+                left: b(bare("total")),
+                right: b(bare("qty")),
+            },
+            lit("0"),
+        ),
+    ));
+
+    // `IN (<list>)`.
+    cases.push((
+        "in-list",
+        ExprNode::In {
+            negated: false,
+            operand: b(bare("status")),
+            items: vec![lit("1"), lit("2"), lit("3")],
+        },
+    ));
+
+    // `BETWEEN`.
+    cases.push((
+        "between",
+        ExprNode::Between {
+            negated: false,
+            operand: b(bare("qty")),
+            low: b(lit("1")),
+            high: b(lit("10")),
+        },
+    ));
+
+    // `LIKE`.
+    cases.push((
+        "like",
+        ExprNode::Like {
+            case_insensitive: false,
+            negated: false,
+            operand: b(bare("code")),
+            pattern: b(lit("'A%'")),
+        },
+    ));
+
+    // Concatenation: `||` (PostgreSQL/SQLite) vs `CONCAT(...)` (MySQL).
+    cases.push((
+        "concat",
+        cmp(
+            CompareOp::NotEquals,
+            ExprNode::ScalarFn {
+                func: ScalarFunc::Concat,
+                args: vec![bare("first"), bare("last")],
+            },
+            lit("''"),
+        ),
+    ));
+
+    // Chained concatenation is binary-nested in the model (`a.concat(b).concat(c)`), so it renders as
+    // `((a || b) || c)` (PG/SQLite) / `CONCAT(CONCAT(a, b), c)` (MySQL) — NOT a flat chain — and must
+    // round-trip without flattening. Both left- and right-nested shapes are exercised.
+    let concat = |left, right| ExprNode::ScalarFn {
+        func: ScalarFunc::Concat,
+        args: vec![left, right],
+    };
+    cases.push((
+        "concat-nested-left",
+        concat(concat(bare("a"), bare("b")), bare("c")),
+    ));
+    cases.push((
+        "concat-nested-right",
+        concat(bare("a"), concat(bare("b"), bare("c"))),
+    ));
+
+    // The empty-`IN` / empty-`NOT IN` sentinels (`<op> IS NOT NULL AND 1 = 0` / `… OR 1 = 1`).
+    cases.push((
+        "empty-in",
+        ExprNode::In {
+            negated: false,
+            operand: b(bare("status")),
+            items: Vec::new(),
+        },
+    ));
+    cases.push((
+        "empty-not-in",
+        ExprNode::In {
+            negated: true,
+            operand: b(bare("status")),
+            items: Vec::new(),
+        },
+    ));
+
+    // `SUBSTRING(s FROM a FOR b)` (PostgreSQL/MySQL) vs `substr(s, a, b)` (SQLite).
+    cases.push((
+        "substring",
+        cmp(
+            CompareOp::Equals,
+            ExprNode::ScalarFn {
+                func: ScalarFunc::Substring,
+                args: vec![bare("code"), lit("1"), lit("1")],
+            },
+            lit("'A'"),
+        ),
+    ));
+
+    // `IS NULL` and `NOT`.
+    cases.push((
+        "is-null",
+        ExprNode::IsNull {
+            negated: false,
+            operand: b(bare("deleted_at")),
+        },
+    ));
+    cases.push(("not", ExprNode::Not(b(bare("active")))));
+
+    cases
+}
+
+fn render_scalar(node: &ExprNode, dialect: &dyn squealy::Dialect) -> String {
+    let mut buf = Vec::new();
+    squealy::render_scalar_expr(node, dialect, &mut buf).expect("scalar expression renders");
+    String::from_utf8(buf).expect("rendered SQL is valid UTF-8")
+}
+
+/// The full round-trip spine for scalar constraint expressions: a neutral node, rendered to each
+/// dialect and read back, must lower to the same node and re-render identically. A gap here is exactly
+/// the churn Phase 1 removes (an introspected constraint that will not re-plan to empty).
+#[test]
+fn constraint_expressions_round_trip_through_each_dialect() {
+    let dialects: [(&str, SqlDialect, &dyn squealy::Dialect); 3] = [
+        (
+            "postgres",
+            SqlDialect::Postgres,
+            &squealy_postgresql::Postgres.dialect(),
+        ),
+        ("mysql", SqlDialect::Mysql, &squealy_mysql::Mysql.dialect()),
+        (
+            "sqlite",
+            SqlDialect::Sqlite,
+            &squealy_sqlite::Sqlite.dialect(),
+        ),
+    ];
+
+    let mut failures: Vec<String> = Vec::new();
+    for (case, node) in constraint_corpus() {
+        for (backend, sql_dialect, dialect) in dialects {
+            let rendered = render_scalar(&node, dialect);
+            let lowered = match Reader::new(sql_dialect).read_check_expression(&rendered) {
+                Ok(lowered) => lowered,
+                Err(err) => {
+                    failures.push(format!(
+                        "{case} on {backend}: read failed: {err}\n  SQL: {rendered}"
+                    ));
+                    continue;
+                }
+            };
+            if lowered != node {
+                failures.push(format!(
+                    "{case} on {backend}: lowered node differs from the original\n  SQL: {rendered}\n  got: {lowered:?}"
+                ));
+                continue;
+            }
+            let re_rendered = render_scalar(&lowered, dialect);
+            if re_rendered != rendered {
+                failures.push(format!(
+                    "{case} on {backend}: re-rendered SQL differs\n  first:  {rendered}\n  second: {re_rendered}"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "constraint round-trip failed for {} case(s):\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
 }

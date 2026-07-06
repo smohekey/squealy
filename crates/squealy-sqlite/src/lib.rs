@@ -45,6 +45,16 @@ pub use query::{SqliteRowReader, SqliteTransaction, SqliteValue};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Sqlite;
 
+impl Sqlite {
+    /// This backend's [`Dialect`](squealy::Dialect) — the render-side counterpart to the reverse
+    /// parser's reader ([`squealy_parse`](https://docs.rs/squealy-parse)). Exposed so a round-trip can
+    /// render a scalar expression (a `CHECK` / index / generated-column term) the same way DDL does,
+    /// then read it back, and assert the two stay symmetric.
+    pub fn dialect(&self) -> impl squealy::Dialect {
+        crate::sql::SqliteDialect
+    }
+}
+
 // SQLite (3.25+) supports window functions and the query-level named `WINDOW` clause.
 impl squealy::SupportsNamedWindow for Sqlite {}
 

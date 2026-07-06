@@ -622,8 +622,13 @@ pub enum OrderNulls {
 /// Literals are inlined, since a view body carries no bind parameters.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExprNode {
-    /// A qualified column reference, rendered as `<alias>.<column>`.
+    /// A qualified column reference, rendered as `<alias>.<column>`. A view body binds every column to
+    /// a source alias; the unqualified form used by constraint / generated / index expressions is
+    /// [`ExprNode::BareColumn`].
     Column { alias: String, column: String },
+    /// An unqualified column reference, rendered as a bare `<column>`. Constraint, generated-column, and
+    /// index expressions name columns of their own table with no alias.
+    BareColumn { column: String },
     /// An inlined SQL literal, already formatted (e.g. `'Ada'`, `42`, `TRUE`, `NULL`).
     Literal(String),
     /// Binary arithmetic; `Divide` uses the backend's fractional-division handling.
@@ -857,7 +862,7 @@ fn collect_query_sources<'a>(query: &'a ViewQueryModel, sources: &mut Vec<&'a So
 /// Collects every [`SourceRef`] reachable from an expression, recursing through nested subqueries.
 fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>) {
     match expr {
-        ExprNode::Column { .. } | ExprNode::Literal(_) => {}
+        ExprNode::Column { .. } | ExprNode::BareColumn { .. } | ExprNode::Literal(_) => {}
         ExprNode::Binary { left, right, .. }
         | ExprNode::Compare { left, right, .. }
         | ExprNode::Logical { left, right, .. } => {
