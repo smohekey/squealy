@@ -263,12 +263,28 @@ fn render_source(
     write!(writer, " AS {}", source.alias)
 }
 
+/// Renders a single scalar [`ExprNode`] to SQL for the given dialect — the entry point for the
+/// expressions that live outside a view body: `CHECK` constraints, generated-column definitions, and
+/// index key / partial-predicate terms. These carry **unqualified** column references
+/// ([`ExprNode::Column`] with `alias: None`), rendered as bare quoted identifiers.
+///
+/// This is the render half that the reverse parser ([`squealy_parse`](https://docs.rs/squealy-parse)'s
+/// `lower_expr`) inverts; the two must stay symmetric so a published constraint re-plans to empty.
+pub fn render_scalar_expr(
+    node: &ExprNode,
+    dialect: &dyn Dialect,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
+    render_expr(node, dialect, writer)
+}
+
 fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -> io::Result<()> {
     match node {
         ExprNode::Column { alias, column } => {
             write!(writer, "{alias}.")?;
             dialect.write_quoted_ident(column, writer)
         }
+        ExprNode::BareColumn { column } => dialect.write_quoted_ident(column, writer),
         ExprNode::Literal(text) => writer.write_all(text.as_bytes()),
         ExprNode::Binary { op, left, right } => {
             if *op == ArithmeticOp::Divide && dialect.integer_division_needs_float_cast() {

@@ -132,6 +132,16 @@ pub use query::MysqlRowReader;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Mysql;
 
+impl Mysql {
+    /// This backend's [`Dialect`](squealy::Dialect) — the render-side counterpart to the reverse
+    /// parser's reader ([`squealy_parse`](https://docs.rs/squealy-parse)). Exposed so a round-trip can
+    /// render a scalar expression (a `CHECK` / index / generated-column term) the same way DDL does,
+    /// then read it back, and assert the two stay symmetric.
+    pub fn dialect(&self) -> impl squealy::Dialect {
+        crate::sql::MysqlDialect
+    }
+}
+
 // MySQL (8.0.31+) supports `INTERSECT ALL` / `EXCEPT ALL`.
 impl squealy::SupportsIntersectExceptAll for Mysql {}
 

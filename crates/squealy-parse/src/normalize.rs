@@ -62,7 +62,11 @@
 //! semantic the renderer reproduces per dialect, or normalization must refuse to fold. Each fold added
 //! here carries that judgement as a first-class review criterion, not an afterthought.
 //!
-//! # Status (Phase 0)
+//! # Status
 //!
-//! This module is the design reference; the fold/unwind implementations land alongside the lowering in
-//! [`crate::lower`], one phase at a time (checks / generated / index expressions first).
+//! This module is the design reference; the fold/unwind implementations live alongside the lowering in
+//! [`crate::lower`]. The **scalar** folds above — full parenthesization, the float-cast division form,
+//! `||`/`CONCAT` concatenation, `SUBSTRING`/`substr`, `CHAR_LENGTH`/`length`, `LIKE`/`ILIKE` — have
+//! landed for check / generated-column / index expressions. The view-body idioms (CAST-result pins,
+//! per-branch `CASE` casts, the empty-`IN ()` sentinel, `AT TIME ZONE`, `date_trunc`) land with
+//! view-body lowering in a later phase.
