@@ -1872,6 +1872,33 @@ async fn an_explicit_drop_trigger_through_the_executor_is_honored() {
 }
 
 #[tokio::test]
+async fn an_explicit_drop_of_a_dollar_named_trigger_is_honored() {
+    // `$` is a valid unquoted SQLite identifier byte, so the batch scan must read the whole name
+    // `active_widgets_ins$1` — otherwise it records a drop of `active_widgets_ins` and replay resurrects
+    // the trigger the caller explicitly dropped (the view is untouched, so its definition matches).
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+    exec(
+        &raw,
+        "CREATE TRIGGER active_widgets_ins$1 INSTEAD OF INSERT ON \"active_widgets\" \
+         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
+    )
+    .await;
+
+    connection
+        .execute_ddl("DROP TRIGGER active_widgets_ins$1")
+        .await
+        .expect("drop the $-named trigger through the executor");
+
+    assert!(
+        !trigger_exists(&raw, "active_widgets_ins$1").await,
+        "an explicit DROP TRIGGER of a $-named trigger must not be undone by replay",
+    );
+}
+
+#[tokio::test]
 async fn an_explicit_single_quoted_drop_trigger_is_honored() {
     // SQLite accepts a single-quoted trigger name in `DROP TRIGGER 'x'` (treating the string as an
     // identifier). The batch scan must recognize that form too, or replay would resurrect the trigger the

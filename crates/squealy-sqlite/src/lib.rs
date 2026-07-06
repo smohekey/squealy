@@ -965,6 +965,11 @@ mod tests {
             dropped("DROP TRIGGER temp.foo"),
             vec![(Some("temp".to_owned()), "foo".to_owned())],
         );
+        // `$` is a valid unquoted SQLite identifier byte, so it is part of the name (not a separator).
+        assert_eq!(
+            dropped("DROP TRIGGER trig$1"),
+            vec![(None, "trig$1".to_owned())],
+        );
         // SQLite accepts a single-quoted name in this identifier position (with `''` escaping).
         assert_eq!(
             dropped("DROP TRIGGER 'single'"),

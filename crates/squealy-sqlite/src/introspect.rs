@@ -337,12 +337,13 @@ pub(crate) fn skip_noncode(bytes: &[u8], index: usize) -> Option<usize> {
     }
 }
 
-/// Whether `byte` can be part of an unquoted SQL identifier/keyword token. A non-ASCII byte (a
-/// continuation or lead byte of a multi-byte UTF-8 identifier such as `é`) counts as a word byte, so a
-/// Unicode identifier is scanned as one whole token — this keeps token boundaries on `char` boundaries,
-/// avoiding a mid-`char` slice (and its panic) in the token helpers.
+/// Whether `byte` can be part of an unquoted SQL identifier/keyword token. SQLite's unquoted-identifier
+/// set is alphanumerics, `_`, `$`, and any byte `>= 0x80`; the `$` matters for a name like `trig$1`, and
+/// a non-ASCII byte (a continuation or lead byte of a multi-byte UTF-8 identifier such as `é`) counts too
+/// so a Unicode identifier is scanned as one whole token — this keeps token boundaries on `char`
+/// boundaries, avoiding a mid-`char` slice (and its panic) in the token helpers.
 pub(crate) fn is_word_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_' || !byte.is_ascii()
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' || !byte.is_ascii()
 }
 
 /// The byte offset just past the first occurrence of `keyword` (ASCII, matched case-insensitively) as a
