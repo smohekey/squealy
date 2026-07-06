@@ -1,8 +1,8 @@
 //! Reverse SQL parsing for squealy: dialect SQL text back into the neutral schema model.
 //!
-//! squealy is otherwise a one-way compiler — the neutral model ([`squealy::DatabaseModel`],
-//! [`squealy::ViewQueryModel`], [`squealy::ExprNode`]) is rendered *out* to dialect SQL by the
-//! renderers in [`squealy::view_render`] and each backend's DDL writer. This crate is the missing
+//! squealy is otherwise a one-way compiler — the neutral model (`DatabaseModel`,
+//! [`squealy_ir::ViewQueryModel`], [`squealy_ir::ExprNode`]) is rendered *out* to dialect SQL by the
+//! renderers in `view_render` and each backend's DDL writer. This crate is the missing
 //! inverse: it parses dialect SQL and lowers it *into* that neutral model, so a live database of any
 //! dialect can be introspected structurally (view bodies, check / generated / index expressions) and
 //! re-rendered to any other dialect.
@@ -13,7 +13,7 @@
 //! faithful, dialect-spelled AST but does **zero** cross-dialect canonicalization. The real work lives
 //! in two squealy-owned layers:
 //!
-//! - [`lower`] — AST → [`squealy::ExprNode`] / [`squealy::ViewQueryModel`]. The structural inverse of
+//! - [`lower`] — AST → [`squealy_ir::ExprNode`] / [`squealy_ir::ViewQueryModel`]. The structural inverse of
 //!   the renderers, dialect-parameterized the same way they are.
 //! - [`normalize`] — semantics-preserving folding of dialect spellings to one neutral node (e.g.
 //!   `||` ↔ `CONCAT`, `substr` ↔ `SUBSTRING … FROM … FOR`, `CURRENT_TIMESTAMP(n)` ↔ `now()`), and the
@@ -52,7 +52,7 @@ pub use sqlparser;
 /// Selects which SQL dialect's grammar and spelling conventions a [`Reader`] parses against.
 ///
 /// Each variant maps to a [`sqlparser`] dialect. It also identifies which of the renderer's
-/// per-dialect idioms (see [`squealy::Dialect`]) were used to produce the text, which the lowering
+/// per-dialect idioms (see `Dialect`) were used to produce the text, which the lowering
 /// layer needs in order to invert them (e.g. whether `||` denotes string concatenation or logical
 /// `OR`). The neutral model itself is dialect-independent; this only describes the *input* text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
