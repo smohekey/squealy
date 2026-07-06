@@ -464,9 +464,12 @@ fn is_integer_type(data_type: &DataType) -> bool {
     )
 }
 
-/// Whether `data_type` is a numeric type whose cast is a guaranteed no-op on a literal — an integer type,
-/// or an **unbounded** fractional type. A precision-bounded `numeric(p, s)` can round, so it is excluded
-/// (it falls through to `Raw` + string canonicalization rather than being stripped).
+/// Whether casting a literal to `data_type` is a guaranteed value-preserving no-op — an integer type,
+/// or an **unbounded arbitrary-precision** `numeric`/`decimal`. Notably NOT a floating type
+/// (`real`/`float4`/`float8`/`double precision`): a binary float cannot hold every integer or decimal
+/// exactly (`(16777217)::real` rounds to `16777216`), so a float cast can change the value and is left as
+/// `Raw` (kept comparable by the string canonicalizer) rather than stripped. A precision-bounded
+/// `numeric(p, s)` can round too, so only the unbounded form is a no-op.
 fn is_numeric_type(data_type: &DataType) -> bool {
     use sqlparser::ast::ExactNumberInfo::None as NoPrecision;
     is_integer_type(data_type)
@@ -475,10 +478,6 @@ fn is_numeric_type(data_type: &DataType) -> bool {
             DataType::Numeric(NoPrecision)
                 | DataType::Decimal(NoPrecision)
                 | DataType::Dec(NoPrecision)
-                | DataType::Real
-                | DataType::Float4
-                | DataType::Float8
-                | DataType::DoublePrecision
         )
 }
 
@@ -1013,6 +1012,15 @@ mod tests {
         ));
         assert!(matches!(
             low("(1.5)::numeric(2, 0)", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // A float cast is never provably value-preserving (`(16777217)::real` rounds) → stays Raw.
+        assert!(matches!(
+            low("(16777217)::real", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low("(1.5)::float8", SqlDialect::Postgres),
             Err(ReadError::NotYetLowered(_))
         ));
 
