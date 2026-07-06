@@ -1,12 +1,12 @@
 //! The per-dialect reader seam — SQL text into neutral-model objects.
 //!
 //! [`Reader`] mirrors the renderer's structure: where each backend renders the neutral model to SQL
-//! via a [`squealy::Dialect`], a `Reader` inverts that for one [`SqlDialect`]. The entry points here
+//! via a `Dialect`, a `Reader` inverts that for one [`SqlDialect`]. The entry points here
 //! correspond one-for-one to the render entry points a round-trip must invert:
 //!
 //! | render (out)                                   | read (in)                        |
 //! |------------------------------------------------|----------------------------------|
-//! | [`squealy::render_create_view`]                | [`Reader::read_create_view`]     |
+//! | `render_create_view`                | [`Reader::read_create_view`]     |
 //! | backend DDL writer — `CHECK (<expr>)`          | [`Reader::read_check_expression`]     |
 //! | backend DDL writer — `GENERATED ALWAYS AS (…)` | [`Reader::read_generated_expression`] |
 //! | backend DDL writer — index key term            | [`Reader::read_index_expression`]     |
@@ -15,7 +15,7 @@
 //! then return [`ReadError::NotYetLowered`]; the lowering is filled in per phase.
 
 use sqlparser::ast::Statement;
-use squealy::{ExprNode, ViewModel};
+use squealy_ir::{ExprNode, ViewModel};
 
 use crate::{ReadError, SqlDialect, lower, parse_expr, parse_sql};
 
@@ -39,7 +39,7 @@ impl Reader {
     }
 
     /// Reads a `CREATE VIEW` statement into a [`ViewModel`] (the inverse of
-    /// [`squealy::render_create_view`]).
+    /// `render_create_view`).
     ///
     /// Phase 0: verifies the text parses to a single `CREATE VIEW` and routes its body through the
     /// lowering seam, which returns [`ReadError::NotYetLowered`] — view-body reconstruction lands in a

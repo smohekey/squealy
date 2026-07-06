@@ -3,6 +3,11 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Add, BitAnd, BitOr, Div, Mul, Not, Sub};
 
+use squealy_ir::{
+    AggregateFunc, ArithmeticOp, CompareOp, DateField, FrameBound, FrameMode, FrameSpec,
+    OrderDirection, WindowFunc,
+};
+
 /// A structured SQL source alias used by generated query typestates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceAlias {
@@ -28,40 +33,6 @@ impl fmt::Display for SourceAlias {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "q{}_{}", self.depth, self.index)
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ArithmeticOp {
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompareOp {
-    Equals,
-    NotEquals,
-    LessThan,
-    LessThanOrEquals,
-    GreaterThan,
-    GreaterThanOrEquals,
-}
-
-/// A SQL aggregate function applied to a single expression operand.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AggregateFunc {
-    Count,
-    Sum,
-    Avg,
-    Min,
-    Max,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OrderDirection {
-    Asc,
-    Desc,
 }
 
 /// Marker trait for Rust types that can participate in numeric SQL operations.
@@ -857,47 +828,6 @@ where
 
 // ===== date/time functions =====
 
-/// A date/time field for [`extract`] (rendered as the `EXTRACT` keyword, e.g. `YEAR`) and
-/// [`date_trunc`] (rendered as the quoted unit literal, e.g. `'year'`). Each field's `i64` result is
-/// uniform across PostgreSQL and MySQL. `Second` is the whole-seconds component (`0`–`59`): PostgreSQL's
-/// `EXTRACT(SECOND …)` is fractional, so [`extract`] floors it to match MySQL's integer value — use
-/// [`extract_second`] for the fractional part.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DateField {
-    Year,
-    Month,
-    Day,
-    Hour,
-    Minute,
-    Second,
-}
-
-impl DateField {
-    /// The `EXTRACT(<keyword> FROM …)` field keyword.
-    pub fn extract_keyword(self) -> &'static str {
-        match self {
-            DateField::Year => "YEAR",
-            DateField::Month => "MONTH",
-            DateField::Day => "DAY",
-            DateField::Hour => "HOUR",
-            DateField::Minute => "MINUTE",
-            DateField::Second => "SECOND",
-        }
-    }
-
-    /// The `date_trunc('<literal>', …)` unit literal.
-    pub fn trunc_literal(self) -> &'static str {
-        match self {
-            DateField::Year => "year",
-            DateField::Month => "month",
-            DateField::Day => "day",
-            DateField::Hour => "hour",
-            DateField::Minute => "minute",
-            DateField::Second => "second",
-        }
-    }
-}
-
 /// `CURRENT_TIMESTAMP` — the current transaction timestamp. Carries the result timestamp type `T` at
 /// the type level only (no operand, no parameters).
 #[doc(hidden)]
@@ -1349,20 +1279,6 @@ where
 
 // ===== Window functions =====
 
-/// The function part of a window expression (`func(args) OVER (…)`): a SQL aggregate used as a
-/// window, or a dedicated window function.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WindowFunc {
-    /// An aggregate (`SUM`/`AVG`/`COUNT`/`MIN`/`MAX`) used as a window function.
-    Aggregate(AggregateFunc),
-    RowNumber,
-    Rank,
-    DenseRank,
-    Ntile,
-    Lag,
-    Lead,
-}
-
 /// Empty terminator for a window `PARTITION BY` / `ORDER BY` list.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1480,46 +1396,6 @@ where
 
 // ===== Window frame clauses =====
 
-/// The mode of a window frame: `ROWS` (physical, row-count offsets) or `RANGE` (logical, value
-/// offsets relative to the `ORDER BY` key). Chosen by the [`Window::rows`] / [`Window::range`]
-/// builder method.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FrameMode {
-    Rows,
-    Range,
-}
-
-/// The stored value of a window frame bound (the left/right of `BETWEEN <start> AND <end>`). Offsets
-/// are compile-time literals, so a frame contributes no runtime bind parameters. End users do not name
-/// this directly — they build bounds with the typed constructors ([`unbounded_preceding`],
-/// [`preceding`], [`current_row`], [`following`], [`unbounded_following`]), which the [`FrameStart`] /
-/// [`FrameEnd`] traits restrict to the valid side. It is public for the view-model (de)serializer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FrameBound {
-    /// `UNBOUNDED PRECEDING` — the start of the partition.
-    UnboundedPreceding,
-    /// `<n> PRECEDING` — `n` rows (or `n` of the order key's value) before the current row.
-    Preceding(u64),
-    /// `CURRENT ROW`.
-    CurrentRow,
-    /// `<n> FOLLOWING` — `n` rows (or value) after the current row.
-    Following(u64),
-    /// `UNBOUNDED FOLLOWING` — the end of the partition.
-    UnboundedFollowing,
-}
-
-impl FrameBound {
-    fn render<W: std::io::Write + ?Sized>(self, w: &mut W) -> std::io::Result<()> {
-        match self {
-            FrameBound::UnboundedPreceding => w.write_all(b"UNBOUNDED PRECEDING"),
-            FrameBound::Preceding(n) => write!(w, "{n} PRECEDING"),
-            FrameBound::CurrentRow => w.write_all(b"CURRENT ROW"),
-            FrameBound::Following(n) => write!(w, "{n} FOLLOWING"),
-            FrameBound::UnboundedFollowing => w.write_all(b"UNBOUNDED FOLLOWING"),
-        }
-    }
-}
-
 /// A bound valid as a frame's **start** (the left of `BETWEEN … AND …`). SQL's `<frame start>` grammar
 /// admits everything except `UNBOUNDED FOLLOWING`, so [`unbounded_following`] does not implement this —
 /// passing it as the start of [`Window::rows`] / [`Window::range`] is a compile error.
@@ -1631,52 +1507,6 @@ pub fn unbounded_following() -> UnboundedFollowing {
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NoFrame;
-
-/// A concrete window frame clause (`{ROWS|RANGE} BETWEEN <start> AND <end>`) stored in a [`Window`]
-/// and its [`WindowExprAst`]. Contributes no runtime params (the bounds are literals). PostgreSQL and
-/// MySQL 8.0+ share this syntax, so it renders identically across backends.
-#[doc(hidden)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FrameSpec {
-    mode: FrameMode,
-    start: FrameBound,
-    end: FrameBound,
-}
-
-impl FrameSpec {
-    /// Construct a frame clause from its mode and bounds. Used by the view-model (de)serializer to
-    /// rebuild a frame; query builders go through [`Window::rows`] / [`Window::range`] instead.
-    pub fn new(mode: FrameMode, start: FrameBound, end: FrameBound) -> Self {
-        Self { mode, start, end }
-    }
-
-    /// The frame mode (`ROWS` or `RANGE`).
-    pub fn mode(&self) -> FrameMode {
-        self.mode
-    }
-
-    /// The frame's start bound (the left of `BETWEEN … AND …`).
-    pub fn start(&self) -> FrameBound {
-        self.start
-    }
-
-    /// The frame's end bound (the right of `BETWEEN … AND …`).
-    pub fn end(&self) -> FrameBound {
-        self.end
-    }
-
-    /// Render the frame clause without a leading space (the caller emits the separator), e.g.
-    /// `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. Shared by every backend renderer.
-    pub fn render<W: std::io::Write + ?Sized>(&self, w: &mut W) -> std::io::Result<()> {
-        w.write_all(match self.mode {
-            FrameMode::Rows => b"ROWS BETWEEN ".as_slice(),
-            FrameMode::Range => b"RANGE BETWEEN ".as_slice(),
-        })?;
-        self.start.render(w)?;
-        w.write_all(b" AND ")?;
-        self.end.render(w)
-    }
-}
 
 /// The frame slot of a [`Window`]: either [`NoFrame`] or a concrete [`FrameSpec`]. Reports the frame
 /// (if any) to the renderer; the frame carries no runtime params, so it does not affect a window
@@ -3399,11 +3229,11 @@ impl<'scope, Parts, Ords> Window<'scope, Parts, Ords> {
         Window {
             partitions: self.partitions,
             orders: self.orders,
-            frame: FrameSpec {
-                mode: FrameMode::Rows,
-                start: start.into_start_bound(),
-                end: end.into_end_bound(),
-            },
+            frame: FrameSpec::new(
+                FrameMode::Rows,
+                start.into_start_bound(),
+                end.into_end_bound(),
+            ),
             _scope: PhantomData,
         }
     }
@@ -3419,11 +3249,11 @@ impl<'scope, Parts, Ords> Window<'scope, Parts, Ords> {
         Window {
             partitions: self.partitions,
             orders: self.orders,
-            frame: FrameSpec {
-                mode: FrameMode::Range,
-                start: start.into_start_bound(),
-                end: end.into_end_bound(),
-            },
+            frame: FrameSpec::new(
+                FrameMode::Range,
+                start.into_start_bound(),
+                end.into_end_bound(),
+            ),
             _scope: PhantomData,
         }
     }
@@ -6091,7 +5921,7 @@ where
 /// DDL partial-index `WHERE` clause. Used by the `Table` derive to lower a `where = |row| ...`
 /// attribute on a unique column/constraint or index into [`IndexModel::predicate`].
 ///
-/// [`IndexModel::predicate`]: crate::model::IndexModel::predicate
+/// [`IndexModel::predicate`]: squealy_ir::IndexModel::predicate
 pub fn render_ddl_predicate<K, Ast>(predicate: &Predicate<'_, K, Ast>) -> String
 where
     K: PredicateKind,

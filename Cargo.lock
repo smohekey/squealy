@@ -1765,6 +1765,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures-core",
+ "squealy-ir",
  "squealy-macros",
  "squealy-test",
  "time",
@@ -1787,6 +1788,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "squealy-ir"
+version = "0.1.0"
 
 [[package]]
 name = "squealy-macros"
@@ -1837,7 +1842,7 @@ name = "squealy-parse"
 version = "0.1.0"
 dependencies = [
  "sqlparser",
- "squealy",
+ "squealy-ir",
  "thiserror",
 ]
 

@@ -1,6 +1,6 @@
 [package]
-name = "squealy-parse"
-description = "Reverse SQL parser for squealy: dialect SQL text into the neutral schema model"
+name = "squealy-ir"
+description = "Backend-neutral schema/expression data types shared by squealy crates"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,3 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-squealy-ir.workspace = true
-sqlparser = "=0.62.0"
-thiserror.workspace = true
