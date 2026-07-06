@@ -478,36 +478,35 @@ pub use cte::{
 pub use database::Database;
 pub use dialect::{DeleteUsingStyle, Dialect, SetOperandStyle, UpdateFromStyle};
 pub use expr::{
-    AddExpr, AggregateExprAst, AggregateFunc, AggregateScalar, AndPredicate, AnyPredicate,
-    AppendArm, AppendCoalesceArg, AppendOrder, AppendPartition, AppendSimpleArm, ArithmeticOp,
-    AvgExpr, BetweenPredicate, BetweenPredicateAst, BinaryExprAst, BoolTestPredicate,
-    BoolTestPredicateAst, CaseArmsParams, CaseBuilder, CaseExprAst, CaseMaybeNull, CaseNil,
-    CaseNonNull, CaseNull, CaseNullAnd, CaseNullOr, CaseWhen, CoalesceArg, CoalesceArgsParams,
-    CoalesceBuilder, CoalesceExprAst, CoalesceNil, ColumnBetween, ColumnCaseNull, ColumnComparison,
-    ColumnExprAst, ColumnLike, ColumnRef, CompareOp, ComparePredicateAst, ConcatExprAst, CountExpr,
-    CurrentRow, DateField, DateTruncExprAst, DdlExprAst, DdlPredicateAst, DdlSqlLiteral,
-    DivideExpr, EqualsPredicate, ExistsPredicate, ExistsPredicateAst, Expr, ExprAst, ExprKind,
-    ExprVisitor, ExtractAtExprAst, ExtractExprAst, ExtractSecondExprAst, Following, FrameBound,
-    FrameEnd, FrameMode, FrameSpec, FrameStart, GreaterThanOrEqualsPredicate, GreaterThanPredicate,
-    InPredicate, InPredicateAst, InSubqueryPredicateAst, IntoExpr, IntoWindowNullable,
-    IsNotNullPredicate, IsNullPredicate, KindNullability, LagArgsAst, LessThanOrEqualsPredicate,
-    LessThanPredicate, LikePredicate, LikePredicateAst, LiteralExprAst, MaxExpr, MinExpr,
-    MultiplyExpr, NamedWindowExprAst, NoElse, NoFrame, NonAggregateAst, NonAggregatePredicate,
-    NonEmptyArms, NonWindowAst, NotEqualsPredicate, NotPredicate, NowExprAst,
-    NullCheckPredicateAst, Nullable, NullableExpr, NullifExprAst, OrPredicate, Order,
-    OrderDirection, ParamExprAst, PendingWindow, Preceding, Predicate, PredicateAst,
-    PredicateAstVisitor, PredicateKind, ProjectionParams, RenderAst, RenderCaseArms,
-    RenderCoalesceArgs, RenderPredicateAst, RenderSimpleCaseArms, RenderWindowList,
-    ReturnableProjection, RuntimeParam, SameValue, ScalarNullable, ScalarProjection,
-    ScalarSubqueryExprAst, SimpleCaseArmsParams, SimpleCaseBuilder, SimpleCaseExprAst,
-    SimpleCaseNil, SimpleCaseWhen, SourceAlias, SqlDivide, SqlNumber, SqlSum, SqlText,
-    SubstringExprAst, SubtractExpr, SumExpr, TimestampKind, UnaryFnExprAst, UnaryStringFunc,
-    UnboundedFollowing, UnboundedPreceding, Window, WindowExprAst, WindowFrame, WindowFunc,
-    WindowListParams, WindowNil, WindowNoArg, WindowOperand, WindowOrder, WindowPartition,
-    WindowRef, case, case_of, coalesce, current_row, date_trunc, date_trunc_at, dense_rank, exists,
-    extract, extract_at, extract_second, following, lag, lead, length, lower, named_window_alias,
-    not_exists, now, ntile, nullif, param, preceding, rank, render_ddl_predicate, row_number,
-    scalar_subquery, substring, trim, unbounded_following, unbounded_preceding, upper,
+    AddExpr, AggregateExprAst, AggregateScalar, AndPredicate, AnyPredicate, AppendArm,
+    AppendCoalesceArg, AppendOrder, AppendPartition, AppendSimpleArm, AvgExpr, BetweenPredicate,
+    BetweenPredicateAst, BinaryExprAst, BoolTestPredicate, BoolTestPredicateAst, CaseArmsParams,
+    CaseBuilder, CaseExprAst, CaseMaybeNull, CaseNil, CaseNonNull, CaseNull, CaseNullAnd,
+    CaseNullOr, CaseWhen, CoalesceArg, CoalesceArgsParams, CoalesceBuilder, CoalesceExprAst,
+    CoalesceNil, ColumnBetween, ColumnCaseNull, ColumnComparison, ColumnExprAst, ColumnLike,
+    ColumnRef, ComparePredicateAst, ConcatExprAst, CountExpr, CurrentRow, DateTruncExprAst,
+    DdlExprAst, DdlPredicateAst, DdlSqlLiteral, DivideExpr, EqualsPredicate, ExistsPredicate,
+    ExistsPredicateAst, Expr, ExprAst, ExprKind, ExprVisitor, ExtractAtExprAst, ExtractExprAst,
+    ExtractSecondExprAst, Following, FrameEnd, FrameStart, GreaterThanOrEqualsPredicate,
+    GreaterThanPredicate, InPredicate, InPredicateAst, InSubqueryPredicateAst, IntoExpr,
+    IntoWindowNullable, IsNotNullPredicate, IsNullPredicate, KindNullability, LagArgsAst,
+    LessThanOrEqualsPredicate, LessThanPredicate, LikePredicate, LikePredicateAst, LiteralExprAst,
+    MaxExpr, MinExpr, MultiplyExpr, NamedWindowExprAst, NoElse, NoFrame, NonAggregateAst,
+    NonAggregatePredicate, NonEmptyArms, NonWindowAst, NotEqualsPredicate, NotPredicate,
+    NowExprAst, NullCheckPredicateAst, Nullable, NullableExpr, NullifExprAst, OrPredicate, Order,
+    ParamExprAst, PendingWindow, Preceding, Predicate, PredicateAst, PredicateAstVisitor,
+    PredicateKind, ProjectionParams, RenderAst, RenderCaseArms, RenderCoalesceArgs,
+    RenderPredicateAst, RenderSimpleCaseArms, RenderWindowList, ReturnableProjection, RuntimeParam,
+    SameValue, ScalarNullable, ScalarProjection, ScalarSubqueryExprAst, SimpleCaseArmsParams,
+    SimpleCaseBuilder, SimpleCaseExprAst, SimpleCaseNil, SimpleCaseWhen, SourceAlias, SqlDivide,
+    SqlNumber, SqlSum, SqlText, SubstringExprAst, SubtractExpr, SumExpr, TimestampKind,
+    UnaryFnExprAst, UnaryStringFunc, UnboundedFollowing, UnboundedPreceding, Window, WindowExprAst,
+    WindowFrame, WindowListParams, WindowNil, WindowNoArg, WindowOperand, WindowOrder,
+    WindowPartition, WindowRef, case, case_of, coalesce, current_row, date_trunc, date_trunc_at,
+    dense_rank, exists, extract, extract_at, extract_second, following, lag, lead, length, lower,
+    named_window_alias, not_exists, now, ntile, nullif, param, preceding, rank,
+    render_ddl_predicate, row_number, scalar_subquery, substring, trim, unbounded_following,
+    unbounded_preceding, upper,
 };
 pub use expr::{
     AggregateNeedsGroupBy, AggregateProjection, AggregateTerm, Aggregated, AstProjectionClass,
@@ -525,15 +524,7 @@ pub use list::{
     MapFixedList, NoRuntimeParams, PreparedParamValues, PushBack, RequiredCol, RequiredCovered,
     There, ToTuple, TupleAppend, TupleConcat,
 };
-pub use model::{
-    CaseArm, CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintEnforcement,
-    ConstraintValidation, DatabaseModel, DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch,
-    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
-    JoinItem, JoinKind, LogicalOp, OrderItem, OrderNulls, ProjectionItem, ScalarFunc, SchemaModel,
-    SourceRef, SqlType, TableModel, ViewColumnModel, ViewDef, ViewModel, ViewQueryModel,
-    WindowOrderTerm, table_from_dyn,
-};
+pub use model::{DatabaseModel, ViewDef, table_from_dyn};
 pub use plan::{DatabasePlan, DatabasePlanStep, TablePlanStep};
 pub use projection::{
     Maybe, Projectable, ProjectionShape, ProjectionVisitor, QuerySource, RenderProjectable,
@@ -570,6 +561,16 @@ pub use query::{
     Where, WindowBy, WindowScope, assert_distinct_insert_select_columns, default,
 };
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
+pub use squealy_ir::{
+    AggregateFunc, ArithmeticOp, CaseArm, CheckModel, ColumnModel, CompareOp, Constraint,
+    ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, DateField, DefaultValue,
+    ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, FrameBound, FrameMode, FrameSpec,
+    GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
+    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, JoinItem,
+    JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem, ScalarFunc,
+    SchemaModel, SourceRef, SqlType, TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
+    WindowFunc, WindowOrderTerm,
+};
 pub use squealy_macros::{CTE, ColumnType, Database, RecursiveCTE, Schema, Table, View};
 pub use table::{
     InsertableTable, SchemaTable, Table, TablePrimaryKey, TableUnique, UpdateableTable,

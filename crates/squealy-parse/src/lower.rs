@@ -1,7 +1,7 @@
 //! AST → neutral-model lowering — the structural inverse of the renderers.
 //!
-//! The renderers walk [`squealy::ExprNode`] / [`squealy::ViewQueryModel`] into dialect SQL
-//! ([`squealy::view_render`] and each backend's DDL writer). Lowering walks the [`sqlparser`] AST the
+//! The renderers walk [`squealy_ir::ExprNode`] / [`squealy_ir::ViewQueryModel`] into dialect SQL
+//! (`view_render` and each backend's DDL writer). Lowering walks the [`sqlparser`] AST the
 //! other way. It is dialect-parameterized by [`SqlDialect`] because the same syntax can mean different
 //! things across dialects (`||` is concatenation in PostgreSQL/SQLite but logical `OR` in MySQL), and
 //! because inverting the renderer's per-dialect idioms requires knowing which dialect emitted them.
@@ -24,7 +24,7 @@ use sqlparser::ast::{
     BinaryOperator, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
     FunctionArguments, Query, UnaryOperator, Value,
 };
-use squealy::{ArithmeticOp, CompareOp, ExprNode, LogicalOp, ScalarFunc, ViewQueryModel};
+use squealy_ir::{ArithmeticOp, CompareOp, ExprNode, LogicalOp, ScalarFunc, ViewQueryModel};
 
 use crate::{ReadError, SqlDialect};
 
@@ -480,7 +480,7 @@ fn lower_function(function: &Function, dialect: SqlDialect) -> Result<ExprNode, 
 }
 
 /// Whether `||` denotes string concatenation in this dialect (mirrors
-/// [`squealy::Dialect::concat_uses_pipe_operator`]): PostgreSQL and SQLite (and the permissive `Generic`
+/// `Dialect::concat_uses_pipe_operator`): PostgreSQL and SQLite (and the permissive `Generic`
 /// superset) read `||` as concatenation; MySQL reads it as logical `OR` and renders concatenation as
 /// `CONCAT(...)` instead. This gates the two concat spellings so neither is folded on a dialect whose
 /// renderer does not emit it.
