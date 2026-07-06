@@ -585,6 +585,13 @@ fn expr_to_node(expr: &ExprNode) -> KdlNode {
             node.push(KdlEntry::new(column.clone()));
             node
         }
+        ExprNode::BareColumn { column } => {
+            // An unqualified column (a constraint / generated / index term) serializes as `bare-col
+            // <column>`, distinct from the two-argument qualified `col <alias> <column>`.
+            let mut node = KdlNode::new("bare-col");
+            node.push(KdlEntry::new(column.clone()));
+            node
+        }
         ExprNode::Literal(text) => {
             let mut node = KdlNode::new("lit");
             node.push(KdlEntry::new(text.clone()));
@@ -1540,6 +1547,12 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
                 .next()
                 .ok_or_else(|| malformed("`col` is missing its column"))?;
             ExprNode::Column { alias, column }
+        }
+        "bare-col" => {
+            let column = first_arg(node)
+                .ok_or_else(|| malformed("`bare-col` is missing its column"))?
+                .to_owned();
+            ExprNode::BareColumn { column }
         }
         "lit" => ExprNode::Literal(
             first_arg(node)
@@ -2795,6 +2808,19 @@ mod tests {
                 node
             );
         }
+    }
+
+    #[test]
+    fn expr_node_bare_column_round_trips_through_kdl() {
+        // An unqualified column (a constraint / generated / index term) serializes as `bare-col`,
+        // distinct from the two-argument qualified `col`.
+        let node = ExprNode::BareColumn {
+            column: "sku".to_owned(),
+        };
+        assert_eq!(
+            expr_from_node(&expr_to_node(&node)).expect("bare column round-trips"),
+            node
+        );
     }
 
     #[test]
