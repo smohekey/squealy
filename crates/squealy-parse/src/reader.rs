@@ -41,14 +41,23 @@ impl Reader {
     /// Reads a `CREATE VIEW` statement into a [`ViewModel`] (the inverse of
     /// [`squealy::render_create_view`]).
     ///
-    /// Phase 0: verifies the text parses to a single `CREATE VIEW`, then returns
-    /// [`ReadError::NotYetLowered`] — view-body reconstruction lands in a later phase.
+    /// Phase 0: verifies the text parses to a single `CREATE VIEW` and routes its body through the
+    /// lowering seam, which returns [`ReadError::NotYetLowered`] — view-body reconstruction lands in a
+    /// later phase.
     pub fn read_create_view(&self, sql: &str) -> Result<ViewModel, ReadError> {
         let statements = parse_sql(sql, self.dialect)?;
         match statements.as_slice() {
-            [Statement::CreateView(_)] => Err(ReadError::NotYetLowered(
-                "CREATE VIEW body reconstruction".to_owned(),
-            )),
+            [Statement::CreateView(create_view)] => {
+                // Route the body through the lowering seam (as the scalar entry points call
+                // `lower_expr`), so a future `lower_query` implementation is actually exercised here
+                // rather than shadowed by an early return. Phase 0 `lower_query` yields NotYetLowered.
+                let _query = lower::lower_query(&create_view.query, self.dialect)?;
+                // Assembling the full `ViewModel` (name, output columns, inferred output types) around
+                // the lowered body is later-phase work; reaching here still means unimplemented.
+                Err(ReadError::NotYetLowered(
+                    "CREATE VIEW model assembly".to_owned(),
+                ))
+            }
             [other] => Err(ReadError::Unexpected(format!(
                 "expected a single CREATE VIEW statement, found: {other}"
             ))),
