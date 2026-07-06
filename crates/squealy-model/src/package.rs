@@ -1926,14 +1926,15 @@ fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
 
 fn check_from_node(node: &KdlNode) -> Result<CheckModel, PackageError> {
     // The current format stores the expression structurally as an `expr { … }` child. Packages written
-    // before the check expression became structural carry it as an `expr="..."` string *prop* instead;
-    // accept that legacy form (parse it in the neutral authoring dialect) so existing `.sqz` deploy
-    // artifacts still read without a format-version bump.
+    // before the check expression became structural carry it as an `expr="..."` string *prop*, which was
+    // the backend-specific SQL the renderer emitted — and the package does not record which dialect. So
+    // the legacy string is preserved **verbatim** as `ExprNode::Raw` (it re-renders exactly as before,
+    // with no semantic change); it is NOT re-parsed, which could mis-interpret a dialect-sensitive
+    // spelling (e.g. MySQL `length` = bytes). Re-exporting the package produces the structural form.
     let expression = if let Some(expr) = child_nodes(node, "expr").next() {
         first_child_expr(expr)?
     } else if let Some(legacy) = prop(node, "expr") {
-        squealy_parse::Reader::new(squealy_parse::SqlDialect::Generic)
-            .read_check_expression_or_raw(legacy)
+        ExprNode::Raw(legacy.to_owned())
     } else {
         return Err(malformed("`check` is missing its `expr`"));
     };
@@ -3719,8 +3720,9 @@ database {
     #[test]
     fn kdl_reads_legacy_check_expr_string_prop() {
         // Packages written before the check expression became structural carry it as an `expr="..."`
-        // string prop, not an `expr { … }` child. The reader must still accept that form (parsing it
-        // into the structural node) so existing `.sqz` artifacts keep working without a format bump.
+        // string prop (the verbatim backend SQL), not an `expr { … }` child. The reader must still accept
+        // that form — preserved verbatim as `Raw` (no re-parse, so no dialect-sensitive semantic change)
+        // — so existing `.sqz` artifacts keep working without a format bump.
         let kdl = r#"
 database {
     schema {
@@ -3734,15 +3736,6 @@ database {
         let parsed = from_kdl(kdl).expect("legacy check package should parse");
         let check = &parsed.schemas[0].tables[0].checks[0];
         assert_eq!(check.name, "ck_widgets_status");
-        assert_eq!(
-            check.expression,
-            ExprNode::Compare {
-                op: squealy::CompareOp::Equals,
-                left: Box::new(ExprNode::BareColumn {
-                    column: "status".to_owned()
-                }),
-                right: Box::new(ExprNode::Literal("1".to_owned())),
-            }
-        );
+        assert_eq!(check.expression, ExprNode::Raw("status = 1".to_owned()));
     }
 }
