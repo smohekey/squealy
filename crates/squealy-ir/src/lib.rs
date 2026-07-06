@@ -962,6 +962,127 @@ fn collect_query_sources<'a>(query: &'a ViewQueryModel, sources: &mut Vec<&'a So
     }
 }
 
+/// Normalizes a constraint [`ExprNode`] to a canonical structural form, so expressions that
+/// PostgreSQL's `pg_get_constraintdef` rewrites compare equal to the authored form once both the desired
+/// and introspected model are normalized (applied in `canonicalize_model` before diffing). Two rewrites:
+///
+/// - **`BETWEEN` expansion**: `x BETWEEN a AND b` → `(x >= a) AND (x <= b)`, and
+///   `x NOT BETWEEN a AND b` → `(x < a) OR (x > b)`.
+/// - **Boolean re-nesting**: an associative `AND`/`OR` chain is flattened and re-folded
+///   left-associatively, so `a AND (b AND c)` and `(a AND b) AND c` normalize to the same tree.
+///
+/// Recurses through the constraint-expression node set; leaves and view-body-only nodes (which never
+/// occur in a check) are returned unchanged.
+pub fn normalize_expr(expr: &ExprNode) -> ExprNode {
+    match expr {
+        ExprNode::Between {
+            negated,
+            operand,
+            low,
+            high,
+        } => {
+            let operand = normalize_expr(operand);
+            let low = normalize_expr(low);
+            let high = normalize_expr(high);
+            let (op, lower_cmp, upper_cmp) = if *negated {
+                (LogicalOp::Or, CompareOp::LessThan, CompareOp::GreaterThan)
+            } else {
+                (
+                    LogicalOp::And,
+                    CompareOp::GreaterThanOrEquals,
+                    CompareOp::LessThanOrEquals,
+                )
+            };
+            ExprNode::Logical {
+                op,
+                left: Box::new(ExprNode::Compare {
+                    op: lower_cmp,
+                    left: Box::new(operand.clone()),
+                    right: Box::new(low),
+                }),
+                right: Box::new(ExprNode::Compare {
+                    op: upper_cmp,
+                    left: Box::new(operand),
+                    right: Box::new(high),
+                }),
+            }
+        }
+        ExprNode::Logical { op, .. } => {
+            let mut terms = Vec::new();
+            flatten_logical(*op, expr, &mut terms);
+            let mut terms = terms.into_iter();
+            let mut acc = terms
+                .next()
+                .expect("a logical node always has at least two operands");
+            for term in terms {
+                acc = ExprNode::Logical {
+                    op: *op,
+                    left: Box::new(acc),
+                    right: Box::new(term),
+                };
+            }
+            acc
+        }
+        ExprNode::Binary { op, left, right } => ExprNode::Binary {
+            op: *op,
+            left: Box::new(normalize_expr(left)),
+            right: Box::new(normalize_expr(right)),
+        },
+        ExprNode::Compare { op, left, right } => ExprNode::Compare {
+            op: *op,
+            left: Box::new(normalize_expr(left)),
+            right: Box::new(normalize_expr(right)),
+        },
+        ExprNode::Not(inner) => ExprNode::Not(Box::new(normalize_expr(inner))),
+        ExprNode::IsNull { negated, operand } => ExprNode::IsNull {
+            negated: *negated,
+            operand: Box::new(normalize_expr(operand)),
+        },
+        ExprNode::Like {
+            case_insensitive,
+            negated,
+            operand,
+            pattern,
+        } => ExprNode::Like {
+            case_insensitive: *case_insensitive,
+            negated: *negated,
+            operand: Box::new(normalize_expr(operand)),
+            pattern: Box::new(normalize_expr(pattern)),
+        },
+        ExprNode::In {
+            negated,
+            operand,
+            items,
+        } => ExprNode::In {
+            negated: *negated,
+            operand: Box::new(normalize_expr(operand)),
+            items: items.iter().map(normalize_expr).collect(),
+        },
+        ExprNode::ScalarFn { func, args } => ExprNode::ScalarFn {
+            func: *func,
+            args: args.iter().map(normalize_expr).collect(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Flattens a same-operator `AND`/`OR` chain into its operands (normalizing each non-matching operand),
+/// so a re-nested boolean tree collapses to a single canonical order.
+fn flatten_logical(op: LogicalOp, expr: &ExprNode, terms: &mut Vec<ExprNode>) {
+    if let ExprNode::Logical {
+        op: inner_op,
+        left,
+        right,
+    } = expr
+        && *inner_op == op
+    {
+        flatten_logical(op, left, terms);
+        flatten_logical(op, right, terms);
+        return;
+    }
+    terms.push(normalize_expr(expr));
+}
+
 /// Collects every [`SourceRef`] reachable from an expression, recursing through nested subqueries.
 fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>) {
     match expr {
@@ -1069,5 +1190,82 @@ fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>
         | ExprNode::ExtractSecond { operand, .. } => {
             collect_expr_sources(operand, sources);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bare(column: &str) -> ExprNode {
+        ExprNode::BareColumn {
+            column: column.to_owned(),
+        }
+    }
+
+    fn lit(text: &str) -> ExprNode {
+        ExprNode::Literal(text.to_owned())
+    }
+
+    fn cmp(op: CompareOp, left: ExprNode, right: ExprNode) -> ExprNode {
+        ExprNode::Compare {
+            op,
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
+    fn and(left: ExprNode, right: ExprNode) -> ExprNode {
+        ExprNode::Logical {
+            op: LogicalOp::And,
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
+    #[test]
+    fn normalize_expands_between() {
+        // `x BETWEEN 0 AND 10` → `(x >= 0) AND (x <= 10)`, matching PostgreSQL's deparse.
+        let between = ExprNode::Between {
+            negated: false,
+            operand: Box::new(bare("x")),
+            low: Box::new(lit("0")),
+            high: Box::new(lit("10")),
+        };
+        let expected = and(
+            cmp(CompareOp::GreaterThanOrEquals, bare("x"), lit("0")),
+            cmp(CompareOp::LessThanOrEquals, bare("x"), lit("10")),
+        );
+        assert_eq!(normalize_expr(&between), expected);
+        // The introspected deparse form normalizes to the same tree (a no-op on it).
+        assert_eq!(normalize_expr(&expected), expected);
+    }
+
+    #[test]
+    fn normalize_expands_not_between() {
+        let between = ExprNode::Between {
+            negated: true,
+            operand: Box::new(bare("x")),
+            low: Box::new(lit("0")),
+            high: Box::new(lit("10")),
+        };
+        let expected = ExprNode::Logical {
+            op: LogicalOp::Or,
+            left: Box::new(cmp(CompareOp::LessThan, bare("x"), lit("0"))),
+            right: Box::new(cmp(CompareOp::GreaterThan, bare("x"), lit("10"))),
+        };
+        assert_eq!(normalize_expr(&between), expected);
+    }
+
+    #[test]
+    fn normalize_reassociates_boolean_chains() {
+        // Right-nested `a AND (b AND c)` and left-nested `(a AND b) AND c` normalize to the same tree.
+        let a = cmp(CompareOp::GreaterThan, bare("a"), lit("0"));
+        let bb = cmp(CompareOp::GreaterThan, bare("b"), lit("0"));
+        let c = cmp(CompareOp::GreaterThan, bare("c"), lit("0"));
+        let right_nested = and(a.clone(), and(bb.clone(), c.clone()));
+        let left_nested = and(and(a.clone(), bb.clone()), c.clone());
+        assert_eq!(normalize_expr(&right_nested), normalize_expr(&left_nested));
+        assert_eq!(normalize_expr(&right_nested), left_nested);
     }
 }

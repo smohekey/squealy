@@ -313,6 +313,9 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 // one) in the backend's dialect so equivalent checks compare structurally; an already
                 // structural expression is returned unchanged.
                 check.expression = connection.canonical_check_expression(check.expression.clone());
+                // Normalize the structural form (expand `BETWEEN`, re-nest boolean chains) so a check
+                // PostgreSQL's deparse rewrites still compares equal to the authored one.
+                check.expression = squealy::normalize_expr(&check.expression);
                 // Derive the canonical name from that expression, so a backend that does not round-trip a
                 // check's name (SQLite) matches equivalent checks by expression.
                 check.name = connection.canonical_check_name(check);
