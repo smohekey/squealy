@@ -16,6 +16,9 @@ thiserror.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+squealy-mysql.workspace = true
+squealy-parse.workspace = true
 squealy-postgresql = { workspace = true, features = ["schema"] }
+squealy-sqlite.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tokio-postgres = "0.7"
