@@ -352,13 +352,13 @@ pub trait Column: Sync {
     /// [`HasColumnType`] or from a raw `#[column(db_type = "...")]` override.
     fn column_type(&self) -> ColumnType;
 
-    /// An optional `CHECK` constraint expression, emitted verbatim into DDL.
+    /// An optional `CHECK` constraint expression as a structural [`ExprNode`](crate::ExprNode).
     ///
-    /// The string is rendered into the generated `CHECK (...)` clause without
-    /// escaping or validation, so it must be a valid backend boolean expression.
-    /// It originates from a compile-time `check = "..."` attribute, not runtime
-    /// input.
-    fn check(&self) -> Option<&'static str> {
+    /// It originates from a compile-time `check = "..."` attribute: the derive macro parses that string
+    /// (in the neutral authoring dialect) into an `ExprNode` at expansion time — a malformed expression
+    /// is a compile error — so the neutral model carries the structure and each backend renders it in its
+    /// own dialect.
+    fn check(&self) -> Option<crate::ExprNode> {
         None
     }
 

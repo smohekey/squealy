@@ -6,8 +6,6 @@ use proc_macro::TokenStream;
 
 mod column_type;
 mod common;
-// WIP: wired into check/index codegen in the field-flip step below (not yet a caller).
-#[allow(dead_code)]
 mod expr_tokens;
 mod cte;
 mod database;

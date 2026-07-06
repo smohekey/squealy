@@ -309,9 +309,10 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 }
             }
             for check in &mut table.checks {
-                check.expression = connection.canonical_check_expression(&check.expression);
-                // Derive the canonical name from the now-canonicalized expression, so a backend that
-                // does not round-trip a check's name (SQLite) matches equivalent checks by expression.
+                // The expression is a structural `ExprNode` compared by `PartialEq`, so no string
+                // canonicalization is needed. Derive the canonical name from that expression, so a
+                // backend that does not round-trip a check's name (SQLite) matches equivalent checks by
+                // expression.
                 check.name = connection.canonical_check_name(check);
             }
         }

@@ -237,14 +237,18 @@ fn fold_fixed_bytes_checks(columns: &mut [ColumnModel], checks: &mut Vec<CheckMo
     });
 }
 
-/// Extracts `N` from a generated `octet_length(<col>) = N` check expression. Only the trailing
-/// integer is parsed (after the final `=`), so it does not matter how PostgreSQL quotes the column
-/// identifier inside the call.
-fn parse_octet_length_width(expression: &str) -> Option<u32> {
-    if !expression.contains("octet_length(") {
+/// Extracts `N` from a generated `octet_length(<col>) = N` check expression. `octet_length` is not a
+/// structural node, so such a check reads back as an [`ExprNode::Raw`](squealy::ExprNode::Raw) carrying
+/// the deparse text; only the trailing integer is parsed (after the final `=`), so it does not matter
+/// how PostgreSQL quotes the column identifier inside the call.
+fn parse_octet_length_width(expression: &squealy::ExprNode) -> Option<u32> {
+    let squealy::ExprNode::Raw(text) = expression else {
+        return None;
+    };
+    if !text.contains("octet_length(") {
         return None;
     }
-    let (_, rhs) = expression.rsplit_once('=')?;
+    let (_, rhs) = text.rsplit_once('=')?;
     rhs.trim().trim_end_matches(')').trim().parse().ok()
 }
 
@@ -823,12 +827,12 @@ fn index_collations(positions: Vec<i32>, names: Vec<String>) -> Vec<IndexCollati
         .collect()
 }
 
-fn check_expression(definition: &str) -> String {
-    definition
+fn check_expression(definition: &str) -> squealy::ExprNode {
+    let inner = definition
         .strip_prefix("CHECK (")
         .and_then(|body| body.strip_suffix(')'))
-        .unwrap_or(definition)
-        .to_owned()
+        .unwrap_or(definition);
+    squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres).read_check_expression_or_raw(inner)
 }
 
 #[cfg(test)]

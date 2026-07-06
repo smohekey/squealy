@@ -317,14 +317,11 @@ impl squealy::SchemaIntrospect for PostgresConnection {
 
     /// Normalizes a partial-index predicate by parsing it and re-serializing a canonical AST, so the
     /// crate-rendered form and PostgreSQL's `pg_get_expr` deparse compare equal. See [`canonical`].
+    /// (`CHECK` expressions are now structural [`ExprNode`](squealy::ExprNode)s compared directly, so the
+    /// former `canonical_check_expression` override is gone; index predicates are still strings until
+    /// they migrate too.)
     fn canonical_index_predicate(&self, predicate: &str) -> String {
         canonical::canonical_index_predicate(predicate)
-    }
-
-    /// Normalizes a `CHECK` expression with the same parser, so an authored expression and
-    /// PostgreSQL's `pg_get_constraintdef` deparse compare equal. See [`canonical`].
-    fn canonical_check_expression(&self, expression: &str) -> String {
-        canonical::canonical_check_expression(expression)
     }
 }
 

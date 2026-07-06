@@ -37,6 +37,7 @@ mysql_async = { version = "0.37", default-features = false, features = ["default
 serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 squealy.workspace = true
+squealy-parse.workspace = true
 thiserror.workspace = true
 time = { version = "0.3", optional = true, default-features = false }
 uuid = { version = "1", optional = true }

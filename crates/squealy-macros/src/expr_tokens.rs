@@ -13,6 +13,27 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use squealy_ir::{ArithmeticOp, CompareOp, ExprNode, LogicalOp, ScalarFunc};
+use squealy_parse::{Reader, SqlDialect};
+
+/// Renders a column's `check = "..."` attribute as the `Option<::squealy::ExprNode>` body of the
+/// generated `Column::check`: `None` when absent; `Some(<structural expr>)` when the string parses in the
+/// neutral authoring dialect; and a `compile_error!` (with a `None` fallback so exactly one clear error
+/// surfaces) when it cannot be parsed/lowered.
+pub(crate) fn check_option_tokens(expr: Option<&str>) -> TokenStream {
+    let Some(expr) = expr else {
+        return quote! { ::std::option::Option::None };
+    };
+    match Reader::new(SqlDialect::Generic).read_check_expression(expr) {
+        Ok(node) => {
+            let tokens = expr_tokens(&node);
+            quote! { ::std::option::Option::Some(#tokens) }
+        }
+        Err(error) => {
+            let message = format!("invalid `check` expression `{expr}`: {error}");
+            quote! { { ::std::compile_error!(#message); ::std::option::Option::None } }
+        }
+    }
+}
 
 /// Renders `node` as a `TokenStream` constructing the equivalent `::squealy::ExprNode` at runtime.
 pub(crate) fn expr_tokens(node: &ExprNode) -> TokenStream {

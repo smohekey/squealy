@@ -515,11 +515,12 @@ impl ForeignKeyAction {
     }
 }
 
-/// A named check constraint carrying a backend-specific boolean expression.
+/// A named check constraint carrying its boolean expression as a structural [`ExprNode`], so each
+/// backend renders it in its own dialect and the diff compares it structurally.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CheckModel {
     pub name: String,
-    pub expression: String,
+    pub expression: ExprNode,
     pub validation: Option<ConstraintValidation>,
     pub enforcement: Option<ConstraintEnforcement>,
 }
@@ -742,6 +743,13 @@ pub enum ExprNode {
     BareColumn { column: String },
     /// An inlined SQL literal, already formatted (e.g. `'Ada'`, `42`, `TRUE`, `NULL`).
     Literal(String),
+    /// An un-modelable expression, carried as its already-rendered dialect SQL and re-emitted verbatim.
+    /// The last-resort escape hatch: live introspection uses it when the reverse parser cannot yet lower
+    /// a backend's deparse output into a structural node. It is dialect-specific (does not re-render
+    /// across dialects) and never produced by the forward path (the derive macro / typed builders), so a
+    /// squealy-published object round-trips structurally; a `Raw` on one side of a diff means the
+    /// introspected form could not be structured and will not compare equal to a structural desired node.
+    Raw(String),
     /// Binary arithmetic; `Divide` uses the backend's fractional-division handling.
     Binary {
         op: ArithmeticOp,
@@ -957,7 +965,10 @@ fn collect_query_sources<'a>(query: &'a ViewQueryModel, sources: &mut Vec<&'a So
 /// Collects every [`SourceRef`] reachable from an expression, recursing through nested subqueries.
 fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>) {
     match expr {
-        ExprNode::Column { .. } | ExprNode::BareColumn { .. } | ExprNode::Literal(_) => {}
+        ExprNode::Column { .. }
+        | ExprNode::BareColumn { .. }
+        | ExprNode::Literal(_)
+        | ExprNode::Raw(_) => {}
         ExprNode::Binary { left, right, .. }
         | ExprNode::Compare { left, right, .. }
         | ExprNode::Logical { left, right, .. } => {

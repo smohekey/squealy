@@ -419,14 +419,6 @@ pub trait SchemaIntrospect {
         predicate.to_owned()
     }
 
-    /// Canonicalizes a `CHECK` constraint expression into a stable form, the constraint analogue of
-    /// [`canonical_index_predicate`]. A user-authored `check = "status = 1"` and the backend's
-    /// deparse (`pg_get_constraintdef` → `(status = 1)`) compare equal once both the desired and the
-    /// introspected model are canonicalized through this before diffing. The default is the identity.
-    fn canonical_check_expression(&self, expression: &str) -> String {
-        expression.to_owned()
-    }
-
     /// Canonicalizes a `CHECK` constraint's name to a stable, name-independent form, the check
     /// analogue of [`canonical_unique_name`](Self::canonical_unique_name) and
     /// [`canonical_foreign_key_name`](Self::canonical_foreign_key_name).
@@ -434,11 +426,10 @@ pub trait SchemaIntrospect {
     /// SQLite renders a `CHECK` inline and unnamed; introspection recovers it by parsing the
     /// `CREATE TABLE` text, which yields only the expression, so a crate-declared `ck_<table>_<column>`
     /// cannot round-trip and — since the diff keys checks by name — would diff as a drop/add after every
-    /// publish. Deriving the canonical name from the (already-canonicalized) expression, identical on
-    /// both the desired and introspected side, makes equivalent checks compare equal while staying
-    /// distinct when a table carries more than one. This is applied to **both** models before diffing,
-    /// after [`canonical_check_expression`](Self::canonical_check_expression). The default preserves the
-    /// declared name, which suits backends that round-trip it (PostgreSQL, MySQL).
+    /// publish. Deriving the canonical name from the structural expression (identical on both the desired
+    /// and introspected side) makes equivalent checks compare equal while staying distinct when a table
+    /// carries more than one. This is applied to **both** models before diffing. The default preserves
+    /// the declared name, which suits backends that round-trip it (PostgreSQL, MySQL).
     fn canonical_check_name(&self, check: &CheckModel) -> String {
         check.name.clone()
     }

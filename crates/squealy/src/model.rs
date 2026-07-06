@@ -197,7 +197,7 @@ pub fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
         .filter_map(|column| {
             column.check().map(|expression| CheckModel {
                 name: ck_name(&name, column.name()),
-                expression: expression.to_owned(),
+                expression,
                 validation: None,
                 enforcement: None,
             })

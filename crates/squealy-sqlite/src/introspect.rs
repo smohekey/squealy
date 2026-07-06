@@ -444,7 +444,8 @@ fn table_checks(create_sql: &str) -> Vec<squealy::CheckModel> {
         .filter_map(|entry| {
             table_check_expression(entry).map(|expression| squealy::CheckModel {
                 name: String::new(),
-                expression,
+                expression: squealy_parse::Reader::new(squealy_parse::SqlDialect::Sqlite)
+                    .read_check_expression_or_raw(&expression),
                 validation: None,
                 enforcement: None,
             })
