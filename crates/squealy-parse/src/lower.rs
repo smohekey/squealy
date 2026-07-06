@@ -422,37 +422,61 @@ fn is_redundant_literal_cast(expr: &Expr, data_type: &DataType) -> bool {
         return false;
     };
     match &value.value {
-        Value::Number(_, _) => matches!(
-            data_type,
-            DataType::Numeric(_)
-                | DataType::Decimal(_)
-                | DataType::Dec(_)
-                | DataType::TinyInt(_)
-                | DataType::SmallInt(_)
-                | DataType::Int(_)
-                | DataType::Int2(_)
-                | DataType::Int4(_)
-                | DataType::Int8(_)
-                | DataType::Integer(_)
-                | DataType::BigInt(_)
-                | DataType::Real
-                | DataType::Float4
-                | DataType::Float8
-                | DataType::Float(_)
-                | DataType::Double(_)
-                | DataType::DoublePrecision
-        ),
+        Value::Number(text, _) => {
+            let integer_literal = !text.contains(['.', 'e', 'E']);
+            if integer_literal {
+                // An integer literal is exactly representable in every numeric type, so the cast is a
+                // no-op regardless of target.
+                is_numeric_type(data_type)
+            } else {
+                // A fractional literal survives only in a fractional type; casting it to an integer type
+                // TRUNCATES (`(1.5)::integer` → `1`), which is a real conversion, not redundant.
+                is_numeric_type(data_type) && !is_integer_type(data_type)
+            }
+        }
+        // A string cast to a variable-length text type is a no-op; a fixed-length `char(n)` could pad or
+        // truncate, so it is not treated as redundant.
         Value::SingleQuotedString(_) => matches!(
             data_type,
             DataType::Text
                 | DataType::Varchar(_)
                 | DataType::CharVarying(_)
                 | DataType::CharacterVarying(_)
-                | DataType::Char(_)
-                | DataType::Character(_)
         ),
         _ => false,
     }
+}
+
+/// Whether `data_type` is a whole-number integer type (casting a fractional literal to it truncates).
+fn is_integer_type(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::TinyInt(_)
+            | DataType::SmallInt(_)
+            | DataType::Int(_)
+            | DataType::Int2(_)
+            | DataType::Int4(_)
+            | DataType::Int8(_)
+            | DataType::Integer(_)
+            | DataType::BigInt(_)
+    )
+}
+
+/// Whether `data_type` is any numeric type (integer or fractional).
+fn is_numeric_type(data_type: &DataType) -> bool {
+    is_integer_type(data_type)
+        || matches!(
+            data_type,
+            DataType::Numeric(_)
+                | DataType::Decimal(_)
+                | DataType::Dec(_)
+                | DataType::Real
+                | DataType::Float4
+                | DataType::Float8
+                | DataType::Float(_)
+                | DataType::Double(_)
+                | DataType::DoublePrecision
+        )
 }
 
 /// Resolves an identifier to the column name the model stores. An *unquoted* identifier is
@@ -969,6 +993,16 @@ mod tests {
             low("('2020-01-01')::date", SqlDialect::Postgres),
             Err(ReadError::NotYetLowered(_))
         ));
+        // A fractional literal cast to an INTEGER type truncates (`1.5::integer` = 1) → not redundant.
+        assert!(matches!(
+            low("(1.5)::integer", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // …but a fractional literal cast to a fractional type is a no-op → strips.
+        assert_eq!(
+            low("(1.5)::numeric", SqlDialect::Postgres).unwrap(),
+            low("1.5", SqlDialect::Generic).unwrap()
+        );
 
         // `IN` / `NOT IN` → `= ANY (ARRAY[..])` / `<> ALL (ARRAY[..])`.
         assert_eq!(
