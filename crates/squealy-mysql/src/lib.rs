@@ -325,6 +325,19 @@ impl SchemaIntrospect for MysqlConnection {
         introspect::database(self.conn_mut()).await
     }
 
+    /// Structures a `Raw` check expression (a legacy package's verbatim check, or an un-invertible
+    /// introspected one) by re-parsing it in the MySQL dialect, so it compares equal to a freshly
+    /// introspected structural check. An already-structural expression is returned unchanged.
+    fn canonical_check_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
+        match expression {
+            squealy::ExprNode::Raw(sql) => {
+                squealy_parse::Reader::new(squealy_parse::SqlDialect::Mysql)
+                    .read_check_expression_or_raw(&sql)
+            }
+            other => other,
+        }
+    }
+
     /// MySQL renders bare `String` as `VARCHAR(255)` (it has no key-usable unbounded `text`), which
     /// introspects back as `Varchar(255)`; map `String` to that physical form so a desired model
     /// using `String` does not churn as an ambiguous type change against the live schema.

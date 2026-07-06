@@ -434,6 +434,20 @@ pub trait SchemaIntrospect {
         check.name.clone()
     }
 
+    /// Structures a [`ExprNode::Raw`](crate::ExprNode::Raw) check expression into a comparable node using
+    /// this backend's dialect, leaving an already-structural expression untouched.
+    ///
+    /// A check expression is normally structural, but a package written before checks became structural
+    /// carries it verbatim as `Raw` (and the reverse parser leaves an un-invertible introspected
+    /// expression as `Raw` too). Applied to **both** the desired and introspected model in
+    /// [`canonicalize_model`](crate::canonicalize_model), this re-parses such a `Raw` in the backend's own
+    /// dialect so a legacy package's check compares equal to a freshly introspected structural one instead
+    /// of churning as a drop/add. The default leaves it unchanged (a backend with no reverse parser
+    /// cannot structure it); PostgreSQL/MySQL/SQLite override it via their `squealy-parse` reader.
+    fn canonical_check_expression(&self, expression: crate::ExprNode) -> crate::ExprNode {
+        expression
+    }
+
     /// Canonicalizes a schema (namespace) name to the form this backend's introspection reports.
     ///
     /// A backend with no namespaces flattens every table into one unqualified namespace: SQLite has no

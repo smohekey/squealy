@@ -157,16 +157,19 @@ fn lower(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
         // cast falls through to `NotYetLowered`; proper cross-dialect cast inversion lands with the
         // model-field migration that first produces such casts.
         //
-        // EXCEPT PostgreSQL's `pg_get_constraintdef` synthesizes a `::type` cast on every literal
-        // (`0` → `(0)::numeric`, `'x'` → `('x')::text`). The neutral authoring dialect cannot produce
-        // `::`, so a `::`-cast on a *literal* only appears when reading PG's own deparse; strip it back to
-        // the bare literal so a published check re-plans to empty. A `::`-cast on a non-literal is a real
-        // user cast and is left `NotYetLowered`.
+        // EXCEPT PostgreSQL's `pg_get_constraintdef` synthesizes a *redundant* `::type` cast on a literal
+        // whose natural type already matches: a number to a numeric type (`0` → `(0)::numeric`) or a
+        // string to a text type (`'x'` → `('x')::text`). Strip only those back to the bare literal (so a
+        // published check re-plans to empty) — NOT a cast that *converts* (`'Infinity'::float8`,
+        // `'2020-01-01'::date`), which is a meaningful user cast and is left `NotYetLowered` (→ `Raw`).
         Expr::Cast {
             kind: CastKind::DoubleColon,
             expr,
+            data_type,
             ..
-        } if dialect == SqlDialect::Postgres && matches!(strip_nested(expr), Expr::Value(_)) => {
+        } if dialect == SqlDialect::Postgres
+            && is_redundant_literal_cast(strip_nested(expr), data_type) =>
+        {
             lower(strip_nested(expr), dialect)
         }
 
@@ -408,6 +411,48 @@ fn lower_array_membership(
             .map(|item| lower(item, dialect))
             .collect::<Result<_, _>>()?,
     })
+}
+
+/// Whether `expr` is a literal whose `::type` cast is a *redundant* one PostgreSQL's deparse synthesizes
+/// on a literal already of that type — a number cast to a numeric type, or a string cast to a text type.
+/// A cast that *converts* (a string to a float/date/etc.) is meaningful and is NOT redundant, so it is
+/// not stripped.
+fn is_redundant_literal_cast(expr: &Expr, data_type: &DataType) -> bool {
+    let Expr::Value(value) = expr else {
+        return false;
+    };
+    match &value.value {
+        Value::Number(_, _) => matches!(
+            data_type,
+            DataType::Numeric(_)
+                | DataType::Decimal(_)
+                | DataType::Dec(_)
+                | DataType::TinyInt(_)
+                | DataType::SmallInt(_)
+                | DataType::Int(_)
+                | DataType::Int2(_)
+                | DataType::Int4(_)
+                | DataType::Int8(_)
+                | DataType::Integer(_)
+                | DataType::BigInt(_)
+                | DataType::Real
+                | DataType::Float4
+                | DataType::Float8
+                | DataType::Float(_)
+                | DataType::Double(_)
+                | DataType::DoublePrecision
+        ),
+        Value::SingleQuotedString(_) => matches!(
+            data_type,
+            DataType::Text
+                | DataType::Varchar(_)
+                | DataType::CharVarying(_)
+                | DataType::CharacterVarying(_)
+                | DataType::Char(_)
+                | DataType::Character(_)
+        ),
+        _ => false,
+    }
 }
 
 /// Strips [`Expr::Nested`] wrappers, returning the inner expression (PostgreSQL wraps a cast's literal
@@ -881,9 +926,23 @@ mod tests {
             low("(quota > (0)::numeric)", SqlDialect::Postgres).unwrap(),
             low("quota > 0", SqlDialect::Generic).unwrap()
         );
+        // A redundant string→text cast also strips.
+        assert_eq!(
+            low("('x')::text", SqlDialect::Postgres).unwrap(),
+            low("'x'", SqlDialect::Generic).unwrap()
+        );
         // A `::` cast on a NON-literal is a real user cast, still not lowered.
         assert!(matches!(
             low("(quota)::numeric", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // A CONVERTING literal cast (string → float / date) is meaningful and must NOT be stripped.
+        assert!(matches!(
+            low("('Infinity')::float8", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low("('2020-01-01')::date", SqlDialect::Postgres),
             Err(ReadError::NotYetLowered(_))
         ));
 

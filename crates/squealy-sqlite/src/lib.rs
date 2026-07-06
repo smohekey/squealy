@@ -334,6 +334,19 @@ impl SchemaIntrospect for SqliteConnection {
         format!("check:{:?}", check.expression)
     }
 
+    /// Structures a `Raw` check expression (a legacy package's verbatim check, or an un-invertible
+    /// introspected one) by re-parsing it in the SQLite dialect, so it compares equal to a freshly
+    /// introspected structural check. An already-structural expression is returned unchanged.
+    fn canonical_check_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
+        match expression {
+            squealy::ExprNode::Raw(sql) => {
+                squealy_parse::Reader::new(squealy_parse::SqlDialect::Sqlite)
+                    .read_check_expression_or_raw(&sql)
+            }
+            other => other,
+        }
+    }
+
     /// SQLite has no boolean or unsigned literal, so a `bool`/unsigned default on an `INTEGER`-affinity
     /// column is rendered as a plain integer and reads back as [`DefaultValue::Int`]; likewise an integer
     /// default on a `REAL`-affinity column reads back as a float. Collapse the desired default the same
