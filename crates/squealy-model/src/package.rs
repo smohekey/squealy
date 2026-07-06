@@ -1925,12 +1925,21 @@ fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
 }
 
 fn check_from_node(node: &KdlNode) -> Result<CheckModel, PackageError> {
-    let expr = child_nodes(node, "expr")
-        .next()
-        .ok_or_else(|| malformed("`check` is missing its `expr`"))?;
+    // The current format stores the expression structurally as an `expr { … }` child. Packages written
+    // before the check expression became structural carry it as an `expr="..."` string *prop* instead;
+    // accept that legacy form (parse it in the neutral authoring dialect) so existing `.sqz` deploy
+    // artifacts still read without a format-version bump.
+    let expression = if let Some(expr) = child_nodes(node, "expr").next() {
+        first_child_expr(expr)?
+    } else if let Some(legacy) = prop(node, "expr") {
+        squealy_parse::Reader::new(squealy_parse::SqlDialect::Generic)
+            .read_check_expression_or_raw(legacy)
+    } else {
+        return Err(malformed("`check` is missing its `expr`"));
+    };
     Ok(CheckModel {
         name: required_prop(node, "name")?,
-        expression: first_child_expr(expr)?,
+        expression,
         validation: prop(node, "validation").map(ConstraintValidation::from_sql),
         enforcement: prop(node, "enforcement").map(ConstraintEnforcement::from_sql),
     })
@@ -3704,6 +3713,36 @@ database {
                 expression: String::new(),
                 storage: GeneratedStorage::Unknown
             })
+        );
+    }
+
+    #[test]
+    fn kdl_reads_legacy_check_expr_string_prop() {
+        // Packages written before the check expression became structural carry it as an `expr="..."`
+        // string prop, not an `expr { … }` child. The reader must still accept that form (parsing it
+        // into the structural node) so existing `.sqz` artifacts keep working without a format bump.
+        let kdl = r#"
+database {
+    schema {
+        table "widgets" {
+            column "status" type="i32"
+            check name="ck_widgets_status" expr="status = 1"
+        }
+    }
+}
+"#;
+        let parsed = from_kdl(kdl).expect("legacy check package should parse");
+        let check = &parsed.schemas[0].tables[0].checks[0];
+        assert_eq!(check.name, "ck_widgets_status");
+        assert_eq!(
+            check.expression,
+            ExprNode::Compare {
+                op: squealy::CompareOp::Equals,
+                left: Box::new(ExprNode::BareColumn {
+                    column: "status".to_owned()
+                }),
+                right: Box::new(ExprNode::Literal("1".to_owned())),
+            }
         );
     }
 }

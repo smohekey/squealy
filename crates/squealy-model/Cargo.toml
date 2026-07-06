@@ -12,12 +12,13 @@ categories.workspace = true
 [dependencies]
 kdl.workspace = true
 squealy.workspace = true
+# Reads a legacy package's `check expr="..."` string prop into a structural `ExprNode`.
+squealy-parse.workspace = true
 thiserror.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
 squealy-mysql.workspace = true
-squealy-parse.workspace = true
 squealy-postgresql = { workspace = true, features = ["schema"] }
 squealy-sqlite.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
