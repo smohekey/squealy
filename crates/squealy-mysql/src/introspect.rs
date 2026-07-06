@@ -465,6 +465,12 @@ async fn indexes(
     conn: &mut mysql_async::Conn,
     table_ref: &TableRef,
 ) -> Result<Vec<IndexModel>, MysqlError> {
+    // `COLUMN_NAME` is NULL for a functional/expression key part (MySQL 8.0.13+); it must be decoded as
+    // `Option<String>`, as decoding it as a plain `String` fails row decoding on any table carrying an
+    // expression index and aborts the whole introspection. squealy does not model expression indexes yet
+    // (the renderer rejects them), so an index with any functional key part is skipped entirely — leaving
+    // it alone rather than crashing or misrepresenting it. Full expression-index support (ordered key
+    // parts + rendering) is deferred to the round-trip epic.
     let rows = conn
         .exec_map(
             "\
@@ -488,7 +494,7 @@ ORDER BY INDEX_NAME, SEQ_IN_INDEX",
                 String,
                 u8,
                 String,
-                String,
+                Option<String>,
                 Option<String>,
             )| { (name, non_unique, index_type, column, collation) },
         )
@@ -496,7 +502,13 @@ ORDER BY INDEX_NAME, SEQ_IN_INDEX",
         .map_err(MysqlError::Introspect)?;
 
     let mut grouped = BTreeMap::<String, IndexModel>::new();
+    let mut has_expression = std::collections::BTreeSet::<String>::new();
     for (name, non_unique, index_type, column, collation) in rows {
+        // A functional key part has a NULL `COLUMN_NAME`; mark the whole index for removal.
+        let Some(column) = column else {
+            has_expression.insert(name);
+            continue;
+        };
         let index = grouped.entry(name.clone()).or_insert_with(|| IndexModel {
             name,
             columns: Vec::new(),
@@ -513,17 +525,22 @@ ORDER BY INDEX_NAME, SEQ_IN_INDEX",
         index.columns.push(column);
         index.directions.push(index_direction(collation.as_deref()));
     }
+    grouped.retain(|name, _| !has_expression.contains(name));
 
     Ok(grouped.into_values().collect())
 }
 
 fn sql_type(data_type: &str, column_type: &str) -> SqlType {
     let data_type = data_type.to_ascii_lowercase();
-    let column_type = column_type.to_ascii_lowercase();
-    let unsigned = column_type.contains(" unsigned");
+    // A lowercased copy is used only for structural matching (the `match` arms, `unsigned`, the
+    // `single_arg_type`/`decimal_type`/`temporal_precision` parsers); a `Raw` payload keeps the original
+    // `column_type` (via `raw_column_type`) so `ENUM`/`SET` member labels are not case-folded.
+    let lower = column_type.to_ascii_lowercase();
+    let unsigned = lower.contains(" unsigned");
+    let raw = || SqlType::Raw(raw_column_type(column_type));
 
     match data_type.as_str() {
-        "tinyint" if column_type == "tinyint(1)" => SqlType::Bool,
+        "tinyint" if lower == "tinyint(1)" => SqlType::Bool,
         "tinyint" if unsigned => SqlType::U8,
         "tinyint" => SqlType::I8,
         "smallint" if unsigned => SqlType::U16,
@@ -534,39 +551,55 @@ fn sql_type(data_type: &str, column_type: &str) -> SqlType {
         "bigint" => SqlType::I64,
         "float" => SqlType::F32,
         "double" => SqlType::F64,
-        "varchar" => single_arg_type(&column_type, "varchar").map_or_else(
-            || SqlType::Raw(column_type.to_uppercase()),
-            SqlType::Varchar,
-        ),
-        "char" => single_arg_type(&column_type, "char")
-            .map_or_else(|| SqlType::Raw(column_type.to_uppercase()), SqlType::Char),
+        "varchar" => single_arg_type(&lower, "varchar").map_or_else(raw, SqlType::Varchar),
+        "char" => single_arg_type(&lower, "char").map_or_else(raw, SqlType::Char),
         "text" => SqlType::Text,
-        "decimal" => {
-            decimal_type(&column_type).unwrap_or_else(|| SqlType::Raw(column_type.to_uppercase()))
-        }
+        "decimal" => decimal_type(&lower).unwrap_or_else(raw),
         "date" => SqlType::Date,
         "time" => SqlType::Time {
             tz: false,
-            precision: temporal_precision(&column_type, "time"),
+            precision: temporal_precision(&lower, "time"),
         },
         "datetime" => SqlType::Timestamp {
             tz: false,
-            precision: temporal_precision(&column_type, "datetime"),
+            precision: temporal_precision(&lower, "datetime"),
         },
         "timestamp" => SqlType::Timestamp {
             tz: true,
-            precision: temporal_precision(&column_type, "timestamp"),
+            precision: temporal_precision(&lower, "timestamp"),
         },
         "json" => SqlType::Json,
         "blob" => SqlType::Bytes,
         // Fixed-width binary `BINARY(N)` -> `[u8; N]` (the width is in the type, so it round-trips
         // directly; variable-length `varbinary` is left as a raw type).
-        "binary" => single_arg_type(&column_type, "binary").map_or_else(
-            || SqlType::Raw(column_type.to_uppercase()),
-            SqlType::FixedBytes,
-        ),
-        _ => SqlType::Raw(column_type.to_uppercase()),
+        "binary" => single_arg_type(&lower, "binary").map_or_else(raw, SqlType::FixedBytes),
+        _ => raw(),
     }
+}
+
+/// A MySQL `COLUMN_TYPE` normalized to a neutral `Raw` type name: keywords are upper-cased, but the
+/// contents of single-quoted string literals are preserved exactly. `ENUM`/`SET` member labels live in
+/// those literals, and upper-casing them would change the column's set of allowed values — the corruption
+/// this guards against. A doubled `''` is an escaped quote that stays inside the literal.
+fn raw_column_type(column_type: &str) -> String {
+    let mut out = String::with_capacity(column_type.len());
+    let mut in_literal = false;
+    let mut chars = column_type.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '\'' if in_literal && chars.peek() == Some(&'\'') => {
+                out.push('\'');
+                out.push(chars.next().expect("peeked a quote"));
+            }
+            '\'' => {
+                in_literal = !in_literal;
+                out.push('\'');
+            }
+            _ if in_literal => out.push(character),
+            _ => out.extend(character.to_uppercase()),
+        }
+    }
+    out
 }
 
 fn generated_model(extra: &str, expression: Option<String>) -> Option<GeneratedColumnModel> {
@@ -782,6 +815,25 @@ mod tests {
         assert_eq!(
             sql_type("varbinary", "varbinary(32)"),
             SqlType::Raw("VARBINARY(32)".to_owned())
+        );
+    }
+
+    #[test]
+    fn enum_and_set_labels_keep_their_case_in_raw() {
+        // The type keyword is upper-cased, but the quoted member labels must NOT be — upper-casing them
+        // would change the column's allowed values.
+        assert_eq!(
+            sql_type("enum", "enum('Active','InActive')"),
+            SqlType::Raw("ENUM('Active','InActive')".to_owned())
+        );
+        assert_eq!(
+            sql_type("set", "set('Read','Write')"),
+            SqlType::Raw("SET('Read','Write')".to_owned())
+        );
+        // A doubled '' escape inside a label is preserved verbatim.
+        assert_eq!(
+            sql_type("enum", "enum('O''Brien')"),
+            SqlType::Raw("ENUM('O''Brien')".to_owned())
         );
     }
 

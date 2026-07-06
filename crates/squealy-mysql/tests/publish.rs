@@ -909,3 +909,80 @@ async fn timestamp_precision_round_trips_and_migrates() {
         .await
         .expect("cleanup");
 }
+
+#[tokio::test]
+#[ignore]
+async fn introspects_an_enum_column_and_a_functional_index_without_crashing() {
+    // Guards two MySQL introspection defects: (1) a functional/expression index makes
+    // `information_schema.STATISTICS.COLUMN_NAME` NULL, which must not abort introspection; (2) an
+    // ENUM/SET column's member labels must keep their case (upper-casing them would change the allowed
+    // values).
+    let _db_guard = db_lock().lock().await;
+    let mut connection = Mysql
+        .connect(&database_url())
+        .await
+        .expect("connect to MySQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog_enum`")
+        .await
+        .expect("drop schema");
+    connection
+        .execute_ddl("CREATE SCHEMA `catalog_enum`")
+        .await
+        .expect("create schema");
+    connection
+        .execute_ddl(
+            "CREATE TABLE `catalog_enum`.`items` (\
+`id` INT NOT NULL PRIMARY KEY, \
+`status` ENUM('Active','InActive') NOT NULL, \
+`name` VARCHAR(255) NOT NULL)",
+        )
+        .await
+        .expect("create table with an enum column");
+    // A functional index — the shape that used to abort introspection.
+    connection
+        .execute_ddl("CREATE INDEX `items_lower_name` ON `catalog_enum`.`items` ((LOWER(`name`)))")
+        .await
+        .expect("create functional index");
+
+    // The whole point: this must not error.
+    let actual = squealy_model::introspect(&mut connection)
+        .await
+        .expect("introspection must not crash on a functional index");
+
+    let table = actual
+        .schemas
+        .iter()
+        .find(|schema| schema.name.as_deref() == Some("catalog_enum"))
+        .and_then(|schema| schema.tables.iter().find(|table| table.name == "items"))
+        .expect("items table should be introspected");
+    let status = table
+        .columns
+        .iter()
+        .find(|column| column.name == "status")
+        .expect("status column");
+    assert_eq!(
+        status.ty,
+        SqlType::Raw("ENUM('Active','InActive')".to_owned()),
+        "enum member labels must keep their case",
+    );
+    // squealy does not model expression indexes yet, so the functional index is skipped (not
+    // crashed on, not mismodeled); the introspected model therefore renders without being rejected.
+    assert!(
+        !table
+            .indexes
+            .iter()
+            .any(|index| index.name == "items_lower_name"),
+        "the functional index should be skipped, not introspected: {:?}",
+        table.indexes,
+    );
+    let mut rendered = Vec::new();
+    Mysql
+        .render_create(&actual, &mut rendered)
+        .expect("the introspected model must render (functional index skipped, not carried)");
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog_enum`")
+        .await
+        .expect("cleanup");
+}
