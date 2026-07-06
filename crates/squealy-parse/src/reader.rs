@@ -46,7 +46,7 @@ impl Reader {
     pub fn read_create_view(&self, sql: &str) -> Result<ViewModel, ReadError> {
         let statements = parse_sql(sql, self.dialect)?;
         match statements.as_slice() {
-            [Statement::CreateView { .. }] => Err(ReadError::NotYetLowered(
+            [Statement::CreateView(_)] => Err(ReadError::NotYetLowered(
                 "CREATE VIEW body reconstruction".to_owned(),
             )),
             [other] => Err(ReadError::Unexpected(format!(
