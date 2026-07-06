@@ -158,13 +158,16 @@ fn lower(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
         // model-field migration that first produces such casts.
 
         // `SUBSTRING(s FROM start FOR len)` and SQLite's `substr(s, start, len)` both parse to this node.
-        // The renderer only emits the three-argument form, so both bounds must be present.
+        // The renderer only emits the three-argument *positional* form (integer bounds), so both bounds
+        // must be present and neither may be a string — PostgreSQL overloads the same `FROM … FOR …` shape
+        // as a POSIX-regex extractor when the bounds are string patterns (`SUBSTRING(s FROM 'p' FOR 'e')`),
+        // which is a different operation and is left `NotYetLowered` rather than mis-lowered to positional.
         Expr::Substring {
             expr,
             substring_from: Some(from),
             substring_for: Some(len),
             ..
-        } => Ok(ExprNode::ScalarFn {
+        } if !is_string_literal(from) && !is_string_literal(len) => Ok(ExprNode::ScalarFn {
             func: ScalarFunc::Substring,
             args: vec![
                 lower(expr, dialect)?,
@@ -248,8 +251,10 @@ fn lower_binary(
         if op == ArithmeticOp::Divide {
             // PostgreSQL/SQLite render a neutral `Divide` as the paired float-cast form
             // `CAST(a AS <float>) / CAST(b AS <float>)` (`integer_division_needs_float_cast`); peel it.
-            if let (Some(left), Some(right)) = (float_cast_operand(left), float_cast_operand(right))
-            {
+            if let (Some(left), Some(right)) = (
+                float_cast_operand(left, dialect),
+                float_cast_operand(right, dialect),
+            ) {
                 return Ok(ExprNode::Binary {
                     op,
                     left: b(lower(left, dialect)?),
@@ -368,17 +373,42 @@ fn is_number(expr: &Expr, value: &str) -> bool {
     )
 }
 
-/// If `expr` is a `CAST(inner AS <float type>)` — the wrapper the float-division idiom applies to each
-/// operand — returns `inner`. `None` for anything else, so a non-idiom division is left intact.
-fn float_cast_operand(expr: &Expr) -> Option<&Expr> {
+/// Whether `expr` is a string literal — used to reject PostgreSQL's regex `SUBSTRING(s FROM 'p' FOR 'e')`
+/// overload, whose bounds are strings (the positional form squealy emits has integer bounds).
+fn is_string_literal(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Value(v) if matches!(
+            &v.value,
+            Value::SingleQuotedString(_)
+                | Value::DoubleQuotedString(_)
+                | Value::EscapedStringLiteral(_)
+                | Value::NationalStringLiteral(_)
+        )
+    )
+}
+
+/// If `expr` is the `CAST(inner AS <float>)` wrapper the renderer applies to each operand of a neutral
+/// `Divide` on `dialect`, returns `inner`; else `None` (leaving a non-idiom division intact). The
+/// accepted cast type is gated to the exact spelling that dialect emits for the idiom — `double
+/// precision` on PostgreSQL, `REAL` on SQLite — so a different float cast the renderer never emits for
+/// this dialect (e.g. an externally-authored PostgreSQL `CAST(_ AS real)` division) is not peeled and
+/// re-rendered with the wrong precision.
+fn float_cast_operand(expr: &Expr, dialect: SqlDialect) -> Option<&Expr> {
+    let idiom_type = match dialect {
+        SqlDialect::Postgres => DataType::DoublePrecision,
+        SqlDialect::Sqlite => DataType::Real,
+        // MySQL renders a neutral `Divide` bare (no cast); `Generic` is not a round-trip target.
+        SqlDialect::Mysql | SqlDialect::Generic => return None,
+    };
     match expr {
         Expr::Cast {
             kind: CastKind::Cast,
             expr,
-            data_type: DataType::DoublePrecision | DataType::Real,
+            data_type,
             format: None,
             array: false,
-        } => Some(expr),
+        } if *data_type == idiom_type => Some(expr),
         _ => None,
     }
 }
@@ -719,6 +749,21 @@ mod tests {
         // A general `CAST` is deferred (dialect-ambiguous target names, e.g. MySQL `SIGNED`).
         assert!(matches!(
             low("CAST(\"a\" AS integer)", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // A division whose float casts are NOT the dialect's idiom type (PostgreSQL emits `double
+        // precision`, not `real`) is external, not the render idiom → not peeled/lowered.
+        assert!(matches!(
+            low(
+                "(CAST(\"a\" AS real) / CAST(\"b\" AS real))",
+                SqlDialect::Postgres
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // PostgreSQL's regex `SUBSTRING(s FROM 'pattern' FOR 'escape')` overload (string bounds) is a
+        // different operation from positional substring → not lowered.
+        assert!(matches!(
+            low("SUBSTRING(\"s\" FROM 'a.*' FOR '#')", SqlDialect::Postgres),
             Err(ReadError::NotYetLowered(_))
         ));
         // A general/user function outside the closed scalar set.
