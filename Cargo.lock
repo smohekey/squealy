@@ -1800,6 +1800,8 @@ dependencies = [
  "proc-macro2",
  "quote",
  "squealy",
+ "squealy-ir",
+ "squealy-parse",
  "trybuild",
 ]
 

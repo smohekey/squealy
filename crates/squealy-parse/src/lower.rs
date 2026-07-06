@@ -261,10 +261,12 @@ fn lower_binary(
                     right: b(lower(right, dialect)?),
                 });
             }
-            // A *bare* `/` is fractional only where the renderer emits it bare — MySQL. On PostgreSQL/
-            // SQLite a bare `/` is *integer* division (a different operation, with no neutral node); the
-            // neutral `Divide` re-renders as the float-cast form, so lowering it would change semantics.
-            if dialect != SqlDialect::Mysql {
+            // A *bare* `/` is fractional only where the renderer emits it bare — MySQL — or when reading
+            // neutral authored SQL (`Generic`), where `/` denotes the neutral (always-fractional) divide.
+            // On PostgreSQL/SQLite a bare `/` is *integer* division (a different operation, no neutral
+            // node); the neutral `Divide` re-renders as the float-cast form, so lowering it there would
+            // change semantics.
+            if !matches!(dialect, SqlDialect::Mysql | SqlDialect::Generic) {
                 return Err(not_yet(
                     "bare `/` division (integer division has no neutral node outside MySQL)",
                 ));
@@ -461,20 +463,25 @@ fn lower_function(function: &Function, dialect: SqlDialect) -> Result<ExprNode, 
         // `CHAR_LENGTH` is character length in every dialect (and is what the renderer emits for
         // `ScalarFunc::Length` on PostgreSQL/MySQL).
         "char_length" => unary(ScalarFunc::Length, args),
-        // Bare `length` is character length only in SQLite (where the renderer emits it). MySQL's
-        // `LENGTH` counts *bytes* — folding it to the neutral node (which re-renders as `CHAR_LENGTH`)
-        // would silently change semantics on multibyte text, so it is not lowered for MySQL. (PostgreSQL
-        // never emits bare `length`; it renders `CHAR_LENGTH`.)
-        "length" if dialect == SqlDialect::Sqlite => unary(ScalarFunc::Length, args),
+        // Bare `length` is character length in SQLite (where the renderer emits it) and in neutral
+        // authored SQL (`Generic`). MySQL's `LENGTH` counts *bytes* — folding it to the neutral node
+        // (which re-renders as `CHAR_LENGTH`) would silently change semantics on multibyte text, so it is
+        // not lowered for MySQL. (PostgreSQL never emits bare `length`; it renders `CHAR_LENGTH`.)
+        "length" if matches!(dialect, SqlDialect::Sqlite | SqlDialect::Generic) => {
+            unary(ScalarFunc::Length, args)
+        }
         "trim" => unary(ScalarFunc::Trim, args),
         // The renderer emits `CONCAT(...)` for `Concat` only on MySQL; PostgreSQL/SQLite use `||`. A
         // `CONCAT(...)` seen on those dialects is externally authored and, on PostgreSQL, has different
         // NULL semantics (it ignores NULLs, whereas the neutral node re-renders as NULL-propagating
-        // `||`), so it is only folded for MySQL.
-        "concat" if !pipe_is_concatenation(dialect) => Ok(ExprNode::ScalarFn {
-            func: ScalarFunc::Concat,
-            args,
-        }),
+        // `||`), so it is only folded for MySQL — and for `Generic`, where either concat spelling denotes
+        // the neutral node in authored SQL.
+        "concat" if !pipe_is_concatenation(dialect) || dialect == SqlDialect::Generic => {
+            Ok(ExprNode::ScalarFn {
+                func: ScalarFunc::Concat,
+                args,
+            })
+        }
         _ => Err(not_yet(format!("function `{name}`"))),
     }
 }
@@ -737,6 +744,34 @@ mod tests {
             low("(\"a\" IS NOT NULL AND 1 = 2)", SqlDialect::Postgres).unwrap(),
             ExprNode::Logical { .. }
         ));
+    }
+
+    #[test]
+    fn generic_is_the_lenient_neutral_authoring_mode() {
+        // Under `Generic` (how the derive macro parses an authored check/index string), the neutral
+        // spelling of each op lowers directly — `length` is neutral length, bare `/` is neutral divide,
+        // and both `||` and `CONCAT(...)` are the neutral concat node.
+        assert_eq!(
+            low("length(\"s\")", SqlDialect::Generic).unwrap(),
+            ExprNode::ScalarFn {
+                func: ScalarFunc::Length,
+                args: vec![bare("s")],
+            }
+        );
+        assert_eq!(
+            low("(\"a\" / \"b\")", SqlDialect::Generic).unwrap(),
+            ExprNode::Binary {
+                op: ArithmeticOp::Divide,
+                left: Box::new(bare("a")),
+                right: Box::new(bare("b")),
+            }
+        );
+        let concat = ExprNode::ScalarFn {
+            func: ScalarFunc::Concat,
+            args: vec![bare("a"), bare("b")],
+        };
+        assert_eq!(low("(\"a\" || \"b\")", SqlDialect::Generic).unwrap(), concat);
+        assert_eq!(low("CONCAT(\"a\", \"b\")", SqlDialect::Generic).unwrap(), concat);
     }
 
     #[test]
