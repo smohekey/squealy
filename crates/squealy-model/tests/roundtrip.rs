@@ -12,8 +12,9 @@
 //!
 //! 1. [`renders_the_corpus_to_parseable_sql`] — squealy's own rendered output, for every backend that
 //!    supports each construct, is accepted by the pinned `sqlparser` for the matching dialect. This is
-//!    the precondition for lowering: you cannot invert SQL the parser rejects. Backends that reject a
-//!    construct outright (e.g. SQLite has no generated columns) are skipped for that case, not failed.
+//!    the precondition for lowering: you cannot invert SQL the parser rejects. Coverage is pinned
+//!    exactly: only the documented backend limitations in `EXPECTED_UNSUPPORTED` (e.g. SQLite has no
+//!    generated columns) are skipped — any other render failure fails the test as a regression.
 //! 2. [`reader_entry_points_parse_but_do_not_yet_lower`] — the [`Reader`] seam is wired end-to-end: it
 //!    parses squealy's output and reaches the lowering step, which reports [`ReadError::NotYetLowered`].
 //!    This documents the current gap the epic closes phase by phase; the test tightens as lowering lands.
@@ -505,14 +506,24 @@ const BACKENDS: [(&str, SqlDialect, RenderFn); 3] = [
     ("sqlite", SqlDialect::Sqlite, render_sqlite),
 ];
 
+/// The `(case, backend)` pairs a backend legitimately cannot render — a documented backend limitation,
+/// not a parse gap. Every *other* render failure is a regression the harness must fail on (not silently
+/// skip). Keep this exhaustive: an entry that stops applying (the backend gains support) is caught by
+/// the exact-coverage assertion, forcing this list to stay honest.
+const EXPECTED_UNSUPPORTED: &[(&str, &str)] = &[
+    ("table/generated", "sqlite"),    // SQLite has no generated columns.
+    ("table/partial-index", "mysql"), // MySQL has no partial index predicates.
+];
+
 // ---- tests ----------------------------------------------------------------------------------------
 
 /// Leg one of the round-trip spine: everything squealy renders is parseable by the pinned parser.
 ///
-/// A backend that *rejects* a construct (returns an `io::Error` from `render_create`) is a known
-/// backend limitation, not a parse gap — it is counted and skipped. A rendered statement the parser
-/// *cannot* parse is a real gap and fails the test with the offending SQL, so the corpus and the parser
-/// front-end stay in lockstep as later phases build the lowering on top.
+/// Every `(case, backend)` pair must resolve one of exactly two ways: the model renders and the parser
+/// accepts it, or the pair is a documented backend limitation in [`EXPECTED_UNSUPPORTED`]. Any other
+/// outcome fails the test — a parse gap (the parser rejects squealy's own output) *or* an unexpected
+/// render failure (a supported model regressed, or a whole backend broke). Coverage is pinned exactly,
+/// so a silently-dropped pair can't let a regression slip through green.
 #[test]
 fn renders_the_corpus_to_parseable_sql() {
     let corpus = corpus();
@@ -522,8 +533,20 @@ fn renders_the_corpus_to_parseable_sql() {
 
     for (case, model) in &corpus {
         for (backend, dialect, render) in BACKENDS {
+            let expected_unsupported = EXPECTED_UNSUPPORTED.contains(&(case, backend));
             match render(model) {
-                Err(err) => skipped.push(format!("{case} on {backend}: {err}")),
+                Err(err) if expected_unsupported => {
+                    skipped.push(format!("{case} on {backend}: {err}"))
+                }
+                // A render failure for a pair we expect to support is a regression, not a skip.
+                Err(err) => gaps.push(format!(
+                    "{case} on {backend}: unexpected render failure: {err}"
+                )),
+                // A pair we listed as unsupported that now renders means the whitelist is stale.
+                Ok(_) if expected_unsupported => gaps.push(format!(
+                    "{case} on {backend}: rendered though listed unsupported — remove it from \
+                     EXPECTED_UNSUPPORTED"
+                )),
                 Ok(bytes) => {
                     let sql = String::from_utf8(bytes).expect("rendered SQL is valid UTF-8");
                     match parse_sql(&sql, dialect) {
@@ -554,14 +577,17 @@ fn renders_the_corpus_to_parseable_sql() {
 
     assert!(
         gaps.is_empty(),
-        "sqlparser could not parse squealy's own rendered output for {} case(s):\n\n{}",
+        "round-trip corpus failed for {} pair(s):\n\n{}",
         gaps.len(),
         gaps.join("\n\n")
     );
-    // The corpus must actually exercise the parser, or a rename/regression could silently gut it.
-    assert!(
-        checked >= corpus.len(),
-        "corpus produced too few parse checks"
+    // Exact coverage: every corpus × backend pair is either parsed or a known-unsupported skip, nothing
+    // silently dropped. If a backend gains support for a whitelisted pair, `checked` rises and this
+    // fails — forcing EXPECTED_UNSUPPORTED to be pruned.
+    assert_eq!(
+        checked,
+        corpus.len() * BACKENDS.len() - EXPECTED_UNSUPPORTED.len(),
+        "unexpected number of parse checks — coverage drifted from the whitelist"
     );
 }
 
