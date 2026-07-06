@@ -789,10 +789,16 @@ mod tests {
         }
     }
 
+    fn check_expr(sql: &str) -> squealy::ExprNode {
+        squealy_parse::Reader::new(squealy_parse::SqlDialect::Generic)
+            .read_check_expression(sql)
+            .unwrap()
+    }
+
     fn check() -> CheckModel {
         CheckModel {
             name: "ck_memberships_quota".to_owned(),
-            expression: "quota > 0".to_owned(),
+            expression: check_expr("quota > 0"),
             validation: None,
             enforcement: None,
         }

@@ -435,14 +435,23 @@ fn corpus() -> Vec<(&'static str, DatabaseModel)> {
         )),
     ));
 
-    // A table CHECK constraint (rendered verbatim; portable spelling across all three backends).
+    // A table CHECK constraint, carried structurally so each backend renders it in its own dialect.
     let mut widgets = plain_table(
         "widgets",
         vec![column("id", SqlType::I32), column("sku", SqlType::Text)],
     );
     widgets.checks = vec![CheckModel {
         name: "sku_len".to_owned(),
-        expression: "length(sku) > 0".to_owned(),
+        expression: ExprNode::Compare {
+            op: CompareOp::GreaterThan,
+            left: b(ExprNode::ScalarFn {
+                func: ScalarFunc::Length,
+                args: vec![ExprNode::BareColumn {
+                    column: "sku".to_owned(),
+                }],
+            }),
+            right: b(lit("0")),
+        },
         validation: None,
         enforcement: None,
     }];

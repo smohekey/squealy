@@ -1781,6 +1781,7 @@ dependencies = [
  "serde_json",
  "squealy-model",
  "squealy-mysql",
+ "squealy-parse",
  "squealy-postgresql",
  "tempfile",
  "thiserror",

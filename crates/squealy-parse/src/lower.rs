@@ -770,8 +770,14 @@ mod tests {
             func: ScalarFunc::Concat,
             args: vec![bare("a"), bare("b")],
         };
-        assert_eq!(low("(\"a\" || \"b\")", SqlDialect::Generic).unwrap(), concat);
-        assert_eq!(low("CONCAT(\"a\", \"b\")", SqlDialect::Generic).unwrap(), concat);
+        assert_eq!(
+            low("(\"a\" || \"b\")", SqlDialect::Generic).unwrap(),
+            concat
+        );
+        assert_eq!(
+            low("CONCAT(\"a\", \"b\")", SqlDialect::Generic).unwrap(),
+            concat
+        );
     }
 
     #[test]

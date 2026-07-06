@@ -6,9 +6,9 @@ use proc_macro::TokenStream;
 
 mod column_type;
 mod common;
-mod expr_tokens;
 mod cte;
 mod database;
+mod expr_tokens;
 mod schema;
 mod table;
 mod tuple;

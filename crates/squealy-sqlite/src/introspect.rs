@@ -979,6 +979,13 @@ where
 mod tests {
     use super::*;
 
+    /// The structural check node a SQLite-dialect read of `sql` produces (matching how
+    /// [`table_checks`] lowers a recovered check body).
+    fn check_expr(sql: &str) -> squealy::ExprNode {
+        squealy_parse::Reader::new(squealy_parse::SqlDialect::Sqlite)
+            .read_check_expression_or_raw(sql)
+    }
+
     #[test]
     fn affinity_follows_sqlite_rules() {
         assert!(matches!(affinity_of("INTEGER"), Affinity::Integer));
@@ -1113,8 +1120,12 @@ mod tests {
                    \"n\" INTEGER,\n  PRIMARY KEY (\"n\"),\n  CHECK (\"n\" >= 0),\n  CONSTRAINT \"c2\" \
                    CHECK (\"n\" < 100)\n)";
         let checks = table_checks(sql);
-        let expressions: Vec<&str> = checks.iter().map(|c| c.expression.as_str()).collect();
-        assert_eq!(expressions, vec!["\"n\" >= 0", "\"n\" < 100"]);
+        let expressions: Vec<squealy::ExprNode> =
+            checks.iter().map(|c| c.expression.clone()).collect();
+        assert_eq!(
+            expressions,
+            vec![check_expr("\"n\" >= 0"), check_expr("\"n\" < 100")]
+        );
         // The recovered name is empty (matched by a derived name, not the DDL name).
         assert!(checks.iter().all(|c| c.name.is_empty()));
     }
@@ -1144,9 +1155,9 @@ mod tests {
         assert_eq!(
             table_checks(sql)
                 .iter()
-                .map(|c| c.expression.as_str())
+                .map(|c| c.expression.clone())
                 .collect::<Vec<_>>(),
-            vec!["é <> ''"]
+            vec![check_expr("é <> ''")]
         );
         // A non-ASCII collation name round-trips too.
         assert_eq!(

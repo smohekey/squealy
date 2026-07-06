@@ -2340,6 +2340,12 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    fn check_expr(sql: &str) -> squealy::ExprNode {
+        squealy_parse::Reader::new(squealy_parse::SqlDialect::Generic)
+            .read_check_expression(sql)
+            .unwrap()
+    }
+
     #[test]
     fn read_entry_rejects_oversized_input() {
         let oversized = vec![b'x'; 64];
@@ -2415,7 +2421,7 @@ mod tests {
                         }],
                         checks: vec![CheckModel {
                             name: "ck_orgs_slug".to_owned(),
-                            expression: "length(slug) > 0".to_owned(),
+                            expression: check_expr("length(slug) > 0"),
                             validation: None,
                             enforcement: None,
                         }],
@@ -3464,7 +3470,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![CheckModel {
                         name: "ck_children_parent_id".to_owned(),
-                        expression: "parent_id_0 > 0".to_owned(),
+                        expression: check_expr("parent_id_0 > 0"),
                         validation: Some(ConstraintValidation::NotValidated),
                         enforcement: None,
                     }],
@@ -3519,7 +3525,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![CheckModel {
                         name: "ck_children_parent_id".to_owned(),
-                        expression: "parent_id_0 > 0".to_owned(),
+                        expression: check_expr("parent_id_0 > 0"),
                         validation: None,
                         enforcement: Some(ConstraintEnforcement::NotEnforced),
                     }],

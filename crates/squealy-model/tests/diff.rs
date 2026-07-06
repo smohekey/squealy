@@ -377,10 +377,16 @@ fn foreign_key(name: &str, references_table: &str) -> ForeignKeyModel {
     }
 }
 
+fn check_expr(sql: &str) -> ExprNode {
+    squealy_parse::Reader::new(squealy_parse::SqlDialect::Generic)
+        .read_check_expression(sql)
+        .unwrap()
+}
+
 fn check(name: &str, expression: &str) -> CheckModel {
     CheckModel {
         name: name.to_owned(),
-        expression: expression.to_owned(),
+        expression: check_expr(expression),
         validation: None,
         enforcement: None,
     }

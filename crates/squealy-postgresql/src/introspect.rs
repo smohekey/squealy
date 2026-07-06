@@ -832,7 +832,8 @@ fn check_expression(definition: &str) -> squealy::ExprNode {
         .strip_prefix("CHECK (")
         .and_then(|body| body.strip_suffix(')'))
         .unwrap_or(definition);
-    squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres).read_check_expression_or_raw(inner)
+    squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+        .read_check_expression_or_raw(inner)
 }
 
 #[cfg(test)]
@@ -909,24 +910,32 @@ mod tests {
 
     #[test]
     fn parses_generated_octet_length_width() {
-        // Only the trailing integer is parsed, so quoting of the identifier is irrelevant — including
-        // exotic names containing `)` or `=` inside the quotes.
-        assert_eq!(parse_octet_length_width("octet_length(key) = 32"), Some(32));
+        // `octet_length` is not a structural node, so such a check reads back as `ExprNode::Raw`; the
+        // width is parsed from that text. Only the trailing integer is parsed, so quoting of the
+        // identifier is irrelevant — including exotic names containing `)` or `=` inside the quotes.
+        let raw = |text: &str| squealy::ExprNode::Raw(text.to_owned());
         assert_eq!(
-            parse_octet_length_width("(octet_length(key) = 32)"),
+            parse_octet_length_width(&raw("octet_length(key) = 32")),
             Some(32)
         );
         assert_eq!(
-            parse_octet_length_width("(octet_length(\"Key\") = 12)"),
+            parse_octet_length_width(&raw("(octet_length(key) = 32)")),
+            Some(32)
+        );
+        assert_eq!(
+            parse_octet_length_width(&raw("(octet_length(\"Key\") = 12)")),
             Some(12)
         );
         assert_eq!(
-            parse_octet_length_width("(octet_length(\"we)ird=name\") = 16)"),
+            parse_octet_length_width(&raw("(octet_length(\"we)ird=name\") = 16)")),
             Some(16)
         );
         // Unrelated checks are not width markers.
-        assert_eq!(parse_octet_length_width("length(key) = 32"), None);
-        assert_eq!(parse_octet_length_width("(octet_length(key) > 0)"), None);
+        assert_eq!(parse_octet_length_width(&raw("length(key) = 32")), None);
+        assert_eq!(
+            parse_octet_length_width(&raw("(octet_length(key) > 0)")),
+            None
+        );
     }
 
     #[test]
@@ -946,7 +955,8 @@ mod tests {
         fn check(name: &str, expression: &str) -> CheckModel {
             CheckModel {
                 name: name.to_owned(),
-                expression: expression.to_owned(),
+                // `octet_length` is not structural, so the fold reads it from a `Raw` node.
+                expression: squealy::ExprNode::Raw(expression.to_owned()),
                 validation: None,
                 enforcement: None,
             }
@@ -987,7 +997,7 @@ mod tests {
         }];
         let mut checks = vec![CheckModel {
             name: "my_key_len".to_owned(),
-            expression: "(octet_length(key) = 32)".to_owned(),
+            expression: squealy::ExprNode::Raw("(octet_length(key) = 32)".to_owned()),
             validation: None,
             enforcement: None,
         }];
@@ -1063,7 +1073,16 @@ mod tests {
 
     #[test]
     fn strips_check_wrapper() {
-        assert_eq!(check_expression("CHECK ((score > 0))"), "(score > 0)");
-        assert_eq!(check_expression("score > 0"), "score > 0");
+        // The `CHECK (...)` wrapper is stripped and the body lowers to the same structural expression
+        // whether or not the wrapper (and pg's extra inner parens) is present.
+        let expected = squealy::ExprNode::Compare {
+            op: squealy::CompareOp::GreaterThan,
+            left: Box::new(squealy::ExprNode::BareColumn {
+                column: "score".to_owned(),
+            }),
+            right: Box::new(squealy::ExprNode::Literal("0".to_owned())),
+        };
+        assert_eq!(check_expression("CHECK ((score > 0))"), expected);
+        assert_eq!(check_expression("score > 0"), expected);
     }
 }
