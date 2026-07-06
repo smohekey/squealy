@@ -156,6 +156,34 @@ fn lower(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
         // float-division idiom, peeled at the `Divide` operator via `float_cast_operand`), so a general
         // cast falls through to `NotYetLowered`; proper cross-dialect cast inversion lands with the
         // model-field migration that first produces such casts.
+        //
+        // EXCEPT PostgreSQL's `pg_get_constraintdef` synthesizes a `::type` cast on every literal
+        // (`0` → `(0)::numeric`, `'x'` → `('x')::text`). The neutral authoring dialect cannot produce
+        // `::`, so a `::`-cast on a *literal* only appears when reading PG's own deparse; strip it back to
+        // the bare literal so a published check re-plans to empty. A `::`-cast on a non-literal is a real
+        // user cast and is left `NotYetLowered`.
+        Expr::Cast {
+            kind: CastKind::DoubleColon,
+            expr,
+            ..
+        } if dialect == SqlDialect::Postgres && matches!(strip_nested(expr), Expr::Value(_)) => {
+            lower(strip_nested(expr), dialect)
+        }
+
+        // PostgreSQL deparses `x IN (a, b, c)` as `x = ANY (ARRAY[a, b, c])` and `x NOT IN (…)` as
+        // `x <> ALL (ARRAY[…])`. Recover the neutral `In`. (These operators are PostgreSQL-only syntax, so
+        // they never arrive on another dialect.)
+        Expr::AnyOp {
+            left,
+            compare_op: BinaryOperator::Eq,
+            right,
+            is_some: false,
+        } => lower_array_membership(left, right, false, dialect),
+        Expr::AllOp {
+            left,
+            compare_op: BinaryOperator::NotEq,
+            right,
+        } => lower_array_membership(left, right, true, dialect),
 
         // `SUBSTRING(s FROM start FOR len)` and SQLite's `substr(s, start, len)` both parse to this node.
         // The renderer only emits the three-argument *positional* form (integer bounds), so both bounds
@@ -329,9 +357,67 @@ fn lower_binary(
             func: ScalarFunc::Concat,
             args: vec![lower(left, dialect)?, lower(right, dialect)?],
         }),
+        // PostgreSQL's `pg_get_constraintdef` deparses `LIKE`/`ILIKE` as the operator forms
+        // `~~`/`~~*` (and `NOT LIKE`/`NOT ILIKE` as `!~~`/`!~~*`). Recover the neutral `Like`.
+        BinaryOperator::PGLikeMatch => Ok(like_node(false, false, left, right, dialect)?),
+        BinaryOperator::PGNotLikeMatch => Ok(like_node(false, true, left, right, dialect)?),
+        BinaryOperator::PGILikeMatch => Ok(like_node(true, false, left, right, dialect)?),
+        BinaryOperator::PGNotILikeMatch => Ok(like_node(true, true, left, right, dialect)?),
         // `%` (no neutral arithmetic node), MySQL `||` (logical OR), and any other operator.
         other => Err(not_yet(format!("binary operator `{other}`"))),
     }
+}
+
+/// Builds a [`ExprNode::Like`] from an operand/pattern pair (used to invert PostgreSQL's `~~` operator
+/// deparse of `LIKE`/`ILIKE`).
+fn like_node(
+    case_insensitive: bool,
+    negated: bool,
+    operand: &Expr,
+    pattern: &Expr,
+    dialect: SqlDialect,
+) -> Result<ExprNode, ReadError> {
+    Ok(ExprNode::Like {
+        case_insensitive,
+        negated,
+        operand: b(lower(operand, dialect)?),
+        pattern: b(lower(pattern, dialect)?),
+    })
+}
+
+/// Recovers a neutral [`ExprNode::In`] from PostgreSQL's `<operand> = ANY (ARRAY[..])` /
+/// `<operand> <> ALL (ARRAY[..])` deparse of `IN`/`NOT IN`. The right side must be an array literal.
+fn lower_array_membership(
+    operand: &Expr,
+    array: &Expr,
+    negated: bool,
+    dialect: SqlDialect,
+) -> Result<ExprNode, ReadError> {
+    let Expr::Array(array) = array else {
+        return Err(not_yet(format!(
+            "`{}` membership over a non-array operand",
+            if negated { "ALL" } else { "ANY" }
+        )));
+    };
+    Ok(ExprNode::In {
+        negated,
+        operand: b(lower(operand, dialect)?),
+        items: array
+            .elem
+            .iter()
+            .map(|item| lower(item, dialect))
+            .collect::<Result<_, _>>()?,
+    })
+}
+
+/// Strips [`Expr::Nested`] wrappers, returning the inner expression (PostgreSQL wraps a cast's literal
+/// operand in parentheses: `(0)::numeric`).
+fn strip_nested(expr: &Expr) -> &Expr {
+    let mut current = expr;
+    while let Expr::Nested(inner) = current {
+        current = inner;
+    }
+    current
 }
 
 /// Recognizes the renderer's empty-`IN` sentinel and recovers the original empty [`ExprNode::In`].
@@ -778,6 +864,55 @@ mod tests {
             low("CONCAT(\"a\", \"b\")", SqlDialect::Generic).unwrap(),
             concat
         );
+    }
+
+    #[test]
+    fn postgres_deparse_idioms_invert_to_the_authored_form() {
+        // `pg_get_constraintdef` reshapes a check; introspecting its output must lower to the SAME
+        // neutral node the macro produces from the authored (Generic) string, so a published check
+        // re-plans to empty. Each pair asserts that convergence.
+
+        // Literal casts: `0` → `(0)::numeric`, `'x'` → `('x')::text`.
+        assert_eq!(
+            low("(0)::numeric", SqlDialect::Postgres).unwrap(),
+            low("0", SqlDialect::Generic).unwrap()
+        );
+        assert_eq!(
+            low("(quota > (0)::numeric)", SqlDialect::Postgres).unwrap(),
+            low("quota > 0", SqlDialect::Generic).unwrap()
+        );
+        // A `::` cast on a NON-literal is a real user cast, still not lowered.
+        assert!(matches!(
+            low("(quota)::numeric", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+
+        // `IN` / `NOT IN` → `= ANY (ARRAY[..])` / `<> ALL (ARRAY[..])`.
+        assert_eq!(
+            low("(status = ANY (ARRAY[1, 2, 3]))", SqlDialect::Postgres).unwrap(),
+            low("status IN (1, 2, 3)", SqlDialect::Generic).unwrap()
+        );
+        assert_eq!(
+            low("(status <> ALL (ARRAY[1, 2]))", SqlDialect::Postgres).unwrap(),
+            low("status NOT IN (1, 2)", SqlDialect::Generic).unwrap()
+        );
+
+        // `LIKE` / `NOT LIKE` / `ILIKE` → `~~` / `!~~` / `~~*`.
+        assert_eq!(
+            low("(name ~~ 'a%')", SqlDialect::Postgres).unwrap(),
+            low("name LIKE 'a%'", SqlDialect::Generic).unwrap()
+        );
+        assert_eq!(
+            low("(name !~~ 'a%')", SqlDialect::Postgres).unwrap(),
+            low("name NOT LIKE 'a%'", SqlDialect::Generic).unwrap()
+        );
+        assert!(matches!(
+            low("(name ~~* 'a%')", SqlDialect::Postgres).unwrap(),
+            ExprNode::Like {
+                case_insensitive: true,
+                ..
+            }
+        ));
     }
 
     #[test]
