@@ -513,6 +513,20 @@ async fn trigger_exists(raw: &RawConnection, name: &'static str) -> bool {
         != 0
 }
 
+/// The stored `CREATE VIEW` text of a view, per `sqlite_master` (verbatim, so it can be re-emitted to
+/// reproduce a byte-identical churn re-apply the way squealy's renderer does).
+async fn view_sql(raw: &RawConnection, name: &'static str) -> String {
+    raw.call(move |conn| {
+        conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = ?1",
+            [name],
+            |row| row.get::<_, String>(0),
+        )
+    })
+    .await
+    .expect("view sql")
+}
+
 /// Whether a view of the given name exists, per `sqlite_master`.
 async fn view_exists(raw: &RawConnection, name: &'static str) -> bool {
     raw.call(move |conn| {
@@ -1679,10 +1693,62 @@ async fn a_view_redefined_with_different_columns_does_not_replay_its_old_trigger
 }
 
 #[tokio::test]
+async fn a_view_redefined_over_a_different_source_does_not_replay_its_old_trigger() {
+    // Even when the output columns are unchanged, a view whose *body* changes (here the source table is
+    // swapped) is a redefinition, and the old trigger body may reference the old source. Replay compares
+    // the view's stored definition (not just its columns), so a body change skips replay.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish widgets + active_widgets(id) view over widgets");
+    exec(
+        &raw,
+        "CREATE TRIGGER \"active_widgets_insert\" INSTEAD OF INSERT ON \"active_widgets\" \
+         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
+    )
+    .await;
+
+    // v2 re-points the same-columned view at a new `widgets2` table (a body change, same output `id`).
+    let mut view_over_widgets2 = active_widgets_view();
+    view_over_widgets2.query.from = Some(SourceRef {
+        schema: None,
+        name: "widgets2".to_owned(),
+        alias: "q0_0".to_owned(),
+    });
+    let v2 = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![
+                widget_table(),
+                table(
+                    "widgets2",
+                    vec![
+                        column("id", SqlType::I64, false),
+                        column("active", SqlType::I64, false),
+                    ],
+                ),
+            ],
+            views: vec![view_over_widgets2],
+        }],
+    };
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan the view body change");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply the view body change");
+
+    assert!(
+        !trigger_exists(&raw, "active_widgets_insert").await,
+        "an INSTEAD OF trigger must not be replayed across a view body change",
+    );
+}
+
+#[tokio::test]
 async fn a_batch_is_not_aborted_by_a_triggered_view_whose_body_is_broken() {
-    // Capturing a triggered view's columns probes it with `PRAGMA table_info`, which errors when the view
-    // is unanalyzable (its base table dropped out of band). That probe failure must be tolerated, not
-    // propagated — otherwise even a `DROP VIEW` of the broken view would abort and strand the database.
+    // A triggered view whose base table was dropped out of band is unanalyzable. Capture reads its stored
+    // definition straight from `sqlite_master` (no view-body analysis), so it must not error — otherwise
+    // even a `DROP VIEW` of the broken view would abort during pre-capture and strand the database.
     let (mut connection, raw) = setup().await;
     publish(&table_and_view(), &Sqlite, &mut connection)
         .await
@@ -1740,38 +1806,6 @@ async fn a_trigger_declared_with_different_target_casing_is_preserved() {
 }
 
 #[tokio::test]
-async fn a_view_recreated_with_only_its_name_casing_changed_preserves_its_trigger() {
-    // The replay's target lookup must be case-insensitive too: if a batch drops a view and recreates it
-    // under a differently-cased spelling of the same name, SQLite treats it as the same object, so the
-    // trigger (captured under the old casing) must still match the survivor and be replayed.
-    let (mut connection, raw) = setup().await;
-    publish(&table_and_view(), &Sqlite, &mut connection)
-        .await
-        .expect("publish table + view");
-    exec(
-        &raw,
-        "CREATE TRIGGER \"active_widgets_insert\" INSTEAD OF INSERT ON \"active_widgets\" \
-         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
-    )
-    .await;
-
-    // Drop and recreate the view under a differently-cased name, through the executor (the drop+create
-    // shape SQLite view churn uses), so trigger replay runs around it.
-    connection
-        .execute_ddl(
-            "DROP VIEW \"active_widgets\"; \
-             CREATE VIEW \"Active_Widgets\" AS SELECT \"id\" FROM \"widgets\" WHERE \"active\" > 0",
-        )
-        .await
-        .expect("recreate the view with only its casing changed");
-
-    assert!(
-        trigger_exists(&raw, "active_widgets_insert").await,
-        "the trigger must be preserved across a case-only recreation of its target view",
-    );
-}
-
-#[tokio::test]
 async fn a_temp_qualified_drop_trigger_does_not_suppress_a_persistent_view_trigger() {
     // An explicit `DROP TRIGGER temp.foo` targets the temp schema, so it must not suppress replay of a
     // same-named *persistent* view trigger that the batch's view re-apply cascades. The scan preserves
@@ -1787,14 +1821,15 @@ async fn a_temp_qualified_drop_trigger_does_not_suppress_a_persistent_view_trigg
     )
     .await;
 
-    // One batch: a temp-qualified DROP TRIGGER (of a non-existent temp trigger) plus a view re-apply that
-    // cascades the persistent trigger. The persistent trigger must be replayed, not suppressed.
+    // One batch: a temp-qualified DROP TRIGGER (of a non-existent temp trigger) plus a byte-identical view
+    // re-apply (re-emitting the view's own stored definition) that cascades the persistent trigger. The
+    // persistent trigger must be replayed, not suppressed by the temp-qualified drop.
+    let view_definition = view_sql(&raw, "active_widgets").await;
     connection
-        .execute_ddl(
+        .execute_ddl(&format!(
             "DROP TRIGGER IF EXISTS temp.\"active_widgets_insert\"; \
-             DROP VIEW \"active_widgets\"; \
-             CREATE VIEW \"active_widgets\" AS SELECT \"id\" FROM \"widgets\" WHERE \"active\" > 0",
-        )
+             DROP VIEW \"active_widgets\"; {view_definition}",
+        ))
         .await
         .expect("re-apply the view alongside a temp-qualified trigger drop");
 

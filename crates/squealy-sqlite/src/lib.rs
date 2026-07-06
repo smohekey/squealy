@@ -255,10 +255,13 @@ fn apply_ddl_batch(conn: &mut rusqlite::Connection, sql: &str) -> rusqlite::Resu
 ///   connection closes), so preserving one across a mid-session re-publish has little value, and the
 ///   temp/`main` shadowing and qualified-name (`ON main.v`) interactions make correct handling fraught.
 ///
-/// The view's output columns are captured too, so replay can skip a trigger whose view was *redefined*
-/// with a different column set (a destructive `DropView`+`CreateView`) rather than merely re-applied —
-/// an old `INSTEAD OF` body referencing a removed `NEW`/`OLD` column would otherwise re-create cleanly
-/// and then fail writes at runtime (same silent break as the table-rebuild case).
+/// The view's stored `CREATE VIEW` text is captured too, so replay can tell a pure churn re-apply
+/// (squealy re-renders the *byte-identical* definition SQLite stored) from any body/shape change (a
+/// destructive `DropView`+`CreateView`). Only the identical case is replayed: an old `INSTEAD OF` body
+/// can reference the view's old columns *or* underlying tables, both of which a body change may
+/// invalidate — SQLite accepts such a `CREATE TRIGGER` and only misfires when the trigger later runs
+/// (the same silent break as the table-rebuild case). Comparing the stored definition catches both
+/// (columns and body) and, unlike probing columns, never fails on an unanalyzable view.
 struct CapturedTrigger {
     /// The trigger's name (unique in the schema; how we detect whether the batch dropped it).
     name: String,
@@ -266,22 +269,9 @@ struct CapturedTrigger {
     target: String,
     /// The stored `CREATE TRIGGER …` text, replayed verbatim to recreate the trigger.
     sql: String,
-    /// The target view's output column names, in order, when captured — or `None` if the view could not
-    /// be analyzed (e.g. its base table was dropped out of band, so `PRAGMA table_info` errors). Replay
-    /// recreates the trigger only if the columns were captured *and* the surviving view still has exactly
-    /// them (a churn re-apply); a probe failure at capture skips replay rather than aborting the batch.
-    target_columns: Option<Vec<String>>,
-}
-
-/// The output column names of a view (or table), in order, via `PRAGMA table_info` — used to tell a
-/// view re-applied unchanged from one redefined with a different column set. The name resolves
-/// case-insensitively, so a view re-created under different casing still reads back.
-fn view_column_names(conn: &rusqlite::Connection, view: &str) -> rusqlite::Result<Vec<String>> {
-    let mut statement = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
-    let columns = statement
-        .query_map([view], |row| row.get(0))?
-        .collect::<rusqlite::Result<Vec<String>>>()?;
-    Ok(columns)
+    /// The target view's stored `CREATE VIEW …` text when captured. Replay recreates the trigger only if
+    /// the surviving view's stored definition is byte-identical (a churn re-apply), not a body change.
+    target_view_sql: String,
 }
 
 /// Snapshots every persistent user-defined trigger **on a view** before a DDL batch runs.
@@ -290,45 +280,33 @@ fn view_column_names(conn: &rusqlite::Connection, view: &str) -> rusqlite::Resul
 /// the `INSTEAD OF` triggers that make a view writeable. SQLite has no `CREATE OR REPLACE VIEW`, so the
 /// diff re-applies a present view as `DROP VIEW … ; CREATE VIEW …`, and a `DROP VIEW` silently drops the
 /// triggers attached to it. Capturing here lets [`replay_dropped_triggers`] restore any that the batch
-/// removes but whose view still exists. Only persistent view triggers are captured (see
+/// removes but whose view is re-created identically. Only persistent view triggers are captured (see
 /// [`CapturedTrigger`]).
 ///
 /// The join matches `tbl_name` to the target view `COLLATE NOCASE`: SQLite resolves object names
 /// case-insensitively but stores `tbl_name` with the `CREATE TRIGGER` statement's casing, so a trigger
 /// created `ON activewidgets` for view `ActiveWidgets` must still find its target. Object names are
-/// unique case-insensitively within a schema, so the match is unambiguous.
+/// unique case-insensitively within a schema, so the match is unambiguous. `target.sql` is the view's
+/// stored definition, read straight from `sqlite_master` (no view-body analysis, so a broken view does
+/// not error the capture).
 fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<CapturedTrigger>> {
     let mut statement = conn.prepare(
-        "SELECT trigger.name, target.name, trigger.sql \
+        "SELECT trigger.name, target.name, trigger.sql, target.sql \
          FROM sqlite_master AS trigger \
          JOIN sqlite_master AS target \
               ON target.name = trigger.tbl_name COLLATE NOCASE AND target.type = 'view' \
-         WHERE trigger.type = 'trigger' AND trigger.sql IS NOT NULL",
+         WHERE trigger.type = 'trigger' AND trigger.sql IS NOT NULL AND target.sql IS NOT NULL",
     )?;
-    let rows = statement
+    let triggers = statement
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
+            Ok(CapturedTrigger {
+                name: row.get(0)?,
+                target: row.get(1)?,
+                sql: row.get(2)?,
+                target_view_sql: row.get(3)?,
+            })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(statement);
-    // Capture each target view's columns in a second pass (`pragma_table_info` can't be joined here
-    // while the trigger statement is still borrowed). A probe failure (e.g. a view whose base table was
-    // dropped out of band) is tolerated as `None` so it never aborts the batch — the existing
-    // introspection path likewise tolerates broken views.
-    let mut triggers = Vec::with_capacity(rows.len());
-    for (name, target, sql) in rows {
-        let target_columns = view_column_names(conn, &target).ok();
-        triggers.push(CapturedTrigger {
-            name,
-            target,
-            sql,
-            target_columns,
-        });
-    }
     Ok(triggers)
 }
 
@@ -336,12 +314,12 @@ fn capture_triggers(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Capture
 ///
 /// A trigger still present in `sqlite_master` survived the batch (its view was untouched) and is left
 /// alone. A trigger now missing was dropped with its view; it is replayed only if a **view** of that name
-/// still exists **with the same output columns** — a view re-created under the same name and shape is the
-/// churn case this fixes. If the name is gone (the user removed the view), now holds a table (a supported
-/// view→table swap — an `INSTEAD OF` trigger cannot live on a table), or the view was redefined with a
-/// different column set (a destructive replacement whose new shape the old trigger body may not match),
-/// the trigger is legitimately gone and is not resurrected. Replaying the stored text reproduces the
-/// trigger exactly, and the missing-name guard means it never collides with a survivor.
+/// still exists **with a byte-identical stored definition** — i.e. the batch re-created the exact same
+/// view (the churn case this fixes). If the name is gone (the user removed the view), now holds a table (a
+/// supported view→table swap — an `INSTEAD OF` trigger cannot live on a table), or the view was redefined
+/// (any body/shape change, whose new definition the old trigger body may not match), the trigger is
+/// legitimately gone and is not resurrected. Replaying the stored text reproduces the trigger exactly, and
+/// the missing-name guard means it never collides with a survivor.
 ///
 /// A trigger the batch **explicitly** dropped (`DROP TRIGGER`, in `explicitly_dropped`) is honored — its
 /// disappearance is the caller's intent, not a side effect of dropping its view — so it is never replayed
@@ -379,25 +357,18 @@ fn replay_dropped_triggers(
         if still_present {
             continue;
         }
-        // Replay only if a view of that name survives, so the trigger is not resurrected onto a table
-        // that replaced the view (a view→table swap — an `INSTEAD OF` trigger cannot live on a table).
-        let view_survives = conn
+        // Replay only if a view of that name survives with a byte-identical stored definition — i.e. the
+        // batch re-created the exact same view (the churn case). A missing view (removed, or replaced by a
+        // table — an `INSTEAD OF` trigger cannot live on a table) yields no row; a body/shape change yields
+        // a different definition. Either way the (possibly stale) trigger is not resurrected.
+        let surviving_view_sql: Option<String> = conn
             .query_row(
-                "SELECT 1 FROM sqlite_master WHERE name = ?1 COLLATE NOCASE AND type = 'view'",
+                "SELECT sql FROM sqlite_master WHERE name = ?1 COLLATE NOCASE AND type = 'view'",
                 [&trigger.target],
-                |_| Ok(()),
+                |row| row.get(0),
             )
-            .optional()?
-            .is_some();
-        // ...and only if the view's output columns were captured and the surviving view still has exactly
-        // them, so a view redefined with a different shape does not get an old trigger whose `NEW`/`OLD`
-        // body may reference a now-missing column. A probe failure at capture or now is tolerated by
-        // simply not replaying (the trigger is a user concern on an unanalyzable view).
-        let columns_unchanged = matches!(
-            (&trigger.target_columns, view_column_names(conn, &trigger.target)),
-            (Some(captured), Ok(current)) if *captured == current
-        );
-        if view_survives && columns_unchanged {
+            .optional()?;
+        if surviving_view_sql.as_deref() == Some(trigger.target_view_sql.as_str()) {
             conn.execute_batch(&trigger.sql)?;
         }
     }
