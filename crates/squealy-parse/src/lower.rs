@@ -157,20 +157,20 @@ fn lower(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
         // cast falls through to `NotYetLowered`; proper cross-dialect cast inversion lands with the
         // model-field migration that first produces such casts.
         //
-        // EXCEPT PostgreSQL's `pg_get_constraintdef` synthesizes a *redundant* `::type` cast on a literal
-        // whose natural type already matches: a number to a numeric type (`0` → `(0)::numeric`) or a
-        // string to a text type (`'x'` → `('x')::text`). Strip only those back to the bare literal (so a
-        // published check re-plans to empty) — NOT a cast that *converts* (`'Infinity'::float8`,
-        // `'2020-01-01'::date`), which is a meaningful user cast and is left `NotYetLowered` (→ `Raw`).
+        // EXCEPT PostgreSQL's `pg_get_constraintdef` synthesizes a `::type` cast on a literal: a number to
+        // a numeric type (`0` → `(0)::numeric`), a string to a text type (`'x'` → `('x')::text`), and — for
+        // a *negative* number — a string cast to a numeric type (`-5` → `('-5')::integer`). Recover the
+        // bare literal only when the cast is a guaranteed value-preserving no-op (so a published check
+        // re-plans to empty); a *converting* cast (`'Infinity'::float8`, `(1.5)::integer`, `varchar(3)`, any
+        // float target) is meaningful and left `NotYetLowered` (→ `Raw`, kept comparable by canonical.rs).
         Expr::Cast {
             kind: CastKind::DoubleColon,
             expr,
             data_type,
             ..
-        } if dialect == SqlDialect::Postgres
-            && is_redundant_literal_cast(strip_nested(expr), data_type) =>
-        {
-            lower(strip_nested(expr), dialect)
+        } if dialect == SqlDialect::Postgres => {
+            redundant_cast_literal(strip_nested(expr), data_type)
+                .ok_or_else(|| not_yet(format!("cast to `{data_type}`")))
         }
 
         // PostgreSQL deparses `x IN (a, b, c)` as `x = ANY (ARRAY[a, b, c])` and `x NOT IN (…)` as
@@ -413,39 +413,63 @@ fn lower_array_membership(
     })
 }
 
-/// Whether `expr` is a literal whose `::type` cast is a *redundant* one PostgreSQL's deparse synthesizes
-/// on a literal already of that type — a number cast to a numeric type, or a string cast to a text type.
-/// A cast that *converts* (a string to a float/date/etc.) is meaningful and is NOT redundant, so it is
-/// not stripped.
-fn is_redundant_literal_cast(expr: &Expr, data_type: &DataType) -> bool {
+/// Recovers the bare [`ExprNode::Literal`] from a PostgreSQL deparse cast on a literal, but only when the
+/// cast is a guaranteed value-preserving no-op; otherwise `None` (the caller reports `NotYetLowered`).
+///
+/// Handles the three forms `pg_get_constraintdef` produces: a number cast to a numeric type
+/// (`(0)::numeric`), a string cast to a text type (`('x')::text`), and — how PostgreSQL renders a
+/// *negative* number — a string cast to a numeric type (`('-5')::integer`, `('-1.5')::numeric`). A cast
+/// that converts (fractional→integer, any float target, bounded `varchar(n)`/`numeric(p,s)`, string→date)
+/// is not a no-op and yields `None`.
+fn redundant_cast_literal(expr: &Expr, data_type: &DataType) -> Option<ExprNode> {
     let Expr::Value(value) = expr else {
-        return false;
+        return None;
     };
     match &value.value {
-        Value::Number(text, _) => {
-            let integer_literal = !text.contains(['.', 'e', 'E']);
-            if integer_literal {
-                // An integer literal is exactly representable in every numeric type, so the cast is a
-                // no-op regardless of target.
-                is_numeric_type(data_type)
+        Value::Number(text, _) if numeric_cast_is_noop(text, data_type) => {
+            Some(ExprNode::Literal(text.clone()))
+        }
+        Value::SingleQuotedString(text) => {
+            if is_numeric_literal(text) {
+                // PostgreSQL's negative-number deparse: `('-5')::integer`. Recover the bare number.
+                numeric_cast_is_noop(text, data_type).then(|| ExprNode::Literal(text.clone()))
             } else {
-                // A fractional literal survives only in a fractional type; casting it to an integer type
-                // TRUNCATES (`(1.5)::integer` → `1`), which is a real conversion, not redundant.
-                is_numeric_type(data_type) && !is_integer_type(data_type)
+                // A genuine string literal cast to an UNBOUNDED text type is a no-op; a bounded
+                // `varchar(n)`/`char(n)` can truncate/pad, and a non-text target (date, float) converts.
+                matches!(
+                    data_type,
+                    DataType::Text
+                        | DataType::Varchar(None)
+                        | DataType::CharVarying(None)
+                        | DataType::CharacterVarying(None)
+                )
+                .then(|| ExprNode::Literal(format!("'{}'", text.replace('\'', "''"))))
             }
         }
-        // A string cast to an UNBOUNDED text type is a no-op. A length-bounded `varchar(n)`/`char(n)`
-        // can truncate or pad, so it is NOT redundant (it falls through to `Raw`, where the string
-        // canonicalizer keeps it comparable without dropping the cast).
-        Value::SingleQuotedString(_) => matches!(
-            data_type,
-            DataType::Text
-                | DataType::Varchar(None)
-                | DataType::CharVarying(None)
-                | DataType::CharacterVarying(None)
-        ),
-        _ => false,
+        _ => None,
     }
+}
+
+/// Whether the decimal literal `text` casts to `data_type` without changing value: an integer literal is
+/// exact in any numeric type; a fractional literal only in a non-integer numeric type (an integer type
+/// truncates it).
+fn numeric_cast_is_noop(text: &str, data_type: &DataType) -> bool {
+    if text.contains(['.', 'e', 'E']) {
+        is_numeric_type(data_type) && !is_integer_type(data_type)
+    } else {
+        is_numeric_type(data_type)
+    }
+}
+
+/// Whether `text` is a plain decimal numeric literal (optional leading sign): the content PostgreSQL puts
+/// in a `('-5')::integer`-style negative-literal cast.
+fn is_numeric_literal(text: &str) -> bool {
+    let digits = text.strip_prefix(['-', '+']).unwrap_or(text);
+    !digits.is_empty()
+        && digits
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        && digits.bytes().filter(|byte| *byte == b'.').count() <= 1
 }
 
 /// Whether `data_type` is a whole-number integer type (casting a fractional literal to it truncates).
@@ -981,6 +1005,24 @@ mod tests {
             low("('x')::text", SqlDialect::Postgres).unwrap(),
             low("'x'", SqlDialect::Generic).unwrap()
         );
+        // PostgreSQL deparses a NEGATIVE numeric literal as a string cast: `-5` → `('-5')::integer`.
+        assert_eq!(
+            low("('-5')::integer", SqlDialect::Postgres).unwrap(),
+            low("-5", SqlDialect::Generic).unwrap()
+        );
+        assert_eq!(
+            low("(status = ('-5')::integer)", SqlDialect::Postgres).unwrap(),
+            low("status = -5", SqlDialect::Generic).unwrap()
+        );
+        assert_eq!(
+            low("('-1.5')::numeric", SqlDialect::Postgres).unwrap(),
+            low("-1.5", SqlDialect::Generic).unwrap()
+        );
+        // …but a negative fractional string cast to an INTEGER type truncates → stays Raw.
+        assert!(matches!(
+            low("('-1.5')::integer", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
         // A `::` cast on a NON-literal is a real user cast, still not lowered.
         assert!(matches!(
             low("(quota)::numeric", SqlDialect::Postgres),
