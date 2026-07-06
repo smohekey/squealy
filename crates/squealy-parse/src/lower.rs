@@ -430,20 +430,23 @@ fn redundant_cast_literal(expr: &Expr, data_type: &DataType) -> Option<ExprNode>
             Some(ExprNode::Literal(text.clone()))
         }
         Value::SingleQuotedString(text) => {
-            if is_numeric_literal(text) {
+            // A string cast to an UNBOUNDED text type is a no-op regardless of the string's content —
+            // including a numeric-looking string like `('0')::text` from a text check `code <> '0'`. Check
+            // the text target FIRST so such a string stays a quoted string literal. (A bounded
+            // `varchar(n)`/`char(n)` can truncate/pad, and a non-text target converts → not a no-op.)
+            if matches!(
+                data_type,
+                DataType::Text
+                    | DataType::Varchar(None)
+                    | DataType::CharVarying(None)
+                    | DataType::CharacterVarying(None)
+            ) {
+                Some(ExprNode::Literal(format!("'{}'", text.replace('\'', "''"))))
+            } else if is_numeric_literal(text) && numeric_cast_is_noop(text, data_type) {
                 // PostgreSQL's negative-number deparse: `('-5')::integer`. Recover the bare number.
-                numeric_cast_is_noop(text, data_type).then(|| ExprNode::Literal(text.clone()))
+                Some(ExprNode::Literal(text.clone()))
             } else {
-                // A genuine string literal cast to an UNBOUNDED text type is a no-op; a bounded
-                // `varchar(n)`/`char(n)` can truncate/pad, and a non-text target (date, float) converts.
-                matches!(
-                    data_type,
-                    DataType::Text
-                        | DataType::Varchar(None)
-                        | DataType::CharVarying(None)
-                        | DataType::CharacterVarying(None)
-                )
-                .then(|| ExprNode::Literal(format!("'{}'", text.replace('\'', "''"))))
+                None
             }
         }
         _ => None,
