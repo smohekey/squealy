@@ -64,12 +64,12 @@ fn lower(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
         // columns) or a qualified `alias.column` (a view body binds columns to a source alias). The
         // renderer always quotes these; `sqlparser` hands back the unquoted value.
         Expr::Identifier(ident) => Ok(ExprNode::BareColumn {
-            column: ident.value.clone(),
+            column: fold_ident(ident),
         }),
         Expr::CompoundIdentifier(parts) => match parts.as_slice() {
             [alias, column] => Ok(ExprNode::Column {
-                alias: alias.value.clone(),
-                column: column.value.clone(),
+                alias: fold_ident(alias),
+                column: fold_ident(column),
             }),
             _ => Err(not_yet(format!(
                 "compound identifier with {} parts",
@@ -455,6 +455,18 @@ fn is_redundant_literal_cast(expr: &Expr, data_type: &DataType) -> bool {
     }
 }
 
+/// Resolves an identifier to the column name the model stores. An *unquoted* identifier is
+/// case-insensitive in SQL and folds to lower case (PostgreSQL folds `Id` → `id`; the renderer then
+/// re-quotes it, so it must already be the folded form to name the right column); a *quoted* identifier
+/// is case-exact and preserved verbatim.
+fn fold_ident(ident: &sqlparser::ast::Ident) -> String {
+    if ident.quote_style.is_none() {
+        ident.value.to_lowercase()
+    } else {
+        ident.value.clone()
+    }
+}
+
 /// Strips [`Expr::Nested`] wrappers, returning the inner expression (PostgreSQL wraps a cast's literal
 /// operand in parentheses: `(0)::numeric`).
 fn strip_nested(expr: &Expr) -> &Expr {
@@ -659,6 +671,18 @@ mod tests {
                 alias: "q0_0".to_owned(),
                 column: "name".to_owned(),
             }
+        );
+    }
+
+    #[test]
+    fn unquoted_identifiers_fold_to_lowercase() {
+        // An unquoted identifier is case-insensitive (PostgreSQL folds `Id` → `id`); the model stores
+        // the folded name so the renderer re-quotes the correct column. A quoted identifier is case-exact.
+        assert_eq!(low("Id", SqlDialect::Postgres).unwrap(), bare("id"));
+        assert_eq!(low("\"Id\"", SqlDialect::Postgres).unwrap(), bare("Id"));
+        assert_eq!(
+            low("MixedCase", SqlDialect::Generic).unwrap(),
+            bare("mixedcase")
         );
     }
 

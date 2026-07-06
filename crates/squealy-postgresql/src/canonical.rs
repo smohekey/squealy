@@ -261,6 +261,15 @@ pub(crate) fn canonical_index_predicate(predicate: &str) -> String {
     normalize(predicate).unwrap_or_else(|| predicate.to_owned())
 }
 
+/// Canonicalizes a `CHECK` expression's raw dialect SQL to the same normalized string, using the same
+/// parser. This is the fallback for a check the reverse parser cannot structure (a general function like
+/// `jsonb_typeof(...)`, a `CASE`, …): the desired (legacy-package) and PostgreSQL-deparsed forms both
+/// normalize to one string — stripping synthesized `::text` casts, parentheses, and identifier quoting —
+/// so an un-structurable raw check still compares equal instead of churning.
+pub(crate) fn canonical_check_expression(expression: &str) -> String {
+    normalize(expression).unwrap_or_else(|| expression.to_owned())
+}
+
 // ===========================================================================================
 // A small PostgreSQL boolean-expression parser + normalizer.
 //

@@ -328,8 +328,17 @@ impl squealy::SchemaIntrospect for PostgresConnection {
     fn canonical_check_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
         match expression {
             squealy::ExprNode::Raw(sql) => {
-                squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                // Try to structure it; if it stays outside the structural grammar (a general function,
+                // `CASE`, …), fall back to the string canonicalizer so the legacy/deparsed raw forms
+                // normalize to one string and do not churn.
+                match squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
                     .read_check_expression_or_raw(&sql)
+                {
+                    squealy::ExprNode::Raw(raw) => {
+                        squealy::ExprNode::Raw(canonical::canonical_check_expression(&raw))
+                    }
+                    structured => structured,
+                }
             }
             other => other,
         }
