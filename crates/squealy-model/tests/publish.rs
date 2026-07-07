@@ -649,7 +649,9 @@ fn rich_model() -> DatabaseModel {
                     indexes: vec![IndexModel {
                         name: "idx_tenants_lower_slug".to_owned(),
                         columns: Vec::new(),
-                        expressions: vec!["lower((slug)::text)".to_owned()],
+                        // PostgreSQL deparses the index expression with a `::text` operand cast, which is
+                        // not structurally lowered (ambiguous without the column type) → stays `Raw`.
+                        expressions: vec![squealy::ExprNode::Raw("lower((slug)::text)".to_owned())],
                         include_columns: Vec::new(),
                         unique: false,
                         method: Some(IndexMethod::BTree),

@@ -927,7 +927,12 @@ fn mysql_rejects_expression_indexes() {
                 indexes: vec![IndexModel {
                     name: "idx_tenants_lower_slug".to_owned(),
                     columns: Vec::new(),
-                    expressions: vec!["lower(slug)".to_owned()],
+                    expressions: vec![squealy::ExprNode::ScalarFn {
+                        func: squealy::ScalarFunc::Lower,
+                        args: vec![squealy::ExprNode::BareColumn {
+                            column: "slug".to_owned(),
+                        }],
+                    }],
                     include_columns: Vec::new(),
                     unique: false,
                     method: Some(IndexMethod::BTree),

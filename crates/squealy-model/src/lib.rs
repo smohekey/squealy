@@ -252,7 +252,8 @@ where
 /// through [`SchemaIntrospect::canonical_identity_mode`], an index declared without an explicit
 /// method / directions has them filled to the backend default (see
 /// [`SchemaIntrospect::default_index_method`], empty directions becoming all-ASC), partial-index
-/// predicates go through [`SchemaIntrospect::canonical_index_predicate`] and CHECK expressions
+/// predicates go through [`SchemaIntrospect::canonical_index_predicate`], index-key expressions
+/// through [`SchemaIntrospect::canonical_index_expression`], and CHECK expressions
 /// through [`SchemaIntrospect::canonical_check_expression`] (then names through
 /// [`SchemaIntrospect::canonical_check_name`]).
 ///
@@ -303,6 +304,17 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 normalize_no_action(&mut foreign_key.on_update);
             }
             for index in &mut table.indexes {
+                // Structure each `Raw` term (a legacy-package index expression, or an un-invertible
+                // introspected one) in the backend's dialect, then normalize it, so a legacy package's
+                // expression index compares equal to a freshly introspected structural one. A single legacy
+                // `Raw` may re-split into several structural terms, so this rebuilds the vector. This runs
+                // BEFORE `canonicalize_index`, which sizes the default direction list by the (columns +
+                // expressions) term count — a stale pre-split count would leave too few directions and churn.
+                index.expressions = std::mem::take(&mut index.expressions)
+                    .into_iter()
+                    .flat_map(|expression| connection.canonical_index_expression(expression))
+                    .map(|expression| squealy::normalize_expr(&expression))
+                    .collect();
                 canonicalize_index(index, &default_method);
                 if let Some(predicate) = &index.predicate {
                     index.predicate = Some(connection.canonical_index_predicate(predicate));
@@ -1246,7 +1258,12 @@ mod tests {
     fn render_create_rejects_unsupported_index_capabilities() {
         let mut index = index();
         index.predicate = Some("tenant_id IS NOT NULL".to_owned());
-        index.expressions = vec!["lower(name)".to_owned()];
+        index.expressions = vec![squealy::ExprNode::ScalarFn {
+            func: squealy::ScalarFunc::Lower,
+            args: vec![squealy::ExprNode::BareColumn {
+                column: "name".to_owned(),
+            }],
+        }];
         index.include_columns = vec!["created_at".to_owned()];
         index.nulls = vec![IndexNullsOrder::Last];
         index.collations = vec![IndexCollation {
@@ -1307,7 +1324,12 @@ mod tests {
     fn render_create_allows_reported_index_capabilities() {
         let mut index = index();
         index.predicate = Some("tenant_id IS NOT NULL".to_owned());
-        index.expressions = vec!["lower(name)".to_owned()];
+        index.expressions = vec![squealy::ExprNode::ScalarFn {
+            func: squealy::ScalarFunc::Lower,
+            args: vec![squealy::ExprNode::BareColumn {
+                column: "name".to_owned(),
+            }],
+        }];
         index.include_columns = vec!["created_at".to_owned()];
         index.nulls = vec![IndexNullsOrder::Last];
         index.collations = vec![IndexCollation {

@@ -139,3 +139,26 @@ pub fn parse_expr(sql: &str, dialect: SqlDialect) -> Result<Expr, ReadError> {
     }
     Ok(expr)
 }
+
+/// Parses a comma-separated list of scalar SQL expressions into the `sqlparser` [`Expr`] AST — the form
+/// PostgreSQL's `pg_get_expr(indexprs, …)` returns for a multi-expression index key (`lower(a), upper(b)`).
+///
+/// Like [`parse_expr`], the whole input must be consumed: any tokens after the final expression are an
+/// error, so a stray statement or junk does not silently truncate the read. Top-level commas separate the
+/// terms; commas nested inside a call or parenthesized group (`coalesce(a, b)`) stay part of their term.
+pub fn parse_expr_list(sql: &str, dialect: SqlDialect) -> Result<Vec<Expr>, ReadError> {
+    let binding = dialect.parser_dialect();
+    let mut parser = Parser::new(binding.as_ref())
+        .try_with_sql(sql)
+        .map_err(|source| ReadError::Parse { dialect, source })?;
+    let exprs = parser
+        .parse_comma_separated(Parser::parse_expr)
+        .map_err(|source| ReadError::Parse { dialect, source })?;
+    let trailing = &parser.peek_token().token;
+    if *trailing != Token::EOF {
+        return Err(ReadError::Unexpected(format!(
+            "unexpected trailing tokens after expression list: `{trailing}`"
+        )));
+    }
+    Ok(exprs)
+}
