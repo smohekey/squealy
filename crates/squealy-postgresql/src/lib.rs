@@ -343,6 +343,27 @@ impl squealy::SchemaIntrospect for PostgresConnection {
             other => other,
         }
     }
+
+    /// Structures a `Raw` index-key expression (a legacy package's verbatim term, or an un-invertible
+    /// introspected one) by re-parsing it in the PostgreSQL dialect, so it compares equal to a freshly
+    /// introspected structural expression index. An already-structural expression is returned unchanged.
+    fn canonical_index_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
+        match expression {
+            squealy::ExprNode::Raw(sql) => {
+                // Try to structure it; if it stays outside the structural grammar, fall back to the string
+                // canonicalizer so the legacy/deparsed raw forms normalize to one string and do not churn.
+                match squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                    .read_index_expression_or_raw(&sql)
+                {
+                    squealy::ExprNode::Raw(raw) => {
+                        squealy::ExprNode::Raw(canonical::canonical_check_expression(&raw))
+                    }
+                    structured => structured,
+                }
+            }
+            other => other,
+        }
+    }
 }
 
 #[cfg(feature = "schema")]

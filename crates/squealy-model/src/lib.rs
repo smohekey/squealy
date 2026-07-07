@@ -252,7 +252,8 @@ where
 /// through [`SchemaIntrospect::canonical_identity_mode`], an index declared without an explicit
 /// method / directions has them filled to the backend default (see
 /// [`SchemaIntrospect::default_index_method`], empty directions becoming all-ASC), partial-index
-/// predicates go through [`SchemaIntrospect::canonical_index_predicate`] and CHECK expressions
+/// predicates go through [`SchemaIntrospect::canonical_index_predicate`], index-key expressions
+/// through [`SchemaIntrospect::canonical_index_expression`], and CHECK expressions
 /// through [`SchemaIntrospect::canonical_check_expression`] (then names through
 /// [`SchemaIntrospect::canonical_check_name`]).
 ///
@@ -306,6 +307,13 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 canonicalize_index(index, &default_method);
                 if let Some(predicate) = &index.predicate {
                     index.predicate = Some(connection.canonical_index_predicate(predicate));
+                }
+                for expression in &mut index.expressions {
+                    // Structure a `Raw` term (a legacy-package index expression, or an un-invertible
+                    // introspected one) in the backend's dialect, then normalize it, so a legacy package's
+                    // expression index compares equal to a freshly introspected structural one.
+                    *expression = connection.canonical_index_expression(expression.clone());
+                    *expression = squealy::normalize_expr(expression);
                 }
             }
             for check in &mut table.checks {

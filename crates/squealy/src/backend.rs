@@ -448,6 +448,21 @@ pub trait SchemaIntrospect {
         expression
     }
 
+    /// Structures a [`ExprNode::Raw`](crate::ExprNode::Raw) index-key expression into a comparable node
+    /// using this backend's dialect, leaving an already-structural expression untouched.
+    ///
+    /// Mirrors [`canonical_check_expression`](Self::canonical_check_expression) for the expression terms of
+    /// an index key: a package written before index expressions became structural carries each term
+    /// verbatim as `Raw`, while live introspection now lowers a parseable index expression to a structural
+    /// node. Applied to **both** the desired and introspected model in
+    /// [`canonicalize_model`](crate::canonicalize_model), this re-parses such a `Raw` in the backend's own
+    /// dialect so a legacy package's expression index compares equal to a freshly introspected structural
+    /// one instead of churning as an `AlterIndex`. The default leaves it unchanged; only PostgreSQL (the
+    /// sole backend that supports expression indexes) overrides it.
+    fn canonical_index_expression(&self, expression: crate::ExprNode) -> crate::ExprNode {
+        expression
+    }
+
     /// Canonicalizes a schema (namespace) name to the form this backend's introspection reports.
     ///
     /// A backend with no namespaces flattens every table into one unqualified namespace: SQLite has no
