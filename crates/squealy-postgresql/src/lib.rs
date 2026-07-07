@@ -343,6 +343,27 @@ impl squealy::SchemaIntrospect for PostgresConnection {
             other => other,
         }
     }
+
+    /// Structures a `Raw` index-key expression (a legacy package's verbatim term, or an un-invertible
+    /// introspected one) by re-parsing it in the PostgreSQL dialect, so it compares equal to a freshly
+    /// introspected structural expression index. An already-structural expression is returned unchanged.
+    ///
+    /// A single legacy `Raw` may carry a whole comma-separated key (`lower(a), upper(b)`, the old
+    /// introspector's one-term form), so this re-splits via `read_index_expressions_or_raw` into the
+    /// per-term structural vector live introspection now produces. A term that stays outside the structural
+    /// grammar is kept **verbatim** as `Raw` — unlike a `CHECK` expression it is NOT run through the string
+    /// canonicalizer, which strips literal casts (`my_func('x'::text)` → `my_func('x')`) and so could change
+    /// overload resolution for a user-defined function; the canonical model feeds the rendered
+    /// `CREATE INDEX`, so rewriting a raw term here would build a different index.
+    fn canonical_index_expression(&self, expression: squealy::ExprNode) -> Vec<squealy::ExprNode> {
+        match expression {
+            squealy::ExprNode::Raw(sql) => {
+                squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                    .read_index_expressions_or_raw(&sql)
+            }
+            other => vec![other],
+        }
+    }
 }
 
 #[cfg(feature = "schema")]

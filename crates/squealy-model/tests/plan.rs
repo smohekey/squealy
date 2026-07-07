@@ -1,4 +1,4 @@
-use squealy::{SourceRef, ViewColumnModel, ViewModel, ViewQueryModel};
+use squealy::{ExprNode, SourceRef, ViewColumnModel, ViewModel, ViewQueryModel};
 use squealy_model::{
     AppliedRefactorError, CastColumn, ChangeRisk, CheckModel, ColumnModel, DatabaseModel,
     DatabasePlanStep, DdlExecutor, DiffPolicy, IndexModel, PlanApplyOptions, RefactorLog,
@@ -680,6 +680,13 @@ impl SchemaIntrospect for TestConnection {
         Ok(self.model.clone())
     }
 
+    // Mimics PostgreSQL, whose default index method is btree — so `canonicalize_index` fills an empty
+    // direction list to one `Asc` per (column + expression) term, exercising the ordering that a legacy
+    // `Raw` index key's re-split must precede.
+    fn default_index_method(&self) -> Option<squealy_model::IndexMethod> {
+        Some(squealy_model::IndexMethod::BTree)
+    }
+
     // Mimics PostgreSQL, where `String` and `Text` both render to `text` and introspect as `String`.
     fn canonical_sql_type(&self, ty: &SqlType) -> SqlType {
         match ty {
@@ -696,6 +703,19 @@ impl SchemaIntrospect for TestConnection {
             .filter(|c| !c.is_whitespace() && *c != '(' && *c != ')')
             .collect::<String>()
             .to_ascii_lowercase()
+    }
+
+    // Stand-in for a backend that re-parses a legacy-package `Raw` index expression into the structural
+    // form live introspection produces, so the two converge (PostgreSQL does this in its own dialect). A
+    // single `Raw` may hold a whole comma-separated key, so it re-splits into per-term structural nodes.
+    fn canonical_index_expression(&self, expression: squealy::ExprNode) -> Vec<squealy::ExprNode> {
+        match expression {
+            squealy::ExprNode::Raw(sql) => {
+                squealy_parse::Reader::new(squealy_parse::SqlDialect::Generic)
+                    .read_index_expressions_or_raw(&sql)
+            }
+            other => vec![other],
+        }
     }
 }
 
@@ -855,6 +875,85 @@ async fn plan_from_database_canonicalizes_predicates_and_checks_on_both_sides() 
     assert!(
         plan.is_empty(),
         "predicate/CHECK differ only in surface form; expected no changes, got {:?}",
+        plan.steps
+    );
+}
+
+#[tokio::test]
+async fn plan_from_database_canonicalizes_legacy_index_expression() {
+    // A legacy package carries an index-key expression verbatim as `Raw` (the old string form), while
+    // live introspection now lowers the same expression to a structural node. `canonical_index_expression`
+    // must run on both sides so the two forms converge instead of churning an `AlterIndex` every publish.
+    let scalar_fn = |func: squealy::ScalarFunc, arg: &str| ExprNode::ScalarFn {
+        func,
+        args: vec![ExprNode::BareColumn {
+            column: arg.to_owned(),
+        }],
+    };
+    let index = |expressions: Vec<ExprNode>| {
+        model_with_tables(
+            "public",
+            vec![{
+                let mut t = table("t");
+                t.columns = vec![column("status", SqlType::Text)];
+                t.indexes = vec![IndexModel {
+                    name: "idx_t_lower_status".to_owned(),
+                    columns: Vec::new(),
+                    expressions,
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: None,
+                    directions: Vec::new(),
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    predicate: None,
+                }];
+                t
+            }],
+        )
+    };
+    let live = index(vec![scalar_fn(squealy::ScalarFunc::Lower, "status")]);
+    let desired = index(vec![ExprNode::Raw("lower(status)".to_owned())]);
+    let mut connection = TestConnection {
+        model: live,
+        applied_refactor_ids: Vec::new(),
+        executed: Vec::new(),
+    };
+
+    let plan = plan_from_database(&desired, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan");
+
+    assert!(
+        plan.is_empty(),
+        "legacy Raw index expression matches the structural introspected one; expected no changes, got {:?}",
+        plan.steps
+    );
+
+    // A legacy package stored a *multi-expression* index key as one lumped `Raw` (the old introspector
+    // joined `pg_get_expr` with commas); canonicalization must re-split it into the per-term structural
+    // vector live introspection now produces, or the differing term counts churn an `AlterIndex` forever.
+    let live = index(vec![
+        scalar_fn(squealy::ScalarFunc::Lower, "status"),
+        scalar_fn(squealy::ScalarFunc::Upper, "status"),
+    ]);
+    let desired = index(vec![ExprNode::Raw(
+        "lower(status), upper(status)".to_owned(),
+    )]);
+    let mut connection = TestConnection {
+        model: live,
+        applied_refactor_ids: Vec::new(),
+        executed: Vec::new(),
+    };
+
+    let plan = plan_from_database(&desired, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan");
+
+    assert!(
+        plan.is_empty(),
+        "legacy lumped multi-expr index key must re-split to match the structural introspected terms; got {:?}",
         plan.steps
     );
 }

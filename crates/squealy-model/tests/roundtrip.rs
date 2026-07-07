@@ -654,6 +654,33 @@ fn reader_entry_points_lower_scalars_but_not_yet_view_bodies() {
         Err(ReadError::Unexpected(_)) => {}
         other => panic!("expected Unexpected for trailing tokens, got: {other:?}"),
     }
+
+    // A multi-expression index key (as `pg_get_expr` returns it, comma-joined) splits into one structural
+    // term per expression — a comma inside a call (`substring(x, 1, 2)`) stays part of its term.
+    assert_eq!(
+        reader.read_index_expressions_or_raw("lower(slug), substring(x, 1, 2)"),
+        vec![
+            ExprNode::ScalarFn {
+                func: ScalarFunc::Lower,
+                args: vec![bare("slug")],
+            },
+            ExprNode::ScalarFn {
+                func: ScalarFunc::Substring,
+                args: vec![
+                    bare("x"),
+                    ExprNode::Literal("1".to_owned()),
+                    ExprNode::Literal("2".to_owned()),
+                ],
+            },
+        ],
+    );
+
+    // If any term cannot be lowered (a `::text` cast on a non-literal), the whole key is preserved as one
+    // verbatim `Raw` rather than a partial/garbled split.
+    assert_eq!(
+        reader.read_index_expressions_or_raw("lower((slug)::text), upper(name)"),
+        vec![ExprNode::Raw("lower((slug)::text), upper(name)".to_owned())],
+    );
 }
 
 // ---- constraint / generated / index expression round-trip -----------------------------------------

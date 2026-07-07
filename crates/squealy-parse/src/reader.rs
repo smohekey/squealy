@@ -17,7 +17,7 @@
 use sqlparser::ast::Statement;
 use squealy_ir::{ExprNode, ViewModel};
 
-use crate::{ReadError, SqlDialect, lower, parse_expr, parse_sql};
+use crate::{ReadError, SqlDialect, lower, parse_expr, parse_expr_list, parse_sql};
 
 /// Reads dialect SQL text back into neutral-model objects for a single [`SqlDialect`].
 ///
@@ -94,6 +94,31 @@ impl Reader {
     /// Reads an index key term's expression into an [`ExprNode`].
     pub fn read_index_expression(&self, sql: &str) -> Result<ExprNode, ReadError> {
         self.read_scalar_expression(sql)
+    }
+
+    /// Reads an index key term's expression into a structural [`ExprNode`], falling back to
+    /// [`ExprNode::Raw`] carrying the input text when it cannot be parsed or lowered — the
+    /// live-introspection entry point (see [`read_check_expression_or_raw`](Self::read_check_expression_or_raw)).
+    pub fn read_index_expression_or_raw(&self, sql: &str) -> ExprNode {
+        self.read_index_expression(sql)
+            .unwrap_or_else(|_| ExprNode::Raw(sql.to_owned()))
+    }
+
+    /// Reads the expression key terms of an index into one structural [`ExprNode`] **per term**, splitting
+    /// the comma-separated list PostgreSQL's `pg_get_expr(indexprs, …)` returns for a multi-expression
+    /// index (`lower(a), upper(b)` → two nodes). This is the live-introspection entry point for the whole
+    /// expression key: each element must lower structurally for the split to be taken; if the list does not
+    /// parse, or any element cannot be lowered (e.g. a `::text` cast on a non-literal), the entire input is
+    /// preserved as a single verbatim [`ExprNode::Raw`] so it re-renders unchanged and both sides of a diff
+    /// still compare equal.
+    pub fn read_index_expressions_or_raw(&self, sql: &str) -> Vec<ExprNode> {
+        let lowered = parse_expr_list(sql, self.dialect).ok().and_then(|exprs| {
+            exprs
+                .iter()
+                .map(|expr| lower::lower_expr(expr, self.dialect).ok())
+                .collect::<Option<Vec<_>>>()
+        });
+        lowered.unwrap_or_else(|| vec![ExprNode::Raw(sql.to_owned())])
     }
 
     /// Shared path for the scalar-expression entry points: parse a single expression, then lower it.

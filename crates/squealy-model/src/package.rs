@@ -1152,9 +1152,10 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
     {
         let mut children = KdlDocument::new();
         if !index.expressions.is_empty() {
+            // Each expression term is stored structurally as a child expr node (not a string arg).
             let mut expressions = KdlNode::new("expressions");
             for expression in &index.expressions {
-                expressions.push(KdlEntry::new(expression.clone()));
+                push_child(&mut expressions, expr_to_node(expression));
             }
             children.nodes_mut().push(expressions);
         }
@@ -1890,13 +1891,28 @@ fn foreign_key_from_node(node: &KdlNode) -> Result<ForeignKeyModel, PackageError
     })
 }
 
+/// Reads the terms of an index's `expressions` child node. The current format stores each term
+/// structurally as a child expr node; packages written before index expressions became structural
+/// carry them as string *args* (`expressions "lower(name)"`) — the backend-specific SQL the renderer
+/// emitted, with no recorded dialect. Those legacy args are preserved **verbatim** as
+/// [`ExprNode::Raw`] (they re-render exactly as before; re-exporting produces the structural form),
+/// mirroring the check-expression compatibility path in [`check_from_node`].
+fn index_expressions_from_node(node: &KdlNode) -> Result<Vec<ExprNode>, PackageError> {
+    let children = expr_child_nodes(node);
+    if children.is_empty() {
+        return Ok(args(node).into_iter().map(ExprNode::Raw).collect());
+    }
+    children.into_iter().map(expr_from_node).collect()
+}
+
 fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
     Ok(IndexModel {
         name: required_prop(node, "name")?,
         columns: args(node),
         expressions: child_nodes(node, "expressions")
             .next()
-            .map(args)
+            .map(index_expressions_from_node)
+            .transpose()?
             .unwrap_or_default(),
         include_columns: child_nodes(node, "include")
             .next()
@@ -3620,7 +3636,12 @@ mod tests {
                     indexes: vec![IndexModel {
                         name: "idx_events_lower_name".to_owned(),
                         columns: Vec::new(),
-                        expressions: vec!["lower(event_name)".to_owned()],
+                        expressions: vec![squealy::ExprNode::ScalarFn {
+                            func: squealy::ScalarFunc::Lower,
+                            args: vec![squealy::ExprNode::BareColumn {
+                                column: "event_name".to_owned(),
+                            }],
+                        }],
                         include_columns: Vec::new(),
                         unique: false,
                         method: Some(IndexMethod::BTree),
@@ -3737,5 +3758,35 @@ database {
         let check = &parsed.schemas[0].tables[0].checks[0];
         assert_eq!(check.name, "ck_widgets_status");
         assert_eq!(check.expression, ExprNode::Raw("status = 1".to_owned()));
+    }
+
+    #[test]
+    fn kdl_reads_legacy_index_expression_string_args() {
+        // Packages written before index expressions became structural carry each term as a string *arg*
+        // on the `expressions` node (the verbatim backend SQL), not a child expr node. The reader must
+        // still accept that form — preserved verbatim as `Raw` (no re-parse) — so existing `.sqz`
+        // artifacts keep their expression indexes instead of silently dropping the terms.
+        let kdl = r#"
+database {
+    schema {
+        table "events" {
+            column "event_name" type="text"
+            index name="idx_events_lower_name" method="btree" {
+                expressions "lower(event_name)" "upper(event_name)"
+            }
+        }
+    }
+}
+"#;
+        let parsed = from_kdl(kdl).expect("legacy index package should parse");
+        let index = &parsed.schemas[0].tables[0].indexes[0];
+        assert_eq!(index.name, "idx_events_lower_name");
+        assert_eq!(
+            index.expressions,
+            vec![
+                ExprNode::Raw("lower(event_name)".to_owned()),
+                ExprNode::Raw("upper(event_name)".to_owned()),
+            ]
+        );
     }
 }

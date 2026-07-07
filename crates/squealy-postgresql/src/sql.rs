@@ -1244,7 +1244,19 @@ pub(crate) mod ddl {
             if position > 0 {
                 writer.write_all(b", ")?;
             }
-            writer.write_all(expression.as_bytes())?;
+            // A structural PostgreSQL expression index key term is wrapped in parentheses. A `Raw` term
+            // (a legacy package's verbatim expression, or an un-invertible introspected one — which may
+            // carry its own decoration such as `COLLATE`, or be a comma-separated `pg_get_expr` list) is
+            // emitted verbatim, as its `ExprNode::Raw` contract requires; wrapping it could change its
+            // meaning (a comma list becomes a row constructor).
+            match expression {
+                squealy::ExprNode::Raw(raw) => writer.write_all(raw.as_bytes())?,
+                structural => {
+                    writer.write_all(b"(")?;
+                    squealy::render_scalar_expr(structural, &super::PostgresDialect, writer)?;
+                    writer.write_all(b")")?;
+                }
+            }
             write_index_collation(index, position, writer)?;
             write_index_operator_class(index, position, writer)?;
             write_index_direction(index, position, writer)?;

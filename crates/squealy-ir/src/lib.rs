@@ -531,8 +531,8 @@ pub struct IndexModel {
     pub name: String,
     /// Quoted column terms in the index key.
     pub columns: Vec<String>,
-    /// Backend-specific expression terms in the index key, emitted verbatim.
-    pub expressions: Vec<String>,
+    /// Structural expression terms in the index key, rendered per backend (an expression index).
+    pub expressions: Vec<ExprNode>,
     /// Non-key columns stored with a covering index.
     pub include_columns: Vec<String>,
     pub unique: bool,
