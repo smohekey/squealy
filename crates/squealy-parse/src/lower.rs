@@ -163,14 +163,25 @@ fn lower(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
         // bare literal only when the cast is a guaranteed value-preserving no-op (so a published check
         // re-plans to empty); a *converting* cast (`'Infinity'::float8`, `(1.5)::integer`, `varchar(3)`, any
         // float target) is meaningful and left `NotYetLowered` (→ `Raw`, kept comparable by canonical.rs).
+        //
+        // PostgreSQL also wraps a text-function/comparison operand in a value-preserving `::text` cast
+        // (`char_length(name)` on a `varchar` column deparses as `char_length((name)::text)`). A cast to
+        // an unbounded text type around a *lowerable* operand is transparent — strip it and lower the
+        // inner — so such a check re-plans to empty. (`lower` returns `NotYetLowered` if the inner isn't
+        // lowerable, so a cast around an un-modelable operand still stays `Raw`.)
         Expr::Cast {
             kind: CastKind::DoubleColon,
             expr,
             data_type,
             ..
         } if dialect == SqlDialect::Postgres => {
-            redundant_cast_literal(strip_nested(expr), data_type)
-                .ok_or_else(|| not_yet(format!("cast to `{data_type}`")))
+            if let Some(node) = redundant_cast_literal(strip_nested(expr), data_type) {
+                Ok(node)
+            } else if is_unbounded_text_type(data_type) {
+                lower(strip_nested(expr), dialect)
+            } else {
+                Err(not_yet(format!("cast to `{data_type}`")))
+            }
         }
 
         // PostgreSQL deparses `x IN (a, b, c)` as `x = ANY (ARRAY[a, b, c])` and `x NOT IN (…)` as
@@ -434,13 +445,7 @@ fn redundant_cast_literal(expr: &Expr, data_type: &DataType) -> Option<ExprNode>
             // including a numeric-looking string like `('0')::text` from a text check `code <> '0'`. Check
             // the text target FIRST so such a string stays a quoted string literal. (A bounded
             // `varchar(n)`/`char(n)` can truncate/pad, and a non-text target converts → not a no-op.)
-            if matches!(
-                data_type,
-                DataType::Text
-                    | DataType::Varchar(None)
-                    | DataType::CharVarying(None)
-                    | DataType::CharacterVarying(None)
-            ) {
+            if is_unbounded_text_type(data_type) {
                 Some(ExprNode::Literal(format!("'{}'", text.replace('\'', "''"))))
             } else if is_numeric_literal(text) && numeric_cast_is_noop(text, data_type) {
                 // PostgreSQL's negative-number deparse: `('-5')::integer`. Recover the bare number.
@@ -473,6 +478,18 @@ fn is_numeric_literal(text: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || byte == b'.')
         && digits.bytes().filter(|byte| *byte == b'.').count() <= 1
+}
+
+/// Whether `data_type` is an UNBOUNDED text type (`text`, or `varchar`/`character varying` with no
+/// length): a cast to it neither truncates nor pads, so it is a value-preserving no-op.
+fn is_unbounded_text_type(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Text
+            | DataType::Varchar(None)
+            | DataType::CharVarying(None)
+            | DataType::CharacterVarying(None)
+    )
 }
 
 /// Whether `data_type` is a whole-number integer type (casting a fractional literal to it truncates).
@@ -1008,6 +1025,18 @@ mod tests {
             low("('x')::text", SqlDialect::Postgres).unwrap(),
             low("'x'", SqlDialect::Generic).unwrap()
         );
+        // PostgreSQL wraps a text-function operand in a value-preserving `::text` cast on varchar/char
+        // columns: `char_length(name)` → `char_length((name)::text)`. The cast is transparent.
+        assert_eq!(
+            low("(char_length((name)::text) > 0)", SqlDialect::Postgres).unwrap(),
+            low("char_length(name) > 0", SqlDialect::Generic).unwrap()
+        );
+        // A `::text` cast around an un-modelable operand still stays Raw (the inner does not lower).
+        assert!(matches!(
+            low("(md5(x))::text", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+
         // PostgreSQL deparses a NEGATIVE numeric literal as a string cast: `-5` → `('-5')::integer`.
         assert_eq!(
             low("('-5')::integer", SqlDialect::Postgres).unwrap(),
