@@ -307,7 +307,7 @@ fn index_from_dyn(table: &str, index: &dyn Index) -> IndexModel {
         nulls: Vec::new(),
         collations: Vec::new(),
         operator_classes: Vec::new(),
-        predicate: index.predicate().map(|predicate| predicate()),
+        predicate: index.predicate().map(|predicate| Box::new(predicate())),
     }
 }
 
@@ -317,7 +317,7 @@ fn index_from_dyn(table: &str, index: &dyn Index) -> IndexModel {
 fn partial_unique_index(
     name: String,
     columns: Vec<String>,
-    predicate: fn() -> String,
+    predicate: fn() -> crate::ExprNode,
 ) -> IndexModel {
     IndexModel {
         name,
@@ -330,7 +330,7 @@ fn partial_unique_index(
         nulls: Vec::new(),
         collations: Vec::new(),
         operator_classes: Vec::new(),
-        predicate: Some(predicate()),
+        predicate: Some(Box::new(predicate())),
     }
 }
 

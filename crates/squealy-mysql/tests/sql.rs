@@ -890,7 +890,13 @@ fn mysql_rejects_partial_index_predicates() {
                     nulls: Vec::new(),
                     collations: Vec::new(),
                     operator_classes: Vec::new(),
-                    predicate: Some("tenant_id > 0".to_owned()),
+                    predicate: Some(Box::new(squealy::ExprNode::Compare {
+                        op: squealy::CompareOp::GreaterThan,
+                        left: Box::new(squealy::ExprNode::BareColumn {
+                            column: "tenant_id".to_owned(),
+                        }),
+                        right: Box::new(squealy::ExprNode::Literal("0".to_owned())),
+                    })),
                 }],
             }],
         }],

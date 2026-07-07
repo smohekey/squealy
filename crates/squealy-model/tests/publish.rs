@@ -570,7 +570,16 @@ fn rich_model() -> DatabaseModel {
                         nulls: vec![IndexNullsOrder::First],
                         collations: Vec::new(),
                         operator_classes: Vec::new(),
-                        predicate: Some("(quota > (0)::numeric)".to_owned()),
+                        // PostgreSQL deparses this partial-index predicate as `(quota > (0)::numeric)`; the
+                        // reverse parser strips the redundant unbounded-numeric cast on the integer literal,
+                        // so the canonical structural form is `quota > 0`.
+                        predicate: Some(Box::new(squealy::ExprNode::Compare {
+                            op: squealy::CompareOp::GreaterThan,
+                            left: Box::new(squealy::ExprNode::BareColumn {
+                                column: "quota".to_owned(),
+                            }),
+                            right: Box::new(squealy::ExprNode::Literal("0".to_owned())),
+                        })),
                     }],
                 },
                 TableModel {

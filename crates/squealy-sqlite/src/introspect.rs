@@ -729,7 +729,14 @@ async fn indexes(
                 // A partial index's `WHERE` predicate is not reported by any PRAGMA; SQLite stores the
                 // `CREATE INDEX` text verbatim, so recover it from there (only when the index is partial).
                 let predicate = if index.partial {
-                    partial_predicate(index_sql(connection, &index.name).await?.as_deref())
+                    partial_predicate(index_sql(connection, &index.name).await?.as_deref()).map(
+                        |predicate| {
+                            Box::new(
+                                squealy_parse::Reader::new(squealy_parse::SqlDialect::Sqlite)
+                                    .read_index_predicate_or_raw(&predicate),
+                            )
+                        },
+                    )
                 } else {
                     None
                 };

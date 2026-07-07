@@ -1111,7 +1111,8 @@ fn write_create_index(table: &str, index: &IndexModel, writer: &mut impl Write) 
     writer.write_all(b")")?;
     // SQLite supports partial indexes (a `WHERE` predicate), unlike MySQL.
     if let Some(predicate) = &index.predicate {
-        write!(writer, " WHERE {predicate}")?;
+        writer.write_all(b" WHERE ")?;
+        squealy::render_scalar_expr(predicate, &SqliteDialect, writer)?;
     }
     Ok(())
 }

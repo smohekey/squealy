@@ -1757,7 +1757,7 @@ impl IndexAttrs {
                     #unique
                 }
 
-                fn predicate(&self) -> Option<fn() -> ::std::string::String> {
+                fn predicate(&self) -> Option<fn() -> ::squealy::ExprNode> {
                     #predicate
                 }
             }
@@ -1867,7 +1867,7 @@ impl Field {
                 fn primary_key(&self) -> bool { #primary_key }
                 fn indexed(&self) -> bool { #indexed }
                 fn unique(&self) -> bool { #unique }
-                fn unique_predicate(&self) -> Option<fn() -> ::std::string::String> { #unique_predicate }
+                fn unique_predicate(&self) -> Option<fn() -> ::squealy::ExprNode> { #unique_predicate }
                 fn nullable(&self) -> bool { <#value_ty as ::squealy::ColumnNullability>::NULLABLE }
                 fn auto_increment(&self) -> bool { #auto_increment }
                 fn generated(&self) -> bool { #generated }
@@ -2441,12 +2441,13 @@ fn token_trees_to_stream(tokens: &[TokenTree]) -> proc_macro2::TokenStream {
     tokens.iter().cloned().collect::<TokenStream>().into()
 }
 
-/// Emits a `fn() -> String` that lowers a `where = |row| ...` predicate to an ANSI SQL string, and
-/// returns the `Option<fn() -> String>` expression that references it (for a `TableUnique`,
-/// `Column::unique_predicate`, or `Index::predicate`). The function definition is pushed onto
-/// `defs`; the predicate closure is applied to the table's column expressions and rendered by
-/// [`squealy::render_ddl_predicate`], which only accepts the literal-free subset (`IS NULL` /
-/// comparisons of columns), so an unsupported predicate fails to compile here.
+/// Emits a `fn() -> ExprNode` that lowers a `where = |row| ...` predicate to a neutral structural
+/// [`ExprNode`], and returns the `Option<fn() -> ExprNode>` expression that references it (for a
+/// `TableUnique`, `Column::unique_predicate`, or `Index::predicate`). The function definition is pushed
+/// onto `defs`; the predicate closure is applied to the table's column expressions and lowered by
+/// [`squealy::build_ddl_predicate`], whose `DdlPredicateAst` bound only accepts the single-table,
+/// subquery-free subset (`IS NULL` / comparisons of columns and literals), so an unsupported predicate
+/// fails to compile here.
 fn predicate_fn_reference(
     table_ident: &proc_macro2::Ident,
     tag: &str,
@@ -2456,7 +2457,7 @@ fn predicate_fn_reference(
     let fn_ident = generated_ident(table_ident, tag, "Predicate");
     defs.push(quote::quote! {
         #[allow(non_snake_case)]
-        fn #fn_ident() -> ::std::string::String {
+        fn #fn_ident() -> ::squealy::ExprNode {
             // Pass the user's `|row| ...` closure to a helper whose parameter type is fixed to the
             // table's column-expression struct. This gives the closure an *expected* signature, so
             // its `row` parameter is inferred (a bare immediately-applied closure cannot be — the
@@ -2472,10 +2473,10 @@ fn predicate_fn_reference(
                     ),
                 )
             }
-            ::squealy::render_ddl_predicate(&build(#closure))
+            ::squealy::build_ddl_predicate(&build(#closure))
         }
     });
-    quote::quote! { ::std::option::Option::Some(#fn_ident as fn() -> ::std::string::String) }
+    quote::quote! { ::std::option::Option::Some(#fn_ident as fn() -> ::squealy::ExprNode) }
 }
 
 /// Rejects column attribute combinations that are mutually contradictory and would
