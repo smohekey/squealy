@@ -147,6 +147,15 @@ pub(crate) fn expr_tokens(node: &ExprNode) -> TokenStream {
             let args = args.iter().map(expr_tokens);
             quote! { ::squealy::ExprNode::ScalarFn { func: #func, args: ::std::vec![ #(#args),* ] } }
         }
+        ExprNode::Function { name, args } => {
+            let args = args.iter().map(expr_tokens);
+            quote! {
+                ::squealy::ExprNode::Function {
+                    name: ::std::string::String::from(#name),
+                    args: ::std::vec![ #(#args),* ],
+                }
+            }
+        }
         other => panic!(
             "internal error: the reverse parser produced an expression node the constraint token \
              emitter does not handle: {other:?}"

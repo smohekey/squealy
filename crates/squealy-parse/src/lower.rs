@@ -14,11 +14,15 @@
 //!
 //! [`lower_expr`] covers the **scalar** grammar the renderer emits for `CHECK` / generated-column /
 //! index expressions: columns (qualified + unqualified), literals, arithmetic, comparison, logical
-//! `AND`/`OR`/`NOT`, `IS [NOT] NULL`, `IN (<list>)`, `BETWEEN`, `LIKE`/`ILIKE`, and the closed
-//! scalar-function set (`LOWER`/`UPPER`/`CHAR_LENGTH`/`TRIM`/`CONCAT`/`SUBSTRING`). Anything outside it
-//! (`%` modulo — no neutral node; a general `CAST` — dialect-ambiguous target names; general/user
-//! functions; subqueries; `CASE`) yields [`ReadError::NotYetLowered`]. View-body lowering
-//! ([`lower_query`]) is a later phase.
+//! `AND`/`OR`/`NOT`, `IS [NOT] NULL`, `IN (<list>)`, `BETWEEN`, `LIKE`/`ILIKE`, the closed
+//! scalar-function set (`LOWER`/`UPPER`/`CHAR_LENGTH`/`TRIM`/`CONCAT`/`SUBSTRING`), and any other
+//! *unquoted*-named function with no direct literal argument as a general, dialect-neutral
+//! [`ExprNode::Function`] call (`jsonb_typeof(data)`). Remaining shapes outside it (`%` modulo — no
+//! neutral node; a general `CAST` — dialect-ambiguous target names; a *quoted* function name or a
+//! function with a *direct literal argument* — folding the case or stripping pg's synthesized arg cast
+//! could change overload resolution; a wildcard/`DISTINCT`/`OVER`/qualified function argument;
+//! subqueries; `CASE`) yield [`ReadError::NotYetLowered`]. View-body lowering ([`lower_query`]) is a
+//! later phase.
 
 use sqlparser::ast::{
     BinaryOperator, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
@@ -636,13 +640,15 @@ fn lower_function(function: &Function, dialect: SqlDialect) -> Result<ExprNode, 
     {
         return Err(not_yet(format!("function call `{function}`")));
     }
-    let name = match function.name.0.as_slice() {
-        [part] => part
-            .as_ident()
-            .map(|ident| ident.value.to_ascii_lowercase()),
+    let name_ident = match function.name.0.as_slice() {
+        [part] => part.as_ident(),
         _ => None,
     }
     .ok_or_else(|| not_yet(format!("qualified function name `{}`", function.name)))?;
+    // The name is folded to lowercase to match PostgreSQL's unquoted deparse; whether it was quoted in
+    // the source gates the general fallback below (a quoted mixed-case name must not be folded lossily).
+    let name = name_ident.value.to_ascii_lowercase();
+    let name_is_quoted = name_ident.quote_style.is_some();
 
     let args = match &function.args {
         FunctionArguments::List(list)
@@ -692,7 +698,29 @@ fn lower_function(function: &Function, dialect: SqlDialect) -> Result<ExprNode, 
                 args,
             })
         }
-        _ => Err(not_yet(format!("function `{name}`"))),
+        // Any other *unquoted* function with *no direct literal argument* is a general, dialect-neutral
+        // call: the closed `ScalarFn` set only covers the functions whose rendering diverges across
+        // dialects (`CHAR_LENGTH`/`LENGTH`, `||`/`CONCAT`, `substr`/`SUBSTRING`); every other function —
+        // user-defined or built-in like `jsonb_typeof` — renders its name verbatim, so it lowers to a
+        // general `Function` node. The name is folded to lowercase (faithful to PostgreSQL's deparse of an
+        // unquoted name). A published `jsonb_typeof(data) = 'object'` check re-plans to empty: the function
+        // takes a column argument (no synthesized cast), and the literal `'object'::text` cast pg adds to
+        // the *comparison* operand is stripped where operand casts always are.
+        //
+        // Two shapes are deliberately kept `Raw` instead (normalized as a string by the backend's
+        // `canonical_check_expression`, or held verbatim by the generated/index seams):
+        //  - a *quoted* function name (`"MyFunc"`) — folding its case would change which overload the call
+        //    resolves to;
+        //  - a *direct literal argument* (`my_func('x')`) — pg deparses it as `my_func('x'::text)`, and
+        //    stripping that synthesized arg cast to converge would rewrite the term the canonical model
+        //    feeds into `GENERATED`/`CREATE INDEX` DDL, potentially resolving a different overload.
+        _ if !name_is_quoted && !args.iter().any(|arg| matches!(arg, ExprNode::Literal(_))) => {
+            Ok(ExprNode::Function { name, args })
+        }
+        _ => Err(not_yet(format!(
+            "general function `{}` (quoted name or literal argument)",
+            function.name
+        ))),
     }
 }
 
@@ -892,8 +920,7 @@ mod tests {
 
     #[test]
     fn mysql_byte_length_is_not_folded_to_character_length() {
-        // `CHAR_LENGTH` is character length everywhere → folds; MySQL `LENGTH` is *bytes* and must not
-        // be folded to the neutral node (which re-renders as `CHAR_LENGTH`).
+        // `CHAR_LENGTH` is character length everywhere → folds to the neutral node.
         assert_eq!(
             low("CHAR_LENGTH(`s`)", SqlDialect::Mysql).unwrap(),
             ExprNode::ScalarFn {
@@ -901,10 +928,16 @@ mod tests {
                 args: vec![bare("s")],
             }
         );
-        assert!(matches!(
-            low("LENGTH(`s`)", SqlDialect::Mysql),
-            Err(ReadError::NotYetLowered(_))
-        ));
+        // MySQL `LENGTH` is *bytes* and must not fold to the neutral `ScalarFn::Length` (which
+        // re-renders as `CHAR_LENGTH`, changing multibyte semantics). It lowers instead to a general
+        // `Function` node that renders `length(...)` verbatim, preserving the byte-length meaning.
+        assert_eq!(
+            low("LENGTH(`s`)", SqlDialect::Mysql).unwrap(),
+            ExprNode::Function {
+                name: "length".to_string(),
+                args: vec![bare("s")],
+            }
+        );
     }
 
     #[test]
@@ -935,11 +968,16 @@ mod tests {
         ));
 
         // `CONCAT(...)` is the neutral concat spelling only on MySQL; on PostgreSQL it ignores NULLs
-        // (different semantics from the `||` the neutral node re-renders as there).
-        assert!(matches!(
-            low("CONCAT(\"a\", \"b\")", SqlDialect::Postgres),
-            Err(ReadError::NotYetLowered(_))
-        ));
+        // (different semantics from the `||` the neutral `ScalarFn::Concat` re-renders as there), so it
+        // must not fold to that node. It lowers instead to a general `Function` node that renders
+        // `concat(...)` verbatim, preserving PostgreSQL's NULL-ignoring semantics.
+        assert_eq!(
+            low("CONCAT(\"a\", \"b\")", SqlDialect::Postgres).unwrap(),
+            ExprNode::Function {
+                name: "concat".to_string(),
+                args: vec![bare("a"), bare("b")],
+            }
+        );
     }
 
     #[test]
@@ -1150,11 +1188,6 @@ mod tests {
             low("SUBSTRING(\"s\" FROM 'a.*' FOR '#')", SqlDialect::Postgres),
             Err(ReadError::NotYetLowered(_))
         ));
-        // A general/user function outside the closed scalar set.
-        assert!(matches!(
-            low("md5(\"s\")", SqlDialect::Postgres),
-            Err(ReadError::NotYetLowered(_))
-        ));
         // A subquery in a scalar position.
         assert!(matches!(
             low("(\"a\" IN (SELECT 1))", SqlDialect::Postgres),
@@ -1163,6 +1196,64 @@ mod tests {
         // A windowed call is not a scalar constraint function.
         assert!(matches!(
             low("ROW_NUMBER() OVER ()", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+    }
+
+    #[test]
+    fn general_functions_lower_to_a_function_node() {
+        // A function outside the closed `ScalarFn` set (whose spelling diverges by dialect) lowers to a
+        // general, verbatim `Function` node — the name is stored lowercased and the arguments recurse.
+        assert_eq!(
+            low("md5(\"s\")", SqlDialect::Postgres).unwrap(),
+            ExprNode::Function {
+                name: "md5".to_string(),
+                args: vec![bare("s")],
+            }
+        );
+        assert_eq!(
+            low("jsonb_typeof(\"data\")", SqlDialect::Postgres).unwrap(),
+            ExprNode::Function {
+                name: "jsonb_typeof".to_string(),
+                args: vec![bare("data")],
+            }
+        );
+        // The name folds to lowercase (matching PostgreSQL's unquoted deparse). Multiple column
+        // arguments are supported.
+        assert_eq!(
+            low("MD5(\"s\")", SqlDialect::Postgres).unwrap(),
+            ExprNode::Function {
+                name: "md5".to_string(),
+                args: vec![bare("s")],
+            }
+        );
+        assert_eq!(
+            low("custom_fn(\"a\", \"b\")", SqlDialect::Postgres).unwrap(),
+            ExprNode::Function {
+                name: "custom_fn".to_string(),
+                args: vec![bare("a"), bare("b")],
+            }
+        );
+        // A wildcard argument (`count(*)`) is still outside the grammar.
+        assert!(matches!(
+            low("count(*)", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // A *quoted* function name is NOT lowered — folding its case would change which overload the
+        // check calls, so it stays `Raw` (normalized as a string by the backend, preserving the quotes).
+        assert!(matches!(
+            low("\"MyFunc\"(\"s\")", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // A *direct literal argument* is NOT lowered — pg deparses it as `f('x'::text)`, and stripping
+        // that synthesized arg cast to converge would rewrite the term the canonical model feeds into
+        // `GENERATED`/`CREATE INDEX` DDL, potentially resolving a different overload; it stays `Raw`.
+        assert!(matches!(
+            low("my_func('x')", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low("my_func(\"data\", 'x'::text)", SqlDialect::Postgres),
             Err(ReadError::NotYetLowered(_))
         ));
     }

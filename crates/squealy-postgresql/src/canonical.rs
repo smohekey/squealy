@@ -1152,6 +1152,10 @@ mod tests {
             "score > 0 OR label IS NOT NULL",
             "((score > 0) OR (label IS NOT NULL))",
         );
+        // `%` modulo has no neutral `ExprNode`, so the structural grammar leaves it `Raw`; this string
+        // normalizer is what folds the authored form to pg's parenthesized deparse (the residual role
+        // that keeps `canonical.rs` alive after the general-function node structures the rest).
+        same("amount % 2 = 0", "((amount % 2) = 0)");
     }
 
     #[test]

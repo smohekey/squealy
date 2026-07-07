@@ -870,6 +870,13 @@ pub enum ExprNode {
         func: ScalarFunc,
         args: Vec<ExprNode>,
     },
+    /// A general, dialect-neutral function call `<name>(<args>)` for functions outside the closed
+    /// [`ScalarFn`](ExprNode::ScalarFn) set — user-defined and other built-in functions in CHECK /
+    /// generated-column / index expressions (`jsonb_typeof(data) = 'object'`). The `name` is stored
+    /// lowercased (matching the forward path's authored spelling and PostgreSQL's unquoted deparse) and
+    /// re-emitted verbatim: unlike [`ScalarFn`](ExprNode::ScalarFn) there is no cross-dialect name
+    /// mapping, so a general function does not re-render across dialects with a different spelling.
+    Function { name: String, args: Vec<ExprNode> },
     /// `CURRENT_TIMESTAMP`.
     Now,
     /// `CAST(EXTRACT(<field> FROM <operand>) AS <result>)` — `result` pins the dialect-divergent
@@ -1075,6 +1082,14 @@ pub fn normalize_expr(expr: &ExprNode) -> ExprNode {
             func: *func,
             args: args.iter().map(normalize_expr).collect(),
         },
+        // A general function's name is folded to lowercase: the reverse parser only ever produces one
+        // from an *unquoted* call (which PostgreSQL deparses lowercased), so lowercasing here — applied to
+        // both the desired and introspected model in `canonicalize_model` — makes a model- or KDL-authored
+        // `MD5(...)` compare equal to the introspected `md5(...)` instead of churning.
+        ExprNode::Function { name, args } => ExprNode::Function {
+            name: name.to_ascii_lowercase(),
+            args: args.iter().map(normalize_expr).collect(),
+        },
         other => other.clone(),
     }
 }
@@ -1140,6 +1155,10 @@ pub fn fold_like_case_insensitivity(expr: &ExprNode) -> ExprNode {
         },
         ExprNode::ScalarFn { func, args } => ExprNode::ScalarFn {
             func: *func,
+            args: args.iter().map(fold_like_case_insensitivity).collect(),
+        },
+        ExprNode::Function { name, args } => ExprNode::Function {
+            name: name.clone(),
             args: args.iter().map(fold_like_case_insensitivity).collect(),
         },
         other => other.clone(),
@@ -1259,7 +1278,7 @@ fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>
                 collect_expr_sources(else_, sources);
             }
         }
-        ExprNode::ScalarFn { args, .. } => {
+        ExprNode::ScalarFn { args, .. } | ExprNode::Function { args, .. } => {
             for arg in args {
                 collect_expr_sources(arg, sources);
             }
@@ -1369,6 +1388,24 @@ mod tests {
         assert_eq!(normalize_expr(&right_nested), normalize_expr(&left_nested));
         assert_eq!(normalize_expr(&right_nested), left_nested);
     }
+
+    #[test]
+    fn normalize_lowercases_general_function_names() {
+        // A model- or KDL-authored `MD5(col)` must compare equal to the introspected `md5(col)` (the
+        // reverse parser only produces a `Function` node from an unquoted, hence lowercase, name), so
+        // normalization folds the name and recurses into arguments.
+        let upper = ExprNode::Function {
+            name: "MD5".to_owned(),
+            args: vec![bare("col")],
+        };
+        let lower = ExprNode::Function {
+            name: "md5".to_owned(),
+            args: vec![bare("col")],
+        };
+        assert_eq!(normalize_expr(&upper), lower);
+        assert_eq!(normalize_expr(&lower), lower);
+    }
+
     #[test]
     fn fold_like_ci_forces_case_sensitive() {
         // On MySQL/SQLite a `Like{case_insensitive: true}` renders as plain `LIKE` and reads back false;

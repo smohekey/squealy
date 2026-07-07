@@ -835,6 +835,14 @@ fn expr_to_node(expr: &ExprNode) -> KdlNode {
             }
             node
         }
+        ExprNode::Function { name, args } => {
+            let mut node = KdlNode::new("function");
+            node.push(KdlEntry::new_prop("name", name.clone()));
+            for arg in args {
+                push_child(&mut node, expr_to_node(arg));
+            }
+            node
+        }
         ExprNode::Now => KdlNode::new("now"),
         ExprNode::Extract {
             field,
@@ -1735,6 +1743,13 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
         }
         "scalar-fn" => ExprNode::ScalarFn {
             func: scalar_func_from_str(&required_prop(node, "func")?)?,
+            args: children
+                .iter()
+                .map(|child| expr_from_node(child))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        "function" => ExprNode::Function {
+            name: required_prop(node, "name")?,
             args: children
                 .iter()
                 .map(|child| expr_from_node(child))

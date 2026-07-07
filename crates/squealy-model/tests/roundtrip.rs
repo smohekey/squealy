@@ -863,6 +863,53 @@ fn constraint_corpus() -> Vec<(&'static str, ExprNode)> {
     ));
     cases.push(("not", ExprNode::Not(b(bare("active")))));
 
+    // A general (non-closed-set) function call — the case that lets PostgreSQL's `canonical.rs` string
+    // normalizer be deleted. Its name renders verbatim on every dialect and lowers back to the same
+    // `Function` node.
+    cases.push((
+        "general-function",
+        cmp(
+            CompareOp::Equals,
+            ExprNode::Function {
+                name: "md5".to_string(),
+                args: vec![bare("sku")],
+            },
+            lit("'x'"),
+        ),
+    ));
+
+    // A general function with multiple (comma-separated) column arguments. Only column/expression
+    // arguments structure — a direct literal argument stays `Raw` (pg would synthesize an arg cast that
+    // cannot be stripped without risking a different overload), so it is not exercised here.
+    cases.push((
+        "general-function-multi-arg",
+        cmp(
+            CompareOp::GreaterThan,
+            ExprNode::Function {
+                name: "custom_fn".to_string(),
+                args: vec![bare("path"), bare("host")],
+            },
+            lit("0"),
+        ),
+    ));
+
+    // A general function nested as an argument of another general function (`abs` is outside the closed
+    // set, so it stays a `Function` node rather than folding).
+    cases.push((
+        "general-function-nested",
+        cmp(
+            CompareOp::Equals,
+            ExprNode::Function {
+                name: "md5".to_string(),
+                args: vec![ExprNode::Function {
+                    name: "abs".to_string(),
+                    args: vec![bare("sku")],
+                }],
+            },
+            lit("'x'"),
+        ),
+    ));
+
     cases
 }
 
