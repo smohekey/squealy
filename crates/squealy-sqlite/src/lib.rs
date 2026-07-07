@@ -337,11 +337,19 @@ impl SchemaIntrospect for SqliteConnection {
     /// Structures a `Raw` check expression (a legacy package's verbatim check, or an un-invertible
     /// introspected one) by re-parsing it in the SQLite dialect, so it compares equal to a freshly
     /// introspected structural check. An already-structural expression is returned unchanged.
+    ///
+    /// The raw SQL is trimmed first: SQLite introspection extracts a `CHECK` body from the stored
+    /// `CREATE TABLE` text with surrounding whitespace stripped, so an un-lowerable raw check must trim
+    /// too or a padded desired `" f(x) "` would not match the introspected `"f(x)"`.
     fn canonical_check_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
         match expression {
             squealy::ExprNode::Raw(sql) => {
-                squealy_parse::Reader::new(squealy_parse::SqlDialect::Sqlite)
-                    .read_check_expression_or_raw(&sql)
+                match squealy_parse::Reader::new(squealy_parse::SqlDialect::Sqlite)
+                    .read_check_expression_or_raw(sql.trim())
+                {
+                    squealy::ExprNode::Raw(raw) => squealy::ExprNode::Raw(raw.trim().to_owned()),
+                    structured => structured,
+                }
             }
             other => other,
         }
