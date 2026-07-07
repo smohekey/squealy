@@ -612,7 +612,7 @@ fn rich_mysql_model() -> DatabaseModel {
                             default: None,
                             identity: None,
                             generated: Some(GeneratedColumnModel {
-                                expression: "char_length(`slug`)".to_owned(),
+                                expression: Some(check_expr("char_length(`slug`)")),
                                 storage: GeneratedStorage::Virtual,
                             }),
                         },
@@ -782,7 +782,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                         default: None,
                         identity: None,
                         generated: Some(GeneratedColumnModel {
-                            expression: "char_length(`slug`)".to_owned(),
+                            expression: Some(check_expr("char_length(`slug`)")),
                             storage: GeneratedStorage::Virtual,
                         }),
                     },

@@ -617,7 +617,10 @@ fn rich_model() -> DatabaseModel {
                             default: None,
                             identity: None,
                             generated: Some(GeneratedColumnModel {
-                                expression: "length((slug)::text)".to_owned(),
+                                expression: Some(
+                                    squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                                        .read_generated_expression_or_raw("length((slug)::text)"),
+                                ),
                                 storage: GeneratedStorage::Stored,
                             }),
                         },

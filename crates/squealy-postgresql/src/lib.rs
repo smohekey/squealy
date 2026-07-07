@@ -354,6 +354,25 @@ impl squealy::SchemaIntrospect for PostgresConnection {
         }
     }
 
+    /// Structures a `Raw` generated-column expression (a legacy package's verbatim one, or an
+    /// un-invertible introspected `pg_get_expr` deparse) by re-parsing it in the PostgreSQL dialect, so it
+    /// compares equal to a freshly introspected structural one. An already-structural expression is
+    /// returned unchanged.
+    ///
+    /// A term that stays outside the structural grammar is kept **verbatim** as `Raw` — like a
+    /// [`canonical_index_expression`](Self::canonical_index_expression) term (and unlike a `CHECK`), it is
+    /// NOT run through the string canonicalizer, since the canonical model feeds the rendered
+    /// `GENERATED ALWAYS AS (…)` and rewriting the raw text could change the computed column.
+    fn canonical_generated_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
+        match expression {
+            squealy::ExprNode::Raw(sql) => {
+                squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                    .read_generated_expression_or_raw(&sql)
+            }
+            other => other,
+        }
+    }
+
     /// Structures a `Raw` index-key expression (a legacy package's verbatim term, or an un-invertible
     /// introspected one) by re-parsing it in the PostgreSQL dialect, so it compares equal to a freshly
     /// introspected structural expression index. An already-structural expression is returned unchanged.

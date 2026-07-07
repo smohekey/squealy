@@ -676,7 +676,15 @@ fn identity_model(identity: &str) -> Option<IdentityModel> {
 fn generated_model(generated: &str, expression: Option<String>) -> Option<GeneratedColumnModel> {
     match generated {
         "s" => Some(GeneratedColumnModel {
-            expression: expression.unwrap_or_default(),
+            // Structure the `pg_get_expr` deparse into a comparable node, falling back to a verbatim
+            // `Raw` for an expression the reverse parser cannot yet lower. A blank deparse (there should
+            // be none for a real stored generated column) yields no expression.
+            expression: expression
+                .filter(|expression| !expression.trim().is_empty())
+                .map(|expression| {
+                    squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                        .read_generated_expression_or_raw(&expression)
+                }),
             storage: GeneratedStorage::Stored,
         }),
         _ => None,
@@ -1097,5 +1105,38 @@ mod tests {
         };
         assert_eq!(check_expression("CHECK ((score > 0))"), expected);
         assert_eq!(check_expression("score > 0"), expected);
+    }
+
+    #[test]
+    fn generated_expression_lowers_to_structural_node() {
+        // pg's `pg_get_expr` deparse of a stored generated column lowers to the same structural node an
+        // authored one produces, so a published generated column re-plans to empty instead of churning
+        // against the introspected string.
+        let expected = Some(GeneratedColumnModel {
+            expression: Some(squealy::ExprNode::Binary {
+                op: squealy::ArithmeticOp::Add,
+                left: Box::new(squealy::ExprNode::BareColumn {
+                    column: "base".to_owned(),
+                }),
+                right: Box::new(squealy::ExprNode::Literal("1".to_owned())),
+            }),
+            storage: GeneratedStorage::Stored,
+        });
+        assert_eq!(
+            generated_model("s", Some("(base + 1)".to_owned())),
+            expected
+        );
+
+        // Only a stored generation kind (`s`) is a generated column.
+        assert_eq!(generated_model("", Some("(base + 1)".to_owned())), None);
+
+        // A blank deparse yields a generated column with no expression (the renderer rejects it).
+        assert!(matches!(
+            generated_model("s", Some("   ".to_owned())),
+            Some(GeneratedColumnModel {
+                expression: None,
+                ..
+            })
+        ));
     }
 }

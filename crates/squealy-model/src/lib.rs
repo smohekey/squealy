@@ -284,6 +284,15 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 if let Some(identity) = &mut column.identity {
                     identity.mode = connection.canonical_identity_mode(&identity.mode);
                 }
+                if let Some(generated) = &mut column.generated
+                    && let Some(expression) = generated.expression.take()
+                {
+                    // Structure a `Raw` generated expression (a legacy-package one, or an un-invertible
+                    // introspected deparse) in the backend's dialect, then normalize it, so a generated
+                    // column written one way and deparsed another compares equal instead of churning.
+                    let expression = connection.canonical_generated_expression(expression);
+                    generated.expression = Some(squealy::normalize_expr(&expression));
+                }
             }
             if let Some(primary_key) = &mut table.primary_key {
                 primary_key.name = connection.canonical_primary_key_name(&primary_key.name);

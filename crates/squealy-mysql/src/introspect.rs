@@ -604,7 +604,7 @@ fn raw_column_type(column_type: &str) -> String {
 }
 
 fn generated_model(extra: &str, expression: Option<String>) -> Option<GeneratedColumnModel> {
-    let expression = expression.filter(|expression| !expression.is_empty())?;
+    let expression = expression.filter(|expression| !expression.trim().is_empty())?;
     let storage = if extra.contains("stored generated") {
         GeneratedStorage::Stored
     } else if extra.contains("virtual generated") {
@@ -613,7 +613,12 @@ fn generated_model(extra: &str, expression: Option<String>) -> Option<GeneratedC
         GeneratedStorage::Unknown
     };
     Some(GeneratedColumnModel {
-        expression,
+        // Structure the `GENERATION_EXPRESSION` deparse into a comparable node, falling back to a
+        // verbatim `Raw` for an expression the reverse parser cannot yet lower.
+        expression: Some(
+            squealy_parse::Reader::new(squealy_parse::SqlDialect::Mysql)
+                .read_generated_expression_or_raw(&expression),
+        ),
         storage,
     })
 }
@@ -886,6 +891,44 @@ mod tests {
                 "42.00"
             ),
             DefaultValue::Raw("42.00".to_owned())
+        );
+    }
+
+    #[test]
+    fn generated_expression_lowers_to_structural_node() {
+        // MySQL's `GENERATION_EXPRESSION` deparse (backtick-quoted) lowers to the same structural node an
+        // authored one produces, so a published generated column re-plans to empty instead of churning
+        // against the introspected string. The `extra` column reports the storage kind.
+        let expected = Some(GeneratedColumnModel {
+            expression: Some(squealy::ExprNode::Binary {
+                op: squealy::ArithmeticOp::Add,
+                left: Box::new(squealy::ExprNode::BareColumn {
+                    column: "base".to_owned(),
+                }),
+                right: Box::new(squealy::ExprNode::Literal("1".to_owned())),
+            }),
+            storage: GeneratedStorage::Stored,
+        });
+        assert_eq!(
+            generated_model("stored generated", Some("(`base` + 1)".to_owned())),
+            expected
+        );
+
+        // The storage kind comes from `extra`; an unrecognized one falls back to `Unknown`.
+        assert!(matches!(
+            generated_model("virtual generated", Some("(`base` + 1)".to_owned())),
+            Some(GeneratedColumnModel {
+                storage: GeneratedStorage::Virtual,
+                ..
+            })
+        ));
+
+        // MySQL keys "is generated" on a non-empty generation expression, so a column with none (or a
+        // blank one) is not a generated column.
+        assert_eq!(generated_model("virtual generated", None), None);
+        assert_eq!(
+            generated_model("stored generated", Some("   ".to_owned())),
+            None
         );
     }
 }
