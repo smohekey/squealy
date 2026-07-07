@@ -1,6 +1,12 @@
 use squealy::*;
 use squealy_mysql::Mysql;
 
+fn check_expr(sql: &str) -> ExprNode {
+    squealy_parse::Reader::new(squealy_parse::SqlDialect::Mysql)
+        .read_check_expression(sql)
+        .unwrap()
+}
+
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(Shop)]
 struct Tenant<'scope, C: ColumnMode = ColumnExpr> {
@@ -236,13 +242,13 @@ fn mysql_renders_changed_constraints_and_indexes_in_schema_plan() {
                 change: Box::new(TablePlanStep::AlterCheck {
                     before: CheckModel {
                         name: "ck_events_id".to_owned(),
-                        expression: "id > 0".to_owned(),
+                        expression: check_expr("id > 0"),
                         validation: None,
                         enforcement: None,
                     },
                     after: CheckModel {
                         name: "ck_events_id".to_owned(),
-                        expression: "event_id > 0".to_owned(),
+                        expression: check_expr("event_id > 0"),
                         validation: None,
                         enforcement: None,
                     },
@@ -298,7 +304,7 @@ ALTER TABLE `shop`.`events` ADD CONSTRAINT `uq_events_name` UNIQUE (`slug`);\n\
 ALTER TABLE `shop`.`events` DROP FOREIGN KEY `fk_events_user_id`;\n\
 ALTER TABLE `shop`.`events` ADD CONSTRAINT `fk_events_user_id` FOREIGN KEY (`owner_id`) REFERENCES `shop`.`users` (`id`) ON DELETE CASCADE;\n\
 ALTER TABLE `shop`.`events` DROP CHECK `ck_events_id`;\n\
-ALTER TABLE `shop`.`events` ADD CONSTRAINT `ck_events_id` CHECK (event_id > 0);\n\
+ALTER TABLE `shop`.`events` ADD CONSTRAINT `ck_events_id` CHECK ((`event_id` > 0));\n\
 DROP INDEX `idx_events_name` ON `shop`.`events`;\n\
 CREATE UNIQUE INDEX `idx_events_name` ON `shop`.`events` (`slug`);"
     );
@@ -836,7 +842,7 @@ fn mysql_rejects_check_constraint_enforcement() {
                 uniques: Vec::new(),
                 checks: vec![CheckModel {
                     name: "ck_memberships_tenant_id".to_owned(),
-                    expression: "tenant_id > 0".to_owned(),
+                    expression: check_expr("tenant_id > 0"),
                     validation: None,
                     enforcement: Some(ConstraintEnforcement::NotEnforced),
                 }],

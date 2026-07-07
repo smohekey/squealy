@@ -309,9 +309,15 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 }
             }
             for check in &mut table.checks {
-                check.expression = connection.canonical_check_expression(&check.expression);
-                // Derive the canonical name from the now-canonicalized expression, so a backend that
-                // does not round-trip a check's name (SQLite) matches equivalent checks by expression.
+                // Structure a `Raw` expression (a legacy-package check, or an un-invertible introspected
+                // one) in the backend's dialect so equivalent checks compare structurally; an already
+                // structural expression is returned unchanged.
+                check.expression = connection.canonical_check_expression(check.expression.clone());
+                // Normalize the structural form (expand `BETWEEN`, re-nest boolean chains) so a check
+                // PostgreSQL's deparse rewrites still compares equal to the authored one.
+                check.expression = squealy::normalize_expr(&check.expression);
+                // Derive the canonical name from that expression, so a backend that does not round-trip a
+                // check's name (SQLite) matches equivalent checks by expression.
                 check.name = connection.canonical_check_name(check);
             }
         }
@@ -788,10 +794,16 @@ mod tests {
         }
     }
 
+    fn check_expr(sql: &str) -> squealy::ExprNode {
+        squealy_parse::Reader::new(squealy_parse::SqlDialect::Generic)
+            .read_check_expression(sql)
+            .unwrap()
+    }
+
     fn check() -> CheckModel {
         CheckModel {
             name: "ck_memberships_quota".to_owned(),
-            expression: "quota > 0".to_owned(),
+            expression: check_expr("quota > 0"),
             validation: None,
             enforcement: None,
         }

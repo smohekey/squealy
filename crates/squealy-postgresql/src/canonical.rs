@@ -10,7 +10,7 @@
 //! `LIKE` → `~~`). Comparing the strings directly therefore reports a never-settling
 //! `AlterIndex` / `AlterCheck` after a clean publish.
 //!
-//! [`canonical_index_predicate`] and [`canonical_check_expression`] **parse** an expression into a
+//! [`canonical_index_predicate`] **parses** a partial-index predicate into a
 //! normalized AST and re-serialize it to a single canonical string, collapsing all of those
 //! differences to equality when the *same* canonicalization is applied to both the desired and the
 //! introspected model before diffing. The canonical string is internal — it need not match pg's
@@ -261,8 +261,11 @@ pub(crate) fn canonical_index_predicate(predicate: &str) -> String {
     normalize(predicate).unwrap_or_else(|| predicate.to_owned())
 }
 
-/// Canonicalizes a `CHECK` constraint expression to PostgreSQL's `pg_get_constraintdef` deparse form,
-/// using the same parser. See [`canonical_index_predicate`].
+/// Canonicalizes a `CHECK` expression's raw dialect SQL to the same normalized string, using the same
+/// parser. This is the fallback for a check the reverse parser cannot structure (a general function like
+/// `jsonb_typeof(...)`, a `CASE`, …): the desired (legacy-package) and PostgreSQL-deparsed forms both
+/// normalize to one string — stripping synthesized `::text` casts, parentheses, and identifier quoting —
+/// so an un-structurable raw check still compares equal instead of churning.
 pub(crate) fn canonical_check_expression(expression: &str) -> String {
     normalize(expression).unwrap_or_else(|| expression.to_owned())
 }
@@ -1174,15 +1177,5 @@ mod tests {
         // Dollar-quoted strings likewise.
         let dollar = "(a = $$x$$)";
         assert_eq!(canonical_index_predicate(dollar), dollar);
-    }
-
-    #[test]
-    fn check_and_index_hooks_share_normalization() {
-        // The two public entry points are the same normalizer; a CHECK in pg deparse form matches
-        // its authored form.
-        assert_eq!(
-            canonical_check_expression("status IN (1, 2)"),
-            canonical_check_expression("(status = ANY (ARRAY[1, 2]))")
-        );
     }
 }

@@ -10,6 +10,12 @@ use squealy_model::{
 };
 use squealy_postgresql::Postgres;
 
+fn check_expr(sql: &str) -> squealy::ExprNode {
+    squealy_parse::Reader::new(squealy_parse::SqlDialect::Generic)
+        .read_check_expression(sql)
+        .unwrap()
+}
+
 #[test]
 fn plan_models_flattens_diff_changes_in_order() {
     let mut desired_events = table("events");
@@ -691,10 +697,6 @@ impl SchemaIntrospect for TestConnection {
             .collect::<String>()
             .to_ascii_lowercase()
     }
-
-    fn canonical_check_expression(&self, expression: &str) -> String {
-        self.canonical_index_predicate(expression)
-    }
 }
 
 #[tokio::test]
@@ -830,7 +832,7 @@ async fn plan_from_database_canonicalizes_predicates_and_checks_on_both_sides() 
                 }];
                 t.checks = vec![CheckModel {
                     name: "ck_t_score".to_owned(),
-                    expression: check.to_owned(),
+                    expression: check_expr(check),
                     validation: None,
                     enforcement: None,
                 }];

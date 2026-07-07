@@ -317,14 +317,31 @@ impl squealy::SchemaIntrospect for PostgresConnection {
 
     /// Normalizes a partial-index predicate by parsing it and re-serializing a canonical AST, so the
     /// crate-rendered form and PostgreSQL's `pg_get_expr` deparse compare equal. See [`canonical`].
+    /// (index predicates are still strings until they migrate to structural `ExprNode`s too.)
     fn canonical_index_predicate(&self, predicate: &str) -> String {
         canonical::canonical_index_predicate(predicate)
     }
 
-    /// Normalizes a `CHECK` expression with the same parser, so an authored expression and
-    /// PostgreSQL's `pg_get_constraintdef` deparse compare equal. See [`canonical`].
-    fn canonical_check_expression(&self, expression: &str) -> String {
-        canonical::canonical_check_expression(expression)
+    /// Structures a `Raw` check expression (a legacy package's verbatim check, or an un-invertible
+    /// introspected one) by re-parsing it in the PostgreSQL dialect, so it compares equal to a freshly
+    /// introspected structural check. An already-structural expression is returned unchanged.
+    fn canonical_check_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
+        match expression {
+            squealy::ExprNode::Raw(sql) => {
+                // Try to structure it; if it stays outside the structural grammar (a general function,
+                // `CASE`, …), fall back to the string canonicalizer so the legacy/deparsed raw forms
+                // normalize to one string and do not churn.
+                match squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                    .read_check_expression_or_raw(&sql)
+                {
+                    squealy::ExprNode::Raw(raw) => {
+                        squealy::ExprNode::Raw(canonical::canonical_check_expression(&raw))
+                    }
+                    structured => structured,
+                }
+            }
+            other => other,
+        }
     }
 }
 

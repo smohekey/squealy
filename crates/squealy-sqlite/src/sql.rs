@@ -982,7 +982,7 @@ fn write_check(check: &CheckModel, writer: &mut impl Write) -> io::Result<()> {
         ));
     }
     writer.write_all(b"CHECK (")?;
-    writer.write_all(check.expression.trim().as_bytes())?;
+    squealy::render_scalar_expr(&check.expression, &SqliteDialect, writer)?;
     writer.write_all(b")")
 }
 

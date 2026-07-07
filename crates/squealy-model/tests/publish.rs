@@ -554,7 +554,8 @@ fn rich_model() -> DatabaseModel {
                     uniques: Vec::new(),
                     checks: vec![CheckModel {
                         name: "ck_memberships_quota".to_owned(),
-                        expression: "(quota > (0)::numeric)".to_owned(),
+                        expression: squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                            .read_check_expression_or_raw("(quota > (0)::numeric)"),
                         validation: None,
                         enforcement: None,
                     }],

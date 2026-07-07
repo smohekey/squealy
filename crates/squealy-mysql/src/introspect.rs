@@ -452,7 +452,8 @@ ORDER BY cc.CONSTRAINT_NAME",
         },
         |(name, expression): (String, String)| CheckModel {
             name,
-            expression,
+            expression: squealy_parse::Reader::new(squealy_parse::SqlDialect::Mysql)
+                .read_check_expression_or_raw(&expression),
             validation: None,
             enforcement: None,
         },

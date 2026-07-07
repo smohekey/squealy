@@ -5,6 +5,12 @@ use squealy::{
 };
 use squealy_sqlite::Sqlite;
 
+fn check_expr(sql: &str) -> squealy::ExprNode {
+    squealy_parse::Reader::new(squealy_parse::SqlDialect::Sqlite)
+        .read_check_expression(sql)
+        .unwrap()
+}
+
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(App)]
 struct User<'scope, C: ColumnMode = ColumnExpr> {
@@ -380,7 +386,7 @@ fn renders_table_check_constraint() {
                 checks: vec![CheckModel {
                     // The declared name is not rendered (SQLite checks are unnamed inline).
                     name: "ck_balance".to_owned(),
-                    expression: "balance >= 0".to_owned(),
+                    expression: check_expr("balance >= 0"),
                     validation: None,
                     enforcement: None,
                 }],
@@ -392,7 +398,7 @@ fn renders_table_check_constraint() {
     let mut sql = Vec::new();
     Sqlite.render_create(&model, &mut sql).unwrap();
     let sql = String::from_utf8(sql).unwrap();
-    assert!(sql.contains("CHECK (balance >= 0)"), "{sql}");
+    assert!(sql.contains("CHECK ((\"balance\" >= 0))"), "{sql}");
     // Rendered unnamed — the constraint name never reaches the DDL.
     assert!(!sql.contains("ck_balance"), "{sql}");
 }
@@ -433,7 +439,7 @@ fn rejects_check_constraint_validation_or_enforcement_metadata() {
     };
     let base = || CheckModel {
         name: "ck_accounts_balance".to_owned(),
-        expression: "balance >= 0".to_owned(),
+        expression: check_expr("balance >= 0"),
         validation: None,
         enforcement: None,
     };

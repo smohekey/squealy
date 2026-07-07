@@ -56,6 +56,12 @@ fn database_url() -> String {
         .unwrap_or_else(|_| "mysql://root:root@127.0.0.1:33306/squealy_test".to_owned())
 }
 
+fn check_expr(sql: &str) -> squealy::ExprNode {
+    squealy_parse::Reader::new(squealy_parse::SqlDialect::Mysql)
+        .read_check_expression(sql)
+        .unwrap()
+}
+
 #[tokio::test]
 #[ignore]
 async fn publishes_create_from_scratch() {
@@ -553,7 +559,7 @@ fn rich_mysql_model() -> DatabaseModel {
                     uniques: Vec::new(),
                     checks: vec![CheckModel {
                         name: "ck_memberships_quota".to_owned(),
-                        expression: "quota > 0".to_owned(),
+                        expression: check_expr("quota > 0"),
                         validation: None,
                         enforcement: None,
                     }],
@@ -723,7 +729,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                 uniques: Vec::new(),
                 checks: vec![CheckModel {
                     name: "ck_memberships_quota".to_owned(),
-                    expression: "(`quota` > 0)".to_owned(),
+                    expression: check_expr("(`quota` > 0)"),
                     validation: None,
                     enforcement: None,
                 }],

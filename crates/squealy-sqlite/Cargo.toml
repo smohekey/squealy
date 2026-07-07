@@ -12,6 +12,7 @@ categories.workspace = true
 [dependencies]
 futures-core.workspace = true
 squealy.workspace = true
+squealy-parse.workspace = true
 thiserror.workspace = true
 # `bundled` compiles a modern SQLite from source (past the 3.35 RETURNING threshold) so no system
 # `libsqlite3` is required. `tokio-rusqlite` owns the `!Send` `rusqlite::Connection` on a dedicated

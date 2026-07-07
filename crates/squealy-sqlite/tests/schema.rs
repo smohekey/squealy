@@ -17,6 +17,12 @@ async fn connect() -> SqliteConnection {
     Sqlite.connect(":memory:").await.expect("open in-memory db")
 }
 
+fn check_expr(sql: &str) -> squealy::ExprNode {
+    squealy_parse::Reader::new(squealy_parse::SqlDialect::Sqlite)
+        .read_check_expression(sql)
+        .unwrap()
+}
+
 // A derive model exercising every fact SQLite loses on the way back: an `AUTOINCREMENT` identity
 // primary key, a named foreign key, a named multi-column unique, a named secondary index, and a
 // `#[schema(App)]` namespace — all of which the canonicalizers must flatten for the replan to be empty.
@@ -884,7 +890,7 @@ async fn round_trips_a_table_check_constraint() {
                 uniques: Vec::new(),
                 checks: vec![CheckModel {
                     name: "ck_accounts_balance".to_owned(),
-                    expression: expression.to_owned(),
+                    expression: check_expr(expression),
                     validation: None,
                     enforcement: None,
                 }],
@@ -902,7 +908,7 @@ async fn round_trips_a_table_check_constraint() {
     let actual = squealy_model::introspect(&mut connection).await.unwrap();
     let checks = &actual.schemas[0].tables[0].checks;
     assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].expression, "balance >= 0");
+    assert_eq!(checks[0].expression, check_expr("balance >= 0"));
     assert!(checks[0].name.is_empty());
 
     // Same expression re-plans empty.
