@@ -13,37 +13,46 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use squealy_ir::{ArithmeticOp, CompareOp, ExprNode, LogicalOp, ScalarFunc};
-use squealy_parse::{ReadError, Reader, SqlDialect};
+use squealy_parse::{ReadError, Reader, SqlDialect, parse_expr};
 
 /// Renders a column's `check = "..."` attribute as the `Option<::squealy::ExprNode>` body of the
 /// generated `Column::check`:
 /// - `None` when absent;
 /// - `Some(<structural expr>)` when the string lowers to a structural node in the neutral dialect;
 /// - `Some(ExprNode::Raw("..."))` when it parses as valid SQL but is outside the structural subset the
-///   reverse parser handles (e.g. `%` modulo, a backend-specific function) — preserved verbatim so the
-///   check renders exactly as authored (and stays comparable via the backend's `Raw` canonicalization),
-///   matching the pre-migration behavior;
-/// - a `compile_error!` (with a `None` fallback so exactly one clear error surfaces) only for a genuine
-///   parse error / trailing tokens — a real authoring mistake worth catching at compile time.
+///   reverse parser handles (`%` modulo, a backend-specific function) — OR when it is backend-specific
+///   syntax the neutral `Generic` dialect cannot parse but a concrete backend can (e.g. PostgreSQL JSONB
+///   `metadata ? 'key'`). It is preserved verbatim so the check renders exactly as authored (and stays
+///   comparable via the backend's `Raw` canonicalization), matching the pre-migration behavior;
+/// - a `compile_error!` (with a `None` fallback so exactly one clear error surfaces) only when NO SQL
+///   dialect can parse the string — a genuine authoring mistake worth catching at compile time.
 pub(crate) fn check_option_tokens(expr: Option<&str>) -> TokenStream {
     let Some(expr) = expr else {
         return quote! { ::std::option::Option::None };
+    };
+    let raw = quote! {
+        ::std::option::Option::Some(::squealy::ExprNode::Raw(::std::string::String::from(#expr)))
     };
     match Reader::new(SqlDialect::Generic).read_check_expression(expr) {
         Ok(node) => {
             let tokens = expr_tokens(&node);
             quote! { ::std::option::Option::Some(#tokens) }
         }
-        Err(ReadError::NotYetLowered(_)) => {
-            quote! {
-                ::std::option::Option::Some(
-                    ::squealy::ExprNode::Raw(::std::string::String::from(#expr)),
-                )
-            }
-        }
+        // Valid neutral SQL outside the structural subset → preserved verbatim.
+        Err(ReadError::NotYetLowered(_)) => raw,
+        // `Generic` could not parse it. It may still be valid *backend-specific* syntax (PostgreSQL
+        // JSONB operators, etc.); if any concrete backend parses it, keep it verbatim rather than reject a
+        // check that used to compile. Only a string no dialect can parse is a real authoring error.
         Err(error) => {
-            let message = format!("invalid `check` expression `{expr}`: {error}");
-            quote! { { ::std::compile_error!(#message); ::std::option::Option::None } }
+            let parses_somewhere = [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite]
+                .into_iter()
+                .any(|dialect| parse_expr(expr, dialect).is_ok());
+            if parses_somewhere {
+                raw
+            } else {
+                let message = format!("invalid `check` expression `{expr}`: {error}");
+                quote! { { ::std::compile_error!(#message); ::std::option::Option::None } }
+            }
         }
     }
 }
@@ -209,7 +218,12 @@ mod tests {
         assert!(raw.contains("Raw"), "{raw}");
         assert!(!raw.contains("compile_error"), "{raw}");
 
-        // Genuinely malformed SQL is a compile error.
+        // Backend-specific syntax (PostgreSQL JSONB) is preserved as `Raw`, never a compile error.
+        let jsonb = check_option_tokens(Some("metadata ? 'key'")).to_string();
+        assert!(jsonb.contains("Raw"), "{jsonb}");
+        assert!(!jsonb.contains("compile_error"), "{jsonb}");
+
+        // Genuinely malformed SQL — parses in no dialect — is a compile error.
         let malformed = check_option_tokens(Some("qty >")).to_string();
         assert!(malformed.contains("compile_error"), "{malformed}");
 
