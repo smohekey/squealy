@@ -304,19 +304,21 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 normalize_no_action(&mut foreign_key.on_update);
             }
             for index in &mut table.indexes {
-                canonicalize_index(index, &default_method);
-                if let Some(predicate) = &index.predicate {
-                    index.predicate = Some(connection.canonical_index_predicate(predicate));
-                }
                 // Structure each `Raw` term (a legacy-package index expression, or an un-invertible
                 // introspected one) in the backend's dialect, then normalize it, so a legacy package's
                 // expression index compares equal to a freshly introspected structural one. A single legacy
-                // `Raw` may re-split into several structural terms, so this rebuilds the vector.
+                // `Raw` may re-split into several structural terms, so this rebuilds the vector. This runs
+                // BEFORE `canonicalize_index`, which sizes the default direction list by the (columns +
+                // expressions) term count — a stale pre-split count would leave too few directions and churn.
                 index.expressions = std::mem::take(&mut index.expressions)
                     .into_iter()
                     .flat_map(|expression| connection.canonical_index_expression(expression))
                     .map(|expression| squealy::normalize_expr(&expression))
                     .collect();
+                canonicalize_index(index, &default_method);
+                if let Some(predicate) = &index.predicate {
+                    index.predicate = Some(connection.canonical_index_predicate(predicate));
+                }
             }
             for check in &mut table.checks {
                 // Structure a `Raw` expression (a legacy-package check, or an un-invertible introspected

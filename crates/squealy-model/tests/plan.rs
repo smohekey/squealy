@@ -680,6 +680,13 @@ impl SchemaIntrospect for TestConnection {
         Ok(self.model.clone())
     }
 
+    // Mimics PostgreSQL, whose default index method is btree — so `canonicalize_index` fills an empty
+    // direction list to one `Asc` per (column + expression) term, exercising the ordering that a legacy
+    // `Raw` index key's re-split must precede.
+    fn default_index_method(&self) -> Option<squealy_model::IndexMethod> {
+        Some(squealy_model::IndexMethod::BTree)
+    }
+
     // Mimics PostgreSQL, where `String` and `Text` both render to `text` and introspect as `String`.
     fn canonical_sql_type(&self, ty: &SqlType) -> SqlType {
         match ty {
