@@ -1244,7 +1244,10 @@ pub(crate) mod ddl {
             if position > 0 {
                 writer.write_all(b", ")?;
             }
-            writer.write_all(expression.as_bytes())?;
+            // A PostgreSQL expression index key term is wrapped in parentheses.
+            writer.write_all(b"(")?;
+            squealy::render_scalar_expr(expression, &super::PostgresDialect, writer)?;
+            writer.write_all(b")")?;
             write_index_collation(index, position, writer)?;
             write_index_operator_class(index, position, writer)?;
             write_index_direction(index, position, writer)?;

@@ -582,7 +582,14 @@ ORDER BY idx.relname",
                 unique: row.get(1),
                 method: Some(IndexMethod::from_sql(&row.get::<_, String>(2))),
                 columns: row.get(3),
-                expressions: row.get::<_, Option<String>>(12).into_iter().collect(),
+                expressions: row
+                    .get::<_, Option<String>>(12)
+                    .into_iter()
+                    .map(|expression| {
+                        squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                            .read_index_expression_or_raw(&expression)
+                    })
+                    .collect(),
                 include_columns: row.get(4),
                 directions,
                 nulls,

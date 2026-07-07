@@ -1152,9 +1152,10 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
     {
         let mut children = KdlDocument::new();
         if !index.expressions.is_empty() {
+            // Each expression term is stored structurally as a child expr node (not a string arg).
             let mut expressions = KdlNode::new("expressions");
             for expression in &index.expressions {
-                expressions.push(KdlEntry::new(expression.clone()));
+                push_child(&mut expressions, expr_to_node(expression));
             }
             children.nodes_mut().push(expressions);
         }
@@ -1896,7 +1897,13 @@ fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
         columns: args(node),
         expressions: child_nodes(node, "expressions")
             .next()
-            .map(args)
+            .map(|expressions| {
+                expr_child_nodes(expressions)
+                    .into_iter()
+                    .map(expr_from_node)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
             .unwrap_or_default(),
         include_columns: child_nodes(node, "include")
             .next()
@@ -3620,7 +3627,12 @@ mod tests {
                     indexes: vec![IndexModel {
                         name: "idx_events_lower_name".to_owned(),
                         columns: Vec::new(),
-                        expressions: vec!["lower(event_name)".to_owned()],
+                        expressions: vec![squealy::ExprNode::ScalarFn {
+                            func: squealy::ScalarFunc::Lower,
+                            args: vec![squealy::ExprNode::BareColumn {
+                                column: "event_name".to_owned(),
+                            }],
+                        }],
                         include_columns: Vec::new(),
                         unique: false,
                         method: Some(IndexMethod::BTree),

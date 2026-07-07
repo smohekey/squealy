@@ -2170,7 +2170,12 @@ fn postgres_renders_expression_indexes() {
                 indexes: vec![IndexModel {
                     name: "idx_tenants_lower_slug".to_owned(),
                     columns: Vec::new(),
-                    expressions: vec!["lower(slug)".to_owned()],
+                    expressions: vec![squealy::ExprNode::ScalarFn {
+                        func: squealy::ScalarFunc::Lower,
+                        args: vec![squealy::ExprNode::BareColumn {
+                            column: "slug".to_owned(),
+                        }],
+                    }],
                     include_columns: Vec::new(),
                     unique: false,
                     method: Some(IndexMethod::BTree),
@@ -2190,7 +2195,7 @@ fn postgres_renders_expression_indexes() {
 
     assert!(
         sql.contains(
-            "CREATE INDEX \"idx_tenants_lower_slug\" ON \"catalog\".\"tenants\" USING btree (lower(slug) ASC)"
+            "CREATE INDEX \"idx_tenants_lower_slug\" ON \"catalog\".\"tenants\" USING btree ((LOWER(\"slug\")) ASC)"
         ),
         "expression index not rendered as expected: {sql}"
     );

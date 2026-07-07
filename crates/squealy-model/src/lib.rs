@@ -1246,7 +1246,12 @@ mod tests {
     fn render_create_rejects_unsupported_index_capabilities() {
         let mut index = index();
         index.predicate = Some("tenant_id IS NOT NULL".to_owned());
-        index.expressions = vec!["lower(name)".to_owned()];
+        index.expressions = vec![squealy::ExprNode::ScalarFn {
+            func: squealy::ScalarFunc::Lower,
+            args: vec![squealy::ExprNode::BareColumn {
+                column: "name".to_owned(),
+            }],
+        }];
         index.include_columns = vec!["created_at".to_owned()];
         index.nulls = vec![IndexNullsOrder::Last];
         index.collations = vec![IndexCollation {
@@ -1307,7 +1312,12 @@ mod tests {
     fn render_create_allows_reported_index_capabilities() {
         let mut index = index();
         index.predicate = Some("tenant_id IS NOT NULL".to_owned());
-        index.expressions = vec!["lower(name)".to_owned()];
+        index.expressions = vec![squealy::ExprNode::ScalarFn {
+            func: squealy::ScalarFunc::Lower,
+            args: vec![squealy::ExprNode::BareColumn {
+                column: "name".to_owned(),
+            }],
+        }];
         index.include_columns = vec!["created_at".to_owned()];
         index.nulls = vec![IndexNullsOrder::Last];
         index.collations = vec![IndexCollation {
