@@ -497,7 +497,7 @@ fn mysql_renders_identity_and_generated_transitions() {
     let total_before = column("total");
     let mut total_after = total_before.clone();
     total_after.generated = Some(GeneratedColumnModel {
-        expression: "`a` + `b`".to_owned(),
+        expression: Some(check_expr("`a` + `b`")),
         storage: GeneratedStorage::Virtual,
     });
 
@@ -523,7 +523,7 @@ fn mysql_renders_identity_and_generated_transitions() {
     assert_eq!(
         sql,
         "ALTER TABLE `shop`.`events` MODIFY COLUMN `id` INT NOT NULL AUTO_INCREMENT;\n\
-ALTER TABLE `shop`.`events` MODIFY COLUMN `total` TEXT GENERATED ALWAYS AS (`a` + `b`) VIRTUAL;"
+ALTER TABLE `shop`.`events` MODIFY COLUMN `total` TEXT GENERATED ALWAYS AS ((`a` + `b`)) VIRTUAL;"
     );
 }
 

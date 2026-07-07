@@ -479,7 +479,7 @@ fn postgres_renders_identity_and_generated_transitions() {
             alter(
                 ColumnModel {
                     generated: Some(GeneratedColumnModel {
-                        expression: "1 + 1".to_owned(),
+                        expression: Some(check_expr("1 + 1")),
                         storage: GeneratedStorage::Stored,
                     }),
                     ..plain("d")
@@ -518,7 +518,7 @@ fn postgres_rejects_adding_a_generated_column_in_place() {
     };
     let after = ColumnModel {
         generated: Some(GeneratedColumnModel {
-            expression: "price * qty".to_owned(),
+            expression: Some(check_expr("price * qty")),
             storage: GeneratedStorage::Stored,
         }),
         ..before.clone()
@@ -788,7 +788,7 @@ fn postgres_rejects_unsupported_changed_column_definitions() {
     // Adding a generated expression to an existing column is not possible in place on Postgres.
     let mut generated = column("description");
     generated.generated = Some(GeneratedColumnModel {
-        expression: "length(description)".to_owned(),
+        expression: Some(check_expr("char_length(description)")),
         storage: GeneratedStorage::Stored,
     });
 

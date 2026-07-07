@@ -91,6 +91,14 @@ impl Reader {
         self.read_scalar_expression(sql)
     }
 
+    /// Reads a generated-column expression into a structural [`ExprNode`], falling back to
+    /// [`ExprNode::Raw`] carrying the input text when it cannot be parsed or lowered — the
+    /// live-introspection entry point (see [`read_check_expression_or_raw`](Self::read_check_expression_or_raw)).
+    pub fn read_generated_expression_or_raw(&self, sql: &str) -> ExprNode {
+        self.read_generated_expression(sql)
+            .unwrap_or_else(|_| ExprNode::Raw(sql.to_owned()))
+    }
+
     /// Reads an index key term's expression into an [`ExprNode`].
     pub fn read_index_expression(&self, sql: &str) -> Result<ExprNode, ReadError> {
         self.read_scalar_expression(sql)

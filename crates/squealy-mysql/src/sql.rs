@@ -466,9 +466,9 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
         writer.write_all(b" AUTO_INCREMENT")?;
     }
     if let Some(generated) = &column.generated {
-        reject_empty_generated_expression(&column.name, &generated.expression)?;
+        let expression = require_generated_expression(&column.name, &generated.expression)?;
         writer.write_all(b" GENERATED ALWAYS AS (")?;
-        writer.write_all(generated.expression.as_bytes())?;
+        squealy::render_scalar_expr(expression, &MysqlDialect, writer)?;
         writer.write_all(b")")?;
         match generated.storage {
             GeneratedStorage::Virtual | GeneratedStorage::Unknown => {
@@ -487,17 +487,26 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
 /// Rejects a generated column with no expression instead of emitting invalid
 /// `GENERATED ALWAYS AS ()`. The `#[column(generated)]` derive attribute marks a column as generated
 /// but has no way to supply the expression, so such a model cannot be rendered.
-fn reject_empty_generated_expression(column: &str, expression: &str) -> io::Result<()> {
-    if expression.trim().is_empty() {
-        return Err(io::Error::new(
+fn require_generated_expression<'a>(
+    column: &str,
+    expression: &'a Option<squealy::ExprNode>,
+) -> io::Result<&'a squealy::ExprNode> {
+    match expression {
+        Some(expr) if !is_blank_raw(expr) => Ok(expr),
+        _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
                 "generated column `{column}` has no expression; #[column(generated)] cannot supply \
                  one, so it cannot be rendered to DDL"
             ),
-        ));
+        )),
     }
-    Ok(())
+}
+
+/// Whether an expression is a verbatim [`squealy::ExprNode::Raw`] holding only whitespace — an empty
+/// generated expression that would render as invalid `GENERATED ALWAYS AS ()`.
+fn is_blank_raw(expr: &squealy::ExprNode) -> bool {
+    matches!(expr, squealy::ExprNode::Raw(sql) if sql.trim().is_empty())
 }
 
 /// Renders the neutral [`SqlType`] as a MySQL DDL type.
@@ -1269,7 +1278,7 @@ mod tests {
                         default: None,
                         identity: None,
                         generated: Some(GeneratedColumnModel {
-                            expression: String::new(),
+                            expression: None,
                             storage: GeneratedStorage::Stored,
                         }),
                     }],

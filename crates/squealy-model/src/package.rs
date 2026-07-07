@@ -1042,11 +1042,11 @@ fn column_to_node(column: &ColumnModel) -> KdlNode {
             "generated",
             generated_storage(&generated.storage),
         ));
-        if !generated.expression.is_empty() {
-            node.push(KdlEntry::new_prop(
-                "generated-expr",
-                generated.expression.clone(),
-            ));
+        // The defining expression is stored structurally (a `generated-expr { … }` child), not as a
+        // string prop, so it round-trips as the same `ExprNode` and re-renders in any dialect. A column
+        // marked generated with no expression (the bare `#[column(generated)]` case) has no child.
+        if let Some(expression) = &generated.expression {
+            push_child(&mut node, wrap_expr("generated-expr", expression));
         }
     }
     if let Some(default) = &column.default {
@@ -2240,8 +2240,22 @@ fn generated_from_node(node: &KdlNode) -> Result<Option<GeneratedColumnModel>, P
         return Ok(None);
     };
 
+    // The current format stores the expression structurally as a `generated-expr { … }` child. Packages
+    // written before it became structural carry it as a `generated-expr="..."` string *prop* of
+    // backend-specific SQL (the package does not record which dialect), so that legacy string is
+    // preserved **verbatim** as `ExprNode::Raw` rather than re-parsed (re-exporting produces the
+    // structural form). A column marked generated with no expression has neither, yielding `None`.
+    let expression = if let Some(expr) = child_nodes(node, "generated-expr").next() {
+        Some(first_child_expr(expr)?)
+    } else {
+        prop(node, "generated-expr")
+            .map(str::trim)
+            .filter(|legacy| !legacy.is_empty())
+            .map(|legacy| ExprNode::Raw(legacy.to_owned()))
+    };
+
     Ok(Some(GeneratedColumnModel {
-        expression: prop(node, "generated-expr").unwrap_or_default().to_owned(),
+        expression,
         storage,
     }))
 }
@@ -3264,7 +3278,7 @@ mod tests {
                 default: None,
                 identity: None,
                 generated: Some(GeneratedColumnModel {
-                    expression: "length(slug)".to_owned(),
+                    expression: Some(check_expr("length(slug)")),
                     storage: GeneratedStorage::Virtual,
                 }),
             },
@@ -3277,7 +3291,7 @@ mod tests {
                 default: None,
                 identity: None,
                 generated: Some(GeneratedColumnModel {
-                    expression: "char_length(`slug`)".to_owned(),
+                    expression: Some(check_expr("char_length(slug)")),
                     storage: GeneratedStorage::Stored,
                 }),
             },
@@ -3290,7 +3304,7 @@ mod tests {
                 default: None,
                 identity: None,
                 generated: Some(GeneratedColumnModel {
-                    expression: String::new(),
+                    expression: None,
                     storage: GeneratedStorage::Unknown,
                 }),
             },
@@ -3751,7 +3765,7 @@ database {
         assert_eq!(
             columns[1].generated,
             Some(GeneratedColumnModel {
-                expression: String::new(),
+                expression: None,
                 storage: GeneratedStorage::Unknown
             })
         );
@@ -3777,6 +3791,41 @@ database {
         let check = &parsed.schemas[0].tables[0].checks[0];
         assert_eq!(check.name, "ck_widgets_status");
         assert_eq!(check.expression, ExprNode::Raw("status = 1".to_owned()));
+    }
+
+    #[test]
+    fn kdl_reads_legacy_generated_expr_string_prop() {
+        // Packages written before the generated expression became structural carry it as a
+        // `generated-expr="..."` string prop (the verbatim backend SQL), not a `generated-expr { … }`
+        // child. The reader must still accept that form — preserved verbatim as `Raw` — so existing `.sqz`
+        // artifacts keep their computed columns. A blank legacy prop is treated as no expression.
+        let kdl = r#"
+database {
+    schema {
+        table "people" {
+            column "slug" type="text"
+            column "slug_len" type="i32" generated="stored" generated-expr="char_length(`slug`)"
+            column "computed" type="i32" generated="unknown" generated-expr=""
+        }
+    }
+}
+"#;
+        let parsed = from_kdl(kdl).expect("legacy generated package should parse");
+        let columns = &parsed.schemas[0].tables[0].columns;
+        assert_eq!(
+            columns[1].generated,
+            Some(GeneratedColumnModel {
+                expression: Some(ExprNode::Raw("char_length(`slug`)".to_owned())),
+                storage: GeneratedStorage::Stored,
+            })
+        );
+        assert_eq!(
+            columns[2].generated,
+            Some(GeneratedColumnModel {
+                expression: None,
+                storage: GeneratedStorage::Unknown,
+            })
+        );
     }
 
     #[test]

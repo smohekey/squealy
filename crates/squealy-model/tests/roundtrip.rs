@@ -467,7 +467,11 @@ fn corpus() -> Vec<(&'static str, DatabaseModel)> {
     );
     calc.columns[1].nullable = false;
     calc.columns[1].generated = Some(GeneratedColumnModel {
-        expression: "base * 2".to_owned(),
+        expression: Some(ExprNode::Binary {
+            op: ArithmeticOp::Multiply,
+            left: Box::new(bare("base")),
+            right: Box::new(ExprNode::Literal("2".to_owned())),
+        }),
         storage: GeneratedStorage::Stored,
     });
     cases.push(("table/generated", schema_with_table(calc)));
