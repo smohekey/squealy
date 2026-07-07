@@ -342,7 +342,7 @@ impl SchemaIntrospect for SqliteConnection {
     /// `CREATE TABLE` text with surrounding whitespace stripped, so an un-lowerable raw check must trim
     /// too or a padded desired `" f(x) "` would not match the introspected `"f(x)"`.
     fn canonical_check_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
-        match expression {
+        let structured = match expression {
             squealy::ExprNode::Raw(sql) => {
                 match squealy_parse::Reader::new(squealy_parse::SqlDialect::Sqlite)
                     .read_check_expression_or_raw(sql.trim())
@@ -352,7 +352,10 @@ impl SchemaIntrospect for SqliteConnection {
                 }
             }
             other => other,
-        }
+        };
+        // SQLite renders both `Like` case-sensitivity states as plain `LIKE` and introspects them back as
+        // `case_insensitive: false`, so fold the flag to keep an authored `ILIKE` check from churning.
+        squealy::fold_like_case_insensitivity(&structured)
     }
 
     /// SQLite has no boolean or unsigned literal, so a `bool`/unsigned default on an `INTEGER`-affinity

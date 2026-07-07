@@ -85,10 +85,12 @@
 //!
 //! ## Schema-diff expression fidelity
 //!
-//! MySQL has no expression-canonicalization pass (there is no `canonical.rs`, unlike the PostgreSQL
-//! backend). It inherits the identity `canonical_check_expression` / `canonical_index_predicate`, so a
-//! `CHECK` or partial-index predicate that the server's catalog stores in a re-spelled form can diff as
-//! a spurious change. Tightening this is planned.
+//! `CHECK` expressions are structural [`ExprNode`](squealy::ExprNode)s, compared structurally after
+//! `canonical_check_expression` re-parses any `Raw` (legacy/unmodelable) form in the MySQL dialect and
+//! folds the case-insensitivity flag on `Like` nodes (MySQL renders `ILIKE` as plain `LIKE`). Partial
+//! *index* predicates are still strings and inherit the identity `canonical_index_predicate` (there is
+//! no MySQL `canonical.rs`, unlike PostgreSQL), so a predicate the catalog re-spells can still diff as a
+//! spurious change until index predicates migrate to structural form too.
 //!
 //! ## Dialect divergences (transparent)
 //!
@@ -329,13 +331,16 @@ impl SchemaIntrospect for MysqlConnection {
     /// introspected one) by re-parsing it in the MySQL dialect, so it compares equal to a freshly
     /// introspected structural check. An already-structural expression is returned unchanged.
     fn canonical_check_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
-        match expression {
+        let structured = match expression {
             squealy::ExprNode::Raw(sql) => {
                 squealy_parse::Reader::new(squealy_parse::SqlDialect::Mysql)
                     .read_check_expression_or_raw(&sql)
             }
             other => other,
-        }
+        };
+        // MySQL renders both `Like` case-sensitivity states as plain `LIKE` and introspects them back as
+        // `case_insensitive: false`, so fold the flag to keep an authored `ILIKE` check from churning.
+        squealy::fold_like_case_insensitivity(&structured)
     }
 
     /// MySQL renders bare `String` as `VARCHAR(255)` (it has no key-usable unbounded `text`), which

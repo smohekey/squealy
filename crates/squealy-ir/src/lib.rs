@@ -1071,6 +1071,73 @@ pub fn normalize_expr(expr: &ExprNode) -> ExprNode {
     }
 }
 
+/// Drops the case-insensitivity distinction on every [`ExprNode::Like`] node (forces
+/// `case_insensitive = false`), for backends whose renderer emits the same `LIKE` for both flag states
+/// and whose introspection therefore always reads `false` (MySQL/SQLite — only PostgreSQL spells the
+/// case-insensitive form distinctly, as `ILIKE`). Applied to both the desired and introspected model in
+/// `canonicalize_model` so an authored `ILIKE` (`case_insensitive: true`) check does not churn against
+/// the introspected `false`. Recurses the constraint node set; other nodes pass through.
+pub fn fold_like_case_insensitivity(expr: &ExprNode) -> ExprNode {
+    match expr {
+        ExprNode::Like {
+            negated,
+            operand,
+            pattern,
+            ..
+        } => ExprNode::Like {
+            case_insensitive: false,
+            negated: *negated,
+            operand: Box::new(fold_like_case_insensitivity(operand)),
+            pattern: Box::new(fold_like_case_insensitivity(pattern)),
+        },
+        ExprNode::Binary { op, left, right } => ExprNode::Binary {
+            op: *op,
+            left: Box::new(fold_like_case_insensitivity(left)),
+            right: Box::new(fold_like_case_insensitivity(right)),
+        },
+        ExprNode::Compare { op, left, right } => ExprNode::Compare {
+            op: *op,
+            left: Box::new(fold_like_case_insensitivity(left)),
+            right: Box::new(fold_like_case_insensitivity(right)),
+        },
+        ExprNode::Logical { op, left, right } => ExprNode::Logical {
+            op: *op,
+            left: Box::new(fold_like_case_insensitivity(left)),
+            right: Box::new(fold_like_case_insensitivity(right)),
+        },
+        ExprNode::Not(inner) => ExprNode::Not(Box::new(fold_like_case_insensitivity(inner))),
+        ExprNode::IsNull { negated, operand } => ExprNode::IsNull {
+            negated: *negated,
+            operand: Box::new(fold_like_case_insensitivity(operand)),
+        },
+        ExprNode::In {
+            negated,
+            operand,
+            items,
+        } => ExprNode::In {
+            negated: *negated,
+            operand: Box::new(fold_like_case_insensitivity(operand)),
+            items: items.iter().map(fold_like_case_insensitivity).collect(),
+        },
+        ExprNode::Between {
+            negated,
+            operand,
+            low,
+            high,
+        } => ExprNode::Between {
+            negated: *negated,
+            operand: Box::new(fold_like_case_insensitivity(operand)),
+            low: Box::new(fold_like_case_insensitivity(low)),
+            high: Box::new(fold_like_case_insensitivity(high)),
+        },
+        ExprNode::ScalarFn { func, args } => ExprNode::ScalarFn {
+            func: *func,
+            args: args.iter().map(fold_like_case_insensitivity).collect(),
+        },
+        other => other.clone(),
+    }
+}
+
 /// Splices an already-normalized operand into a same-operator `AND`/`OR` chain: if it is itself a
 /// same-operator logical (a nested chain, or an expanded `BETWEEN`), its operands join the chain;
 /// otherwise it is one term. Collapses a re-nested boolean tree to one canonical left-folded order.
@@ -1293,5 +1360,39 @@ mod tests {
         let left_nested = and(and(a.clone(), bb.clone()), c.clone());
         assert_eq!(normalize_expr(&right_nested), normalize_expr(&left_nested));
         assert_eq!(normalize_expr(&right_nested), left_nested);
+    }
+    #[test]
+    fn fold_like_ci_forces_case_sensitive() {
+        // On MySQL/SQLite a `Like{case_insensitive: true}` renders as plain `LIKE` and reads back false;
+        // folding both sides to false keeps an authored `ILIKE` check from churning.
+        let insensitive = ExprNode::Like {
+            case_insensitive: true,
+            negated: false,
+            operand: Box::new(bare("name")),
+            pattern: Box::new(lit("'a%'")),
+        };
+        let folded = fold_like_case_insensitivity(&insensitive);
+        assert_eq!(
+            folded,
+            ExprNode::Like {
+                case_insensitive: false,
+                negated: false,
+                operand: Box::new(bare("name")),
+                pattern: Box::new(lit("'a%'")),
+            }
+        );
+        // Nested inside a boolean chain, the flag is folded too.
+        let nested = and(
+            insensitive,
+            cmp(CompareOp::GreaterThan, bare("x"), lit("0")),
+        );
+        assert_eq!(
+            fold_like_case_insensitivity(&nested),
+            fold_like_case_insensitivity(&nested)
+        );
+        assert!(matches!(
+            fold_like_case_insensitivity(&nested),
+            ExprNode::Logical { .. }
+        ));
     }
 }

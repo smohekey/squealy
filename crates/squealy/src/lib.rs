@@ -569,7 +569,7 @@ pub use squealy_ir::{
     IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, JoinItem,
     JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem, ScalarFunc,
     SchemaModel, SourceRef, SqlType, TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
-    WindowFunc, WindowOrderTerm, normalize_expr,
+    WindowFunc, WindowOrderTerm, fold_like_case_insensitivity, normalize_expr,
 };
 pub use squealy_macros::{CTE, ColumnType, Database, RecursiveCTE, Schema, Table, View};
 pub use table::{
