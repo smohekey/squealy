@@ -186,7 +186,7 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
         writer.write_all(b")")?;
         if let Some(predicate) = index.predicate() {
             writer.write_all(b" WHERE ")?;
-            writer.write_all(predicate().as_bytes())?;
+            squealy::render_scalar_expr(&predicate(), &PostgresDialect, writer)?;
         }
     }
 
@@ -206,7 +206,7 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
         writer.write_all(b" (")?;
         write_quoted_ident(column.name(), writer)?;
         writer.write_all(b") WHERE ")?;
-        writer.write_all(predicate().as_bytes())?;
+        squealy::render_scalar_expr(&predicate(), &PostgresDialect, writer)?;
     }
     for unique in table.uniques() {
         let Some(predicate) = unique.predicate else {
@@ -222,7 +222,7 @@ pub(crate) fn write_table(table: &(dyn Table + Sync), writer: &mut impl Write) -
         writer.write_all(b" (")?;
         write_quoted_idents(unique.columns, writer)?;
         writer.write_all(b") WHERE ")?;
-        writer.write_all(predicate().as_bytes())?;
+        squealy::render_scalar_expr(&predicate(), &PostgresDialect, writer)?;
     }
 
     Ok(())
@@ -1131,7 +1131,7 @@ pub(crate) mod ddl {
         }
         if let Some(predicate) = &index.predicate {
             writer.write_all(b" WHERE ")?;
-            writer.write_all(predicate.as_bytes())?;
+            squealy::render_scalar_expr(predicate, &super::PostgresDialect, writer)?;
         }
         Ok(())
     }

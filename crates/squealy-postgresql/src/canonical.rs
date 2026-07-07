@@ -1,22 +1,24 @@
-//! Semantic canonicalization of partial-index predicates and `CHECK` expressions, so a desired model
-//! does not churn against a live schema (git-bug `64d9d03`).
+//! Semantic canonicalization of an un-structurable `CHECK` expression's raw dialect SQL, so a desired
+//! model does not churn against a live schema (git-bug `64d9d03`).
 //!
 //! A crate-rendered or user-authored expression (`("deleted_at" IS NULL)`, `status IN (1, 2, 3)`)
-//! and the form PostgreSQL's `pg_get_expr` / `pg_get_constraintdef` deparse back
+//! and the form PostgreSQL's `pg_get_constraintdef` deparses back
 //! (`(deleted_at IS NULL)`, `(status = ANY (ARRAY[1, 2, 3]))`) describe the *same* expression but
 //! differ in surface form: identifier quoting, boolean case, associative nesting
 //! (`((a AND b) AND c)` vs `(a AND b AND c)`), synthesized literal type casts (`'x'::text`,
 //! `'-5'::integer`), and operator rewrites (`IN` → `= ANY (ARRAY[..])`, `BETWEEN` → `>= AND <=`,
-//! `LIKE` → `~~`). Comparing the strings directly therefore reports a never-settling
-//! `AlterIndex` / `AlterCheck` after a clean publish.
+//! `LIKE` → `~~`). Comparing the strings directly therefore reports a never-settling `AlterCheck`
+//! after a clean publish.
 //!
-//! [`canonical_index_predicate`] **parses** a partial-index predicate into a
-//! normalized AST and re-serialize it to a single canonical string, collapsing all of those
-//! differences to equality when the *same* canonicalization is applied to both the desired and the
-//! introspected model before diffing. The canonical string is internal — it need not match pg's
-//! deparse, only be identical for equivalent expressions. Anything outside the grammar (subqueries,
-//! `CASE`, timestamp literals pg reformats, escape / dollar-quoted strings, ...) fails to parse, and
-//! the caller falls back to string equality — never a wrong match.
+//! [`canonical_check_expression`] **parses** such an expression into a normalized AST and re-serializes
+//! it to a single canonical string, collapsing all of those differences to equality when the *same*
+//! canonicalization is applied to both the desired and the introspected model before diffing. It is the
+//! fallback for a check the reverse parser cannot structure into an `ExprNode` (a general function, a
+//! `CASE`, …); partial-index predicates and index expressions are now structural and normalize via the
+//! neutral [`squealy::normalize_expr`] instead. The canonical string is internal — it need not match
+//! pg's deparse, only be identical for equivalent expressions. Anything outside the grammar (subqueries,
+//! `CASE`, timestamp literals pg reformats, escape / dollar-quoted strings, ...) fails to parse, and the
+//! caller falls back to string equality — never a wrong match.
 
 /// Keywords PostgreSQL's `quote_identifier` quotes when used as an identifier: every keyword whose
 /// category is not `unreserved` (`U`) — i.e. reserved (`R`), type/function-name (`T`), and col_name
@@ -251,14 +253,6 @@ fn quoted_string_end(bytes: &[u8], quote: usize, escape_aware: bool) -> usize {
         }
     }
     i
-}
-
-/// Canonicalizes a partial-index predicate to the form PostgreSQL's `pg_get_expr` deparse produces,
-/// by parsing it and re-serializing a normalized AST (see [`normalize`]). Falls back to the input
-/// unchanged when the grammar does not cover the expression, so the diff degrades to string equality
-/// rather than mis-matching.
-pub(crate) fn canonical_index_predicate(predicate: &str) -> String {
-    normalize(predicate).unwrap_or_else(|| predicate.to_owned())
 }
 
 /// Canonicalizes a `CHECK` expression's raw dialect SQL to the same normalized string, using the same
@@ -1086,8 +1080,8 @@ mod tests {
             "inputs must differ so equality proves parsing"
         );
         assert_eq!(
-            canonical_index_predicate(desired),
-            canonical_index_predicate(actual),
+            canonical_check_expression(desired),
+            canonical_check_expression(actual),
             "desired {desired:?} and actual {actual:?} should canonicalize equal"
         );
     }
@@ -1170,12 +1164,12 @@ mod tests {
         // A subquery is outside the grammar: the parse fails and the input is returned unchanged, so
         // the diff degrades to string equality rather than mis-matching.
         let subquery = "(id IN (select x from t))";
-        assert_eq!(canonical_index_predicate(subquery), subquery);
+        assert_eq!(canonical_check_expression(subquery), subquery);
         // Escape strings are not decoded; bail rather than risk a wrong value.
         let escaped = "(a = E'x')";
-        assert_eq!(canonical_index_predicate(escaped), escaped);
+        assert_eq!(canonical_check_expression(escaped), escaped);
         // Dollar-quoted strings likewise.
         let dollar = "(a = $$x$$)";
-        assert_eq!(canonical_index_predicate(dollar), dollar);
+        assert_eq!(canonical_check_expression(dollar), dollar);
     }
 }

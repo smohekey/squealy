@@ -695,14 +695,17 @@ impl SchemaIntrospect for TestConnection {
         }
     }
 
-    // Stand-in for the backend's real expression normalizer: strips whitespace and parentheses and
-    // lowercases, enough to map an "authored" and a "deparsed" form of the same expression together.
-    fn canonical_index_predicate(&self, predicate: &str) -> String {
-        predicate
-            .chars()
-            .filter(|c| !c.is_whitespace() && *c != '(' && *c != ')')
-            .collect::<String>()
-            .to_ascii_lowercase()
+    // Stand-in for a backend that re-parses a legacy-package `Raw` partial-index predicate into the
+    // structural form live introspection produces, so the two converge (PostgreSQL does this in its own
+    // dialect). An already-structural predicate is returned unchanged.
+    fn canonical_index_predicate(&self, predicate: squealy::ExprNode) -> squealy::ExprNode {
+        match predicate {
+            squealy::ExprNode::Raw(sql) => {
+                squealy_parse::Reader::new(squealy_parse::SqlDialect::Generic)
+                    .read_index_predicate_or_raw(&sql)
+            }
+            other => other,
+        }
     }
 
     // Stand-in for a backend that re-parses a legacy-package `Raw` index expression into the structural
@@ -848,7 +851,7 @@ async fn plan_from_database_canonicalizes_predicates_and_checks_on_both_sides() 
                     nulls: Vec::new(),
                     collations: Vec::new(),
                     operator_classes: Vec::new(),
-                    predicate: Some(predicate.to_owned()),
+                    predicate: Some(Box::new(check_expr(predicate))),
                 }];
                 t.checks = vec![CheckModel {
                     name: "ck_t_score".to_owned(),
@@ -875,6 +878,58 @@ async fn plan_from_database_canonicalizes_predicates_and_checks_on_both_sides() 
     assert!(
         plan.is_empty(),
         "predicate/CHECK differ only in surface form; expected no changes, got {:?}",
+        plan.steps
+    );
+}
+
+#[tokio::test]
+async fn plan_from_database_canonicalizes_legacy_index_predicate() {
+    // A legacy package carries a partial-index predicate verbatim as `Raw` (the old string form), while
+    // live introspection now lowers the same predicate to a structural node. `canonical_index_predicate`
+    // must run on both sides so the two forms converge instead of churning an `AlterIndex` every publish.
+    let index = |predicate: ExprNode| {
+        model_with_tables(
+            "public",
+            vec![{
+                let mut t = table("t");
+                t.columns = vec![column("status", SqlType::I32)];
+                t.indexes = vec![IndexModel {
+                    name: "idx_t_active".to_owned(),
+                    columns: vec!["status".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: None,
+                    directions: Vec::new(),
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    predicate: Some(Box::new(predicate)),
+                }];
+                t
+            }],
+        )
+    };
+    let live = index(ExprNode::IsNull {
+        negated: true,
+        operand: Box::new(ExprNode::BareColumn {
+            column: "status".to_owned(),
+        }),
+    });
+    let desired = index(ExprNode::Raw("status IS NOT NULL".to_owned()));
+    let mut connection = TestConnection {
+        model: live,
+        applied_refactor_ids: Vec::new(),
+        executed: Vec::new(),
+    };
+
+    let plan = plan_from_database(&desired, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan");
+
+    assert!(
+        plan.is_empty(),
+        "legacy Raw predicate matches the structural introspected one; expected no changes, got {:?}",
         plan.steps
     );
 }

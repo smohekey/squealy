@@ -316,8 +316,12 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                     .map(|expression| squealy::normalize_expr(&expression))
                     .collect();
                 canonicalize_index(index, &default_method);
-                if let Some(predicate) = &index.predicate {
-                    index.predicate = Some(connection.canonical_index_predicate(predicate));
+                if let Some(predicate) = index.predicate.take() {
+                    // Structure a `Raw` predicate (a legacy-package partial index, or an un-invertible
+                    // introspected one) in the backend's dialect, then normalize it, so a partial index
+                    // written one way and deparsed another compares equal instead of churning.
+                    let predicate = connection.canonical_index_predicate(*predicate);
+                    index.predicate = Some(Box::new(squealy::normalize_expr(&predicate)));
                 }
             }
             for check in &mut table.checks {
@@ -1257,7 +1261,12 @@ mod tests {
     #[test]
     fn render_create_rejects_unsupported_index_capabilities() {
         let mut index = index();
-        index.predicate = Some("tenant_id IS NOT NULL".to_owned());
+        index.predicate = Some(Box::new(squealy::ExprNode::IsNull {
+            negated: true,
+            operand: Box::new(squealy::ExprNode::BareColumn {
+                column: "tenant_id".to_owned(),
+            }),
+        }));
         index.expressions = vec![squealy::ExprNode::ScalarFn {
             func: squealy::ScalarFunc::Lower,
             args: vec![squealy::ExprNode::BareColumn {
@@ -1323,7 +1332,12 @@ mod tests {
     #[test]
     fn render_create_allows_reported_index_capabilities() {
         let mut index = index();
-        index.predicate = Some("tenant_id IS NOT NULL".to_owned());
+        index.predicate = Some(Box::new(squealy::ExprNode::IsNull {
+            negated: true,
+            operand: Box::new(squealy::ExprNode::BareColumn {
+                column: "tenant_id".to_owned(),
+            }),
+        }));
         index.expressions = vec![squealy::ExprNode::ScalarFn {
             func: squealy::ScalarFunc::Lower,
             args: vec![squealy::ExprNode::BareColumn {

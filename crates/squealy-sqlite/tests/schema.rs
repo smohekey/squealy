@@ -262,7 +262,12 @@ async fn round_trips_a_partial_index_predicate() {
                     nulls: Vec::new(),
                     collations: Vec::new(),
                     operator_classes: Vec::new(),
-                    predicate: Some("\"deleted_at\" IS NULL".to_owned()),
+                    predicate: Some(Box::new(squealy::ExprNode::IsNull {
+                        negated: false,
+                        operand: Box::new(squealy::ExprNode::BareColumn {
+                            column: "deleted_at".to_owned(),
+                        }),
+                    })),
                 }],
             }],
         }],
@@ -275,7 +280,15 @@ async fn round_trips_a_partial_index_predicate() {
 
     let actual = squealy_model::introspect(&mut connection).await.unwrap();
     let index = &actual.schemas[0].tables[0].indexes[0];
-    assert_eq!(index.predicate.as_deref(), Some("\"deleted_at\" IS NULL"));
+    assert_eq!(
+        index.predicate,
+        Some(Box::new(squealy::ExprNode::IsNull {
+            negated: false,
+            operand: Box::new(squealy::ExprNode::BareColumn {
+                column: "deleted_at".to_owned(),
+            }),
+        }))
+    );
 
     let plan = squealy_model::plan_from_database(
         &model,

@@ -543,8 +543,9 @@ pub struct IndexModel {
     pub collations: Vec<IndexCollation>,
     /// Backend-specific operator classes by zero-based key-term position.
     pub operator_classes: Vec<IndexOperatorClass>,
-    /// Backend-specific predicate for a partial index.
-    pub predicate: Option<String>,
+    /// Structural predicate for a partial index, rendered per backend (a partial-index `WHERE`). Boxed
+    /// so an [`ExprNode`] (a large enum) does not bloat every `IndexModel` when the predicate is absent.
+    pub predicate: Option<Box<ExprNode>>,
 }
 
 /// Sort direction for an indexed column.

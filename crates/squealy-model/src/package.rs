@@ -1140,17 +1140,19 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
     if let Some(method) = &index.method {
         node.push(KdlEntry::new_prop("method", index_method(method)));
     }
-    if let Some(predicate) = &index.predicate {
-        node.push(KdlEntry::new_prop("predicate", predicate.clone()));
-    }
     if !index.expressions.is_empty()
         || !index.include_columns.is_empty()
         || !index.directions.is_empty()
         || !index.nulls.is_empty()
         || !index.collations.is_empty()
         || !index.operator_classes.is_empty()
+        || index.predicate.is_some()
     {
         let mut children = KdlDocument::new();
+        if let Some(predicate) = &index.predicate {
+            // The partial-index predicate is stored structurally as a `predicate { <expr> }` child node.
+            children.nodes_mut().push(wrap_expr("predicate", predicate));
+        }
         if !index.expressions.is_empty() {
             // Each expression term is stored structurally as a child expr node (not a string arg).
             let mut expressions = KdlNode::new("expressions");
@@ -1936,8 +1938,20 @@ fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
         operator_classes: child_nodes(node, "operator-class")
             .map(index_operator_class_from_node)
             .collect::<Result<Vec<_>, _>>()?,
-        predicate: prop(node, "predicate").map(str::to_owned),
+        predicate: index_predicate_from_node(node)?,
     })
+}
+
+/// Reads an index's partial predicate. The current format stores it structurally as a `predicate { … }`
+/// child node; packages written before the predicate became structural carry it as a `predicate="..."`
+/// string *prop* (the verbatim backend SQL, dialect unrecorded), preserved as [`ExprNode::Raw`] so
+/// existing `.sqz` artifacts keep working — mirroring the check-expression compatibility path.
+fn index_predicate_from_node(node: &KdlNode) -> Result<Option<Box<ExprNode>>, PackageError> {
+    if let Some(predicate) = child_nodes(node, "predicate").next() {
+        Ok(Some(Box::new(first_child_expr(predicate)?)))
+    } else {
+        Ok(prop(node, "predicate").map(|legacy| Box::new(ExprNode::Raw(legacy.to_owned()))))
+    }
 }
 
 fn check_from_node(node: &KdlNode) -> Result<CheckModel, PackageError> {
@@ -3594,7 +3608,12 @@ mod tests {
                 nulls: Vec::new(),
                 collations: Vec::new(),
                 operator_classes: Vec::new(),
-                predicate: Some("event_id IS NOT NULL".to_owned()),
+                predicate: Some(Box::new(squealy::ExprNode::IsNull {
+                    negated: true,
+                    operand: Box::new(squealy::ExprNode::BareColumn {
+                        column: "event_id".to_owned(),
+                    }),
+                })),
             })
             .collect();
         let model = DatabaseModel {
@@ -3787,6 +3806,31 @@ database {
                 ExprNode::Raw("lower(event_name)".to_owned()),
                 ExprNode::Raw("upper(event_name)".to_owned()),
             ]
+        );
+    }
+
+    #[test]
+    fn kdl_reads_legacy_index_predicate_string_prop() {
+        // Packages written before the partial-index predicate became structural carry it as a
+        // `predicate="..."` string *prop* (the verbatim backend SQL), not a `predicate { … }` child. The
+        // reader must still accept that form — preserved verbatim as `Raw` (no re-parse) — so existing
+        // `.sqz` artifacts keep their partial indexes.
+        let kdl = r#"
+database {
+    schema {
+        table "docs" {
+            column "deleted_at" type="i64"
+            index name="idx_docs_active" predicate="deleted_at IS NULL"
+        }
+    }
+}
+"#;
+        let parsed = from_kdl(kdl).expect("legacy predicate package should parse");
+        let index = &parsed.schemas[0].tables[0].indexes[0];
+        assert_eq!(index.name, "idx_docs_active");
+        assert_eq!(
+            index.predicate.as_deref(),
+            Some(&ExprNode::Raw("deleted_at IS NULL".to_owned()))
         );
     }
 }

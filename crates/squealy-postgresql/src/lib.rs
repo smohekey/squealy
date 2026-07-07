@@ -315,11 +315,21 @@ impl squealy::SchemaIntrospect for PostgresConnection {
         Some(squealy::IndexMethod::BTree)
     }
 
-    /// Normalizes a partial-index predicate by parsing it and re-serializing a canonical AST, so the
-    /// crate-rendered form and PostgreSQL's `pg_get_expr` deparse compare equal. See [`canonical`].
-    /// (index predicates are still strings until they migrate to structural `ExprNode`s too.)
-    fn canonical_index_predicate(&self, predicate: &str) -> String {
-        canonical::canonical_index_predicate(predicate)
+    /// Structures a `Raw` partial-index predicate (a legacy package's verbatim `WHERE`, or an
+    /// un-invertible introspected one) by re-parsing it in the PostgreSQL dialect, so it compares equal to
+    /// a freshly introspected structural predicate. An already-structural predicate is returned unchanged.
+    ///
+    /// An un-structurable `Raw` is kept **verbatim** (not string-normalized): the canonical model feeds the
+    /// rendered `CREATE INDEX … WHERE`, so rewriting a raw predicate here — e.g. stripping a cast that a
+    /// user-defined overloaded function's resolution depends on — could build a different partial index.
+    fn canonical_index_predicate(&self, predicate: squealy::ExprNode) -> squealy::ExprNode {
+        match predicate {
+            squealy::ExprNode::Raw(sql) => {
+                squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                    .read_index_predicate_or_raw(&sql)
+            }
+            other => other,
+        }
     }
 
     /// Structures a `Raw` check expression (a legacy package's verbatim check, or an un-invertible

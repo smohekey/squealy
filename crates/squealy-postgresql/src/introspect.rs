@@ -596,7 +596,12 @@ ORDER BY idx.relname",
                 nulls,
                 collations,
                 operator_classes,
-                predicate: row.get(11),
+                predicate: row.get::<_, Option<String>>(11).map(|predicate| {
+                    Box::new(
+                        squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                            .read_index_predicate_or_raw(&predicate),
+                    )
+                }),
             }
         })
         .collect())

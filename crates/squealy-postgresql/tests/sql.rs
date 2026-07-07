@@ -1834,6 +1834,29 @@ fn postgres_renders_partial_unique_index_for_soft_delete() {
 }
 
 #[test]
+fn partial_index_predicate_lowers_to_structural_bare_column() {
+    // The typed `where = |row| row.deleted_at.is_null()` closure is lowered into a neutral, structural
+    // `ExprNode` in the model (not a pre-rendered string). Because an index predicate names its own
+    // table's columns, the column must be an unqualified `BareColumn` — no source alias leaks in from the
+    // view-body lowering path that `build_ddl_predicate` reuses.
+    let model = DatabaseModel::from_database::<OrganizationDb>();
+    let index = model.schemas[0].tables[0]
+        .indexes
+        .iter()
+        .find(|index| index.name == "uq_organizations_slug")
+        .expect("partial unique index present");
+    assert_eq!(
+        index.predicate.as_deref(),
+        Some(&squealy::ExprNode::IsNull {
+            negated: false,
+            operand: Box::new(squealy::ExprNode::BareColumn {
+                column: "deleted_at".to_owned(),
+            }),
+        })
+    );
+}
+
+#[test]
 fn postgres_renders_composite_partial_unique_index() {
     let model = DatabaseModel::from_database::<WorkspaceDb>();
     let mut sql = Vec::new();
@@ -2126,7 +2149,13 @@ fn postgres_renders_partial_indexes() {
                     nulls: Vec::new(),
                     collations: Vec::new(),
                     operator_classes: Vec::new(),
-                    predicate: Some("(tenant_id > 0)".to_owned()),
+                    predicate: Some(Box::new(squealy::ExprNode::Compare {
+                        op: squealy::CompareOp::GreaterThan,
+                        left: Box::new(squealy::ExprNode::BareColumn {
+                            column: "tenant_id".to_owned(),
+                        }),
+                        right: Box::new(squealy::ExprNode::Literal("0".to_owned())),
+                    })),
                 }],
             }],
         }],
@@ -2138,7 +2167,7 @@ fn postgres_renders_partial_indexes() {
 
     assert!(
         sql.contains(
-            "CREATE INDEX \"idx_memberships_tenant_id\" ON \"catalog\".\"memberships\" USING btree (\"tenant_id\" DESC) WHERE (tenant_id > 0)"
+            "CREATE INDEX \"idx_memberships_tenant_id\" ON \"catalog\".\"memberships\" USING btree (\"tenant_id\" DESC) WHERE (\"tenant_id\" > 0)"
         ),
         "partial index not rendered as expected: {sql}"
     );

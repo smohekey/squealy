@@ -488,7 +488,11 @@ fn corpus() -> Vec<(&'static str, DatabaseModel)> {
         nulls: Vec::new(),
         collations: Vec::new(),
         operator_classes: Vec::new(),
-        predicate: Some("level = 'error'".to_owned()),
+        predicate: Some(Box::new(ExprNode::Compare {
+            op: CompareOp::Equals,
+            left: Box::new(bare("level")),
+            right: Box::new(ExprNode::Literal("'error'".to_owned())),
+        })),
     }];
     cases.push(("table/partial-index", schema_with_table(logs)));
 
@@ -624,6 +628,15 @@ fn reader_entry_points_lower_scalars_but_not_yet_view_bodies() {
         }) => {}
         other => panic!("expected a lowered comparison from read_check_expression, got: {other:?}"),
     }
+
+    // A partial-index predicate (a boolean `WHERE`) lowers structurally, as unqualified bare columns.
+    assert_eq!(
+        reader.read_index_predicate_or_raw("(deleted_at IS NULL)"),
+        ExprNode::IsNull {
+            negated: false,
+            operand: Box::new(bare("deleted_at")),
+        },
+    );
 
     // A scalar shape outside the covered grammar (`%` has no neutral node) is reported, not mislowered.
     match reader.read_check_expression("(\"a\" % 2)") {
