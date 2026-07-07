@@ -798,7 +798,7 @@ fn mysql_backend_rejects_unsupported_index_metadata() {
         nulls: vec![],
         collations: vec![],
         operator_classes: vec![],
-        predicate: Some("id > 0".to_owned()),
+        predicate: Some(Box::new(check_expr("id > 0"))),
     });
     write_package(&model, &package).expect("write package");
 

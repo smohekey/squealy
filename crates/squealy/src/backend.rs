@@ -407,16 +407,18 @@ pub trait SchemaIntrospect {
         None
     }
 
-    /// Canonicalizes a partial-index predicate into a stable form, so a predicate written one way
-    /// (the renderer's `("deleted_at" IS NULL)`) and read back another (PostgreSQL's `pg_get_expr`
-    /// deparse `(deleted_at IS NULL)`, with synthesized literal casts and operator rewrites) compare
-    /// equal. This is applied to **both** the desired and the introspected model before diffing (see
-    /// [`canonicalize_model`](crate::model) callers), so a partial index does not produce a
-    /// never-settling `AlterIndex` after publish. The returned string is internal — it need not match
-    /// the backend's deparse, only be identical for equivalent predicates. The default is the
-    /// identity, which suits backends that have no partial indexes (e.g. MySQL).
-    fn canonical_index_predicate(&self, predicate: &str) -> String {
-        predicate.to_owned()
+    /// Structures a [`ExprNode::Raw`](crate::ExprNode::Raw) partial-index predicate into a comparable node
+    /// using this backend's dialect, leaving an already-structural predicate untouched.
+    ///
+    /// Mirrors [`canonical_check_expression`](Self::canonical_check_expression) for a partial-index `WHERE`:
+    /// the forward path now lowers the typed `where` closure structurally, but a legacy package carries the
+    /// predicate verbatim as `Raw`, and live introspection leaves an un-invertible deparse as `Raw` too.
+    /// Applied to **both** the desired and introspected model in [`canonicalize_model`](crate::model)
+    /// (then followed by [`normalize_expr`](crate::normalize_expr)), this re-parses such a `Raw` in the
+    /// backend's dialect so equivalent predicates compare equal instead of churning an `AlterIndex`. The
+    /// default is the identity, which suits backends with no partial indexes (MySQL).
+    fn canonical_index_predicate(&self, predicate: crate::ExprNode) -> crate::ExprNode {
+        predicate
     }
 
     /// Canonicalizes a `CHECK` constraint's name to a stable, name-independent form, the check

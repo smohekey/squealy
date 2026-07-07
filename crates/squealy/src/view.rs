@@ -14,14 +14,14 @@ use std::io::{self, Write};
 use std::marker::PhantomData;
 
 use crate::{
-    AggregateFunc, ArithmeticOp, Backend, CaseArm, ColumnRef, CompareOp, DateField, Decode, Encode,
-    Expr, ExprKind, ExprNode, ExprVisitor, FrameSpec, InsertableTable, JoinItem, JoinKind,
-    LogicalOp, Order, OrderDirection, OrderItem, ParamWriter, Predicate, PredicateAstVisitor,
-    PredicateKind, Projectable, ProjectionItem, ProjectionShape, ProjectionVisitor, QueryBuilder,
-    RenderAst, RenderCaseArms, RenderCoalesceArgs, RenderPredicateAst, RenderProjectable,
-    RenderSelectAst, RenderSimpleCaseArms, RenderSubquery, RowReader, ScalarFunc, SelectAst,
-    SelectSink, Selected, SourceAlias, SourceRef, SqlType, Table, TableProjection, UnaryStringFunc,
-    ViewQueryModel, WindowFunc, WindowOrderTerm,
+    AggregateFunc, ArithmeticOp, Backend, CaseArm, ColumnRef, CompareOp, DateField,
+    DdlPredicateAst, Decode, Encode, Expr, ExprKind, ExprNode, ExprVisitor, FrameSpec,
+    InsertableTable, JoinItem, JoinKind, LogicalOp, Order, OrderDirection, OrderItem, ParamWriter,
+    Predicate, PredicateAstVisitor, PredicateKind, Projectable, ProjectionItem, ProjectionShape,
+    ProjectionVisitor, QueryBuilder, RenderAst, RenderCaseArms, RenderCoalesceArgs,
+    RenderPredicateAst, RenderProjectable, RenderSelectAst, RenderSimpleCaseArms, RenderSubquery,
+    RowReader, ScalarFunc, SelectAst, SelectSink, Selected, SourceAlias, SourceRef, SqlType, Table,
+    TableProjection, UnaryStringFunc, ViewQueryModel, WindowFunc, WindowOrderTerm,
 };
 
 // ---------------------------------------------------------------------------
@@ -195,6 +195,10 @@ struct IrBuilder {
     /// Window `ORDER BY` directions, recorded by `visit_window_order_direction` and paired with the
     /// order expressions in `visit_window`.
     window_order_directions: Vec<OrderDirection>,
+    /// Emit unqualified [`ExprNode::BareColumn`] rather than the alias-qualified [`ExprNode::Column`].
+    /// Set for a single-source DDL constraint context (a partial-index `WHERE`), where every column
+    /// names the index's own table and carries no alias. Never set while lowering a view body.
+    bare_columns: bool,
 }
 
 impl IrBuilder {
@@ -221,9 +225,15 @@ impl ExprVisitor for IrBuilder {
     type Backend = ModelBackend;
 
     fn visit_column(&mut self, alias: SourceAlias, column: &str) -> io::Result<()> {
-        self.stack.push(ExprNode::Column {
-            alias: alias.to_string(),
-            column: column.to_owned(),
+        self.stack.push(if self.bare_columns {
+            ExprNode::BareColumn {
+                column: column.to_owned(),
+            }
+        } else {
+            ExprNode::Column {
+                alias: alias.to_string(),
+                column: column.to_owned(),
+            }
         });
         Ok(())
     }
@@ -823,6 +833,32 @@ where
     let mut builder = IrBuilder::default();
     predicate.visit(&mut builder)?;
     Ok(builder.finish())
+}
+
+/// Lowers a `where = |row| ...` partial-index predicate closure's result into a neutral [`ExprNode`],
+/// the structural counterpart to [`render_ddl_predicate`](crate::render_ddl_predicate). Used by the
+/// `Table` derive to populate [`IndexModel::predicate`](squealy_ir::IndexModel::predicate) so each
+/// backend renders the partial-index `WHERE` in its own dialect.
+///
+/// The [`DdlPredicateAst`](crate::DdlPredicateAst) bound restricts a DDL predicate to the same
+/// single-table, subquery-free subset [`render_ddl_predicate`] accepts, so every column names the
+/// index's own table: columns are emitted as unqualified [`ExprNode::BareColumn`] (as a `CHECK` /
+/// index-expression term is), not the alias-qualified form a view body uses.
+pub fn build_ddl_predicate<K, Ast>(predicate: &Predicate<'_, K, Ast>) -> ExprNode
+where
+    K: PredicateKind,
+    Ast: DdlPredicateAst + RenderPredicateAst<ModelBackend>,
+{
+    let mut builder = IrBuilder {
+        bare_columns: true,
+        ..IrBuilder::default()
+    };
+    // The visit is infallible for a DDL predicate (no subqueries, no fallible encodes), so the
+    // `io::Result` the shared visitor returns cannot actually error here.
+    predicate
+        .visit(&mut builder)
+        .expect("a DDL partial-index predicate lowers without error");
+    builder.finish()
 }
 
 fn build_order<K, Ast>(order: &Order<'_, K, Ast>) -> io::Result<ExprNode>

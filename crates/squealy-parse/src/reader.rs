@@ -121,6 +121,19 @@ impl Reader {
         lowered.unwrap_or_else(|| vec![ExprNode::Raw(sql.to_owned())])
     }
 
+    /// Reads a partial-index predicate (the boolean `WHERE` of a `CREATE INDEX`) into an [`ExprNode`].
+    pub fn read_index_predicate(&self, sql: &str) -> Result<ExprNode, ReadError> {
+        self.read_scalar_expression(sql)
+    }
+
+    /// Reads a partial-index predicate into a structural [`ExprNode`], falling back to [`ExprNode::Raw`]
+    /// carrying the input text when it cannot be parsed or lowered — the live-introspection entry point
+    /// (see [`read_check_expression_or_raw`](Self::read_check_expression_or_raw)).
+    pub fn read_index_predicate_or_raw(&self, sql: &str) -> ExprNode {
+        self.read_index_predicate(sql)
+            .unwrap_or_else(|_| ExprNode::Raw(sql.to_owned()))
+    }
+
     /// Shared path for the scalar-expression entry points: parse a single expression, then lower it.
     fn read_scalar_expression(&self, sql: &str) -> Result<ExprNode, ReadError> {
         let expr = parse_expr(sql, self.dialect)?;

@@ -578,7 +578,7 @@ pub use table::{
 };
 pub use view::{ModelBackend, ModelConn, SchemaView, ViewDefinition, ViewSelect};
 #[doc(hidden)]
-pub use view::{lower_view, view_definition_model};
+pub use view::{build_ddl_predicate, lower_view, view_definition_model};
 pub use view_render::{
     ordered_views, render_create_view, render_cte_body, render_drop_view,
     render_recursive_cte_body, render_scalar_expr,

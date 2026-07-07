@@ -358,6 +358,20 @@ impl SchemaIntrospect for SqliteConnection {
         squealy::fold_like_case_insensitivity(&structured)
     }
 
+    /// Structures a `Raw` partial-index predicate by re-parsing it in the SQLite dialect (the predicate is
+    /// recovered from the stored `CREATE INDEX` text, so an un-lowerable one is trimmed), then folds the
+    /// `Like` case-sensitivity flag — mirroring [`canonical_check_expression`](Self::canonical_check_expression).
+    fn canonical_index_predicate(&self, predicate: squealy::ExprNode) -> squealy::ExprNode {
+        let structured = match predicate {
+            squealy::ExprNode::Raw(sql) => {
+                squealy_parse::Reader::new(squealy_parse::SqlDialect::Sqlite)
+                    .read_index_predicate_or_raw(sql.trim())
+            }
+            other => other,
+        };
+        squealy::fold_like_case_insensitivity(&structured)
+    }
+
     /// SQLite has no boolean or unsigned literal, so a `bool`/unsigned default on an `INTEGER`-affinity
     /// column is rendered as a plain integer and reads back as [`DefaultValue::Int`]; likewise an integer
     /// default on a `REAL`-affinity column reads back as a float. Collapse the desired default the same
