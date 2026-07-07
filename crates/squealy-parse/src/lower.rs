@@ -157,31 +157,28 @@ fn lower(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
         // cast falls through to `NotYetLowered`; proper cross-dialect cast inversion lands with the
         // model-field migration that first produces such casts.
         //
-        // EXCEPT PostgreSQL's `pg_get_constraintdef` synthesizes a `::type` cast on a literal: a number to
+        // EXCEPT PostgreSQL's `pg_get_constraintdef` synthesizes a `::type` cast on a LITERAL: a number to
         // a numeric type (`0` → `(0)::numeric`), a string to a text type (`'x'` → `('x')::text`), and — for
         // a *negative* number — a string cast to a numeric type (`-5` → `('-5')::integer`). Recover the
         // bare literal only when the cast is a guaranteed value-preserving no-op (so a published check
         // re-plans to empty); a *converting* cast (`'Infinity'::float8`, `(1.5)::integer`, `varchar(3)`, any
         // float target) is meaningful and left `NotYetLowered` (→ `Raw`, kept comparable by canonical.rs).
         //
-        // PostgreSQL also wraps a text-function/comparison operand in a value-preserving `::text` cast
-        // (`char_length(name)` on a `varchar` column deparses as `char_length((name)::text)`). A cast to
-        // an unbounded text type around a *lowerable* operand is transparent — strip it and lower the
-        // inner — so such a check re-plans to empty. (`lower` returns `NotYetLowered` if the inner isn't
-        // lowerable, so a cast around an un-modelable operand still stays `Raw`.)
+        // A `::type` cast around a NON-literal operand is deliberately NOT stripped: it is ambiguous
+        // without the operand's column type. PostgreSQL adds a value-preserving `::text` around an
+        // already-text operand (`char_length((name)::text)` on a `varchar`), but the same syntactic shape
+        // is a MEANINGFUL conversion on a non-text operand (`id::text LIKE '1%'`, `char_length(id::text)`
+        // — digit count), and the two cannot be told apart here. So it stays `Raw` (kept comparable by
+        // canonical.rs) rather than risk dropping a semantic cast. (A text-function check on an explicit
+        // `varchar` column may therefore churn — a documented limitation, never corruption.)
         Expr::Cast {
             kind: CastKind::DoubleColon,
             expr,
             data_type,
             ..
         } if dialect == SqlDialect::Postgres => {
-            if let Some(node) = redundant_cast_literal(strip_nested(expr), data_type) {
-                Ok(node)
-            } else if is_unbounded_text_type(data_type) {
-                lower(strip_nested(expr), dialect)
-            } else {
-                Err(not_yet(format!("cast to `{data_type}`")))
-            }
+            redundant_cast_literal(strip_nested(expr), data_type)
+                .ok_or_else(|| not_yet(format!("cast to `{data_type}`")))
         }
 
         // PostgreSQL deparses `x IN (a, b, c)` as `x = ANY (ARRAY[a, b, c])` and `x NOT IN (…)` as
@@ -1025,15 +1022,15 @@ mod tests {
             low("('x')::text", SqlDialect::Postgres).unwrap(),
             low("'x'", SqlDialect::Generic).unwrap()
         );
-        // PostgreSQL wraps a text-function operand in a value-preserving `::text` cast on varchar/char
-        // columns: `char_length(name)` → `char_length((name)::text)`. The cast is transparent.
-        assert_eq!(
-            low("(char_length((name)::text) > 0)", SqlDialect::Postgres).unwrap(),
-            low("char_length(name) > 0", SqlDialect::Generic).unwrap()
-        );
-        // A `::text` cast around an un-modelable operand still stays Raw (the inner does not lower).
+        // A `::text` (or any `::`) cast around a NON-literal operand is ambiguous without the operand's
+        // type — redundant on a text column, a real conversion on `id::text LIKE '1%'` — so it is NOT
+        // stripped; it stays Raw rather than risk dropping a semantic cast.
         assert!(matches!(
-            low("(md5(x))::text", SqlDialect::Postgres),
+            low("(char_length((name)::text) > 0)", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low("(id::text ~~ '1%')", SqlDialect::Postgres),
             Err(ReadError::NotYetLowered(_))
         ));
 
