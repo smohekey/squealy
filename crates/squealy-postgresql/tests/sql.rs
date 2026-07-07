@@ -2202,6 +2202,61 @@ fn postgres_renders_expression_indexes() {
 }
 
 #[test]
+fn postgres_renders_raw_expression_index_verbatim() {
+    // A `Raw` index term (a legacy package's verbatim expression, or an un-invertible introspected one)
+    // must be emitted exactly as-is — NOT wrapped in the parentheses a structural term gets — so a term
+    // that already carries its own decoration or is a comma-separated `pg_get_expr` list keeps its meaning.
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog".to_owned()),
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    comment: None,
+                    ty: SqlType::String,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_tenants_lower_slug".to_owned(),
+                    columns: Vec::new(),
+                    expressions: vec![squealy::ExprNode::Raw("lower((slug)::text)".to_owned())],
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: Some(IndexMethod::BTree),
+                    directions: vec![IndexDirection::Asc],
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE INDEX \"idx_tenants_lower_slug\" ON \"catalog\".\"tenants\" USING btree (lower((slug)::text) ASC)"
+        ),
+        "raw expression index not emitted verbatim: {sql}"
+    );
+}
+
+#[test]
 fn postgres_renders_covering_indexes() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
