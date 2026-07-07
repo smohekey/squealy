@@ -597,6 +597,11 @@ fn expr_to_node(expr: &ExprNode) -> KdlNode {
             node.push(KdlEntry::new(text.clone()));
             node
         }
+        ExprNode::Raw(text) => {
+            let mut node = KdlNode::new("raw");
+            node.push(KdlEntry::new(text.clone()));
+            node
+        }
         ExprNode::Binary { op, left, right } => {
             let mut node = KdlNode::new("binary");
             node.push(KdlEntry::new_prop("op", arithmetic_op_str(*op)));
@@ -1208,7 +1213,9 @@ fn index_operator_class_to_node(operator_class: &IndexOperatorClass) -> KdlNode 
 fn check_to_node(check: &CheckModel) -> KdlNode {
     let mut node = KdlNode::new("check");
     node.push(KdlEntry::new_prop("name", check.name.clone()));
-    node.push(KdlEntry::new_prop("expr", check.expression.clone()));
+    // The expression is stored structurally (an `expr { … }` child), not as a string prop, so it
+    // round-trips as the same `ExprNode` and re-renders in any dialect.
+    push_child(&mut node, wrap_expr("expr", &check.expression));
     if let Some(validation) = &check.validation {
         node.push(KdlEntry::new_prop(
             "validation",
@@ -1557,6 +1564,11 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
         "lit" => ExprNode::Literal(
             first_arg(node)
                 .ok_or_else(|| malformed("`lit` is missing its text"))?
+                .to_owned(),
+        ),
+        "raw" => ExprNode::Raw(
+            first_arg(node)
+                .ok_or_else(|| malformed("`raw` is missing its text"))?
                 .to_owned(),
         ),
         "binary" => ExprNode::Binary {
@@ -1913,9 +1925,22 @@ fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
 }
 
 fn check_from_node(node: &KdlNode) -> Result<CheckModel, PackageError> {
+    // The current format stores the expression structurally as an `expr { … }` child. Packages written
+    // before the check expression became structural carry it as an `expr="..."` string *prop*, which was
+    // the backend-specific SQL the renderer emitted — and the package does not record which dialect. So
+    // the legacy string is preserved **verbatim** as `ExprNode::Raw` (it re-renders exactly as before,
+    // with no semantic change); it is NOT re-parsed, which could mis-interpret a dialect-sensitive
+    // spelling (e.g. MySQL `length` = bytes). Re-exporting the package produces the structural form.
+    let expression = if let Some(expr) = child_nodes(node, "expr").next() {
+        first_child_expr(expr)?
+    } else if let Some(legacy) = prop(node, "expr") {
+        ExprNode::Raw(legacy.to_owned())
+    } else {
+        return Err(malformed("`check` is missing its `expr`"));
+    };
     Ok(CheckModel {
         name: required_prop(node, "name")?,
-        expression: required_prop(node, "expr")?,
+        expression,
         validation: prop(node, "validation").map(ConstraintValidation::from_sql),
         enforcement: prop(node, "enforcement").map(ConstraintEnforcement::from_sql),
     })
@@ -2325,6 +2350,12 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    fn check_expr(sql: &str) -> squealy::ExprNode {
+        squealy_parse::Reader::new(squealy_parse::SqlDialect::Generic)
+            .read_check_expression(sql)
+            .unwrap()
+    }
+
     #[test]
     fn read_entry_rejects_oversized_input() {
         let oversized = vec![b'x'; 64];
@@ -2400,7 +2431,7 @@ mod tests {
                         }],
                         checks: vec![CheckModel {
                             name: "ck_orgs_slug".to_owned(),
-                            expression: "length(slug) > 0".to_owned(),
+                            expression: check_expr("length(slug) > 0"),
                             validation: None,
                             enforcement: None,
                         }],
@@ -3449,7 +3480,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![CheckModel {
                         name: "ck_children_parent_id".to_owned(),
-                        expression: "parent_id_0 > 0".to_owned(),
+                        expression: check_expr("parent_id_0 > 0"),
                         validation: Some(ConstraintValidation::NotValidated),
                         enforcement: None,
                     }],
@@ -3504,7 +3535,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![CheckModel {
                         name: "ck_children_parent_id".to_owned(),
-                        expression: "parent_id_0 > 0".to_owned(),
+                        expression: check_expr("parent_id_0 > 0"),
                         validation: None,
                         enforcement: Some(ConstraintEnforcement::NotEnforced),
                     }],
@@ -3684,5 +3715,27 @@ database {
                 storage: GeneratedStorage::Unknown
             })
         );
+    }
+
+    #[test]
+    fn kdl_reads_legacy_check_expr_string_prop() {
+        // Packages written before the check expression became structural carry it as an `expr="..."`
+        // string prop (the verbatim backend SQL), not an `expr { … }` child. The reader must still accept
+        // that form — preserved verbatim as `Raw` (no re-parse, so no dialect-sensitive semantic change)
+        // — so existing `.sqz` artifacts keep working without a format bump.
+        let kdl = r#"
+database {
+    schema {
+        table "widgets" {
+            column "status" type="i32"
+            check name="ck_widgets_status" expr="status = 1"
+        }
+    }
+}
+"#;
+        let parsed = from_kdl(kdl).expect("legacy check package should parse");
+        let check = &parsed.schemas[0].tables[0].checks[0];
+        assert_eq!(check.name, "ck_widgets_status");
+        assert_eq!(check.expression, ExprNode::Raw("status = 1".to_owned()));
     }
 }

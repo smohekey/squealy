@@ -1856,7 +1856,7 @@ impl Field {
         } else {
             quote::quote! { <#value_ty as ::squealy::HasColumnType>::COLUMN_TYPE }
         };
-        let check = option_literal(self.attrs.check.as_deref());
+        let check = crate::expr_tokens::check_option_tokens(self.attrs.check.as_deref());
         let references = self.references_tokens(column_ident);
 
         quote::quote! {
@@ -1875,7 +1875,7 @@ impl Field {
                 fn updateable(&self) -> bool { #updateable }
                 fn default(&self) -> Option<::squealy::ColumnDefault> { #default }
                 fn column_type(&self) -> ::squealy::ColumnType { #column_type }
-                fn check(&self) -> Option<&'static str> { #check }
+                fn check(&self) -> Option<::squealy::ExprNode> { #check }
                 fn references(&self) -> Option<&'static dyn ::squealy::ForeignKey> { #references }
             }
         }

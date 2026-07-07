@@ -15,6 +15,11 @@ proc-macro = true
 [dependencies]
 proc-macro2 = "1.0"
 quote = "1.0"
+# The leaf IR crate + the reverse parser, used to lower a `check = "..."` / index expression string into
+# a structural `ExprNode` at macro-expansion time (compile-time validation). These sit below the macro in
+# the graph (squealy-parse → squealy-ir, both leaf of the macro), so there is no cycle back through core.
+squealy-ir.workspace = true
+squealy-parse.workspace = true
 
 [dev-dependencies]
 squealy.workspace = true

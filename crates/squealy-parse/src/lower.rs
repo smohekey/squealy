@@ -64,12 +64,12 @@ fn lower(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
         // columns) or a qualified `alias.column` (a view body binds columns to a source alias). The
         // renderer always quotes these; `sqlparser` hands back the unquoted value.
         Expr::Identifier(ident) => Ok(ExprNode::BareColumn {
-            column: ident.value.clone(),
+            column: fold_ident(ident),
         }),
         Expr::CompoundIdentifier(parts) => match parts.as_slice() {
             [alias, column] => Ok(ExprNode::Column {
-                alias: alias.value.clone(),
-                column: column.value.clone(),
+                alias: fold_ident(alias),
+                column: fold_ident(column),
             }),
             _ => Err(not_yet(format!(
                 "compound identifier with {} parts",
@@ -156,6 +156,45 @@ fn lower(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
         // float-division idiom, peeled at the `Divide` operator via `float_cast_operand`), so a general
         // cast falls through to `NotYetLowered`; proper cross-dialect cast inversion lands with the
         // model-field migration that first produces such casts.
+        //
+        // EXCEPT PostgreSQL's `pg_get_constraintdef` synthesizes a `::type` cast on a LITERAL: a number to
+        // a numeric type (`0` → `(0)::numeric`), a string to a text type (`'x'` → `('x')::text`), and — for
+        // a *negative* number — a string cast to a numeric type (`-5` → `('-5')::integer`). Recover the
+        // bare literal only when the cast is a guaranteed value-preserving no-op (so a published check
+        // re-plans to empty); a *converting* cast (`'Infinity'::float8`, `(1.5)::integer`, `varchar(3)`, any
+        // float target) is meaningful and left `NotYetLowered` (→ `Raw`, kept comparable by canonical.rs).
+        //
+        // A `::type` cast around a NON-literal operand is deliberately NOT stripped: it is ambiguous
+        // without the operand's column type. PostgreSQL adds a value-preserving `::text` around an
+        // already-text operand (`char_length((name)::text)` on a `varchar`), but the same syntactic shape
+        // is a MEANINGFUL conversion on a non-text operand (`id::text LIKE '1%'`, `char_length(id::text)`
+        // — digit count), and the two cannot be told apart here. So it stays `Raw` (kept comparable by
+        // canonical.rs) rather than risk dropping a semantic cast. (A text-function check on an explicit
+        // `varchar` column may therefore churn — a documented limitation, never corruption.)
+        Expr::Cast {
+            kind: CastKind::DoubleColon,
+            expr,
+            data_type,
+            ..
+        } if dialect == SqlDialect::Postgres => {
+            redundant_cast_literal(strip_nested(expr), data_type)
+                .ok_or_else(|| not_yet(format!("cast to `{data_type}`")))
+        }
+
+        // PostgreSQL deparses `x IN (a, b, c)` as `x = ANY (ARRAY[a, b, c])` and `x NOT IN (…)` as
+        // `x <> ALL (ARRAY[…])`. Recover the neutral `In`. (These operators are PostgreSQL-only syntax, so
+        // they never arrive on another dialect.)
+        Expr::AnyOp {
+            left,
+            compare_op: BinaryOperator::Eq,
+            right,
+            is_some: false,
+        } => lower_array_membership(left, right, false, dialect),
+        Expr::AllOp {
+            left,
+            compare_op: BinaryOperator::NotEq,
+            right,
+        } => lower_array_membership(left, right, true, dialect),
 
         // `SUBSTRING(s FROM start FOR len)` and SQLite's `substr(s, start, len)` both parse to this node.
         // The renderer only emits the three-argument *positional* form (integer bounds), so both bounds
@@ -261,10 +300,12 @@ fn lower_binary(
                     right: b(lower(right, dialect)?),
                 });
             }
-            // A *bare* `/` is fractional only where the renderer emits it bare — MySQL. On PostgreSQL/
-            // SQLite a bare `/` is *integer* division (a different operation, with no neutral node); the
-            // neutral `Divide` re-renders as the float-cast form, so lowering it would change semantics.
-            if dialect != SqlDialect::Mysql {
+            // A *bare* `/` is fractional only where the renderer emits it bare — MySQL — or when reading
+            // neutral authored SQL (`Generic`), where `/` denotes the neutral (always-fractional) divide.
+            // On PostgreSQL/SQLite a bare `/` is *integer* division (a different operation, no neutral
+            // node); the neutral `Divide` re-renders as the float-cast form, so lowering it there would
+            // change semantics.
+            if !matches!(dialect, SqlDialect::Mysql | SqlDialect::Generic) {
                 return Err(not_yet(
                     "bare `/` division (integer division has no neutral node outside MySQL)",
                 ));
@@ -327,9 +368,180 @@ fn lower_binary(
             func: ScalarFunc::Concat,
             args: vec![lower(left, dialect)?, lower(right, dialect)?],
         }),
+        // PostgreSQL's `pg_get_constraintdef` deparses `LIKE`/`ILIKE` as the operator forms
+        // `~~`/`~~*` (and `NOT LIKE`/`NOT ILIKE` as `!~~`/`!~~*`). Recover the neutral `Like`.
+        BinaryOperator::PGLikeMatch => Ok(like_node(false, false, left, right, dialect)?),
+        BinaryOperator::PGNotLikeMatch => Ok(like_node(false, true, left, right, dialect)?),
+        BinaryOperator::PGILikeMatch => Ok(like_node(true, false, left, right, dialect)?),
+        BinaryOperator::PGNotILikeMatch => Ok(like_node(true, true, left, right, dialect)?),
         // `%` (no neutral arithmetic node), MySQL `||` (logical OR), and any other operator.
         other => Err(not_yet(format!("binary operator `{other}`"))),
     }
+}
+
+/// Builds a [`ExprNode::Like`] from an operand/pattern pair (used to invert PostgreSQL's `~~` operator
+/// deparse of `LIKE`/`ILIKE`).
+fn like_node(
+    case_insensitive: bool,
+    negated: bool,
+    operand: &Expr,
+    pattern: &Expr,
+    dialect: SqlDialect,
+) -> Result<ExprNode, ReadError> {
+    Ok(ExprNode::Like {
+        case_insensitive,
+        negated,
+        operand: b(lower(operand, dialect)?),
+        pattern: b(lower(pattern, dialect)?),
+    })
+}
+
+/// Recovers a neutral [`ExprNode::In`] from PostgreSQL's `<operand> = ANY (ARRAY[..])` /
+/// `<operand> <> ALL (ARRAY[..])` deparse of `IN`/`NOT IN`. The right side must be an array literal.
+fn lower_array_membership(
+    operand: &Expr,
+    array: &Expr,
+    negated: bool,
+    dialect: SqlDialect,
+) -> Result<ExprNode, ReadError> {
+    let Expr::Array(array) = array else {
+        return Err(not_yet(format!(
+            "`{}` membership over a non-array operand",
+            if negated { "ALL" } else { "ANY" }
+        )));
+    };
+    Ok(ExprNode::In {
+        negated,
+        operand: b(lower(operand, dialect)?),
+        items: array
+            .elem
+            .iter()
+            .map(|item| lower(item, dialect))
+            .collect::<Result<_, _>>()?,
+    })
+}
+
+/// Recovers the bare [`ExprNode::Literal`] from a PostgreSQL deparse cast on a literal, but only when the
+/// cast is a guaranteed value-preserving no-op; otherwise `None` (the caller reports `NotYetLowered`).
+///
+/// Handles the three forms `pg_get_constraintdef` produces: a number cast to a numeric type
+/// (`(0)::numeric`), a string cast to a text type (`('x')::text`), and — how PostgreSQL renders a
+/// *negative* number — a string cast to a numeric type (`('-5')::integer`, `('-1.5')::numeric`). A cast
+/// that converts (fractional→integer, any float target, bounded `varchar(n)`/`numeric(p,s)`, string→date)
+/// is not a no-op and yields `None`.
+fn redundant_cast_literal(expr: &Expr, data_type: &DataType) -> Option<ExprNode> {
+    let Expr::Value(value) = expr else {
+        return None;
+    };
+    match &value.value {
+        Value::Number(text, _) if numeric_cast_is_noop(text, data_type) => {
+            Some(ExprNode::Literal(text.clone()))
+        }
+        Value::SingleQuotedString(text) => {
+            // A string cast to an UNBOUNDED text type is a no-op regardless of the string's content —
+            // including a numeric-looking string like `('0')::text` from a text check `code <> '0'`. Check
+            // the text target FIRST so such a string stays a quoted string literal. (A bounded
+            // `varchar(n)`/`char(n)` can truncate/pad, and a non-text target converts → not a no-op.)
+            if is_unbounded_text_type(data_type) {
+                Some(ExprNode::Literal(format!("'{}'", text.replace('\'', "''"))))
+            } else if is_numeric_literal(text) && numeric_cast_is_noop(text, data_type) {
+                // PostgreSQL's negative-number deparse: `('-5')::integer`. Recover the bare number.
+                Some(ExprNode::Literal(text.clone()))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether the decimal literal `text` casts to `data_type` without changing value: an integer literal is
+/// exact in any numeric type; a fractional literal only in a non-integer numeric type (an integer type
+/// truncates it).
+fn numeric_cast_is_noop(text: &str, data_type: &DataType) -> bool {
+    if text.contains(['.', 'e', 'E']) {
+        is_numeric_type(data_type) && !is_integer_type(data_type)
+    } else {
+        is_numeric_type(data_type)
+    }
+}
+
+/// Whether `text` is a plain decimal numeric literal (optional leading sign): the content PostgreSQL puts
+/// in a `('-5')::integer`-style negative-literal cast.
+fn is_numeric_literal(text: &str) -> bool {
+    let digits = text.strip_prefix(['-', '+']).unwrap_or(text);
+    !digits.is_empty()
+        && digits
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        && digits.bytes().filter(|byte| *byte == b'.').count() <= 1
+}
+
+/// Whether `data_type` is an UNBOUNDED text type (`text`, or `varchar`/`character varying` with no
+/// length): a cast to it neither truncates nor pads, so it is a value-preserving no-op.
+fn is_unbounded_text_type(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Text
+            | DataType::Varchar(None)
+            | DataType::CharVarying(None)
+            | DataType::CharacterVarying(None)
+    )
+}
+
+/// Whether `data_type` is a whole-number integer type (casting a fractional literal to it truncates).
+/// A display-width arg (`int(11)`) does not change the value, so it is accepted.
+fn is_integer_type(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::TinyInt(_)
+            | DataType::SmallInt(_)
+            | DataType::Int(_)
+            | DataType::Int2(_)
+            | DataType::Int4(_)
+            | DataType::Int8(_)
+            | DataType::Integer(_)
+            | DataType::BigInt(_)
+    )
+}
+
+/// Whether casting a literal to `data_type` is a guaranteed value-preserving no-op — an integer type,
+/// or an **unbounded arbitrary-precision** `numeric`/`decimal`. Notably NOT a floating type
+/// (`real`/`float4`/`float8`/`double precision`): a binary float cannot hold every integer or decimal
+/// exactly (`(16777217)::real` rounds to `16777216`), so a float cast can change the value and is left as
+/// `Raw` (kept comparable by the string canonicalizer) rather than stripped. A precision-bounded
+/// `numeric(p, s)` can round too, so only the unbounded form is a no-op.
+fn is_numeric_type(data_type: &DataType) -> bool {
+    use sqlparser::ast::ExactNumberInfo::None as NoPrecision;
+    is_integer_type(data_type)
+        || matches!(
+            data_type,
+            DataType::Numeric(NoPrecision)
+                | DataType::Decimal(NoPrecision)
+                | DataType::Dec(NoPrecision)
+        )
+}
+
+/// Resolves an identifier to the column name the model stores. An *unquoted* identifier is
+/// case-insensitive in SQL and folds to lower case (PostgreSQL folds `Id` → `id`; the renderer then
+/// re-quotes it, so it must already be the folded form to name the right column); a *quoted* identifier
+/// is case-exact and preserved verbatim.
+fn fold_ident(ident: &sqlparser::ast::Ident) -> String {
+    if ident.quote_style.is_none() {
+        ident.value.to_lowercase()
+    } else {
+        ident.value.clone()
+    }
+}
+
+/// Strips [`Expr::Nested`] wrappers, returning the inner expression (PostgreSQL wraps a cast's literal
+/// operand in parentheses: `(0)::numeric`).
+fn strip_nested(expr: &Expr) -> &Expr {
+    let mut current = expr;
+    while let Expr::Nested(inner) = current {
+        current = inner;
+    }
+    current
 }
 
 /// Recognizes the renderer's empty-`IN` sentinel and recovers the original empty [`ExprNode::In`].
@@ -461,20 +673,25 @@ fn lower_function(function: &Function, dialect: SqlDialect) -> Result<ExprNode, 
         // `CHAR_LENGTH` is character length in every dialect (and is what the renderer emits for
         // `ScalarFunc::Length` on PostgreSQL/MySQL).
         "char_length" => unary(ScalarFunc::Length, args),
-        // Bare `length` is character length only in SQLite (where the renderer emits it). MySQL's
-        // `LENGTH` counts *bytes* — folding it to the neutral node (which re-renders as `CHAR_LENGTH`)
-        // would silently change semantics on multibyte text, so it is not lowered for MySQL. (PostgreSQL
-        // never emits bare `length`; it renders `CHAR_LENGTH`.)
-        "length" if dialect == SqlDialect::Sqlite => unary(ScalarFunc::Length, args),
+        // Bare `length` is character length in SQLite (where the renderer emits it) and in neutral
+        // authored SQL (`Generic`). MySQL's `LENGTH` counts *bytes* — folding it to the neutral node
+        // (which re-renders as `CHAR_LENGTH`) would silently change semantics on multibyte text, so it is
+        // not lowered for MySQL. (PostgreSQL never emits bare `length`; it renders `CHAR_LENGTH`.)
+        "length" if matches!(dialect, SqlDialect::Sqlite | SqlDialect::Generic) => {
+            unary(ScalarFunc::Length, args)
+        }
         "trim" => unary(ScalarFunc::Trim, args),
         // The renderer emits `CONCAT(...)` for `Concat` only on MySQL; PostgreSQL/SQLite use `||`. A
         // `CONCAT(...)` seen on those dialects is externally authored and, on PostgreSQL, has different
         // NULL semantics (it ignores NULLs, whereas the neutral node re-renders as NULL-propagating
-        // `||`), so it is only folded for MySQL.
-        "concat" if !pipe_is_concatenation(dialect) => Ok(ExprNode::ScalarFn {
-            func: ScalarFunc::Concat,
-            args,
-        }),
+        // `||`), so it is only folded for MySQL — and for `Generic`, where either concat spelling denotes
+        // the neutral node in authored SQL.
+        "concat" if !pipe_is_concatenation(dialect) || dialect == SqlDialect::Generic => {
+            Ok(ExprNode::ScalarFn {
+                func: ScalarFunc::Concat,
+                args,
+            })
+        }
         _ => Err(not_yet(format!("function `{name}`"))),
     }
 }
@@ -521,6 +738,18 @@ mod tests {
                 alias: "q0_0".to_owned(),
                 column: "name".to_owned(),
             }
+        );
+    }
+
+    #[test]
+    fn unquoted_identifiers_fold_to_lowercase() {
+        // An unquoted identifier is case-insensitive (PostgreSQL folds `Id` → `id`); the model stores
+        // the folded name so the renderer re-quotes the correct column. A quoted identifier is case-exact.
+        assert_eq!(low("Id", SqlDialect::Postgres).unwrap(), bare("id"));
+        assert_eq!(low("\"Id\"", SqlDialect::Postgres).unwrap(), bare("Id"));
+        assert_eq!(
+            low("MixedCase", SqlDialect::Generic).unwrap(),
+            bare("mixedcase")
         );
     }
 
@@ -736,6 +965,161 @@ mod tests {
         assert!(matches!(
             low("(\"a\" IS NOT NULL AND 1 = 2)", SqlDialect::Postgres).unwrap(),
             ExprNode::Logical { .. }
+        ));
+    }
+
+    #[test]
+    fn generic_is_the_lenient_neutral_authoring_mode() {
+        // Under `Generic` (how the derive macro parses an authored check/index string), the neutral
+        // spelling of each op lowers directly — `length` is neutral length, bare `/` is neutral divide,
+        // and both `||` and `CONCAT(...)` are the neutral concat node.
+        assert_eq!(
+            low("length(\"s\")", SqlDialect::Generic).unwrap(),
+            ExprNode::ScalarFn {
+                func: ScalarFunc::Length,
+                args: vec![bare("s")],
+            }
+        );
+        assert_eq!(
+            low("(\"a\" / \"b\")", SqlDialect::Generic).unwrap(),
+            ExprNode::Binary {
+                op: ArithmeticOp::Divide,
+                left: Box::new(bare("a")),
+                right: Box::new(bare("b")),
+            }
+        );
+        let concat = ExprNode::ScalarFn {
+            func: ScalarFunc::Concat,
+            args: vec![bare("a"), bare("b")],
+        };
+        assert_eq!(
+            low("(\"a\" || \"b\")", SqlDialect::Generic).unwrap(),
+            concat
+        );
+        assert_eq!(
+            low("CONCAT(\"a\", \"b\")", SqlDialect::Generic).unwrap(),
+            concat
+        );
+    }
+
+    #[test]
+    fn postgres_deparse_idioms_invert_to_the_authored_form() {
+        // `pg_get_constraintdef` reshapes a check; introspecting its output must lower to the SAME
+        // neutral node the macro produces from the authored (Generic) string, so a published check
+        // re-plans to empty. Each pair asserts that convergence.
+
+        // Literal casts: `0` → `(0)::numeric`, `'x'` → `('x')::text`.
+        assert_eq!(
+            low("(0)::numeric", SqlDialect::Postgres).unwrap(),
+            low("0", SqlDialect::Generic).unwrap()
+        );
+        assert_eq!(
+            low("(quota > (0)::numeric)", SqlDialect::Postgres).unwrap(),
+            low("quota > 0", SqlDialect::Generic).unwrap()
+        );
+        // A redundant string→text cast also strips.
+        assert_eq!(
+            low("('x')::text", SqlDialect::Postgres).unwrap(),
+            low("'x'", SqlDialect::Generic).unwrap()
+        );
+        // A `::text` (or any `::`) cast around a NON-literal operand is ambiguous without the operand's
+        // type — redundant on a text column, a real conversion on `id::text LIKE '1%'` — so it is NOT
+        // stripped; it stays Raw rather than risk dropping a semantic cast.
+        assert!(matches!(
+            low("(char_length((name)::text) > 0)", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low("(id::text ~~ '1%')", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+
+        // PostgreSQL deparses a NEGATIVE numeric literal as a string cast: `-5` → `('-5')::integer`.
+        assert_eq!(
+            low("('-5')::integer", SqlDialect::Postgres).unwrap(),
+            low("-5", SqlDialect::Generic).unwrap()
+        );
+        assert_eq!(
+            low("(status = ('-5')::integer)", SqlDialect::Postgres).unwrap(),
+            low("status = -5", SqlDialect::Generic).unwrap()
+        );
+        assert_eq!(
+            low("('-1.5')::numeric", SqlDialect::Postgres).unwrap(),
+            low("-1.5", SqlDialect::Generic).unwrap()
+        );
+        // …but a negative fractional string cast to an INTEGER type truncates → stays Raw.
+        assert!(matches!(
+            low("('-1.5')::integer", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // A `::` cast on a NON-literal is a real user cast, still not lowered.
+        assert!(matches!(
+            low("(quota)::numeric", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // A CONVERTING literal cast (string → float / date) is meaningful and must NOT be stripped.
+        assert!(matches!(
+            low("('Infinity')::float8", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low("('2020-01-01')::date", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // A fractional literal cast to an INTEGER type truncates (`1.5::integer` = 1) → not redundant.
+        assert!(matches!(
+            low("(1.5)::integer", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // …but a fractional literal cast to a fractional type is a no-op → strips.
+        assert_eq!(
+            low("(1.5)::numeric", SqlDialect::Postgres).unwrap(),
+            low("1.5", SqlDialect::Generic).unwrap()
+        );
+        // A LENGTH/PRECISION-bounded cast can truncate/round/pad → not stripped (stays Raw).
+        assert!(matches!(
+            low("('abcdef')::varchar(3)", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low("(1.5)::numeric(2, 0)", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // A float cast is never provably value-preserving (`(16777217)::real` rounds) → stays Raw.
+        assert!(matches!(
+            low("(16777217)::real", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low("(1.5)::float8", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+
+        // `IN` / `NOT IN` → `= ANY (ARRAY[..])` / `<> ALL (ARRAY[..])`.
+        assert_eq!(
+            low("(status = ANY (ARRAY[1, 2, 3]))", SqlDialect::Postgres).unwrap(),
+            low("status IN (1, 2, 3)", SqlDialect::Generic).unwrap()
+        );
+        assert_eq!(
+            low("(status <> ALL (ARRAY[1, 2]))", SqlDialect::Postgres).unwrap(),
+            low("status NOT IN (1, 2)", SqlDialect::Generic).unwrap()
+        );
+
+        // `LIKE` / `NOT LIKE` / `ILIKE` → `~~` / `!~~` / `~~*`.
+        assert_eq!(
+            low("(name ~~ 'a%')", SqlDialect::Postgres).unwrap(),
+            low("name LIKE 'a%'", SqlDialect::Generic).unwrap()
+        );
+        assert_eq!(
+            low("(name !~~ 'a%')", SqlDialect::Postgres).unwrap(),
+            low("name NOT LIKE 'a%'", SqlDialect::Generic).unwrap()
+        );
+        assert!(matches!(
+            low("(name ~~* 'a%')", SqlDialect::Postgres).unwrap(),
+            ExprNode::Like {
+                case_insensitive: true,
+                ..
+            }
         ));
     }
 

@@ -73,6 +73,19 @@ impl Reader {
         self.read_scalar_expression(sql)
     }
 
+    /// Reads a `CHECK` expression into a structural [`ExprNode`], falling back to
+    /// [`ExprNode::Raw`] carrying the input text when it cannot be parsed or lowered.
+    ///
+    /// This is the live-introspection entry point: a backend's deparse output must always yield *some*
+    /// `ExprNode` (the model field is structural), so an expression the reverse parser cannot yet
+    /// structure is preserved verbatim rather than dropped. A `Raw` result will not compare equal to a
+    /// structural desired node — i.e. it churns — so extending the lowering shrinks the set that lands
+    /// here.
+    pub fn read_check_expression_or_raw(&self, sql: &str) -> ExprNode {
+        self.read_check_expression(sql)
+            .unwrap_or_else(|_| ExprNode::Raw(sql.to_owned()))
+    }
+
     /// Reads a generated/computed column's defining expression into an [`ExprNode`].
     pub fn read_generated_expression(&self, sql: &str) -> Result<ExprNode, ReadError> {
         self.read_scalar_expression(sql)

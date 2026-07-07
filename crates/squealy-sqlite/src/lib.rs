@@ -327,17 +327,35 @@ impl SchemaIntrospect for SqliteConnection {
 
     /// SQLite renders a `CHECK` constraint inline and unnamed, and introspection recovers it by parsing
     /// the `CREATE TABLE` text — which yields only the expression, not a name. Derive a stable name from
-    /// the expression (identical on the desired and introspected side) so equivalent checks compare equal
-    /// while a table's several checks stay distinct.
+    /// the structural expression (identical on the desired and introspected side) so equivalent checks
+    /// compare equal while a table's several checks stay distinct. The name is only a diff key (SQLite
+    /// emits checks unnamed), so the structural `Debug` form is a fine stable, unique key.
     fn canonical_check_name(&self, check: &CheckModel) -> String {
-        format!("check:{}", check.expression)
+        format!("check:{:?}", check.expression)
     }
 
-    /// SQLite stores a `CHECK` expression verbatim in the `CREATE TABLE` text, so introspection recovers
-    /// it exactly as rendered — trim only surrounding whitespace on both sides so a desired expression
-    /// authored with incidental padding matches the parenthesized text read back.
-    fn canonical_check_expression(&self, expression: &str) -> String {
-        expression.trim().to_owned()
+    /// Structures a `Raw` check expression (a legacy package's verbatim check, or an un-invertible
+    /// introspected one) by re-parsing it in the SQLite dialect, so it compares equal to a freshly
+    /// introspected structural check. An already-structural expression is returned unchanged.
+    ///
+    /// The raw SQL is trimmed first: SQLite introspection extracts a `CHECK` body from the stored
+    /// `CREATE TABLE` text with surrounding whitespace stripped, so an un-lowerable raw check must trim
+    /// too or a padded desired `" f(x) "` would not match the introspected `"f(x)"`.
+    fn canonical_check_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
+        let structured = match expression {
+            squealy::ExprNode::Raw(sql) => {
+                match squealy_parse::Reader::new(squealy_parse::SqlDialect::Sqlite)
+                    .read_check_expression_or_raw(sql.trim())
+                {
+                    squealy::ExprNode::Raw(raw) => squealy::ExprNode::Raw(raw.trim().to_owned()),
+                    structured => structured,
+                }
+            }
+            other => other,
+        };
+        // SQLite renders both `Like` case-sensitivity states as plain `LIKE` and introspects them back as
+        // `case_insensitive: false`, so fold the flag to keep an authored `ILIKE` check from churning.
+        squealy::fold_like_case_insensitivity(&structured)
     }
 
     /// SQLite has no boolean or unsigned literal, so a `bool`/unsigned default on an `INTEGER`-affinity

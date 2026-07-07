@@ -1093,8 +1093,9 @@ pub(crate) mod ddl {
         reject_constraint_enforcement(&check.enforcement)?;
         writer.write_all(b"CONSTRAINT ")?;
         write_quoted_ident(&check.name, writer)?;
-        // The check expression is a backend-specific escape hatch, emitted verbatim.
-        write!(writer, " CHECK ({})", check.expression)?;
+        writer.write_all(b" CHECK (")?;
+        squealy::render_scalar_expr(&check.expression, &super::PostgresDialect, writer)?;
+        writer.write_all(b")")?;
         write_constraint_validation(&check.validation, writer)
     }
 

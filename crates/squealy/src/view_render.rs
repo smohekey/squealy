@@ -286,6 +286,8 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
         }
         ExprNode::BareColumn { column } => dialect.write_quoted_ident(column, writer),
         ExprNode::Literal(text) => writer.write_all(text.as_bytes()),
+        // The un-modelable escape hatch: emit the already-rendered dialect SQL verbatim.
+        ExprNode::Raw(text) => writer.write_all(text.as_bytes()),
         ExprNode::Binary { op, left, right } => {
             if *op == ArithmeticOp::Divide && dialect.integer_division_needs_float_cast() {
                 // Cast operands to float so integer `/` matches the builder's always-fractional

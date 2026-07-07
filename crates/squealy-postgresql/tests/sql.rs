@@ -2,6 +2,12 @@ use squealy::SchemaBackend;
 use squealy::*;
 use squealy_postgresql::{Postgres, PostgresParam};
 
+fn check_expr(sql: &str) -> ExprNode {
+    squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+        .read_check_expression(sql)
+        .unwrap()
+}
+
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(Public)]
 struct User<'scope, C: ColumnMode = ColumnExpr> {
@@ -285,13 +291,13 @@ fn postgres_renders_changed_constraints_and_indexes_in_schema_plan() {
                 change: Box::new(TablePlanStep::AlterCheck {
                     before: CheckModel {
                         name: "ck_events_id".to_owned(),
-                        expression: "id > 0".to_owned(),
+                        expression: check_expr("id > 0"),
                         validation: None,
                         enforcement: None,
                     },
                     after: CheckModel {
                         name: "ck_events_id".to_owned(),
-                        expression: "event_id > 0".to_owned(),
+                        expression: check_expr("event_id > 0"),
                         validation: None,
                         enforcement: None,
                     },
@@ -347,7 +353,7 @@ ALTER TABLE \"public\".\"events\" ADD CONSTRAINT \"uq_events_name\" UNIQUE (\"sl
 ALTER TABLE \"public\".\"events\" DROP CONSTRAINT \"fk_events_user_id\";\n\
 ALTER TABLE \"public\".\"events\" ADD CONSTRAINT \"fk_events_user_id\" FOREIGN KEY (\"owner_id\") REFERENCES \"public\".\"users\" (\"id\") ON DELETE CASCADE;\n\
 ALTER TABLE \"public\".\"events\" DROP CONSTRAINT \"ck_events_id\";\n\
-ALTER TABLE \"public\".\"events\" ADD CONSTRAINT \"ck_events_id\" CHECK (event_id > 0);\n\
+ALTER TABLE \"public\".\"events\" ADD CONSTRAINT \"ck_events_id\" CHECK ((\"event_id\" > 0));\n\
 DROP INDEX \"public\".\"idx_events_name\";\n\
 CREATE UNIQUE INDEX \"idx_events_name\" ON \"public\".\"events\" (\"slug\");"
     );

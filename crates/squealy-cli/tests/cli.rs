@@ -45,6 +45,12 @@ fn db_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn check_expr(sql: &str) -> squealy_model::ExprNode {
+    squealy_parse::Reader::new(squealy_parse::SqlDialect::Generic)
+        .read_check_expression(sql)
+        .unwrap()
+}
+
 #[test]
 fn rejects_injection() {
     let output = Command::new(SQUEALY)
@@ -349,7 +355,7 @@ fn unsupported_metadata_error_explains_round_trip_requirement() {
     let mut model = empty_model();
     model.schemas[0].tables[0].checks.push(CheckModel {
         name: "ck_events_id".to_owned(),
-        expression: "id > 0".to_owned(),
+        expression: check_expr("id > 0"),
         validation: None,
         enforcement: Some(squealy_model::ConstraintEnforcement::NotEnforced),
     });
@@ -693,7 +699,7 @@ fn check_rejects_unsupported_package_metadata() {
     let mut model = empty_model();
     model.schemas[0].tables[0].checks.push(CheckModel {
         name: "ck_events_id".to_owned(),
-        expression: "id > 0".to_owned(),
+        expression: check_expr("id > 0"),
         validation: None,
         enforcement: Some(squealy_model::ConstraintEnforcement::NotEnforced),
     });
@@ -720,7 +726,7 @@ fn mysql_backend_rejects_postgres_only_metadata() {
     let mut model = empty_model();
     model.schemas[0].tables[0].checks.push(CheckModel {
         name: "ck_events_id".to_owned(),
-        expression: "id > 0".to_owned(),
+        expression: check_expr("id > 0"),
         validation: Some(squealy_model::ConstraintValidation::NotValidated),
         enforcement: None,
     });

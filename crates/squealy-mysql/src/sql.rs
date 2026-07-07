@@ -648,7 +648,9 @@ fn write_check(check: &CheckModel, writer: &mut impl Write) -> io::Result<()> {
     }
     writer.write_all(b"CONSTRAINT ")?;
     write_quoted_ident(&check.name, writer)?;
-    write!(writer, " CHECK ({})", check.expression)
+    writer.write_all(b" CHECK (")?;
+    squealy::render_scalar_expr(&check.expression, &MysqlDialect, writer)?;
+    writer.write_all(b")")
 }
 
 fn write_create_index(

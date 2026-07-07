@@ -515,11 +515,12 @@ impl ForeignKeyAction {
     }
 }
 
-/// A named check constraint carrying a backend-specific boolean expression.
+/// A named check constraint carrying its boolean expression as a structural [`ExprNode`], so each
+/// backend renders it in its own dialect and the diff compares it structurally.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CheckModel {
     pub name: String,
-    pub expression: String,
+    pub expression: ExprNode,
     pub validation: Option<ConstraintValidation>,
     pub enforcement: Option<ConstraintEnforcement>,
 }
@@ -742,6 +743,13 @@ pub enum ExprNode {
     BareColumn { column: String },
     /// An inlined SQL literal, already formatted (e.g. `'Ada'`, `42`, `TRUE`, `NULL`).
     Literal(String),
+    /// An un-modelable expression, carried as its already-rendered dialect SQL and re-emitted verbatim.
+    /// The last-resort escape hatch: live introspection uses it when the reverse parser cannot yet lower
+    /// a backend's deparse output into a structural node. It is dialect-specific (does not re-render
+    /// across dialects) and never produced by the forward path (the derive macro / typed builders), so a
+    /// squealy-published object round-trips structurally; a `Raw` on one side of a diff means the
+    /// introspected form could not be structured and will not compare equal to a structural desired node.
+    Raw(String),
     /// Binary arithmetic; `Divide` uses the backend's fractional-division handling.
     Binary {
         op: ArithmeticOp,
@@ -954,10 +962,206 @@ fn collect_query_sources<'a>(query: &'a ViewQueryModel, sources: &mut Vec<&'a So
     }
 }
 
+/// Normalizes a constraint [`ExprNode`] to a canonical structural form, so expressions that
+/// PostgreSQL's `pg_get_constraintdef` rewrites compare equal to the authored form once both the desired
+/// and introspected model are normalized (applied in `canonicalize_model` before diffing). Two rewrites:
+///
+/// - **`BETWEEN` expansion**: `x BETWEEN a AND b` → `(x >= a) AND (x <= b)`, and
+///   `x NOT BETWEEN a AND b` → `(x < a) OR (x > b)`.
+/// - **Boolean re-nesting**: an associative `AND`/`OR` chain is flattened and re-folded
+///   left-associatively, so `a AND (b AND c)` and `(a AND b) AND c` normalize to the same tree.
+///
+/// Recurses through the constraint-expression node set; leaves and view-body-only nodes (which never
+/// occur in a check) are returned unchanged.
+pub fn normalize_expr(expr: &ExprNode) -> ExprNode {
+    match expr {
+        ExprNode::Between {
+            negated,
+            operand,
+            low,
+            high,
+        } => {
+            let operand = normalize_expr(operand);
+            let low = normalize_expr(low);
+            let high = normalize_expr(high);
+            let (op, lower_cmp, upper_cmp) = if *negated {
+                (LogicalOp::Or, CompareOp::LessThan, CompareOp::GreaterThan)
+            } else {
+                (
+                    LogicalOp::And,
+                    CompareOp::GreaterThanOrEquals,
+                    CompareOp::LessThanOrEquals,
+                )
+            };
+            ExprNode::Logical {
+                op,
+                left: Box::new(ExprNode::Compare {
+                    op: lower_cmp,
+                    left: Box::new(operand.clone()),
+                    right: Box::new(low),
+                }),
+                right: Box::new(ExprNode::Compare {
+                    op: upper_cmp,
+                    left: Box::new(operand),
+                    right: Box::new(high),
+                }),
+            }
+        }
+        ExprNode::Logical { op, left, right } => {
+            // Normalize each operand FIRST (so a nested `BETWEEN` is already expanded to its `AND`/`OR`
+            // pair), then splice same-operator logicals into one flat chain and re-fold left-associatively.
+            // This is why `y AND x BETWEEN 1 AND 2` normalizes to the same flat `y AND x >= 1 AND x <= 2`
+            // tree PostgreSQL deparses, not `y AND (x >= 1 AND x <= 2)`.
+            let mut terms = Vec::new();
+            splice_same_op(*op, normalize_expr(left), &mut terms);
+            splice_same_op(*op, normalize_expr(right), &mut terms);
+            let mut terms = terms.into_iter();
+            let mut acc = terms
+                .next()
+                .expect("a logical node always has at least two operands");
+            for term in terms {
+                acc = ExprNode::Logical {
+                    op: *op,
+                    left: Box::new(acc),
+                    right: Box::new(term),
+                };
+            }
+            acc
+        }
+        ExprNode::Binary { op, left, right } => ExprNode::Binary {
+            op: *op,
+            left: Box::new(normalize_expr(left)),
+            right: Box::new(normalize_expr(right)),
+        },
+        ExprNode::Compare { op, left, right } => ExprNode::Compare {
+            op: *op,
+            left: Box::new(normalize_expr(left)),
+            right: Box::new(normalize_expr(right)),
+        },
+        ExprNode::Not(inner) => ExprNode::Not(Box::new(normalize_expr(inner))),
+        ExprNode::IsNull { negated, operand } => ExprNode::IsNull {
+            negated: *negated,
+            operand: Box::new(normalize_expr(operand)),
+        },
+        ExprNode::Like {
+            case_insensitive,
+            negated,
+            operand,
+            pattern,
+        } => ExprNode::Like {
+            case_insensitive: *case_insensitive,
+            negated: *negated,
+            operand: Box::new(normalize_expr(operand)),
+            pattern: Box::new(normalize_expr(pattern)),
+        },
+        ExprNode::In {
+            negated,
+            operand,
+            items,
+        } => ExprNode::In {
+            negated: *negated,
+            operand: Box::new(normalize_expr(operand)),
+            items: items.iter().map(normalize_expr).collect(),
+        },
+        ExprNode::ScalarFn { func, args } => ExprNode::ScalarFn {
+            func: *func,
+            args: args.iter().map(normalize_expr).collect(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Drops the case-insensitivity distinction on every [`ExprNode::Like`] node (forces
+/// `case_insensitive = false`), for backends whose renderer emits the same `LIKE` for both flag states
+/// and whose introspection therefore always reads `false` (MySQL/SQLite — only PostgreSQL spells the
+/// case-insensitive form distinctly, as `ILIKE`). Applied to both the desired and introspected model in
+/// `canonicalize_model` so an authored `ILIKE` (`case_insensitive: true`) check does not churn against
+/// the introspected `false`. Recurses the constraint node set; other nodes pass through.
+pub fn fold_like_case_insensitivity(expr: &ExprNode) -> ExprNode {
+    match expr {
+        ExprNode::Like {
+            negated,
+            operand,
+            pattern,
+            ..
+        } => ExprNode::Like {
+            case_insensitive: false,
+            negated: *negated,
+            operand: Box::new(fold_like_case_insensitivity(operand)),
+            pattern: Box::new(fold_like_case_insensitivity(pattern)),
+        },
+        ExprNode::Binary { op, left, right } => ExprNode::Binary {
+            op: *op,
+            left: Box::new(fold_like_case_insensitivity(left)),
+            right: Box::new(fold_like_case_insensitivity(right)),
+        },
+        ExprNode::Compare { op, left, right } => ExprNode::Compare {
+            op: *op,
+            left: Box::new(fold_like_case_insensitivity(left)),
+            right: Box::new(fold_like_case_insensitivity(right)),
+        },
+        ExprNode::Logical { op, left, right } => ExprNode::Logical {
+            op: *op,
+            left: Box::new(fold_like_case_insensitivity(left)),
+            right: Box::new(fold_like_case_insensitivity(right)),
+        },
+        ExprNode::Not(inner) => ExprNode::Not(Box::new(fold_like_case_insensitivity(inner))),
+        ExprNode::IsNull { negated, operand } => ExprNode::IsNull {
+            negated: *negated,
+            operand: Box::new(fold_like_case_insensitivity(operand)),
+        },
+        ExprNode::In {
+            negated,
+            operand,
+            items,
+        } => ExprNode::In {
+            negated: *negated,
+            operand: Box::new(fold_like_case_insensitivity(operand)),
+            items: items.iter().map(fold_like_case_insensitivity).collect(),
+        },
+        ExprNode::Between {
+            negated,
+            operand,
+            low,
+            high,
+        } => ExprNode::Between {
+            negated: *negated,
+            operand: Box::new(fold_like_case_insensitivity(operand)),
+            low: Box::new(fold_like_case_insensitivity(low)),
+            high: Box::new(fold_like_case_insensitivity(high)),
+        },
+        ExprNode::ScalarFn { func, args } => ExprNode::ScalarFn {
+            func: *func,
+            args: args.iter().map(fold_like_case_insensitivity).collect(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Splices an already-normalized operand into a same-operator `AND`/`OR` chain: if it is itself a
+/// same-operator logical (a nested chain, or an expanded `BETWEEN`), its operands join the chain;
+/// otherwise it is one term. Collapses a re-nested boolean tree to one canonical left-folded order.
+fn splice_same_op(op: LogicalOp, node: ExprNode, terms: &mut Vec<ExprNode>) {
+    match node {
+        ExprNode::Logical {
+            op: inner_op,
+            left,
+            right,
+        } if inner_op == op => {
+            splice_same_op(op, *left, terms);
+            splice_same_op(op, *right, terms);
+        }
+        other => terms.push(other),
+    }
+}
+
 /// Collects every [`SourceRef`] reachable from an expression, recursing through nested subqueries.
 fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>) {
     match expr {
-        ExprNode::Column { .. } | ExprNode::BareColumn { .. } | ExprNode::Literal(_) => {}
+        ExprNode::Column { .. }
+        | ExprNode::BareColumn { .. }
+        | ExprNode::Literal(_)
+        | ExprNode::Raw(_) => {}
         ExprNode::Binary { left, right, .. }
         | ExprNode::Compare { left, right, .. }
         | ExprNode::Logical { left, right, .. } => {
@@ -1058,5 +1262,137 @@ fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>
         | ExprNode::ExtractSecond { operand, .. } => {
             collect_expr_sources(operand, sources);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bare(column: &str) -> ExprNode {
+        ExprNode::BareColumn {
+            column: column.to_owned(),
+        }
+    }
+
+    fn lit(text: &str) -> ExprNode {
+        ExprNode::Literal(text.to_owned())
+    }
+
+    fn cmp(op: CompareOp, left: ExprNode, right: ExprNode) -> ExprNode {
+        ExprNode::Compare {
+            op,
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
+    fn and(left: ExprNode, right: ExprNode) -> ExprNode {
+        ExprNode::Logical {
+            op: LogicalOp::And,
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
+    #[test]
+    fn normalize_expands_between() {
+        // `x BETWEEN 0 AND 10` → `(x >= 0) AND (x <= 10)`, matching PostgreSQL's deparse.
+        let between = ExprNode::Between {
+            negated: false,
+            operand: Box::new(bare("x")),
+            low: Box::new(lit("0")),
+            high: Box::new(lit("10")),
+        };
+        let expected = and(
+            cmp(CompareOp::GreaterThanOrEquals, bare("x"), lit("0")),
+            cmp(CompareOp::LessThanOrEquals, bare("x"), lit("10")),
+        );
+        assert_eq!(normalize_expr(&between), expected);
+        // The introspected deparse form normalizes to the same tree (a no-op on it).
+        assert_eq!(normalize_expr(&expected), expected);
+    }
+
+    #[test]
+    fn normalize_expands_not_between() {
+        let between = ExprNode::Between {
+            negated: true,
+            operand: Box::new(bare("x")),
+            low: Box::new(lit("0")),
+            high: Box::new(lit("10")),
+        };
+        let expected = ExprNode::Logical {
+            op: LogicalOp::Or,
+            left: Box::new(cmp(CompareOp::LessThan, bare("x"), lit("0"))),
+            right: Box::new(cmp(CompareOp::GreaterThan, bare("x"), lit("10"))),
+        };
+        assert_eq!(normalize_expr(&between), expected);
+    }
+
+    #[test]
+    fn normalize_flattens_between_inside_a_chain() {
+        // `y AND (x BETWEEN 1 AND 2)` must normalize to the FLAT `y AND x >= 1 AND x <= 2` tree that
+        // PostgreSQL deparses — the expanded BETWEEN joins the surrounding AND chain, not nested.
+        let y = cmp(CompareOp::GreaterThan, bare("y"), lit("0"));
+        let between = ExprNode::Between {
+            negated: false,
+            operand: Box::new(bare("x")),
+            low: Box::new(lit("1")),
+            high: Box::new(lit("2")),
+        };
+        let with_between = and(y.clone(), between);
+        // The deparsed form: flat `(y AND x >= 1) AND x <= 2`.
+        let deparsed = and(
+            and(y, cmp(CompareOp::GreaterThanOrEquals, bare("x"), lit("1"))),
+            cmp(CompareOp::LessThanOrEquals, bare("x"), lit("2")),
+        );
+        assert_eq!(normalize_expr(&with_between), deparsed);
+        assert_eq!(normalize_expr(&with_between), normalize_expr(&deparsed));
+    }
+
+    #[test]
+    fn normalize_reassociates_boolean_chains() {
+        // Right-nested `a AND (b AND c)` and left-nested `(a AND b) AND c` normalize to the same tree.
+        let a = cmp(CompareOp::GreaterThan, bare("a"), lit("0"));
+        let bb = cmp(CompareOp::GreaterThan, bare("b"), lit("0"));
+        let c = cmp(CompareOp::GreaterThan, bare("c"), lit("0"));
+        let right_nested = and(a.clone(), and(bb.clone(), c.clone()));
+        let left_nested = and(and(a.clone(), bb.clone()), c.clone());
+        assert_eq!(normalize_expr(&right_nested), normalize_expr(&left_nested));
+        assert_eq!(normalize_expr(&right_nested), left_nested);
+    }
+    #[test]
+    fn fold_like_ci_forces_case_sensitive() {
+        // On MySQL/SQLite a `Like{case_insensitive: true}` renders as plain `LIKE` and reads back false;
+        // folding both sides to false keeps an authored `ILIKE` check from churning.
+        let insensitive = ExprNode::Like {
+            case_insensitive: true,
+            negated: false,
+            operand: Box::new(bare("name")),
+            pattern: Box::new(lit("'a%'")),
+        };
+        let folded = fold_like_case_insensitivity(&insensitive);
+        assert_eq!(
+            folded,
+            ExprNode::Like {
+                case_insensitive: false,
+                negated: false,
+                operand: Box::new(bare("name")),
+                pattern: Box::new(lit("'a%'")),
+            }
+        );
+        // Nested inside a boolean chain, the flag is folded too.
+        let nested = and(
+            insensitive,
+            cmp(CompareOp::GreaterThan, bare("x"), lit("0")),
+        );
+        assert_eq!(
+            fold_like_case_insensitivity(&nested),
+            fold_like_case_insensitivity(&nested)
+        );
+        assert!(matches!(
+            fold_like_case_insensitivity(&nested),
+            ExprNode::Logical { .. }
+        ));
     }
 }
