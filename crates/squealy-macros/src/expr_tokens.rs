@@ -13,12 +13,18 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use squealy_ir::{ArithmeticOp, CompareOp, ExprNode, LogicalOp, ScalarFunc};
-use squealy_parse::{Reader, SqlDialect};
+use squealy_parse::{ReadError, Reader, SqlDialect};
 
 /// Renders a column's `check = "..."` attribute as the `Option<::squealy::ExprNode>` body of the
-/// generated `Column::check`: `None` when absent; `Some(<structural expr>)` when the string parses in the
-/// neutral authoring dialect; and a `compile_error!` (with a `None` fallback so exactly one clear error
-/// surfaces) when it cannot be parsed/lowered.
+/// generated `Column::check`:
+/// - `None` when absent;
+/// - `Some(<structural expr>)` when the string lowers to a structural node in the neutral dialect;
+/// - `Some(ExprNode::Raw("..."))` when it parses as valid SQL but is outside the structural subset the
+///   reverse parser handles (e.g. `%` modulo, a backend-specific function) — preserved verbatim so the
+///   check renders exactly as authored (and stays comparable via the backend's `Raw` canonicalization),
+///   matching the pre-migration behavior;
+/// - a `compile_error!` (with a `None` fallback so exactly one clear error surfaces) only for a genuine
+///   parse error / trailing tokens — a real authoring mistake worth catching at compile time.
 pub(crate) fn check_option_tokens(expr: Option<&str>) -> TokenStream {
     let Some(expr) = expr else {
         return quote! { ::std::option::Option::None };
@@ -27,6 +33,13 @@ pub(crate) fn check_option_tokens(expr: Option<&str>) -> TokenStream {
         Ok(node) => {
             let tokens = expr_tokens(&node);
             quote! { ::std::option::Option::Some(#tokens) }
+        }
+        Err(ReadError::NotYetLowered(_)) => {
+            quote! {
+                ::std::option::Option::Some(
+                    ::squealy::ExprNode::Raw(::std::string::String::from(#expr)),
+                )
+            }
         }
         Err(error) => {
             let message = format!("invalid `check` expression `{expr}`: {error}");
@@ -177,4 +190,30 @@ fn scalar_fn_tokens(func: ScalarFunc) -> TokenStream {
         ScalarFunc::Substring => quote!(Substring),
     };
     quote! { ::squealy::ScalarFunc::#variant }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routes_check_expressions_correctly() {
+        // A check inside the structural grammar lowers to a structural node.
+        let structural = check_option_tokens(Some("qty >= 0")).to_string();
+        assert!(structural.contains("Compare"), "{structural}");
+        assert!(!structural.contains("compile_error"), "{structural}");
+
+        // Valid SQL outside the structural subset (`%` modulo) is preserved verbatim as `Raw`, NOT a
+        // compile error — upgrading a table with such a check must keep compiling.
+        let raw = check_option_tokens(Some("amount % 2 = 0")).to_string();
+        assert!(raw.contains("Raw"), "{raw}");
+        assert!(!raw.contains("compile_error"), "{raw}");
+
+        // Genuinely malformed SQL is a compile error.
+        let malformed = check_option_tokens(Some("qty >")).to_string();
+        assert!(malformed.contains("compile_error"), "{malformed}");
+
+        // No attribute → None.
+        assert!(check_option_tokens(None).to_string().contains("None"));
+    }
 }
