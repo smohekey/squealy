@@ -450,6 +450,21 @@ pub trait SchemaIntrospect {
         expression
     }
 
+    /// Structures a [`ExprNode::Raw`](crate::ExprNode::Raw) generated-column expression into a comparable
+    /// node using this backend's dialect, leaving an already-structural expression untouched.
+    ///
+    /// Mirrors [`canonical_check_expression`](Self::canonical_check_expression) for a generated column's
+    /// defining expression: a package written before the expression became structural carries it verbatim
+    /// as `Raw`, and live introspection leaves an un-invertible deparse (`pg_get_expr` /
+    /// `GENERATION_EXPRESSION`) as `Raw` too. Applied to **both** the desired and introspected model in
+    /// [`canonicalize_model`](crate::canonicalize_model), this re-parses such a `Raw` in the backend's own
+    /// dialect so a legacy package's generated expression compares equal to a freshly introspected
+    /// structural one instead of churning. The default leaves it unchanged; PostgreSQL/MySQL (the backends
+    /// that support generated columns) override it via their `squealy-parse` reader.
+    fn canonical_generated_expression(&self, expression: crate::ExprNode) -> crate::ExprNode {
+        expression
+    }
+
     /// Structures a [`ExprNode::Raw`](crate::ExprNode::Raw) index-key expression into a comparable node
     /// using this backend's dialect, leaving an already-structural expression untouched.
     ///

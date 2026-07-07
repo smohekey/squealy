@@ -244,9 +244,16 @@ pub enum IdentityMode {
 }
 
 /// Backend-neutral generated-column metadata.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// The `expression` is [`Option`] because a column can be *marked* generated without an authored
+/// expression: the `#[column(generated)]` derive attribute is a bare flag with no expression syntax,
+/// so a macro-built model carries `None` (and the renderer rejects it — a generated column has to have
+/// an expression). A real defining expression arrives only from a KDL package or live introspection,
+/// as `Some`. It is a structural [`ExprNode`] so the backend renders it in its own dialect and the diff
+/// compares it structurally (mirroring [`CheckModel`]).
+#[derive(Clone, Debug, PartialEq)]
 pub struct GeneratedColumnModel {
-    pub expression: String,
+    pub expression: Option<ExprNode>,
     pub storage: GeneratedStorage,
 }
 

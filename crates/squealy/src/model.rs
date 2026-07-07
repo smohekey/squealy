@@ -269,7 +269,9 @@ fn column_from_dyn(column: &dyn Column) -> ColumnModel {
             mode: IdentityMode::ByDefault,
         }),
         generated: column.generated().then_some(GeneratedColumnModel {
-            expression: String::new(),
+            // The `#[column(generated)]` attribute marks the column generated but supplies no
+            // expression, so a macro-built model has none; the renderer rejects such a column.
+            expression: None,
             storage: GeneratedStorage::Unknown,
         }),
     }

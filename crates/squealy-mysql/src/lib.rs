@@ -343,6 +343,25 @@ impl SchemaIntrospect for MysqlConnection {
         squealy::fold_like_case_insensitivity(&structured)
     }
 
+    /// Structures a `Raw` generated-column expression (a legacy package's verbatim one, or an
+    /// un-invertible introspected `GENERATION_EXPRESSION` deparse) by re-parsing it in the MySQL dialect,
+    /// so it compares equal to a freshly introspected structural one. An already-structural expression is
+    /// returned unchanged. A term outside the structural grammar is kept verbatim as `Raw` (the canonical
+    /// model feeds the rendered `GENERATED ALWAYS AS (…)`).
+    fn canonical_generated_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
+        let structured = match expression {
+            squealy::ExprNode::Raw(sql) => {
+                squealy_parse::Reader::new(squealy_parse::SqlDialect::Mysql)
+                    .read_generated_expression_or_raw(&sql)
+            }
+            other => other,
+        };
+        // MySQL renders both `Like` case-sensitivity states as plain `LIKE`, so fold the flag to keep an
+        // authored case-insensitive `LIKE` inside a generated expression from churning (mirrors
+        // `canonical_check_expression`).
+        squealy::fold_like_case_insensitivity(&structured)
+    }
+
     /// MySQL renders bare `String` as `VARCHAR(255)` (it has no key-usable unbounded `text`), which
     /// introspects back as `Varchar(255)`; map `String` to that physical form so a desired model
     /// using `String` does not churn as an ambiguous type change against the live schema.
