@@ -1007,9 +1007,14 @@ pub fn normalize_expr(expr: &ExprNode) -> ExprNode {
                 }),
             }
         }
-        ExprNode::Logical { op, .. } => {
+        ExprNode::Logical { op, left, right } => {
+            // Normalize each operand FIRST (so a nested `BETWEEN` is already expanded to its `AND`/`OR`
+            // pair), then splice same-operator logicals into one flat chain and re-fold left-associatively.
+            // This is why `y AND x BETWEEN 1 AND 2` normalizes to the same flat `y AND x >= 1 AND x <= 2`
+            // tree PostgreSQL deparses, not `y AND (x >= 1 AND x <= 2)`.
             let mut terms = Vec::new();
-            flatten_logical(*op, expr, &mut terms);
+            splice_same_op(*op, normalize_expr(left), &mut terms);
+            splice_same_op(*op, normalize_expr(right), &mut terms);
             let mut terms = terms.into_iter();
             let mut acc = terms
                 .next()
@@ -1066,21 +1071,21 @@ pub fn normalize_expr(expr: &ExprNode) -> ExprNode {
     }
 }
 
-/// Flattens a same-operator `AND`/`OR` chain into its operands (normalizing each non-matching operand),
-/// so a re-nested boolean tree collapses to a single canonical order.
-fn flatten_logical(op: LogicalOp, expr: &ExprNode, terms: &mut Vec<ExprNode>) {
-    if let ExprNode::Logical {
-        op: inner_op,
-        left,
-        right,
-    } = expr
-        && *inner_op == op
-    {
-        flatten_logical(op, left, terms);
-        flatten_logical(op, right, terms);
-        return;
+/// Splices an already-normalized operand into a same-operator `AND`/`OR` chain: if it is itself a
+/// same-operator logical (a nested chain, or an expanded `BETWEEN`), its operands join the chain;
+/// otherwise it is one term. Collapses a re-nested boolean tree to one canonical left-folded order.
+fn splice_same_op(op: LogicalOp, node: ExprNode, terms: &mut Vec<ExprNode>) {
+    match node {
+        ExprNode::Logical {
+            op: inner_op,
+            left,
+            right,
+        } if inner_op == op => {
+            splice_same_op(op, *left, terms);
+            splice_same_op(op, *right, terms);
+        }
+        other => terms.push(other),
     }
-    terms.push(normalize_expr(expr));
 }
 
 /// Collects every [`SourceRef`] reachable from an expression, recursing through nested subqueries.
@@ -1255,6 +1260,27 @@ mod tests {
             right: Box::new(cmp(CompareOp::GreaterThan, bare("x"), lit("10"))),
         };
         assert_eq!(normalize_expr(&between), expected);
+    }
+
+    #[test]
+    fn normalize_flattens_between_inside_a_chain() {
+        // `y AND (x BETWEEN 1 AND 2)` must normalize to the FLAT `y AND x >= 1 AND x <= 2` tree that
+        // PostgreSQL deparses — the expanded BETWEEN joins the surrounding AND chain, not nested.
+        let y = cmp(CompareOp::GreaterThan, bare("y"), lit("0"));
+        let between = ExprNode::Between {
+            negated: false,
+            operand: Box::new(bare("x")),
+            low: Box::new(lit("1")),
+            high: Box::new(lit("2")),
+        };
+        let with_between = and(y.clone(), between);
+        // The deparsed form: flat `(y AND x >= 1) AND x <= 2`.
+        let deparsed = and(
+            and(y, cmp(CompareOp::GreaterThanOrEquals, bare("x"), lit("1"))),
+            cmp(CompareOp::LessThanOrEquals, bare("x"), lit("2")),
+        );
+        assert_eq!(normalize_expr(&with_between), deparsed);
+        assert_eq!(normalize_expr(&with_between), normalize_expr(&deparsed));
     }
 
     #[test]
