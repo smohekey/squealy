@@ -699,14 +699,15 @@ impl SchemaIntrospect for TestConnection {
     }
 
     // Stand-in for a backend that re-parses a legacy-package `Raw` index expression into the structural
-    // form live introspection produces, so the two converge (PostgreSQL does this in its own dialect).
-    fn canonical_index_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
+    // form live introspection produces, so the two converge (PostgreSQL does this in its own dialect). A
+    // single `Raw` may hold a whole comma-separated key, so it re-splits into per-term structural nodes.
+    fn canonical_index_expression(&self, expression: squealy::ExprNode) -> Vec<squealy::ExprNode> {
         match expression {
             squealy::ExprNode::Raw(sql) => {
                 squealy_parse::Reader::new(squealy_parse::SqlDialect::Generic)
-                    .read_index_expression_or_raw(&sql)
+                    .read_index_expressions_or_raw(&sql)
             }
-            other => other,
+            other => vec![other],
         }
     }
 }
@@ -876,7 +877,13 @@ async fn plan_from_database_canonicalizes_legacy_index_expression() {
     // A legacy package carries an index-key expression verbatim as `Raw` (the old string form), while
     // live introspection now lowers the same expression to a structural node. `canonical_index_expression`
     // must run on both sides so the two forms converge instead of churning an `AlterIndex` every publish.
-    let index = |expression: ExprNode| {
+    let scalar_fn = |func: squealy::ScalarFunc, arg: &str| ExprNode::ScalarFn {
+        func,
+        args: vec![ExprNode::BareColumn {
+            column: arg.to_owned(),
+        }],
+    };
+    let index = |expressions: Vec<ExprNode>| {
         model_with_tables(
             "public",
             vec![{
@@ -885,7 +892,7 @@ async fn plan_from_database_canonicalizes_legacy_index_expression() {
                 t.indexes = vec![IndexModel {
                     name: "idx_t_lower_status".to_owned(),
                     columns: Vec::new(),
-                    expressions: vec![expression],
+                    expressions,
                     include_columns: Vec::new(),
                     unique: false,
                     method: None,
@@ -899,13 +906,8 @@ async fn plan_from_database_canonicalizes_legacy_index_expression() {
             }],
         )
     };
-    let live = index(ExprNode::ScalarFn {
-        func: squealy::ScalarFunc::Lower,
-        args: vec![ExprNode::BareColumn {
-            column: "status".to_owned(),
-        }],
-    });
-    let desired = index(ExprNode::Raw("lower(status)".to_owned()));
+    let live = index(vec![scalar_fn(squealy::ScalarFunc::Lower, "status")]);
+    let desired = index(vec![ExprNode::Raw("lower(status)".to_owned())]);
     let mut connection = TestConnection {
         model: live,
         applied_refactor_ids: Vec::new(),
@@ -919,6 +921,32 @@ async fn plan_from_database_canonicalizes_legacy_index_expression() {
     assert!(
         plan.is_empty(),
         "legacy Raw index expression matches the structural introspected one; expected no changes, got {:?}",
+        plan.steps
+    );
+
+    // A legacy package stored a *multi-expression* index key as one lumped `Raw` (the old introspector
+    // joined `pg_get_expr` with commas); canonicalization must re-split it into the per-term structural
+    // vector live introspection now produces, or the differing term counts churn an `AlterIndex` forever.
+    let live = index(vec![
+        scalar_fn(squealy::ScalarFunc::Lower, "status"),
+        scalar_fn(squealy::ScalarFunc::Upper, "status"),
+    ]);
+    let desired = index(vec![ExprNode::Raw(
+        "lower(status), upper(status)".to_owned(),
+    )]);
+    let mut connection = TestConnection {
+        model: live,
+        applied_refactor_ids: Vec::new(),
+        executed: Vec::new(),
+    };
+
+    let plan = plan_from_database(&desired, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan");
+
+    assert!(
+        plan.is_empty(),
+        "legacy lumped multi-expr index key must re-split to match the structural introspected terms; got {:?}",
         plan.steps
     );
 }

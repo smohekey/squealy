@@ -459,8 +459,12 @@ pub trait SchemaIntrospect {
     /// dialect so a legacy package's expression index compares equal to a freshly introspected structural
     /// one instead of churning as an `AlterIndex`. The default leaves it unchanged; only PostgreSQL (the
     /// sole backend that supports expression indexes) overrides it.
-    fn canonical_index_expression(&self, expression: crate::ExprNode) -> crate::ExprNode {
-        expression
+    ///
+    /// Returns a **vector** because a single legacy `Raw` term may hold a whole comma-separated expression
+    /// key (`lower(a), upper(b)`) — the old introspector stored `pg_get_expr(indexprs, …)` as one term — so
+    /// canonicalizing it must re-split into the per-term structural form live introspection now produces.
+    fn canonical_index_expression(&self, expression: crate::ExprNode) -> Vec<crate::ExprNode> {
+        vec![expression]
     }
 
     /// Canonicalizes a schema (namespace) name to the form this backend's introspection reports.

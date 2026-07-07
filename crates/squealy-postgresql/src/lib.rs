@@ -347,21 +347,27 @@ impl squealy::SchemaIntrospect for PostgresConnection {
     /// Structures a `Raw` index-key expression (a legacy package's verbatim term, or an un-invertible
     /// introspected one) by re-parsing it in the PostgreSQL dialect, so it compares equal to a freshly
     /// introspected structural expression index. An already-structural expression is returned unchanged.
-    fn canonical_index_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
+    ///
+    /// A single legacy `Raw` may carry a whole comma-separated key (`lower(a), upper(b)`, the old
+    /// introspector's one-term form), so this re-splits via `read_index_expressions_or_raw` into the
+    /// per-term structural vector live introspection now produces. A term that stays outside the structural
+    /// grammar falls back to the string canonicalizer so the legacy/deparsed raw forms normalize alike.
+    fn canonical_index_expression(&self, expression: squealy::ExprNode) -> Vec<squealy::ExprNode> {
         match expression {
             squealy::ExprNode::Raw(sql) => {
-                // Try to structure it; if it stays outside the structural grammar, fall back to the string
-                // canonicalizer so the legacy/deparsed raw forms normalize to one string and do not churn.
-                match squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
-                    .read_index_expression_or_raw(&sql)
-                {
-                    squealy::ExprNode::Raw(raw) => {
-                        squealy::ExprNode::Raw(canonical::canonical_check_expression(&raw))
+                let split = squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                    .read_index_expressions_or_raw(&sql);
+                match split.as_slice() {
+                    // The whole key stayed un-structurable (one `Raw`): normalize it as a string.
+                    [squealy::ExprNode::Raw(raw)] => {
+                        vec![squealy::ExprNode::Raw(
+                            canonical::canonical_check_expression(raw),
+                        )]
                     }
-                    structured => structured,
+                    _ => split,
                 }
             }
-            other => other,
+            other => vec![other],
         }
     }
 }
