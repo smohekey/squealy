@@ -265,8 +265,16 @@ fn lower(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
             data_type,
             ..
         } if dialect == SqlDialect::Postgres => {
-            redundant_cast_literal(strip_nested(expr), data_type)
-                .ok_or_else(|| not_yet(format!("cast to `{data_type}`")))
+            let inner = strip_nested(expr);
+            // A `::type` on a LITERAL is the redundant deparse cast recovered above (`(0)::numeric`).
+            // Otherwise a `::type` around a pinnable aggregate / window / `EXTRACT` is a result-pin in
+            // PostgreSQL's `pg_get_viewdef` deparse — it emits the `::` form `(sum(x))::bigint` where the
+            // renderer writes the function-style `CAST(sum(x) AS bigint)`. Peel it the same way (a `::` on
+            // any other non-literal, e.g. a bare column, stays `NotYetLowered` via `lower_result_pin`).
+            match redundant_cast_literal(inner, data_type) {
+                Some(literal) => Ok(literal),
+                None => lower_result_pin(inner, data_type, dialect),
+            }
         }
 
         // A function-style `CAST(<call> AS ty)` is the renderer's result-pin: an OUTER cast wrapping an
@@ -2579,6 +2587,43 @@ mod tests {
         assert_eq!(pin("smallint"), Some(SqlType::I16));
         // Bare `numeric` is the 128-bit-integer pin; canonical `I128`.
         assert_eq!(pin("numeric"), Some(SqlType::I128));
+    }
+
+    #[test]
+    fn pg_double_colon_result_pins_peel_like_the_function_cast() {
+        // PostgreSQL's `pg_get_viewdef` deparses a result-pin as the `::` form `(<call>)::type` (whereas
+        // the renderer writes the function-style `CAST(<call> AS type)`). Both must peel into the node's
+        // `result` so a view read back from the catalog round-trips — the `::` form is what a real PG view
+        // introspection feeds `read_view_query`.
+        assert_eq!(
+            low("(sum(q0_0.\"amount\"))::bigint", SqlDialect::Postgres).unwrap(),
+            ExprNode::Aggregate {
+                func: AggregateFunc::Sum,
+                distinct: false,
+                operand: b(col("amount")),
+                result: Some(SqlType::I64),
+            }
+        );
+        assert_eq!(
+            low(
+                "(EXTRACT(YEAR FROM q0_0.\"created\"))::integer",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::Extract {
+                field: DateField::Year,
+                operand: b(col("created")),
+                result: Some(SqlType::I32),
+                timezone: None,
+            }
+        );
+        // A `::` cast on a bare column is still a general cast, not a pin → not lowered (unchanged).
+        assert!(matches!(
+            low("(q0_0.\"amount\")::bigint", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // A redundant literal `::` cast is still recovered (unchanged).
+        assert_eq!(low("(0)::numeric", SqlDialect::Postgres).unwrap(), lit("0"));
     }
 
     #[test]
