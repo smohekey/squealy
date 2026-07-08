@@ -1525,10 +1525,16 @@ fn lower_case(
 /// Recovers the per-branch result-pin cast shared by `CASE`/`COALESCE`/`NULLIF` branch values.
 ///
 /// The renderer wraps each branch value in `CAST(<value> AS <result>)` — for `CASE` whenever `result`
-/// is set, and for `COALESCE`/`NULLIF` only when *every* operand is an inlined literal (`literal_only`).
-/// So: if *every* value is such a cast (with one consistent, invertible target type) the values are the
-/// bare inners and `result` is `Some(ty)`; if *none* is, `result` is `None` and the values lower as-is.
-/// A partial mix, or branches cast to differing types, is outside the emitted grammar (`NotYetLowered`).
+/// is set, and for `COALESCE`/`NULLIF` only when *every* operand is an inlined literal (`literal_only`) —
+/// so a genuine result-pin casts *every* branch, uniformly, to one type. Two cases:
+///
+/// - **Every branch is a cast to one consistent type** → the pin: the values are the bare inners and
+///   `result` is `Some(ty)`.
+/// - **Otherwise** → `result` is `None` and the values lower as-is. PostgreSQL's `pg_get_viewdef` still
+///   wraps a bare *literal* branch in a redundant `::type` cast (`(0)::bigint`) even in an un-pinned
+///   expression, so a `::` literal cast on *some* (not all) branches is deparse noise, not a mixed pin —
+///   `lower` strips it to the bare literal. A *function-style* cast, or a non-redundant `::` cast, on some
+///   but not all branches is a genuine mix the renderer never emits → `NotYetLowered`.
 fn recover_branch_casts(
     values: &[&Expr],
     dialect: SqlDialect,
@@ -1537,8 +1543,9 @@ fn recover_branch_casts(
     if values.is_empty() {
         return Ok((Vec::new(), None));
     }
-    // Classify each value: `Some((inner, ty))` if it is a recoverable per-branch cast, else `None`.
-    let classified: Vec<Option<(&Expr, SqlType)>> = values
+    // A per-branch cast the renderer could have emitted: `CAST(v AS ty)` (or pg's `(v)::ty` deparse) with
+    // an invertible target and — for `COALESCE`/`NULLIF` — a literal operand.
+    let casts: Vec<Option<(&Expr, SqlType)>> = values
         .iter()
         .map(|value| match as_function_cast(value) {
             Some((inner, data_type)) if !literal_only || is_inlined_literal(inner) => {
@@ -1548,35 +1555,49 @@ fn recover_branch_casts(
         })
         .collect();
 
-    let pinned = classified.iter().filter(|entry| entry.is_some()).count();
-    if pinned == 0 {
-        // No branch is a recoverable cast — an un-pinned node; lower the values verbatim.
-        let args = values
+    // Case A — every branch is a cast: the renderer's uniform result-pin. Require one consistent type.
+    if casts.iter().all(Option::is_some) {
+        let ty = casts[0].as_ref().expect("all cast").1.clone();
+        if casts
             .iter()
-            .map(|value| lower(value, dialect))
+            .any(|entry| entry.as_ref().expect("all cast").1 != ty)
+        {
+            return Err(not_yet(
+                "CASE/COALESCE/NULLIF branches cast to differing types",
+            ));
+        }
+        let args = casts
+            .iter()
+            .map(|entry| lower(entry.as_ref().expect("all cast").0, dialect))
             .collect::<Result<_, _>>()?;
-        return Ok((args, None));
+        return Ok((args, Some(ty)));
     }
-    if pinned != values.len() {
-        return Err(not_yet(
-            "CASE/COALESCE/NULLIF with mixed cast and un-cast branches",
-        ));
+
+    // Case B — not a uniform pin. A cast on only some branches is tolerated only when it is PostgreSQL's
+    // redundant `::type` deparse of a bare literal (`(0)::bigint`); anything else is a genuine mix.
+    for (value, cast) in values.iter().zip(&casts) {
+        if cast.is_some() && !is_redundant_double_colon_literal(value) {
+            return Err(not_yet(
+                "CASE/COALESCE/NULLIF with mixed cast and un-cast branches",
+            ));
+        }
     }
-    // Every branch is cast: require one consistent target type (the renderer pins all to `result`).
-    let ty = classified[0].as_ref().expect("all pinned").1.clone();
-    if classified
+    // Every cast branch is a redundant `::` literal (deparse noise); lower verbatim — `lower` strips it.
+    let args = values
         .iter()
-        .any(|entry| entry.as_ref().expect("all pinned").1 != ty)
-    {
-        return Err(not_yet(
-            "CASE/COALESCE/NULLIF branches cast to differing types",
-        ));
-    }
-    let args = classified
-        .iter()
-        .map(|entry| lower(entry.as_ref().expect("all pinned").0, dialect))
+        .map(|value| lower(value, dialect))
         .collect::<Result<_, _>>()?;
-    Ok((args, Some(ty)))
+    Ok((args, None))
+}
+
+/// Whether `value` is PostgreSQL's `pg_get_viewdef` redundant `::type` cast on a bare literal
+/// (`(0)::bigint`) — deparse noise a caller can strip to the bare literal, not a result-pin.
+fn is_redundant_double_colon_literal(value: &Expr) -> bool {
+    matches!(
+        value,
+        Expr::Cast { kind: CastKind::DoubleColon, expr, data_type, .. }
+            if redundant_cast_literal(strip_nested(expr), data_type).is_some()
+    )
 }
 
 /// If `expr` is a per-branch result-pin cast, returns `(inner, ty)`; else `None`. Recognizes both the
@@ -1698,8 +1719,19 @@ fn date_trunc_unit(expr: &Expr) -> Result<DateField, ReadError> {
 }
 
 /// Reads a single-quoted string literal's content; any other expression is outside the grammar.
+/// PostgreSQL's `pg_get_viewdef` deparses a bare string argument (e.g. a `date_trunc` unit) with a
+/// redundant `::text` cast (`'day'::text`) — that no-op text cast is peeled first.
 fn string_literal(expr: &Expr) -> Result<String, ReadError> {
-    match strip_nested(expr) {
+    let expr = match strip_nested(expr) {
+        Expr::Cast {
+            kind: CastKind::DoubleColon,
+            expr,
+            data_type,
+            ..
+        } if is_unbounded_text_type(data_type) => strip_nested(expr),
+        other => other,
+    };
+    match expr {
         Expr::Value(value) => match &value.value {
             Value::SingleQuotedString(text) => Ok(text.clone()),
             other => Err(not_yet(format!("non-string literal `{other}`"))),
@@ -3043,6 +3075,19 @@ mod tests {
                 timezone: Some("UTC".to_owned()),
             }
         );
+        // `pg_get_viewdef` deparses the unit (and tz) string with a redundant `::text` cast; peel it.
+        assert_eq!(
+            low(
+                "date_trunc('day'::text, q0_0.\"created\", 'UTC'::text)",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::DateTrunc {
+                unit: DateField::Day,
+                operand: b(col("created")),
+                timezone: Some("UTC".to_owned()),
+            }
+        );
     }
 
     #[test]
@@ -3125,7 +3170,7 @@ mod tests {
             .unwrap(),
             ExprNode::SimpleCase { .. }
         ));
-        // A branch-cast mix (one branch cast, one not) is outside the emitted grammar.
+        // A branch-cast mix (one branch a *function-style* cast, one not) is outside the emitted grammar.
         assert!(matches!(
             low(
                 "COALESCE(CAST(1 AS bigint), q0_0.\"amount\")",
@@ -3133,6 +3178,40 @@ mod tests {
             ),
             Err(ReadError::NotYetLowered(_))
         ));
+        // But `pg_get_viewdef` wraps a bare LITERAL branch in a redundant `::type` cast even in an
+        // un-pinned expression (`COALESCE(amount, (0)::bigint)`); that is deparse noise, not a mixed pin,
+        // so it lowers to the bare literal with `result: None` (matching the renderer's `COALESCE(amount, 0)`).
+        assert_eq!(
+            low(
+                "COALESCE(q0_0.\"amount\", (0)::bigint)",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::Coalesce {
+                args: vec![col("amount"), lit("0")],
+                result: None,
+            }
+        );
+        // The deparsed `::` form of a genuine all-branch pin still recovers `result` (round-2 case).
+        assert_eq!(
+            low(
+                "CASE WHEN (q0_0.\"cnt\" > 10) THEN (q0_0.\"cnt\")::bigint ELSE (0)::bigint END",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::Case {
+                arms: vec![CaseArm {
+                    when: b(ExprNode::Compare {
+                        op: CompareOp::GreaterThan,
+                        left: b(col("cnt")),
+                        right: b(lit("10")),
+                    }),
+                    then: b(col("cnt")),
+                }],
+                else_: Some(b(lit("0"))),
+                result: Some(SqlType::I64),
+            }
+        );
     }
 
     #[test]
