@@ -46,11 +46,11 @@
 //! a parser limitation, tracked separately, not a lowering gap.
 
 use sqlparser::ast::{
-    BinaryOperator, CaseWhen, CastKind, CeilFloorKind, CreateView, DataType, DateTimeField,
-    Distinct, DuplicateTreatment, Expr, ExtractSyntax, Function, FunctionArg, FunctionArgExpr,
-    FunctionArguments, GroupByExpr, Join, JoinConstraint, JoinOperator, LimitClause, ObjectName,
-    OrderBy, OrderByExpr, OrderByKind, Query, Select, SelectFlavor, SelectItem, SetExpr,
-    TableAlias, TableFactor, UnaryOperator, Value, WindowType,
+    BinaryOperator, CaseWhen, CastKind, CeilFloorKind, CreateTableOptions, CreateView, DataType,
+    DateTimeField, Distinct, DuplicateTreatment, Expr, ExtractSyntax, Function, FunctionArg,
+    FunctionArgExpr, FunctionArguments, GroupByExpr, Join, JoinConstraint, JoinOperator,
+    LimitClause, ObjectName, OrderBy, OrderByExpr, OrderByKind, Query, Select, SelectFlavor,
+    SelectItem, SetExpr, TableAlias, TableFactor, UnaryOperator, Value, WindowType,
 };
 use squealy_ir::{
     AggregateFunc, ArithmeticOp, CaseArm, CompareOp, DateField, ExprNode, JoinItem, JoinKind,
@@ -94,6 +94,12 @@ pub fn lower_create_view(
     create_view: &CreateView,
     dialect: SqlDialect,
 ) -> Result<ViewQueryModel, ReadError> {
+    // The renderer emits only `CREATE [OR REPLACE] VIEW <name> [(cols)] AS <select>`. A modifier it never
+    // emits (`MATERIALIZED`, `TEMPORARY`, `SECURE`, `IF NOT EXISTS`, `WITH (…)` options, `CLUSTER BY`, a
+    // comment, …) carries semantics the body-only `ViewQueryModel` cannot hold — reject it, else a caller
+    // re-rendering the body as a plain `CREATE VIEW` would silently drop those semantics.
+    reject_unsupported_view_modifiers(create_view)?;
+
     // The declared column names (`fold_ident` so a quoted name stays case-exact) name the outputs
     // positionally; an empty list means the projections carry their own `AS` aliases instead.
     let names: Vec<String> = create_view
@@ -136,6 +142,53 @@ fn lower_query_inner(
 
 fn not_yet(what: impl std::fmt::Display) -> ReadError {
     ReadError::NotYetLowered(what.to_string())
+}
+
+/// Rejects `CREATE VIEW` modifiers the renderer never emits and the body-only [`ViewQueryModel`] cannot
+/// carry (`MATERIALIZED`, `TEMPORARY`, `SECURE`, `IF NOT EXISTS`, `WITH (…)` options, `CLUSTER BY`, a
+/// view comment, a `TO`/params target, …). `OR REPLACE` is accepted — the renderer emits it and it does
+/// not change the body (whether to re-create is a plan-time choice, not part of the model).
+fn reject_unsupported_view_modifiers(create_view: &CreateView) -> Result<(), ReadError> {
+    let CreateView {
+        or_alter,
+        materialized,
+        secure,
+        options,
+        cluster_by,
+        comment,
+        with_no_schema_binding,
+        if_not_exists,
+        temporary,
+        copy_grants,
+        to,
+        params,
+        // Accepted / body-irrelevant: `or_replace` (emitted), `name`/`columns`/`query` (consumed),
+        // `name_before_not_exists` (a spelling detail).
+        or_replace: _,
+        name: _,
+        name_before_not_exists: _,
+        columns: _,
+        query: _,
+    } = create_view;
+    let unsupported = *or_alter
+        || *materialized
+        || *secure
+        || *with_no_schema_binding
+        || *if_not_exists
+        || *temporary
+        || *copy_grants
+        || to.is_some()
+        || params.is_some()
+        || comment.is_some()
+        || !cluster_by.is_empty()
+        || !matches!(options, CreateTableOptions::None);
+    if unsupported {
+        return Err(not_yet(
+            "CREATE VIEW modifier (MATERIALIZED / TEMPORARY / SECURE / IF NOT EXISTS / WITH options / \
+             CLUSTER BY / comment / TO)",
+        ));
+    }
+    Ok(())
 }
 
 fn b(node: ExprNode) -> Box<ExprNode> {
@@ -1964,23 +2017,26 @@ fn lower_limit_offset(
             if !limit_by.is_empty() {
                 return Err(not_yet("LIMIT … BY (…)"));
             }
+            let offset = offset
+                .as_ref()
+                .map(|offset| integer_literal(&offset.value))
+                .transpose()?;
             // MySQL renders an offset-only view as `LIMIT <u64::MAX> OFFSET n` (it has no bare `OFFSET`);
             // that max-u64 limit is the "all rows" sentinel, not a real bound, so recover it to
             // `limit: None` — else an offset-only view would carry `Some(u64::MAX)` and never re-plan to
-            // empty.
+            // empty. Gate on an `OFFSET` being present: a *bare* `LIMIT <u64::MAX>` is the renderer's output
+            // for a genuine — if absurd — `Some(usize::MAX)` limit, which must round-trip unchanged.
             let limit = match limit {
                 Some(expr)
-                    if dialect == SqlDialect::Mysql && is_number(expr, MYSQL_NO_LIMIT_SENTINEL) =>
+                    if dialect == SqlDialect::Mysql
+                        && offset.is_some()
+                        && is_number(expr, MYSQL_NO_LIMIT_SENTINEL) =>
                 {
                     None
                 }
                 Some(expr) => Some(integer_literal(expr)?),
                 None => None,
             };
-            let offset = offset
-                .as_ref()
-                .map(|offset| integer_literal(&offset.value))
-                .transpose()?;
             Ok((limit, offset))
         }
         // MySQL's `LIMIT <offset>, <limit>`; the renderer emits the `LIMIT … OFFSET …` form instead.
@@ -3088,6 +3144,15 @@ mod tests {
         .unwrap();
         assert_eq!(bounded.limit, Some(10));
         assert_eq!(bounded.offset, Some(5));
+        // A *bare* `LIMIT <u64::MAX>` (no OFFSET) is the renderer's output for a genuine `Some(usize::MAX)`
+        // limit, not the offset-only sentinel — it must round-trip unchanged, not collapse to `None`.
+        let bare_max = low_query(
+            "SELECT q0_0.`id` AS id FROM `events` AS q0_0 LIMIT 18446744073709551615",
+            SqlDialect::Mysql,
+        )
+        .unwrap();
+        assert_eq!(bare_max.limit, Some(18446744073709551615));
+        assert_eq!(bare_max.offset, None);
     }
 
     #[test]
@@ -3146,6 +3211,23 @@ mod tests {
             ),
             Err(ReadError::NotYetLowered(_))
         ));
+        // A `CREATE VIEW` modifier the renderer never emits (here `MATERIALIZED`) is rejected, not lowered
+        // as an ordinary view (which would drop the materialized semantics on re-render).
+        assert!(matches!(
+            low_query(
+                "CREATE MATERIALIZED VIEW v AS SELECT 1 AS n",
+                SqlDialect::Postgres
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // `OR REPLACE` is accepted — the renderer emits it and it does not change the body.
+        assert!(
+            low_query(
+                "CREATE OR REPLACE VIEW v AS SELECT 1 AS n",
+                SqlDialect::Postgres
+            )
+            .is_ok()
+        );
         // A query-level clause the model cannot hold is rejected, not silently dropped: `FETCH` and
         // `FOR UPDATE` (both attach to the `Query`, which this path otherwise only reads ORDER/LIMIT from).
         assert!(matches!(
