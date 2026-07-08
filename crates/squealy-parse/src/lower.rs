@@ -2012,14 +2012,45 @@ fn split_object_name(name: &ObjectName) -> Result<(Option<String>, String), Read
 
 /// The required source alias — the renderer always binds `<source> AS <alias>` so columns qualify with
 /// the alias. A missing alias, or one carrying column aliases (`t (a, b)`), is outside that grammar.
+///
+/// The renderer emits the alias UNQUOTED (`AS {alias}`) and every qualified column as `{alias}.col`, so
+/// the alias must be a bare identifier that re-emits and re-parses unquoted unchanged — squealy's
+/// generated `q0_0`-style aliases are. An alias that needs quotes (special characters, mixed case — an
+/// unquoted identifier parses case-folded — or a reserved word) would re-render as invalid or different
+/// SQL, so it is left `NotYetLowered` (only externally-authored views use such aliases).
 fn table_alias(alias: Option<&TableAlias>) -> Result<String, ReadError> {
     match alias {
         Some(alias) if alias.columns.is_empty() && alias.at.is_none() => {
-            Ok(fold_ident(&alias.name))
+            let name = fold_ident(&alias.name);
+            if is_bare_unquoted_alias(&name) {
+                Ok(name)
+            } else {
+                Err(not_yet(format!(
+                    "source alias `{}` is not a bare unquoted identifier",
+                    alias.name
+                )))
+            }
         }
         Some(_) => Err(not_yet("source alias with column aliases")),
         None => Err(not_yet("un-aliased FROM source")),
     }
+}
+
+/// Whether `name` re-emits (and re-parses) unchanged as an unquoted SQL identifier: ASCII, starts with a
+/// lowercase letter or `_`, continues with lowercase letters / digits / `_`, and is not a keyword. An
+/// unquoted identifier parses case-folded to lowercase, so a mixed-case name would not round-trip; a
+/// special character would need quotes; a keyword unquoted is a syntax error. Matches squealy's generated
+/// `q0_0`-style aliases.
+fn is_bare_unquoted_alias(name: &str) -> bool {
+    let mut chars = name.chars();
+    let starts = matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_lowercase());
+    let regular = starts && chars.all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit());
+    // `ALL_KEYWORDS` is uppercase and sorted; reject any alias that collides with a keyword (conservative
+    // — some are non-reserved, but squealy never emits a keyword alias).
+    regular
+        && sqlparser::keywords::ALL_KEYWORDS
+            .binary_search(&name.to_ascii_uppercase().as_str())
+            .is_err()
 }
 
 /// Lowers a single [`Join`] into a [`JoinItem`], mapping the join operator to a [`JoinKind`] and the
@@ -3466,6 +3497,29 @@ mod tests {
         assert!(matches!(
             low_query(
                 "SELECT q0_0.\"id\" AS id FROM \"public\".\"a\" AS q0_0 FOR UPDATE",
+                SqlDialect::Postgres
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // A source alias the renderer could not re-emit unquoted is rejected (it emits `AS {alias}` bare):
+        // a special-character alias, a mixed-case alias (unquoted parses case-folded), and a reserved word.
+        assert!(matches!(
+            low_query(
+                "SELECT \"q-1\".\"id\" AS id FROM \"public\".\"a\" AS \"q-1\"",
+                SqlDialect::Postgres
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low_query(
+                "SELECT \"Q0\".\"id\" AS id FROM \"public\".\"a\" AS \"Q0\"",
+                SqlDialect::Postgres
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low_query(
+                "SELECT \"select\".\"id\" AS id FROM \"public\".\"a\" AS \"select\"",
                 SqlDialect::Postgres
             ),
             Err(ReadError::NotYetLowered(_))
