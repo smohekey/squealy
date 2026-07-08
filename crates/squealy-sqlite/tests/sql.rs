@@ -555,11 +555,11 @@ fn id_view(name: &str, from: &str, filter: Option<squealy::ExprNode>) -> squealy
                 output_name: "id".to_owned(),
                 expr: view_col("id"),
             }],
-            from: Some(squealy::SourceRef {
+            from: Some(squealy::SourceItem::Named(squealy::SourceRef {
                 schema: Some("app".to_owned()),
                 name: from.to_owned(),
                 alias: "q0_0".to_owned(),
-            }),
+            })),
             joins: Vec::new(),
             filter,
             group_by: Vec::new(),
@@ -659,8 +659,8 @@ fn render_create_renders_view_expression_ir_in_sqlite_dialect() {
     // the query layer uses: `length` (not `CHAR_LENGTH`), `substr(s, start, len)` (not the standard
     // `SUBSTRING(s FROM start FOR len)`), and `||` concat (not `CONCAT`).
     use squealy::{
-        DatabaseModel, ExprNode, ProjectionItem, ScalarFunc, SchemaModel, SourceRef, SqlType,
-        ViewColumnModel, ViewModel, ViewQueryModel,
+        DatabaseModel, ExprNode, ProjectionItem, ScalarFunc, SchemaModel, SourceItem, SourceRef,
+        SqlType, ViewColumnModel, ViewModel, ViewQueryModel,
     };
 
     let scalar = |func: ScalarFunc, args: Vec<ExprNode>| ExprNode::ScalarFn { func, args };
@@ -705,11 +705,11 @@ fn render_create_renders_view_expression_ir_in_sqlite_dialect() {
                             ),
                         },
                     ],
-                    from: Some(SourceRef {
+                    from: Some(SourceItem::Named(SourceRef {
                         schema: Some("app".to_owned()),
                         name: "users".to_owned(),
                         alias: "q0_0".to_owned(),
-                    }),
+                    })),
                     joins: Vec::new(),
                     filter: None,
                     group_by: Vec::new(),

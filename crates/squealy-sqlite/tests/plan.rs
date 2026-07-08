@@ -8,8 +8,8 @@
 use squealy::{
     ColumnModel, CompareOp, Constraint, DatabaseModel, DatabasePlan, DatabasePlanStep, DdlExecutor,
     ExprNode, ForeignKeyAction, ForeignKeyModel, IdentityMode, IdentityModel, IndexModel,
-    ProjectionItem, SchemaBackend, SchemaModel, SourceRef, SqlType, TableModel, ViewColumnModel,
-    ViewModel, ViewQueryModel,
+    ProjectionItem, SchemaBackend, SchemaModel, SourceItem, SourceRef, SqlType, TableModel,
+    ViewColumnModel, ViewModel, ViewQueryModel,
 };
 use squealy_model::{
     CastColumn, DiffPolicy, PlanApplyOptions, RefactorLog, RefactorOperation, RenameColumn,
@@ -100,11 +100,11 @@ fn active_widgets_view() -> ViewModel {
                 output_name: "id".to_owned(),
                 expr: widget_col("id"),
             }],
-            from: Some(SourceRef {
+            from: Some(SourceItem::Named(SourceRef {
                 schema: None,
                 name: "widgets".to_owned(),
                 alias: "q0_0".to_owned(),
-            }),
+            })),
             joins: Vec::new(),
             filter: Some(ExprNode::Compare {
                 op: CompareOp::GreaterThan,
@@ -1428,11 +1428,11 @@ async fn replanning_an_unchanged_view_is_not_destructive() {
                     },
                 },
             ],
-            from: Some(SourceRef {
+            from: Some(SourceItem::Named(SourceRef {
                 schema: None,
                 name: "people".to_owned(),
                 alias: "q0_0".to_owned(),
-            }),
+            })),
             joins: Vec::new(),
             filter: None,
             group_by: Vec::new(),
@@ -1664,11 +1664,11 @@ async fn renaming_a_table_and_reusing_its_name_for_a_view_succeeds() {
     // v2 renames x→y and adds a view `x` over the renamed table `y`.
     let mut view_x = active_widgets_view();
     view_x.name = "x".to_owned();
-    view_x.query.from = Some(SourceRef {
+    view_x.query.from = Some(SourceItem::Named(SourceRef {
         schema: None,
         name: "y".to_owned(),
         alias: "q0_0".to_owned(),
-    });
+    }));
     let v2 = DatabaseModel {
         schemas: vec![SchemaModel {
             name: None,
@@ -1776,11 +1776,11 @@ async fn renaming_a_table_and_reusing_its_name_for_a_view_case_insensitively_suc
 
     let mut view_thing = active_widgets_view();
     view_thing.name = "thing".to_owned();
-    view_thing.query.from = Some(SourceRef {
+    view_thing.query.from = Some(SourceItem::Named(SourceRef {
         schema: None,
         name: "renamed".to_owned(),
         alias: "q0_0".to_owned(),
-    });
+    }));
     let v2 = DatabaseModel {
         schemas: vec![SchemaModel {
             name: None,

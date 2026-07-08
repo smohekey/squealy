@@ -1,8 +1,8 @@
 use squealy_model::{
     ChangeRisk, CheckModel, ColumnModel, Constraint, DatabaseDiffChange, DatabaseModel,
     DefaultValue, DiffPolicy, ExprNode, ForeignKeyAction, ForeignKeyModel, IndexModel,
-    ProjectionItem, SchemaModel, SourceRef, SqlType, TableDiffChange, TableModel, ViewColumnModel,
-    ViewModel, ViewQueryModel, check_diff_policy, diff_models,
+    ProjectionItem, SchemaModel, SourceItem, SourceRef, SqlType, TableDiffChange, TableModel,
+    ViewColumnModel, ViewModel, ViewQueryModel, check_diff_policy, diff_models,
 };
 
 #[test]
@@ -438,11 +438,11 @@ fn dep_view(name: &str, from: &str) -> ViewModel {
                     column: "id".to_owned(),
                 },
             }],
-            from: Some(SourceRef {
+            from: Some(SourceItem::Named(SourceRef {
                 schema: Some("public".to_owned()),
                 name: from.to_owned(),
                 alias: "q0_0".to_owned(),
-            }),
+            })),
             joins: Vec::new(),
             filter: None,
             group_by: Vec::new(),

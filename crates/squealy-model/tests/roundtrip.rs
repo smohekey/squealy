@@ -101,12 +101,12 @@ fn events_table() -> TableModel {
     )
 }
 
-fn events_source() -> SourceRef {
-    SourceRef {
+fn events_source() -> SourceItem {
+    SourceItem::Named(SourceRef {
         schema: Some("public".to_owned()),
         name: "events".to_owned(),
         alias: ALIAS.to_owned(),
-    }
+    })
 }
 
 fn proj(output_name: &str, expr: ExprNode) -> ProjectionItem {
@@ -435,6 +435,45 @@ fn corpus() -> Vec<(&'static str, DatabaseModel)> {
                     },
                 ),
             ]),
+        )),
+    ));
+
+    // A derived-table (subquery) FROM source: the outer view selects from `(SELECT …) AS q0_0`. This
+    // exercises the `SourceItem::Derived` IR widening end to end (render → parse → lower → render), incl.
+    // the inner body's own `FROM`/`WHERE` and its aliased projections.
+    let inner_col = |column: &str| ExprNode::Column {
+        alias: "q1_0".to_owned(),
+        column: column.to_owned(),
+    };
+    cases.push((
+        "view/derived-table",
+        schema_with_view(view(
+            "v_derived",
+            vec![("id", SqlType::I32), ("cnt", SqlType::I64)],
+            ViewQueryModel {
+                projection: vec![proj("id", col("id")), proj("cnt", col("cnt"))],
+                from: Some(SourceItem::Derived {
+                    query: Box::new(ViewQueryModel {
+                        projection: vec![
+                            proj("id", inner_col("id")),
+                            proj("cnt", inner_col("cnt")),
+                        ],
+                        from: Some(SourceItem::Named(SourceRef {
+                            schema: Some("public".to_owned()),
+                            name: "events".to_owned(),
+                            alias: "q1_0".to_owned(),
+                        })),
+                        filter: Some(ExprNode::Compare {
+                            op: CompareOp::GreaterThan,
+                            left: b(inner_col("cnt")),
+                            right: b(lit("0")),
+                        }),
+                        ..ViewQueryModel::default()
+                    }),
+                    alias: "q0_0".to_owned(),
+                }),
+                ..ViewQueryModel::default()
+            },
         )),
     ));
 
@@ -1087,6 +1126,6 @@ fn view_bodies_round_trip_through_each_dialect() {
         failures.len(),
         failures.join("\n\n")
     );
-    // Every view case × every backend was exercised (7 views × 3 backends).
-    assert_eq!(checked, 7 * dialects.len(), "view coverage drifted");
+    // Every view case × every backend was exercised (8 views × 3 backends).
+    assert_eq!(checked, 8 * dialects.len(), "view coverage drifted");
 }

@@ -1,7 +1,7 @@
 //! Incremental diff/plan coverage for views: adding, removing, and changing a view between the
 //! desired and actual model must produce the right plan steps and risk classification.
 
-use squealy::{ExprNode, ProjectionItem, SourceRef, ViewQueryModel};
+use squealy::{ExprNode, ProjectionItem, SourceItem, SourceRef, ViewQueryModel};
 use squealy_model::{
     ChangeRisk, DatabaseModel, DatabasePlanStep, DiffPolicy, SchemaModel, SqlType, TableModel,
     ViewColumnModel, ViewModel, classified_plan_steps, plan_models,
@@ -45,11 +45,11 @@ fn view(filter: &str, columns: &[&str]) -> ViewModel {
                     },
                 })
                 .collect(),
-            from: Some(SourceRef {
+            from: Some(SourceItem::Named(SourceRef {
                 schema: Some("public".to_owned()),
                 name: "users".to_owned(),
                 alias: "q0_0".to_owned(),
-            }),
+            })),
             joins: Vec::new(),
             // The filter is a stand-in expression that differs between view variants so the diff sees a
             // body change.
@@ -164,11 +164,11 @@ fn dropping_a_view_for_a_column_change_drops_and_recreates_its_dependents() {
     let mut desired_child = view("(q0_0.\"id\" > 0)", &["id"]);
     desired_child.name = "child".to_owned();
     // The desired child genuinely selects from parent, so the create phase orders parent before it.
-    desired_child.query.from = Some(SourceRef {
+    desired_child.query.from = Some(SourceItem::Named(SourceRef {
         schema: Some("public".to_owned()),
         name: "parent".to_owned(),
         alias: "q0_0".to_owned(),
-    });
+    }));
     let desired = model(vec![desired_parent, desired_child]);
 
     let actual = model(vec![
@@ -275,11 +275,11 @@ fn cross_schema_dependent_is_dropped_and_recreated() {
     desired_parent.name = "parent".to_owned();
     let mut desired_child = view("(q0_0.\"id\" > 0)", &["id"]);
     desired_child.name = "child".to_owned();
-    desired_child.query.from = Some(SourceRef {
+    desired_child.query.from = Some(SourceItem::Named(SourceRef {
         schema: Some("public".to_owned()),
         name: "parent".to_owned(),
         alias: "q0_0".to_owned(),
-    });
+    }));
 
     let mut actual_child = introspected_view_named("child", &["id"], &[]);
     actual_child.query.dependencies = vec![SourceRef {
@@ -439,11 +439,11 @@ fn subquery_only_view_dependency_orders_create_after_it() {
     child.query.filter = Some(ExprNode::Exists {
         negated: false,
         subquery: Box::new(ViewQueryModel {
-            from: Some(SourceRef {
+            from: Some(SourceItem::Named(SourceRef {
                 schema: Some("public".to_owned()),
                 name: "parent".to_owned(),
                 alias: "q1_0".to_owned(),
-            }),
+            })),
             ..ViewQueryModel::default()
         }),
     });

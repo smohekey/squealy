@@ -54,8 +54,8 @@ use sqlparser::ast::{
 };
 use squealy_ir::{
     AggregateFunc, ArithmeticOp, CaseArm, CompareOp, DateField, ExprNode, JoinItem, JoinKind,
-    LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem, ScalarFunc, SourceRef,
-    SqlType, ViewQueryModel, WindowFunc, WindowOrderTerm,
+    LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem, ScalarFunc, SourceItem,
+    SourceRef, SqlType, ViewQueryModel, WindowFunc, WindowOrderTerm,
 };
 
 use crate::{ReadError, SqlDialect};
@@ -1968,10 +1968,12 @@ fn bare_column_name(expr: &Expr) -> Option<String> {
     }
 }
 
-/// Lowers a named `TableFactor::Table` into a [`SourceRef`] (schema from a multi-part name, alias from
-/// the `AS`). A derived-table / function / other table factor is a later phase.
-fn lower_source(factor: &TableFactor, dialect: SqlDialect) -> Result<SourceRef, ReadError> {
-    let _ = dialect;
+/// Lowers a `FROM`/`JOIN` [`TableFactor`] into a [`SourceItem`]. A named `Table` becomes
+/// [`SourceItem::Named`] (schema from a multi-part name, alias from the `AS`); a `Derived` table (a
+/// parenthesized subquery) recursively lowers its body via [`lower_query`] into [`SourceItem::Derived`].
+/// A table function, `UNNEST`, `LATERAL`/sampled derived table, or hinted/versioned table is a later
+/// phase.
+fn lower_source(factor: &TableFactor, dialect: SqlDialect) -> Result<SourceItem, ReadError> {
     match factor {
         TableFactor::Table {
             name,
@@ -1987,13 +1989,30 @@ fn lower_source(factor: &TableFactor, dialect: SqlDialect) -> Result<SourceRef, 
         } if with_hints.is_empty() && partitions.is_empty() && index_hints.is_empty() => {
             let (schema, name) = split_object_name(name)?;
             let alias = table_alias(alias.as_ref())?;
-            Ok(SourceRef {
+            Ok(SourceItem::Named(SourceRef {
                 schema,
                 name,
                 alias,
+            }))
+        }
+        // A derived table: `(<subquery>) AS <alias>`. The alias is required and must be a bare unquoted
+        // identifier (the renderer emits it unquoted); its body lowers like any other view query, so a
+        // nested `WITH`/set-op/un-lowerable body surfaces as `NotYetLowered`. `LATERAL` and table-sample
+        // modifiers carry semantics the neutral model cannot hold.
+        TableFactor::Derived {
+            lateral: false,
+            subquery,
+            alias,
+            sample: None,
+        } => {
+            let alias = table_alias(alias.as_ref())?;
+            let query = lower_query(subquery, dialect)?;
+            Ok(SourceItem::Derived {
+                query: Box::new(query),
+                alias,
             })
         }
-        // A derived table (subquery), table function, `UNNEST`, or hinted/versioned table.
+        // A `LATERAL`/sampled derived table, table function, `UNNEST`, or hinted/versioned table.
         other => Err(not_yet(format!("FROM source `{other}`"))),
     }
 }
@@ -3312,11 +3331,11 @@ mod tests {
                         expr: col("id"),
                     },
                 ],
-                from: Some(SourceRef {
+                from: Some(SourceItem::Named(SourceRef {
                     schema: Some("public".to_owned()),
                     name: "events".to_owned(),
                     alias: "q0_0".to_owned(),
-                }),
+                })),
                 joins: Vec::new(),
                 filter: Some(ExprNode::Compare {
                     op: CompareOp::GreaterThan,
@@ -3372,11 +3391,11 @@ mod tests {
         assert_eq!(query.joins[0].kind, JoinKind::Left);
         assert_eq!(
             query.joins[0].source,
-            SourceRef {
+            SourceItem::Named(SourceRef {
                 schema: Some("public".to_owned()),
                 name: "other".to_owned(),
                 alias: "q0_1".to_owned(),
-            }
+            })
         );
         assert!(query.joins[0].on.is_some());
     }
@@ -3426,6 +3445,81 @@ mod tests {
     }
 
     #[test]
+    fn derived_table_from_source_lowers_to_a_subquery() {
+        // `FROM (<subquery>) AS q0_0` — the derived body lowers like any other view query and the alias
+        // binds it. The outer projection references the derived alias.
+        let query = low_query(
+            "SELECT q0_0.\"id\" AS id \
+             FROM (SELECT q0_1.\"id\" AS id FROM \"public\".\"events\" AS q0_1 WHERE (q0_1.\"cnt\" > 0)) \
+             AS q0_0",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        let SourceItem::Derived {
+            query: inner,
+            alias,
+        } = query.from.expect("a FROM source")
+        else {
+            panic!("expected a derived FROM source");
+        };
+        assert_eq!(alias, "q0_0");
+        assert_eq!(inner.projection.len(), 1);
+        assert_eq!(inner.projection[0].output_name, "id");
+        assert_eq!(
+            inner.from,
+            Some(SourceItem::Named(SourceRef {
+                schema: Some("public".to_owned()),
+                name: "events".to_owned(),
+                alias: "q0_1".to_owned(),
+            }))
+        );
+        assert!(inner.filter.is_some());
+    }
+
+    #[test]
+    fn derived_table_in_a_join_lowers() {
+        // A derived table on the right of a `JOIN … ON`.
+        let query = low_query(
+            "SELECT q0_0.\"id\" AS id FROM \"public\".\"events\" AS q0_0 \
+             INNER JOIN (SELECT q0_1.\"id\" AS id FROM \"public\".\"other\" AS q0_1) AS q0_2 \
+             ON (q0_0.\"id\" = q0_2.\"id\")",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        assert_eq!(query.joins.len(), 1);
+        assert_eq!(query.joins[0].kind, JoinKind::Inner);
+        let SourceItem::Derived { alias, .. } = &query.joins[0].source else {
+            panic!("expected a derived join source");
+        };
+        assert_eq!(alias, "q0_2");
+        assert!(query.joins[0].on.is_some());
+    }
+
+    #[test]
+    fn a_lateral_or_set_op_derived_table_is_not_yet_lowered() {
+        // `LATERAL` carries correlation semantics the neutral model cannot hold.
+        assert!(matches!(
+            low_query(
+                "SELECT q0_0.\"id\" AS id FROM \"public\".\"a\" AS q0_1 \
+                 CROSS JOIN LATERAL (SELECT q0_1.\"id\" AS id) AS q0_0",
+                SqlDialect::Postgres
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // A set-op body *inside* a derived table is rejected by the recursive `lower_query`, same as a
+        // top-level set-op body — a later phase widens the IR for it.
+        assert!(matches!(
+            low_query(
+                "SELECT q0_0.\"id\" AS id FROM \
+                 (SELECT q1_0.\"id\" AS id FROM \"public\".\"a\" AS q1_0 \
+                  UNION SELECT q1_1.\"id\" AS id FROM \"public\".\"b\" AS q1_1) AS q0_0",
+                SqlDialect::Postgres
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+    }
+
+    #[test]
     fn view_body_shapes_outside_the_grammar_are_not_yet_lowered() {
         // A set operation (UNION) body.
         assert!(matches!(
@@ -3440,14 +3534,6 @@ mod tests {
         assert!(matches!(
             low_query(
                 "WITH c AS (SELECT 1 AS n) SELECT q0_0.\"n\" AS n FROM c AS q0_0",
-                SqlDialect::Postgres
-            ),
-            Err(ReadError::NotYetLowered(_))
-        ));
-        // A derived-table (subquery) FROM source.
-        assert!(matches!(
-            low_query(
-                "SELECT q0_0.\"id\" AS id FROM (SELECT 1 AS id) AS q0_0",
                 SqlDialect::Postgres
             ),
             Err(ReadError::NotYetLowered(_))

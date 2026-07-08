@@ -69,7 +69,9 @@ fn derived_view_lowers_its_body() {
     let model = <ActiveUserMeta as ViewDefinition>::definition(&CONN).lower();
 
     assert_eq!(model.projection.len(), 2);
-    let from = model.from.expect("FROM source");
+    let SourceItem::Named(from) = model.from.expect("FROM source") else {
+        panic!("expected a named FROM source");
+    };
     assert_eq!(from.name, "users");
     assert!(matches!(
         model.filter.expect("WHERE"),
@@ -95,7 +97,10 @@ fn database_walk_includes_views() {
     assert_eq!(view.columns[0].name, "id");
     assert_eq!(view.columns[1].name, "name");
     assert_eq!(view.query.projection.len(), 2);
-    assert_eq!(view.query.from.as_ref().unwrap().name, "users");
+    let Some(SourceItem::Named(from)) = view.query.from.as_ref() else {
+        panic!("expected a named FROM source");
+    };
+    assert_eq!(from.name, "users");
     assert!(matches!(
         view.query.filter.as_ref().unwrap(),
         ExprNode::Compare {
@@ -115,6 +120,9 @@ fn view_is_queryable_as_a_from_source() {
         .project(|(active,)| (active.id, active.name));
 
     let model = lower_view(&query);
-    assert_eq!(model.from.as_ref().unwrap().name, "active_users");
+    let Some(SourceItem::Named(from)) = model.from.as_ref() else {
+        panic!("expected a named FROM source");
+    };
+    assert_eq!(from.name, "active_users");
     assert_eq!(model.projection.len(), 2);
 }
