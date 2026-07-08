@@ -877,12 +877,13 @@ pub enum ExprNode {
     /// re-emitted verbatim: unlike [`ScalarFn`](ExprNode::ScalarFn) there is no cross-dialect name
     /// mapping, so a general function does not re-render across dialects with a different spelling.
     ///
-    /// **Invariant:** the arguments carry no direct [`Literal`](ExprNode::Literal). The reverse parser
-    /// only produces this node from an *unquoted*, *literal-free* call, because PostgreSQL synthesizes a
-    /// `::type` cast on a literal argument (`f('x')` deparses as `f('x'::text)`) and stripping that cast
-    /// to make the introspected form match could rewrite the DDL the canonical model feeds. A call with a
-    /// literal argument stays [`Raw`](ExprNode::Raw); the KDL reader rejects a literal-argument `function`
-    /// node for the same reason, so a structural `Function` never holds a literal argument.
+    /// **Invariant:** the arguments are fully structural — no direct [`Literal`](ExprNode::Literal) and no
+    /// [`Raw`](ExprNode::Raw). The reverse parser only produces this node from an *unquoted* call whose
+    /// every argument lowered structurally: PostgreSQL synthesizes a `::type` cast on a literal argument
+    /// (`f('x')` deparses as `f('x'::text)`) and stripping that cast to make the introspected form match
+    /// could rewrite the DDL the canonical model feeds, so a literal-argument call stays `Raw`; and any
+    /// unlowerable argument makes the *whole* call `Raw`. The KDL reader rejects a `function` node with a
+    /// literal or `Raw` argument for the same reason, so a structural `Function` holds neither.
     Function { name: String, args: Vec<ExprNode> },
     /// `CURRENT_TIMESTAMP`.
     Now,

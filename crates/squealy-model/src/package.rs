@@ -1754,15 +1754,21 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
                 .iter()
                 .map(|child| expr_from_node(child))
                 .collect::<Result<Vec<_>, _>>()?;
-            // A general `Function` node's arguments carry no direct literal (see the invariant on
-            // `ExprNode::Function`): the reverse parser only produces one from an unquoted, literal-free
-            // call, and stripping the `::text` cast PostgreSQL synthesizes on a literal argument to make
-            // the introspected form match could rewrite the DDL the canonical model feeds. Reject a
-            // literal-argument `function` node rather than deserialize a shape live introspection cannot
-            // reproduce (which would then churn on every publish); such a call belongs in a `raw` node.
-            if args.iter().any(|arg| matches!(arg, ExprNode::Literal(_))) {
+            // A general `Function` node's arguments are fully structural — no direct literal and no
+            // `Raw` (see the invariant on `ExprNode::Function`). The reverse parser only produces one from
+            // an unquoted call whose every argument lowered structurally: a literal argument stays outside
+            // the node (PostgreSQL synthesizes a `::text` cast on it, and stripping that to converge could
+            // rewrite the DDL the canonical model feeds), and any unlowerable argument makes the *whole*
+            // call `Raw`. Reject a `function` node outside that shape rather than deserialize one live
+            // introspection cannot reproduce (which would then churn on every publish); such a call
+            // belongs in a `raw` node.
+            if args
+                .iter()
+                .any(|arg| matches!(arg, ExprNode::Literal(_) | ExprNode::Raw(_)))
+            {
                 return Err(malformed(format!(
-                    "general function `{name}` has a literal argument; use a `raw` expression instead"
+                    "general function `{name}` must have fully structural arguments (no literal or raw); \
+                     use a `raw` expression instead"
                 )));
             }
             ExprNode::Function { name, args }
@@ -2928,14 +2934,20 @@ mod tests {
             node
         );
 
-        // A `function` node with a direct literal argument is rejected on read: live introspection can
-        // never produce such a node (a literal argument stays `Raw`), so accepting it would let a
-        // hand-authored package churn against the introspected `Raw`. It belongs in a `raw` node instead.
+        // A `function` node with a non-structural argument — a direct literal or a `Raw` — is rejected on
+        // read: live introspection can never produce such a node (a literal argument stays `Raw`, and any
+        // unlowerable argument makes the whole call `Raw`), so accepting it would let a hand-authored
+        // package churn against the introspected `Raw`. It belongs in a `raw` node instead.
         let with_literal = ExprNode::Function {
             name: "json_extract".to_owned(),
             args: vec![bare("data"), ExprNode::Literal("'$.id'".to_owned())],
         };
         assert!(expr_from_node(&expr_to_node(&with_literal)).is_err());
+        let with_raw = ExprNode::Function {
+            name: "my_func".to_owned(),
+            args: vec![ExprNode::Raw("'x'".to_owned())],
+        };
+        assert!(expr_from_node(&expr_to_node(&with_raw)).is_err());
     }
 
     #[test]
