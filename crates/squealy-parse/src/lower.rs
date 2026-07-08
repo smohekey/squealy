@@ -1138,6 +1138,10 @@ fn invert_mysql_cast_type(data_type: &DataType) -> Option<SqlType> {
         },
         // `DECIMAL(65, 0)` is the widened cast for a 128-bit int (both `I128`/`U128`); canonical `I128`.
         DataType::Decimal(PrecisionAndScale(65, 0)) => SqlType::I128,
+        // Any other `DECIMAL` is a `Decimal` pin. MySQL's cast renders bare `DECIMAL` (dropping
+        // precision/scale), so a canonical `Decimal` re-renders to the same keyword (identity holds; the
+        // exact precision is the backend PR's `canonical_view_*` job).
+        DataType::Decimal(info) => decimal_from_exact(info),
         _ => return None,
     };
     Some(ty)
@@ -1146,6 +1150,19 @@ fn invert_mysql_cast_type(data_type: &DataType) -> Option<SqlType> {
 /// Narrows a parsed fractional-seconds precision to the model's width (fsp is 0..=6).
 fn fsp(precision: Option<u64>) -> Option<u8> {
     precision.map(|p| p as u8)
+}
+
+/// A canonical [`SqlType::Decimal`] from a parsed `DECIMAL`/`NUMERIC` precision spec. A bare form (no
+/// precision) takes the `(10, 0)` default MySQL/SQLite apply; those dialects drop the precision on render
+/// (a bare `DECIMAL` / a `NUMERIC` affinity), so the canonical re-renders to the same spelling regardless.
+fn decimal_from_exact(info: &sqlparser::ast::ExactNumberInfo) -> SqlType {
+    use sqlparser::ast::ExactNumberInfo;
+    let (precision, scale) = match info {
+        ExactNumberInfo::None => (10, 0),
+        ExactNumberInfo::Precision(p) => (*p as u32, 0),
+        ExactNumberInfo::PrecisionAndScale(p, s) => (*p as u32, *s as u32),
+    };
+    SqlType::Decimal { precision, scale }
 }
 
 /// Whether a parsed temporal type carries the `with time zone` suffix (PostgreSQL `timestamptz`).
@@ -1169,15 +1186,18 @@ fn character_length(length: &sqlparser::ast::CharacterLength) -> Option<u32> {
 
 /// Inverse of SQLite's `sqlite_affinity` for the result-pin cast vocabulary. Deeply lossy — SQLite has
 /// five affinities, so every integer width is `INTEGER`, every text-like type `TEXT`, both binary widths
-/// `BLOB` — and this returns the canonical representative for each, which re-renders to the same affinity
-/// name. (A `NUMERIC` affinity comes only from a `Decimal` pin, whose precision/scale the affinity drops
-/// and cannot be recovered, so it is not inverted; SQLite compares view columns by name regardless.)
+/// `BLOB`, and a `Decimal` is `NUMERIC` — and this returns the canonical representative for each, which
+/// re-renders to the same affinity name (the exact original type is the backend PR's `canonical_view_*`
+/// job; SQLite compares view columns by name regardless).
 fn invert_sqlite_cast_type(data_type: &DataType) -> Option<SqlType> {
     match data_type {
         DataType::Integer(None) | DataType::Int(None) => Some(SqlType::I64),
         DataType::Real => Some(SqlType::F64),
         DataType::Text => Some(SqlType::Text),
         DataType::Blob(None) => Some(SqlType::Bytes),
+        // A `NUMERIC` affinity comes from a `Decimal` pin; the affinity drops the precision, so a canonical
+        // `Decimal` re-renders to the same `NUMERIC`.
+        DataType::Numeric(info) => Some(decimal_from_exact(info)),
         _ => None,
     }
 }
@@ -2830,6 +2850,45 @@ mod tests {
                 operand: b(col("n")),
                 result: Some(SqlType::I64),
             }
+        );
+    }
+
+    #[test]
+    fn decimal_result_pins_invert_to_a_canonical_decimal() {
+        // MySQL renders a `Decimal` pin as bare `DECIMAL` and SQLite as the `NUMERIC` affinity — both drop
+        // the precision/scale, so a canonical `Decimal` re-renders to the same keyword (the invariant
+        // holds; the exact precision is the backend PR's `canonical_view_*` job). Must invert, not reject.
+        let decimal = |dialect, ty: &str| match low(
+            &format!("CAST(SUM(q0_0.`n`) AS {ty})"),
+            dialect,
+        )
+        .unwrap()
+        {
+            ExprNode::Aggregate { result, .. } => result,
+            other => panic!("expected an aggregate, got: {other:?}"),
+        };
+        assert_eq!(
+            decimal(SqlDialect::Mysql, "DECIMAL"),
+            Some(SqlType::Decimal {
+                precision: 10,
+                scale: 0,
+            })
+        );
+        // `DECIMAL(65, 0)` is instead the 128-bit-int pin.
+        assert_eq!(
+            decimal(SqlDialect::Mysql, "DECIMAL(65, 0)"),
+            Some(SqlType::I128)
+        );
+        // SQLite uses double-quoted idents, so re-issue against a SQLite-quoted operand.
+        assert_eq!(
+            match low("CAST(SUM(q0_0.\"n\") AS NUMERIC)", SqlDialect::Sqlite).unwrap() {
+                ExprNode::Aggregate { result, .. } => result,
+                other => panic!("expected an aggregate, got: {other:?}"),
+            },
+            Some(SqlType::Decimal {
+                precision: 10,
+                scale: 0,
+            })
         );
     }
 
