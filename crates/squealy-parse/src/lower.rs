@@ -17,18 +17,46 @@
 //! `AND`/`OR`/`NOT`, `IS [NOT] NULL`, `IN (<list>)`, `BETWEEN`, `LIKE`/`ILIKE`, the closed
 //! scalar-function set (`LOWER`/`UPPER`/`CHAR_LENGTH`/`TRIM`/`CONCAT`/`SUBSTRING`), and any other
 //! *unquoted*-named function with no direct literal argument as a general, dialect-neutral
-//! [`ExprNode::Function`] call (`jsonb_typeof(data)`). Remaining shapes outside it (`%` modulo — no
-//! neutral node; a general `CAST` — dialect-ambiguous target names; a *quoted* function name or a
-//! function with a *direct literal argument* — folding the case or stripping pg's synthesized arg cast
-//! could change overload resolution; a wildcard/`DISTINCT`/`OVER`/qualified function argument;
-//! subqueries; `CASE`) yield [`ReadError::NotYetLowered`]. View-body lowering ([`lower_query`]) is a
-//! later phase.
+//! [`ExprNode::Function`] call (`jsonb_typeof(data)`).
+//!
+//! It additionally covers the **view-body** node set the SELECT renderer emits: aggregates
+//! (`FUNC([DISTINCT] x)`, peeling the outer `CAST(<agg> AS ty)` result-pin into `result`), `CASE` /
+//! simple `CASE` / `NULLIF` / `COALESCE` (recovering the per-branch `CAST(… AS ty)` casts into
+//! `result`), `CURRENT_TIMESTAMP[(n)]` → `Now`, `EXTRACT(<field> FROM …)` (with the `Second` `FLOOR`,
+//! the `AT TIME ZONE` operand, and the outer cast-pin), `date_trunc('unit', …)`, window functions
+//! (`FUNC(args) OVER (PARTITION BY … ORDER BY …)`), and scalar / `IN` / `EXISTS` subqueries (recursing
+//! through [`lower_query`]).
+//!
+//! [`lower_query`] reconstructs a single-`SELECT` view body into a [`ViewQueryModel`]: `DISTINCT`,
+//! projection, one named `FROM` source, `INNER`/`LEFT`/`RIGHT`/`FULL`/`CROSS` joins, `WHERE`,
+//! `GROUP BY`, `HAVING`, `ORDER BY`, and integer-literal `LIMIT`/`OFFSET`.
+//!
+//! Remaining shapes outside these (`%` modulo — no neutral node; a general `CAST` — dialect-ambiguous
+//! target names; a *quoted* function name or a function with a *direct literal argument*; a `CAST` pin
+//! whose target type this dialect's cast vocabulary cannot invert to an exact [`SqlType`]; a window
+//! `FILTER`/frame; set operations / CTEs / derived tables / comma joins; `USING`/`NATURAL` joins;
+//! non-integer `LIMIT`) yield [`ReadError::NotYetLowered`]. A query-/select-level clause the
+//! [`ViewQueryModel`] cannot hold (`FETCH`, `FOR UPDATE`, `QUALIFY`, …) is rejected up front rather than
+//! silently dropped (`reject_unsupported_clauses`).
+//!
+//! One shape is unreachable, not merely un-lowered: MySQL renders [`ExprNode::ExtractSecond`] as the
+//! composite `CAST(EXTRACT(SECOND_MICROSECOND FROM x) / 1000000.0 AS …)`, but `sqlparser` 0.62's MySQL
+//! dialect does not accept `SECOND_MICROSECOND` as an `EXTRACT` field, so that SQL fails at the *parse*
+//! step (before lowering). A MySQL view body using `extract_second()` therefore cannot round-trip yet —
+//! a parser limitation, tracked separately, not a lowering gap.
 
 use sqlparser::ast::{
-    BinaryOperator, CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArguments, Query, UnaryOperator, Value,
+    BinaryOperator, CaseWhen, CastKind, CeilFloorKind, CreateView, DataType, DateTimeField,
+    Distinct, DuplicateTreatment, Expr, ExtractSyntax, Function, FunctionArg, FunctionArgExpr,
+    FunctionArguments, GroupByExpr, Join, JoinConstraint, JoinOperator, LimitClause, ObjectName,
+    OrderBy, OrderByExpr, OrderByKind, Query, Select, SelectFlavor, SelectItem, SetExpr,
+    TableAlias, TableFactor, UnaryOperator, Value, WindowType,
 };
-use squealy_ir::{ArithmeticOp, CompareOp, ExprNode, LogicalOp, ScalarFunc, ViewQueryModel};
+use squealy_ir::{
+    AggregateFunc, ArithmeticOp, CaseArm, CompareOp, DateField, ExprNode, JoinItem, JoinKind,
+    LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem, ScalarFunc, SourceRef,
+    SqlType, ViewQueryModel, WindowFunc, WindowOrderTerm,
+};
 
 use crate::{ReadError, SqlDialect};
 
@@ -41,13 +69,69 @@ pub fn lower_expr(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadErro
     lower(expr, dialect)
 }
 
-/// Lowers a parsed `SELECT` query (a view body) into a [`ViewQueryModel`].
+/// Lowers a parsed single-`SELECT` [`Query`] (a view body, or the deparse a backend returns for a
+/// view definition) into a [`ViewQueryModel`] — the structural inverse of the SELECT renderer.
 ///
-/// Phase 0 stub: returns [`ReadError::NotYetLowered`]. View-body reconstruction (projection/from/
-/// joins/filter + view-output type inference) is a later phase.
+/// Projection output names are taken from the projection aliases (`… AS name`), the form the renderer
+/// emits for a subquery or a column-less view; a bare-column projection is named by its column. A
+/// column-listed `CREATE VIEW (cols) AS …` names its (un-aliased) projections from the column list
+/// instead — see [`lower_create_view`], which supplies them.
+///
+/// Shapes outside the single-SELECT grammar — a `WITH` clause, a set operation
+/// (`UNION`/`EXCEPT`/`INTERSECT`), a `VALUES`, a derived-table (subquery) `FROM`, comma joins
+/// (multiple `FROM` entries), `USING`/`NATURAL` joins, a wildcard projection, or a non-integer
+/// `LIMIT`/`OFFSET` — return [`ReadError::NotYetLowered`] (they land in later phases).
 pub fn lower_query(query: &Query, dialect: SqlDialect) -> Result<ViewQueryModel, ReadError> {
-    let _ = dialect;
-    Err(ReadError::NotYetLowered(format!("query body `{query}`")))
+    lower_query_inner(query, None, dialect)
+}
+
+/// Lowers a parsed `CREATE VIEW` into its body [`ViewQueryModel`]. When the statement carries a
+/// declared column list (`CREATE VIEW v (a, b) AS …`), the renderer leaves the projections un-aliased
+/// and those names identify the outputs; they are supplied here so each projection is named
+/// positionally. The view's output column *types* are not present in the SQL text (only names), so this
+/// returns just the body — the backend supplies the typed columns from its catalog.
+pub fn lower_create_view(
+    create_view: &CreateView,
+    dialect: SqlDialect,
+) -> Result<ViewQueryModel, ReadError> {
+    // The declared column names (`fold_ident` so a quoted name stays case-exact) name the outputs
+    // positionally; an empty list means the projections carry their own `AS` aliases instead.
+    let names: Vec<String> = create_view
+        .columns
+        .iter()
+        .map(|column| fold_ident(&column.name))
+        .collect();
+    let names = if names.is_empty() {
+        None
+    } else {
+        Some(names.as_slice())
+    };
+    lower_query_inner(&create_view.query, names, dialect)
+}
+
+/// The shared query-lowering core. `output_names`, when `Some`, names the projections positionally (a
+/// column-listed `CREATE VIEW`); when `None`, each projection is named by its own `AS` alias (or, for a
+/// bare column, the column name).
+fn lower_query_inner(
+    query: &Query,
+    output_names: Option<&[String]>,
+    dialect: SqlDialect,
+) -> Result<ViewQueryModel, ReadError> {
+    // A `WITH` (CTE) prelude widens the IR beyond a single SELECT — a later phase.
+    if query.with.is_some() {
+        return Err(not_yet("query with a `WITH` (CTE) clause"));
+    }
+    let select = match query.body.as_ref() {
+        SetExpr::Select(select) => select.as_ref(),
+        // Set operations, parenthesized subquery bodies, and `VALUES` are not a single SELECT.
+        SetExpr::SetOperation { .. } => {
+            return Err(not_yet("set operation (UNION/EXCEPT/INTERSECT) body"));
+        }
+        SetExpr::Query(_) => return Err(not_yet("parenthesized subquery body")),
+        SetExpr::Values(_) => return Err(not_yet("VALUES body")),
+        other => return Err(not_yet(format!("non-SELECT query body `{other}`"))),
+    };
+    lower_select(select, query, output_names, dialect)
 }
 
 fn not_yet(what: impl std::fmt::Display) -> ReadError {
@@ -185,6 +269,18 @@ fn lower(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
                 .ok_or_else(|| not_yet(format!("cast to `{data_type}`")))
         }
 
+        // A function-style `CAST(<call> AS ty)` is the renderer's result-pin: an OUTER cast wrapping an
+        // aggregate / window / `EXTRACT` so the output column's wire type is uniform across dialects.
+        // Peel the cast into the wrapped node's `result` field. A cast around anything else is a general
+        // user cast (dialect-ambiguous target spelling), still `NotYetLowered`.
+        Expr::Cast {
+            kind: CastKind::Cast,
+            expr,
+            data_type,
+            format: None,
+            array: false,
+        } => lower_result_pin(expr, data_type, dialect),
+
         // PostgreSQL deparses `x IN (a, b, c)` as `x = ANY (ARRAY[a, b, c])` and `x NOT IN (…)` as
         // `x <> ALL (ARRAY[…])`. Recover the neutral `In`. (These operators are PostgreSQL-only syntax, so
         // they never arrive on another dialect.)
@@ -231,6 +327,51 @@ fn lower(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
         }),
 
         Expr::Function(function) => lower_function(function, dialect),
+
+        // `EXTRACT(<field> FROM <operand>)` with no outer result-pin (`result: None`). `SECOND` is the
+        // fractional-seconds node; every other field is the integer `Extract`.
+        Expr::Extract {
+            field,
+            expr,
+            syntax: ExtractSyntax::From,
+        } => lower_extract(field, expr, None, dialect),
+
+        // A bare `FLOOR(EXTRACT(SECOND FROM x))` (no result-pin) is the whole-seconds `Extract` for the
+        // `Second` field (the renderer floors PostgreSQL's fractional `EXTRACT(SECOND …)`).
+        Expr::Floor {
+            expr,
+            field: CeilFloorKind::DateTimeField(DateTimeField::NoDateTime),
+        } => lower_floored_second(expr, None, dialect),
+
+        Expr::Case {
+            operand,
+            conditions,
+            else_result,
+            ..
+        } => lower_case(
+            operand.as_deref(),
+            conditions,
+            else_result.as_deref(),
+            dialect,
+        ),
+
+        // Subqueries in a scalar position, recursing through `lower_query`.
+        Expr::Subquery(query) => Ok(ExprNode::ScalarSubquery(Box::new(lower_query(
+            query, dialect,
+        )?))),
+        Expr::InSubquery {
+            expr,
+            subquery,
+            negated,
+        } => Ok(ExprNode::InSubquery {
+            negated: *negated,
+            operand: b(lower(expr, dialect)?),
+            subquery: Box::new(lower_query(subquery, dialect)?),
+        }),
+        Expr::Exists { subquery, negated } => Ok(ExprNode::Exists {
+            negated: *negated,
+            subquery: Box::new(lower_query(subquery, dialect)?),
+        }),
 
         other => Err(not_yet(format!("scalar expression `{other}`"))),
     }
@@ -629,7 +770,59 @@ fn float_cast_operand(expr: &Expr, dialect: SqlDialect) -> Option<&Expr> {
     }
 }
 
+/// Dispatches a parsed function call. A windowed call (`OVER`) becomes an [`ExprNode::Window`]; a
+/// single, unquoted aggregate / `CURRENT_TIMESTAMP` / `COALESCE` / `NULLIF` name becomes its dedicated
+/// view-body node; everything else is a scalar / general function ([`lower_scalar_function`]).
 fn lower_function(function: &Function, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
+    // A windowed call `FUNC(args) OVER (…)` — handled before the scalar guards, which reject `OVER`.
+    if let Some(over) = &function.over {
+        return lower_window(function, over, None, dialect);
+    }
+    // The view-body call forms are keyed by a single, *unquoted* function name (a quoted name is a
+    // user identifier whose case must not be folded — it falls through to the general path).
+    if let Some(name) = single_unquoted_name(function) {
+        if let Some(func) = aggregate_func(&name) {
+            return lower_aggregate(function, func, None, dialect);
+        }
+        match name.as_str() {
+            "current_timestamp" => return lower_now(function, dialect),
+            "coalesce" => return lower_coalesce(function, dialect),
+            "nullif" => return lower_nullif(function, dialect),
+            "date_trunc" => return lower_date_trunc(function, dialect),
+            _ => {}
+        }
+    }
+    lower_scalar_function(function, dialect)
+}
+
+/// The lowercased name of a call with a single, *unquoted* identifier name (`SUM`, `coalesce`); `None`
+/// for a qualified (`schema.f`) or quoted (`"MyFunc"`) name, which never denotes a built-in view-body
+/// call form.
+fn single_unquoted_name(function: &Function) -> Option<String> {
+    let ident = match function.name.0.as_slice() {
+        [part] => part.as_ident()?,
+        _ => return None,
+    };
+    if ident.quote_style.is_some() {
+        return None;
+    }
+    Some(ident.value.to_ascii_lowercase())
+}
+
+/// Maps an aggregate function name (as the renderer's `aggregate_name` spells it, case-folded) to its
+/// [`AggregateFunc`]; `None` for a non-aggregate name.
+fn aggregate_func(name: &str) -> Option<AggregateFunc> {
+    match name {
+        "count" => Some(AggregateFunc::Count),
+        "sum" => Some(AggregateFunc::Sum),
+        "avg" => Some(AggregateFunc::Avg),
+        "min" => Some(AggregateFunc::Min),
+        "max" => Some(AggregateFunc::Max),
+        _ => None,
+    }
+}
+
+fn lower_scalar_function(function: &Function, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
     // Only a bare `name(args)` call is a scalar function the renderer emits — no window (`OVER`),
     // `FILTER`, `WITHIN GROUP`, `DISTINCT`, or qualified/parameterized name.
     if function.over.is_some()
@@ -736,6 +929,1069 @@ fn pipe_is_concatenation(dialect: SqlDialect) -> bool {
     )
 }
 
+// ===== view-body node lowering (aggregate / window / CASE / EXTRACT / subquery) =====
+
+/// Peels the renderer's result-pin — an OUTER `CAST(<call> AS ty)` around an aggregate / window /
+/// `EXTRACT` — into the wrapped node's `result` field. The target `ty` is inverted from the parsed
+/// [`DataType`] via this dialect's cast vocabulary; a type the vocabulary cannot map to an exact
+/// [`SqlType`] yields `NotYetLowered` (guessing a different type would churn the re-render). A cast
+/// around anything that is *not* a pinnable call is a general user cast, also `NotYetLowered`.
+fn lower_result_pin(
+    inner: &Expr,
+    data_type: &DataType,
+    dialect: SqlDialect,
+) -> Result<ExprNode, ReadError> {
+    let ty = invert_pin_type(data_type, dialect)
+        .ok_or_else(|| not_yet(format!("cast to `{data_type}`")))?;
+    match inner {
+        // A windowed call keeps its `OVER (…)` — pin the window's result.
+        Expr::Function(function) if function.over.is_some() => {
+            let over = function.over.as_ref().expect("checked is_some");
+            lower_window(function, over, Some(ty), dialect)
+        }
+        // Only an aggregate call is otherwise pinned (a plain scalar/general function self-types).
+        Expr::Function(function) => {
+            let func = single_unquoted_name(function)
+                .as_deref()
+                .and_then(aggregate_func)
+                .ok_or_else(|| not_yet(format!("cast around function `{function}`")))?;
+            lower_aggregate(function, func, Some(ty), dialect)
+        }
+        Expr::Extract {
+            field,
+            expr,
+            syntax: ExtractSyntax::From,
+        } => lower_extract(field, expr, Some(ty), dialect),
+        Expr::Floor {
+            expr,
+            field: CeilFloorKind::DateTimeField(DateTimeField::NoDateTime),
+        } => lower_floored_second(expr, Some(ty), dialect),
+        other => Err(not_yet(format!("cast around `{other}`"))),
+    }
+}
+
+/// Inverts a parsed cast-target [`DataType`] back to the neutral [`SqlType`] this dialect's renderer
+/// would have emitted it from. Dialect-specific because each dialect spells cast types differently
+/// (`bigint` vs `SIGNED` vs `INTEGER`). Returns `None` for a spelling this inverter does not recognize,
+/// so the caller reports `NotYetLowered` rather than guess.
+///
+/// PostgreSQL's cast spellings are one-to-one for the common widths, so the inverse is *exact*. MySQL's
+/// cast vocabulary is lossy — every integer width collapses to `SIGNED` — so the inverse is a canonical
+/// representative (`SIGNED` → [`SqlType::I64`]) that re-renders to the same keyword (preserving the
+/// round-trip identity invariant) but may not equal the original narrower type structurally. SQLite's
+/// affinity names are likewise many-to-one; its canonical inverse re-renders identically.
+fn invert_pin_type(data_type: &DataType, dialect: SqlDialect) -> Option<SqlType> {
+    match dialect {
+        SqlDialect::Postgres => invert_pg_cast_type(data_type),
+        SqlDialect::Mysql => invert_mysql_cast_type(data_type),
+        SqlDialect::Sqlite => invert_sqlite_cast_type(data_type),
+        // `Generic` is not a render target, so it emits no result-pin idiom to invert.
+        SqlDialect::Generic => None,
+    }
+}
+
+/// Inverse of PostgreSQL's `write_pg_sql_type` over the whole cast vocabulary a result-pin can carry (the
+/// pin's type is the view's output column type — any [`SqlType`]). Mostly exact — each PostgreSQL keyword
+/// maps back to the `SqlType` it is rendered from — with two documented many-to-one collapses that take a
+/// canonical representative (re-rendering to the same keyword, so round-trip identity holds, though the
+/// residual narrower type is the backend PR's `canonical_view_*` job): `smallint`←`I8`/`I16`/`U8`,
+/// `integer`←`I32`/`U16`, `bigint`←`I64`/`Isize`/`U32`/`Usize`, bare `numeric`←`I128`/`U64`/`U128`. A
+/// `numeric(p, s)` is a `Decimal` and inverts exactly.
+fn invert_pg_cast_type(data_type: &DataType) -> Option<SqlType> {
+    use sqlparser::ast::ExactNumberInfo::{None as NoInfo, PrecisionAndScale};
+    let ty = match data_type {
+        DataType::Bool | DataType::Boolean => SqlType::Bool,
+        DataType::SmallInt(None) | DataType::Int2(None) => SqlType::I16,
+        DataType::Integer(None) | DataType::Int(None) | DataType::Int4(None) => SqlType::I32,
+        DataType::BigInt(None) | DataType::Int8(None) => SqlType::I64,
+        DataType::Real | DataType::Float4 => SqlType::F32,
+        DataType::DoublePrecision | DataType::Float8 => SqlType::F64,
+        DataType::Text => SqlType::Text,
+        DataType::Uuid => SqlType::Uuid,
+        DataType::JSON => SqlType::Json,
+        DataType::JSONB => SqlType::Jsonb,
+        DataType::Bytea => SqlType::Bytes,
+        DataType::Date => SqlType::Date,
+        // Bare `numeric` is the pin for a 128-bit / wide-unsigned integer (all render `numeric`); canonical
+        // `I128`. A precision/scale `numeric(p, s)` is a `Decimal` and inverts exactly.
+        DataType::Numeric(NoInfo) | DataType::Decimal(NoInfo) | DataType::Dec(NoInfo) => {
+            SqlType::I128
+        }
+        DataType::Numeric(PrecisionAndScale(p, s))
+        | DataType::Decimal(PrecisionAndScale(p, s))
+        | DataType::Dec(PrecisionAndScale(p, s)) => SqlType::Decimal {
+            precision: *p as u32,
+            scale: *s as u32,
+        },
+        DataType::Varchar(Some(length)) => SqlType::Varchar(character_length(length)?),
+        DataType::Char(Some(length)) | DataType::Character(Some(length)) => {
+            SqlType::Char(character_length(length)?)
+        }
+        DataType::Time(precision, tz) => SqlType::Time {
+            tz: is_with_time_zone(tz),
+            precision: fsp(*precision),
+        },
+        DataType::Timestamp(precision, tz) => SqlType::Timestamp {
+            tz: is_with_time_zone(tz),
+            precision: fsp(*precision),
+        },
+        _ => return None,
+    };
+    Some(ty)
+}
+
+/// Inverse of MySQL's `write_cast_type` for the result-pin cast vocabulary. Lossy: MySQL's cast keywords
+/// are many-to-one (`SIGNED` for every signed-integer width, `CHAR` for every text-like type, `BINARY`
+/// for both binary widths, `DATETIME` drops a timestamp's time zone, `DECIMAL(65, 0)` for both 128-bit
+/// ints), so this returns a canonical representative that re-renders to the same keyword (round-trip
+/// identity preserved) but is not guaranteed to equal a narrower/tz-carrying original structurally.
+/// Reconciling that residual difference so a MySQL view re-plans to empty is the MySQL backend PR's
+/// `canonical_view_*` seam. A *bare* `DECIMAL` (a `Decimal` pin, whose precision/scale the keyword drops)
+/// is not inverted — its precision cannot be recovered.
+fn invert_mysql_cast_type(data_type: &DataType) -> Option<SqlType> {
+    use sqlparser::ast::ExactNumberInfo::PrecisionAndScale;
+    let ty = match data_type {
+        DataType::Signed | DataType::SignedInteger => SqlType::I64,
+        DataType::Unsigned | DataType::UnsignedInteger => SqlType::U64,
+        DataType::Double(_) => SqlType::F64,
+        // `CHAR` is MySQL's cast keyword for every text-like type (`Text`/`Uuid`/`Json`/…); canonical `Text`.
+        DataType::Char(None) => SqlType::Text,
+        // `BINARY` covers both variable- and fixed-width binary; canonical `Bytes`.
+        DataType::Binary(None) => SqlType::Bytes,
+        DataType::Date => SqlType::Date,
+        // `DATETIME(n)`/`TIME(n)` are tz-naive casts for a `Timestamp`/`Time` pin — the canonical inverse
+        // drops the time zone (`tz: false`).
+        DataType::Datetime(precision) => SqlType::Timestamp {
+            tz: false,
+            precision: fsp(*precision),
+        },
+        DataType::Time(precision, _) => SqlType::Time {
+            tz: false,
+            precision: fsp(*precision),
+        },
+        // `DECIMAL(65, 0)` is the widened cast for a 128-bit int (both `I128`/`U128`); canonical `I128`.
+        DataType::Decimal(PrecisionAndScale(65, 0)) => SqlType::I128,
+        _ => return None,
+    };
+    Some(ty)
+}
+
+/// Narrows a parsed fractional-seconds precision to the model's width (fsp is 0..=6).
+fn fsp(precision: Option<u64>) -> Option<u8> {
+    precision.map(|p| p as u8)
+}
+
+/// Whether a parsed temporal type carries the `with time zone` suffix (PostgreSQL `timestamptz`).
+fn is_with_time_zone(tz: &sqlparser::ast::TimezoneInfo) -> bool {
+    matches!(
+        tz,
+        sqlparser::ast::TimezoneInfo::WithTimeZone | sqlparser::ast::TimezoneInfo::Tz
+    )
+}
+
+/// The integer length of a `varchar(n)`/`char(n)` cast target (in the default character unit); `None` for
+/// a `MAX` or unit-qualified length, which squealy never renders.
+fn character_length(length: &sqlparser::ast::CharacterLength) -> Option<u32> {
+    match length {
+        sqlparser::ast::CharacterLength::IntegerLength { length, unit: None } => {
+            Some(*length as u32)
+        }
+        _ => None,
+    }
+}
+
+/// Inverse of SQLite's `sqlite_affinity` for the result-pin cast vocabulary. Deeply lossy — SQLite has
+/// five affinities, so every integer width is `INTEGER`, every text-like type `TEXT`, both binary widths
+/// `BLOB` — and this returns the canonical representative for each, which re-renders to the same affinity
+/// name. (A `NUMERIC` affinity comes only from a `Decimal` pin, whose precision/scale the affinity drops
+/// and cannot be recovered, so it is not inverted; SQLite compares view columns by name regardless.)
+fn invert_sqlite_cast_type(data_type: &DataType) -> Option<SqlType> {
+    match data_type {
+        DataType::Integer(None) | DataType::Int(None) => Some(SqlType::I64),
+        DataType::Real => Some(SqlType::F64),
+        DataType::Text => Some(SqlType::Text),
+        DataType::Blob(None) => Some(SqlType::Bytes),
+        _ => None,
+    }
+}
+
+/// Lowers an aggregate call `FUNC([DISTINCT] <operand>)` into an [`ExprNode::Aggregate`]. `result` is
+/// `Some` when peeled from an outer result-pin cast, else `None` (the un-pinned `COUNT(id)` form).
+fn lower_aggregate(
+    function: &Function,
+    func: AggregateFunc,
+    result: Option<SqlType>,
+    dialect: SqlDialect,
+) -> Result<ExprNode, ReadError> {
+    // The renderer emits a bare `FUNC([DISTINCT] x)` — no `FILTER`, `WITHIN GROUP`, ordering clause, or
+    // `IGNORE NULLS`.
+    if function.filter.is_some()
+        || function.null_treatment.is_some()
+        || !function.within_group.is_empty()
+        || function.parameters != FunctionArguments::None
+    {
+        return Err(not_yet(format!("aggregate call `{function}`")));
+    }
+    let (distinct, operand) = match &function.args {
+        FunctionArguments::List(list) if list.clauses.is_empty() => {
+            let distinct = match list.duplicate_treatment {
+                None => false,
+                Some(DuplicateTreatment::Distinct) => true,
+                // The renderer never emits an explicit `ALL`.
+                Some(DuplicateTreatment::All) => {
+                    return Err(not_yet("aggregate with explicit `ALL`"));
+                }
+            };
+            match list.args.as_slice() {
+                [FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))] => {
+                    (distinct, lower(expr, dialect)?)
+                }
+                // `COUNT(*)` (wildcard) and multi-argument aggregates are outside the emitted grammar.
+                _ => return Err(not_yet(format!("aggregate arguments of `{function}`"))),
+            }
+        }
+        _ => return Err(not_yet(format!("aggregate arguments of `{function}`"))),
+    };
+    Ok(ExprNode::Aggregate {
+        func,
+        distinct,
+        operand: b(operand),
+        result,
+    })
+}
+
+/// Lowers a windowed call `FUNC(<args>) OVER (PARTITION BY … ORDER BY …)` into an [`ExprNode::Window`].
+/// A window *frame* is not yet inverted (returns `NotYetLowered`); the renderer's simple windows carry
+/// none.
+fn lower_window(
+    function: &Function,
+    over: &WindowType,
+    result: Option<SqlType>,
+    dialect: SqlDialect,
+) -> Result<ExprNode, ReadError> {
+    let spec = match over {
+        WindowType::WindowSpec(spec) => spec,
+        WindowType::NamedWindow(_) => return Err(not_yet("named window reference")),
+    };
+    if function.filter.is_some()
+        || function.null_treatment.is_some()
+        || !function.within_group.is_empty()
+        || function.parameters != FunctionArguments::None
+        || spec.window_name.is_some()
+    {
+        return Err(not_yet(format!("window call `{function}`")));
+    }
+    // A frame (`ROWS`/`RANGE BETWEEN …`) is not yet inverted.
+    if spec.window_frame.is_some() {
+        return Err(not_yet("window frame clause"));
+    }
+    let func = single_unquoted_name(function)
+        .as_deref()
+        .and_then(window_func)
+        .ok_or_else(|| not_yet(format!("window function name of `{function}`")))?;
+    let args = match &function.args {
+        FunctionArguments::None => Vec::new(),
+        FunctionArguments::List(list)
+            if list.duplicate_treatment.is_none() && list.clauses.is_empty() =>
+        {
+            list.args
+                .iter()
+                .map(|arg| match arg {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => lower(expr, dialect),
+                    other => Err(not_yet(format!("window argument `{other}`"))),
+                })
+                .collect::<Result<_, _>>()?
+        }
+        _ => return Err(not_yet(format!("window arguments of `{function}`"))),
+    };
+    let partition_by = spec
+        .partition_by
+        .iter()
+        .map(|expr| lower(expr, dialect))
+        .collect::<Result<_, _>>()?;
+    let order_by = spec
+        .order_by
+        .iter()
+        .map(|order| lower_window_order(order, dialect))
+        .collect::<Result<_, _>>()?;
+    Ok(ExprNode::Window {
+        func,
+        args,
+        partition_by,
+        order_by,
+        frame: None,
+        result,
+    })
+}
+
+/// Maps a window function name (as `window_func_name` spells it, case-folded) to its [`WindowFunc`],
+/// including an aggregate used as a window (`SUM(x) OVER (…)`).
+fn window_func(name: &str) -> Option<WindowFunc> {
+    match name {
+        "row_number" => Some(WindowFunc::RowNumber),
+        "rank" => Some(WindowFunc::Rank),
+        "dense_rank" => Some(WindowFunc::DenseRank),
+        "ntile" => Some(WindowFunc::Ntile),
+        "lag" => Some(WindowFunc::Lag),
+        "lead" => Some(WindowFunc::Lead),
+        other => aggregate_func(other).map(WindowFunc::Aggregate),
+    }
+}
+
+/// Lowers one `ORDER BY` term inside a window `OVER (…)`. The renderer always writes an explicit
+/// `ASC`/`DESC` and no `NULLS`; an omitted direction or a `NULLS` modifier is outside that grammar.
+fn lower_window_order(
+    order: &OrderByExpr,
+    dialect: SqlDialect,
+) -> Result<WindowOrderTerm, ReadError> {
+    if order.with_fill.is_some() || order.options.nulls_first.is_some() {
+        return Err(not_yet("window ORDER BY with WITH FILL / NULLS modifier"));
+    }
+    let direction = match order.options.asc {
+        Some(true) => OrderDirection::Asc,
+        Some(false) => OrderDirection::Desc,
+        None => return Err(not_yet("window ORDER BY without explicit ASC/DESC")),
+    };
+    Ok(WindowOrderTerm {
+        expr: lower(&order.expr, dialect)?,
+        direction,
+    })
+}
+
+/// Lowers `CURRENT_TIMESTAMP` / `CURRENT_TIMESTAMP(<digits>)` into [`ExprNode::Now`]. `Now` carries no
+/// precision — it is re-derived per dialect on render — so only the *exact* spelling this dialect emits is
+/// accepted: MySQL renders `CURRENT_TIMESTAMP(6)` (its `now_fractional_digits`), every other dialect the
+/// bare `CURRENT_TIMESTAMP`. A different precision (`CURRENT_TIMESTAMP(3)`, or a bare call read as MySQL)
+/// would re-render as this dialect's form and silently change the fractional-seconds precision, so it is
+/// left `NotYetLowered` rather than lowered lossily.
+fn lower_now(function: &Function, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
+    let digits = current_timestamp_digits(function)?;
+    let expected = match dialect {
+        SqlDialect::Mysql => Some(6),
+        // PostgreSQL/SQLite render `now()` as the bare keyword; `Generic` authoring is bare too.
+        SqlDialect::Postgres | SqlDialect::Sqlite | SqlDialect::Generic => None,
+    };
+    if digits == expected {
+        Ok(ExprNode::Now)
+    } else {
+        Err(not_yet(format!(
+            "CURRENT_TIMESTAMP precision `{function}` (this dialect's now() renders {})",
+            match expected {
+                Some(d) => format!("CURRENT_TIMESTAMP({d})"),
+                None => "a bare CURRENT_TIMESTAMP".to_owned(),
+            }
+        )))
+    }
+}
+
+/// The parsed precision of a `CURRENT_TIMESTAMP[(n)]` call: `None` for the bare form, `Some(n)` for an
+/// explicit integer precision. A non-integer, multi-argument, or otherwise-decorated call is outside the
+/// grammar (`NotYetLowered`).
+fn current_timestamp_digits(function: &Function) -> Result<Option<u64>, ReadError> {
+    let args = match &function.args {
+        FunctionArguments::None => return Ok(None),
+        FunctionArguments::List(list)
+            if list.duplicate_treatment.is_none() && list.clauses.is_empty() =>
+        {
+            list.args.as_slice()
+        }
+        _ => return Err(not_yet(format!("CURRENT_TIMESTAMP call `{function}`"))),
+    };
+    match args {
+        [] => Ok(None),
+        [FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value)))] => match &value.value {
+            Value::Number(number, false) => number
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|_| not_yet(format!("CURRENT_TIMESTAMP precision `{number}`"))),
+            _ => Err(not_yet(format!("CURRENT_TIMESTAMP call `{function}`"))),
+        },
+        _ => Err(not_yet(format!("CURRENT_TIMESTAMP call `{function}`"))),
+    }
+}
+
+/// Lowers `COALESCE(<args>)`, recovering the per-argument literal cast into `result` (present only when
+/// every argument is an inlined literal; see [`recover_branch_casts`]).
+fn lower_coalesce(function: &Function, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
+    let values = unnamed_args(function)?;
+    let (args, result) = recover_branch_casts(&values, dialect, true)?;
+    Ok(ExprNode::Coalesce { args, result })
+}
+
+/// Lowers `NULLIF(<left>, <right>)`, recovering the per-operand literal cast into `result` (present only
+/// when both operands are inlined literals).
+fn lower_nullif(function: &Function, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
+    let values = unnamed_args(function)?;
+    let [left, right] = values.as_slice() else {
+        return Err(not_yet(format!("NULLIF call `{function}`")));
+    };
+    let (mut args, result) = recover_branch_casts(&[left, right], dialect, true)?;
+    let right = args.pop().expect("two operands");
+    let left = args.pop().expect("two operands");
+    Ok(ExprNode::Nullif {
+        left: b(left),
+        right: b(right),
+        result,
+    })
+}
+
+/// The plain, unnamed argument expressions of a call — no `DISTINCT`, ordering clauses, or named
+/// arguments (the forms the `COALESCE`/`NULLIF` renderer never emits).
+fn unnamed_args(function: &Function) -> Result<Vec<&Expr>, ReadError> {
+    match &function.args {
+        FunctionArguments::List(list)
+            if list.duplicate_treatment.is_none() && list.clauses.is_empty() =>
+        {
+            list.args
+                .iter()
+                .map(|arg| match arg {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => Ok(expr),
+                    other => Err(not_yet(format!("function argument `{other}`"))),
+                })
+                .collect()
+        }
+        _ => Err(not_yet(format!("function arguments of `{function}`"))),
+    }
+}
+
+/// Lowers a `CASE` expression — searched ([`ExprNode::Case`], `operand: None`) or simple
+/// ([`ExprNode::SimpleCase`]). The result-pin cast wraps each `THEN`/`ELSE` value (never the `WHEN`
+/// conditions or a simple `CASE`'s operand); [`recover_branch_casts`] peels it back into `result`.
+fn lower_case(
+    operand: Option<&Expr>,
+    conditions: &[CaseWhen],
+    else_result: Option<&Expr>,
+    dialect: SqlDialect,
+) -> Result<ExprNode, ReadError> {
+    // The branch VALUES (each `THEN`, then the `ELSE`) carry the per-branch cast; recover it uniformly.
+    let mut values: Vec<&Expr> = conditions.iter().map(|when| &when.result).collect();
+    if let Some(else_value) = else_result {
+        values.push(else_value);
+    }
+    let (lowered_values, result) = recover_branch_casts(&values, dialect, false)?;
+    let mut lowered = lowered_values.into_iter();
+    let arms = conditions
+        .iter()
+        .map(|when| {
+            Ok::<_, ReadError>(CaseArm {
+                when: b(lower(&when.condition, dialect)?),
+                then: b(lowered.next().expect("one value per WHEN arm")),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let else_ = else_result.map(|_| b(lowered.next().expect("ELSE value")));
+    match operand {
+        None => Ok(ExprNode::Case {
+            arms,
+            else_,
+            result,
+        }),
+        Some(operand) => Ok(ExprNode::SimpleCase {
+            operand: b(lower(operand, dialect)?),
+            arms,
+            else_,
+            result,
+        }),
+    }
+}
+
+/// Recovers the per-branch result-pin cast shared by `CASE`/`COALESCE`/`NULLIF` branch values.
+///
+/// The renderer wraps each branch value in `CAST(<value> AS <result>)` — for `CASE` whenever `result`
+/// is set, and for `COALESCE`/`NULLIF` only when *every* operand is an inlined literal (`literal_only`).
+/// So: if *every* value is such a cast (with one consistent, invertible target type) the values are the
+/// bare inners and `result` is `Some(ty)`; if *none* is, `result` is `None` and the values lower as-is.
+/// A partial mix, or branches cast to differing types, is outside the emitted grammar (`NotYetLowered`).
+fn recover_branch_casts(
+    values: &[&Expr],
+    dialect: SqlDialect,
+    literal_only: bool,
+) -> Result<(Vec<ExprNode>, Option<SqlType>), ReadError> {
+    if values.is_empty() {
+        return Ok((Vec::new(), None));
+    }
+    // Classify each value: `Some((inner, ty))` if it is a recoverable per-branch cast, else `None`.
+    let classified: Vec<Option<(&Expr, SqlType)>> = values
+        .iter()
+        .map(|value| match as_function_cast(value) {
+            Some((inner, data_type)) if !literal_only || is_inlined_literal(inner) => {
+                invert_pin_type(data_type, dialect).map(|ty| (inner, ty))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let pinned = classified.iter().filter(|entry| entry.is_some()).count();
+    if pinned == 0 {
+        // No branch is a recoverable cast — an un-pinned node; lower the values verbatim.
+        let args = values
+            .iter()
+            .map(|value| lower(value, dialect))
+            .collect::<Result<_, _>>()?;
+        return Ok((args, None));
+    }
+    if pinned != values.len() {
+        return Err(not_yet(
+            "CASE/COALESCE/NULLIF with mixed cast and un-cast branches",
+        ));
+    }
+    // Every branch is cast: require one consistent target type (the renderer pins all to `result`).
+    let ty = classified[0].as_ref().expect("all pinned").1.clone();
+    if classified
+        .iter()
+        .any(|entry| entry.as_ref().expect("all pinned").1 != ty)
+    {
+        return Err(not_yet(
+            "CASE/COALESCE/NULLIF branches cast to differing types",
+        ));
+    }
+    let args = classified
+        .iter()
+        .map(|entry| lower(entry.as_ref().expect("all pinned").0, dialect))
+        .collect::<Result<_, _>>()?;
+    Ok((args, Some(ty)))
+}
+
+/// If `expr` is a function-style `CAST(<inner> AS <ty>)` (the shape a result-pin/per-branch cast takes),
+/// returns `(inner, ty)`; else `None`.
+fn as_function_cast(expr: &Expr) -> Option<(&Expr, &DataType)> {
+    match expr {
+        Expr::Cast {
+            kind: CastKind::Cast,
+            expr,
+            data_type,
+            format: None,
+            array: false,
+        } => Some((expr, data_type)),
+        _ => None,
+    }
+}
+
+/// Whether `expr` is an inlined SQL literal (a bare value, or a signed numeric literal `-5` which parses
+/// as unary minus over the magnitude) — the only operand kind `COALESCE`/`NULLIF` per-branch-casts.
+fn is_inlined_literal(expr: &Expr) -> bool {
+    match strip_nested(expr) {
+        Expr::Value(_) => true,
+        Expr::UnaryOp {
+            op: UnaryOperator::Minus | UnaryOperator::Plus,
+            expr,
+        } => {
+            matches!(strip_nested(expr), Expr::Value(value) if matches!(&value.value, Value::Number(_, _)))
+        }
+        _ => false,
+    }
+}
+
+/// Lowers `EXTRACT(<field> FROM <operand>)`. `SECOND` is the fractional-seconds [`ExprNode::ExtractSecond`]
+/// (bare, no `FLOOR`); every other field is the integer [`ExprNode::Extract`], whose operand may be wrapped
+/// `(… AT TIME ZONE '<tz>')`.
+fn lower_extract(
+    field: &DateTimeField,
+    operand: &Expr,
+    result: Option<SqlType>,
+    dialect: SqlDialect,
+) -> Result<ExprNode, ReadError> {
+    if *field == DateTimeField::Second {
+        // Bare `EXTRACT(SECOND …)` (no surrounding `FLOOR`) is the fractional-seconds node; its operand
+        // is never `AT TIME ZONE`-wrapped by the renderer.
+        return Ok(ExprNode::ExtractSecond {
+            operand: b(lower(operand, dialect)?),
+            result,
+        });
+    }
+    let field = map_date_field(field).ok_or_else(|| not_yet(format!("EXTRACT field `{field}`")))?;
+    let (operand, timezone) = lower_extract_operand(operand, dialect)?;
+    Ok(ExprNode::Extract {
+        field,
+        operand: b(operand),
+        result,
+        timezone,
+    })
+}
+
+/// Lowers `FLOOR(EXTRACT(SECOND FROM <operand>))` — the whole-seconds [`ExprNode::Extract`] for the
+/// `Second` field (the renderer floors PostgreSQL's fractional `EXTRACT(SECOND …)`).
+fn lower_floored_second(
+    inner: &Expr,
+    result: Option<SqlType>,
+    dialect: SqlDialect,
+) -> Result<ExprNode, ReadError> {
+    match inner {
+        Expr::Extract {
+            field: DateTimeField::Second,
+            expr,
+            syntax: ExtractSyntax::From,
+        } => {
+            let (operand, timezone) = lower_extract_operand(expr, dialect)?;
+            Ok(ExprNode::Extract {
+                field: DateField::Second,
+                operand: b(operand),
+                result,
+                timezone,
+            })
+        }
+        other => Err(not_yet(format!("FLOOR around `{other}`"))),
+    }
+}
+
+/// Lowers `date_trunc('<unit>', <operand>[, '<tz>'])` (PostgreSQL only) into [`ExprNode::DateTrunc`].
+/// The unit and the optional 3-argument timezone are string literals (not the `AT TIME ZONE` operand
+/// wrapper `EXTRACT` uses).
+fn lower_date_trunc(function: &Function, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
+    let values = unnamed_args(function)?;
+    let (unit, operand, tz) = match values.as_slice() {
+        [unit, operand] => (unit, operand, None),
+        [unit, operand, tz] => (unit, operand, Some(tz)),
+        _ => return Err(not_yet(format!("date_trunc call `{function}`"))),
+    };
+    let unit = date_trunc_unit(unit)?;
+    let timezone = tz.map(|tz| string_literal(tz)).transpose()?;
+    Ok(ExprNode::DateTrunc {
+        unit,
+        operand: b(lower(operand, dialect)?),
+        timezone,
+    })
+}
+
+/// Maps a `date_trunc` unit string literal (as `DateField::trunc_literal` spells it) back to its
+/// [`DateField`].
+fn date_trunc_unit(expr: &Expr) -> Result<DateField, ReadError> {
+    let literal = string_literal(expr)?;
+    match literal.as_str() {
+        "year" => Ok(DateField::Year),
+        "month" => Ok(DateField::Month),
+        "day" => Ok(DateField::Day),
+        "hour" => Ok(DateField::Hour),
+        "minute" => Ok(DateField::Minute),
+        "second" => Ok(DateField::Second),
+        other => Err(not_yet(format!("date_trunc unit `{other}`"))),
+    }
+}
+
+/// Reads a single-quoted string literal's content; any other expression is outside the grammar.
+fn string_literal(expr: &Expr) -> Result<String, ReadError> {
+    match strip_nested(expr) {
+        Expr::Value(value) => match &value.value {
+            Value::SingleQuotedString(text) => Ok(text.clone()),
+            other => Err(not_yet(format!("non-string literal `{other}`"))),
+        },
+        other => Err(not_yet(format!("non-literal `{other}`"))),
+    }
+}
+
+/// Maps a parsed [`DateTimeField`] to the neutral [`DateField`]; `None` for a field outside the neutral
+/// set (`Second` is handled by the caller as the fractional node).
+fn map_date_field(field: &DateTimeField) -> Option<DateField> {
+    match field {
+        DateTimeField::Year => Some(DateField::Year),
+        DateTimeField::Month => Some(DateField::Month),
+        DateTimeField::Day => Some(DateField::Day),
+        DateTimeField::Hour => Some(DateField::Hour),
+        DateTimeField::Minute => Some(DateField::Minute),
+        DateTimeField::Second => Some(DateField::Second),
+        _ => None,
+    }
+}
+
+/// Lowers an `EXTRACT`/`date_trunc` operand, recovering the `(<operand> AT TIME ZONE '<tz>')` wrapper the
+/// renderer emits for the timezone-explicit form into a `Some(tz)` timezone (else `None`).
+fn lower_extract_operand(
+    operand: &Expr,
+    dialect: SqlDialect,
+) -> Result<(ExprNode, Option<String>), ReadError> {
+    if let Expr::AtTimeZone {
+        timestamp,
+        time_zone,
+    } = strip_nested(operand)
+        && let Expr::Value(value) = strip_nested(time_zone)
+        && let Value::SingleQuotedString(tz) = &value.value
+    {
+        return Ok((lower(timestamp, dialect)?, Some(tz.clone())));
+    }
+    Ok((lower(operand, dialect)?, None))
+}
+
+// ===== single-SELECT view-body lowering =====
+
+/// Lowers a `SELECT` (with its enclosing [`Query`]'s `ORDER BY` / `LIMIT` / `OFFSET`, which attach to the
+/// query, not the select) into a [`ViewQueryModel`].
+fn lower_select(
+    select: &Select,
+    query: &Query,
+    output_names: Option<&[String]>,
+    dialect: SqlDialect,
+) -> Result<ViewQueryModel, ReadError> {
+    // A clause `ViewQueryModel` cannot represent must fail loudly, not be dropped: silently ignoring, say,
+    // a `FETCH`/`FOR UPDATE`/`QUALIFY` would re-render SQL with a different result set. (The renderer emits
+    // none of these; they arrive only from externally-authored SQL.)
+    reject_unsupported_clauses(query, select)?;
+
+    let distinct = match &select.distinct {
+        None => false,
+        Some(Distinct::Distinct) => true,
+        Some(Distinct::On(_)) => return Err(not_yet("SELECT DISTINCT ON (…)")),
+        Some(Distinct::All) => false,
+    };
+
+    // Projection. A column-listed view supplies names positionally (its projections are un-aliased);
+    // otherwise each projection is named by its `AS` alias, or a bare column by its name.
+    if let Some(names) = output_names
+        && names.len() != select.projection.len()
+    {
+        return Err(ReadError::Unexpected(format!(
+            "view column list names {} outputs but the SELECT projects {}",
+            names.len(),
+            select.projection.len()
+        )));
+    }
+    let mut projection = Vec::with_capacity(select.projection.len());
+    for (index, item) in select.projection.iter().enumerate() {
+        // The projected expression, and the name it would carry from its own `AS` alias or bare column.
+        let (expr, self_name) = match item {
+            SelectItem::UnnamedExpr(expr) => (expr, bare_column_name(expr)),
+            SelectItem::ExprWithAlias { expr, alias } => (expr, Some(fold_ident(alias))),
+            SelectItem::Wildcard(_)
+            | SelectItem::QualifiedWildcard(..)
+            | SelectItem::ExprWithAliases { .. } => {
+                return Err(not_yet(format!("projection item `{item}`")));
+            }
+        };
+        // A column-listed `CREATE VIEW (cols)` names the outputs positionally and *authoritatively* — SQL
+        // uses the declared column list even when a projection also carries an inner `AS` alias, so the
+        // list wins. Only without a column list does the projection's own alias / bare-column name it (an
+        // expression with neither needs an explicit output name and is outside the grammar).
+        let output_name = match output_names {
+            Some(names) => names[index].clone(),
+            None => self_name.ok_or_else(|| not_yet(format!("un-aliased projection `{expr}`")))?,
+        };
+        projection.push(ProjectionItem {
+            output_name,
+            expr: lower(expr, dialect)?,
+        });
+    }
+
+    // FROM: no source (`SELECT <consts>`), one named source, or — later phases — a derived table /
+    // comma joins.
+    let (from, joins) = match select.from.as_slice() {
+        [] => (None, Vec::new()),
+        [table] => {
+            let source = lower_source(&table.relation, dialect)?;
+            let joins = table
+                .joins
+                .iter()
+                .map(|join| lower_join(join, dialect))
+                .collect::<Result<_, _>>()?;
+            (Some(source), joins)
+        }
+        // Multiple comma-separated `FROM` entries are cross-products the IR does not model yet.
+        _ => return Err(not_yet("comma-separated FROM (implicit cross join)")),
+    };
+
+    let filter = select
+        .selection
+        .as_ref()
+        .map(|e| lower(e, dialect))
+        .transpose()?;
+
+    let group_by = match &select.group_by {
+        GroupByExpr::Expressions(exprs, modifiers) if modifiers.is_empty() => exprs
+            .iter()
+            .map(|e| lower(e, dialect))
+            .collect::<Result<_, _>>()?,
+        GroupByExpr::Expressions(_, _) => return Err(not_yet("GROUP BY with modifiers")),
+        GroupByExpr::All(_) => return Err(not_yet("GROUP BY ALL")),
+    };
+
+    let having = select
+        .having
+        .as_ref()
+        .map(|e| lower(e, dialect))
+        .transpose()?;
+
+    let order_by = lower_order_by(query.order_by.as_ref(), dialect)?;
+    let (limit, offset) = lower_limit_offset(query.limit_clause.as_ref(), dialect)?;
+
+    Ok(ViewQueryModel {
+        distinct,
+        projection,
+        from,
+        joins,
+        filter,
+        group_by,
+        having,
+        order_by,
+        limit,
+        offset,
+        dependencies: Vec::new(),
+    })
+}
+
+/// Rejects the query-/select-level clauses `ViewQueryModel` does not represent, so they surface as
+/// [`ReadError::NotYetLowered`] rather than being silently discarded (which would re-render different
+/// SQL). The clauses this path *does* lower — `ORDER BY`/`LIMIT`/`OFFSET` on the query, and
+/// `DISTINCT`/projection/`FROM`/`WHERE`/`GROUP BY`/`HAVING` on the select — are handled by the caller;
+/// everything else the parser can attach is enumerated here.
+fn reject_unsupported_clauses(query: &Query, select: &Select) -> Result<(), ReadError> {
+    // Query-level.
+    if query.fetch.is_some() {
+        return Err(not_yet("FETCH clause"));
+    }
+    if !query.locks.is_empty() {
+        return Err(not_yet("row-locking clause (FOR UPDATE / FOR SHARE)"));
+    }
+    if query.for_clause.is_some() {
+        return Err(not_yet("FOR clause (FOR XML / FOR JSON)"));
+    }
+    if query.settings.is_some() {
+        return Err(not_yet("SETTINGS clause"));
+    }
+    if query.format_clause.is_some() {
+        return Err(not_yet("FORMAT clause"));
+    }
+    if !query.pipe_operators.is_empty() {
+        return Err(not_yet("pipe operators"));
+    }
+    // Select-level.
+    if select.flavor != SelectFlavor::Standard {
+        return Err(not_yet("non-standard SELECT flavor (FROM-first)"));
+    }
+    if select.top.is_some() {
+        return Err(not_yet("TOP clause"));
+    }
+    if select.into.is_some() {
+        return Err(not_yet("SELECT … INTO"));
+    }
+    if !select.lateral_views.is_empty() {
+        return Err(not_yet("LATERAL VIEW"));
+    }
+    if select.prewhere.is_some() {
+        return Err(not_yet("PREWHERE clause"));
+    }
+    if !select.cluster_by.is_empty()
+        || !select.distribute_by.is_empty()
+        || !select.sort_by.is_empty()
+    {
+        return Err(not_yet("CLUSTER BY / DISTRIBUTE BY / SORT BY clause"));
+    }
+    if !select.connect_by.is_empty() {
+        return Err(not_yet("CONNECT BY clause"));
+    }
+    if !select.named_window.is_empty() {
+        return Err(not_yet("named WINDOW clause"));
+    }
+    if select.qualify.is_some() {
+        return Err(not_yet("QUALIFY clause"));
+    }
+    if select.value_table_mode.is_some() {
+        return Err(not_yet("value-table mode (AS STRUCT / AS VALUE)"));
+    }
+    if !select.optimizer_hints.is_empty() {
+        return Err(not_yet("optimizer hints"));
+    }
+    if select.select_modifiers.is_some() {
+        return Err(not_yet("SELECT modifiers"));
+    }
+    if select.exclude.is_some() {
+        return Err(not_yet("EXCLUDE clause"));
+    }
+    Ok(())
+}
+
+/// The output column name a bare-column projection carries when un-aliased (`SELECT a` → `a`,
+/// `SELECT t.a` → `a`); `None` for any expression that needs an explicit alias to be named.
+fn bare_column_name(expr: &Expr) -> Option<String> {
+    match strip_nested(expr) {
+        Expr::Identifier(ident) => Some(fold_ident(ident)),
+        Expr::CompoundIdentifier(parts) => parts.last().map(fold_ident),
+        _ => None,
+    }
+}
+
+/// Lowers a named `TableFactor::Table` into a [`SourceRef`] (schema from a multi-part name, alias from
+/// the `AS`). A derived-table / function / other table factor is a later phase.
+fn lower_source(factor: &TableFactor, dialect: SqlDialect) -> Result<SourceRef, ReadError> {
+    let _ = dialect;
+    match factor {
+        TableFactor::Table {
+            name,
+            alias,
+            args: None,
+            with_hints,
+            version: None,
+            with_ordinality: false,
+            partitions,
+            json_path: None,
+            sample: None,
+            index_hints,
+        } if with_hints.is_empty() && partitions.is_empty() && index_hints.is_empty() => {
+            let (schema, name) = split_object_name(name)?;
+            let alias = table_alias(alias.as_ref())?;
+            Ok(SourceRef {
+                schema,
+                name,
+                alias,
+            })
+        }
+        // A derived table (subquery), table function, `UNNEST`, or hinted/versioned table.
+        other => Err(not_yet(format!("FROM source `{other}`"))),
+    }
+}
+
+/// Splits a source's [`ObjectName`] into an optional schema and the table name (`fold_ident` applied so
+/// unquoted names match the renderer's re-quoting). Only bare or two-part names are lowered.
+fn split_object_name(name: &ObjectName) -> Result<(Option<String>, String), ReadError> {
+    let idents: Option<Vec<_>> = name.0.iter().map(|part| part.as_ident()).collect();
+    let idents = idents.ok_or_else(|| not_yet(format!("non-identifier source name `{name}`")))?;
+    match idents.as_slice() {
+        [table] => Ok((None, fold_ident(table))),
+        [schema, table] => Ok((Some(fold_ident(schema)), fold_ident(table))),
+        _ => Err(not_yet(format!("source name with {} parts", idents.len()))),
+    }
+}
+
+/// The required source alias — the renderer always binds `<source> AS <alias>` so columns qualify with
+/// the alias. A missing alias, or one carrying column aliases (`t (a, b)`), is outside that grammar.
+fn table_alias(alias: Option<&TableAlias>) -> Result<String, ReadError> {
+    match alias {
+        Some(alias) if alias.columns.is_empty() && alias.at.is_none() => {
+            Ok(fold_ident(&alias.name))
+        }
+        Some(_) => Err(not_yet("source alias with column aliases")),
+        None => Err(not_yet("un-aliased FROM source")),
+    }
+}
+
+/// Lowers a single [`Join`] into a [`JoinItem`], mapping the join operator to a [`JoinKind`] and the
+/// `ON` constraint (or none, for `CROSS JOIN`). `USING`/`NATURAL` joins are a later phase.
+fn lower_join(join: &Join, dialect: SqlDialect) -> Result<JoinItem, ReadError> {
+    let source = lower_source(&join.relation, dialect)?;
+    let (kind, constraint) = match &join.join_operator {
+        JoinOperator::Inner(constraint) => (JoinKind::Inner, constraint),
+        JoinOperator::Left(constraint) | JoinOperator::LeftOuter(constraint) => {
+            (JoinKind::Left, constraint)
+        }
+        JoinOperator::Right(constraint) | JoinOperator::RightOuter(constraint) => {
+            (JoinKind::Right, constraint)
+        }
+        JoinOperator::FullOuter(constraint) => (JoinKind::Full, constraint),
+        JoinOperator::CrossJoin(constraint) => (JoinKind::Cross, constraint),
+        other => return Err(not_yet(format!("join operator `{other:?}`"))),
+    };
+    let on = match (kind, constraint) {
+        // A standard `CROSS JOIN` is unconditioned. Some dialects accept `CROSS JOIN … ON`/`USING`, whose
+        // predicate the neutral `Cross` join cannot hold — reject it rather than silently drop it (which
+        // would re-render an unconstrained Cartesian product).
+        (JoinKind::Cross, JoinConstraint::None) => None,
+        (JoinKind::Cross, _) => return Err(not_yet("CROSS JOIN with an ON/USING condition")),
+        (_, JoinConstraint::On(expr)) => Some(lower(expr, dialect)?),
+        // `USING`/`NATURAL` have no neutral node yet; a conditionless non-cross join is unexpected.
+        (_, JoinConstraint::Using(_)) => return Err(not_yet("JOIN … USING (…)")),
+        (_, JoinConstraint::Natural) => return Err(not_yet("NATURAL JOIN")),
+        (_, JoinConstraint::None) => {
+            return Err(not_yet("non-CROSS join without an ON condition"));
+        }
+    };
+    Ok(JoinItem { kind, source, on })
+}
+
+/// Lowers a query's `ORDER BY` into [`OrderItem`]s (expression + optional `ASC`/`DESC` + optional
+/// `NULLS FIRST`/`LAST`). `ORDER BY ALL` and ClickHouse `WITH FILL` are outside the grammar.
+fn lower_order_by(
+    order_by: Option<&OrderBy>,
+    dialect: SqlDialect,
+) -> Result<Vec<OrderItem>, ReadError> {
+    let Some(order_by) = order_by else {
+        return Ok(Vec::new());
+    };
+    let exprs = match &order_by.kind {
+        OrderByKind::Expressions(exprs) => exprs,
+        OrderByKind::All(_) => return Err(not_yet("ORDER BY ALL")),
+    };
+    exprs
+        .iter()
+        .map(|order| {
+            if order.with_fill.is_some() {
+                return Err(not_yet("ORDER BY … WITH FILL"));
+            }
+            let direction = match order.options.asc {
+                Some(true) => Some(OrderDirection::Asc),
+                Some(false) => Some(OrderDirection::Desc),
+                None => None,
+            };
+            let nulls = match order.options.nulls_first {
+                Some(true) => Some(OrderNulls::First),
+                Some(false) => Some(OrderNulls::Last),
+                None => None,
+            };
+            Ok(OrderItem {
+                expr: lower(&order.expr, dialect)?,
+                direction,
+                nulls,
+            })
+        })
+        .collect()
+}
+
+/// MySQL's documented "all rows" limit — `u64::MAX` — which its renderer emits as the sentinel limit for
+/// an offset-*without*-limit query (MySQL has no bare `OFFSET`). Matched as a string so it recovers even on
+/// a 32-bit `usize` (where it would overflow [`integer_literal`]).
+const MYSQL_NO_LIMIT_SENTINEL: &str = "18446744073709551615";
+
+/// Lowers a query's `LIMIT`/`OFFSET` into the neutral `(limit, offset)` pair. Only a plain integer
+/// literal count is lowered; `LIMIT ALL`, an expression bound, or the ClickHouse `BY` clause is a later
+/// phase.
+fn lower_limit_offset(
+    limit_clause: Option<&LimitClause>,
+    dialect: SqlDialect,
+) -> Result<(Option<usize>, Option<usize>), ReadError> {
+    match limit_clause {
+        None => Ok((None, None)),
+        Some(LimitClause::LimitOffset {
+            limit,
+            offset,
+            limit_by,
+        }) => {
+            if !limit_by.is_empty() {
+                return Err(not_yet("LIMIT … BY (…)"));
+            }
+            // MySQL renders an offset-only view as `LIMIT <u64::MAX> OFFSET n` (it has no bare `OFFSET`);
+            // that max-u64 limit is the "all rows" sentinel, not a real bound, so recover it to
+            // `limit: None` — else an offset-only view would carry `Some(u64::MAX)` and never re-plan to
+            // empty.
+            let limit = match limit {
+                Some(expr)
+                    if dialect == SqlDialect::Mysql && is_number(expr, MYSQL_NO_LIMIT_SENTINEL) =>
+                {
+                    None
+                }
+                Some(expr) => Some(integer_literal(expr)?),
+                None => None,
+            };
+            let offset = offset
+                .as_ref()
+                .map(|offset| integer_literal(&offset.value))
+                .transpose()?;
+            Ok((limit, offset))
+        }
+        // MySQL's `LIMIT <offset>, <limit>`; the renderer emits the `LIMIT … OFFSET …` form instead.
+        Some(LimitClause::OffsetCommaLimit { .. }) => Err(not_yet("LIMIT <offset>, <limit> form")),
+    }
+}
+
+/// Reads a plain non-negative integer literal into a `usize` (a `LIMIT`/`OFFSET` count); a non-integer or
+/// out-of-range bound is outside the grammar.
+fn integer_literal(expr: &Expr) -> Result<usize, ReadError> {
+    match expr {
+        Expr::Value(value) => match &value.value {
+            Value::Number(number, false) => number
+                .parse::<usize>()
+                .map_err(|_| not_yet(format!("non-integer or out-of-range bound `{number}`"))),
+            other => Err(not_yet(format!("non-numeric bound `{other}`"))),
+        },
+        other => Err(not_yet(format!("non-literal bound `{other}`"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -755,6 +2011,26 @@ mod tests {
 
     fn lit(text: &str) -> ExprNode {
         ExprNode::Literal(text.to_owned())
+    }
+
+    /// A qualified `q0_0.<column>` — a view body binds every column to a source alias.
+    fn col(column: &str) -> ExprNode {
+        ExprNode::Column {
+            alias: "q0_0".to_owned(),
+            column: column.to_owned(),
+        }
+    }
+
+    /// Lowers a `CREATE VIEW` / bare `SELECT` statement into its [`ViewQueryModel`], panicking on a
+    /// parse error so a test asserts against the lowering outcome directly.
+    fn low_query(sql: &str, dialect: SqlDialect) -> Result<ViewQueryModel, ReadError> {
+        use sqlparser::ast::Statement;
+        let statements = crate::parse_sql(sql, dialect).expect("parses");
+        match statements.as_slice() {
+            [Statement::CreateView(create_view)] => lower_create_view(create_view, dialect),
+            [Statement::Query(query)] => lower_query(query, dialect),
+            other => panic!("expected one CREATE VIEW / SELECT statement, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -1193,9 +2469,12 @@ mod tests {
             low("(\"a\" IN (SELECT 1))", SqlDialect::Postgres),
             Err(ReadError::NotYetLowered(_))
         ));
-        // A windowed call is not a scalar constraint function.
+        // A window *frame* is not yet inverted (the simple windows lowering covers carry none).
         assert!(matches!(
-            low("ROW_NUMBER() OVER ()", SqlDialect::Postgres),
+            low(
+                "ROW_NUMBER() OVER (ORDER BY \"a\" ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
+                SqlDialect::Postgres
+            ),
             Err(ReadError::NotYetLowered(_))
         ));
     }
@@ -1254,6 +2533,563 @@ mod tests {
         ));
         assert!(matches!(
             low("my_func(\"data\", 'x'::text)", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+    }
+
+    // ---- view-body node lowering --------------------------------------------------------------
+
+    #[test]
+    fn pg_result_pins_invert_across_the_type_vocabulary() {
+        // A result pin's type is the view's output column type — any `SqlType`. PostgreSQL's cast
+        // spellings are (mostly) exact, so each renderer-emitted pin type must invert precisely, not just
+        // the basic int/float widths. (A view with a `Date`/`Timestamp`/`Decimal`/`Uuid` output column
+        // otherwise fails to read.)
+        let pin = |ty: &str| {
+            let sql = format!("CAST(MAX(q0_0.\"c\") AS {ty})");
+            match low(&sql, SqlDialect::Postgres).unwrap() {
+                ExprNode::Aggregate { result, .. } => result,
+                other => panic!("expected an aggregate, got: {other:?}"),
+            }
+        };
+        assert_eq!(pin("date"), Some(SqlType::Date));
+        assert_eq!(
+            pin("timestamp(6) with time zone"),
+            Some(SqlType::Timestamp {
+                tz: true,
+                precision: Some(6),
+            })
+        );
+        assert_eq!(
+            pin("timestamp"),
+            Some(SqlType::Timestamp {
+                tz: false,
+                precision: None,
+            })
+        );
+        assert_eq!(
+            pin("numeric(10,2)"),
+            Some(SqlType::Decimal {
+                precision: 10,
+                scale: 2,
+            })
+        );
+        assert_eq!(pin("uuid"), Some(SqlType::Uuid));
+        assert_eq!(pin("bytea"), Some(SqlType::Bytes));
+        assert_eq!(pin("smallint"), Some(SqlType::I16));
+        // Bare `numeric` is the 128-bit-integer pin; canonical `I128`.
+        assert_eq!(pin("numeric"), Some(SqlType::I128));
+    }
+
+    #[test]
+    fn aggregates_peel_the_cast_result_pin() {
+        // `SUM` with a `bigint` pin peels into `result: Some(I64)` (exact on PostgreSQL); `COUNT` with
+        // no pin lowers to `result: None`.
+        assert_eq!(
+            low("CAST(SUM(q0_0.\"amount\") AS bigint)", SqlDialect::Postgres).unwrap(),
+            ExprNode::Aggregate {
+                func: AggregateFunc::Sum,
+                distinct: false,
+                operand: b(col("amount")),
+                result: Some(SqlType::I64),
+            }
+        );
+        assert_eq!(
+            low("COUNT(q0_0.\"id\")", SqlDialect::Postgres).unwrap(),
+            ExprNode::Aggregate {
+                func: AggregateFunc::Count,
+                distinct: false,
+                operand: b(col("id")),
+                result: None,
+            }
+        );
+        // `DISTINCT` is recovered.
+        assert_eq!(
+            low("COUNT(DISTINCT q0_0.\"id\")", SqlDialect::Postgres).unwrap(),
+            ExprNode::Aggregate {
+                func: AggregateFunc::Count,
+                distinct: true,
+                operand: b(col("id")),
+                result: None,
+            }
+        );
+        // MySQL's `SIGNED` cast collapses every integer width; it inverts to the canonical `I64` (which
+        // re-renders to `SIGNED`, preserving identity) — a narrower original width is not recoverable.
+        assert_eq!(
+            low("CAST(SUM(q0_0.`amount`) AS SIGNED)", SqlDialect::Mysql).unwrap(),
+            ExprNode::Aggregate {
+                func: AggregateFunc::Sum,
+                distinct: false,
+                operand: b(col("amount")),
+                result: Some(SqlType::I64),
+            }
+        );
+    }
+
+    #[test]
+    fn now_lowers_only_the_exact_dialect_form() {
+        assert_eq!(
+            low("CURRENT_TIMESTAMP", SqlDialect::Postgres).unwrap(),
+            ExprNode::Now
+        );
+        // MySQL's fractional `CURRENT_TIMESTAMP(6)` — the digit count is re-derived on render.
+        assert_eq!(
+            low("CURRENT_TIMESTAMP(6)", SqlDialect::Mysql).unwrap(),
+            ExprNode::Now
+        );
+        // A precision the dialect's `now()` never emits must NOT lower to `Now` — re-rendering would emit
+        // the dialect default and silently change the fractional-seconds precision. So: an explicit
+        // precision on PostgreSQL, a non-`6` precision on MySQL, and a bare call read as MySQL all reject.
+        assert!(matches!(
+            low("CURRENT_TIMESTAMP(3)", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low("CURRENT_TIMESTAMP(0)", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low("CURRENT_TIMESTAMP(3)", SqlDialect::Mysql),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low("CURRENT_TIMESTAMP", SqlDialect::Mysql),
+            Err(ReadError::NotYetLowered(_))
+        ));
+    }
+
+    #[test]
+    fn mysql_text_and_binary_result_pins_invert_to_canonical_types() {
+        // MySQL renders a text-valued all-literal `COALESCE`/`NULLIF`/`CASE` result-pin as `CAST(… AS
+        // CHAR)` (and a binary one as `CAST(… AS BINARY)`); both must invert so `read_create_view` can
+        // read SQL squealy itself rendered. The keyword is many-to-one, so the inverse is the canonical
+        // representative (`Text`/`Bytes`), which re-renders to the same keyword.
+        assert_eq!(
+            low(
+                "COALESCE(CAST('x' AS CHAR), CAST('y' AS CHAR))",
+                SqlDialect::Mysql
+            )
+            .unwrap(),
+            ExprNode::Coalesce {
+                args: vec![lit("'x'"), lit("'y'")],
+                result: Some(SqlType::Text),
+            }
+        );
+        assert_eq!(
+            low("CAST(SUM(q0_0.`n`) AS SIGNED)", SqlDialect::Mysql).unwrap(),
+            ExprNode::Aggregate {
+                func: AggregateFunc::Sum,
+                distinct: false,
+                operand: b(col("n")),
+                result: Some(SqlType::I64),
+            }
+        );
+    }
+
+    #[test]
+    fn extract_recovers_field_pin_and_timezone() {
+        // `EXTRACT(YEAR …)` with an `integer` pin (exact on PostgreSQL).
+        assert_eq!(
+            low(
+                "CAST(EXTRACT(YEAR FROM q0_0.\"created\") AS integer)",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::Extract {
+                field: DateField::Year,
+                operand: b(col("created")),
+                result: Some(SqlType::I32),
+                timezone: None,
+            }
+        );
+        // The `AT TIME ZONE '<tz>'` operand wrapper is peeled into `timezone`.
+        assert_eq!(
+            low(
+                "EXTRACT(HOUR FROM (q0_0.\"created\" AT TIME ZONE 'UTC'))",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::Extract {
+                field: DateField::Hour,
+                operand: b(col("created")),
+                result: None,
+                timezone: Some("UTC".to_owned()),
+            }
+        );
+        // `SECOND` is the fractional-seconds node (bare `EXTRACT(SECOND …)`), while
+        // `FLOOR(EXTRACT(SECOND …))` is the whole-seconds `Extract`.
+        assert_eq!(
+            low(
+                "EXTRACT(SECOND FROM q0_0.\"created\")",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::ExtractSecond {
+                operand: b(col("created")),
+                result: None,
+            }
+        );
+        assert_eq!(
+            low(
+                "FLOOR(EXTRACT(SECOND FROM q0_0.\"created\"))",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::Extract {
+                field: DateField::Second,
+                operand: b(col("created")),
+                result: None,
+                timezone: None,
+            }
+        );
+    }
+
+    #[test]
+    fn date_trunc_lowers_unit_and_timezone() {
+        assert_eq!(
+            low(
+                "date_trunc('month', q0_0.\"created\")",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::DateTrunc {
+                unit: DateField::Month,
+                operand: b(col("created")),
+                timezone: None,
+            }
+        );
+        assert_eq!(
+            low(
+                "date_trunc('day', q0_0.\"created\", 'UTC')",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::DateTrunc {
+                unit: DateField::Day,
+                operand: b(col("created")),
+                timezone: Some("UTC".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn case_coalesce_nullif_recover_per_branch_casts() {
+        // A searched `CASE` with bare (un-cast) branch values → `result: None`.
+        assert_eq!(
+            low(
+                "CASE WHEN (q0_0.\"cnt\" > 10) THEN 'hi' ELSE 'lo' END",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::Case {
+                arms: vec![CaseArm {
+                    when: b(ExprNode::Compare {
+                        op: CompareOp::GreaterThan,
+                        left: b(col("cnt")),
+                        right: b(lit("10")),
+                    }),
+                    then: b(lit("'hi'")),
+                }],
+                else_: Some(b(lit("'lo'"))),
+                result: None,
+            }
+        );
+        // A `CASE` whose every branch value is `CAST(<v> AS bigint)` peels back to `result: Some(I64)`.
+        assert_eq!(
+            low(
+                "CASE WHEN (q0_0.\"cnt\" > 10) THEN CAST(1 AS bigint) ELSE CAST(0 AS bigint) END",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::Case {
+                arms: vec![CaseArm {
+                    when: b(ExprNode::Compare {
+                        op: CompareOp::GreaterThan,
+                        left: b(col("cnt")),
+                        right: b(lit("10")),
+                    }),
+                    then: b(lit("1")),
+                }],
+                else_: Some(b(lit("0"))),
+                result: Some(SqlType::I64),
+            }
+        );
+        // `COALESCE` with a column argument (not all literals) → no per-branch cast → `result: None`.
+        assert_eq!(
+            low("COALESCE(q0_0.\"amount\", 0)", SqlDialect::Postgres).unwrap(),
+            ExprNode::Coalesce {
+                args: vec![col("amount"), lit("0")],
+                result: None,
+            }
+        );
+        // An all-literal `COALESCE` casts every argument → `result: Some(I64)`, bare literals recovered.
+        assert_eq!(
+            low(
+                "COALESCE(CAST(1 AS bigint), CAST(0 AS bigint))",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::Coalesce {
+                args: vec![lit("1"), lit("0")],
+                result: Some(SqlType::I64),
+            }
+        );
+        // `NULLIF` with a column operand → `result: None`.
+        assert_eq!(
+            low("NULLIF(q0_0.\"cnt\", 0)", SqlDialect::Postgres).unwrap(),
+            ExprNode::Nullif {
+                left: b(col("cnt")),
+                right: b(lit("0")),
+                result: None,
+            }
+        );
+        // A simple `CASE <operand> WHEN …` lowers to `SimpleCase`.
+        assert!(matches!(
+            low(
+                "CASE q0_0.\"cnt\" WHEN 1 THEN 'a' ELSE 'b' END",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::SimpleCase { .. }
+        ));
+        // A branch-cast mix (one branch cast, one not) is outside the emitted grammar.
+        assert!(matches!(
+            low(
+                "COALESCE(CAST(1 AS bigint), q0_0.\"amount\")",
+                SqlDialect::Postgres
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+    }
+
+    #[test]
+    fn simple_window_lowers_partition_and_order() {
+        assert_eq!(
+            low(
+                "ROW_NUMBER() OVER (PARTITION BY q0_0.\"name\" ORDER BY q0_0.\"id\" ASC)",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::Window {
+                func: WindowFunc::RowNumber,
+                args: Vec::new(),
+                partition_by: vec![col("name")],
+                order_by: vec![WindowOrderTerm {
+                    expr: col("id"),
+                    direction: OrderDirection::Asc,
+                }],
+                frame: None,
+                result: None,
+            }
+        );
+        // An aggregate used as a window, with a `bigint` result-pin.
+        assert_eq!(
+            low(
+                "CAST(SUM(q0_0.\"amount\") OVER (PARTITION BY q0_0.\"name\") AS bigint)",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::Window {
+                func: WindowFunc::Aggregate(AggregateFunc::Sum),
+                args: vec![col("amount")],
+                partition_by: vec![col("name")],
+                order_by: Vec::new(),
+                frame: None,
+                result: Some(SqlType::I64),
+            }
+        );
+    }
+
+    // ---- single-SELECT view-body lowering -----------------------------------------------------
+
+    #[test]
+    fn create_view_with_column_list_names_projections_positionally() {
+        let query = low_query(
+            "CREATE VIEW \"public\".\"v\" (\"added\", \"id\") AS \
+             SELECT (q0_0.\"cnt\" + 1), q0_0.\"id\" FROM \"public\".\"events\" AS q0_0 \
+             WHERE (q0_0.\"cnt\" > 0) GROUP BY q0_0.\"name\" ORDER BY q0_0.\"id\" DESC LIMIT 10 OFFSET 5",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        assert_eq!(
+            query,
+            ViewQueryModel {
+                distinct: false,
+                projection: vec![
+                    ProjectionItem {
+                        output_name: "added".to_owned(),
+                        expr: ExprNode::Binary {
+                            op: ArithmeticOp::Add,
+                            left: b(col("cnt")),
+                            right: b(lit("1")),
+                        },
+                    },
+                    ProjectionItem {
+                        output_name: "id".to_owned(),
+                        expr: col("id"),
+                    },
+                ],
+                from: Some(SourceRef {
+                    schema: Some("public".to_owned()),
+                    name: "events".to_owned(),
+                    alias: "q0_0".to_owned(),
+                }),
+                joins: Vec::new(),
+                filter: Some(ExprNode::Compare {
+                    op: CompareOp::GreaterThan,
+                    left: b(col("cnt")),
+                    right: b(lit("0")),
+                }),
+                group_by: vec![col("name")],
+                having: None,
+                order_by: vec![OrderItem {
+                    expr: col("id"),
+                    direction: Some(OrderDirection::Desc),
+                    nulls: None,
+                }],
+                limit: Some(10),
+                offset: Some(5),
+                dependencies: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn column_list_names_win_over_an_inner_projection_alias() {
+        // When a `CREATE VIEW (cols)` list is present, SQL names the outputs from the list — even if a
+        // projection also carries its own `AS` alias, the declared column name (`out`) wins over it
+        // (`inner`). (squealy never emits this combination, but external / hand-authored SQL can.)
+        let query = low_query(
+            "CREATE VIEW \"v\" (\"out\") AS SELECT 1 AS \"inner\"",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        assert_eq!(
+            query.projection,
+            vec![ProjectionItem {
+                output_name: "out".to_owned(),
+                expr: lit("1"),
+            }],
+        );
+    }
+
+    #[test]
+    fn distinct_and_join_and_aliased_projection_lower() {
+        // A bare `SELECT` (as a view-body deparse returns) names its projections by their `AS` aliases.
+        let query = low_query(
+            "SELECT DISTINCT q0_0.\"id\" AS id FROM \"public\".\"events\" AS q0_0 \
+             LEFT JOIN \"public\".\"other\" AS q0_1 ON (q0_0.\"id\" = q0_1.\"id\")",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        assert!(query.distinct);
+        assert_eq!(query.projection.len(), 1);
+        assert_eq!(query.projection[0].output_name, "id");
+        assert_eq!(query.joins.len(), 1);
+        assert_eq!(query.joins[0].kind, JoinKind::Left);
+        assert_eq!(
+            query.joins[0].source,
+            SourceRef {
+                schema: Some("public".to_owned()),
+                name: "other".to_owned(),
+                alias: "q0_1".to_owned(),
+            }
+        );
+        assert!(query.joins[0].on.is_some());
+    }
+
+    #[test]
+    fn mysql_offset_only_sentinel_limit_recovers_to_none() {
+        // MySQL has no bare `OFFSET`, so the renderer emits an offset-only view as
+        // `LIMIT <u64::MAX> OFFSET n`. The max-u64 limit is the "all rows" sentinel, not a real bound, so
+        // it must recover to `limit: None` (else the model carries `Some(u64::MAX)` and churns).
+        let query = low_query(
+            "SELECT q0_0.`id` AS id FROM `events` AS q0_0 LIMIT 18446744073709551615 OFFSET 5",
+            SqlDialect::Mysql,
+        )
+        .unwrap();
+        assert_eq!(query.limit, None);
+        assert_eq!(query.offset, Some(5));
+        // A genuine limit is unaffected.
+        let bounded = low_query(
+            "SELECT q0_0.`id` AS id FROM `events` AS q0_0 LIMIT 10 OFFSET 5",
+            SqlDialect::Mysql,
+        )
+        .unwrap();
+        assert_eq!(bounded.limit, Some(10));
+        assert_eq!(bounded.offset, Some(5));
+    }
+
+    #[test]
+    fn cross_join_has_no_on_condition() {
+        let query = low_query(
+            "SELECT q0_0.\"id\" AS id FROM \"public\".\"a\" AS q0_0 \
+             CROSS JOIN \"public\".\"b\" AS q0_1",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        assert_eq!(query.joins.len(), 1);
+        assert_eq!(query.joins[0].kind, JoinKind::Cross);
+        assert!(query.joins[0].on.is_none());
+    }
+
+    #[test]
+    fn view_body_shapes_outside_the_grammar_are_not_yet_lowered() {
+        // A set operation (UNION) body.
+        assert!(matches!(
+            low_query(
+                "SELECT q0_0.\"id\" AS id FROM \"public\".\"a\" AS q0_0 \
+                 UNION SELECT q0_1.\"id\" AS id FROM \"public\".\"b\" AS q0_1",
+                SqlDialect::Postgres
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // A CTE prelude.
+        assert!(matches!(
+            low_query(
+                "WITH c AS (SELECT 1 AS n) SELECT q0_0.\"n\" AS n FROM c AS q0_0",
+                SqlDialect::Postgres
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // A derived-table (subquery) FROM source.
+        assert!(matches!(
+            low_query(
+                "SELECT q0_0.\"id\" AS id FROM (SELECT 1 AS id) AS q0_0",
+                SqlDialect::Postgres
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // Comma-separated FROM (implicit cross join).
+        assert!(matches!(
+            low_query(
+                "SELECT q0_0.\"id\" AS id FROM \"public\".\"a\" AS q0_0, \"public\".\"b\" AS q0_1",
+                SqlDialect::Postgres
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // A wildcard projection cannot be named.
+        assert!(matches!(
+            low_query(
+                "SELECT * FROM \"public\".\"a\" AS q0_0",
+                SqlDialect::Postgres
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // A query-level clause the model cannot hold is rejected, not silently dropped: `FETCH` and
+        // `FOR UPDATE` (both attach to the `Query`, which this path otherwise only reads ORDER/LIMIT from).
+        assert!(matches!(
+            low_query(
+                "SELECT q0_0.\"id\" AS id FROM \"public\".\"a\" AS q0_0 FETCH FIRST 1 ROW ONLY",
+                SqlDialect::Postgres
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low_query(
+                "SELECT q0_0.\"id\" AS id FROM \"public\".\"a\" AS q0_0 FOR UPDATE",
+                SqlDialect::Postgres
+            ),
             Err(ReadError::NotYetLowered(_))
         ));
     }

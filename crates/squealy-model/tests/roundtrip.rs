@@ -16,9 +16,12 @@
 //!    constraint expressions (Phase 1): a neutral node rendered to each dialect and read back through
 //!    the [`Reader`] must lower to the same node and re-render byte-identically. A failure here is the
 //!    churn Phase 1 removes.
-//! 3. [`reader_entry_points_lower_scalars_but_not_yet_view_bodies`] — the [`Reader`] seam behaves per
-//!    entry point: scalar expressions lower structurally; view-body lowering is a later phase and still
-//!    reports [`ReadError::NotYetLowered`]. This test tightens as lowering lands.
+//! 3. [`reader_entry_points_lower_scalars_and_single_select_view_bodies`] — the [`Reader`] seam behaves
+//!    per entry point: scalar expressions lower structurally, and a single-`SELECT` view body now lowers
+//!    into a [`ViewQueryModel`]. This test tightens as lowering lands.
+//! 4. [`view_bodies_round_trip_through_each_dialect`] — the **view-body spine** (PR 2.0): a neutral
+//!    [`ViewModel`] rendered to each dialect and read back must re-render byte-identically (the epic
+//!    invariant), and — where the dialect's cast vocabulary is lossless — lower to the same model.
 
 use std::io;
 
@@ -617,11 +620,11 @@ fn renders_the_corpus_to_parseable_sql() {
 }
 
 /// Leg two: the `Reader` seam behaves per entry point. Scalar expressions (check / generated / index)
-/// now *lower* into an [`ExprNode`]; view-body lowering is a later phase and still reports
-/// `NotYetLowered` (rather than a parse error, which would mean the seam is broken). This test tightens
-/// as lowering lands.
+/// lower into an [`ExprNode`]; a single-`SELECT` view body lowers into a [`ViewQueryModel`]. A shape
+/// error (a non-view statement) or a parse error must stay distinct from `NotYetLowered`. This test
+/// tightens as lowering lands.
 #[test]
-fn reader_entry_points_lower_scalars_but_not_yet_view_bodies() {
+fn reader_entry_points_lower_scalars_and_single_select_view_bodies() {
     let reader = Reader::new(SqlDialect::Postgres);
 
     // A scalar expression (as a check / generated / index expression arrives) lowers structurally.
@@ -648,11 +651,17 @@ fn reader_entry_points_lower_scalars_but_not_yet_view_bodies() {
         other => panic!("expected NotYetLowered for modulo, got: {other:?}"),
     }
 
-    // A CREATE VIEW: parses to the right statement shape, then reports lowering unimplemented.
-    match reader.read_create_view("CREATE VIEW v AS SELECT 1 AS n") {
-        Err(ReadError::NotYetLowered(_)) => {}
-        other => panic!("expected NotYetLowered from read_create_view, got: {other:?}"),
-    }
+    // A CREATE VIEW body now lowers: the aliased projection `1 AS n` names the single output `n`, and a
+    // constant SELECT has no `FROM`.
+    assert_eq!(
+        reader
+            .read_create_view("CREATE VIEW v AS SELECT 1 AS n")
+            .expect("a single-SELECT view body lowers"),
+        ViewQueryModel {
+            projection: vec![proj("n", lit("1"))],
+            ..ViewQueryModel::default()
+        },
+    );
 
     // A non-view statement handed to the view entry point is a shape error, not NotYetLowered.
     match reader.read_create_view("SELECT 1") {
@@ -972,4 +981,112 @@ fn constraint_expressions_round_trip_through_each_dialect() {
         failures.len(),
         failures.join("\n\n")
     );
+}
+
+// ---- single-SELECT view-body round-trip -----------------------------------------------------------
+
+/// Renders a view's `CREATE VIEW` for `dialect` (schema `public`, no `OR REPLACE`).
+fn render_view(view: &ViewModel, dialect: &dyn squealy::Dialect) -> String {
+    let mut buf = Vec::new();
+    squealy::render_create_view(Some("public"), view, false, dialect, &mut buf)
+        .expect("view renders");
+    String::from_utf8(buf).expect("rendered SQL is valid UTF-8")
+}
+
+/// Whether the round-tripped body is expected to equal the original *model* on `backend` (beyond the
+/// re-render identity, which always holds). Two backends lose structural equality for principled,
+/// documented reasons — the SQL still re-renders byte-identically (the epic invariant), only the
+/// stricter model comparison is affected:
+///
+/// - **SQLite** has no schemas: its renderer suppresses the `schema` qualifier, so the round-tripped
+///   `FROM` recovers `schema: None` instead of the original `Some("public")`. Re-qualifying is the
+///   SQLite backend PR's job; here every SQLite case is model-equality-exempt.
+/// - **MySQL `view/temporal`**: MySQL's `CAST` vocabulary collapses every integer width to `SIGNED`, so
+///   the `EXTRACT(YEAR …)` result-pin's exact type (`I32`) is unrecoverable — it inverts to the
+///   canonical `I64` (which re-renders to `SIGNED`, so identity holds) but is not structurally equal.
+///   (The `view/aggregate` `SUM` pin is `I64`, which *is* the canonical, so it stays model-equal.)
+fn view_model_equality_expected(case: &str, backend: &str) -> bool {
+    match backend {
+        "postgres" => true,
+        "mysql" => case != "view/temporal",
+        _ => false, // sqlite: schema qualifier suppressed
+    }
+}
+
+/// The view-body spine (PR 2.0): a neutral [`ViewModel`], rendered to each dialect and read back through
+/// the [`Reader`], must (a) re-render byte-identically on every dialect — the epic invariant
+/// `render(parse(render(m))) == render(m)` — and (b) lower to the *same* body model wherever the
+/// dialect's cast vocabulary and identifier rules are lossless (see [`view_model_equality_expected`]).
+#[test]
+fn view_bodies_round_trip_through_each_dialect() {
+    let dialects: [(&str, SqlDialect, &dyn squealy::Dialect); 3] = [
+        (
+            "postgres",
+            SqlDialect::Postgres,
+            &squealy_postgresql::Postgres.dialect(),
+        ),
+        ("mysql", SqlDialect::Mysql, &squealy_mysql::Mysql.dialect()),
+        (
+            "sqlite",
+            SqlDialect::Sqlite,
+            &squealy_sqlite::Sqlite.dialect(),
+        ),
+    ];
+
+    let corpus = corpus();
+    let mut failures: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+
+    for (case, model) in &corpus {
+        // Only the view cases; the table/* cases are covered by the constraint spine.
+        if !case.starts_with("view/") {
+            continue;
+        }
+        let view = &model.schemas[0].views[0];
+
+        for (backend, sql_dialect, dialect) in dialects {
+            let rendered = render_view(view, dialect);
+            let lowered = match Reader::new(sql_dialect).read_create_view(&rendered) {
+                Ok(lowered) => lowered,
+                Err(err) => {
+                    failures.push(format!(
+                        "{case} on {backend}: read failed: {err}\n  SQL: {rendered}"
+                    ));
+                    continue;
+                }
+            };
+
+            // (a) Re-render identity on every dialect: reconstruct a view around the lowered body (reusing
+            // the original name/comment/columns — the output types are not in the SQL text) and re-render.
+            let round_tripped = ViewModel {
+                name: view.name.clone(),
+                comment: view.comment.clone(),
+                columns: view.columns.clone(),
+                query: lowered.clone(),
+            };
+            let re_rendered = render_view(&round_tripped, dialect);
+            if re_rendered != rendered {
+                failures.push(format!(
+                    "{case} on {backend}: re-rendered SQL differs\n  first:  {rendered}\n  second: {re_rendered}"
+                ));
+            }
+
+            // (b) Model equality where the dialect is lossless.
+            if view_model_equality_expected(case, backend) && lowered != view.query {
+                failures.push(format!(
+                    "{case} on {backend}: lowered body differs from the original\n  SQL: {rendered}\n  got: {lowered:?}"
+                ));
+            }
+            checked += 1;
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "view round-trip failed for {} case(s):\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+    // Every view case × every backend was exercised (7 views × 3 backends).
+    assert_eq!(checked, 7 * dialects.len(), "view coverage drifted");
 }
