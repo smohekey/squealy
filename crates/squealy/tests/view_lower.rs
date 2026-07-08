@@ -44,7 +44,9 @@ fn lowers_filtered_projection_with_inlined_literals() {
         matches!(&model.projection[1].expr, ExprNode::Column { column, .. } if column == "name")
     );
 
-    let from = model.from.expect("a FROM source");
+    let SourceItem::Named(from) = model.from.expect("a FROM source") else {
+        panic!("expected a named FROM source");
+    };
     assert_eq!(from.schema.as_deref(), Some("public"));
     assert_eq!(from.name, "users");
 

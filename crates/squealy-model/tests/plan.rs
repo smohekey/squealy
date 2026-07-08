@@ -1,4 +1,4 @@
-use squealy::{ExprNode, SourceRef, ViewColumnModel, ViewModel, ViewQueryModel};
+use squealy::{ExprNode, SourceItem, SourceRef, ViewColumnModel, ViewModel, ViewQueryModel};
 use squealy_model::{
     AppliedRefactorError, CastColumn, ChangeRisk, CheckModel, ColumnModel, DatabaseModel,
     DatabasePlanStep, DdlExecutor, DiffPolicy, IndexModel, PlanApplyOptions, RefactorLog,
@@ -776,11 +776,11 @@ async fn plan_from_database_canonicalizes_view_column_types() {
             ViewQueryModel::default()
         } else {
             ViewQueryModel {
-                from: Some(SourceRef {
+                from: Some(SourceItem::Named(SourceRef {
                     schema: Some("public".to_owned()),
                     name: "events".to_owned(),
                     alias: "q0_0".to_owned(),
-                }),
+                })),
                 ..ViewQueryModel::default()
             }
         },

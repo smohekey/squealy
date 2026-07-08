@@ -670,7 +670,7 @@ pub struct ViewQueryModel {
     /// Whether the view body is `SELECT DISTINCT`.
     pub distinct: bool,
     pub projection: Vec<ProjectionItem>,
-    pub from: Option<SourceRef>,
+    pub from: Option<SourceItem>,
     pub joins: Vec<JoinItem>,
     pub filter: Option<ExprNode>,
     pub group_by: Vec<ExprNode>,
@@ -700,11 +700,35 @@ pub struct SourceRef {
     pub alias: String,
 }
 
+/// A `FROM`/`JOIN` source in a view body: either a named table/view or a derived table (a
+/// parenthesized subquery, `(SELECT …) AS alias`). Both bind an alias that qualified columns reference.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SourceItem {
+    /// A named relation — `<schema>.<name> AS <alias>`.
+    Named(SourceRef),
+    /// A derived table — `(<subquery>) AS <alias>`. Boxed because the subquery is itself a
+    /// [`ViewQueryModel`] (recursive type).
+    Derived {
+        query: Box<ViewQueryModel>,
+        alias: String,
+    },
+}
+
+impl SourceItem {
+    /// The alias bound to this source, which qualified columns in the enclosing `SELECT` reference.
+    pub fn alias(&self) -> &str {
+        match self {
+            SourceItem::Named(source) => &source.alias,
+            SourceItem::Derived { alias, .. } => alias,
+        }
+    }
+}
+
 /// A join in a view body.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JoinItem {
     pub kind: JoinKind,
-    pub source: SourceRef,
+    pub source: SourceItem,
     /// The `ON` condition, or `None` for a `CROSS JOIN` (Cartesian product, no condition).
     pub on: Option<ExprNode>,
 }
@@ -961,9 +985,11 @@ fn collect_query_sources<'a>(query: &'a ViewQueryModel, sources: &mut Vec<&'a So
     // Introspected views carry no body but record their dependencies here; declared/package views
     // leave this empty and contribute their sources by walking the body below.
     sources.extend(query.dependencies.iter());
-    sources.extend(query.from.iter());
+    if let Some(from) = &query.from {
+        collect_source_item(from, sources);
+    }
     for join in &query.joins {
-        sources.push(&join.source);
+        collect_source_item(&join.source, sources);
         if let Some(on) = &join.on {
             collect_expr_sources(on, sources);
         }
@@ -982,6 +1008,16 @@ fn collect_query_sources<'a>(query: &'a ViewQueryModel, sources: &mut Vec<&'a So
     }
     for order in &query.order_by {
         collect_expr_sources(&order.expr, sources);
+    }
+}
+
+/// Collects the [`SourceRef`]s reachable from a `FROM`/`JOIN` source: a named relation is itself a
+/// dependency; a derived table's alias is a local binding (not a dependency), so its body is walked
+/// for the real relations it references.
+fn collect_source_item<'a>(source: &'a SourceItem, sources: &mut Vec<&'a SourceRef>) {
+    match source {
+        SourceItem::Named(named) => sources.push(named),
+        SourceItem::Derived { query, .. } => collect_query_sources(query, sources),
     }
 }
 

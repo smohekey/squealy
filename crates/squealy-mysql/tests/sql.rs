@@ -1272,11 +1272,11 @@ fn mysql_renders_view_after_tables() {
                             column: "id".to_owned(),
                         },
                     }],
-                    from: Some(SourceRef {
+                    from: Some(SourceItem::Named(SourceRef {
                         schema: Some("app".to_owned()),
                         name: "users".to_owned(),
                         alias: "q0_0".to_owned(),
-                    }),
+                    })),
                     joins: Vec::new(),
                     filter: Some(ExprNode::Compare {
                         op: CompareOp::GreaterThan,
@@ -1339,11 +1339,11 @@ fn mysql_view_fragment_requoting_preserves_string_literals() {
                             column: "name".to_owned(),
                         },
                     }],
-                    from: Some(SourceRef {
+                    from: Some(SourceItem::Named(SourceRef {
                         schema: None,
                         name: "people".to_owned(),
                         alias: "q0_0".to_owned(),
-                    }),
+                    })),
                     joins: Vec::new(),
                     // A string literal that itself contains a double quote.
                     filter: Some(ExprNode::Compare {
@@ -1396,11 +1396,11 @@ fn mysql_renders_view_plan_steps() {
                     column: "id".to_owned(),
                 },
             }],
-            from: Some(SourceRef {
+            from: Some(SourceItem::Named(SourceRef {
                 schema: Some("app".to_owned()),
                 name: "users".to_owned(),
                 alias: "q0_0".to_owned(),
-            }),
+            })),
             joins: Vec::new(),
             filter: Some(ExprNode::Compare {
                 op: CompareOp::GreaterThan,
@@ -1574,11 +1574,11 @@ fn mysql_renders_view_expression_ir_in_its_dialect() {
                             },
                         },
                     ],
-                    from: Some(SourceRef {
+                    from: Some(SourceItem::Named(SourceRef {
                         schema: Some("app".to_owned()),
                         name: "events".to_owned(),
                         alias: "q0_0".to_owned(),
-                    }),
+                    })),
                     joins: Vec::new(),
                     filter: None,
                     group_by: Vec::new(),
@@ -1682,11 +1682,11 @@ fn mysql_view_order_by_drops_nulls_modifier() {
                             column: "id".to_owned(),
                         },
                     }],
-                    from: Some(SourceRef {
+                    from: Some(SourceItem::Named(SourceRef {
                         schema: Some("app".to_owned()),
                         name: "events".to_owned(),
                         alias: "q0_0".to_owned(),
-                    }),
+                    })),
                     joins: Vec::new(),
                     filter: None,
                     group_by: Vec::new(),

@@ -9,7 +9,7 @@ use std::io::{self, Write};
 
 use crate::{
     AggregateFunc, ArithmeticOp, DatabaseModel, DateField, Dialect, ExprNode, JoinKind, LogicalOp,
-    OrderDirection, ScalarFunc, SourceRef, SqlType, UnaryStringFunc, ViewModel, ViewQueryModel,
+    OrderDirection, ScalarFunc, SourceItem, SqlType, UnaryStringFunc, ViewModel, ViewQueryModel,
     WindowFunc,
 };
 
@@ -252,15 +252,26 @@ fn render_select(
     dialect.write_limit_offset(query.limit, query.offset, writer)
 }
 
-/// Writes a `<qualified> AS <alias>` source. The alias is emitted unquoted so it matches the column
-/// references inside expressions, which qualify with the bare alias.
+/// Writes a `FROM`/`JOIN` source. A named relation renders `<qualified> AS <alias>`; a derived table
+/// renders `(<subquery>) AS <alias>` with its projections aliased so its output columns are named. The
+/// alias is emitted unquoted so it matches the column references inside expressions, which qualify with
+/// the bare alias.
 fn render_source(
-    source: &SourceRef,
+    source: &SourceItem,
     dialect: &dyn Dialect,
     writer: &mut dyn Write,
 ) -> io::Result<()> {
-    render_qualified(source.schema.as_deref(), &source.name, dialect, writer)?;
-    write!(writer, " AS {}", source.alias)
+    match source {
+        SourceItem::Named(named) => {
+            render_qualified(named.schema.as_deref(), &named.name, dialect, writer)?;
+            write!(writer, " AS {}", named.alias)
+        }
+        SourceItem::Derived { query, alias } => {
+            writer.write_all(b"(")?;
+            render_select(query, true, dialect, writer)?;
+            write!(writer, ") AS {alias}")
+        }
+    }
 }
 
 /// Renders a single scalar [`ExprNode`] to SQL for the given dialect — the entry point for the

@@ -20,8 +20,8 @@ use crate::{
     Predicate, PredicateAstVisitor, PredicateKind, Projectable, ProjectionItem, ProjectionShape,
     ProjectionVisitor, QueryBuilder, RenderAst, RenderCaseArms, RenderCoalesceArgs,
     RenderPredicateAst, RenderProjectable, RenderSelectAst, RenderSimpleCaseArms, RenderSubquery,
-    RowReader, ScalarFunc, SelectAst, SelectSink, Selected, SourceAlias, SourceRef, SqlType, Table,
-    TableProjection, UnaryStringFunc, ViewQueryModel, WindowFunc, WindowOrderTerm,
+    RowReader, ScalarFunc, SelectAst, SelectSink, Selected, SourceAlias, SourceItem, SourceRef,
+    SqlType, Table, TableProjection, UnaryStringFunc, ViewQueryModel, WindowFunc, WindowOrderTerm,
 };
 
 // ---------------------------------------------------------------------------
@@ -893,15 +893,18 @@ fn and_into(slot: &mut Option<ExprNode>, node: ExprNode) {
     });
 }
 
-fn source_ref<S>(alias: SourceAlias) -> SourceRef
+/// Builds a named source item for a table/view relation. The typed view builder can only reference
+/// named relations, so it always produces [`SourceItem::Named`]; derived-table view bodies are
+/// reconstructed on introspection, not authored through this builder (Track F, a separate feature).
+fn source_ref<S>(alias: SourceAlias) -> SourceItem
 where
     S: TableProjection,
 {
-    SourceRef {
+    SourceItem::Named(SourceRef {
         schema: <S as TableProjection>::schema_name().map(str::to_owned),
         name: <S as TableProjection>::name().to_owned(),
         alias: alias.to_string(),
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------

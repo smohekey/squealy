@@ -2668,11 +2668,11 @@ fn postgres_renders_views_in_dependency_order() {
                         },
                     })
                     .collect(),
-                from: Some(SourceRef {
+                from: Some(SourceItem::Named(SourceRef {
                     schema: Some("public".to_owned()),
                     name: from.to_owned(),
                     alias: "q0_0".to_owned(),
-                }),
+                })),
                 joins: Vec::new(),
                 filter,
                 group_by: Vec::new(),
@@ -2781,11 +2781,11 @@ fn postgres_renders_view_plan_steps() {
                     column: "id".to_owned(),
                 },
             }],
-            from: Some(SourceRef {
+            from: Some(SourceItem::Named(SourceRef {
                 schema: Some("public".to_owned()),
                 name: "users".to_owned(),
                 alias: "q0_0".to_owned(),
-            }),
+            })),
             joins: Vec::new(),
             filter: Some(ExprNode::Compare {
                 op: CompareOp::GreaterThan,
@@ -2855,11 +2855,11 @@ fn postgres_renders_distinct_view_body() {
                     column: "name".to_owned(),
                 },
             }],
-            from: Some(SourceRef {
+            from: Some(SourceItem::Named(SourceRef {
                 schema: Some("public".to_owned()),
                 name: "users".to_owned(),
                 alias: "q0_0".to_owned(),
-            }),
+            })),
             joins: Vec::new(),
             filter: None,
             group_by: Vec::new(),
@@ -2921,11 +2921,11 @@ fn postgres_renders_case_view_body() {
                     result: Some(SqlType::I32),
                 },
             }],
-            from: Some(SourceRef {
+            from: Some(SourceItem::Named(SourceRef {
                 schema: Some("public".to_owned()),
                 name: "users".to_owned(),
                 alias: "q0_0".to_owned(),
-            }),
+            })),
             joins: Vec::new(),
             filter: None,
             group_by: Vec::new(),
@@ -3101,11 +3101,11 @@ fn postgres_renders_view_expression_ir_in_its_dialect() {
                             },
                         },
                     ],
-                    from: Some(SourceRef {
+                    from: Some(SourceItem::Named(SourceRef {
                         schema: Some("public".to_owned()),
                         name: "events".to_owned(),
                         alias: "q0_0".to_owned(),
-                    }),
+                    })),
                     joins: Vec::new(),
                     filter: None,
                     group_by: Vec::new(),
@@ -3253,11 +3253,11 @@ fn postgres_view_order_by_keeps_nulls_modifier() {
                             column: "id".to_owned(),
                         },
                     }],
-                    from: Some(SourceRef {
+                    from: Some(SourceItem::Named(SourceRef {
                         schema: Some("public".to_owned()),
                         name: "events".to_owned(),
                         alias: "q0_0".to_owned(),
-                    }),
+                    })),
                     joins: Vec::new(),
                     filter: None,
                     group_by: Vec::new(),

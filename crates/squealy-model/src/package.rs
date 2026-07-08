@@ -23,8 +23,8 @@ use squealy::{
     FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
     IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
     JoinItem, JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem,
-    ScalarFunc, SchemaModel, SourceRef, SqlType, TableModel, ViewColumnModel, ViewModel,
-    ViewQueryModel, WindowFunc, WindowOrderTerm,
+    ScalarFunc, SchemaModel, SourceItem, SourceRef, SqlType, TableModel, ViewColumnModel,
+    ViewModel, ViewQueryModel, WindowFunc, WindowOrderTerm,
 };
 
 use crate::{CastColumn, RefactorLog, RefactorOperation, RenameColumn, RenameTable};
@@ -502,7 +502,7 @@ fn view_query_to_node(query: &ViewQueryModel) -> KdlNode {
     }
     if let Some(from) = &query.from {
         body.nodes_mut()
-            .push(view_source_to_node("from", from, None));
+            .push(view_source_item_to_node("from", from, None));
     }
     for join in &query.joins {
         let kind = match join.kind {
@@ -512,7 +512,7 @@ fn view_query_to_node(query: &ViewQueryModel) -> KdlNode {
             JoinKind::Full => "full",
             JoinKind::Cross => "cross",
         };
-        let mut node = view_source_to_node("join", &join.source, Some(kind));
+        let mut node = view_source_item_to_node("join", &join.source, Some(kind));
         // The join's single child is the `ON` predicate, absent for a `CROSS JOIN`.
         if let Some(on) = &join.on {
             push_child(&mut node, expr_to_node(on));
@@ -1025,6 +1025,24 @@ fn view_source_to_node(kind: &str, source: &SourceRef, join_kind: Option<&str>) 
     node
 }
 
+/// Serializes a `FROM`/`JOIN` [`SourceItem`]. A named relation reuses [`view_source_to_node`]; a derived
+/// table (subquery) emits only its `alias` (and join `kind`) plus a nested `query` child holding the
+/// subquery body — the absence of a name arg distinguishes it from a named source on read-back.
+fn view_source_item_to_node(kind: &str, source: &SourceItem, join_kind: Option<&str>) -> KdlNode {
+    match source {
+        SourceItem::Named(named) => view_source_to_node(kind, named, join_kind),
+        SourceItem::Derived { query, alias } => {
+            let mut node = KdlNode::new(kind);
+            node.push(KdlEntry::new_prop("alias", alias.clone()));
+            if let Some(join_kind) = join_kind {
+                node.push(KdlEntry::new_prop("kind", join_kind));
+            }
+            push_child(&mut node, view_query_to_node(query));
+            node
+        }
+    }
+}
+
 fn column_to_node(column: &ColumnModel) -> KdlNode {
     let mut node = KdlNode::new("column");
     node.push(KdlEntry::new(column.name.clone()));
@@ -1436,7 +1454,7 @@ fn view_query_from_node(node: &KdlNode) -> Result<ViewQueryModel, PackageError> 
         .collect::<Result<Vec<_>, _>>()?;
     let from = child_nodes(node, "from")
         .next()
-        .map(view_source_from_node)
+        .map(view_source_item_from_node)
         .transpose()?;
     let joins = child_nodes(node, "join")
         .map(view_join_from_node)
@@ -1482,6 +1500,18 @@ fn view_source_from_node(node: &KdlNode) -> Result<SourceRef, PackageError> {
     })
 }
 
+/// Reads a `FROM`/`JOIN` [`SourceItem`]: a `query` child marks a derived table (its alias comes from the
+/// `alias` prop); otherwise the node names a relation and reads as a [`SourceItem::Named`].
+fn view_source_item_from_node(node: &KdlNode) -> Result<SourceItem, PackageError> {
+    match child_nodes(node, "query").next() {
+        Some(query) => Ok(SourceItem::Derived {
+            query: Box::new(view_query_from_node(query)?),
+            alias: required_prop(node, "alias")?,
+        }),
+        None => Ok(SourceItem::Named(view_source_from_node(node)?)),
+    }
+}
+
 fn view_join_from_node(node: &KdlNode) -> Result<JoinItem, PackageError> {
     let kind = match prop(node, "kind") {
         Some("left") => JoinKind::Left,
@@ -1490,16 +1520,32 @@ fn view_join_from_node(node: &KdlNode) -> Result<JoinItem, PackageError> {
         Some("cross") => JoinKind::Cross,
         _ => JoinKind::Inner,
     };
-    // A `CROSS JOIN` has no `ON` child; every other kind carries its condition.
+    // A `CROSS JOIN` has no `ON` child; every other kind carries its condition. A derived source stores
+    // its subquery in a `query` child, so the `ON` predicate is the first child that is *not* that block.
     let on = match kind {
         JoinKind::Cross => None,
-        _ => Some(first_child_expr(node)?),
+        _ => Some(join_on_expr(node)?),
     };
     Ok(JoinItem {
         kind,
-        source: view_source_from_node(node)?,
+        source: view_source_item_from_node(node)?,
         on,
     })
+}
+
+/// The `ON` predicate of a join node — the first child expression, skipping a derived source's nested
+/// `query` block (which is not an expression).
+fn join_on_expr(node: &KdlNode) -> Result<ExprNode, PackageError> {
+    let child = expr_child_nodes(node)
+        .into_iter()
+        .find(|child| child.name().value() != "query")
+        .ok_or_else(|| {
+            malformed(format!(
+                "`{}` is missing its ON expression",
+                node.name().value()
+            ))
+        })?;
+    expr_from_node(child)
 }
 
 fn view_order_from_node(node: &KdlNode) -> Result<OrderItem, PackageError> {
@@ -2637,19 +2683,19 @@ mod tests {
                                 },
                             },
                         ],
-                        from: Some(SourceRef {
+                        from: Some(SourceItem::Named(SourceRef {
                             schema: Some("public".to_owned()),
                             name: "memberships".to_owned(),
                             alias: "q0_0".to_owned(),
-                        }),
+                        })),
                         joins: vec![
                             JoinItem {
                                 kind: JoinKind::Left,
-                                source: SourceRef {
+                                source: SourceItem::Named(SourceRef {
                                     schema: Some("public".to_owned()),
                                     name: "orgs".to_owned(),
                                     alias: "q0_1".to_owned(),
-                                },
+                                }),
                                 on: Some(ExprNode::Compare {
                                     op: CompareOp::Equals,
                                     left: Box::new(col("q0_0", "org_id")),
@@ -2658,11 +2704,11 @@ mod tests {
                             },
                             JoinItem {
                                 kind: JoinKind::Right,
-                                source: SourceRef {
+                                source: SourceItem::Named(SourceRef {
                                     schema: Some("public".to_owned()),
                                     name: "teams".to_owned(),
                                     alias: "q0_2".to_owned(),
-                                },
+                                }),
                                 on: Some(ExprNode::Compare {
                                     op: CompareOp::Equals,
                                     left: Box::new(col("q0_0", "team_id")),
@@ -2671,11 +2717,11 @@ mod tests {
                             },
                             JoinItem {
                                 kind: JoinKind::Full,
-                                source: SourceRef {
+                                source: SourceItem::Named(SourceRef {
                                     schema: Some("public".to_owned()),
                                     name: "regions".to_owned(),
                                     alias: "q0_3".to_owned(),
-                                },
+                                }),
                                 on: Some(ExprNode::Compare {
                                     op: CompareOp::Equals,
                                     left: Box::new(col("q0_0", "region_id")),
@@ -2685,11 +2731,11 @@ mod tests {
                             // CROSS JOIN has no `ON` condition.
                             JoinItem {
                                 kind: JoinKind::Cross,
-                                source: SourceRef {
+                                source: SourceItem::Named(SourceRef {
                                     schema: Some("public".to_owned()),
                                     name: "tenants".to_owned(),
                                     alias: "q0_4".to_owned(),
-                                },
+                                }),
                                 on: None,
                             },
                         ],
@@ -2733,6 +2779,88 @@ mod tests {
         );
         let parsed = from_kdl(&kdl).expect("view model.kdl should parse");
         assert_eq!(parsed, model, "view KDL round-trip diverged:\n{kdl}");
+    }
+
+    #[test]
+    fn kdl_round_trips_derived_table_view_bodies() {
+        fn col(alias: &str, column: &str) -> ExprNode {
+            ExprNode::Column {
+                alias: alias.to_owned(),
+                column: column.to_owned(),
+            }
+        }
+        fn proj(name: &str, expr: ExprNode) -> ProjectionItem {
+            ProjectionItem {
+                output_name: name.to_owned(),
+                expr,
+            }
+        }
+        fn named(name: &str, alias: &str) -> SourceItem {
+            SourceItem::Named(SourceRef {
+                schema: Some("public".to_owned()),
+                name: name.to_owned(),
+                alias: alias.to_owned(),
+            })
+        }
+
+        // A derived source in the `FROM`, and a second derived source in a `LEFT JOIN` — the join's `ON`
+        // must round-trip alongside the derived subquery's `query` child (i.e. not be mistaken for it).
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: Some("public".to_owned()),
+                tables: Vec::new(),
+                views: vec![ViewModel {
+                    name: "v_derived".to_owned(),
+                    comment: None,
+                    columns: vec![ViewColumnModel {
+                        name: "id".to_owned(),
+                        ty: SqlType::I32,
+                        nullable: true,
+                    }],
+                    query: ViewQueryModel {
+                        distinct: false,
+                        projection: vec![proj("id", col("d0", "id"))],
+                        from: Some(SourceItem::Derived {
+                            query: Box::new(ViewQueryModel {
+                                projection: vec![proj("id", col("q1_0", "id"))],
+                                from: Some(named("events", "q1_0")),
+                                filter: Some(ExprNode::Compare {
+                                    op: CompareOp::GreaterThan,
+                                    left: Box::new(col("q1_0", "cnt")),
+                                    right: Box::new(ExprNode::Literal("0".to_owned())),
+                                }),
+                                ..ViewQueryModel::default()
+                            }),
+                            alias: "d0".to_owned(),
+                        }),
+                        joins: vec![JoinItem {
+                            kind: JoinKind::Left,
+                            source: SourceItem::Derived {
+                                query: Box::new(ViewQueryModel {
+                                    projection: vec![proj("id", col("q2_0", "id"))],
+                                    from: Some(named("audits", "q2_0")),
+                                    ..ViewQueryModel::default()
+                                }),
+                                alias: "d1".to_owned(),
+                            },
+                            on: Some(ExprNode::Compare {
+                                op: CompareOp::Equals,
+                                left: Box::new(col("d0", "id")),
+                                right: Box::new(col("d1", "id")),
+                            }),
+                        }],
+                        ..ViewQueryModel::default()
+                    },
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("derived-table view model.kdl should parse");
+        assert_eq!(
+            parsed, model,
+            "derived-table view KDL round-trip diverged:\n{kdl}"
+        );
     }
 
     #[test]

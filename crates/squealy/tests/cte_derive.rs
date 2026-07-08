@@ -55,7 +55,10 @@ fn derive_generates_schema_cte_metadata() {
 fn cte_body_lowers_to_a_model() {
     let model = cte_definition_model::<ActiveUserMeta>();
     assert_eq!(model.projection.len(), 2);
-    assert_eq!(model.from.as_ref().unwrap().name, "users");
+    let Some(SourceItem::Named(from)) = model.from.as_ref() else {
+        panic!("expected a named FROM source");
+    };
+    assert_eq!(from.name, "users");
     assert!(matches!(
         model.filter.expect("WHERE"),
         ExprNode::Compare {
