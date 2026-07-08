@@ -96,13 +96,16 @@ fn database_walk_includes_views() {
     assert_eq!(view.columns.len(), 2);
     assert_eq!(view.columns[0].name, "id");
     assert_eq!(view.columns[1].name, "name");
-    assert_eq!(view.query.projection.len(), 2);
-    let Some(SourceItem::Named(from)) = view.query.from.as_ref() else {
+    let ViewBody::Select(select) = &view.query else {
+        panic!("expected a single-SELECT view body");
+    };
+    assert_eq!(select.projection.len(), 2);
+    let Some(SourceItem::Named(from)) = select.from.as_ref() else {
         panic!("expected a named FROM source");
     };
     assert_eq!(from.name, "users");
     assert!(matches!(
-        view.query.filter.as_ref().unwrap(),
+        select.filter.as_ref().unwrap(),
         ExprNode::Compare {
             op: CompareOp::Equals,
             ..

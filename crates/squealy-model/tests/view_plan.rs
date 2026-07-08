@@ -1,11 +1,19 @@
 //! Incremental diff/plan coverage for views: adding, removing, and changing a view between the
 //! desired and actual model must produce the right plan steps and risk classification.
 
-use squealy::{ExprNode, ProjectionItem, SourceItem, SourceRef, ViewQueryModel};
+use squealy::{ExprNode, ProjectionItem, SourceItem, SourceRef, ViewBody, ViewQueryModel};
 use squealy_model::{
     ChangeRisk, DatabaseModel, DatabasePlanStep, DiffPolicy, SchemaModel, SqlType, TableModel,
     ViewColumnModel, ViewModel, classified_plan_steps, plan_models,
 };
+
+/// The mutable single-`SELECT` body of a view (these tests only build `SELECT` bodies).
+fn select_mut(view: &mut ViewModel) -> &mut ViewQueryModel {
+    match &mut view.query {
+        ViewBody::Select(select) => select,
+        ViewBody::Set { .. } => panic!("expected a single-SELECT view body"),
+    }
+}
 
 fn users_table() -> TableModel {
     TableModel {
@@ -32,7 +40,7 @@ fn view(filter: &str, columns: &[&str]) -> ViewModel {
                 nullable: false,
             })
             .collect(),
-        query: ViewQueryModel {
+        query: ViewBody::Select(Box::new(ViewQueryModel {
             dependencies: Vec::new(),
             distinct: false,
             projection: columns
@@ -59,7 +67,7 @@ fn view(filter: &str, columns: &[&str]) -> ViewModel {
             order_by: Vec::new(),
             limit: None,
             offset: None,
-        },
+        })),
     }
 }
 
@@ -134,7 +142,7 @@ fn changing_the_column_set_plans_drop_then_create() {
 // a spurious CreateView every run.
 fn introspected_view(columns: &[&str]) -> ViewModel {
     let mut view = view("ignored-body", columns);
-    view.query = ViewQueryModel::default();
+    view.query = ViewBody::default();
     view
 }
 
@@ -143,7 +151,7 @@ fn introspected_view(columns: &[&str]) -> ViewModel {
 fn introspected_view_named(name: &str, columns: &[&str], depends_on: &[&str]) -> ViewModel {
     let mut view = introspected_view(columns);
     view.name = name.to_owned();
-    view.query.dependencies = depends_on
+    select_mut(&mut view).dependencies = depends_on
         .iter()
         .map(|dependency| SourceRef {
             schema: Some("public".to_owned()),
@@ -164,7 +172,7 @@ fn dropping_a_view_for_a_column_change_drops_and_recreates_its_dependents() {
     let mut desired_child = view("(q0_0.\"id\" > 0)", &["id"]);
     desired_child.name = "child".to_owned();
     // The desired child genuinely selects from parent, so the create phase orders parent before it.
-    desired_child.query.from = Some(SourceItem::Named(SourceRef {
+    select_mut(&mut desired_child).from = Some(SourceItem::Named(SourceRef {
         schema: Some("public".to_owned()),
         name: "parent".to_owned(),
         alias: "q0_0".to_owned(),
@@ -228,7 +236,7 @@ fn cross_schema_dependent_is_not_promoted_by_a_same_named_view() {
     // it; it must be left untouched (a same-shape introspected view, so just a CREATE OR REPLACE).
     let mut report = introspected_view(&["id"]);
     report.name = "report".to_owned();
-    report.query.dependencies = vec![SourceRef {
+    select_mut(&mut report).dependencies = vec![SourceRef {
         schema: Some("auth".to_owned()),
         name: "users".to_owned(),
         alias: "users".to_owned(),
@@ -275,14 +283,14 @@ fn cross_schema_dependent_is_dropped_and_recreated() {
     desired_parent.name = "parent".to_owned();
     let mut desired_child = view("(q0_0.\"id\" > 0)", &["id"]);
     desired_child.name = "child".to_owned();
-    desired_child.query.from = Some(SourceItem::Named(SourceRef {
+    select_mut(&mut desired_child).from = Some(SourceItem::Named(SourceRef {
         schema: Some("public".to_owned()),
         name: "parent".to_owned(),
         alias: "q0_0".to_owned(),
     }));
 
     let mut actual_child = introspected_view_named("child", &["id"], &[]);
-    actual_child.query.dependencies = vec![SourceRef {
+    select_mut(&mut actual_child).dependencies = vec![SourceRef {
         schema: Some("public".to_owned()),
         name: "parent".to_owned(),
         alias: "parent".to_owned(),
@@ -436,7 +444,7 @@ fn subquery_only_view_dependency_orders_create_after_it() {
 
     let mut child = view("(q0_0.\"id\" > 0)", &["id"]);
     child.name = "child".to_owned();
-    child.query.filter = Some(ExprNode::Exists {
+    select_mut(&mut child).filter = Some(ExprNode::Exists {
         negated: false,
         subquery: Box::new(ViewQueryModel {
             from: Some(SourceItem::Named(SourceRef {

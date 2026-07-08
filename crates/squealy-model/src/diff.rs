@@ -416,9 +416,9 @@ fn diff_views_global(
                 // outputs) and a view's DDL carries no per-column NOT NULL, so the column comparison
                 // ignores it. Models that carry a body (e.g. from a package) are compared in full.
                 //
-                // An introspected view has no projection (only its name, columns, and dependencies are
-                // recovered), so an empty projection is the marker for "introspected, body unknown".
-                if actual_view.query.projection.is_empty() {
+                // An introspected view whose body could not be reconstructed has an empty `SELECT` body
+                // (only its name, columns, and dependencies are recovered) — the "body unknown" marker.
+                if actual_view.query.is_empty() {
                     if view_columns_differ_ignoring_nullability(
                         &desired_view.columns,
                         &actual_view.columns,

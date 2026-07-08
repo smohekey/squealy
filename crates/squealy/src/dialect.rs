@@ -260,6 +260,14 @@ pub trait Dialect {
         SetOperandStyle::Parenthesized
     }
 
+    /// Whether the dialect supports the `ALL` quantifier on `INTERSECT`/`EXCEPT` (`INTERSECT ALL` /
+    /// `EXCEPT ALL`) in a view body. Defaults to `true`; SQLite allows `ALL` only after `UNION`, so it
+    /// returns `false` and the view renderer rejects an `INTERSECT ALL`/`EXCEPT ALL` set-op body for it
+    /// (mirroring the runtime query API's `SupportsIntersectExceptAll` gate, which SQLite also lacks).
+    fn supports_intersect_except_all(&self) -> bool {
+        true
+    }
+
     /// Whether `substring` renders as the comma-argument call `substr(s, start, len)` rather than the
     /// SQL-standard `SUBSTRING(s FROM start FOR len)`. Defaults to `false`; SQLite has no `FROM`/`FOR`
     /// substring syntax, so it returns `true`.

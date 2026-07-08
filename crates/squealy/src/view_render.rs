@@ -9,8 +9,8 @@ use std::io::{self, Write};
 
 use crate::{
     AggregateFunc, ArithmeticOp, DatabaseModel, DateField, Dialect, ExprNode, JoinKind, LogicalOp,
-    OrderDirection, ScalarFunc, SourceItem, SqlType, UnaryStringFunc, ViewModel, ViewQueryModel,
-    WindowFunc,
+    OrderDirection, OrderItem, ScalarFunc, SetOperandStyle, SourceItem, SqlType, UnaryStringFunc,
+    ViewBody, ViewModel, ViewQueryModel, ViewSetOp, WindowFunc,
 };
 
 /// Renders `CREATE [OR REPLACE] VIEW <qualified> [(<cols>)] AS <select>` for the given dialect.
@@ -25,7 +25,7 @@ pub fn render_create_view(
     // are live-introspected ones (whose definition could not be reconstructed into the structural IR);
     // they exist to diff against, not to materialize. Fail clearly rather than emit `AS SELECT` with no
     // output, which would turn a database containing views into an unusable package/plan.
-    if view.query.projection.is_empty() {
+    if view.query.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
@@ -57,7 +57,7 @@ pub fn render_create_view(
     }
 
     writer.write_all(b" AS ")?;
-    render_select(&view.query, view.columns.is_empty(), dialect, writer)
+    render_body(&view.query, view.columns.is_empty(), dialect, writer)
 }
 
 /// Renders a CTE body `SELECT …` for use inside `WITH "name" ("cols"…) AS ( … )`. The projection is
@@ -236,7 +236,19 @@ fn render_select(
         render_expr(having, dialect, writer)?;
     }
 
-    for (index, order) in query.order_by.iter().enumerate() {
+    render_order_limit(&query.order_by, query.limit, query.offset, dialect, writer)
+}
+
+/// Renders a trailing `ORDER BY … [ASC|DESC] [NULLS …]` then `LIMIT`/`OFFSET`. Shared by a single
+/// `SELECT` body and the whole-set tail of a set operation.
+fn render_order_limit(
+    order_by: &[OrderItem],
+    limit: Option<usize>,
+    offset: Option<usize>,
+    dialect: &dyn Dialect,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
+    for (index, order) in order_by.iter().enumerate() {
         writer.write_all(if index == 0 { b" ORDER BY " } else { b", " })?;
         render_expr(&order.expr, dialect, writer)?;
         match order.direction {
@@ -248,8 +260,128 @@ fn render_select(
             dialect.write_order_nulls(nulls, writer)?;
         }
     }
+    dialect.write_limit_offset(limit, offset, writer)
+}
 
-    dialect.write_limit_offset(query.limit, query.offset, writer)
+/// Renders a view body — a single `SELECT` or a set operation. `alias_projections` names the outputs by
+/// aliasing each projected expression (used when the view carries no declared column list); for a set
+/// body it applies to the **leftmost** `SELECT` only, since SQL takes a compound's output names from its
+/// first arm.
+fn render_body(
+    body: &ViewBody,
+    alias_projections: bool,
+    dialect: &dyn Dialect,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
+    match body {
+        ViewBody::Select(query) => render_select(query, alias_projections, dialect, writer),
+        ViewBody::Set {
+            op,
+            all,
+            left,
+            right,
+            order_by,
+            limit,
+            offset,
+        } => {
+            // `INTERSECT ALL`/`EXCEPT ALL` are unsupported on some dialects (SQLite allows `ALL` only
+            // after `UNION`); reject rather than emit SQL the target cannot run.
+            if *all
+                && matches!(op, ViewSetOp::Intersect | ViewSetOp::Except)
+                && !dialect.supports_intersect_except_all()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "this dialect does not support `{}` in a view body",
+                        set_op_keyword(*op, *all)
+                    ),
+                ));
+            }
+            // A compound (set-operation) `ORDER BY` resolves against the set's *output* columns — which
+            // are named by the **leftmost arm's** projection aliases (not the `CREATE VIEW` column list,
+            // and not an arm's `FROM` alias). So each whole-set order term must be either a bare name that
+            // the leftmost arm actually emits, or an ordinal `1..=N` over those outputs. Anything else (an
+            // alias-qualified column, an arbitrary expression, a name/ordinal that does not resolve — none
+            // of which the lowering path produces for a set tail, but a hand-built / packaged model can)
+            // would fail when the view is queried, so reject it here.
+            let outputs = &leftmost_select(left).projection;
+            for order in order_by {
+                let resolves = match &order.expr {
+                    ExprNode::BareColumn { column } => {
+                        outputs.iter().any(|item| &item.output_name == column)
+                    }
+                    ExprNode::Literal(text) => {
+                        matches!(text.parse::<usize>(), Ok(n) if (1..=outputs.len()).contains(&n))
+                    }
+                    _ => false,
+                };
+                if !resolves {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "a set-operation ORDER BY term must reference a leftmost-arm output column by \
+                         name or a 1-based ordinal, not an alias-qualified column or expression",
+                    ));
+                }
+            }
+            // Every arm always aliases its projections, regardless of the view's `alias_projections`
+            // (i.e. its column list). The compound's output names still come from the leftmost arm's
+            // aliases (or the column list, which overrides them on read-back — so this stays round-trip
+            // stable), but each arm additionally *needs* its aliases for its own clauses: a per-arm
+            // `ORDER BY <alias>` on either arm dangles without them, and an aliased *expression*
+            // projection has no other name to lower back to. `alias_projections` is thus only consulted
+            // for a single-`SELECT` body.
+            let _ = alias_projections;
+            render_set_operand(left, true, dialect, writer)?;
+            write!(writer, " {}", set_op_keyword(*op, *all))?;
+            writer.write_all(b" ")?;
+            render_set_operand(right, true, dialect, writer)?;
+            // A trailing ORDER BY/LIMIT over the whole set (after the final arm).
+            render_order_limit(order_by, *limit, *offset, dialect, writer)
+        }
+    }
+}
+
+/// The leftmost single-`SELECT` of a view body — a `Select` directly, or (recursively) the left arm of a
+/// set operation. Its projection names the compound's output columns, which a whole-set `ORDER BY`
+/// resolves against.
+fn leftmost_select(body: &ViewBody) -> &ViewQueryModel {
+    match body {
+        ViewBody::Select(query) => query,
+        ViewBody::Set { left, .. } => leftmost_select(left),
+    }
+}
+
+/// Renders one operand of a set operation, wrapped so its own `ORDER BY`/`LIMIT` (and a nested
+/// compound's grouping) binds to the operand and not the enclosing set. PostgreSQL/MySQL wrap with
+/// `(…)`; SQLite rejects a parenthesized compound operand and wraps with `SELECT * FROM (…)`. This is the
+/// same [`Dialect::set_operand_style`] seam the runtime set renderer honors, so a set-op *view body*
+/// renders identically to a runtime set query — the reverse parser inverts both wrappings.
+fn render_set_operand(
+    body: &ViewBody,
+    alias_projections: bool,
+    dialect: &dyn Dialect,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
+    let (open, close): (&[u8], &[u8]) = match dialect.set_operand_style() {
+        SetOperandStyle::Parenthesized => (b"(", b")"),
+        SetOperandStyle::SubquerySelect => (b"SELECT * FROM (", b")"),
+    };
+    writer.write_all(open)?;
+    render_body(body, alias_projections, dialect, writer)?;
+    writer.write_all(close)
+}
+
+/// The SQL keyword(s) for a view-body set operator, e.g. `UNION` / `UNION ALL` / `INTERSECT`.
+fn set_op_keyword(op: ViewSetOp, all: bool) -> &'static str {
+    match (op, all) {
+        (ViewSetOp::Union, false) => "UNION",
+        (ViewSetOp::Union, true) => "UNION ALL",
+        (ViewSetOp::Intersect, false) => "INTERSECT",
+        (ViewSetOp::Intersect, true) => "INTERSECT ALL",
+        (ViewSetOp::Except, false) => "EXCEPT",
+        (ViewSetOp::Except, true) => "EXCEPT ALL",
+    }
 }
 
 /// Writes a `FROM`/`JOIN` source. A named relation renders `<qualified> AS <alias>`; a derived table
@@ -268,7 +400,7 @@ fn render_source(
         }
         SourceItem::Derived { query, alias } => {
             writer.write_all(b"(")?;
-            render_select(query, true, dialect, writer)?;
+            render_body(query, true, dialect, writer)?;
             write!(writer, ") AS {alias}")
         }
     }

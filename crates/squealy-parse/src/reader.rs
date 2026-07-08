@@ -13,11 +13,11 @@
 //! | backend DDL writer — index key term            | [`Reader::read_index_expression`]     |
 //!
 //! The scalar entry points lower structurally; the view-body entry points reconstruct a single-`SELECT`
-//! body into a [`ViewQueryModel`] (the structural inverse of the SELECT renderer). Shapes still outside
+//! body into a [`ViewBody`] (the structural inverse of the SELECT renderer). Shapes still outside
 //! the lowering grammar return [`ReadError::NotYetLowered`].
 
 use sqlparser::ast::Statement;
-use squealy_ir::{ExprNode, ViewQueryModel};
+use squealy_ir::{ExprNode, ViewBody};
 
 use crate::{ReadError, SqlDialect, lower, parse_expr, parse_expr_list, parse_sql};
 
@@ -40,7 +40,7 @@ impl Reader {
         self.dialect
     }
 
-    /// Reads a `CREATE VIEW` statement into its body [`ViewQueryModel`] — the structural inverse of
+    /// Reads a `CREATE VIEW` statement into its body [`ViewBody`] — the structural inverse of
     /// `render_create_view`.
     ///
     /// The returned model is the view's `SELECT` *body* only: the view's output column *types* are not
@@ -50,7 +50,7 @@ impl Reader {
     ///
     /// A body outside the single-`SELECT` grammar the SELECT renderer emits (set operations, CTEs,
     /// derived-table sources, comma joins, …) returns [`ReadError::NotYetLowered`].
-    pub fn read_create_view(&self, sql: &str) -> Result<ViewQueryModel, ReadError> {
+    pub fn read_create_view(&self, sql: &str) -> Result<ViewBody, ReadError> {
         let statements = parse_sql(sql, self.dialect)?;
         match statements.as_slice() {
             [Statement::CreateView(create_view)] => {
@@ -66,12 +66,12 @@ impl Reader {
         }
     }
 
-    /// Reads a bare `SELECT` view definition (a `Statement::Query`) into a [`ViewQueryModel`] — the form
+    /// Reads a bare `SELECT` view definition (a `Statement::Query`) into a [`ViewBody`] — the form
     /// a backend's view-body deparse returns (PostgreSQL's `pg_get_viewdef`, MySQL's
     /// `information_schema.VIEWS.VIEW_DEFINITION`). Unlike [`read_create_view`] there is no surrounding
     /// `CREATE VIEW (cols)` column list, so the projection outputs are named by their own `AS` aliases
     /// (or a bare column's name).
-    pub fn read_view_query(&self, sql: &str) -> Result<ViewQueryModel, ReadError> {
+    pub fn read_view_query(&self, sql: &str) -> Result<ViewBody, ReadError> {
         let statements = parse_sql(sql, self.dialect)?;
         match statements.as_slice() {
             [Statement::Query(query)] => lower::lower_query(query, self.dialect),

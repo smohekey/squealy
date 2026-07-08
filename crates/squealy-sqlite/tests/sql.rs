@@ -548,7 +548,7 @@ fn id_view(name: &str, from: &str, filter: Option<squealy::ExprNode>) -> squealy
             ty: squealy::SqlType::I32,
             nullable: false,
         }],
-        query: squealy::ViewQueryModel {
+        query: squealy::ViewBody::Select(Box::new(squealy::ViewQueryModel {
             dependencies: Vec::new(),
             distinct: false,
             projection: vec![squealy::ProjectionItem {
@@ -567,7 +567,7 @@ fn id_view(name: &str, from: &str, filter: Option<squealy::ExprNode>) -> squealy
             order_by: Vec::new(),
             limit: None,
             offset: None,
-        },
+        })),
     }
 }
 
@@ -660,7 +660,7 @@ fn render_create_renders_view_expression_ir_in_sqlite_dialect() {
     // `SUBSTRING(s FROM start FOR len)`), and `||` concat (not `CONCAT`).
     use squealy::{
         DatabaseModel, ExprNode, ProjectionItem, ScalarFunc, SchemaModel, SourceItem, SourceRef,
-        SqlType, ViewColumnModel, ViewModel, ViewQueryModel,
+        SqlType, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
     };
 
     let scalar = |func: ScalarFunc, args: Vec<ExprNode>| ExprNode::ScalarFn { func, args };
@@ -678,7 +678,7 @@ fn render_create_renders_view_expression_ir_in_sqlite_dialect() {
                 name: "labels".to_owned(),
                 comment: None,
                 columns: vec![column("namelen"), column("greeting"), column("prefix")],
-                query: ViewQueryModel {
+                query: ViewBody::Select(Box::new(ViewQueryModel {
                     dependencies: Vec::new(),
                     distinct: false,
                     projection: vec![
@@ -717,7 +717,7 @@ fn render_create_renders_view_expression_ir_in_sqlite_dialect() {
                     order_by: Vec::new(),
                     limit: None,
                     offset: None,
-                },
+                })),
             }],
         }],
     };
@@ -743,6 +743,209 @@ fn render_create_renders_view_expression_ir_in_sqlite_dialect() {
     assert!(
         !sql.contains("SUBSTRING"),
         "SUBSTRING FROM/FOR leaked: {sql}"
+    );
+}
+
+#[test]
+fn rejects_intersect_all_view_body_which_sqlite_cannot_run() {
+    // SQLite allows `ALL` only after `UNION`; `INTERSECT ALL`/`EXCEPT ALL` are syntax errors. A model
+    // carrying such a set-op view body must be rejected at render, not emit SQL SQLite cannot run.
+    use squealy::{
+        DatabaseModel, ProjectionItem, SchemaModel, SourceItem, SourceRef, SqlType, ViewBody,
+        ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
+    };
+
+    let arm = |alias: &str| {
+        ViewBody::Select(Box::new(ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "id".to_owned(),
+                expr: view_col("id"),
+            }],
+            from: Some(SourceItem::Named(SourceRef {
+                schema: None,
+                name: "users".to_owned(),
+                alias: alias.to_owned(),
+            })),
+            ..ViewQueryModel::default()
+        }))
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: Vec::new(),
+            views: vec![ViewModel {
+                name: "v".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "id".to_owned(),
+                    ty: SqlType::I32,
+                    nullable: false,
+                }],
+                query: ViewBody::Set {
+                    op: ViewSetOp::Intersect,
+                    all: true,
+                    left: Box::new(arm("q0_0")),
+                    right: Box::new(arm("q0_1")),
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                },
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let error = Sqlite.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
+fn rejects_set_body_with_an_alias_qualified_order_by_term() {
+    // A compound `ORDER BY` binds to the set's output columns, so an arm-qualified column
+    // (`q0_0."id"`) cannot resolve — it must be rejected at render, not emitted as invalid SQL.
+    use squealy::{
+        DatabaseModel, ExprNode, OrderItem, ProjectionItem, SchemaModel, SourceItem, SourceRef,
+        SqlType, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
+    };
+
+    let arm = |alias: &str| {
+        ViewBody::Select(Box::new(ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "id".to_owned(),
+                expr: view_col("id"),
+            }],
+            from: Some(SourceItem::Named(SourceRef {
+                schema: None,
+                name: "users".to_owned(),
+                alias: alias.to_owned(),
+            })),
+            ..ViewQueryModel::default()
+        }))
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: Vec::new(),
+            views: vec![ViewModel {
+                name: "v".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "id".to_owned(),
+                    ty: SqlType::I32,
+                    nullable: false,
+                }],
+                query: ViewBody::Set {
+                    op: ViewSetOp::Union,
+                    all: false,
+                    left: Box::new(arm("q0_0")),
+                    right: Box::new(arm("q0_1")),
+                    // An alias-qualified column is invalid as a whole-set ORDER BY term.
+                    order_by: vec![OrderItem {
+                        expr: ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: "id".to_owned(),
+                        },
+                        direction: None,
+                        nulls: None,
+                    }],
+                    limit: None,
+                    offset: None,
+                },
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    let error = Sqlite.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
+fn rejects_set_body_order_by_a_name_the_left_arm_does_not_emit() {
+    // A compound `ORDER BY` resolves against the leftmost arm's output names (here `total`), NOT the
+    // `CREATE VIEW` column list (`n`). A whole-set `ORDER BY n` therefore does not resolve and must be
+    // rejected — a valid ordinal (`1`) over that one output is accepted.
+    use squealy::{
+        ArithmeticOp, DatabaseModel, ExprNode, OrderItem, ProjectionItem, SchemaModel, SourceItem,
+        SourceRef, SqlType, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
+    };
+
+    let arm = |alias: &str| {
+        ViewBody::Select(Box::new(ViewQueryModel {
+            // Projects an *expression* aliased `total` — the compound output is named `total`.
+            projection: vec![ProjectionItem {
+                output_name: "total".to_owned(),
+                expr: ExprNode::Binary {
+                    op: ArithmeticOp::Multiply,
+                    left: Box::new(view_col("amount")),
+                    right: Box::new(ExprNode::Literal("2".to_owned())),
+                },
+            }],
+            from: Some(SourceItem::Named(SourceRef {
+                schema: None,
+                name: "users".to_owned(),
+                alias: alias.to_owned(),
+            })),
+            ..ViewQueryModel::default()
+        }))
+    };
+    let set = |order: Vec<OrderItem>| {
+        DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: Vec::new(),
+                views: vec![ViewModel {
+                    name: "v".to_owned(),
+                    comment: None,
+                    // View output column `n` — different from the arms' alias `total`.
+                    columns: vec![ViewColumnModel {
+                        name: "n".to_owned(),
+                        ty: SqlType::I64,
+                        nullable: false,
+                    }],
+                    query: ViewBody::Set {
+                        op: ViewSetOp::Union,
+                        all: false,
+                        left: Box::new(arm("q0_0")),
+                        right: Box::new(arm("q0_1")),
+                        order_by: order,
+                        limit: None,
+                        offset: None,
+                    },
+                }],
+            }],
+        }
+    };
+    let render = |order: Vec<OrderItem>| {
+        let mut sql = Vec::new();
+        Sqlite.render_create(&set(order), &mut sql).map(|()| sql)
+    };
+    let term = |expr: ExprNode| OrderItem {
+        expr,
+        direction: None,
+        nulls: None,
+    };
+
+    // `ORDER BY n` — the view column name, which the compound does not expose — is rejected.
+    let error = render(vec![term(ExprNode::BareColumn {
+        column: "n".to_owned(),
+    })])
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    // `ORDER BY total` — the leftmost arm's actual output — is accepted.
+    assert!(
+        render(vec![term(ExprNode::BareColumn {
+            column: "total".to_owned(),
+        })])
+        .is_ok()
+    );
+    // `ORDER BY 1` — a valid ordinal — is accepted; `ORDER BY 2` (out of range) is rejected.
+    assert!(render(vec![term(ExprNode::Literal("1".to_owned()))]).is_ok());
+    assert_eq!(
+        render(vec![term(ExprNode::Literal("2".to_owned()))])
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::Unsupported
     );
 }
 

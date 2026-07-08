@@ -1,4 +1,6 @@
-use squealy::{ExprNode, SourceItem, SourceRef, ViewColumnModel, ViewModel, ViewQueryModel};
+use squealy::{
+    ExprNode, SourceItem, SourceRef, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
+};
 use squealy_model::{
     AppliedRefactorError, CastColumn, ChangeRisk, CheckModel, ColumnModel, DatabaseModel,
     DatabasePlanStep, DdlExecutor, DiffPolicy, IndexModel, PlanApplyOptions, RefactorLog,
@@ -772,7 +774,7 @@ async fn plan_from_database_canonicalizes_view_column_types() {
             ty,
             nullable: false,
         }],
-        query: if introspected {
+        query: ViewBody::Select(Box::new(if introspected {
             ViewQueryModel::default()
         } else {
             ViewQueryModel {
@@ -783,7 +785,7 @@ async fn plan_from_database_canonicalizes_view_column_types() {
                 })),
                 ..ViewQueryModel::default()
             }
-        },
+        })),
     };
     let schema = |view: ViewModel| DatabaseModel {
         schemas: vec![SchemaModel {

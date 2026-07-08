@@ -2655,7 +2655,7 @@ fn postgres_renders_views_in_dependency_order() {
                     nullable: false,
                 })
                 .collect(),
-            query: ViewQueryModel {
+            query: ViewBody::Select(Box::new(ViewQueryModel {
                 dependencies: Vec::new(),
                 distinct: false,
                 projection: projection
@@ -2680,7 +2680,7 @@ fn postgres_renders_views_in_dependency_order() {
                 order_by: Vec::new(),
                 limit: None,
                 offset: None,
-            },
+            })),
         }
     }
 
@@ -2771,7 +2771,7 @@ fn postgres_renders_view_plan_steps() {
             ty: SqlType::I32,
             nullable: false,
         }],
-        query: ViewQueryModel {
+        query: ViewBody::Select(Box::new(ViewQueryModel {
             dependencies: Vec::new(),
             distinct: false,
             projection: vec![ProjectionItem {
@@ -2800,7 +2800,7 @@ fn postgres_renders_view_plan_steps() {
             order_by: Vec::new(),
             limit: None,
             offset: None,
-        },
+        })),
     };
 
     let plan = DatabasePlan {
@@ -2845,7 +2845,7 @@ fn postgres_renders_distinct_view_body() {
             ty: SqlType::String,
             nullable: false,
         }],
-        query: ViewQueryModel {
+        query: ViewBody::Select(Box::new(ViewQueryModel {
             dependencies: Vec::new(),
             distinct: true,
             projection: vec![ProjectionItem {
@@ -2867,7 +2867,7 @@ fn postgres_renders_distinct_view_body() {
             order_by: Vec::new(),
             limit: None,
             offset: None,
-        },
+        })),
     };
 
     let plan = DatabasePlan {
@@ -2902,7 +2902,7 @@ fn postgres_renders_case_view_body() {
             ty: SqlType::I32,
             nullable: false,
         }],
-        query: ViewQueryModel {
+        query: ViewBody::Select(Box::new(ViewQueryModel {
             distinct: false,
             projection: vec![ProjectionItem {
                 output_name: "label".to_owned(),
@@ -2934,7 +2934,7 @@ fn postgres_renders_case_view_body() {
             limit: None,
             offset: None,
             dependencies: Vec::new(),
-        },
+        })),
     };
 
     let plan = DatabasePlan {
@@ -3077,7 +3077,7 @@ fn postgres_renders_view_expression_ir_in_its_dialect() {
                         nullable: false,
                     },
                 ],
-                query: ViewQueryModel {
+                query: ViewBody::Select(Box::new(ViewQueryModel {
                     dependencies: Vec::new(),
                     distinct: false,
                     projection: vec![
@@ -3113,7 +3113,7 @@ fn postgres_renders_view_expression_ir_in_its_dialect() {
                     order_by: Vec::new(),
                     limit: None,
                     offset: None,
-                },
+                })),
             }],
         }],
     };
@@ -3243,7 +3243,7 @@ fn postgres_view_order_by_keeps_nulls_modifier() {
                     ty: SqlType::I32,
                     nullable: true,
                 }],
-                query: ViewQueryModel {
+                query: ViewBody::Select(Box::new(ViewQueryModel {
                     dependencies: Vec::new(),
                     distinct: false,
                     projection: vec![ProjectionItem {
@@ -3272,7 +3272,7 @@ fn postgres_view_order_by_keeps_nulls_modifier() {
                     }],
                     limit: None,
                     offset: None,
-                },
+                })),
             }],
         }],
     };
@@ -3303,7 +3303,7 @@ fn postgres_render_rejects_empty_view_body() {
                     ty: SqlType::I32,
                     nullable: false,
                 }],
-                query: ViewQueryModel::default(),
+                query: ViewBody::default(),
             }],
         }],
     };
