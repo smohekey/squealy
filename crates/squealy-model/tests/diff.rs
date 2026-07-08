@@ -2,7 +2,7 @@ use squealy_model::{
     ChangeRisk, CheckModel, ColumnModel, Constraint, DatabaseDiffChange, DatabaseModel,
     DefaultValue, DiffPolicy, ExprNode, ForeignKeyAction, ForeignKeyModel, IndexModel,
     ProjectionItem, SchemaModel, SourceItem, SourceRef, SqlType, TableDiffChange, TableModel,
-    ViewColumnModel, ViewModel, ViewQueryModel, check_diff_policy, diff_models,
+    ViewBody, ViewColumnModel, ViewModel, ViewQueryModel, check_diff_policy, diff_models,
 };
 
 #[test]
@@ -428,7 +428,7 @@ fn dep_view(name: &str, from: &str) -> ViewModel {
             ty: SqlType::I32,
             nullable: false,
         }],
-        query: ViewQueryModel {
+        query: ViewBody::Select(Box::new(ViewQueryModel {
             dependencies: Vec::new(),
             distinct: false,
             projection: vec![ProjectionItem {
@@ -450,7 +450,7 @@ fn dep_view(name: &str, from: &str) -> ViewModel {
             order_by: Vec::new(),
             limit: None,
             offset: None,
-        },
+        })),
     }
 }
 

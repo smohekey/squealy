@@ -23,8 +23,8 @@ use squealy::{
     FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
     IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
     JoinItem, JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem,
-    ScalarFunc, SchemaModel, SourceItem, SourceRef, SqlType, TableModel, ViewColumnModel,
-    ViewModel, ViewQueryModel, WindowFunc, WindowOrderTerm,
+    ScalarFunc, SchemaModel, SourceItem, SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel,
+    ViewModel, ViewQueryModel, ViewSetOp, WindowFunc, WindowOrderTerm,
 };
 
 use crate::{CastColumn, RefactorLog, RefactorOperation, RenameColumn, RenameTable};
@@ -460,7 +460,7 @@ fn view_to_node(view: &ViewModel) -> KdlNode {
     for column in &view.columns {
         body.nodes_mut().push(view_column_to_node(column));
     }
-    body.nodes_mut().push(view_query_to_node(&view.query));
+    body.nodes_mut().push(view_body_to_node(&view.query));
     node.set_children(body);
     node
 }
@@ -529,27 +529,7 @@ fn view_query_to_node(query: &ViewQueryModel) -> KdlNode {
         body.nodes_mut().push(wrap_expr("having", having));
     }
     for order in &query.order_by {
-        let mut node = KdlNode::new("order-by");
-        if let Some(direction) = order.direction {
-            node.push(KdlEntry::new_prop(
-                "direction",
-                match direction {
-                    OrderDirection::Asc => "asc",
-                    OrderDirection::Desc => "desc",
-                },
-            ));
-        }
-        if let Some(nulls) = order.nulls {
-            node.push(KdlEntry::new_prop(
-                "nulls",
-                match nulls {
-                    OrderNulls::First => "first",
-                    OrderNulls::Last => "last",
-                },
-            ));
-        }
-        push_child(&mut node, expr_to_node(&order.expr));
-        body.nodes_mut().push(node);
+        body.nodes_mut().push(order_to_node(order));
     }
     // Introspected views have no body but record their view-on-view dependencies; persist them so an
     // exported introspection package keeps the edges that drive live drop ordering.
@@ -558,6 +538,89 @@ fn view_query_to_node(query: &ViewQueryModel) -> KdlNode {
             .push(view_source_to_node("dependency", dependency, None));
     }
     node.set_children(body);
+    node
+}
+
+/// Serializes one `ORDER BY` term (shared by a single `SELECT` and a set operation's trailing tail).
+fn order_to_node(order: &OrderItem) -> KdlNode {
+    let mut node = KdlNode::new("order-by");
+    if let Some(direction) = order.direction {
+        node.push(KdlEntry::new_prop(
+            "direction",
+            match direction {
+                OrderDirection::Asc => "asc",
+                OrderDirection::Desc => "desc",
+            },
+        ));
+    }
+    if let Some(nulls) = order.nulls {
+        node.push(KdlEntry::new_prop(
+            "nulls",
+            match nulls {
+                OrderNulls::First => "first",
+                OrderNulls::Last => "last",
+            },
+        ));
+    }
+    push_child(&mut node, expr_to_node(&order.expr));
+    node
+}
+
+/// Serializes a view body: a single `SELECT` reuses the `query` node; a set operation becomes a `set`
+/// node carrying `op`/`all` (and any trailing whole-set `ORDER BY`/`limit`/`offset`) with its two
+/// operands each wrapped in a `left`/`right` node holding one nested body.
+fn view_body_to_node(body: &ViewBody) -> KdlNode {
+    match body {
+        ViewBody::Select(query) => view_query_to_node(query),
+        ViewBody::Set {
+            op,
+            all,
+            left,
+            right,
+            order_by,
+            limit,
+            offset,
+        } => {
+            let mut node = KdlNode::new("set");
+            node.push(KdlEntry::new_prop(
+                "op",
+                match op {
+                    ViewSetOp::Union => "union",
+                    ViewSetOp::Intersect => "intersect",
+                    ViewSetOp::Except => "except",
+                },
+            ));
+            if *all {
+                node.push(KdlEntry::new_prop("all", KdlValue::Bool(true)));
+            }
+            if let Some(limit) = limit {
+                node.push(KdlEntry::new_prop(
+                    "limit",
+                    KdlValue::Integer(*limit as i128),
+                ));
+            }
+            if let Some(offset) = offset {
+                node.push(KdlEntry::new_prop(
+                    "offset",
+                    KdlValue::Integer(*offset as i128),
+                ));
+            }
+            let mut children = KdlDocument::new();
+            for order in order_by {
+                children.nodes_mut().push(order_to_node(order));
+            }
+            children.nodes_mut().push(wrap_body("left", left));
+            children.nodes_mut().push(wrap_body("right", right));
+            node.set_children(children);
+            node
+        }
+    }
+}
+
+/// A `<name> { <body> }` wrapper for a set operation's `left`/`right` operand.
+fn wrap_body(name: &str, body: &ViewBody) -> KdlNode {
+    let mut node = KdlNode::new(name);
+    push_child(&mut node, view_body_to_node(body));
     node
 }
 
@@ -1037,7 +1100,7 @@ fn view_source_item_to_node(kind: &str, source: &SourceItem, join_kind: Option<&
             if let Some(join_kind) = join_kind {
                 node.push(KdlEntry::new_prop("kind", join_kind));
             }
-            push_child(&mut node, view_query_to_node(query));
+            push_child(&mut node, view_body_to_node(query));
             node
         }
     }
@@ -1418,9 +1481,8 @@ fn view_from_node(node: &KdlNode) -> Result<ViewModel, PackageError> {
     let columns = child_nodes(node, "column")
         .map(view_column_from_node)
         .collect::<Result<Vec<_>, _>>()?;
-    let query = child_nodes(node, "query")
-        .next()
-        .map(view_query_from_node)
+    let query = body_child(node)
+        .map(view_body_from_node)
         .transpose()?
         .unwrap_or_default();
     Ok(ViewModel {
@@ -1429,6 +1491,59 @@ fn view_from_node(node: &KdlNode) -> Result<ViewModel, PackageError> {
         columns,
         query,
     })
+}
+
+/// The child node holding a view body — a `query` (single `SELECT`) or a `set` (set operation) node.
+fn body_child(node: &KdlNode) -> Option<&KdlNode> {
+    node.children()?
+        .nodes()
+        .iter()
+        .find(|child| matches!(child.name().value(), "query" | "set"))
+}
+
+/// Reads a view body: a `query` node is a single `SELECT`; a `set` node is a set operation carrying
+/// `op`/`all` (and a trailing whole-set `ORDER BY`/`limit`/`offset`) with `left`/`right` operand bodies.
+fn view_body_from_node(node: &KdlNode) -> Result<ViewBody, PackageError> {
+    match node.name().value() {
+        "query" => Ok(ViewBody::Select(Box::new(view_query_from_node(node)?))),
+        "set" => {
+            let op = match prop(node, "op") {
+                Some("union") => ViewSetOp::Union,
+                Some("intersect") => ViewSetOp::Intersect,
+                Some("except") => ViewSetOp::Except,
+                other => {
+                    return Err(malformed(format!(
+                        "`set` has an invalid or missing `op` ({other:?})"
+                    )));
+                }
+            };
+            let order_by = child_nodes(node, "order-by")
+                .map(view_order_from_node)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(ViewBody::Set {
+                op,
+                all: prop_bool(node, "all"),
+                left: Box::new(set_operand_from_node(node, "left")?),
+                right: Box::new(set_operand_from_node(node, "right")?),
+                order_by,
+                limit: prop_usize(node, "limit")?,
+                offset: prop_usize(node, "offset")?,
+            })
+        }
+        other => Err(malformed(format!(
+            "expected a view body (`query` or `set`), found `{other}`"
+        ))),
+    }
+}
+
+/// Reads one `left`/`right` operand of a `set` node — a wrapper holding a single nested body.
+fn set_operand_from_node(node: &KdlNode, name: &str) -> Result<ViewBody, PackageError> {
+    let wrapper = child_nodes(node, name)
+        .next()
+        .ok_or_else(|| malformed(format!("`set` is missing its `{name}` operand")))?;
+    let body = body_child(wrapper)
+        .ok_or_else(|| malformed(format!("`set` `{name}` operand has no body")))?;
+    view_body_from_node(body)
 }
 
 fn view_column_from_node(node: &KdlNode) -> Result<ViewColumnModel, PackageError> {
@@ -1500,12 +1615,12 @@ fn view_source_from_node(node: &KdlNode) -> Result<SourceRef, PackageError> {
     })
 }
 
-/// Reads a `FROM`/`JOIN` [`SourceItem`]: a `query` child marks a derived table (its alias comes from the
-/// `alias` prop); otherwise the node names a relation and reads as a [`SourceItem::Named`].
+/// Reads a `FROM`/`JOIN` [`SourceItem`]: a `query`/`set` body child marks a derived table (its alias
+/// comes from the `alias` prop); otherwise the node names a relation and reads as a [`SourceItem::Named`].
 fn view_source_item_from_node(node: &KdlNode) -> Result<SourceItem, PackageError> {
-    match child_nodes(node, "query").next() {
-        Some(query) => Ok(SourceItem::Derived {
-            query: Box::new(view_query_from_node(query)?),
+    match body_child(node) {
+        Some(body) => Ok(SourceItem::Derived {
+            query: Box::new(view_body_from_node(body)?),
             alias: required_prop(node, "alias")?,
         }),
         None => Ok(SourceItem::Named(view_source_from_node(node)?)),
@@ -1521,7 +1636,8 @@ fn view_join_from_node(node: &KdlNode) -> Result<JoinItem, PackageError> {
         _ => JoinKind::Inner,
     };
     // A `CROSS JOIN` has no `ON` child; every other kind carries its condition. A derived source stores
-    // its subquery in a `query` child, so the `ON` predicate is the first child that is *not* that block.
+    // its subquery in a `query`/`set` body child, so the `ON` predicate is the first child that is *not*
+    // that block.
     let on = match kind {
         JoinKind::Cross => None,
         _ => Some(join_on_expr(node)?),
@@ -1534,11 +1650,11 @@ fn view_join_from_node(node: &KdlNode) -> Result<JoinItem, PackageError> {
 }
 
 /// The `ON` predicate of a join node — the first child expression, skipping a derived source's nested
-/// `query` block (which is not an expression).
+/// `query`/`set` body block (which is not an expression).
 fn join_on_expr(node: &KdlNode) -> Result<ExprNode, PackageError> {
     let child = expr_child_nodes(node)
         .into_iter()
-        .find(|child| child.name().value() != "query")
+        .find(|child| !matches!(child.name().value(), "query" | "set"))
         .ok_or_else(|| {
             malformed(format!(
                 "`{}` is missing its ON expression",
@@ -2666,7 +2782,7 @@ mod tests {
                             nullable: true,
                         },
                     ],
-                    query: ViewQueryModel {
+                    query: ViewBody::Select(Box::new(ViewQueryModel {
                         dependencies: Vec::new(),
                         distinct: true,
                         projection: vec![
@@ -2767,7 +2883,7 @@ mod tests {
                         }],
                         limit: Some(10),
                         offset: Some(5),
-                    },
+                    })),
                 }],
             }],
         };
@@ -2802,6 +2918,9 @@ mod tests {
                 alias: alias.to_owned(),
             })
         }
+        fn sel(query: ViewQueryModel) -> ViewBody {
+            ViewBody::Select(Box::new(query))
+        }
 
         // A derived source in the `FROM`, and a second derived source in a `LEFT JOIN` — the join's `ON`
         // must round-trip alongside the derived subquery's `query` child (i.e. not be mistaken for it).
@@ -2817,11 +2936,11 @@ mod tests {
                         ty: SqlType::I32,
                         nullable: true,
                     }],
-                    query: ViewQueryModel {
+                    query: ViewBody::Select(Box::new(ViewQueryModel {
                         distinct: false,
                         projection: vec![proj("id", col("d0", "id"))],
                         from: Some(SourceItem::Derived {
-                            query: Box::new(ViewQueryModel {
+                            query: Box::new(sel(ViewQueryModel {
                                 projection: vec![proj("id", col("q1_0", "id"))],
                                 from: Some(named("events", "q1_0")),
                                 filter: Some(ExprNode::Compare {
@@ -2830,17 +2949,17 @@ mod tests {
                                     right: Box::new(ExprNode::Literal("0".to_owned())),
                                 }),
                                 ..ViewQueryModel::default()
-                            }),
+                            })),
                             alias: "d0".to_owned(),
                         }),
                         joins: vec![JoinItem {
                             kind: JoinKind::Left,
                             source: SourceItem::Derived {
-                                query: Box::new(ViewQueryModel {
+                                query: Box::new(sel(ViewQueryModel {
                                     projection: vec![proj("id", col("q2_0", "id"))],
                                     from: Some(named("audits", "q2_0")),
                                     ..ViewQueryModel::default()
-                                }),
+                                })),
                                 alias: "d1".to_owned(),
                             },
                             on: Some(ExprNode::Compare {
@@ -2850,7 +2969,7 @@ mod tests {
                             }),
                         }],
                         ..ViewQueryModel::default()
-                    },
+                    })),
                 }],
             }],
         };
@@ -2861,6 +2980,77 @@ mod tests {
             parsed, model,
             "derived-table view KDL round-trip diverged:\n{kdl}"
         );
+    }
+
+    #[test]
+    fn kdl_round_trips_set_op_view_bodies() {
+        fn col(alias: &str, column: &str) -> ExprNode {
+            ExprNode::Column {
+                alias: alias.to_owned(),
+                column: column.to_owned(),
+            }
+        }
+        fn leaf(alias: &str) -> ViewBody {
+            ViewBody::Select(Box::new(ViewQueryModel {
+                projection: vec![ProjectionItem {
+                    output_name: "id".to_owned(),
+                    expr: col(alias, "id"),
+                }],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: Some("public".to_owned()),
+                    name: "events".to_owned(),
+                    alias: alias.to_owned(),
+                })),
+                ..ViewQueryModel::default()
+            }))
+        }
+
+        // A nested set: `(a UNION ALL b) EXCEPT c`, with a trailing whole-set ORDER BY/LIMIT/OFFSET on the
+        // outer node — exercises `op`/`all`, recursion through `left`/`right`, and the tail serialization.
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: Some("public".to_owned()),
+                tables: Vec::new(),
+                views: vec![ViewModel {
+                    name: "v_setop".to_owned(),
+                    comment: None,
+                    columns: vec![ViewColumnModel {
+                        name: "id".to_owned(),
+                        ty: SqlType::I32,
+                        nullable: true,
+                    }],
+                    query: ViewBody::Set {
+                        op: ViewSetOp::Except,
+                        all: false,
+                        left: Box::new(ViewBody::Set {
+                            op: ViewSetOp::Union,
+                            all: true,
+                            left: Box::new(leaf("q0_0")),
+                            right: Box::new(leaf("q0_1")),
+                            order_by: Vec::new(),
+                            limit: None,
+                            offset: None,
+                        }),
+                        right: Box::new(leaf("q0_2")),
+                        // A whole-set `ORDER BY` references an *output* column by name (a bare column),
+                        // not an arm's `FROM` alias.
+                        order_by: vec![OrderItem {
+                            expr: ExprNode::BareColumn {
+                                column: "id".to_owned(),
+                            },
+                            direction: Some(OrderDirection::Desc),
+                            nulls: Some(OrderNulls::Last),
+                        }],
+                        limit: Some(10),
+                        offset: Some(2),
+                    },
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("set-op view model.kdl should parse");
+        assert_eq!(parsed, model, "set-op view KDL round-trip diverged:\n{kdl}");
     }
 
     #[test]
@@ -2880,14 +3070,14 @@ mod tests {
                         ty: SqlType::I32,
                         nullable: false,
                     }],
-                    query: ViewQueryModel {
+                    query: ViewBody::Select(Box::new(ViewQueryModel {
                         dependencies: vec![SourceRef {
                             schema: Some("public".to_owned()),
                             name: "parent".to_owned(),
                             alias: "parent".to_owned(),
                         }],
                         ..ViewQueryModel::default()
-                    },
+                    })),
                 }],
             }],
         };

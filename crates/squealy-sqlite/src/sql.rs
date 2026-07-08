@@ -1255,6 +1255,11 @@ impl squealy::Dialect for SqliteDialect {
         squealy::SetOperandStyle::SubquerySelect
     }
 
+    fn supports_intersect_except_all(&self) -> bool {
+        // SQLite allows `ALL` only after `UNION`; `INTERSECT ALL`/`EXCEPT ALL` are syntax errors.
+        false
+    }
+
     fn substring_uses_function_call(&self) -> bool {
         // SQLite spells substring as `substr(s, start, len)`, not `SUBSTRING(s FROM start FOR len)`.
         true

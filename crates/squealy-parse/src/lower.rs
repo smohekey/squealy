@@ -50,12 +50,13 @@ use sqlparser::ast::{
     DateTimeField, Distinct, DuplicateTreatment, Expr, ExtractSyntax, Function, FunctionArg,
     FunctionArgExpr, FunctionArguments, GroupByExpr, Join, JoinConstraint, JoinOperator,
     LimitClause, ObjectName, OrderBy, OrderByExpr, OrderByKind, Query, Select, SelectFlavor,
-    SelectItem, SetExpr, TableAlias, TableFactor, UnaryOperator, Value, WindowType,
+    SelectItem, SetExpr, SetOperator, SetQuantifier, TableAlias, TableFactor, UnaryOperator, Value,
+    WindowType,
 };
 use squealy_ir::{
     AggregateFunc, ArithmeticOp, CaseArm, CompareOp, DateField, ExprNode, JoinItem, JoinKind,
     LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem, ScalarFunc, SourceItem,
-    SourceRef, SqlType, ViewQueryModel, WindowFunc, WindowOrderTerm,
+    SourceRef, SqlType, ViewBody, ViewQueryModel, ViewSetOp, WindowFunc, WindowOrderTerm,
 };
 
 use crate::{ReadError, SqlDialect};
@@ -81,27 +82,28 @@ pub fn lower_expr(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadErro
 /// (`UNION`/`EXCEPT`/`INTERSECT`), a `VALUES`, a derived-table (subquery) `FROM`, comma joins
 /// (multiple `FROM` entries), `USING`/`NATURAL` joins, a wildcard projection, or a non-integer
 /// `LIMIT`/`OFFSET` — return [`ReadError::NotYetLowered`] (they land in later phases).
-pub fn lower_query(query: &Query, dialect: SqlDialect) -> Result<ViewQueryModel, ReadError> {
-    lower_query_inner(query, None, dialect)
+pub fn lower_query(query: &Query, dialect: SqlDialect) -> Result<ViewBody, ReadError> {
+    lower_body(query, None, dialect)
 }
 
-/// Lowers a parsed `CREATE VIEW` into its body [`ViewQueryModel`]. When the statement carries a
-/// declared column list (`CREATE VIEW v (a, b) AS …`), the renderer leaves the projections un-aliased
-/// and those names identify the outputs; they are supplied here so each projection is named
-/// positionally. The view's output column *types* are not present in the SQL text (only names), so this
-/// returns just the body — the backend supplies the typed columns from its catalog.
+/// Lowers a parsed `CREATE VIEW` into its body [`ViewBody`]. When the statement carries a declared column
+/// list (`CREATE VIEW v (a, b) AS …`), the renderer leaves the projections un-aliased and those names
+/// identify the outputs; they are supplied here so each projection is named positionally. The view's
+/// output column *types* are not present in the SQL text (only names), so this returns just the body —
+/// the backend supplies the typed columns from its catalog.
 pub fn lower_create_view(
     create_view: &CreateView,
     dialect: SqlDialect,
-) -> Result<ViewQueryModel, ReadError> {
+) -> Result<ViewBody, ReadError> {
     // The renderer emits only `CREATE [OR REPLACE] VIEW <name> [(cols)] AS <select>`. A modifier it never
     // emits (`MATERIALIZED`, `TEMPORARY`, `SECURE`, `IF NOT EXISTS`, `WITH (…)` options, `CLUSTER BY`, a
-    // comment, …) carries semantics the body-only `ViewQueryModel` cannot hold — reject it, else a caller
+    // comment, …) carries semantics the body-only `ViewBody` cannot hold — reject it, else a caller
     // re-rendering the body as a plain `CREATE VIEW` would silently drop those semantics.
     reject_unsupported_view_modifiers(create_view)?;
 
     // The declared column names (`fold_ident` so a quoted name stays case-exact) name the outputs
-    // positionally; an empty list means the projections carry their own `AS` aliases instead.
+    // positionally; an empty list means the projections carry their own `AS` aliases instead. For a
+    // set-op body the list names the *whole set's* outputs, which SQL takes from the leftmost `SELECT`.
     let names: Vec<String> = create_view
         .columns
         .iter()
@@ -112,32 +114,257 @@ pub fn lower_create_view(
     } else {
         Some(names.as_slice())
     };
-    lower_query_inner(&create_view.query, names, dialect)
+    lower_body(&create_view.query, names, dialect)
 }
 
-/// The shared query-lowering core. `output_names`, when `Some`, names the projections positionally (a
-/// column-listed `CREATE VIEW`); when `None`, each projection is named by its own `AS` alias (or, for a
-/// bare column, the column name).
-fn lower_query_inner(
+/// The shared query-lowering core: a full [`Query`] (its `WITH`/`ORDER BY`/`LIMIT` plus a `SetExpr` body)
+/// into a [`ViewBody`]. `output_names`, when `Some`, is a column-listed `CREATE VIEW`'s declared column
+/// names; they name the projections of a **single `SELECT`** body positionally. For a **set operation**
+/// they name only the *compound output* (kept on `ViewModel.columns`) — they are NOT pushed into the
+/// arms, whose projections keep their own `AS` aliases (the renderer always emits them, and an arm's
+/// own `ORDER BY <alias>` refers to them). A single `SELECT` becomes [`ViewBody::Select`] (its
+/// query-level `ORDER BY`/`LIMIT` attach to that select); a set operation becomes [`ViewBody::Set`] with
+/// the query-level `ORDER BY`/`LIMIT` as the trailing whole-set tail.
+fn lower_body(
     query: &Query,
     output_names: Option<&[String]>,
     dialect: SqlDialect,
-) -> Result<ViewQueryModel, ReadError> {
-    // A `WITH` (CTE) prelude widens the IR beyond a single SELECT — a later phase.
+) -> Result<ViewBody, ReadError> {
+    // A `WITH` (CTE) prelude widens the IR beyond a Select/Set body — a later phase (2.0c).
     if query.with.is_some() {
         return Err(not_yet("query with a `WITH` (CTE) clause"));
     }
-    let select = match query.body.as_ref() {
-        SetExpr::Select(select) => select.as_ref(),
-        // Set operations, parenthesized subquery bodies, and `VALUES` are not a single SELECT.
-        SetExpr::SetOperation { .. } => {
-            return Err(not_yet("set operation (UNION/EXCEPT/INTERSECT) body"));
+    reject_unsupported_query_clauses(query)?;
+    match query.body.as_ref() {
+        SetExpr::Select(select) => {
+            let mut model = lower_select(select, output_names, dialect)?;
+            // A single `SELECT`'s query-level `ORDER BY`/`LIMIT`/`OFFSET` belong to that select.
+            model.order_by = lower_order_by(query.order_by.as_ref(), dialect)?;
+            (model.limit, model.offset) = lower_limit_offset(query.limit_clause.as_ref(), dialect)?;
+            Ok(ViewBody::Select(Box::new(model)))
         }
-        SetExpr::Query(_) => return Err(not_yet("parenthesized subquery body")),
-        SetExpr::Values(_) => return Err(not_yet("VALUES body")),
-        other => return Err(not_yet(format!("non-SELECT query body `{other}`"))),
+        SetExpr::SetOperation {
+            op,
+            set_quantifier,
+            left,
+            right,
+        } => {
+            let (set_op, all) = lower_set_op(op, set_quantifier)?;
+            // A column-listed `CREATE VIEW (cols)` names only the *compound* output (recorded on
+            // `ViewModel.columns`, not here); each arm keeps its OWN projection aliases, so `output_names`
+            // is not pushed into either arm — else a left-arm `AS a … ORDER BY a` would be rewritten to
+            // the view column name and its order term would dangle on re-render.
+            let _ = output_names;
+            let left = lower_set_operand(left, None, dialect)?;
+            let right = lower_set_operand(right, None, dialect)?;
+            // The query-level `ORDER BY`/`LIMIT` here apply to the whole set (after the final arm).
+            let order_by = lower_order_by(query.order_by.as_ref(), dialect)?;
+            let (limit, offset) = lower_limit_offset(query.limit_clause.as_ref(), dialect)?;
+            Ok(ViewBody::Set {
+                op: set_op,
+                all,
+                left: Box::new(left),
+                right: Box::new(right),
+                order_by,
+                limit,
+                offset,
+            })
+        }
+        // A parenthesized top-level body (`(SELECT …) ORDER BY … LIMIT …` or `(… UNION …) ORDER BY …`).
+        // The parser attaches the trailing `ORDER BY`/`LIMIT` to *this* outer query, so fold it onto the
+        // lowered inner body rather than dropping it (which would re-render a different result set).
+        SetExpr::Query(inner) => {
+            let body = lower_body(inner, output_names, dialect)?;
+            apply_query_tail(body, query, dialect)
+        }
+        SetExpr::Values(_) => Err(not_yet("VALUES body")),
+        other => Err(not_yet(format!("non-SELECT query body `{other}`"))),
+    }
+}
+
+/// Applies a query's trailing `ORDER BY`/`LIMIT`/`OFFSET` to an already-lowered [`ViewBody`] — the outer
+/// tail of a parenthesized body (`(…) ORDER BY … LIMIT …`), which the parser hangs on the outer query.
+/// A no-op when there is no tail. If the inner body already carries a tail (two nested tails, which the
+/// model cannot represent) this is [`ReadError::NotYetLowered`] rather than a silent drop of one level.
+fn apply_query_tail(
+    body: ViewBody,
+    query: &Query,
+    dialect: SqlDialect,
+) -> Result<ViewBody, ReadError> {
+    let order_by = lower_order_by(query.order_by.as_ref(), dialect)?;
+    let (limit, offset) = lower_limit_offset(query.limit_clause.as_ref(), dialect)?;
+    if order_by.is_empty() && limit.is_none() && offset.is_none() {
+        return Ok(body);
+    }
+    match body {
+        ViewBody::Select(mut select) => {
+            if !select.order_by.is_empty() || select.limit.is_some() || select.offset.is_some() {
+                return Err(not_yet("nested ORDER BY/LIMIT on a parenthesized query"));
+            }
+            select.order_by = order_by;
+            select.limit = limit;
+            select.offset = offset;
+            Ok(ViewBody::Select(select))
+        }
+        ViewBody::Set {
+            op,
+            all,
+            left,
+            right,
+            order_by: inner_order,
+            limit: inner_limit,
+            offset: inner_offset,
+        } => {
+            if !inner_order.is_empty() || inner_limit.is_some() || inner_offset.is_some() {
+                return Err(not_yet(
+                    "nested ORDER BY/LIMIT on a parenthesized set operation",
+                ));
+            }
+            Ok(ViewBody::Set {
+                op,
+                all,
+                left,
+                right,
+                order_by,
+                limit,
+                offset,
+            })
+        }
+    }
+}
+
+/// Lowers one operand of a set operation into a [`ViewBody`]. `output_names` flows only to a leftmost
+/// operand (naming the whole set's outputs). Handles the three shapes the renderers emit and external SQL
+/// carries: a parenthesized operand ([`SetExpr::Query`], which owns its `ORDER BY`/`LIMIT`), a bare
+/// `SELECT` ([`SetExpr::Select`] — no per-operand `ORDER BY`/`LIMIT`), the SQLite `SELECT * FROM
+/// (<operand>)` wrapper (peeled back to the inner operand), and an un-parenthesized nested set.
+fn lower_set_operand(
+    expr: &SetExpr,
+    output_names: Option<&[String]>,
+    dialect: SqlDialect,
+) -> Result<ViewBody, ReadError> {
+    match expr {
+        // A parenthesized operand (a leaf `(SELECT …)` or a nested `(… UNION …)`): it is its own `Query`,
+        // owning any per-operand `ORDER BY`/`LIMIT`.
+        SetExpr::Query(inner) => lower_body(inner, output_names, dialect),
+        SetExpr::Select(select) => {
+            // Reject unsupported outer select-level clauses FIRST, so the SQLite-wrapper peel below cannot
+            // bypass them: `SELECT * FROM (<operand>) QUALIFY …` matches the wrapper shape but carries a
+            // `QUALIFY` (or `WINDOW`, `CONNECT BY`, …) that peeling would silently drop — it must surface
+            // as `NotYetLowered` instead. (`lower_select` re-checks, harmlessly, on the non-wrapper path.)
+            reject_unsupported_select_clauses(select)?;
+            // SQLite wraps each operand as `SELECT * FROM (<operand>)`; peel it back to the inner operand.
+            if let Some(inner) = sqlite_subquery_operand(select) {
+                return lower_body(inner, output_names, dialect);
+            }
+            // A bare `SELECT` operand carries no per-operand `ORDER BY`/`LIMIT` (those live on a `Query`
+            // wrapper), so the lowered select keeps its default empty tail.
+            Ok(ViewBody::Select(Box::new(lower_select(
+                select,
+                output_names,
+                dialect,
+            )?)))
+        }
+        // An un-parenthesized nested set (`a UNION b INTERSECT c`): no per-operand `ORDER BY`/`LIMIT`.
+        SetExpr::SetOperation {
+            op,
+            set_quantifier,
+            left,
+            right,
+        } => {
+            let (set_op, all) = lower_set_op(op, set_quantifier)?;
+            let left = lower_set_operand(left, output_names, dialect)?;
+            let right = lower_set_operand(right, None, dialect)?;
+            Ok(ViewBody::Set {
+                op: set_op,
+                all,
+                left: Box::new(left),
+                right: Box::new(right),
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+            })
+        }
+        SetExpr::Values(_) => Err(not_yet("VALUES set operand")),
+        other => Err(not_yet(format!("set operand `{other}`"))),
+    }
+}
+
+/// Lowers a subquery in a scalar / `IN` / `EXISTS` expression position into a single-`SELECT`
+/// [`ViewQueryModel`] — the shape those expression IR nodes hold. A set-operation subquery in that
+/// position is a later phase, so it surfaces as [`ReadError::NotYetLowered`].
+fn lower_subquery_model(query: &Query, dialect: SqlDialect) -> Result<ViewQueryModel, ReadError> {
+    match lower_body(query, None, dialect)? {
+        ViewBody::Select(select) => Ok(*select),
+        ViewBody::Set { .. } => Err(not_yet("set operation in a scalar/IN/EXISTS subquery")),
+    }
+}
+
+/// Maps a parsed set operator + quantifier to the neutral [`ViewSetOp`] + `all` flag. `MINUS` and the
+/// `BY NAME` quantifiers are non-standard / unmodeled → [`ReadError::NotYetLowered`].
+fn lower_set_op(
+    op: &SetOperator,
+    quantifier: &SetQuantifier,
+) -> Result<(ViewSetOp, bool), ReadError> {
+    let set_op = match op {
+        SetOperator::Union => ViewSetOp::Union,
+        SetOperator::Intersect => ViewSetOp::Intersect,
+        SetOperator::Except => ViewSetOp::Except,
+        SetOperator::Minus => return Err(not_yet("MINUS set operator")),
     };
-    lower_select(select, query, output_names, dialect)
+    let all = match quantifier {
+        SetQuantifier::None | SetQuantifier::Distinct => false,
+        SetQuantifier::All => true,
+        SetQuantifier::ByName | SetQuantifier::AllByName | SetQuantifier::DistinctByName => {
+            return Err(not_yet("set operation `BY NAME`"));
+        }
+    };
+    Ok((set_op, all))
+}
+
+/// Recognizes the SQLite set-operand wrapper `SELECT * FROM (<subquery>)` — a bare `SELECT *` over a
+/// single un-aliased derived table and nothing else — returning the inner subquery to lower in its place.
+/// Any other clause (a `WHERE`, a join, `DISTINCT`, a named/aliased source, …) means it is a genuine
+/// `SELECT *`, not the wrapper, so this returns `None` (and the genuine `SELECT *` stays unlowered).
+fn sqlite_subquery_operand(select: &Select) -> Option<&Query> {
+    // Exactly one projection, an unqualified `*` with no `EXCEPT`/`REPLACE`/… options.
+    let [SelectItem::Wildcard(opts)] = select.projection.as_slice() else {
+        return None;
+    };
+    if opts.opt_exclude.is_some()
+        || opts.opt_except.is_some()
+        || opts.opt_rename.is_some()
+        || opts.opt_replace.is_some()
+        || opts.opt_ilike.is_some()
+        || opts.opt_alias.is_some()
+    {
+        return None;
+    }
+    // Exactly one FROM entry: an un-aliased, non-lateral derived table with no joins.
+    let [table] = select.from.as_slice() else {
+        return None;
+    };
+    if !table.joins.is_empty() {
+        return None;
+    }
+    let TableFactor::Derived {
+        lateral: false,
+        subquery,
+        alias: None,
+        sample: None,
+    } = &table.relation
+    else {
+        return None;
+    };
+    // No other clause may be present — otherwise it is a real `SELECT *`, not the wrapper.
+    if select.distinct.is_some()
+        || select.selection.is_some()
+        || select.having.is_some()
+        || !matches!(&select.group_by, GroupByExpr::Expressions(exprs, mods) if exprs.is_empty() && mods.is_empty())
+    {
+        return None;
+    }
+    Some(subquery)
 }
 
 fn not_yet(what: impl std::fmt::Display) -> ReadError {
@@ -416,8 +643,9 @@ fn lower(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
             dialect,
         ),
 
-        // Subqueries in a scalar position, recursing through `lower_query`.
-        Expr::Subquery(query) => Ok(ExprNode::ScalarSubquery(Box::new(lower_query(
+        // Subqueries in a scalar / `IN` / `EXISTS` position lower to a single-`SELECT` `ViewQueryModel`
+        // (the expression-subquery IR node is select-only; a set-op subquery there is a later phase).
+        Expr::Subquery(query) => Ok(ExprNode::ScalarSubquery(Box::new(lower_subquery_model(
             query, dialect,
         )?))),
         Expr::InSubquery {
@@ -427,11 +655,11 @@ fn lower(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
         } => Ok(ExprNode::InSubquery {
             negated: *negated,
             operand: b(lower(expr, dialect)?),
-            subquery: Box::new(lower_query(subquery, dialect)?),
+            subquery: Box::new(lower_subquery_model(subquery, dialect)?),
         }),
         Expr::Exists { subquery, negated } => Ok(ExprNode::Exists {
             negated: *negated,
-            subquery: Box::new(lower_query(subquery, dialect)?),
+            subquery: Box::new(lower_subquery_model(subquery, dialect)?),
         }),
 
         other => Err(not_yet(format!("scalar expression `{other}`"))),
@@ -1778,14 +2006,15 @@ fn lower_extract_operand(
 /// query, not the select) into a [`ViewQueryModel`].
 fn lower_select(
     select: &Select,
-    query: &Query,
     output_names: Option<&[String]>,
     dialect: SqlDialect,
 ) -> Result<ViewQueryModel, ReadError> {
-    // A clause `ViewQueryModel` cannot represent must fail loudly, not be dropped: silently ignoring, say,
-    // a `FETCH`/`FOR UPDATE`/`QUALIFY` would re-render SQL with a different result set. (The renderer emits
-    // none of these; they arrive only from externally-authored SQL.)
-    reject_unsupported_clauses(query, select)?;
+    // A select-level clause `ViewQueryModel` cannot represent must fail loudly, not be dropped: silently
+    // ignoring, say, a `QUALIFY`/`PREWHERE` would re-render SQL with a different result set. (The renderer
+    // emits none of these; they arrive only from externally-authored SQL.) The query-level clauses
+    // (`ORDER BY`/`LIMIT`, `WITH`, `FETCH`/`FOR UPDATE`) are checked by the [`lower_body`] caller — a bare
+    // set operand has no `Query` of its own, so `order_by`/`limit`/`offset` here stay their default empty.
+    reject_unsupported_select_clauses(select)?;
 
     let distinct = match &select.distinct {
         None => false,
@@ -1869,9 +2098,8 @@ fn lower_select(
         .map(|e| lower(e, dialect))
         .transpose()?;
 
-    let order_by = lower_order_by(query.order_by.as_ref(), dialect)?;
-    let (limit, offset) = lower_limit_offset(query.limit_clause.as_ref(), dialect)?;
-
+    // `order_by`/`limit`/`offset` are query-level: the [`lower_body`] caller attaches them for a top-level
+    // or parenthesized select, and a bare set operand has none. They default empty here.
     Ok(ViewQueryModel {
         distinct,
         projection,
@@ -1880,20 +2108,19 @@ fn lower_select(
         filter,
         group_by,
         having,
-        order_by,
-        limit,
-        offset,
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
         dependencies: Vec::new(),
     })
 }
 
-/// Rejects the query-/select-level clauses `ViewQueryModel` does not represent, so they surface as
+/// Rejects the query-level clauses a [`ViewBody`] does not represent, so they surface as
 /// [`ReadError::NotYetLowered`] rather than being silently discarded (which would re-render different
-/// SQL). The clauses this path *does* lower — `ORDER BY`/`LIMIT`/`OFFSET` on the query, and
-/// `DISTINCT`/projection/`FROM`/`WHERE`/`GROUP BY`/`HAVING` on the select — are handled by the caller;
-/// everything else the parser can attach is enumerated here.
-fn reject_unsupported_clauses(query: &Query, select: &Select) -> Result<(), ReadError> {
-    // Query-level.
+/// SQL). The clauses this path *does* lower — `WITH` (rejected separately, 2.0c) and
+/// `ORDER BY`/`LIMIT`/`OFFSET` — are handled by [`lower_body`]; everything else a [`Query`] can attach is
+/// enumerated here. Runs once per `Query` (the outer query and each parenthesized operand).
+fn reject_unsupported_query_clauses(query: &Query) -> Result<(), ReadError> {
     if query.fetch.is_some() {
         return Err(not_yet("FETCH clause"));
     }
@@ -1912,7 +2139,14 @@ fn reject_unsupported_clauses(query: &Query, select: &Select) -> Result<(), Read
     if !query.pipe_operators.is_empty() {
         return Err(not_yet("pipe operators"));
     }
-    // Select-level.
+    Ok(())
+}
+
+/// Rejects the select-level clauses a [`ViewQueryModel`] does not represent (the analog of
+/// [`reject_unsupported_query_clauses`] for a `SELECT`). The clauses this path *does* lower —
+/// `DISTINCT`/projection/`FROM`/`WHERE`/`GROUP BY`/`HAVING` — are handled by [`lower_select`]; everything
+/// else a [`Select`] can attach is enumerated here.
+fn reject_unsupported_select_clauses(select: &Select) -> Result<(), ReadError> {
     if select.flavor != SelectFlavor::Standard {
         return Err(not_yet("non-standard SELECT flavor (FROM-first)"));
     }
@@ -2235,15 +2469,32 @@ mod tests {
         }
     }
 
-    /// Lowers a `CREATE VIEW` / bare `SELECT` statement into its [`ViewQueryModel`], panicking on a
-    /// parse error so a test asserts against the lowering outcome directly.
-    fn low_query(sql: &str, dialect: SqlDialect) -> Result<ViewQueryModel, ReadError> {
+    /// Lowers a `CREATE VIEW` / bare `SELECT` statement into its [`ViewBody`], panicking on a parse
+    /// error so a test asserts against the lowering outcome directly.
+    fn low_body(sql: &str, dialect: SqlDialect) -> Result<ViewBody, ReadError> {
         use sqlparser::ast::Statement;
         let statements = crate::parse_sql(sql, dialect).expect("parses");
         match statements.as_slice() {
             [Statement::CreateView(create_view)] => lower_create_view(create_view, dialect),
             [Statement::Query(query)] => lower_query(query, dialect),
             other => panic!("expected one CREATE VIEW / SELECT statement, got: {other:?}"),
+        }
+    }
+
+    /// Like [`low_body`] but unwraps a single-`SELECT` body into its [`ViewQueryModel`] — most lowering
+    /// tests assert against a `SELECT`. A set-operation body panics (those tests use [`low_body`]).
+    fn low_query(sql: &str, dialect: SqlDialect) -> Result<ViewQueryModel, ReadError> {
+        low_body(sql, dialect).map(|body| match body {
+            ViewBody::Select(select) => *select,
+            ViewBody::Set { .. } => panic!("expected a single-SELECT body, got a set operation"),
+        })
+    }
+
+    /// Unwraps a nested [`ViewBody`] (a derived-table body / set operand) to its single `SELECT`.
+    fn select_of(body: &ViewBody) -> &ViewQueryModel {
+        match body {
+            ViewBody::Select(select) => select,
+            ViewBody::Set { .. } => panic!("expected a single-SELECT body, got a set operation"),
         }
     }
 
@@ -3463,6 +3714,7 @@ mod tests {
             panic!("expected a derived FROM source");
         };
         assert_eq!(alias, "q0_0");
+        let inner = select_of(&inner);
         assert_eq!(inner.projection.len(), 1);
         assert_eq!(inner.projection[0].output_name, "id");
         assert_eq!(
@@ -3496,8 +3748,9 @@ mod tests {
     }
 
     #[test]
-    fn a_lateral_or_set_op_derived_table_is_not_yet_lowered() {
-        // `LATERAL` carries correlation semantics the neutral model cannot hold.
+    fn a_lateral_derived_table_is_not_yet_lowered() {
+        // `LATERAL` carries correlation semantics the neutral model cannot hold. (A *set-op* derived
+        // table body now lowers — see `set_op_view_bodies_lower`.)
         assert!(matches!(
             low_query(
                 "SELECT q0_0.\"id\" AS id FROM \"public\".\"a\" AS q0_1 \
@@ -3506,30 +3759,10 @@ mod tests {
             ),
             Err(ReadError::NotYetLowered(_))
         ));
-        // A set-op body *inside* a derived table is rejected by the recursive `lower_query`, same as a
-        // top-level set-op body — a later phase widens the IR for it.
-        assert!(matches!(
-            low_query(
-                "SELECT q0_0.\"id\" AS id FROM \
-                 (SELECT q1_0.\"id\" AS id FROM \"public\".\"a\" AS q1_0 \
-                  UNION SELECT q1_1.\"id\" AS id FROM \"public\".\"b\" AS q1_1) AS q0_0",
-                SqlDialect::Postgres
-            ),
-            Err(ReadError::NotYetLowered(_))
-        ));
     }
 
     #[test]
     fn view_body_shapes_outside_the_grammar_are_not_yet_lowered() {
-        // A set operation (UNION) body.
-        assert!(matches!(
-            low_query(
-                "SELECT q0_0.\"id\" AS id FROM \"public\".\"a\" AS q0_0 \
-                 UNION SELECT q0_1.\"id\" AS id FROM \"public\".\"b\" AS q0_1",
-                SqlDialect::Postgres
-            ),
-            Err(ReadError::NotYetLowered(_))
-        ));
         // A CTE prelude.
         assert!(matches!(
             low_query(
@@ -3606,6 +3839,163 @@ mod tests {
         assert!(matches!(
             low_query(
                 "SELECT \"select\".\"id\" AS id FROM \"public\".\"a\" AS \"select\"",
+                SqlDialect::Postgres
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+    }
+
+    #[test]
+    fn set_op_view_bodies_lower() {
+        // A plain `UNION` over two parenthesized (`SetExpr::Query`) operands.
+        let body = low_body(
+            "(SELECT q0_0.\"id\" AS id FROM \"public\".\"a\" AS q0_0) \
+             UNION (SELECT q0_1.\"id\" AS id FROM \"public\".\"b\" AS q0_1)",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        let ViewBody::Set {
+            op,
+            all,
+            left,
+            right,
+            order_by,
+            limit,
+            offset,
+        } = &body
+        else {
+            panic!("expected a set body, got {body:?}");
+        };
+        assert_eq!(*op, ViewSetOp::Union);
+        assert!(!*all);
+        assert!(order_by.is_empty() && limit.is_none() && offset.is_none());
+        // Each operand is a single SELECT naming the right source.
+        assert_eq!(select_of(left).from.as_ref().unwrap().alias(), "q0_0");
+        assert_eq!(select_of(right).from.as_ref().unwrap().alias(), "q0_1");
+
+        // `INTERSECT ALL` maps to `op = Intersect, all = true`. Bare (unparenthesized) operands lower too.
+        let body = low_body(
+            "SELECT q0_0.\"id\" AS id FROM \"public\".\"a\" AS q0_0 \
+             INTERSECT ALL SELECT q0_1.\"id\" AS id FROM \"public\".\"b\" AS q0_1",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        assert!(matches!(
+            body,
+            ViewBody::Set {
+                op: ViewSetOp::Intersect,
+                all: true,
+                ..
+            }
+        ));
+
+        // A trailing whole-set `ORDER BY`/`LIMIT` attaches to the `Set`, not the arms.
+        let body = low_body(
+            "SELECT q0_0.\"id\" AS id FROM \"public\".\"a\" AS q0_0 \
+             UNION SELECT q0_1.\"id\" AS id FROM \"public\".\"b\" AS q0_1 \
+             ORDER BY id LIMIT 5",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        let ViewBody::Set {
+            order_by,
+            limit,
+            left,
+            ..
+        } = &body
+        else {
+            panic!("expected a set body");
+        };
+        assert_eq!(order_by.len(), 1);
+        assert_eq!(*limit, Some(5));
+        // The arm keeps no ORDER BY/LIMIT of its own.
+        assert!(select_of(left).order_by.is_empty() && select_of(left).limit.is_none());
+    }
+
+    #[test]
+    fn a_parenthesized_body_keeps_its_outer_order_and_limit() {
+        // sqlparser attaches a trailing `ORDER BY`/`LIMIT` on a parenthesized body to the *outer* query
+        // (`body: SetExpr::Query`). It must not be dropped (which would re-render a different result set).
+        // A parenthesized single SELECT: the tail folds onto the leaf.
+        let body = low_body(
+            "(SELECT q0_0.\"id\" AS id FROM \"public\".\"a\" AS q0_0) ORDER BY id LIMIT 5",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        let select = select_of(&body);
+        assert_eq!(select.order_by.len(), 1);
+        assert_eq!(select.limit, Some(5));
+
+        // A parenthesized set operation: the outer tail folds onto the `Set` node.
+        let body = low_body(
+            "(SELECT q0_0.\"id\" AS id FROM \"public\".\"a\" AS q0_0 \
+             UNION SELECT q0_1.\"id\" AS id FROM \"public\".\"b\" AS q0_1) ORDER BY id LIMIT 5",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        let ViewBody::Set {
+            order_by, limit, ..
+        } = &body
+        else {
+            panic!("expected a set body");
+        };
+        assert_eq!(order_by.len(), 1);
+        assert_eq!(*limit, Some(5));
+
+        // Two nested tails (inner + outer) cannot be represented — rejected, not silently collapsed.
+        assert!(matches!(
+            low_body(
+                "(SELECT q0_0.\"id\" AS id FROM \"public\".\"a\" AS q0_0 ORDER BY id LIMIT 3) \
+                 ORDER BY id LIMIT 5",
+                SqlDialect::Postgres,
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+    }
+
+    #[test]
+    fn sqlite_select_star_set_operands_peel() {
+        // SQLite renders each operand as `SELECT * FROM (<operand>)`; the reverse path peels the wrapper
+        // back to the inner operand so the body lowers to the same `Set` as the parenthesized form.
+        let body = low_body(
+            "SELECT * FROM (SELECT q0_0.\"id\" AS id FROM \"a\" AS q0_0) \
+             UNION SELECT * FROM (SELECT q0_1.\"id\" AS id FROM \"b\" AS q0_1)",
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        let ViewBody::Set { left, right, .. } = &body else {
+            panic!("expected a set body, got {body:?}");
+        };
+        // Each operand peeled to its inner single SELECT (not a `SELECT *` over a derived table).
+        assert_eq!(select_of(left).projection[0].output_name, "id");
+        assert_eq!(select_of(left).from.as_ref().unwrap().alias(), "q0_0");
+        assert_eq!(select_of(right).from.as_ref().unwrap().alias(), "q0_1");
+        // A genuine `SELECT *` (over a named table, not the wrapper) is still not lowerable.
+        assert!(matches!(
+            low_body("SELECT * FROM \"a\" AS q0_0", SqlDialect::Sqlite),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // The wrapper shape carrying another select-level clause (`QUALIFY`) must NOT peel-and-drop that
+        // clause — it surfaces as NotYetLowered (the outer select is rejected before the peel).
+        assert!(matches!(
+            low_body(
+                "SELECT * FROM (SELECT q0_0.\"id\" AS id FROM \"a\" AS q0_0) \
+                 QUALIFY ROW_NUMBER() OVER () = 1 \
+                 UNION SELECT * FROM (SELECT q0_1.\"id\" AS id FROM \"b\" AS q0_1)",
+                SqlDialect::Sqlite,
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+    }
+
+    #[test]
+    fn set_op_in_a_scalar_subquery_is_not_yet_lowered() {
+        // The expression-subquery IR node is single-SELECT only, so a set-op subquery there is rejected.
+        assert!(matches!(
+            low_query(
+                "SELECT q0_0.\"id\" AS id FROM \"public\".\"a\" AS q0_0 \
+                 WHERE q0_0.\"id\" IN (SELECT q1_0.\"id\" FROM \"public\".\"b\" AS q1_0 \
+                 UNION SELECT q1_1.\"id\" FROM \"public\".\"c\" AS q1_1)",
                 SqlDialect::Postgres
             ),
             Err(ReadError::NotYetLowered(_))

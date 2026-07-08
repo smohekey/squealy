@@ -3,7 +3,7 @@ use squealy::{
     DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
     IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, SchemaModel,
-    SourceRef, SqlType, TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
+    SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
 };
 use tokio_postgres::Client;
 
@@ -86,10 +86,10 @@ async fn view(client: &Client, view_ref: &TableRef) -> Result<ViewModel, Postgre
         columns: view_columns(client, view_ref).await?,
         // The body can't be reconstructed, but the view-on-view dependencies can — they let the diff
         // order live drops (drop a dependent before the view it selects from).
-        query: ViewQueryModel {
+        query: ViewBody::Select(Box::new(ViewQueryModel {
             dependencies: view_dependencies(client, view_ref).await?,
             ..ViewQueryModel::default()
-        },
+        })),
     })
 }
 

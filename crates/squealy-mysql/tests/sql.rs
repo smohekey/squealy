@@ -1262,7 +1262,7 @@ fn mysql_renders_view_after_tables() {
                     ty: SqlType::I32,
                     nullable: false,
                 }],
-                query: ViewQueryModel {
+                query: ViewBody::Select(Box::new(ViewQueryModel {
                     dependencies: Vec::new(),
                     distinct: false,
                     projection: vec![ProjectionItem {
@@ -1291,7 +1291,7 @@ fn mysql_renders_view_after_tables() {
                     order_by: Vec::new(),
                     limit: None,
                     offset: None,
-                },
+                })),
             }],
         }],
     };
@@ -1329,7 +1329,7 @@ fn mysql_view_fragment_requoting_preserves_string_literals() {
                     ty: SqlType::String,
                     nullable: false,
                 }],
-                query: ViewQueryModel {
+                query: ViewBody::Select(Box::new(ViewQueryModel {
                     dependencies: Vec::new(),
                     distinct: false,
                     projection: vec![ProjectionItem {
@@ -1359,7 +1359,7 @@ fn mysql_view_fragment_requoting_preserves_string_literals() {
                     order_by: Vec::new(),
                     limit: None,
                     offset: None,
-                },
+                })),
             }],
         }],
     };
@@ -1386,7 +1386,7 @@ fn mysql_renders_view_plan_steps() {
             ty: SqlType::I32,
             nullable: false,
         }],
-        query: ViewQueryModel {
+        query: ViewBody::Select(Box::new(ViewQueryModel {
             dependencies: Vec::new(),
             distinct: false,
             projection: vec![ProjectionItem {
@@ -1415,7 +1415,7 @@ fn mysql_renders_view_plan_steps() {
             order_by: Vec::new(),
             limit: None,
             offset: None,
-        },
+        })),
     };
 
     let plan = DatabasePlan {
@@ -1552,7 +1552,7 @@ fn mysql_renders_view_expression_ir_in_its_dialect() {
                         nullable: false,
                     },
                 ],
-                query: ViewQueryModel {
+                query: ViewBody::Select(Box::new(ViewQueryModel {
                     dependencies: Vec::new(),
                     distinct: false,
                     projection: vec![
@@ -1586,7 +1586,7 @@ fn mysql_renders_view_expression_ir_in_its_dialect() {
                     order_by: Vec::new(),
                     limit: None,
                     offset: None,
-                },
+                })),
             }],
         }],
     };
@@ -1630,7 +1630,7 @@ fn mysql_view_now_renders_with_microsecond_precision() {
                     },
                     nullable: false,
                 }],
-                query: ViewQueryModel {
+                query: ViewBody::Select(Box::new(ViewQueryModel {
                     dependencies: Vec::new(),
                     distinct: false,
                     projection: vec![ProjectionItem {
@@ -1645,7 +1645,7 @@ fn mysql_view_now_renders_with_microsecond_precision() {
                     order_by: Vec::new(),
                     limit: None,
                     offset: None,
-                },
+                })),
             }],
         }],
     };
@@ -1672,7 +1672,7 @@ fn mysql_view_order_by_drops_nulls_modifier() {
                     ty: SqlType::I32,
                     nullable: true,
                 }],
-                query: ViewQueryModel {
+                query: ViewBody::Select(Box::new(ViewQueryModel {
                     dependencies: Vec::new(),
                     distinct: false,
                     projection: vec![ProjectionItem {
@@ -1701,7 +1701,7 @@ fn mysql_view_order_by_drops_nulls_modifier() {
                     }],
                     limit: None,
                     offset: None,
-                },
+                })),
             }],
         }],
     };

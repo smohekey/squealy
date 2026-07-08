@@ -42,7 +42,7 @@ pub use squealy::{
     IndexOperatorClass, LogicalOp, ProjectionItem, SchemaBackend, SchemaCapabilities,
     SchemaConnect, SchemaIntrospect, SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore,
     SchemaPublishRecord, SchemaRefactorStore, SourceItem, SourceRef, SqlType, TableModel,
-    TablePlanStep, ViewColumnModel, ViewModel, ViewQueryModel,
+    TablePlanStep, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
 };
 
 use std::collections::BTreeSet;
@@ -901,7 +901,7 @@ mod tests {
                         ty: SqlType::FixedBytes(16),
                         nullable: false,
                     }],
-                    query: ViewQueryModel::default(),
+                    query: ViewBody::default(),
                 }],
             }],
         };

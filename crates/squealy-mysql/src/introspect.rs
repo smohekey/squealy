@@ -5,7 +5,7 @@ use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
     ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
     IdentityModel, IndexDirection, IndexMethod, IndexModel, SchemaModel, SourceRef, SqlType,
-    TableModel, ViewColumnModel, ViewModel, ViewQueryModel,
+    TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
 };
 
 use crate::MysqlError;
@@ -77,10 +77,10 @@ async fn view(conn: &mut mysql_async::Conn, view_ref: &TableRef) -> Result<ViewM
         columns: view_columns(conn, view_ref).await?,
         // The body can't be reconstructed, but the view-on-view dependencies can — they let the diff
         // order live drops (drop a dependent before the view it selects from).
-        query: ViewQueryModel {
+        query: ViewBody::Select(Box::new(ViewQueryModel {
             dependencies: view_dependencies(conn, view_ref).await?,
             ..ViewQueryModel::default()
-        },
+        })),
     })
 }
 
