@@ -811,7 +811,9 @@ fn is_string_literal(expr: &Expr) -> bool {
 /// accepted cast type is gated to the exact spelling that dialect emits for the idiom — `double
 /// precision` on PostgreSQL, `REAL` on SQLite — so a different float cast the renderer never emits for
 /// this dialect (e.g. an externally-authored PostgreSQL `CAST(_ AS real)` division) is not peeled and
-/// re-rendered with the wrong precision.
+/// re-rendered with the wrong precision. Both the renderer's function-style `CAST(inner AS ty)` and
+/// PostgreSQL's `pg_get_viewdef` `::` deparse (`(inner)::double precision`) are accepted (`::` parses only
+/// on PostgreSQL/Generic — SQLite stores the verbatim function-style form — so there is no ambiguity).
 fn float_cast_operand(expr: &Expr, dialect: SqlDialect) -> Option<&Expr> {
     let idiom_type = match dialect {
         SqlDialect::Postgres => DataType::DoublePrecision,
@@ -821,7 +823,7 @@ fn float_cast_operand(expr: &Expr, dialect: SqlDialect) -> Option<&Expr> {
     };
     match expr {
         Expr::Cast {
-            kind: CastKind::Cast,
+            kind: CastKind::Cast | CastKind::DoubleColon,
             expr,
             data_type,
             format: None,
@@ -2219,6 +2221,16 @@ mod tests {
             expected
         );
         assert_eq!(low("(`a` / `b`)", SqlDialect::Mysql).unwrap(), expected);
+        // PostgreSQL's `pg_get_viewdef` deparses the same float casts in the `::` form
+        // `(a)::double precision / (b)::double precision`; the divide idiom must peel that too.
+        assert_eq!(
+            low(
+                "((\"a\")::double precision / (\"b\")::double precision)",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            expected
+        );
     }
 
     #[test]
