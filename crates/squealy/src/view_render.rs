@@ -639,6 +639,19 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
                 writer.write_all(b")")
             }
         },
+        // A general function call renders its name verbatim (stored lowercased; no cross-dialect name
+        // mapping) — `<name>(<arg>, …)`.
+        ExprNode::Function { name, args } => {
+            writer.write_all(name.as_bytes())?;
+            writer.write_all(b"(")?;
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 {
+                    writer.write_all(b", ")?;
+                }
+                render_expr(arg, dialect, writer)?;
+            }
+            writer.write_all(b")")
+        }
         ExprNode::Now => {
             // Match the query renderer: MySQL needs `CURRENT_TIMESTAMP(6)` so a `now()` in a view/CTE
             // body keeps its microseconds (see `Dialect::now_fractional_digits`).
