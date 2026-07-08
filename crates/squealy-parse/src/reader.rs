@@ -4,18 +4,20 @@
 //! via a `Dialect`, a `Reader` inverts that for one [`SqlDialect`]. The entry points here
 //! correspond one-for-one to the render entry points a round-trip must invert:
 //!
-//! | render (out)                                   | read (in)                        |
-//! |------------------------------------------------|----------------------------------|
-//! | `render_create_view`                | [`Reader::read_create_view`]     |
+//! | render (out)                                   | read (in)                             |
+//! |------------------------------------------------|---------------------------------------|
+//! | `render_create_view`                           | [`Reader::read_create_view`]          |
+//! | (a backend's `pg_get_viewdef` / `VIEW_DEFINITION` deparse) | [`Reader::read_view_query`] |
 //! | backend DDL writer — `CHECK (<expr>)`          | [`Reader::read_check_expression`]     |
 //! | backend DDL writer — `GENERATED ALWAYS AS (…)` | [`Reader::read_generated_expression`] |
 //! | backend DDL writer — index key term            | [`Reader::read_index_expression`]     |
 //!
-//! During Phase 0 these parse the input (proving `sqlparser` accepts squealy's rendered output) and
-//! then return [`ReadError::NotYetLowered`]; the lowering is filled in per phase.
+//! The scalar entry points lower structurally; the view-body entry points reconstruct a single-`SELECT`
+//! body into a [`ViewQueryModel`] (the structural inverse of the SELECT renderer). Shapes still outside
+//! the lowering grammar return [`ReadError::NotYetLowered`].
 
 use sqlparser::ast::Statement;
-use squealy_ir::{ExprNode, ViewModel};
+use squealy_ir::{ExprNode, ViewQueryModel};
 
 use crate::{ReadError, SqlDialect, lower, parse_expr, parse_expr_list, parse_sql};
 
@@ -38,31 +40,46 @@ impl Reader {
         self.dialect
     }
 
-    /// Reads a `CREATE VIEW` statement into a [`ViewModel`] (the inverse of
-    /// `render_create_view`).
+    /// Reads a `CREATE VIEW` statement into its body [`ViewQueryModel`] — the structural inverse of
+    /// `render_create_view`.
     ///
-    /// Phase 0: verifies the text parses to a single `CREATE VIEW` and routes its body through the
-    /// lowering seam, which returns [`ReadError::NotYetLowered`] — view-body reconstruction lands in a
-    /// later phase.
-    pub fn read_create_view(&self, sql: &str) -> Result<ViewModel, ReadError> {
+    /// The returned model is the view's `SELECT` *body* only: the view's output column *types* are not
+    /// present in the SQL text (a column list gives at most names), so the backend supplies the typed
+    /// output columns from its catalog to assemble a full `ViewModel`. When a `CREATE VIEW (cols) AS …`
+    /// column list is present, its names identify the (un-aliased) projection outputs positionally.
+    ///
+    /// A body outside the single-`SELECT` grammar the SELECT renderer emits (set operations, CTEs,
+    /// derived-table sources, comma joins, …) returns [`ReadError::NotYetLowered`].
+    pub fn read_create_view(&self, sql: &str) -> Result<ViewQueryModel, ReadError> {
         let statements = parse_sql(sql, self.dialect)?;
         match statements.as_slice() {
             [Statement::CreateView(create_view)] => {
-                // Route the body through the lowering seam (as the scalar entry points call
-                // `lower_expr`), so a future `lower_query` implementation is actually exercised here
-                // rather than shadowed by an early return. Phase 0 `lower_query` yields NotYetLowered.
-                let _query = lower::lower_query(&create_view.query, self.dialect)?;
-                // Assembling the full `ViewModel` (name, output columns, inferred output types) around
-                // the lowered body is later-phase work; reaching here still means unimplemented.
-                Err(ReadError::NotYetLowered(
-                    "CREATE VIEW model assembly".to_owned(),
-                ))
+                lower::lower_create_view(create_view, self.dialect)
             }
             [other] => Err(ReadError::Unexpected(format!(
                 "expected a single CREATE VIEW statement, found: {other}"
             ))),
             stmts => Err(ReadError::Unexpected(format!(
                 "expected a single CREATE VIEW statement, found {} statement(s)",
+                stmts.len()
+            ))),
+        }
+    }
+
+    /// Reads a bare `SELECT` view definition (a `Statement::Query`) into a [`ViewQueryModel`] — the form
+    /// a backend's view-body deparse returns (PostgreSQL's `pg_get_viewdef`, MySQL's
+    /// `information_schema.VIEWS.VIEW_DEFINITION`). Unlike [`read_create_view`] there is no surrounding
+    /// `CREATE VIEW (cols)` column list, so the projection outputs are named by their own `AS` aliases
+    /// (or a bare column's name).
+    pub fn read_view_query(&self, sql: &str) -> Result<ViewQueryModel, ReadError> {
+        let statements = parse_sql(sql, self.dialect)?;
+        match statements.as_slice() {
+            [Statement::Query(query)] => lower::lower_query(query, self.dialect),
+            [other] => Err(ReadError::Unexpected(format!(
+                "expected a single SELECT query, found: {other}"
+            ))),
+            stmts => Err(ReadError::Unexpected(format!(
+                "expected a single SELECT query, found {} statement(s)",
                 stmts.len()
             ))),
         }
