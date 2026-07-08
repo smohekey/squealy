@@ -1460,12 +1460,14 @@ fn recover_branch_casts(
     Ok((args, Some(ty)))
 }
 
-/// If `expr` is a function-style `CAST(<inner> AS <ty>)` (the shape a result-pin/per-branch cast takes),
-/// returns `(inner, ty)`; else `None`.
+/// If `expr` is a per-branch result-pin cast, returns `(inner, ty)`; else `None`. Recognizes both the
+/// renderer's function-style `CAST(<inner> AS <ty>)` and PostgreSQL's `pg_get_viewdef` `::` spelling
+/// (`(<inner>)::ty`) — the form a `CASE`/`COALESCE`/`NULLIF` branch pin arrives in when read from the
+/// catalog. (`::` parses only on PostgreSQL/Generic, so accepting it here adds no cross-dialect ambiguity.)
 fn as_function_cast(expr: &Expr) -> Option<(&Expr, &DataType)> {
     match expr {
         Expr::Cast {
-            kind: CastKind::Cast,
+            kind: CastKind::Cast | CastKind::DoubleColon,
             expr,
             data_type,
             format: None,
@@ -2624,6 +2626,29 @@ mod tests {
         ));
         // A redundant literal `::` cast is still recovered (unchanged).
         assert_eq!(low("(0)::numeric", SqlDialect::Postgres).unwrap(), lit("0"));
+
+        // Per-branch `CASE` pins also arrive in the `::` form from `pg_get_viewdef`
+        // (`THEN (cnt)::bigint`); `recover_branch_casts` must recognize them so a typed conditional
+        // reconstructs (a column branch is cast by the `CASE` renderer whenever `result` is set).
+        assert_eq!(
+            low(
+                "CASE WHEN (q0_0.\"cnt\" > 0) THEN (q0_0.\"cnt\")::bigint ELSE (0)::bigint END",
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            ExprNode::Case {
+                arms: vec![CaseArm {
+                    when: b(ExprNode::Compare {
+                        op: CompareOp::GreaterThan,
+                        left: b(col("cnt")),
+                        right: b(lit("0")),
+                    }),
+                    then: b(col("cnt")),
+                }],
+                else_: Some(b(lit("0"))),
+                result: Some(SqlType::I64),
+            }
+        );
     }
 
     #[test]
