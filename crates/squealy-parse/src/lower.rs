@@ -1084,7 +1084,11 @@ fn invert_pg_cast_type(data_type: &DataType) -> Option<SqlType> {
             precision: *p as u32,
             scale: *s as u32,
         },
-        DataType::Varchar(Some(length)) => SqlType::Varchar(character_length(length)?),
+        // The renderer emits `varchar(n)`, but PostgreSQL's `pg_get_viewdef` deparses the same cast as
+        // `character varying(n)` — accept both spellings for a `Varchar` pin.
+        DataType::Varchar(Some(length))
+        | DataType::CharVarying(Some(length))
+        | DataType::CharacterVarying(Some(length)) => SqlType::Varchar(character_length(length)?),
         DataType::Char(Some(length)) | DataType::Character(Some(length)) => {
             SqlType::Char(character_length(length)?)
         }
@@ -2643,6 +2647,11 @@ mod tests {
         assert_eq!(pin("uuid"), Some(SqlType::Uuid));
         assert_eq!(pin("bytea"), Some(SqlType::Bytes));
         assert_eq!(pin("smallint"), Some(SqlType::I16));
+        // The renderer emits `varchar(n)`; `pg_get_viewdef` deparses it as `character varying(n)` — both
+        // invert to `Varchar`.
+        assert_eq!(pin("varchar(10)"), Some(SqlType::Varchar(10)));
+        assert_eq!(pin("character varying(10)"), Some(SqlType::Varchar(10)));
+        assert_eq!(pin("char(5)"), Some(SqlType::Char(5)));
         // Bare `numeric` is the 128-bit-integer pin; canonical `I128`.
         assert_eq!(pin("numeric"), Some(SqlType::I128));
     }
