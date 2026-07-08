@@ -335,12 +335,20 @@ impl squealy::SchemaIntrospect for PostgresConnection {
     /// Structures a `Raw` check expression (a legacy package's verbatim check, or an un-invertible
     /// introspected one) by re-parsing it in the PostgreSQL dialect, so it compares equal to a freshly
     /// introspected structural check. An already-structural expression is returned unchanged.
+    ///
+    /// General function calls (`jsonb_typeof(data) = 'object'`) now lower structurally to
+    /// [`squealy::ExprNode::Function`], so they converge without a string normalizer. The residual shapes
+    /// the structural grammar still cannot invert — `%` modulo (no neutral node), a general `CAST`
+    /// (dialect-ambiguous target), a quoted function name (kept faithfully rather than folded lossily) —
+    /// stay `Raw` and fall back to the [`canonical`] string normalizer, which folds pg's deparse idioms
+    /// (extra parens, synthesized literal casts, `= ANY(ARRAY[..])`) to one canonical string on both the
+    /// desired and introspected side so they do not churn. Retiring `canonical.rs` entirely needs
+    /// structural `%`/`CAST` inversion (a tracked follow-up).
     fn canonical_check_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
         match expression {
             squealy::ExprNode::Raw(sql) => {
-                // Try to structure it; if it stays outside the structural grammar (a general function,
-                // `CASE`, …), fall back to the string canonicalizer so the legacy/deparsed raw forms
-                // normalize to one string and do not churn.
+                // Try to structure it; if it stays outside the structural grammar, fall back to the string
+                // canonicalizer so the legacy/deparsed raw forms normalize to one string and do not churn.
                 match squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
                     .read_check_expression_or_raw(&sql)
                 {

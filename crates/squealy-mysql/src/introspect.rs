@@ -931,4 +931,22 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn general_function_check_lowers_to_structural_node() {
+        // A general (user/built-in) function outside the closed scalar set lowers to a structural
+        // `Function` node instead of falling to `Raw`, so a published general-function check re-plans to
+        // empty. MySQL's `CHECK_CLAUSE` backtick-quotes column references.
+        let expected = squealy::ExprNode::Function {
+            name: "json_valid".to_owned(),
+            args: vec![squealy::ExprNode::BareColumn {
+                column: "data".to_owned(),
+            }],
+        };
+        assert_eq!(
+            squealy_parse::Reader::new(squealy_parse::SqlDialect::Mysql)
+                .read_check_expression_or_raw("json_valid(`data`)"),
+            expected
+        );
+    }
 }

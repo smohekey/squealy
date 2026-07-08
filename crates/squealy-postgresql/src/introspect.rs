@@ -237,19 +237,37 @@ fn fold_fixed_bytes_checks(columns: &mut [ColumnModel], checks: &mut Vec<CheckMo
     });
 }
 
-/// Extracts `N` from a generated `octet_length(<col>) = N` check expression. `octet_length` is not a
-/// structural node, so such a check reads back as an [`ExprNode::Raw`](squealy::ExprNode::Raw) carrying
-/// the deparse text; only the trailing integer is parsed (after the final `=`), so it does not matter
-/// how PostgreSQL quotes the column identifier inside the call.
+/// Extracts `N` from a generated `octet_length(<col>) = N` check expression, in either form it can be
+/// read back as:
+///  - **structural** — `octet_length` lowers to a general [`ExprNode::Function`](squealy::ExprNode::Function)
+///    and the whole check to `Compare(Eq, Function, Literal(N))`;
+///  - **`Raw`** — a legacy package's verbatim deparse string (or a form the grammar could not lower).
+///
+/// The column identifier inside the call is not inspected — only the width matters.
 fn parse_octet_length_width(expression: &squealy::ExprNode) -> Option<u32> {
-    let squealy::ExprNode::Raw(text) = expression else {
-        return None;
-    };
-    if !text.contains("octet_length(") {
-        return None;
+    match expression {
+        squealy::ExprNode::Compare {
+            op: squealy::CompareOp::Equals,
+            left,
+            right,
+        } => {
+            let squealy::ExprNode::Function { name, .. } = left.as_ref() else {
+                return None;
+            };
+            let squealy::ExprNode::Literal(width) = right.as_ref() else {
+                return None;
+            };
+            (name == "octet_length").then(|| width.trim().parse().ok())?
+        }
+        squealy::ExprNode::Raw(text) => {
+            if !text.contains("octet_length(") {
+                return None;
+            }
+            let (_, rhs) = text.rsplit_once('=')?;
+            rhs.trim().trim_end_matches(')').trim().parse().ok()
+        }
+        _ => None,
     }
-    let (_, rhs) = text.rsplit_once('=')?;
-    rhs.trim().trim_end_matches(')').trim().parse().ok()
 }
 
 async fn columns(client: &Client, table_ref: &TableRef) -> Result<Vec<ColumnModel>, PostgresError> {
@@ -931,32 +949,49 @@ mod tests {
 
     #[test]
     fn parses_generated_octet_length_width() {
-        // `octet_length` is not a structural node, so such a check reads back as `ExprNode::Raw`; the
-        // width is parsed from that text. Only the trailing integer is parsed, so quoting of the
-        // identifier is irrelevant — including exotic names containing `)` or `=` inside the quotes.
-        let raw = |text: &str| squealy::ExprNode::Raw(text.to_owned());
+        // Live introspection lowers `octet_length(key) = 32` structurally (a general `Function` compared
+        // to an integer literal); the width comes from the literal. Feed the actual deparse string
+        // through `check_expression` to exercise the real path end to end.
         assert_eq!(
-            parse_octet_length_width(&raw("octet_length(key) = 32")),
+            parse_octet_length_width(&check_expression("CHECK ((octet_length(key) = 32))")),
             Some(32)
         );
+        assert_eq!(
+            parse_octet_length_width(&squealy::ExprNode::Compare {
+                op: squealy::CompareOp::Equals,
+                left: Box::new(squealy::ExprNode::Function {
+                    name: "octet_length".to_owned(),
+                    args: vec![squealy::ExprNode::BareColumn {
+                        column: "key".to_owned(),
+                    }],
+                }),
+                right: Box::new(squealy::ExprNode::Literal("12".to_owned())),
+            }),
+            Some(12)
+        );
+        // A user function or a non-equality comparison is not a width marker.
+        assert_eq!(
+            parse_octet_length_width(&check_expression("CHECK ((length(key) = 32))")),
+            None
+        );
+        assert_eq!(
+            parse_octet_length_width(&check_expression("CHECK ((octet_length(key) > 0))")),
+            None
+        );
+
+        // A legacy package (or a form the grammar could not lower) still reads back as `Raw`; the width
+        // is parsed from the text, so quoting of the identifier is irrelevant — including exotic names
+        // containing `)` or `=` inside the quotes.
+        let raw = |text: &str| squealy::ExprNode::Raw(text.to_owned());
         assert_eq!(
             parse_octet_length_width(&raw("(octet_length(key) = 32)")),
             Some(32)
         );
         assert_eq!(
-            parse_octet_length_width(&raw("(octet_length(\"Key\") = 12)")),
-            Some(12)
-        );
-        assert_eq!(
             parse_octet_length_width(&raw("(octet_length(\"we)ird=name\") = 16)")),
             Some(16)
         );
-        // Unrelated checks are not width markers.
         assert_eq!(parse_octet_length_width(&raw("length(key) = 32")), None);
-        assert_eq!(
-            parse_octet_length_width(&raw("(octet_length(key) > 0)")),
-            None
-        );
     }
 
     #[test]
@@ -976,8 +1011,9 @@ mod tests {
         fn check(name: &str, expression: &str) -> CheckModel {
             CheckModel {
                 name: name.to_owned(),
-                // `octet_length` is not structural, so the fold reads it from a `Raw` node.
-                expression: squealy::ExprNode::Raw(expression.to_owned()),
+                // Route through the reader, so the fold sees exactly what live introspection produces
+                // (a structural `octet_length(...)` comparison, not a hand-built `Raw`).
+                expression: check_expression(expression),
                 validation: None,
                 enforcement: None,
             }
@@ -1105,6 +1141,33 @@ mod tests {
         };
         assert_eq!(check_expression("CHECK ((score > 0))"), expected);
         assert_eq!(check_expression("score > 0"), expected);
+    }
+
+    #[test]
+    fn general_function_check_lowers_to_structural_node() {
+        // A general (user/built-in) function outside the closed scalar set lowers to a structural
+        // `Function` node instead of falling to `Raw`. pg's `pg_get_constraintdef` synthesizes a `::text`
+        // cast on the string literal, so the authored `jsonb_typeof(data) = 'object'` and its deparse
+        // `jsonb_typeof(data) = 'object'::text` must converge to the same node — the churn a structural
+        // general-function node kills (and the reason PostgreSQL's `canonical.rs` string normalizer is
+        // no longer needed).
+        let expected = squealy::ExprNode::Compare {
+            op: squealy::CompareOp::Equals,
+            left: Box::new(squealy::ExprNode::Function {
+                name: "jsonb_typeof".to_owned(),
+                args: vec![squealy::ExprNode::BareColumn {
+                    column: "data".to_owned(),
+                }],
+            }),
+            right: Box::new(squealy::ExprNode::Literal("'object'".to_owned())),
+        };
+        // The pg deparse form (extra parens + synthesized literal cast).
+        assert_eq!(
+            check_expression("CHECK ((jsonb_typeof(data) = 'object'::text))"),
+            expected
+        );
+        // The authored / neutral form.
+        assert_eq!(check_expression("jsonb_typeof(data) = 'object'"), expected);
     }
 
     #[test]
