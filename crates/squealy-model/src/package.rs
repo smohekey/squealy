@@ -1748,13 +1748,25 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
                 .map(|child| expr_from_node(child))
                 .collect::<Result<Vec<_>, _>>()?,
         },
-        "function" => ExprNode::Function {
-            name: required_prop(node, "name")?,
-            args: children
+        "function" => {
+            let name = required_prop(node, "name")?;
+            let args = children
                 .iter()
                 .map(|child| expr_from_node(child))
-                .collect::<Result<Vec<_>, _>>()?,
-        },
+                .collect::<Result<Vec<_>, _>>()?;
+            // A general `Function` node's arguments carry no direct literal (see the invariant on
+            // `ExprNode::Function`): the reverse parser only produces one from an unquoted, literal-free
+            // call, and stripping the `::text` cast PostgreSQL synthesizes on a literal argument to make
+            // the introspected form match could rewrite the DDL the canonical model feeds. Reject a
+            // literal-argument `function` node rather than deserialize a shape live introspection cannot
+            // reproduce (which would then churn on every publish); such a call belongs in a `raw` node.
+            if args.iter().any(|arg| matches!(arg, ExprNode::Literal(_))) {
+                return Err(malformed(format!(
+                    "general function `{name}` has a literal argument; use a `raw` expression instead"
+                )));
+            }
+            ExprNode::Function { name, args }
+        }
         "now" => ExprNode::Now,
         "extract" => ExprNode::Extract {
             field: date_field_from_str(&required_prop(node, "field")?)?,
@@ -2898,6 +2910,32 @@ mod tests {
                 node
             );
         }
+    }
+
+    #[test]
+    fn expr_node_general_function_round_trips_through_kdl() {
+        // A general (non-closed-set) function with column arguments serializes as `function` and reads
+        // back identically.
+        let bare = |c: &str| ExprNode::BareColumn {
+            column: c.to_owned(),
+        };
+        let node = ExprNode::Function {
+            name: "jsonb_typeof".to_owned(),
+            args: vec![bare("data")],
+        };
+        assert_eq!(
+            expr_from_node(&expr_to_node(&node)).expect("function round-trips"),
+            node
+        );
+
+        // A `function` node with a direct literal argument is rejected on read: live introspection can
+        // never produce such a node (a literal argument stays `Raw`), so accepting it would let a
+        // hand-authored package churn against the introspected `Raw`. It belongs in a `raw` node instead.
+        let with_literal = ExprNode::Function {
+            name: "json_extract".to_owned(),
+            args: vec![bare("data"), ExprNode::Literal("'$.id'".to_owned())],
+        };
+        assert!(expr_from_node(&expr_to_node(&with_literal)).is_err());
     }
 
     #[test]
