@@ -569,11 +569,21 @@ fn lower_binary(
         }
         // `||` denotes concatenation on PostgreSQL/SQLite (where the renderer emits it for `Concat`), but
         // MySQL treats `||` as logical `OR` and the renderer uses `CONCAT(...)` there (see
-        // `lower_function`). Only fold to `Concat` on the dialects where `||` is concatenation.
-        BinaryOperator::StringConcat if pipe_is_concatenation(dialect) => Ok(ExprNode::ScalarFn {
-            func: ScalarFunc::Concat,
-            args: vec![lower(left, dialect)?, lower(right, dialect)?],
-        }),
+        // `lower_function`). Only fold to `Concat` on the dialects where `||` is concatenation. The
+        // renderer joins all args of one `Concat` node with `||` inside a single paren pair, so an N-arg
+        // `Concat` renders flat `(a || b || … )` while a nested `Concat` wraps each sub-node in its own
+        // parens (`((a || b) || c)`); flatten a bare `||` chain into one flat `Concat` (matching the flat
+        // render) but keep a parenthesized operand as a single nested arg, so both shapes re-render
+        // byte-identically.
+        BinaryOperator::StringConcat if pipe_is_concatenation(dialect) => {
+            let mut args = Vec::new();
+            flatten_pipe_concat(left, dialect, &mut args)?;
+            args.push(lower(right, dialect)?);
+            Ok(ExprNode::ScalarFn {
+                func: ScalarFunc::Concat,
+                args,
+            })
+        }
         // PostgreSQL's `pg_get_constraintdef` deparses `LIKE`/`ILIKE` as the operator forms
         // `~~`/`~~*` (and `NOT LIKE`/`NOT ILIKE` as `!~~`/`!~~*`). Recover the neutral `Like`.
         BinaryOperator::PGLikeMatch => Ok(like_node(false, false, left, right, dialect)?),
@@ -582,6 +592,33 @@ fn lower_binary(
         BinaryOperator::PGNotILikeMatch => Ok(like_node(true, true, left, right, dialect)?),
         // `%` (no neutral arithmetic node), MySQL `||` (logical OR), and any other operator.
         other => Err(not_yet(format!("binary operator `{other}`"))),
+    }
+}
+
+/// Flattens a bare `||` concat chain into `args`, matching the renderer's flat output for one `Concat`
+/// node. A parenthesized (`Nested`) operand is NOT descended into — it is an explicitly nested
+/// sub-`Concat` that stays a single argument (`((a || b) || c)`) — so the flat and nested render shapes
+/// stay distinguishable and each re-renders byte-identically. Only called for a `||`-concatenation
+/// dialect (the caller is gated on `pipe_is_concatenation`).
+fn flatten_pipe_concat(
+    expr: &Expr,
+    dialect: SqlDialect,
+    args: &mut Vec<ExprNode>,
+) -> Result<(), ReadError> {
+    // A *bare* left-nested `||` chain (its left operand is itself a `||`, not wrapped in parens); descend
+    // so `a || b || c` becomes the flat `[a, b, c]`.
+    if let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::StringConcat,
+        right,
+    } = expr
+    {
+        flatten_pipe_concat(left, dialect, args)?;
+        args.push(lower(right, dialect)?);
+        Ok(())
+    } else {
+        args.push(lower(expr, dialect)?);
+        Ok(())
     }
 }
 
@@ -1069,7 +1106,10 @@ fn invert_pg_cast_type(data_type: &DataType) -> Option<SqlType> {
         DataType::BigInt(None) | DataType::Int8(None) => SqlType::I64,
         DataType::Real | DataType::Float4 => SqlType::F32,
         DataType::DoublePrecision | DataType::Float8 => SqlType::F64,
-        DataType::Text => SqlType::Text,
+        // PostgreSQL renders both `SqlType::String` and `SqlType::Text` as `text`, and introspection
+        // canonicalizes `text` back to `String` (introspect.rs). Invert to the same `String` so a
+        // `String`-pinned view compares equal to its introspected form (both render `text`).
+        DataType::Text => SqlType::String,
         DataType::Uuid => SqlType::Uuid,
         DataType::JSON => SqlType::Json,
         DataType::JSONB => SqlType::Jsonb,
@@ -2204,6 +2244,30 @@ mod tests {
     }
 
     #[test]
+    fn pipe_concat_flattens_but_preserves_explicit_nesting() {
+        let concat = |args: Vec<ExprNode>| ExprNode::ScalarFn {
+            func: ScalarFunc::Concat,
+            args,
+        };
+        // A flat 3-way `||` chain (the renderer's output for a single 3-arg `Concat`) flattens to one flat
+        // node, so it re-renders `(a || b || c)` rather than churning into `((a || b) || c)`.
+        assert_eq!(
+            low("(\"a\" || \"b\" || \"c\")", SqlDialect::Postgres).unwrap(),
+            concat(vec![bare("a"), bare("b"), bare("c")]),
+        );
+        // But an EXPLICITLY nested concat keeps its structure — a parenthesized sub-concat is one arg — so
+        // `((a || b) || c)` and `(a || (b || c))` (the render of nested `Concat` models) round-trip nested.
+        assert_eq!(
+            low("((\"a\" || \"b\") || \"c\")", SqlDialect::Postgres).unwrap(),
+            concat(vec![concat(vec![bare("a"), bare("b")]), bare("c")]),
+        );
+        assert_eq!(
+            low("(\"a\" || (\"b\" || \"c\"))", SqlDialect::Postgres).unwrap(),
+            concat(vec![bare("a"), concat(vec![bare("b"), bare("c")])]),
+        );
+    }
+
+    #[test]
     fn substring_from_for_and_comma_forms_fold_to_one_node() {
         let standard = low("SUBSTRING(\"s\" FROM 1 FOR 3)", SqlDialect::Postgres).unwrap();
         let comma = low("substr(\"s\", 1, 3)", SqlDialect::Sqlite).unwrap();
@@ -2679,6 +2743,9 @@ mod tests {
         assert_eq!(pin("uuid"), Some(SqlType::Uuid));
         assert_eq!(pin("bytea"), Some(SqlType::Bytes));
         assert_eq!(pin("smallint"), Some(SqlType::I16));
+        // PostgreSQL renders both `String` and `Text` as `text`, and introspection canonicalizes it to
+        // `String` — invert to `String` so a String-pinned view compares equal to its introspected form.
+        assert_eq!(pin("text"), Some(SqlType::String));
         // The renderer emits `varchar(n)`; `pg_get_viewdef` deparses it as `character varying(n)` — both
         // invert to `Varchar`.
         assert_eq!(pin("varchar(10)"), Some(SqlType::Varchar(10)));
