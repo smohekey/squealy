@@ -116,8 +116,19 @@ fn proj(output_name: &str, expr: ExprNode) -> ProjectionItem {
     }
 }
 
-/// A view over `events`, with output columns matching `projection` positionally.
+/// Wraps a single `SELECT` [`ViewQueryModel`] as a [`ViewBody`].
+fn sel(query: ViewQueryModel) -> ViewBody {
+    ViewBody::Select(Box::new(query))
+}
+
+/// A view over `events` whose body is a single `SELECT`, with output columns matching `projection`
+/// positionally.
 fn view(name: &str, outputs: Vec<(&str, SqlType)>, query: ViewQueryModel) -> ViewModel {
+    view_of(name, outputs, sel(query))
+}
+
+/// A view over `events` whose body is any [`ViewBody`] (used for set-operation cases).
+fn view_of(name: &str, outputs: Vec<(&str, SqlType)>, query: ViewBody) -> ViewModel {
     ViewModel {
         name: name.to_owned(),
         comment: None,
@@ -453,7 +464,7 @@ fn corpus() -> Vec<(&'static str, DatabaseModel)> {
             ViewQueryModel {
                 projection: vec![proj("id", col("id")), proj("cnt", col("cnt"))],
                 from: Some(SourceItem::Derived {
-                    query: Box::new(ViewQueryModel {
+                    query: Box::new(sel(ViewQueryModel {
                         projection: vec![
                             proj("id", inner_col("id")),
                             proj("cnt", inner_col("cnt")),
@@ -469,10 +480,114 @@ fn corpus() -> Vec<(&'static str, DatabaseModel)> {
                             right: b(lit("0")),
                         }),
                         ..ViewQueryModel::default()
-                    }),
+                    })),
                     alias: "q0_0".to_owned(),
                 }),
                 ..ViewQueryModel::default()
+            },
+        )),
+    ));
+
+    // A set-operation (`UNION`) view body — exercises the recursive `ViewBody::Set` IR widening end to
+    // end (render → parse → lower → render), including the per-dialect set-operand wrapping (PG/MySQL
+    // `(…)`, SQLite `SELECT * FROM (…)`). Both arms select `id` from `events` under complementary filters.
+    let arm_col = |alias: &str, column: &str| ExprNode::Column {
+        alias: alias.to_owned(),
+        column: column.to_owned(),
+    };
+    let arm = |alias: &str, op: CompareOp| {
+        sel(ViewQueryModel {
+            projection: vec![proj("id", arm_col(alias, "id"))],
+            from: Some(SourceItem::Named(SourceRef {
+                schema: Some("public".to_owned()),
+                name: "events".to_owned(),
+                alias: alias.to_owned(),
+            })),
+            filter: Some(ExprNode::Compare {
+                op,
+                left: b(arm_col(alias, "cnt")),
+                right: b(lit("0")),
+            }),
+            ..ViewQueryModel::default()
+        })
+    };
+    cases.push((
+        "view/set-op",
+        schema_with_view(view_of(
+            "v_setop",
+            vec![("id", SqlType::I32)],
+            ViewBody::Set {
+                op: ViewSetOp::Union,
+                all: false,
+                left: Box::new(arm("q0_0", CompareOp::GreaterThan)),
+                right: Box::new(arm("q0_1", CompareOp::LessThanOrEquals)),
+                // A whole-set `ORDER BY` + `LIMIT` on the compound. The order term references the *output*
+                // column `id` by name (a bare column) — a compound `ORDER BY` binds to outputs, not arms.
+                order_by: vec![OrderItem {
+                    expr: bare("id"),
+                    direction: Some(OrderDirection::Desc),
+                    nulls: None,
+                }],
+                limit: Some(10),
+                offset: None,
+            },
+        )),
+    ));
+
+    // Set-op arms that carry their *own* clauses, on a **column-listed** view whose output column name
+    // (`n`) deliberately DIFFERS from the arms' projection aliases (`total`). Both arms project an
+    // aliased *expression* (so the alias is the only name to lower it back through), and the **leftmost**
+    // arm also has a per-arm `ORDER BY <alias>` + `LIMIT`. Each arm's alias must survive independently of
+    // the view column list — the list names only the compound output (kept on `ViewModel.columns`), so
+    // it must not overwrite the arms' aliases (else `ORDER BY total` dangles on re-render).
+    let named_events = |alias: &str| {
+        SourceItem::Named(SourceRef {
+            schema: Some("public".to_owned()),
+            name: "events".to_owned(),
+            alias: alias.to_owned(),
+        })
+    };
+    let scaled = |alias: &str, op: ArithmeticOp| {
+        proj(
+            "total",
+            ExprNode::Binary {
+                op,
+                left: b(ExprNode::Column {
+                    alias: alias.to_owned(),
+                    column: "amount".to_owned(),
+                }),
+                right: b(lit("2")),
+            },
+        )
+    };
+    cases.push((
+        "view/set-op-arm-clause",
+        schema_with_view(view_of(
+            "v_setop_arm",
+            vec![("n", SqlType::I64)],
+            ViewBody::Set {
+                op: ViewSetOp::Union,
+                all: false,
+                left: Box::new(sel(ViewQueryModel {
+                    projection: vec![scaled("q0_0", ArithmeticOp::Multiply)],
+                    from: Some(named_events("q0_0")),
+                    // A per-arm ORDER BY on the *leftmost* arm's own projection alias, plus a per-arm LIMIT.
+                    order_by: vec![OrderItem {
+                        expr: bare("total"),
+                        direction: None,
+                        nulls: None,
+                    }],
+                    limit: Some(5),
+                    ..ViewQueryModel::default()
+                })),
+                right: Box::new(sel(ViewQueryModel {
+                    projection: vec![scaled("q0_1", ArithmeticOp::Add)],
+                    from: Some(named_events("q0_1")),
+                    ..ViewQueryModel::default()
+                })),
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
             },
         )),
     ));
@@ -696,10 +811,10 @@ fn reader_entry_points_lower_scalars_and_single_select_view_bodies() {
         reader
             .read_create_view("CREATE VIEW v AS SELECT 1 AS n")
             .expect("a single-SELECT view body lowers"),
-        ViewQueryModel {
+        sel(ViewQueryModel {
             projection: vec![proj("n", lit("1"))],
             ..ViewQueryModel::default()
-        },
+        }),
     );
 
     // A non-view statement handed to the view entry point is a shape error, not NotYetLowered.
@@ -1126,6 +1241,6 @@ fn view_bodies_round_trip_through_each_dialect() {
         failures.len(),
         failures.join("\n\n")
     );
-    // Every view case × every backend was exercised (8 views × 3 backends).
-    assert_eq!(checked, 8 * dialects.len(), "view coverage drifted");
+    // Every view case × every backend was exercised (10 views × 3 backends).
+    assert_eq!(checked, 10 * dialects.len(), "view coverage drifted");
 }

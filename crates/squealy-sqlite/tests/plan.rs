@@ -9,7 +9,7 @@ use squealy::{
     ColumnModel, CompareOp, Constraint, DatabaseModel, DatabasePlan, DatabasePlanStep, DdlExecutor,
     ExprNode, ForeignKeyAction, ForeignKeyModel, IdentityMode, IdentityModel, IndexModel,
     ProjectionItem, SchemaBackend, SchemaModel, SourceItem, SourceRef, SqlType, TableModel,
-    ViewColumnModel, ViewModel, ViewQueryModel,
+    ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
 };
 use squealy_model::{
     CastColumn, DiffPolicy, PlanApplyOptions, RefactorLog, RefactorOperation, RenameColumn,
@@ -80,6 +80,14 @@ fn widget_table() -> TableModel {
 }
 
 /// An `active_widgets` view over `widgets` — `SELECT id FROM widgets WHERE active > 0`.
+/// The mutable single-`SELECT` body of a view (these tests only build `SELECT` bodies).
+fn view_select_mut(view: &mut ViewModel) -> &mut ViewQueryModel {
+    match &mut view.query {
+        ViewBody::Select(select) => select,
+        ViewBody::Set { .. } => panic!("expected a single-SELECT view body"),
+    }
+}
+
 fn active_widgets_view() -> ViewModel {
     let widget_col = |column: &str| ExprNode::Column {
         alias: "q0_0".to_owned(),
@@ -93,7 +101,7 @@ fn active_widgets_view() -> ViewModel {
             ty: SqlType::I64,
             nullable: false,
         }],
-        query: ViewQueryModel {
+        query: ViewBody::Select(Box::new(ViewQueryModel {
             dependencies: Vec::new(),
             distinct: false,
             projection: vec![ProjectionItem {
@@ -116,7 +124,7 @@ fn active_widgets_view() -> ViewModel {
             order_by: Vec::new(),
             limit: None,
             offset: None,
-        },
+        })),
     }
 }
 
@@ -1370,7 +1378,7 @@ async fn introspects_a_published_view_by_name() {
         vec![("id", &SqlType::Bytes)],
     );
     assert!(
-        views[0].query.projection.is_empty(),
+        views[0].query.is_empty(),
         "an introspected view is body-unknown: {:?}",
         views[0].query,
     );
@@ -1406,7 +1414,7 @@ async fn replanning_an_unchanged_view_is_not_destructive() {
                 nullable: false,
             },
         ],
-        query: ViewQueryModel {
+        query: ViewBody::Select(Box::new(ViewQueryModel {
             dependencies: Vec::new(),
             distinct: false,
             projection: vec![
@@ -1440,7 +1448,7 @@ async fn replanning_an_unchanged_view_is_not_destructive() {
             order_by: Vec::new(),
             limit: None,
             offset: None,
-        },
+        })),
     });
 
     publish(&model, &Sqlite, &mut connection)
@@ -1664,7 +1672,7 @@ async fn renaming_a_table_and_reusing_its_name_for_a_view_succeeds() {
     // v2 renames x→y and adds a view `x` over the renamed table `y`.
     let mut view_x = active_widgets_view();
     view_x.name = "x".to_owned();
-    view_x.query.from = Some(SourceItem::Named(SourceRef {
+    view_select_mut(&mut view_x).from = Some(SourceItem::Named(SourceRef {
         schema: None,
         name: "y".to_owned(),
         alias: "q0_0".to_owned(),
@@ -1724,7 +1732,7 @@ async fn a_view_column_set_change_is_a_blocked_destructive_change() {
     // v2 renames the view's `id` output column to `widget_id` (same body, different column set).
     let mut renamed = active_widgets_view();
     renamed.columns[0].name = "widget_id".to_owned();
-    renamed.query.projection[0].output_name = "widget_id".to_owned();
+    view_select_mut(&mut renamed).projection[0].output_name = "widget_id".to_owned();
     let v2 = DatabaseModel {
         schemas: vec![SchemaModel {
             name: None,
@@ -1776,7 +1784,7 @@ async fn renaming_a_table_and_reusing_its_name_for_a_view_case_insensitively_suc
 
     let mut view_thing = active_widgets_view();
     view_thing.name = "thing".to_owned();
-    view_thing.query.from = Some(SourceItem::Named(SourceRef {
+    view_select_mut(&mut view_thing).from = Some(SourceItem::Named(SourceRef {
         schema: None,
         name: "renamed".to_owned(),
         alias: "q0_0".to_owned(),

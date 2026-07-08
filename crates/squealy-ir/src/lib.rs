@@ -647,8 +647,8 @@ pub struct ViewModel {
     /// The view's output columns, in projection order. Powers DDL (the optional column list),
     /// packaging, introspection, and the queryable typed face.
     pub columns: Vec<ViewColumnModel>,
-    /// The structural body of the view's `SELECT`.
-    pub query: ViewQueryModel,
+    /// The structural body of the view — a single `SELECT` or a set operation.
+    pub query: ViewBody,
 }
 
 /// One output column of a [`ViewModel`].
@@ -659,7 +659,65 @@ pub struct ViewColumnModel {
     pub nullable: bool,
 }
 
-/// The backend-neutral structural body of a view's `SELECT`.
+/// The backend-neutral structural body of a view definition: a single `SELECT` ([`ViewQueryModel`]) or a
+/// set operation (`UNION`/`INTERSECT`/`EXCEPT`, optionally `ALL`) over two nested bodies.
+///
+/// A view whose body live introspection cannot reconstruct is stored as an **empty** [`ViewBody::Select`]
+/// (empty projection) carrying only its recorded `dependencies` — the diff's body-unknown sentinel (see
+/// [`ViewBody::is_empty`]). A reconstructed body is compared structurally.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ViewBody {
+    /// A single `SELECT`.
+    Select(Box<ViewQueryModel>),
+    /// A set operation over two bodies. An optional trailing `ORDER BY`/`LIMIT`/`OFFSET` applies to the
+    /// whole set — SQL places it after the final arm, so it lives on the `Set` node, not the arms.
+    Set {
+        op: ViewSetOp,
+        /// `true` for the `… ALL` variant (keeps duplicate rows).
+        all: bool,
+        left: Box<ViewBody>,
+        right: Box<ViewBody>,
+        order_by: Vec<OrderItem>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    },
+}
+
+impl Default for ViewBody {
+    /// An empty single `SELECT` — the body-unknown form an introspected, un-reconstructed view carries.
+    fn default() -> Self {
+        ViewBody::Select(Box::default())
+    }
+}
+
+impl ViewBody {
+    /// Whether this is the body-unknown sentinel: an empty `SELECT` (no projection), as stored for a
+    /// live-introspected view whose body could not be reconstructed. A `Set` body is never empty.
+    pub fn is_empty(&self) -> bool {
+        matches!(self, ViewBody::Select(select) if select.projection.is_empty())
+    }
+
+    /// The view-on-view dependencies recorded on an introspected (un-reconstructed) body, or `&[]` for a
+    /// reconstructed body (whose dependencies are found by walking it). Only an empty `Select` carries
+    /// these — see [`ViewModel::referenced_sources`].
+    pub fn dependencies(&self) -> &[SourceRef] {
+        match self {
+            ViewBody::Select(select) => &select.dependencies,
+            ViewBody::Set { .. } => &[],
+        }
+    }
+}
+
+/// A set operator in a view body. The base operator only; the `ALL` modifier is the separate `all` flag
+/// on [`ViewBody::Set`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewSetOp {
+    Union,
+    Intersect,
+    Except,
+}
+
+/// The backend-neutral structural body of a single view `SELECT`.
 ///
 /// Source/join/projection structure and the inner scalar expressions (predicate bodies, projection
 /// expressions, group/having/order keys) are all captured structurally as [`ExprNode`] trees, so each
@@ -706,12 +764,9 @@ pub struct SourceRef {
 pub enum SourceItem {
     /// A named relation — `<schema>.<name> AS <alias>`.
     Named(SourceRef),
-    /// A derived table — `(<subquery>) AS <alias>`. Boxed because the subquery is itself a
-    /// [`ViewQueryModel`] (recursive type).
-    Derived {
-        query: Box<ViewQueryModel>,
-        alias: String,
-    },
+    /// A derived table — `(<subquery>) AS <alias>`. The subquery is a full [`ViewBody`] (it may itself be
+    /// a set operation), boxed for the recursive type.
+    Derived { query: Box<ViewBody>, alias: String },
 }
 
 impl SourceItem {
@@ -975,12 +1030,31 @@ impl ViewModel {
     /// after it. Dependencies on tables are irrelevant to view ordering (all tables precede any view).
     pub fn referenced_sources(&self) -> impl Iterator<Item = &SourceRef> {
         let mut sources = Vec::new();
-        collect_query_sources(&self.query, &mut sources);
+        collect_body_sources(&self.query, &mut sources);
         sources.into_iter()
     }
 }
 
-/// Collects every [`SourceRef`] reachable from a query body, recursing through subqueries.
+/// Collects every [`SourceRef`] reachable from a view body, recursing through set-op arms and subqueries.
+fn collect_body_sources<'a>(body: &'a ViewBody, sources: &mut Vec<&'a SourceRef>) {
+    match body {
+        ViewBody::Select(query) => collect_query_sources(query, sources),
+        ViewBody::Set {
+            left,
+            right,
+            order_by,
+            ..
+        } => {
+            collect_body_sources(left, sources);
+            collect_body_sources(right, sources);
+            for order in order_by {
+                collect_expr_sources(&order.expr, sources);
+            }
+        }
+    }
+}
+
+/// Collects every [`SourceRef`] reachable from a single `SELECT` body, recursing through subqueries.
 fn collect_query_sources<'a>(query: &'a ViewQueryModel, sources: &mut Vec<&'a SourceRef>) {
     // Introspected views carry no body but record their dependencies here; declared/package views
     // leave this empty and contribute their sources by walking the body below.
@@ -1017,7 +1091,7 @@ fn collect_query_sources<'a>(query: &'a ViewQueryModel, sources: &mut Vec<&'a So
 fn collect_source_item<'a>(source: &'a SourceItem, sources: &mut Vec<&'a SourceRef>) {
     match source {
         SourceItem::Named(named) => sources.push(named),
-        SourceItem::Derived { query, .. } => collect_query_sources(query, sources),
+        SourceItem::Derived { query, .. } => collect_body_sources(query, sources),
     }
 }
 

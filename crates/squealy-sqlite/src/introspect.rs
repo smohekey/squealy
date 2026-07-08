@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use squealy::{
     ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyModel,
     IdentityMode, IdentityModel, IndexDirection, IndexModel, SchemaModel, SqlType, TableModel,
-    ViewColumnModel, ViewModel, ViewQueryModel,
+    ViewBody, ViewColumnModel, ViewModel,
 };
 use tokio_rusqlite::rusqlite::{self, Row};
 
@@ -128,7 +128,7 @@ async fn view(connection: &SqliteConnection, name: &str) -> Result<ViewModel, Sq
         name: name.to_owned(),
         comment: None,
         columns,
-        query: ViewQueryModel::default(),
+        query: ViewBody::default(),
     })
 }
 

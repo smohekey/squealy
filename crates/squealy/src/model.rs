@@ -116,7 +116,9 @@ fn view_from_dyn(view: &(dyn crate::ViewDef + Sync)) -> ViewModel {
         name: view.name().to_owned(),
         comment: None,
         columns: view.columns(),
-        query: view.definition_model(),
+        // The typed view builder only produces a single `SELECT`; set-op/CTE view bodies are
+        // reconstructed on introspection, not authored through the builder (Track F, a follow-up).
+        query: crate::ViewBody::Select(Box::new(view.definition_model())),
     }
 }
 
