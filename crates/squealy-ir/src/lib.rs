@@ -1073,23 +1073,48 @@ fn collect_body_sources<'a>(body: &'a ViewBody, sources: &mut Vec<&'a SourceRef>
                 collect_expr_sources(&order.expr, sources);
             }
         }
-        ViewBody::With { ctes, body, .. } => {
-            // Collect from every CTE body and the inner body, then drop any *unqualified* source whose name
-            // matches a locally-bound CTE name: a recursive CTE's self-reference and inter-CTE references
-            // are local bindings, not external view/table dependencies. A **schema-qualified** source
-            // (`public.dep`) is always a real relation even if a CTE shares its bare name, so it is kept —
-            // dropping it would mis-order `ordered_views` and create the view before a sibling it needs.
-            let mut inner = Vec::new();
-            for cte in ctes {
-                collect_body_sources(&cte.body, &mut inner);
+        ViewBody::With {
+            recursive,
+            ctes,
+            body,
+        } => {
+            // Drop only sources that are **in-scope CTE bindings** for the body being walked — the rest are
+            // real view/table dependencies. Scope is per-body and declaration-ordered: a CTE body sees the
+            // CTEs declared *before* it (plus *itself* when the `WITH` is `RECURSIVE`); the main body sees
+            // all of them. A source matching a name NOT in that scope — e.g. a later-declared CTE's name in
+            // a non-recursive `WITH`, or a self-name in a non-recursive CTE — is an existing sibling
+            // relation and must be kept (dropping it would mis-order `ordered_views`). A **schema-qualified**
+            // source (`public.dep`) is always a real relation (a CTE reference is unqualified), so it is
+            // never dropped.
+            for (index, cte) in ctes.iter().enumerate() {
+                let mut in_scope: Vec<&str> =
+                    ctes[..index].iter().map(|cte| cte.name.as_str()).collect();
+                if *recursive {
+                    in_scope.push(cte.name.as_str());
+                }
+                collect_body_sources_dropping_ctes(&cte.body, &in_scope, sources);
             }
-            collect_body_sources(body, &mut inner);
-            let bound: Vec<&str> = ctes.iter().map(|cte| cte.name.as_str()).collect();
-            sources.extend(inner.into_iter().filter(|source| {
-                source.schema.is_some() || !bound.contains(&source.name.as_str())
-            }));
+            let all: Vec<&str> = ctes.iter().map(|cte| cte.name.as_str()).collect();
+            collect_body_sources_dropping_ctes(body, &all, sources);
         }
     }
+}
+
+/// Collects the real (non-CTE) [`SourceRef`] dependencies of `body`, dropping any *unqualified* source
+/// whose name is one of the in-scope CTE names `in_scope` (a local binding, not a dependency). Used by the
+/// [`ViewBody::With`] scoping in [`collect_body_sources`].
+fn collect_body_sources_dropping_ctes<'a>(
+    body: &'a ViewBody,
+    in_scope: &[&str],
+    sources: &mut Vec<&'a SourceRef>,
+) {
+    let mut collected = Vec::new();
+    collect_body_sources(body, &mut collected);
+    sources.extend(
+        collected
+            .into_iter()
+            .filter(|source| source.schema.is_some() || !in_scope.contains(&source.name.as_str())),
+    );
 }
 
 /// Collects every [`SourceRef`] reachable from a single `SELECT` body, recursing through subqueries.
@@ -1595,5 +1620,68 @@ mod tests {
             fold_like_case_insensitivity(&nested),
             ExprNode::Logical { .. }
         ));
+    }
+
+    #[test]
+    fn with_scoping_keeps_out_of_scope_cte_named_sources() {
+        // `WITH a AS (SELECT id FROM seed), seed AS (SELECT id FROM base) SELECT id FROM a`. In a
+        // non-recursive `WITH`, `seed` is declared AFTER `a`, so the `seed` read inside `a` is a real
+        // sibling relation (not the later CTE) and must survive as a dependency; the main body's `a`
+        // reference is an in-scope CTE binding and is dropped. So `referenced_sources` = {seed, base}.
+        let select_from = |name: &str| {
+            ViewBody::Select(Box::new(ViewQueryModel {
+                projection: vec![ProjectionItem {
+                    output_name: "id".to_owned(),
+                    expr: ExprNode::Column {
+                        alias: "q".to_owned(),
+                        column: "id".to_owned(),
+                    },
+                }],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: None,
+                    name: name.to_owned(),
+                    alias: "q".to_owned(),
+                })),
+                ..ViewQueryModel::default()
+            }))
+        };
+        let view = ViewModel {
+            name: "v".to_owned(),
+            comment: None,
+            columns: vec![ViewColumnModel {
+                name: "id".to_owned(),
+                ty: SqlType::I32,
+                nullable: true,
+            }],
+            query: ViewBody::With {
+                recursive: false,
+                ctes: vec![
+                    CteModel {
+                        name: "a".to_owned(),
+                        columns: Vec::new(),
+                        body: select_from("seed"),
+                    },
+                    CteModel {
+                        name: "seed".to_owned(),
+                        columns: Vec::new(),
+                        body: select_from("base"),
+                    },
+                ],
+                body: Box::new(select_from("a")),
+            },
+        };
+        let names: Vec<&str> = view.referenced_sources().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"seed"),
+            "a later-declared CTE's name read by an earlier CTE is a real relation and must be kept: {names:?}",
+        );
+        assert!(
+            names.contains(&"base"),
+            "the `seed` CTE's real source: {names:?}"
+        );
+        assert!(
+            !names.contains(&"a"),
+            "the main body's reference to the in-scope CTE `a` must be dropped: {names:?}",
+        );
     }
 }
