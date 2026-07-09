@@ -60,42 +60,6 @@ pub fn render_create_view(
     render_body(&view.query, view.columns.is_empty(), dialect, writer)
 }
 
-/// Renders a CTE body `SELECT …` for use inside `WITH "name" ("cols"…) AS ( … )`. The projection is
-/// *not* aliased: the enclosing `WITH` column list (rendered from the CTE's declared columns) names
-/// the outputs, exactly like a column-listed `CREATE VIEW (cols) AS …`. This decouples the body's
-/// projection aliases from the names the referencing query uses. CTE bodies are parameter-free
-/// (literals only), like view bodies.
-pub fn render_cte_body(
-    query: &ViewQueryModel,
-    dialect: &dyn Dialect,
-    writer: &mut dyn Write,
-) -> io::Result<()> {
-    render_select(query, false, dialect, writer)
-}
-
-/// Renders a recursive CTE body — `<anchor> UNION [ALL] <recursive>` — for use inside
-/// `WITH RECURSIVE "name" ("cols") AS ( … )`. Both arms render as bare (un-aliased) `SELECT`s like
-/// [`render_cte_body`]; the recursive arm's self-reference renders as the bare CTE name.
-pub fn render_recursive_cte_body(
-    anchor: &ViewQueryModel,
-    union_all: bool,
-    recursive: &ViewQueryModel,
-    dialect: &dyn Dialect,
-    writer: &mut dyn Write,
-) -> io::Result<()> {
-    // Each arm is parenthesized so a term-local `ORDER BY`/`LIMIT`/`OFFSET` scopes to that arm rather
-    // than binding to the whole union (matching how the set renderer wraps its leaves).
-    writer.write_all(b"(")?;
-    render_select(anchor, false, dialect, writer)?;
-    writer.write_all(if union_all {
-        b") UNION ALL (" as &[u8]
-    } else {
-        b") UNION ("
-    })?;
-    render_select(recursive, false, dialect, writer)?;
-    writer.write_all(b")")
-}
-
 /// Renders `DROP VIEW <qualified>`.
 pub fn render_drop_view(
     schema: Option<&str>,
@@ -296,7 +260,16 @@ fn render_body(
             // aliases its projections (see [`render_set`]).
             let _ = alias_projections;
             render_set(
-                *op, *all, left, right, order_by, *limit, *offset, open, close, dialect, writer,
+                *op,
+                *all,
+                left,
+                right,
+                order_by,
+                *limit,
+                *offset,
+                OperandWrap::Fixed { open, close },
+                dialect,
+                writer,
             )
         }
         ViewBody::With {
@@ -310,11 +283,22 @@ fn render_body(
     }
 }
 
-/// Renders a set operation — `<left> <OP> <right>` — with each operand wrapped by the given `open`/`close`
-/// delimiters, followed by any trailing whole-set `ORDER BY`/`LIMIT`/`OFFSET`. A plain set body passes the
+/// How a set operation wraps each of its operands (see [`render_set_operand`]).
+enum OperandWrap<'a> {
+    /// A plain compound: every operand is wrapped by the same fixed `open`/`close` delimiters (the
+    /// dialect's [`SetOperandStyle`]).
+    Fixed { open: &'a [u8], close: &'a [u8] },
+    /// A recursive-CTE body's `<anchor> UNION [ALL] <recursive>`: each arm is wrapped **per arm** — a
+    /// plain tail-less arm renders bare (required for SQLite, valid everywhere), a scoped arm is
+    /// parenthesized where the dialect permits it and rejected where it does not
+    /// ([`Dialect::supports_parenthesized_recursive_cte_arm`]).
+    RecursiveArm,
+}
+
+/// Renders a set operation — `<left> <OP> <right>` — with each operand wrapped per `wrap`, followed by any
+/// trailing whole-set `ORDER BY`/`LIMIT`/`OFFSET`. A plain set body passes [`OperandWrap::Fixed`] with the
 /// dialect's [`SetOperandStyle`] delimiters; a recursive-CTE set body (rendered by [`render_with_prefix`])
-/// passes **empty** delimiters (bare arms) on every dialect, since a recursive-CTE grammar rejects any
-/// parenthesized arm.
+/// passes [`OperandWrap::RecursiveArm`] for per-arm bare/parenthesized handling.
 #[allow(clippy::too_many_arguments)]
 fn render_set(
     op: ViewSetOp,
@@ -324,8 +308,7 @@ fn render_set(
     order_by: &[OrderItem],
     limit: Option<usize>,
     offset: Option<usize>,
-    open: &[u8],
-    close: &[u8],
+    wrap: OperandWrap,
     dialect: &dyn Dialect,
     writer: &mut dyn Write,
 ) -> io::Result<()> {
@@ -374,10 +357,10 @@ fn render_set(
     // stable), but each arm additionally *needs* its aliases for its own clauses: a per-arm `ORDER BY
     // <alias>` on either arm dangles without them, and an aliased *expression* projection has no other
     // name to lower back to.
-    render_set_operand(left, open, close, dialect, writer)?;
+    render_set_operand(left, &wrap, dialect, writer)?;
     write!(writer, " {}", set_op_keyword(op, all))?;
     writer.write_all(b" ")?;
-    render_set_operand(right, open, close, dialect, writer)?;
+    render_set_operand(right, &wrap, dialect, writer)?;
     // A trailing ORDER BY/LIMIT over the whole set (after the final arm).
     render_order_limit(order_by, limit, offset, dialect, writer)
 }
@@ -393,27 +376,66 @@ fn leftmost_select(body: &ViewBody) -> &ViewQueryModel {
     }
 }
 
-/// Renders one operand of a set operation, wrapped by `open`/`close` so its own `ORDER BY`/`LIMIT` (and a
-/// nested compound's grouping) binds to the operand and not the enclosing set.
+/// Renders one operand of a set operation. For a plain compound ([`OperandWrap::Fixed`]) the operand is
+/// wrapped by fixed `open`/`close` delimiters so its own `ORDER BY`/`LIMIT` (and a nested compound's
+/// grouping) binds to the operand and not the enclosing set. For a recursive-CTE body
+/// ([`OperandWrap::RecursiveArm`]) each arm is wrapped per-arm (see [`render_recursive_arm`]).
 fn render_set_operand(
     body: &ViewBody,
-    open: &[u8],
-    close: &[u8],
+    wrap: &OperandWrap,
     dialect: &dyn Dialect,
     writer: &mut dyn Write,
 ) -> io::Result<()> {
-    writer.write_all(open)?;
-    render_body(body, true, dialect, writer)?;
-    writer.write_all(close)
+    match wrap {
+        OperandWrap::Fixed { open, close } => {
+            writer.write_all(open)?;
+            render_body(body, true, dialect, writer)?;
+            writer.write_all(close)
+        }
+        OperandWrap::RecursiveArm => render_recursive_arm(body, dialect, writer),
+    }
+}
+
+/// Renders one arm of a recursive-CTE body. A plain, tail-less `SELECT` renders **bare** — a bare arm is
+/// required by SQLite (which rejects any parenthesized recursive arm) and is valid on every dialect. An arm
+/// that carries its own `ORDER BY`/`LIMIT`/`OFFSET`, or is a nested compound, can only be scoped by
+/// parenthesizing it: rendered `(<arm>)` where the dialect permits a parenthesized recursive arm
+/// ([`Dialect::supports_parenthesized_recursive_cte_arm`]), and rejected where it does not (SQLite — such an
+/// arm has no valid rendering there). Arms are aliased like any set operand.
+fn render_recursive_arm(
+    arm: &ViewBody,
+    dialect: &dyn Dialect,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
+    let is_plain_tailless = matches!(
+        arm,
+        ViewBody::Select(select)
+            if select.order_by.is_empty() && select.limit.is_none() && select.offset.is_none()
+    );
+    if is_plain_tailless {
+        render_body(arm, true, dialect, writer)
+    } else if dialect.supports_parenthesized_recursive_cte_arm() {
+        writer.write_all(b"(")?;
+        render_body(arm, true, dialect, writer)?;
+        writer.write_all(b")")
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this dialect cannot render a recursive CTE arm that carries its own ORDER BY/LIMIT/OFFSET \
+             or is a nested set operation — its recursive-CTE grammar forbids parenthesizing an arm, so \
+             such an arm cannot be operand-scoped",
+        ))
+    }
 }
 
 /// Renders a `WITH [RECURSIVE] <name> [(<cols>)] AS (<body>)[, …] ` prelude (note the trailing space) for a
 /// [`ViewBody::With`]. Each CTE body renders via [`render_body`], except a **recursive** CTE — one whose
-/// set body references its own name — whose `<anchor> UNION [ALL] <recursive>` arms render **bare** (no
-/// operand wrapping) on every dialect, since a recursive-CTE grammar rejects a parenthesized arm.
+/// set body references its own name — whose `<anchor> UNION [ALL] <recursive>` arms render per-arm (bare, or
+/// parenthesized where the dialect permits a scoped arm; see [`render_recursive_arm`]).
 ///
-/// This is authored as the eventual single shared `WITH`-prefix renderer: the runtime query path
-/// (`render.rs::write_cte_prefix`) is slated to build a `&[CteModel]` and route through here too.
+/// This is the single shared `WITH`-prefix renderer: both a view body's `WITH` prelude and the runtime
+/// query path (`render.rs::write_cte_prefix`, which builds a `&[CteModel]` from the collected `CteDef`s)
+/// route through it.
 pub fn render_with_prefix(
     recursive: bool,
     ctes: &[CteModel],
@@ -447,30 +469,38 @@ pub fn render_with_prefix(
             writer.write_all(b")")?;
         }
         writer.write_all(b" AS (")?;
-        render_cte_definition_body(cte, dialect, writer)?;
+        render_cte_definition_body(cte, recursive, dialect, writer)?;
         writer.write_all(b")")?;
     }
     writer.write_all(b" ")
 }
 
 /// Renders the body of one CTE (inside its `AS ( … )`). A recursive CTE — a `Set` body that references the
-/// CTE's own name — renders its `<anchor> UNION [ALL] <recursive>` operands **bare** (no wrapping
-/// delimiters): a recursive-CTE body's grammar requires it (SQLite rejects *any* parenthesized recursive
-/// arm — `(SELECT …)` or `SELECT * FROM (…)` — with a syntax error, and the bare form is the SQL-standard
-/// shape PostgreSQL/MySQL accept too). Any other CTE body renders via [`render_body`] (which wraps set
-/// operands per the dialect). A CTE with no declared column list has its outputs named by the body's
-/// projection aliases (`alias_projections`), exactly like a column-less `CREATE VIEW`.
+/// CTE's own name — renders its `<anchor> UNION [ALL] <recursive>` arms per-arm: a plain tail-less arm
+/// **bare** (a recursive-CTE grammar requires it — SQLite rejects *any* parenthesized recursive arm, and
+/// the bare form is the SQL-standard shape PostgreSQL/MySQL accept too), a scoped arm parenthesized where
+/// the dialect allows it (see [`render_recursive_arm`]). Any other CTE body renders via [`render_body`]
+/// (which wraps set operands per the dialect). A CTE with no declared column list has its outputs named by
+/// the body's projection aliases (`alias_projections`), exactly like a column-less `CREATE VIEW`.
+///
+/// `clause_recursive` is the clause-level `WITH RECURSIVE` flag (authoritative: `def.is_recursive()` on the
+/// runtime path, `With.recursive` on a model). It gates self-reference detection because a CTE's own name is
+/// in scope in its body **only** under `WITH RECURSIVE`: in a plain `WITH`, a body reference to a relation
+/// that merely shares the CTE's bare name (e.g. a schemaless table named like the CTE) is an *outer* table,
+/// not a self-reference, so such a CTE must render as a plain body — never routed to the recursive path.
 fn render_cte_definition_body(
     cte: &CteModel,
+    clause_recursive: bool,
     dialect: &dyn Dialect,
     writer: &mut dyn Write,
 ) -> io::Result<()> {
-    if cte_is_self_referential(cte) {
+    if clause_recursive && cte_is_self_referential(cte) {
         // A recursive CTE's body is a `UNION` set — possibly behind its own leading `WITH` prelude(s), e.g.
         // `WITH RECURSIVE c AS (WITH seed AS (…) <anchor> UNION ALL <recursive>)`. Recurse through those
-        // leading `With` layers (rendering their prefixes normally) down to the recursive `Set`, which must
-        // render with **bare** arms — not the generic set path (whose SQLite `SELECT * FROM (…)` operand
-        // wrapping the recursive reference would make the view fail to create).
+        // leading `With` layers (rendering their prefixes normally) down to the recursive `Set`, whose arms
+        // render per-arm (bare, or parenthesized where the dialect allows it) — not the generic set path
+        // (whose SQLite `SELECT * FROM (…)` operand wrapping the recursive reference would make the view
+        // fail to create).
         render_recursive_cte_set_body(&cte.body, dialect, writer)
     } else {
         render_body(&cte.body, cte.columns.is_empty(), dialect, writer)
@@ -478,7 +508,7 @@ fn render_cte_definition_body(
 }
 
 /// Renders the body of a **recursive** CTE. Leading `With` prelude(s) render normally (their own CTEs are
-/// ordinary); the recursive `Set` at the core renders with bare arms (see [`render_cte_definition_body`]).
+/// ordinary); the recursive `Set` at the core renders its arms per-arm (see [`render_recursive_arm`]).
 /// A self-referential CTE whose core is not a `Set` cannot be a recursive CTE (which requires a `UNION`),
 /// so it is rejected rather than mis-rendered.
 fn render_recursive_cte_set_body(
@@ -514,40 +544,27 @@ fn render_recursive_cte_set_body(
                      recursive term",
                 ));
             }
-            // A recursive-CTE arm renders BARE (no delimiters), so it cannot scope a per-arm
-            // `ORDER BY`/`LIMIT`/`OFFSET` (which would bind to the whole `UNION`) or preserve a nested
-            // compound's grouping — and a recursive-CTE grammar forbids parenthesizing an arm (SQLite has no
-            // valid scoped form). Reject an arm that is not a plain, tail-less `SELECT` rather than emit
-            // mis-scoped SQL. (The standard recursive shape — a simple anchor and recursive `SELECT` — is
-            // unaffected.)
-            reject_unscopable_recursive_arm(left)?;
-            reject_unscopable_recursive_arm(right)?;
+            // Each arm renders per-arm via [`OperandWrap::RecursiveArm`]: a plain tail-less arm bare, a
+            // scoped arm (own `ORDER BY`/`LIMIT`/`OFFSET` or a nested compound) parenthesized where the
+            // dialect permits it (PostgreSQL/MySQL) and rejected where it does not (SQLite). See
+            // [`render_recursive_arm`].
             render_set(
-                *op, *all, left, right, order_by, *limit, *offset, b"", b"", dialect, writer,
+                *op,
+                *all,
+                left,
+                right,
+                order_by,
+                *limit,
+                *offset,
+                OperandWrap::RecursiveArm,
+                dialect,
+                writer,
             )
         }
         ViewBody::Select(_) => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "a recursive CTE body must be a UNION set operation (a self-referential CTE with a plain \
              SELECT body is not a valid recursive CTE)",
-        )),
-    }
-}
-
-/// Rejects a recursive-CTE arm that a bare (un-delimited) render cannot scope: anything other than a plain
-/// `SELECT` with no per-arm `ORDER BY`/`LIMIT`/`OFFSET`. See [`render_cte_definition_body`].
-fn reject_unscopable_recursive_arm(arm: &ViewBody) -> io::Result<()> {
-    match arm {
-        ViewBody::Select(select)
-            if select.order_by.is_empty() && select.limit.is_none() && select.offset.is_none() =>
-        {
-            Ok(())
-        }
-        _ => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "a recursive CTE arm must be a plain SELECT without its own ORDER BY/LIMIT/OFFSET or a \
-             nested set operation — a recursive-CTE grammar forbids parenthesizing an arm, so such an \
-             arm cannot be operand-scoped",
         )),
     }
 }

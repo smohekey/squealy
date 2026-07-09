@@ -1010,45 +1010,29 @@ fn write_cte_prefix(
     ctes: &[&'static dyn crate::CteDef],
     writer: &mut dyn Write,
 ) -> io::Result<()> {
-    if ctes.is_empty() {
-        return Ok(());
-    }
-    // SQL requires `WITH RECURSIVE` on the whole clause if any entry is recursive.
-    if ctes.iter().any(|def| def.is_recursive()) {
-        writer.write_all(b"WITH RECURSIVE ")?;
-    } else {
-        writer.write_all(b"WITH ")?;
-    }
-    for (index, def) in ctes.iter().enumerate() {
-        if index > 0 {
-            writer.write_all(b", ")?;
-        }
-        dialect.write_quoted_ident(def.name(), writer)?;
-        writer.write_all(b" (")?;
-        for (column_index, column) in def.columns().iter().enumerate() {
-            if column_index > 0 {
-                writer.write_all(b", ")?;
-            }
-            dialect.write_quoted_ident(&column.name, writer)?;
-        }
-        writer.write_all(b") AS (")?;
-        match def.body() {
-            crate::CteBody::Plain(model) => {
-                crate::view_render::render_cte_body(&model, dialect, writer)?;
-            }
-            crate::CteBody::Recursive {
-                anchor,
-                union_all,
-                recursive,
-            } => {
-                crate::view_render::render_recursive_cte_body(
-                    &anchor, union_all, &recursive, dialect, writer,
-                )?;
-            }
-        }
-        writer.write_all(b")")?;
-    }
-    writer.write_all(b" ")
+    // The runtime `WITH` prefix and a view body's `WITH` prelude are one and the same: build a
+    // `CteModel` per collected `CteDef` and hand off to the shared renderer, which detects a recursive
+    // CTE by self-reference and renders its arms bare.
+    let models = cte_models(ctes);
+    let recursive = ctes.iter().any(|def| def.is_recursive());
+    crate::view_render::render_with_prefix(recursive, &models, dialect, writer)
+}
+
+/// Builds a [`CteModel`](crate::CteModel) per collected [`CteDef`](crate::CteDef) — its declared name and
+/// column names plus its lowered [`ViewBody`](crate::ViewBody) — for the shared `WITH` renderer. Shared by
+/// the plain and set-query CTE prefix paths.
+fn cte_models(ctes: &[&'static dyn crate::CteDef]) -> Vec<crate::CteModel> {
+    ctes.iter()
+        .map(|def| crate::CteModel {
+            name: def.name().to_string(),
+            columns: def
+                .columns()
+                .into_iter()
+                .map(|column| column.name)
+                .collect(),
+            body: def.body(),
+        })
+        .collect()
 }
 
 fn write_table_ref<S>(dialect: &dyn Dialect, writer: &mut impl Write) -> io::Result<()>

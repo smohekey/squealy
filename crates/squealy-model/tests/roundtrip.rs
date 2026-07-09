@@ -1359,11 +1359,12 @@ fn view_bodies_round_trip_through_each_dialect() {
     assert_eq!(checked, 12 * dialects.len(), "view coverage drifted");
 }
 
-/// A recursive-CTE arm renders BARE (a recursive-CTE grammar forbids parenthesizing an arm), so an arm
-/// carrying its own `ORDER BY`/`LIMIT`/`OFFSET` — which bare rendering cannot scope to the operand — is
-/// rejected rather than emitting mis-scoped SQL, on every dialect. The standard tail-less shape is fine.
+/// A plain, tail-less recursive-CTE arm renders BARE. An arm carrying its own `ORDER BY`/`LIMIT`/`OFFSET`
+/// can only be scoped by parenthesizing it, which is **dialect-specific**: PostgreSQL/MySQL render it
+/// parenthesized, but SQLite (whose recursive-CTE grammar forbids a parenthesized arm) rejects it — see
+/// [`Dialect::supports_parenthesized_recursive_cte_arm`].
 #[test]
-fn a_recursive_cte_arm_with_a_tail_is_rejected() {
+fn a_recursive_cte_arm_with_a_tail_is_dialect_specific() {
     // `WITH RECURSIVE counter(n) AS (SELECT 1 LIMIT 1 UNION ALL SELECT counter.n + 1 FROM counter …)` —
     // the anchor carries a per-arm `LIMIT`, which cannot be scoped under a bare arm.
     let view = view_of(
@@ -1424,9 +1425,33 @@ fn a_recursive_cte_arm_with_a_tail_is_rejected() {
             })),
         },
     );
-    assert_view_render_rejected_on_all_dialects(
+    // PostgreSQL/MySQL parenthesize the scoped anchor — `(SELECT 1 LIMIT 1) UNION ALL …` — so the
+    // per-arm LIMIT binds to the anchor, not the whole UNION.
+    for dialect in [
+        &squealy_postgresql::Postgres.dialect() as &dyn squealy::Dialect,
+        &squealy_mysql::Mysql.dialect(),
+    ] {
+        let mut buf = Vec::new();
+        squealy::render_create_view(Some("public"), &view, false, dialect, &mut buf)
+            .expect("PostgreSQL/MySQL render a scoped recursive CTE arm parenthesized");
+        let sql = String::from_utf8(buf).expect("utf-8 DDL");
+        assert!(
+            sql.contains("LIMIT 1) UNION ALL "),
+            "the scoped anchor must be parenthesized: {sql}"
+        );
+    }
+    // SQLite forbids a parenthesized recursive arm, so it has no valid rendering there — rejected.
+    let mut buf = Vec::new();
+    let result = squealy::render_create_view(
+        Some("public"),
         &view,
-        "a recursive CTE arm with a per-arm LIMIT must be rejected, not rendered",
+        false,
+        &squealy_sqlite::Sqlite.dialect(),
+        &mut buf,
+    );
+    assert!(
+        result.is_err(),
+        "SQLite must reject a scoped recursive CTE arm (no valid rendering)"
     );
 }
 
@@ -1491,6 +1516,61 @@ fn a_recursive_cte_with_a_non_union_operator_is_rejected() {
         &view,
         "a recursive CTE using INTERSECT/EXCEPT must be rejected, not rendered",
     );
+}
+
+/// A **non-recursive** `WITH` whose CTE shares its bare name with a schemaless relation its body reads is
+/// NOT a recursive CTE: a CTE's own name is in scope in its body only under `WITH RECURSIVE`, so the body's
+/// unqualified `counter` is an *outer* relation, not a self-reference. The clause-level `recursive` flag
+/// gates self-reference detection, so this renders as a plain CTE body rather than being misclassified as
+/// recursive (its body is a plain `SELECT`, not a `UNION`, which the recursive path would reject).
+#[test]
+fn a_plain_cte_shadowing_a_relation_name_is_not_recursive() {
+    let counter_col = ExprNode::Column {
+        alias: "q0_0".to_owned(),
+        column: "n".to_owned(),
+    };
+    let counter_source = || {
+        Some(SourceItem::Named(SourceRef {
+            schema: None,
+            name: "counter".to_owned(),
+            alias: "q0_0".to_owned(),
+        }))
+    };
+    let view = view_of(
+        "v_shadow",
+        vec![("n", SqlType::I32)],
+        ViewBody::With {
+            recursive: false,
+            ctes: vec![CteModel {
+                name: "counter".to_owned(),
+                columns: vec!["n".to_owned()],
+                body: sel(ViewQueryModel {
+                    projection: vec![proj("n", counter_col.clone())],
+                    from: counter_source(),
+                    ..ViewQueryModel::default()
+                }),
+            }],
+            body: Box::new(sel(ViewQueryModel {
+                projection: vec![proj("n", counter_col)],
+                from: counter_source(),
+                ..ViewQueryModel::default()
+            })),
+        },
+    );
+    for dialect in [
+        &squealy_postgresql::Postgres.dialect() as &dyn squealy::Dialect,
+        &squealy_mysql::Mysql.dialect(),
+        &squealy_sqlite::Sqlite.dialect(),
+    ] {
+        let mut buf = Vec::new();
+        squealy::render_create_view(Some("public"), &view, false, dialect, &mut buf)
+            .expect("a plain CTE shadowing a relation name renders as a plain body, not recursive");
+        let sql = String::from_utf8(buf).expect("utf-8 DDL");
+        assert!(
+            !sql.contains("RECURSIVE"),
+            "a plain WITH must not become WITH RECURSIVE: {sql}"
+        );
+    }
 }
 
 /// Asserts `render_create_view` fails for `view` on all three dialects.

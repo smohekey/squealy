@@ -1265,6 +1265,12 @@ impl squealy::Dialect for SqliteDialect {
         true
     }
 
+    fn supports_parenthesized_recursive_cte_arm(&self) -> bool {
+        // SQLite's recursive-CTE grammar rejects any parenthesized recursive arm, so an arm carrying its
+        // own ORDER BY/LIMIT/OFFSET (which needs parens to scope) has no valid rendering and is rejected.
+        false
+    }
+
     fn concat_uses_pipe_operator(&self) -> bool {
         // SQLite has no null-propagating `CONCAT`; `||` returns NULL if either operand is NULL,
         // matching squealy's concat expression (nullable iff either operand is nullable).
