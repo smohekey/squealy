@@ -592,6 +592,120 @@ fn corpus() -> Vec<(&'static str, DatabaseModel)> {
         )),
     ));
 
+    // A `WITH` (CTE) view body — exercises the `ViewBody::With` IR widening end to end (render → parse →
+    // lower → render). A single, non-recursive, un-column-listed CTE `recent` filters `events`; the main
+    // body selects from it by the bound CTE name (`recent`, a schema-less `SourceItem::Named` that the
+    // WITH-scoping recognizes as a local binding, not an external dependency).
+    let cte_inner_col = |column: &str| ExprNode::Column {
+        alias: "q1_0".to_owned(),
+        column: column.to_owned(),
+    };
+    cases.push((
+        "view/cte",
+        schema_with_view(view_of(
+            "v_cte",
+            vec![("id", SqlType::I32)],
+            ViewBody::With {
+                recursive: false,
+                ctes: vec![CteModel {
+                    name: "recent".to_owned(),
+                    // No declared column list — the CTE body's aliased projections name its outputs.
+                    columns: Vec::new(),
+                    body: sel(ViewQueryModel {
+                        projection: vec![
+                            proj("id", cte_inner_col("id")),
+                            proj("cnt", cte_inner_col("cnt")),
+                        ],
+                        from: Some(SourceItem::Named(SourceRef {
+                            schema: Some("public".to_owned()),
+                            name: "events".to_owned(),
+                            alias: "q1_0".to_owned(),
+                        })),
+                        filter: Some(ExprNode::Compare {
+                            op: CompareOp::GreaterThan,
+                            left: b(cte_inner_col("cnt")),
+                            right: b(lit("0")),
+                        }),
+                        ..ViewQueryModel::default()
+                    }),
+                }],
+                body: Box::new(sel(ViewQueryModel {
+                    projection: vec![proj("id", col("id"))],
+                    from: Some(SourceItem::Named(SourceRef {
+                        schema: None,
+                        name: "recent".to_owned(),
+                        alias: ALIAS.to_owned(),
+                    })),
+                    ..ViewQueryModel::default()
+                })),
+            },
+        )),
+    ));
+
+    // A **recursive** `WITH RECURSIVE` view body — a classic integer counter. The CTE `counter` carries a
+    // declared column list (`n`); its body is a `ViewBody::Set { Union, all }` whose recursive arm's `FROM`
+    // references the CTE name (`counter`). The renderer detects that self-reference structurally and emits
+    // the arms **bare** — `<anchor> UNION ALL <recursive>` with no operand wrapping — on every dialect (a
+    // recursive-CTE grammar rejects a parenthesized arm; SQLite errors on `(SELECT …)` or `SELECT * FROM
+    // (…)` alike).
+    cases.push((
+        "view/recursive-cte",
+        schema_with_view(view_of(
+            "v_recursive_cte",
+            vec![("n", SqlType::I32)],
+            ViewBody::With {
+                recursive: true,
+                ctes: vec![CteModel {
+                    name: "counter".to_owned(),
+                    columns: vec!["n".to_owned()],
+                    body: ViewBody::Set {
+                        op: ViewSetOp::Union,
+                        all: true,
+                        // Anchor: `SELECT 1` (no FROM).
+                        left: Box::new(sel(ViewQueryModel {
+                            projection: vec![proj("n", lit("1"))],
+                            ..ViewQueryModel::default()
+                        })),
+                        // Recursive arm: `SELECT counter.n + 1 FROM counter WHERE counter.n < 10`.
+                        right: Box::new(sel(ViewQueryModel {
+                            projection: vec![proj(
+                                "n",
+                                ExprNode::Binary {
+                                    op: ArithmeticOp::Add,
+                                    left: b(col("n")),
+                                    right: b(lit("1")),
+                                },
+                            )],
+                            from: Some(SourceItem::Named(SourceRef {
+                                schema: None,
+                                name: "counter".to_owned(),
+                                alias: ALIAS.to_owned(),
+                            })),
+                            filter: Some(ExprNode::Compare {
+                                op: CompareOp::LessThan,
+                                left: b(col("n")),
+                                right: b(lit("10")),
+                            }),
+                            ..ViewQueryModel::default()
+                        })),
+                        order_by: Vec::new(),
+                        limit: None,
+                        offset: None,
+                    },
+                }],
+                body: Box::new(sel(ViewQueryModel {
+                    projection: vec![proj("n", col("n"))],
+                    from: Some(SourceItem::Named(SourceRef {
+                        schema: None,
+                        name: "counter".to_owned(),
+                        alias: ALIAS.to_owned(),
+                    })),
+                    ..ViewQueryModel::default()
+                })),
+            },
+        )),
+    ));
+
     // A table CHECK constraint, carried structurally so each backend renders it in its own dialect.
     let mut widgets = plain_table(
         "widgets",
@@ -1241,6 +1355,6 @@ fn view_bodies_round_trip_through_each_dialect() {
         failures.len(),
         failures.join("\n\n")
     );
-    // Every view case × every backend was exercised (10 views × 3 backends).
-    assert_eq!(checked, 10 * dialects.len(), "view coverage drifted");
+    // Every view case × every backend was exercised (12 views × 3 backends).
+    assert_eq!(checked, 12 * dialects.len(), "view coverage drifted");
 }

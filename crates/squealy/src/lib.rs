@@ -563,14 +563,14 @@ pub use query::{
 pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_ir::{
     AggregateFunc, ArithmeticOp, CaseArm, CheckModel, ColumnModel, CompareOp, Constraint,
-    ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, DateField, DefaultValue,
-    ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, FrameBound, FrameMode, FrameSpec,
-    GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
-    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, JoinItem,
-    JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem, ScalarFunc,
-    SchemaModel, SourceItem, SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel, ViewModel,
-    ViewQueryModel, ViewSetOp, WindowFunc, WindowOrderTerm, fold_like_case_insensitivity,
-    normalize_expr,
+    ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, CteModel, DateField,
+    DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, FrameBound,
+    FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
+    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
+    JoinItem, JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem,
+    ScalarFunc, SchemaModel, SourceItem, SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel,
+    ViewModel, ViewQueryModel, ViewSetOp, WindowFunc, WindowOrderTerm,
+    fold_like_case_insensitivity, normalize_expr,
 };
 pub use squealy_macros::{CTE, ColumnType, Database, RecursiveCTE, Schema, Table, View};
 pub use table::{

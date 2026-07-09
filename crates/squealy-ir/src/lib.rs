@@ -659,8 +659,9 @@ pub struct ViewColumnModel {
     pub nullable: bool,
 }
 
-/// The backend-neutral structural body of a view definition: a single `SELECT` ([`ViewQueryModel`]) or a
-/// set operation (`UNION`/`INTERSECT`/`EXCEPT`, optionally `ALL`) over two nested bodies.
+/// The backend-neutral structural body of a view definition: a single `SELECT` ([`ViewQueryModel`]), a
+/// set operation (`UNION`/`INTERSECT`/`EXCEPT`, optionally `ALL`) over two nested bodies, or a `WITH`
+/// (common-table-expression) prelude wrapping any of these.
 ///
 /// A view whose body live introspection cannot reconstruct is stored as an **empty** [`ViewBody::Select`]
 /// (empty projection) carrying only its recorded `dependencies` — the diff's body-unknown sentinel (see
@@ -681,6 +682,27 @@ pub enum ViewBody {
         limit: Option<usize>,
         offset: Option<usize>,
     },
+    /// A `WITH` (common-table-expression) prelude wrapping any inner body. Nests (a CTE body or the inner
+    /// body may itself be a `With`), and can appear in a derived-table subquery.
+    With {
+        /// `true` for `WITH RECURSIVE` — a clause-level keyword covering the whole prelude. A CTE whose
+        /// body actually self-references is detected structurally at render time (by that body's set arm
+        /// referencing the CTE's own name); this flag only governs the emitted keyword.
+        recursive: bool,
+        ctes: Vec<CteModel>,
+        body: Box<ViewBody>,
+    },
+}
+
+/// One common-table expression declared in a [`ViewBody::With`] prelude: `<name> [(<columns>)] AS
+/// (<body>)`. `columns` is the optional `WITH` column list (empty = none declared; the body's own
+/// projection names the outputs). A **recursive** CTE's `body` is a [`ViewBody::Set`] whose recursive arm
+/// references `name`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CteModel {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub body: ViewBody,
 }
 
 impl Default for ViewBody {
@@ -703,7 +725,7 @@ impl ViewBody {
     pub fn dependencies(&self) -> &[SourceRef] {
         match self {
             ViewBody::Select(select) => &select.dependencies,
-            ViewBody::Set { .. } => &[],
+            ViewBody::Set { .. } | ViewBody::With { .. } => &[],
         }
     }
 }
@@ -1050,6 +1072,22 @@ fn collect_body_sources<'a>(body: &'a ViewBody, sources: &mut Vec<&'a SourceRef>
             for order in order_by {
                 collect_expr_sources(&order.expr, sources);
             }
+        }
+        ViewBody::With { ctes, body, .. } => {
+            // Collect from every CTE body and the inner body, then drop any *unqualified* source whose name
+            // matches a locally-bound CTE name: a recursive CTE's self-reference and inter-CTE references
+            // are local bindings, not external view/table dependencies. A **schema-qualified** source
+            // (`public.dep`) is always a real relation even if a CTE shares its bare name, so it is kept —
+            // dropping it would mis-order `ordered_views` and create the view before a sibling it needs.
+            let mut inner = Vec::new();
+            for cte in ctes {
+                collect_body_sources(&cte.body, &mut inner);
+            }
+            collect_body_sources(body, &mut inner);
+            let bound: Vec<&str> = ctes.iter().map(|cte| cte.name.as_str()).collect();
+            sources.extend(inner.into_iter().filter(|source| {
+                source.schema.is_some() || !bound.contains(&source.name.as_str())
+            }));
         }
     }
 }

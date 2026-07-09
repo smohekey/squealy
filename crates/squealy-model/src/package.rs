@@ -18,13 +18,13 @@ use std::path::Path;
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
     AggregateFunc, ArithmeticOp, CaseArm, CheckModel, ColumnModel, CompareOp, Constraint,
-    ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, DatabaseModel, DateField,
-    DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, FrameBound,
-    FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
-    JoinItem, JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem,
-    ScalarFunc, SchemaModel, SourceItem, SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel,
-    ViewModel, ViewQueryModel, ViewSetOp, WindowFunc, WindowOrderTerm,
+    ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, CteModel, DatabaseModel,
+    DateField, DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
+    FrameBound, FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage, IdentityMode,
+    IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
+    IndexOperatorClass, JoinItem, JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls,
+    ProjectionItem, ScalarFunc, SchemaModel, SourceItem, SourceRef, SqlType, TableModel, ViewBody,
+    ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp, WindowFunc, WindowOrderTerm,
 };
 
 use crate::{CastColumn, RefactorLog, RefactorOperation, RenameColumn, RenameTable};
@@ -614,7 +614,42 @@ fn view_body_to_node(body: &ViewBody) -> KdlNode {
             node.set_children(children);
             node
         }
+        ViewBody::With {
+            recursive,
+            ctes,
+            body,
+        } => {
+            let mut node = KdlNode::new("with");
+            if *recursive {
+                node.push(KdlEntry::new_prop("recursive", KdlValue::Bool(true)));
+            }
+            let mut children = KdlDocument::new();
+            for cte in ctes {
+                children.nodes_mut().push(cte_to_node(cte));
+            }
+            // The inner (wrapped) body is a plain body node (`query`/`set`/`with`), distinguished from the
+            // `cte` children on read-back by node name.
+            children.nodes_mut().push(view_body_to_node(body));
+            node.set_children(children);
+            node
+        }
     }
+}
+
+/// Serializes one [`CteModel`] as `cte "<name>" { column "c1"; …; <body> }` — the declared `WITH` column
+/// list as `column` children (omitted when none), then the CTE body as a nested body node.
+fn cte_to_node(cte: &CteModel) -> KdlNode {
+    let mut node = KdlNode::new("cte");
+    node.push(KdlEntry::new(cte.name.clone()));
+    let mut children = KdlDocument::new();
+    for column in &cte.columns {
+        let mut column_node = KdlNode::new("column");
+        column_node.push(KdlEntry::new(column.clone()));
+        children.nodes_mut().push(column_node);
+    }
+    children.nodes_mut().push(view_body_to_node(&cte.body));
+    node.set_children(children);
+    node
 }
 
 /// A `<name> { <body> }` wrapper for a set operation's `left`/`right` operand.
@@ -1493,12 +1528,13 @@ fn view_from_node(node: &KdlNode) -> Result<ViewModel, PackageError> {
     })
 }
 
-/// The child node holding a view body — a `query` (single `SELECT`) or a `set` (set operation) node.
+/// The child node holding a view body — a `query` (single `SELECT`), a `set` (set operation), or a `with`
+/// (CTE prelude) node.
 fn body_child(node: &KdlNode) -> Option<&KdlNode> {
     node.children()?
         .nodes()
         .iter()
-        .find(|child| matches!(child.name().value(), "query" | "set"))
+        .find(|child| matches!(child.name().value(), "query" | "set" | "with"))
 }
 
 /// Reads a view body: a `query` node is a single `SELECT`; a `set` node is a set operation carrying
@@ -1530,10 +1566,43 @@ fn view_body_from_node(node: &KdlNode) -> Result<ViewBody, PackageError> {
                 offset: prop_usize(node, "offset")?,
             })
         }
+        "with" => {
+            let ctes = child_nodes(node, "cte")
+                .map(cte_from_node)
+                .collect::<Result<Vec<_>, _>>()?;
+            let body = body_child(node)
+                .ok_or_else(|| malformed("`with` has no inner body (`query`/`set`/`with`)"))?;
+            Ok(ViewBody::With {
+                recursive: prop_bool(node, "recursive"),
+                ctes,
+                body: Box::new(view_body_from_node(body)?),
+            })
+        }
         other => Err(malformed(format!(
-            "expected a view body (`query` or `set`), found `{other}`"
+            "expected a view body (`query`, `set`, or `with`), found `{other}`"
         ))),
     }
+}
+
+/// Reads one `cte` node — its name arg, optional `column` children (the `WITH` column list), and its body.
+fn cte_from_node(node: &KdlNode) -> Result<CteModel, PackageError> {
+    let name = first_arg(node)
+        .ok_or_else(|| malformed("`cte` is missing its name"))?
+        .to_owned();
+    let columns = child_nodes(node, "column")
+        .map(|column| {
+            first_arg(column)
+                .map(str::to_owned)
+                .ok_or_else(|| malformed(format!("`cte` `{name}` has a `column` with no name")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let body = body_child(node)
+        .ok_or_else(|| malformed(format!("`cte` `{name}` has no body (`query`/`set`/`with`)")))?;
+    Ok(CteModel {
+        name,
+        columns,
+        body: view_body_from_node(body)?,
+    })
 }
 
 /// Reads one `left`/`right` operand of a `set` node — a wrapper holding a single nested body.
@@ -1650,11 +1719,11 @@ fn view_join_from_node(node: &KdlNode) -> Result<JoinItem, PackageError> {
 }
 
 /// The `ON` predicate of a join node — the first child expression, skipping a derived source's nested
-/// `query`/`set` body block (which is not an expression).
+/// `query`/`set`/`with` body block (which is not an expression).
 fn join_on_expr(node: &KdlNode) -> Result<ExprNode, PackageError> {
     let child = expr_child_nodes(node)
         .into_iter()
-        .find(|child| !matches!(child.name().value(), "query" | "set"))
+        .find(|child| !matches!(child.name().value(), "query" | "set" | "with"))
         .ok_or_else(|| {
             malformed(format!(
                 "`{}` is missing its ON expression",
@@ -3051,6 +3120,110 @@ mod tests {
         let kdl = to_kdl(&model);
         let parsed = from_kdl(&kdl).expect("set-op view model.kdl should parse");
         assert_eq!(parsed, model, "set-op view KDL round-trip diverged:\n{kdl}");
+    }
+
+    #[test]
+    fn kdl_round_trips_cte_view_bodies() {
+        fn col(alias: &str, column: &str) -> ExprNode {
+            ExprNode::Column {
+                alias: alias.to_owned(),
+                column: column.to_owned(),
+            }
+        }
+        fn proj(name: &str, expr: ExprNode) -> ProjectionItem {
+            ProjectionItem {
+                output_name: name.to_owned(),
+                expr,
+            }
+        }
+        fn sel(query: ViewQueryModel) -> ViewBody {
+            ViewBody::Select(Box::new(query))
+        }
+
+        // A `WITH RECURSIVE` prelude carrying two CTEs: a non-recursive, un-column-listed `recent` and a
+        // recursive, column-listed `counter` (a `Set` self-referencing `counter`). Exercises the
+        // `recursive` flag, the optional `column` list (present on one CTE, absent on the other), multiple
+        // CTEs, and the inner-body node — all round-tripping alongside a nested body.
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: Some("public".to_owned()),
+                tables: Vec::new(),
+                views: vec![ViewModel {
+                    name: "v_cte".to_owned(),
+                    comment: None,
+                    columns: vec![ViewColumnModel {
+                        name: "n".to_owned(),
+                        ty: SqlType::I32,
+                        nullable: true,
+                    }],
+                    query: ViewBody::With {
+                        recursive: true,
+                        ctes: vec![
+                            CteModel {
+                                name: "recent".to_owned(),
+                                columns: Vec::new(),
+                                body: sel(ViewQueryModel {
+                                    projection: vec![proj("id", col("q1_0", "id"))],
+                                    from: Some(SourceItem::Named(SourceRef {
+                                        schema: Some("public".to_owned()),
+                                        name: "events".to_owned(),
+                                        alias: "q1_0".to_owned(),
+                                    })),
+                                    ..ViewQueryModel::default()
+                                }),
+                            },
+                            CteModel {
+                                name: "counter".to_owned(),
+                                columns: vec!["n".to_owned()],
+                                body: ViewBody::Set {
+                                    op: ViewSetOp::Union,
+                                    all: true,
+                                    left: Box::new(sel(ViewQueryModel {
+                                        projection: vec![proj(
+                                            "n",
+                                            ExprNode::Literal("1".to_owned()),
+                                        )],
+                                        ..ViewQueryModel::default()
+                                    })),
+                                    right: Box::new(sel(ViewQueryModel {
+                                        projection: vec![proj(
+                                            "n",
+                                            ExprNode::Binary {
+                                                op: ArithmeticOp::Add,
+                                                left: Box::new(col("q0_0", "n")),
+                                                right: Box::new(ExprNode::Literal("1".to_owned())),
+                                            },
+                                        )],
+                                        from: Some(SourceItem::Named(SourceRef {
+                                            schema: None,
+                                            name: "counter".to_owned(),
+                                            alias: "q0_0".to_owned(),
+                                        })),
+                                        ..ViewQueryModel::default()
+                                    })),
+                                    order_by: Vec::new(),
+                                    limit: None,
+                                    offset: None,
+                                },
+                            },
+                        ],
+                        body: Box::new(sel(ViewQueryModel {
+                            projection: vec![proj("n", col("q0_0", "n"))],
+                            from: Some(SourceItem::Named(SourceRef {
+                                schema: None,
+                                name: "counter".to_owned(),
+                                alias: "q0_0".to_owned(),
+                            })),
+                            ..ViewQueryModel::default()
+                        })),
+                    },
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("CTE view model.kdl should parse");
+        assert_eq!(parsed, model, "CTE view KDL round-trip diverged:\n{kdl}");
     }
 
     #[test]

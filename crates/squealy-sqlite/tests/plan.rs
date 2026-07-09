@@ -6,10 +6,10 @@
 //! foreign-key child's rows, which a naive drop-and-recreate would cascade-delete.
 
 use squealy::{
-    ColumnModel, CompareOp, Constraint, DatabaseModel, DatabasePlan, DatabasePlanStep, DdlExecutor,
-    ExprNode, ForeignKeyAction, ForeignKeyModel, IdentityMode, IdentityModel, IndexModel,
-    ProjectionItem, SchemaBackend, SchemaModel, SourceItem, SourceRef, SqlType, TableModel,
-    ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
+    ArithmeticOp, ColumnModel, CompareOp, Constraint, CteModel, DatabaseModel, DatabasePlan,
+    DatabasePlanStep, DdlExecutor, ExprNode, ForeignKeyAction, ForeignKeyModel, IdentityMode,
+    IdentityModel, IndexModel, ProjectionItem, SchemaBackend, SchemaModel, SourceItem, SourceRef,
+    SqlType, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
 };
 use squealy_model::{
     CastColumn, DiffPolicy, PlanApplyOptions, RefactorLog, RefactorOperation, RenameColumn,
@@ -84,7 +84,9 @@ fn widget_table() -> TableModel {
 fn view_select_mut(view: &mut ViewModel) -> &mut ViewQueryModel {
     match &mut view.query {
         ViewBody::Select(select) => select,
-        ViewBody::Set { .. } => panic!("expected a single-SELECT view body"),
+        ViewBody::Set { .. } | ViewBody::With { .. } => {
+            panic!("expected a single-SELECT view body")
+        }
     }
 }
 
@@ -1878,5 +1880,103 @@ async fn introspects_and_drops_a_view_whose_table_was_removed() {
     assert!(
         after.schemas.iter().all(|schema| schema.views.is_empty()),
         "the broken view must be gone: {after:?}",
+    );
+}
+
+#[tokio::test]
+async fn a_recursive_cte_view_is_valid_sqlite() {
+    // A `WITH RECURSIVE` view body must render DDL SQLite actually accepts — not just SQL the pinned
+    // parser accepts. SQLite's recursive-CTE grammar rejects a *parenthesized* recursive arm (`(SELECT …)`
+    // or `SELECT * FROM (…)`) with a syntax error, so the renderer emits the arms **bare**
+    // (`<anchor> UNION ALL <recursive>`). This publishes a counter CTE view and queries it end to end, so
+    // a regression back to parenthesized arms (which the sqlparser-based round-trip harness would NOT
+    // catch) fails here. The CTE has a declared column list (`n`) whose recursive arm references `counter`.
+    let (mut connection, raw) = setup().await;
+    let counter_col = |column: &str| ExprNode::Column {
+        alias: "q0_0".to_owned(),
+        column: column.to_owned(),
+    };
+    let view = ViewModel {
+        name: "v_counter".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "n".to_owned(),
+            ty: SqlType::I64,
+            nullable: false,
+        }],
+        query: ViewBody::With {
+            recursive: true,
+            ctes: vec![CteModel {
+                name: "counter".to_owned(),
+                columns: vec!["n".to_owned()],
+                body: ViewBody::Set {
+                    op: ViewSetOp::Union,
+                    all: true,
+                    // Anchor `SELECT 1` (no FROM).
+                    left: Box::new(ViewBody::Select(Box::new(ViewQueryModel {
+                        projection: vec![ProjectionItem {
+                            output_name: "n".to_owned(),
+                            expr: ExprNode::Literal("1".to_owned()),
+                        }],
+                        ..ViewQueryModel::default()
+                    }))),
+                    // Recursive arm `SELECT counter.n + 1 FROM counter WHERE counter.n < 5`.
+                    right: Box::new(ViewBody::Select(Box::new(ViewQueryModel {
+                        projection: vec![ProjectionItem {
+                            output_name: "n".to_owned(),
+                            expr: ExprNode::Binary {
+                                op: ArithmeticOp::Add,
+                                left: Box::new(counter_col("n")),
+                                right: Box::new(ExprNode::Literal("1".to_owned())),
+                            },
+                        }],
+                        from: Some(SourceItem::Named(SourceRef {
+                            schema: None,
+                            name: "counter".to_owned(),
+                            alias: "q0_0".to_owned(),
+                        })),
+                        filter: Some(ExprNode::Compare {
+                            op: CompareOp::LessThan,
+                            left: Box::new(counter_col("n")),
+                            right: Box::new(ExprNode::Literal("5".to_owned())),
+                        }),
+                        ..ViewQueryModel::default()
+                    }))),
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                },
+            }],
+            body: Box::new(ViewBody::Select(Box::new(ViewQueryModel {
+                projection: vec![ProjectionItem {
+                    output_name: "n".to_owned(),
+                    expr: counter_col("n"),
+                }],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: None,
+                    name: "counter".to_owned(),
+                    alias: "q0_0".to_owned(),
+                })),
+                ..ViewQueryModel::default()
+            }))),
+        },
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: Vec::new(),
+            views: vec![view],
+        }],
+    };
+
+    publish(&model, &Sqlite, &mut connection)
+        .await
+        .expect("publish a recursive-CTE view (rendered DDL must be valid SQLite)");
+
+    // The view resolves and produces the counter rows 1..=5.
+    assert_eq!(
+        count(&raw, "v_counter").await,
+        5,
+        "the recursive CTE view must yield 5 counter rows",
     );
 }

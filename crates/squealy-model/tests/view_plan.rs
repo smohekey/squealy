@@ -11,7 +11,9 @@ use squealy_model::{
 fn select_mut(view: &mut ViewModel) -> &mut ViewQueryModel {
     match &mut view.query {
         ViewBody::Select(select) => select,
-        ViewBody::Set { .. } => panic!("expected a single-SELECT view body"),
+        ViewBody::Set { .. } | ViewBody::With { .. } => {
+            panic!("expected a single-SELECT view body")
+        }
     }
 }
 
