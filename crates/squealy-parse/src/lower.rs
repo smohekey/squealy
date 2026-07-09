@@ -54,9 +54,10 @@ use sqlparser::ast::{
     WindowType,
 };
 use squealy_ir::{
-    AggregateFunc, ArithmeticOp, CaseArm, CompareOp, DateField, ExprNode, JoinItem, JoinKind,
-    LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem, ScalarFunc, SourceItem,
-    SourceRef, SqlType, ViewBody, ViewQueryModel, ViewSetOp, WindowFunc, WindowOrderTerm,
+    AggregateFunc, ArithmeticOp, CaseArm, CompareOp, CteModel, DateField, ExprNode, JoinItem,
+    JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem, ScalarFunc,
+    SourceItem, SourceRef, SqlType, ViewBody, ViewQueryModel, ViewSetOp, WindowFunc,
+    WindowOrderTerm,
 };
 
 use crate::{ReadError, SqlDialect};
@@ -83,7 +84,7 @@ pub fn lower_expr(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadErro
 /// (multiple `FROM` entries), `USING`/`NATURAL` joins, a wildcard projection, or a non-integer
 /// `LIMIT`/`OFFSET` — return [`ReadError::NotYetLowered`] (they land in later phases).
 pub fn lower_query(query: &Query, dialect: SqlDialect) -> Result<ViewBody, ReadError> {
-    lower_body(query, None, dialect)
+    lower_body(query, None, false, dialect)
 }
 
 /// Lowers a parsed `CREATE VIEW` into its body [`ViewBody`]. When the statement carries a declared column
@@ -114,30 +115,97 @@ pub fn lower_create_view(
     } else {
         Some(names.as_slice())
     };
-    lower_body(&create_view.query, names, dialect)
+    lower_body(&create_view.query, names, false, dialect)
 }
 
 /// The shared query-lowering core: a full [`Query`] (its `WITH`/`ORDER BY`/`LIMIT` plus a `SetExpr` body)
-/// into a [`ViewBody`]. `output_names`, when `Some`, is a column-listed `CREATE VIEW`'s declared column
-/// names; they name the projections of a **single `SELECT`** body positionally. For a **set operation**
-/// they name only the *compound output* (kept on `ViewModel.columns`) — they are NOT pushed into the
-/// arms, whose projections keep their own `AS` aliases (the renderer always emits them, and an arm's
-/// own `ORDER BY <alias>` refers to them). A single `SELECT` becomes [`ViewBody::Select`] (its
-/// query-level `ORDER BY`/`LIMIT` attach to that select); a set operation becomes [`ViewBody::Set`] with
-/// the query-level `ORDER BY`/`LIMIT` as the trailing whole-set tail.
+/// into a [`ViewBody`]. `output_names`, when `Some`, is a declared column list (a `CREATE VIEW (cols)` or
+/// `WITH cte (cols)` list) naming the outputs positionally. `column_list_is_fallback` distinguishes how it
+/// applies to a set operation's arms (see [`lower_select`]): `false` for a body whose column list is
+/// authoritative; `true` when this body is itself a set-operation arm (the list only names an arm's
+/// otherwise-unnamed projection). A single `SELECT` becomes [`ViewBody::Select`] (its query-level
+/// `ORDER BY`/`LIMIT` attach to that select); a set operation becomes [`ViewBody::Set`] with the
+/// query-level `ORDER BY`/`LIMIT` as the trailing whole-set tail; a `WITH` prelude becomes [`ViewBody::With`].
 fn lower_body(
     query: &Query,
     output_names: Option<&[String]>,
+    column_list_is_fallback: bool,
     dialect: SqlDialect,
 ) -> Result<ViewBody, ReadError> {
-    // A `WITH` (CTE) prelude widens the IR beyond a Select/Set body — a later phase (2.0c).
-    if query.with.is_some() {
-        return Err(not_yet("query with a `WITH` (CTE) clause"));
+    // A `WITH` (CTE) prelude wraps the query's `SELECT`/`Set` body in a [`ViewBody::With`]. The prelude's
+    // own trailing `ORDER BY`/`LIMIT` belong to that inner body, so the inner body is lowered from the
+    // very same `query` (minus the `WITH`) below.
+    if let Some(with) = query.with.as_ref() {
+        let ctes = lower_ctes(with, dialect)?;
+        let body = lower_query_body(query, output_names, column_list_is_fallback, dialect)?;
+        return Ok(ViewBody::With {
+            recursive: with.recursive,
+            ctes,
+            body: Box::new(body),
+        });
     }
+    lower_query_body(query, output_names, column_list_is_fallback, dialect)
+}
+
+/// Lowers each CTE of a `WITH` prelude into a [`CteModel`]. A CTE's own body is a full [`Query`], lowered
+/// recursively (a recursive CTE's body is a `UNION` set whose recursive arm references the CTE name — no
+/// special handling here; it lowers like any set). `MATERIALIZED`/`NOT MATERIALIZED` hints and PartiQL
+/// `FROM`/`AT` alias extensions carry semantics the neutral model does not model — reject rather than drop.
+fn lower_ctes(
+    with: &sqlparser::ast::With,
+    dialect: SqlDialect,
+) -> Result<Vec<CteModel>, ReadError> {
+    with.cte_tables
+        .iter()
+        .map(|cte| {
+            if cte.materialized.is_some() {
+                return Err(not_yet("MATERIALIZED / NOT MATERIALIZED CTE"));
+            }
+            if cte.from.is_some() {
+                return Err(not_yet("CTE with a `FROM` identifier (PartiQL)"));
+            }
+            if cte.alias.at.is_some() {
+                return Err(not_yet("CTE alias with an `AT` index (PartiQL)"));
+            }
+            // Fold the CTE name and its column aliases the same way sources/projection aliases are folded
+            // (`fold_ident`), so an unquoted mixed-case CTE (`WITH Recent(Id) …`) is stored under the same
+            // folded name its references resolve to — else re-rendering would quote a name the body no
+            // longer binds to.
+            let name = fold_ident(&cte.alias.name);
+            let columns: Vec<String> = cte
+                .alias
+                .columns
+                .iter()
+                .map(|column| fold_ident(&column.name))
+                .collect();
+            // A declared CTE column list names the body's outputs positionally — exactly like a
+            // column-listed `CREATE VIEW` (authoritative, not a set-arm fallback). Without it, a
+            // column-listed CTE whose body has an unaliased projection (which the renderer emits, since the
+            // list names the outputs) — including the un-aliased anchor of a recursive CTE — would fail to
+            // lower.
+            let output_names = (!columns.is_empty()).then_some(columns.as_slice());
+            let body = lower_body(&cte.query, output_names, false, dialect)?;
+            Ok(CteModel {
+                name,
+                columns,
+                body,
+            })
+        })
+        .collect()
+}
+
+/// The query-body core (a full [`Query`]'s `SetExpr` body plus its trailing `ORDER BY`/`LIMIT`), without
+/// the `WITH` prelude [`lower_body`] handles. See [`lower_body`] for the `output_names` semantics.
+fn lower_query_body(
+    query: &Query,
+    output_names: Option<&[String]>,
+    column_list_is_fallback: bool,
+    dialect: SqlDialect,
+) -> Result<ViewBody, ReadError> {
     reject_unsupported_query_clauses(query)?;
     match query.body.as_ref() {
         SetExpr::Select(select) => {
-            let mut model = lower_select(select, output_names, dialect)?;
+            let mut model = lower_select(select, output_names, column_list_is_fallback, dialect)?;
             // A single `SELECT`'s query-level `ORDER BY`/`LIMIT`/`OFFSET` belong to that select.
             model.order_by = lower_order_by(query.order_by.as_ref(), dialect)?;
             (model.limit, model.offset) = lower_limit_offset(query.limit_clause.as_ref(), dialect)?;
@@ -150,13 +218,13 @@ fn lower_body(
             right,
         } => {
             let (set_op, all) = lower_set_op(op, set_quantifier)?;
-            // A column-listed `CREATE VIEW (cols)` names only the *compound* output (recorded on
-            // `ViewModel.columns`, not here); each arm keeps its OWN projection aliases, so `output_names`
-            // is not pushed into either arm — else a left-arm `AS a … ORDER BY a` would be rewritten to
-            // the view column name and its order term would dangle on re-render.
-            let _ = output_names;
-            let left = lower_set_operand(left, None, dialect)?;
-            let right = lower_set_operand(right, None, dialect)?;
+            // A column list names the compound output (also recorded on `ViewModel.columns`), which SQL
+            // takes from the arms positionally. Each arm keeps its own projection aliases for its internal
+            // clauses (a per-arm `ORDER BY <alias>`), so the list is only a FALLBACK naming an arm's
+            // otherwise-unnamed projection — e.g. a recursive CTE's un-aliased anchor `SELECT 1`. Passed to
+            // both arms (either may be un-aliased); `lower_set_operand` lowers arms with fallback semantics.
+            let left = lower_set_operand(left, output_names, dialect)?;
+            let right = lower_set_operand(right, output_names, dialect)?;
             // The query-level `ORDER BY`/`LIMIT` here apply to the whole set (after the final arm).
             let order_by = lower_order_by(query.order_by.as_ref(), dialect)?;
             let (limit, offset) = lower_limit_offset(query.limit_clause.as_ref(), dialect)?;
@@ -174,7 +242,7 @@ fn lower_body(
         // The parser attaches the trailing `ORDER BY`/`LIMIT` to *this* outer query, so fold it onto the
         // lowered inner body rather than dropping it (which would re-render a different result set).
         SetExpr::Query(inner) => {
-            let body = lower_body(inner, output_names, dialect)?;
+            let body = lower_body(inner, output_names, column_list_is_fallback, dialect)?;
             apply_query_tail(body, query, dialect)
         }
         SetExpr::Values(_) => Err(not_yet("VALUES body")),
@@ -230,14 +298,28 @@ fn apply_query_tail(
                 offset,
             })
         }
+        // The outer tail of a parenthesized `WITH` query applies to its inner body's result — fold it
+        // down onto that inner body (which itself rejects a doubled tail).
+        ViewBody::With {
+            recursive,
+            ctes,
+            body: inner,
+        } => Ok(ViewBody::With {
+            recursive,
+            ctes,
+            body: Box::new(apply_query_tail(*inner, query, dialect)?),
+        }),
     }
 }
 
-/// Lowers one operand of a set operation into a [`ViewBody`]. `output_names` flows only to a leftmost
-/// operand (naming the whole set's outputs). Handles the three shapes the renderers emit and external SQL
-/// carries: a parenthesized operand ([`SetExpr::Query`], which owns its `ORDER BY`/`LIMIT`), a bare
-/// `SELECT` ([`SetExpr::Select`] — no per-operand `ORDER BY`/`LIMIT`), the SQLite `SELECT * FROM
-/// (<operand>)` wrapper (peeled back to the inner operand), and an un-parenthesized nested set.
+/// Lowers one operand of a set operation into a [`ViewBody`]. `output_names` is the enclosing set's column
+/// list, applied to each arm as a **fallback** (each arm keeps its own projection aliases; the list names
+/// only an otherwise-unnamed projection — see [`lower_select`]), so it flows to every operand, not just the
+/// leftmost. Handles the shapes the renderers emit and external SQL carries: a parenthesized operand
+/// ([`SetExpr::Query`], which owns its `ORDER BY`/`LIMIT`), a bare `SELECT` ([`SetExpr::Select`] — no
+/// per-operand `ORDER BY`/`LIMIT`), the SQLite `SELECT * FROM (<operand>)` wrapper (peeled back to the inner
+/// operand), and an un-parenthesized nested set. Every arm lowers with the column list as a fallback
+/// (`column_list_is_fallback = true`).
 fn lower_set_operand(
     expr: &SetExpr,
     output_names: Option<&[String]>,
@@ -246,7 +328,7 @@ fn lower_set_operand(
     match expr {
         // A parenthesized operand (a leaf `(SELECT …)` or a nested `(… UNION …)`): it is its own `Query`,
         // owning any per-operand `ORDER BY`/`LIMIT`.
-        SetExpr::Query(inner) => lower_body(inner, output_names, dialect),
+        SetExpr::Query(inner) => lower_body(inner, output_names, true, dialect),
         SetExpr::Select(select) => {
             // Reject unsupported outer select-level clauses FIRST, so the SQLite-wrapper peel below cannot
             // bypass them: `SELECT * FROM (<operand>) QUALIFY …` matches the wrapper shape but carries a
@@ -255,13 +337,14 @@ fn lower_set_operand(
             reject_unsupported_select_clauses(select)?;
             // SQLite wraps each operand as `SELECT * FROM (<operand>)`; peel it back to the inner operand.
             if let Some(inner) = sqlite_subquery_operand(select) {
-                return lower_body(inner, output_names, dialect);
+                return lower_body(inner, output_names, true, dialect);
             }
             // A bare `SELECT` operand carries no per-operand `ORDER BY`/`LIMIT` (those live on a `Query`
             // wrapper), so the lowered select keeps its default empty tail.
             Ok(ViewBody::Select(Box::new(lower_select(
                 select,
                 output_names,
+                true,
                 dialect,
             )?)))
         }
@@ -274,7 +357,7 @@ fn lower_set_operand(
         } => {
             let (set_op, all) = lower_set_op(op, set_quantifier)?;
             let left = lower_set_operand(left, output_names, dialect)?;
-            let right = lower_set_operand(right, None, dialect)?;
+            let right = lower_set_operand(right, output_names, dialect)?;
             Ok(ViewBody::Set {
                 op: set_op,
                 all,
@@ -294,9 +377,10 @@ fn lower_set_operand(
 /// [`ViewQueryModel`] — the shape those expression IR nodes hold. A set-operation subquery in that
 /// position is a later phase, so it surfaces as [`ReadError::NotYetLowered`].
 fn lower_subquery_model(query: &Query, dialect: SqlDialect) -> Result<ViewQueryModel, ReadError> {
-    match lower_body(query, None, dialect)? {
+    match lower_body(query, None, false, dialect)? {
         ViewBody::Select(select) => Ok(*select),
         ViewBody::Set { .. } => Err(not_yet("set operation in a scalar/IN/EXISTS subquery")),
+        ViewBody::With { .. } => Err(not_yet("`WITH` (CTE) in a scalar/IN/EXISTS subquery")),
     }
 }
 
@@ -2004,9 +2088,18 @@ fn lower_extract_operand(
 
 /// Lowers a `SELECT` (with its enclosing [`Query`]'s `ORDER BY` / `LIMIT` / `OFFSET`, which attach to the
 /// query, not the select) into a [`ViewQueryModel`].
+///
+/// `output_names` is a declared column list (a `CREATE VIEW (cols)` or a `WITH cte (cols)` list). When
+/// `column_list_is_fallback` is `false` (a single-`SELECT` body) the list is **authoritative** — it names
+/// the outputs positionally, overriding any inner projection alias, exactly as SQL does. When `true` (a
+/// **set-operation arm**) the list is only a **fallback**: each projection keeps its own alias / bare-column
+/// name (needed for the arm's internal clauses, e.g. a per-arm `ORDER BY <alias>`), and the list names only
+/// an otherwise-unnamed projection — the un-aliased anchor of a recursive CTE (`SELECT 1 UNION ALL …`) or
+/// any un-aliased set arm.
 fn lower_select(
     select: &Select,
     output_names: Option<&[String]>,
+    column_list_is_fallback: bool,
     dialect: SqlDialect,
 ) -> Result<ViewQueryModel, ReadError> {
     // A select-level clause `ViewQueryModel` cannot represent must fail loudly, not be dropped: silently
@@ -2046,13 +2139,18 @@ fn lower_select(
                 return Err(not_yet(format!("projection item `{item}`")));
             }
         };
-        // A column-listed `CREATE VIEW (cols)` names the outputs positionally and *authoritatively* — SQL
-        // uses the declared column list even when a projection also carries an inner `AS` alias, so the
-        // list wins. Only without a column list does the projection's own alias / bare-column name it (an
-        // expression with neither needs an explicit output name and is outside the grammar).
-        let output_name = match output_names {
-            Some(names) => names[index].clone(),
-            None => self_name.ok_or_else(|| not_yet(format!("un-aliased projection `{expr}`")))?,
+        // A column list names the outputs positionally. For a single-`SELECT` body it is *authoritative*
+        // (SQL uses it even when a projection also carries an inner `AS` alias, so the list wins). For a
+        // set-operation arm it is only a *fallback*: the projection's own alias / bare-column name wins so
+        // the arm's internal clauses (e.g. a per-arm `ORDER BY <alias>`) still resolve, and the list names
+        // only an otherwise-unnamed projection. Without a column list the projection's own name is required
+        // (an un-aliased expression with none is outside the grammar).
+        let output_name = match (output_names, column_list_is_fallback) {
+            (Some(names), false) => names[index].clone(),
+            (Some(names), true) => self_name.unwrap_or_else(|| names[index].clone()),
+            (None, _) => {
+                self_name.ok_or_else(|| not_yet(format!("un-aliased projection `{expr}`")))?
+            }
         };
         projection.push(ProjectionItem {
             output_name,
@@ -2487,6 +2585,7 @@ mod tests {
         low_body(sql, dialect).map(|body| match body {
             ViewBody::Select(select) => *select,
             ViewBody::Set { .. } => panic!("expected a single-SELECT body, got a set operation"),
+            ViewBody::With { .. } => panic!("expected a single-SELECT body, got a `WITH` prelude"),
         })
     }
 
@@ -2495,6 +2594,7 @@ mod tests {
         match body {
             ViewBody::Select(select) => select,
             ViewBody::Set { .. } => panic!("expected a single-SELECT body, got a set operation"),
+            ViewBody::With { .. } => panic!("expected a single-SELECT body, got a `WITH` prelude"),
         }
     }
 
@@ -3763,14 +3863,7 @@ mod tests {
 
     #[test]
     fn view_body_shapes_outside_the_grammar_are_not_yet_lowered() {
-        // A CTE prelude.
-        assert!(matches!(
-            low_query(
-                "WITH c AS (SELECT 1 AS n) SELECT q0_0.\"n\" AS n FROM c AS q0_0",
-                SqlDialect::Postgres
-            ),
-            Err(ReadError::NotYetLowered(_))
-        ));
+        // (A `WITH` prelude now lowers to `ViewBody::With` — see `a_with_clause_lowers_to_a_with_body`.)
         // Comma-separated FROM (implicit cross join).
         assert!(matches!(
             low_query(
@@ -3997,6 +4090,142 @@ mod tests {
                  WHERE q0_0.\"id\" IN (SELECT q1_0.\"id\" FROM \"public\".\"b\" AS q1_0 \
                  UNION SELECT q1_1.\"id\" FROM \"public\".\"c\" AS q1_1)",
                 SqlDialect::Postgres
+            ),
+            Err(ReadError::NotYetLowered(_))
+        ));
+    }
+
+    #[test]
+    fn a_with_clause_lowers_to_a_with_body() {
+        // A non-recursive `WITH` — a column-listed CTE plus a main body selecting from it. The prelude
+        // becomes a `ViewBody::With`; its `recursive` flag is false, the CTE's declared columns are
+        // captured, and the main body wraps unchanged.
+        let body = low_body(
+            "WITH \"recent\" (\"id\") AS (SELECT q1_0.\"id\" AS id FROM \"public\".\"events\" AS q1_0) \
+             SELECT q0_0.\"id\" AS id FROM \"recent\" AS q0_0",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        let ViewBody::With {
+            recursive,
+            ctes,
+            body,
+        } = &body
+        else {
+            panic!("expected a WITH body, got {body:?}");
+        };
+        assert!(!*recursive);
+        assert_eq!(ctes.len(), 1);
+        assert_eq!(ctes[0].name, "recent");
+        assert_eq!(ctes[0].columns, vec!["id".to_owned()]);
+        // The CTE body reads the real table; the main body reads the bound CTE name (schema-less).
+        assert_eq!(
+            select_of(&ctes[0].body).from.as_ref().unwrap().alias(),
+            "q1_0"
+        );
+        let SourceItem::Named(main_from) = select_of(body).from.as_ref().unwrap() else {
+            panic!("expected a named main-body source");
+        };
+        assert_eq!(main_from.name, "recent");
+        assert_eq!(main_from.schema, None);
+    }
+
+    #[test]
+    fn a_with_recursive_clause_lowers_to_a_recursive_with_body() {
+        // A `WITH RECURSIVE` counter written the canonical way — bare `UNION ALL` arms with an **un-aliased
+        // anchor** (`SELECT 1`), as a human or an introspected database emits it. The CTE column list
+        // (`n`) names each arm's otherwise-unnamed projection as a *fallback* (arms keep any own aliases),
+        // so both the un-aliased anchor and the `n + 1` recursive projection lower to output column `n`.
+        // The body is a `UNION ALL` set (no special recursive variant); the clause-level `recursive` is set.
+        let body = low_body(
+            "WITH RECURSIVE \"counter\" (\"n\") AS \
+             (SELECT 1 UNION ALL \
+              SELECT q0_0.\"n\" + 1 FROM \"counter\" AS q0_0 WHERE q0_0.\"n\" < 10) \
+             SELECT q0_0.\"n\" AS n FROM \"counter\" AS q0_0",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        let ViewBody::With {
+            recursive, ctes, ..
+        } = &body
+        else {
+            panic!("expected a WITH body, got {body:?}");
+        };
+        assert!(*recursive);
+        assert_eq!(ctes[0].name, "counter");
+        let ViewBody::Set {
+            op,
+            all,
+            left,
+            right,
+            ..
+        } = &ctes[0].body
+        else {
+            panic!("expected the recursive CTE body to be a set");
+        };
+        assert_eq!(*op, ViewSetOp::Union);
+        assert!(*all);
+        // The un-aliased anchor `SELECT 1` is named `n` by the CTE column list (fallback).
+        assert_eq!(select_of(left).projection[0].output_name, "n");
+        assert!(select_of(left).from.is_none());
+        // The recursive arm's un-aliased `n + 1` projection is likewise named `n`, and its `FROM`
+        // references the CTE by its bound name.
+        assert_eq!(select_of(right).projection[0].output_name, "n");
+        assert_eq!(select_of(right).from.as_ref().unwrap().alias(), "q0_0");
+    }
+
+    #[test]
+    fn a_column_listed_set_arm_keeps_its_own_alias_over_the_list() {
+        // For a set body the column list (`n`) is only a *fallback*: an arm projection that carries its own
+        // alias keeps it (so a per-arm `ORDER BY <alias>` still resolves), and only an un-aliased projection
+        // is named by the list. Here the left arm aliases `total` (kept) while the right arm is un-aliased
+        // (named `n`). A `CREATE VIEW (n) AS …` supplies the column list.
+        let body = low_body(
+            "CREATE VIEW v (n) AS \
+             SELECT q0_0.\"amount\" * 2 AS total FROM \"public\".\"a\" AS q0_0 \
+             UNION ALL SELECT q0_1.\"amount\" + 2 FROM \"public\".\"b\" AS q0_1",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        let ViewBody::Set { left, right, .. } = &body else {
+            panic!("expected a set body, got {body:?}");
+        };
+        // Left arm keeps its own alias; right arm (un-aliased) is named by the fallback column list.
+        assert_eq!(select_of(left).projection[0].output_name, "total");
+        assert_eq!(select_of(right).projection[0].output_name, "n");
+    }
+
+    #[test]
+    fn a_cte_column_list_arity_mismatch_is_rejected() {
+        // A CTE column list whose arity differs from the body's projection is rejected (`sqlparser` does
+        // not validate this), not silently mis-indexed — the shared projection-arity check in
+        // `lower_select` fires for both a single-`SELECT` and a set body.
+        assert!(matches!(
+            low_body(
+                "WITH \"c\" (\"a\") AS (SELECT 1, 2) SELECT q0_0.\"a\" AS a FROM \"c\" AS q0_0",
+                SqlDialect::Postgres,
+            ),
+            Err(ReadError::Unexpected(_))
+        ));
+        assert!(matches!(
+            low_body(
+                "WITH \"c\" (\"a\") AS (SELECT 1, 2 UNION ALL SELECT 3, 4) \
+                 SELECT q0_0.\"a\" AS a FROM \"c\" AS q0_0",
+                SqlDialect::Postgres,
+            ),
+            Err(ReadError::Unexpected(_))
+        ));
+    }
+
+    #[test]
+    fn a_materialized_cte_is_not_yet_lowered() {
+        // `AS MATERIALIZED` / `AS NOT MATERIALIZED` carries planner semantics the neutral model does not
+        // hold — rejected rather than silently dropped.
+        assert!(matches!(
+            low_body(
+                "WITH \"m\" AS MATERIALIZED (SELECT q1_0.\"id\" AS id FROM \"public\".\"a\" AS q1_0) \
+                 SELECT q0_0.\"id\" AS id FROM \"m\" AS q0_0",
+                SqlDialect::Postgres,
             ),
             Err(ReadError::NotYetLowered(_))
         ));

@@ -592,6 +592,120 @@ fn corpus() -> Vec<(&'static str, DatabaseModel)> {
         )),
     ));
 
+    // A `WITH` (CTE) view body — exercises the `ViewBody::With` IR widening end to end (render → parse →
+    // lower → render). A single, non-recursive, un-column-listed CTE `recent` filters `events`; the main
+    // body selects from it by the bound CTE name (`recent`, a schema-less `SourceItem::Named` that the
+    // WITH-scoping recognizes as a local binding, not an external dependency).
+    let cte_inner_col = |column: &str| ExprNode::Column {
+        alias: "q1_0".to_owned(),
+        column: column.to_owned(),
+    };
+    cases.push((
+        "view/cte",
+        schema_with_view(view_of(
+            "v_cte",
+            vec![("id", SqlType::I32)],
+            ViewBody::With {
+                recursive: false,
+                ctes: vec![CteModel {
+                    name: "recent".to_owned(),
+                    // No declared column list — the CTE body's aliased projections name its outputs.
+                    columns: Vec::new(),
+                    body: sel(ViewQueryModel {
+                        projection: vec![
+                            proj("id", cte_inner_col("id")),
+                            proj("cnt", cte_inner_col("cnt")),
+                        ],
+                        from: Some(SourceItem::Named(SourceRef {
+                            schema: Some("public".to_owned()),
+                            name: "events".to_owned(),
+                            alias: "q1_0".to_owned(),
+                        })),
+                        filter: Some(ExprNode::Compare {
+                            op: CompareOp::GreaterThan,
+                            left: b(cte_inner_col("cnt")),
+                            right: b(lit("0")),
+                        }),
+                        ..ViewQueryModel::default()
+                    }),
+                }],
+                body: Box::new(sel(ViewQueryModel {
+                    projection: vec![proj("id", col("id"))],
+                    from: Some(SourceItem::Named(SourceRef {
+                        schema: None,
+                        name: "recent".to_owned(),
+                        alias: ALIAS.to_owned(),
+                    })),
+                    ..ViewQueryModel::default()
+                })),
+            },
+        )),
+    ));
+
+    // A **recursive** `WITH RECURSIVE` view body — a classic integer counter. The CTE `counter` carries a
+    // declared column list (`n`); its body is a `ViewBody::Set { Union, all }` whose recursive arm's `FROM`
+    // references the CTE name (`counter`). The renderer detects that self-reference structurally and emits
+    // the arms **bare** — `<anchor> UNION ALL <recursive>` with no operand wrapping — on every dialect (a
+    // recursive-CTE grammar rejects a parenthesized arm; SQLite errors on `(SELECT …)` or `SELECT * FROM
+    // (…)` alike).
+    cases.push((
+        "view/recursive-cte",
+        schema_with_view(view_of(
+            "v_recursive_cte",
+            vec![("n", SqlType::I32)],
+            ViewBody::With {
+                recursive: true,
+                ctes: vec![CteModel {
+                    name: "counter".to_owned(),
+                    columns: vec!["n".to_owned()],
+                    body: ViewBody::Set {
+                        op: ViewSetOp::Union,
+                        all: true,
+                        // Anchor: `SELECT 1` (no FROM).
+                        left: Box::new(sel(ViewQueryModel {
+                            projection: vec![proj("n", lit("1"))],
+                            ..ViewQueryModel::default()
+                        })),
+                        // Recursive arm: `SELECT counter.n + 1 FROM counter WHERE counter.n < 10`.
+                        right: Box::new(sel(ViewQueryModel {
+                            projection: vec![proj(
+                                "n",
+                                ExprNode::Binary {
+                                    op: ArithmeticOp::Add,
+                                    left: b(col("n")),
+                                    right: b(lit("1")),
+                                },
+                            )],
+                            from: Some(SourceItem::Named(SourceRef {
+                                schema: None,
+                                name: "counter".to_owned(),
+                                alias: ALIAS.to_owned(),
+                            })),
+                            filter: Some(ExprNode::Compare {
+                                op: CompareOp::LessThan,
+                                left: b(col("n")),
+                                right: b(lit("10")),
+                            }),
+                            ..ViewQueryModel::default()
+                        })),
+                        order_by: Vec::new(),
+                        limit: None,
+                        offset: None,
+                    },
+                }],
+                body: Box::new(sel(ViewQueryModel {
+                    projection: vec![proj("n", col("n"))],
+                    from: Some(SourceItem::Named(SourceRef {
+                        schema: None,
+                        name: "counter".to_owned(),
+                        alias: ALIAS.to_owned(),
+                    })),
+                    ..ViewQueryModel::default()
+                })),
+            },
+        )),
+    ));
+
     // A table CHECK constraint, carried structurally so each backend renders it in its own dialect.
     let mut widgets = plain_table(
         "widgets",
@@ -1241,6 +1355,154 @@ fn view_bodies_round_trip_through_each_dialect() {
         failures.len(),
         failures.join("\n\n")
     );
-    // Every view case × every backend was exercised (10 views × 3 backends).
-    assert_eq!(checked, 10 * dialects.len(), "view coverage drifted");
+    // Every view case × every backend was exercised (12 views × 3 backends).
+    assert_eq!(checked, 12 * dialects.len(), "view coverage drifted");
+}
+
+/// A recursive-CTE arm renders BARE (a recursive-CTE grammar forbids parenthesizing an arm), so an arm
+/// carrying its own `ORDER BY`/`LIMIT`/`OFFSET` — which bare rendering cannot scope to the operand — is
+/// rejected rather than emitting mis-scoped SQL, on every dialect. The standard tail-less shape is fine.
+#[test]
+fn a_recursive_cte_arm_with_a_tail_is_rejected() {
+    // `WITH RECURSIVE counter(n) AS (SELECT 1 LIMIT 1 UNION ALL SELECT counter.n + 1 FROM counter …)` —
+    // the anchor carries a per-arm `LIMIT`, which cannot be scoped under a bare arm.
+    let view = view_of(
+        "v_bad",
+        vec![("n", SqlType::I32)],
+        ViewBody::With {
+            recursive: true,
+            ctes: vec![CteModel {
+                name: "counter".to_owned(),
+                columns: vec!["n".to_owned()],
+                body: ViewBody::Set {
+                    op: ViewSetOp::Union,
+                    all: true,
+                    left: Box::new(sel(ViewQueryModel {
+                        projection: vec![proj("n", lit("1"))],
+                        // A per-arm LIMIT on the anchor — unscopable under a bare recursive arm.
+                        limit: Some(1),
+                        ..ViewQueryModel::default()
+                    })),
+                    right: Box::new(sel(ViewQueryModel {
+                        projection: vec![proj(
+                            "n",
+                            ExprNode::Binary {
+                                op: ArithmeticOp::Add,
+                                left: b(ExprNode::Column {
+                                    alias: "q0_0".to_owned(),
+                                    column: "n".to_owned(),
+                                }),
+                                right: b(lit("1")),
+                            },
+                        )],
+                        from: Some(SourceItem::Named(SourceRef {
+                            schema: None,
+                            name: "counter".to_owned(),
+                            alias: "q0_0".to_owned(),
+                        })),
+                        ..ViewQueryModel::default()
+                    })),
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                },
+            }],
+            body: Box::new(sel(ViewQueryModel {
+                projection: vec![proj(
+                    "n",
+                    ExprNode::Column {
+                        alias: "q0_0".to_owned(),
+                        column: "n".to_owned(),
+                    },
+                )],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: None,
+                    name: "counter".to_owned(),
+                    alias: "q0_0".to_owned(),
+                })),
+                ..ViewQueryModel::default()
+            })),
+        },
+    );
+    assert_view_render_rejected_on_all_dialects(
+        &view,
+        "a recursive CTE arm with a per-arm LIMIT must be rejected, not rendered",
+    );
+}
+
+/// A recursive CTE must connect its arms with `UNION`/`UNION ALL`; an `INTERSECT`/`EXCEPT` over a
+/// self-reference is not a valid recursive CTE (SQLite rejects it as a circular reference), so it is
+/// rejected at render rather than emitting invalid DDL.
+#[test]
+fn a_recursive_cte_with_a_non_union_operator_is_rejected() {
+    let counter_col = || ExprNode::Column {
+        alias: "q0_0".to_owned(),
+        column: "n".to_owned(),
+    };
+    let view = view_of(
+        "v_bad_op",
+        vec![("n", SqlType::I32)],
+        ViewBody::With {
+            recursive: true,
+            ctes: vec![CteModel {
+                name: "counter".to_owned(),
+                columns: vec!["n".to_owned()],
+                body: ViewBody::Set {
+                    // INTERSECT over a self-referential recursive term — not a valid recursive CTE.
+                    op: ViewSetOp::Intersect,
+                    all: false,
+                    left: Box::new(sel(ViewQueryModel {
+                        projection: vec![proj("n", lit("1"))],
+                        ..ViewQueryModel::default()
+                    })),
+                    right: Box::new(sel(ViewQueryModel {
+                        projection: vec![proj(
+                            "n",
+                            ExprNode::Binary {
+                                op: ArithmeticOp::Add,
+                                left: b(counter_col()),
+                                right: b(lit("1")),
+                            },
+                        )],
+                        from: Some(SourceItem::Named(SourceRef {
+                            schema: None,
+                            name: "counter".to_owned(),
+                            alias: "q0_0".to_owned(),
+                        })),
+                        ..ViewQueryModel::default()
+                    })),
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                },
+            }],
+            body: Box::new(sel(ViewQueryModel {
+                projection: vec![proj("n", counter_col())],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: None,
+                    name: "counter".to_owned(),
+                    alias: "q0_0".to_owned(),
+                })),
+                ..ViewQueryModel::default()
+            })),
+        },
+    );
+    assert_view_render_rejected_on_all_dialects(
+        &view,
+        "a recursive CTE using INTERSECT/EXCEPT must be rejected, not rendered",
+    );
+}
+
+/// Asserts `render_create_view` fails for `view` on all three dialects.
+fn assert_view_render_rejected_on_all_dialects(view: &ViewModel, message: &str) {
+    let dialects: [&dyn squealy::Dialect; 3] = [
+        &squealy_postgresql::Postgres.dialect(),
+        &squealy_mysql::Mysql.dialect(),
+        &squealy_sqlite::Sqlite.dialect(),
+    ];
+    for dialect in dialects {
+        let mut buf = Vec::new();
+        let result = squealy::render_create_view(Some("public"), view, false, dialect, &mut buf);
+        assert!(result.is_err(), "{message}");
+    }
 }
