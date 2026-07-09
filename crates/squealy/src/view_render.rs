@@ -465,7 +465,36 @@ fn render_cte_definition_body(
     dialect: &dyn Dialect,
     writer: &mut dyn Write,
 ) -> io::Result<()> {
-    match &cte.body {
+    if cte_is_self_referential(cte) {
+        // A recursive CTE's body is a `UNION` set — possibly behind its own leading `WITH` prelude(s), e.g.
+        // `WITH RECURSIVE c AS (WITH seed AS (…) <anchor> UNION ALL <recursive>)`. Recurse through those
+        // leading `With` layers (rendering their prefixes normally) down to the recursive `Set`, which must
+        // render with **bare** arms — not the generic set path (whose SQLite `SELECT * FROM (…)` operand
+        // wrapping the recursive reference would make the view fail to create).
+        render_recursive_cte_set_body(&cte.body, dialect, writer)
+    } else {
+        render_body(&cte.body, cte.columns.is_empty(), dialect, writer)
+    }
+}
+
+/// Renders the body of a **recursive** CTE. Leading `With` prelude(s) render normally (their own CTEs are
+/// ordinary); the recursive `Set` at the core renders with bare arms (see [`render_cte_definition_body`]).
+/// A self-referential CTE whose core is not a `Set` cannot be a recursive CTE (which requires a `UNION`),
+/// so it is rejected rather than mis-rendered.
+fn render_recursive_cte_set_body(
+    body: &ViewBody,
+    dialect: &dyn Dialect,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
+    match body {
+        ViewBody::With {
+            recursive,
+            ctes,
+            body,
+        } => {
+            render_with_prefix(*recursive, ctes, dialect, writer)?;
+            render_recursive_cte_set_body(body, dialect, writer)
+        }
         ViewBody::Set {
             op,
             all,
@@ -474,7 +503,7 @@ fn render_cte_definition_body(
             order_by,
             limit,
             offset,
-        } if cte_is_self_referential(cte) => {
+        } => {
             // A recursive-CTE arm renders BARE (no delimiters), so it cannot scope a per-arm
             // `ORDER BY`/`LIMIT`/`OFFSET` (which would bind to the whole `UNION`) or preserve a nested
             // compound's grouping — and a recursive-CTE grammar forbids parenthesizing an arm (SQLite has no
@@ -487,7 +516,11 @@ fn render_cte_definition_body(
                 *op, *all, left, right, order_by, *limit, *offset, b"", b"", dialect, writer,
             )
         }
-        _ => render_body(&cte.body, cte.columns.is_empty(), dialect, writer),
+        ViewBody::Select(_) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "a recursive CTE body must be a UNION set operation (a self-referential CTE with a plain \
+             SELECT body is not a valid recursive CTE)",
+        )),
     }
 }
 
