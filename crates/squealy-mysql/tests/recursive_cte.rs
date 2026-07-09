@@ -52,10 +52,11 @@ fn mysql_recursive_cte() {
     assert_eq!(
         query.to_sql(),
         "WITH RECURSIVE `ancestors` (`id`, `depth`) AS (\
-(SELECT q0_0.`id`, 0 FROM `shop`.`nodes` AS q0_0 WHERE (q0_0.`parent_id` IS NULL)) \
+SELECT q0_0.`id` AS `t0_id`, 0 AS `t1_expr` FROM `shop`.`nodes` AS q0_0 \
+WHERE (q0_0.`parent_id` IS NULL) \
 UNION ALL \
-(SELECT q0_1.`id`, (q0_0.`depth` + 1) FROM `ancestors` AS q0_0 \
-INNER JOIN `shop`.`nodes` AS q0_1 ON (q0_1.`parent_id` = q0_0.`id`))) \
+SELECT q0_1.`id` AS `t0_id`, (q0_0.`depth` + 1) AS `t1_expr` FROM `ancestors` AS q0_0 \
+INNER JOIN `shop`.`nodes` AS q0_1 ON (q0_1.`parent_id` = q0_0.`id`)) \
 SELECT q0_0.`id` AS `t0_id`, q0_0.`depth` AS `t1_depth` FROM `ancestors` AS q0_0"
     );
 }

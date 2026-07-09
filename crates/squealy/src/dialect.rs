@@ -274,6 +274,18 @@ pub trait Dialect {
     fn substring_uses_function_call(&self) -> bool {
         false
     }
+
+    /// Whether a recursive-CTE arm (`WITH RECURSIVE t AS (<anchor> UNION [ALL] <recursive>)`) may be
+    /// **parenthesized**. A plain, tail-less arm always renders bare; but an arm carrying its own
+    /// `ORDER BY`/`LIMIT`/`OFFSET` (or a nested compound) can only be scoped by wrapping it in `(…)`.
+    /// Defaults to `true` (PostgreSQL/MySQL accept `(SELECT … LIMIT n) UNION ALL …`); SQLite's
+    /// recursive-CTE grammar rejects *any* parenthesized recursive arm, so it returns `false` and such an
+    /// arm is rejected there (it has no valid rendering). Distinct from [`set_operand_style`](Self::set_operand_style):
+    /// that governs a plain compound's operands, this governs a *recursive-CTE* body's arms, where SQLite
+    /// forbids even the `SELECT * FROM (…)` sub-select wrapping.
+    fn supports_parenthesized_recursive_cte_arm(&self) -> bool {
+        true
+    }
 }
 
 /// The two shapes a correlated `UPDATE … <source>` / `DELETE … <source>` takes across dialects (see
