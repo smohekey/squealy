@@ -36,13 +36,14 @@ pub use refactor::{
 };
 pub use squealy::{
     CheckModel, ColumnModel, Constraint, ConstraintCapabilities, ConstraintDeferrability,
-    ConstraintEnforcement, ConstraintValidation, DatabaseModel, DatabasePlan, DatabasePlanStep,
-    DdlExecutor, DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
-    IndexCapabilities, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
-    IndexOperatorClass, LogicalOp, ProjectionItem, SchemaBackend, SchemaCapabilities,
-    SchemaConnect, SchemaIntrospect, SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore,
-    SchemaPublishRecord, SchemaRefactorStore, SourceItem, SourceRef, SqlType, TableModel,
-    TablePlanStep, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
+    ConstraintEnforcement, ConstraintValidation, CteModel, DatabaseModel, DatabasePlan,
+    DatabasePlanStep, DdlExecutor, DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch,
+    ForeignKeyModel, IndexCapabilities, IndexCollation, IndexDirection, IndexMethod, IndexModel,
+    IndexNullsOrder, IndexOperatorClass, LogicalOp, ProjectionItem, SchemaBackend,
+    SchemaCapabilities, SchemaConnect, SchemaIntrospect, SchemaMetadataStore, SchemaModel,
+    SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore, SourceItem, SourceRef,
+    SqlType, TableModel, TablePlanStep, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
+    ViewSetOp,
 };
 
 use std::collections::BTreeSet;

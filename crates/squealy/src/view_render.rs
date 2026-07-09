@@ -8,9 +8,9 @@
 use std::io::{self, Write};
 
 use crate::{
-    AggregateFunc, ArithmeticOp, DatabaseModel, DateField, Dialect, ExprNode, JoinKind, LogicalOp,
-    OrderDirection, OrderItem, ScalarFunc, SetOperandStyle, SourceItem, SqlType, UnaryStringFunc,
-    ViewBody, ViewModel, ViewQueryModel, ViewSetOp, WindowFunc,
+    AggregateFunc, ArithmeticOp, CteModel, DatabaseModel, DateField, Dialect, ExprNode, JoinKind,
+    LogicalOp, OrderDirection, OrderItem, ScalarFunc, SetOperandStyle, SourceItem, SqlType,
+    UnaryStringFunc, ViewBody, ViewModel, ViewQueryModel, ViewSetOp, WindowFunc,
 };
 
 /// Renders `CREATE [OR REPLACE] VIEW <qualified> [(<cols>)] AS <select>` for the given dialect.
@@ -284,92 +284,317 @@ fn render_body(
             limit,
             offset,
         } => {
-            // `INTERSECT ALL`/`EXCEPT ALL` are unsupported on some dialects (SQLite allows `ALL` only
-            // after `UNION`); reject rather than emit SQL the target cannot run.
-            if *all
-                && matches!(op, ViewSetOp::Intersect | ViewSetOp::Except)
-                && !dialect.supports_intersect_except_all()
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    format!(
-                        "this dialect does not support `{}` in a view body",
-                        set_op_keyword(*op, *all)
-                    ),
-                ));
-            }
-            // A compound (set-operation) `ORDER BY` resolves against the set's *output* columns — which
-            // are named by the **leftmost arm's** projection aliases (not the `CREATE VIEW` column list,
-            // and not an arm's `FROM` alias). So each whole-set order term must be either a bare name that
-            // the leftmost arm actually emits, or an ordinal `1..=N` over those outputs. Anything else (an
-            // alias-qualified column, an arbitrary expression, a name/ordinal that does not resolve — none
-            // of which the lowering path produces for a set tail, but a hand-built / packaged model can)
-            // would fail when the view is queried, so reject it here.
-            let outputs = &leftmost_select(left).projection;
-            for order in order_by {
-                let resolves = match &order.expr {
-                    ExprNode::BareColumn { column } => {
-                        outputs.iter().any(|item| &item.output_name == column)
-                    }
-                    ExprNode::Literal(text) => {
-                        matches!(text.parse::<usize>(), Ok(n) if (1..=outputs.len()).contains(&n))
-                    }
-                    _ => false,
-                };
-                if !resolves {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "a set-operation ORDER BY term must reference a leftmost-arm output column by \
-                         name or a 1-based ordinal, not an alias-qualified column or expression",
-                    ));
-                }
-            }
-            // Every arm always aliases its projections, regardless of the view's `alias_projections`
-            // (i.e. its column list). The compound's output names still come from the leftmost arm's
-            // aliases (or the column list, which overrides them on read-back — so this stays round-trip
-            // stable), but each arm additionally *needs* its aliases for its own clauses: a per-arm
-            // `ORDER BY <alias>` on either arm dangles without them, and an aliased *expression*
-            // projection has no other name to lower back to. `alias_projections` is thus only consulted
-            // for a single-`SELECT` body.
+            // A plain set body wraps its operands per the dialect: PostgreSQL/MySQL with `(…)`; SQLite
+            // rejects a parenthesized compound operand and wraps with `SELECT * FROM (…)`. This is the
+            // same [`Dialect::set_operand_style`] seam the runtime set renderer honors, so a set-op *view
+            // body* renders identically to a runtime set query — the reverse parser inverts both wrappings.
+            let (open, close): (&[u8], &[u8]) = match dialect.set_operand_style() {
+                SetOperandStyle::Parenthesized => (b"(", b")"),
+                SetOperandStyle::SubquerySelect => (b"SELECT * FROM (", b")"),
+            };
+            // `alias_projections` is only consulted for a single-`SELECT` body; each set arm always
+            // aliases its projections (see [`render_set`]).
             let _ = alias_projections;
-            render_set_operand(left, true, dialect, writer)?;
-            write!(writer, " {}", set_op_keyword(*op, *all))?;
-            writer.write_all(b" ")?;
-            render_set_operand(right, true, dialect, writer)?;
-            // A trailing ORDER BY/LIMIT over the whole set (after the final arm).
-            render_order_limit(order_by, *limit, *offset, dialect, writer)
+            render_set(
+                *op, *all, left, right, order_by, *limit, *offset, open, close, dialect, writer,
+            )
+        }
+        ViewBody::With {
+            recursive,
+            ctes,
+            body,
+        } => {
+            render_with_prefix(*recursive, ctes, dialect, writer)?;
+            render_body(body, alias_projections, dialect, writer)
         }
     }
 }
 
+/// Renders a set operation — `<left> <OP> <right>` — with each operand wrapped by the given `open`/`close`
+/// delimiters, followed by any trailing whole-set `ORDER BY`/`LIMIT`/`OFFSET`. A plain set body passes the
+/// dialect's [`SetOperandStyle`] delimiters; a recursive-CTE set body (rendered by [`render_with_prefix`])
+/// passes **empty** delimiters (bare arms) on every dialect, since a recursive-CTE grammar rejects any
+/// parenthesized arm.
+#[allow(clippy::too_many_arguments)]
+fn render_set(
+    op: ViewSetOp,
+    all: bool,
+    left: &ViewBody,
+    right: &ViewBody,
+    order_by: &[OrderItem],
+    limit: Option<usize>,
+    offset: Option<usize>,
+    open: &[u8],
+    close: &[u8],
+    dialect: &dyn Dialect,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
+    // `INTERSECT ALL`/`EXCEPT ALL` are unsupported on some dialects (SQLite allows `ALL` only
+    // after `UNION`); reject rather than emit SQL the target cannot run.
+    if all
+        && matches!(op, ViewSetOp::Intersect | ViewSetOp::Except)
+        && !dialect.supports_intersect_except_all()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "this dialect does not support `{}` in a view body",
+                set_op_keyword(op, all)
+            ),
+        ));
+    }
+    // A compound (set-operation) `ORDER BY` resolves against the set's *output* columns — which
+    // are named by the **leftmost arm's** projection aliases (not the `CREATE VIEW` column list,
+    // and not an arm's `FROM` alias). So each whole-set order term must be either a bare name that
+    // the leftmost arm actually emits, or an ordinal `1..=N` over those outputs. Anything else (an
+    // alias-qualified column, an arbitrary expression, a name/ordinal that does not resolve — none
+    // of which the lowering path produces for a set tail, but a hand-built / packaged model can)
+    // would fail when the view is queried, so reject it here.
+    let outputs = &leftmost_select(left).projection;
+    for order in order_by {
+        let resolves = match &order.expr {
+            ExprNode::BareColumn { column } => {
+                outputs.iter().any(|item| &item.output_name == column)
+            }
+            ExprNode::Literal(text) => {
+                matches!(text.parse::<usize>(), Ok(n) if (1..=outputs.len()).contains(&n))
+            }
+            _ => false,
+        };
+        if !resolves {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "a set-operation ORDER BY term must reference a leftmost-arm output column by \
+                 name or a 1-based ordinal, not an alias-qualified column or expression",
+            ));
+        }
+    }
+    // Every arm always aliases its projections. The compound's output names still come from the leftmost
+    // arm's aliases (or the column list, which overrides them on read-back — so this stays round-trip
+    // stable), but each arm additionally *needs* its aliases for its own clauses: a per-arm `ORDER BY
+    // <alias>` on either arm dangles without them, and an aliased *expression* projection has no other
+    // name to lower back to.
+    render_set_operand(left, open, close, dialect, writer)?;
+    write!(writer, " {}", set_op_keyword(op, all))?;
+    writer.write_all(b" ")?;
+    render_set_operand(right, open, close, dialect, writer)?;
+    // A trailing ORDER BY/LIMIT over the whole set (after the final arm).
+    render_order_limit(order_by, limit, offset, dialect, writer)
+}
+
 /// The leftmost single-`SELECT` of a view body — a `Select` directly, or (recursively) the left arm of a
-/// set operation. Its projection names the compound's output columns, which a whole-set `ORDER BY`
-/// resolves against.
+/// set operation / the inner body of a `With`. Its projection names the compound's output columns, which
+/// a whole-set `ORDER BY` resolves against.
 fn leftmost_select(body: &ViewBody) -> &ViewQueryModel {
     match body {
         ViewBody::Select(query) => query,
         ViewBody::Set { left, .. } => leftmost_select(left),
+        ViewBody::With { body, .. } => leftmost_select(body),
     }
 }
 
-/// Renders one operand of a set operation, wrapped so its own `ORDER BY`/`LIMIT` (and a nested
-/// compound's grouping) binds to the operand and not the enclosing set. PostgreSQL/MySQL wrap with
-/// `(…)`; SQLite rejects a parenthesized compound operand and wraps with `SELECT * FROM (…)`. This is the
-/// same [`Dialect::set_operand_style`] seam the runtime set renderer honors, so a set-op *view body*
-/// renders identically to a runtime set query — the reverse parser inverts both wrappings.
+/// Renders one operand of a set operation, wrapped by `open`/`close` so its own `ORDER BY`/`LIMIT` (and a
+/// nested compound's grouping) binds to the operand and not the enclosing set.
 fn render_set_operand(
     body: &ViewBody,
-    alias_projections: bool,
+    open: &[u8],
+    close: &[u8],
     dialect: &dyn Dialect,
     writer: &mut dyn Write,
 ) -> io::Result<()> {
-    let (open, close): (&[u8], &[u8]) = match dialect.set_operand_style() {
-        SetOperandStyle::Parenthesized => (b"(", b")"),
-        SetOperandStyle::SubquerySelect => (b"SELECT * FROM (", b")"),
-    };
     writer.write_all(open)?;
-    render_body(body, alias_projections, dialect, writer)?;
+    render_body(body, true, dialect, writer)?;
     writer.write_all(close)
+}
+
+/// Renders a `WITH [RECURSIVE] <name> [(<cols>)] AS (<body>)[, …] ` prelude (note the trailing space) for a
+/// [`ViewBody::With`]. Each CTE body renders via [`render_body`], except a **recursive** CTE — one whose
+/// set body references its own name — whose `<anchor> UNION [ALL] <recursive>` arms render **bare** (no
+/// operand wrapping) on every dialect, since a recursive-CTE grammar rejects a parenthesized arm.
+///
+/// This is authored as the eventual single shared `WITH`-prefix renderer: the runtime query path
+/// (`render.rs::write_cte_prefix`) is slated to build a `&[CteModel]` and route through here too.
+pub fn render_with_prefix(
+    recursive: bool,
+    ctes: &[CteModel],
+    dialect: &dyn Dialect,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
+    if ctes.is_empty() {
+        return Ok(());
+    }
+    // SQL requires `WITH RECURSIVE` on the whole clause if any CTE is recursive.
+    writer.write_all(if recursive {
+        b"WITH RECURSIVE ".as_slice()
+    } else {
+        b"WITH ".as_slice()
+    })?;
+    for (index, cte) in ctes.iter().enumerate() {
+        if index > 0 {
+            writer.write_all(b", ")?;
+        }
+        dialect.write_quoted_ident(&cte.name, writer)?;
+        // The optional `WITH` column list. Absent when the CTE declares no columns — its body's own
+        // projection names the outputs — so an empty `()` is never emitted.
+        if !cte.columns.is_empty() {
+            writer.write_all(b" (")?;
+            for (column_index, column) in cte.columns.iter().enumerate() {
+                if column_index > 0 {
+                    writer.write_all(b", ")?;
+                }
+                dialect.write_quoted_ident(column, writer)?;
+            }
+            writer.write_all(b")")?;
+        }
+        writer.write_all(b" AS (")?;
+        render_cte_definition_body(cte, dialect, writer)?;
+        writer.write_all(b")")?;
+    }
+    writer.write_all(b" ")
+}
+
+/// Renders the body of one CTE (inside its `AS ( … )`). A recursive CTE — a `Set` body that references the
+/// CTE's own name — renders its `<anchor> UNION [ALL] <recursive>` operands **bare** (no wrapping
+/// delimiters): a recursive-CTE body's grammar requires it (SQLite rejects *any* parenthesized recursive
+/// arm — `(SELECT …)` or `SELECT * FROM (…)` — with a syntax error, and the bare form is the SQL-standard
+/// shape PostgreSQL/MySQL accept too). Any other CTE body renders via [`render_body`] (which wraps set
+/// operands per the dialect). A CTE with no declared column list has its outputs named by the body's
+/// projection aliases (`alias_projections`), exactly like a column-less `CREATE VIEW`.
+fn render_cte_definition_body(
+    cte: &CteModel,
+    dialect: &dyn Dialect,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
+    if cte_is_self_referential(cte) {
+        // A recursive CTE's body is a `UNION` set — possibly behind its own leading `WITH` prelude(s), e.g.
+        // `WITH RECURSIVE c AS (WITH seed AS (…) <anchor> UNION ALL <recursive>)`. Recurse through those
+        // leading `With` layers (rendering their prefixes normally) down to the recursive `Set`, which must
+        // render with **bare** arms — not the generic set path (whose SQLite `SELECT * FROM (…)` operand
+        // wrapping the recursive reference would make the view fail to create).
+        render_recursive_cte_set_body(&cte.body, dialect, writer)
+    } else {
+        render_body(&cte.body, cte.columns.is_empty(), dialect, writer)
+    }
+}
+
+/// Renders the body of a **recursive** CTE. Leading `With` prelude(s) render normally (their own CTEs are
+/// ordinary); the recursive `Set` at the core renders with bare arms (see [`render_cte_definition_body`]).
+/// A self-referential CTE whose core is not a `Set` cannot be a recursive CTE (which requires a `UNION`),
+/// so it is rejected rather than mis-rendered.
+fn render_recursive_cte_set_body(
+    body: &ViewBody,
+    dialect: &dyn Dialect,
+    writer: &mut dyn Write,
+) -> io::Result<()> {
+    match body {
+        ViewBody::With {
+            recursive,
+            ctes,
+            body,
+        } => {
+            render_with_prefix(*recursive, ctes, dialect, writer)?;
+            render_recursive_cte_set_body(body, dialect, writer)
+        }
+        ViewBody::Set {
+            op,
+            all,
+            left,
+            right,
+            order_by,
+            limit,
+            offset,
+        } => {
+            // A recursive CTE must connect its anchor and recursive term with `UNION`/`UNION ALL`; an
+            // `INTERSECT`/`EXCEPT` over a self-reference is not a valid recursive CTE (SQLite rejects it as
+            // a circular reference). Reject rather than emit invalid DDL.
+            if *op != ViewSetOp::Union {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "a recursive CTE body must use UNION / UNION ALL — INTERSECT / EXCEPT cannot connect a \
+                     recursive term",
+                ));
+            }
+            // A recursive-CTE arm renders BARE (no delimiters), so it cannot scope a per-arm
+            // `ORDER BY`/`LIMIT`/`OFFSET` (which would bind to the whole `UNION`) or preserve a nested
+            // compound's grouping — and a recursive-CTE grammar forbids parenthesizing an arm (SQLite has no
+            // valid scoped form). Reject an arm that is not a plain, tail-less `SELECT` rather than emit
+            // mis-scoped SQL. (The standard recursive shape — a simple anchor and recursive `SELECT` — is
+            // unaffected.)
+            reject_unscopable_recursive_arm(left)?;
+            reject_unscopable_recursive_arm(right)?;
+            render_set(
+                *op, *all, left, right, order_by, *limit, *offset, b"", b"", dialect, writer,
+            )
+        }
+        ViewBody::Select(_) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "a recursive CTE body must be a UNION set operation (a self-referential CTE with a plain \
+             SELECT body is not a valid recursive CTE)",
+        )),
+    }
+}
+
+/// Rejects a recursive-CTE arm that a bare (un-delimited) render cannot scope: anything other than a plain
+/// `SELECT` with no per-arm `ORDER BY`/`LIMIT`/`OFFSET`. See [`render_cte_definition_body`].
+fn reject_unscopable_recursive_arm(arm: &ViewBody) -> io::Result<()> {
+    match arm {
+        ViewBody::Select(select)
+            if select.order_by.is_empty() && select.limit.is_none() && select.offset.is_none() =>
+        {
+            Ok(())
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "a recursive CTE arm must be a plain SELECT without its own ORDER BY/LIMIT/OFFSET or a \
+             nested set operation — a recursive-CTE grammar forbids parenthesizing an arm, so such an \
+             arm cannot be operand-scoped",
+        )),
+    }
+}
+
+/// Whether a CTE's body references the CTE's own name — the structural mark of a recursive CTE, which
+/// governs its operand rendering (see [`render_with_prefix`]). Names in a `WITH` scope are unqualified,
+/// so a bare-name match on any [`SourceItem::Named`] reachable from the body is correct.
+fn cte_is_self_referential(cte: &CteModel) -> bool {
+    fn body_references(body: &ViewBody, name: &str) -> bool {
+        match body {
+            ViewBody::Select(query) => query_references(query, name),
+            ViewBody::Set { left, right, .. } => {
+                body_references(left, name) || body_references(right, name)
+            }
+            ViewBody::With { ctes, body, .. } => {
+                // An inner `WITH` that re-binds this name shadows the outer CTE — its references are not
+                // self-references of the outer CTE. Only descend where the name is not locally rebound.
+                if ctes.iter().any(|inner| inner.name == name) {
+                    false
+                } else {
+                    ctes.iter().any(|inner| body_references(&inner.body, name))
+                        || body_references(body, name)
+                }
+            }
+        }
+    }
+    fn query_references(query: &ViewQueryModel, name: &str) -> bool {
+        query
+            .from
+            .as_ref()
+            .is_some_and(|source| source_references(source, name))
+            || query
+                .joins
+                .iter()
+                .any(|join| source_references(&join.source, name))
+    }
+    fn source_references(source: &SourceItem, name: &str) -> bool {
+        match source {
+            // A CTE self-reference is always unqualified; a schema-qualified relation (`public.counter`)
+            // is a real table/view even if it shares the CTE's bare name, so it is NOT a self-reference.
+            // Misclassifying it would render this non-recursive CTE's set body with bare arms (dropping the
+            // dialect operand wrapping a per-arm `ORDER BY`/`LIMIT` or nested compound needs).
+            SourceItem::Named(named) => named.schema.is_none() && named.name == name,
+            SourceItem::Derived { query, .. } => body_references(query, name),
+        }
+    }
+    body_references(&cte.body, &cte.name)
 }
 
 /// The SQL keyword(s) for a view-body set operator, e.g. `UNION` / `UNION ALL` / `INTERSECT`.

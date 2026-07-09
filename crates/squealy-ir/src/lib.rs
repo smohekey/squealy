@@ -659,8 +659,9 @@ pub struct ViewColumnModel {
     pub nullable: bool,
 }
 
-/// The backend-neutral structural body of a view definition: a single `SELECT` ([`ViewQueryModel`]) or a
-/// set operation (`UNION`/`INTERSECT`/`EXCEPT`, optionally `ALL`) over two nested bodies.
+/// The backend-neutral structural body of a view definition: a single `SELECT` ([`ViewQueryModel`]), a
+/// set operation (`UNION`/`INTERSECT`/`EXCEPT`, optionally `ALL`) over two nested bodies, or a `WITH`
+/// (common-table-expression) prelude wrapping any of these.
 ///
 /// A view whose body live introspection cannot reconstruct is stored as an **empty** [`ViewBody::Select`]
 /// (empty projection) carrying only its recorded `dependencies` — the diff's body-unknown sentinel (see
@@ -681,6 +682,27 @@ pub enum ViewBody {
         limit: Option<usize>,
         offset: Option<usize>,
     },
+    /// A `WITH` (common-table-expression) prelude wrapping any inner body. Nests (a CTE body or the inner
+    /// body may itself be a `With`), and can appear in a derived-table subquery.
+    With {
+        /// `true` for `WITH RECURSIVE` — a clause-level keyword covering the whole prelude. A CTE whose
+        /// body actually self-references is detected structurally at render time (by that body's set arm
+        /// referencing the CTE's own name); this flag only governs the emitted keyword.
+        recursive: bool,
+        ctes: Vec<CteModel>,
+        body: Box<ViewBody>,
+    },
+}
+
+/// One common-table expression declared in a [`ViewBody::With`] prelude: `<name> [(<columns>)] AS
+/// (<body>)`. `columns` is the optional `WITH` column list (empty = none declared; the body's own
+/// projection names the outputs). A **recursive** CTE's `body` is a [`ViewBody::Set`] whose recursive arm
+/// references `name`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CteModel {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub body: ViewBody,
 }
 
 impl Default for ViewBody {
@@ -703,7 +725,7 @@ impl ViewBody {
     pub fn dependencies(&self) -> &[SourceRef] {
         match self {
             ViewBody::Select(select) => &select.dependencies,
-            ViewBody::Set { .. } => &[],
+            ViewBody::Set { .. } | ViewBody::With { .. } => &[],
         }
     }
 }
@@ -1050,6 +1072,27 @@ fn collect_body_sources<'a>(body: &'a ViewBody, sources: &mut Vec<&'a SourceRef>
             for order in order_by {
                 collect_expr_sources(&order.expr, sources);
             }
+        }
+        ViewBody::With { ctes, body, .. } => {
+            // Every CTE name in a `WITH` is a local binding for every body in it — including a *later*-
+            // declared CTE (forward reference) and a CTE's own body — and it **shadows** any same-named
+            // external relation. (Verified on SQLite: a forward CTE reference resolves to the CTE and hides
+            // an external table of that name; even a non-recursive self-reference is a "circular reference",
+            // i.e. the name is in scope. PostgreSQL/MySQL reject a forward/self reference outright, so a view
+            // carrying that shape is SQLite-only, where mutual visibility holds.) So an unqualified source
+            // whose name matches ANY CTE is a local binding, not a view/table dependency, and is dropped —
+            // dropping it is what keeps `ordered_views` from creating this view after (or in a false cycle
+            // with) an unrelated sibling that merely shares a CTE's name. A **schema-qualified** source
+            // (`public.dep`) is always a real relation (a CTE reference is unqualified), so it is kept.
+            let mut inner = Vec::new();
+            for cte in ctes {
+                collect_body_sources(&cte.body, &mut inner);
+            }
+            collect_body_sources(body, &mut inner);
+            let bound: Vec<&str> = ctes.iter().map(|cte| cte.name.as_str()).collect();
+            sources.extend(inner.into_iter().filter(|source| {
+                source.schema.is_some() || !bound.contains(&source.name.as_str())
+            }));
         }
     }
 }
@@ -1557,5 +1600,70 @@ mod tests {
             fold_like_case_insensitivity(&nested),
             ExprNode::Logical { .. }
         ));
+    }
+
+    #[test]
+    fn with_scoping_drops_all_cte_named_sources_including_forward_refs() {
+        // `WITH a AS (SELECT id FROM seed), seed AS (SELECT id FROM base) SELECT id FROM a`. Every CTE name
+        // is a local binding for every body in the `WITH` and shadows any same-named external relation — so
+        // the `seed` read inside `a` (a *forward* reference to the later CTE) is the CTE, not a real
+        // relation, and is dropped; only `base` (the `seed` CTE's real source) survives. The main body's
+        // `a` reference is likewise a local CTE binding and is dropped. So `referenced_sources` = {base}.
+        let select_from = |name: &str| {
+            ViewBody::Select(Box::new(ViewQueryModel {
+                projection: vec![ProjectionItem {
+                    output_name: "id".to_owned(),
+                    expr: ExprNode::Column {
+                        alias: "q".to_owned(),
+                        column: "id".to_owned(),
+                    },
+                }],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: None,
+                    name: name.to_owned(),
+                    alias: "q".to_owned(),
+                })),
+                ..ViewQueryModel::default()
+            }))
+        };
+        let view = ViewModel {
+            name: "v".to_owned(),
+            comment: None,
+            columns: vec![ViewColumnModel {
+                name: "id".to_owned(),
+                ty: SqlType::I32,
+                nullable: true,
+            }],
+            query: ViewBody::With {
+                recursive: false,
+                ctes: vec![
+                    CteModel {
+                        name: "a".to_owned(),
+                        columns: Vec::new(),
+                        body: select_from("seed"),
+                    },
+                    CteModel {
+                        name: "seed".to_owned(),
+                        columns: Vec::new(),
+                        body: select_from("base"),
+                    },
+                ],
+                body: Box::new(select_from("a")),
+            },
+        };
+        let names: Vec<&str> = view.referenced_sources().map(|s| s.name.as_str()).collect();
+        assert!(
+            !names.contains(&"seed"),
+            "a forward reference to the later CTE `seed` is a local binding (shadowing any external) and \
+             must be dropped: {names:?}",
+        );
+        assert!(
+            names.contains(&"base"),
+            "the `seed` CTE's real source: {names:?}"
+        );
+        assert!(
+            !names.contains(&"a"),
+            "the main body's reference to the CTE `a` must be dropped: {names:?}",
+        );
     }
 }
