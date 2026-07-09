@@ -24,19 +24,44 @@ pub(crate) async fn database(client: &Client) -> Result<DatabaseModel, PostgresE
             .push(table);
     }
 
-    // Views are introspected by name and output columns only: a stored view definition cannot be
-    // reconstructed into the structural `ViewQueryModel`, so the body stays empty and the diff matches
-    // views by name and columns (it cannot detect a pure body change against a live database). Their
-    // view-on-view dependencies are read separately (see `view_dependencies`) so the diff can still
-    // order live drops correctly.
-    for view_ref in view_refs(client).await? {
-        let view = view(client, &view_ref).await?;
-        schema_entry(&mut schemas, &view_ref.schema)
-            .views
-            .push(view);
+    // Views are reconstructed from their `pg_get_viewdef` deparse (see `view`), which OMITS a schema
+    // qualifier for any relation on the session `search_path` (the default includes `public`): a
+    // public-schema view would deparse `FROM users` and reconstruct its source as `schema: None`, unequal
+    // to a desired `Some("public")`, churning every plan. Empty the `search_path` around the view
+    // introspection so every relation deparses fully qualified, then restore it (best-effort, even on
+    // error, so a reused connection is not left altered). Only the view pass needs this — the table
+    // constraint / index / generated-column deparse names `pg_catalog` builtins, which resolve regardless
+    // of `search_path`, so those keep the default to avoid perturbing their round-trip.
+    let original_search_path: String = client
+        .query_one("SELECT current_setting('search_path')", &[])
+        .await?
+        .get(0);
+    client
+        .execute("SELECT set_config('search_path', '', false)", &[])
+        .await?;
+    let views = introspect_views(client).await;
+    let _ = client
+        .execute(
+            "SELECT set_config('search_path', $1, false)",
+            &[&original_search_path],
+        )
+        .await;
+    for (schema, view) in views? {
+        schema_entry(&mut schemas, &schema).views.push(view);
     }
 
     Ok(DatabaseModel { schemas })
+}
+
+/// Introspects every view, pairing each with the name of the schema it belongs to. Called with an
+/// emptied `search_path` (see [`database`]) so `pg_get_viewdef` fully qualifies the sources it deparses.
+async fn introspect_views(client: &Client) -> Result<Vec<(String, ViewModel)>, PostgresError> {
+    let mut views = Vec::new();
+    for view_ref in view_refs(client).await? {
+        let view = view(client, &view_ref).await?;
+        views.push((view_ref.schema, view));
+    }
+    Ok(views)
 }
 
 /// Finds the schema named `name`, creating and appending it (preserving discovery order) if absent.
@@ -80,17 +105,63 @@ ORDER BY n.nspname, c.relname",
 }
 
 async fn view(client: &Client, view_ref: &TableRef) -> Result<ViewModel, PostgresError> {
+    // Reconstruct the view's structural body from its `pg_get_viewdef` deparse so a squealy-published
+    // view re-plans to empty (the diff's structural bar), rather than re-applying it every run. The
+    // reverse parser inverts the deparse idioms it knows; a body it cannot yet lower falls back to the
+    // body-unknown sentinel (only the view-on-view dependencies, which still order live drops) — graceful,
+    // no regression versus the previous always-empty behaviour.
+    let query = match view_definition(client, view_ref).await? {
+        Some(sql) => {
+            match squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                .read_view_query(&sql)
+            {
+                // A reconstructed body's dependencies are found by walking it, so the pg_rewrite lookup
+                // is only needed for the fallback below.
+                Ok(body) => body,
+                Err(_) => empty_body(client, view_ref).await?,
+            }
+        }
+        None => empty_body(client, view_ref).await?,
+    };
     Ok(ViewModel {
         name: view_ref.name.clone(),
         comment: None,
         columns: view_columns(client, view_ref).await?,
-        // The body can't be reconstructed, but the view-on-view dependencies can — they let the diff
-        // order live drops (drop a dependent before the view it selects from).
-        query: ViewBody::Select(Box::new(ViewQueryModel {
-            dependencies: view_dependencies(client, view_ref).await?,
-            ..ViewQueryModel::default()
-        })),
+        query,
     })
+}
+
+/// The body-unknown sentinel: an empty `SELECT` carrying only the view-on-view dependencies, so the diff
+/// can still order live drops (drop a dependent before the view it selects from) even when the body could
+/// not be reconstructed.
+async fn empty_body(client: &Client, view_ref: &TableRef) -> Result<ViewBody, PostgresError> {
+    Ok(ViewBody::Select(Box::new(ViewQueryModel {
+        dependencies: view_dependencies(client, view_ref).await?,
+        ..ViewQueryModel::default()
+    })))
+}
+
+/// The view's `SELECT` body as PostgreSQL deparses it (`pg_get_viewdef(oid, pretty)`). `pretty = true`
+/// gives the same idiom the reverse parser was tuned against (`::`-cast result-pins, `text` casts).
+/// Returns `None` if the view no longer exists (dropped out of band between listing and this fetch).
+async fn view_definition(
+    client: &Client,
+    view_ref: &TableRef,
+) -> Result<Option<String>, PostgresError> {
+    let rows = client
+        .query(
+            "\
+SELECT pg_get_viewdef(c.oid, true)
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = $1
+  AND c.relname = $2
+  AND c.relkind = 'v'",
+            &[&view_ref.schema, &view_ref.name],
+        )
+        .await?;
+
+    Ok(rows.first().map(|row| row.get(0)))
 }
 
 /// The other views this view depends on, read from its `ON SELECT` rewrite rule's dependencies.

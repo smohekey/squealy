@@ -66,6 +66,60 @@ impl PostgresConnection {
     }
 }
 
+/// Canonicalizes a logical [`SqlType`](squealy::SqlType) to the form PostgreSQL introspection reports:
+/// `Text` → `String` (both render `text`), and a bare (`None`) `Timestamp`/`Time` precision →
+/// microseconds (`Some(6)`, PostgreSQL's stored default). The trait
+/// [`canonical_sql_type`](squealy::SchemaIntrospect::canonical_sql_type) delegates here so the pure
+/// mapping is reusable by [`canonical_pg_pin_type`] and unit-testable without a live connection.
+#[cfg(feature = "schema")]
+pub(crate) fn canonical_pg_sql_type(ty: &squealy::SqlType) -> squealy::SqlType {
+    match ty {
+        squealy::SqlType::Text => squealy::SqlType::String,
+        squealy::SqlType::Timestamp {
+            tz,
+            precision: None,
+        } => squealy::SqlType::Timestamp {
+            tz: *tz,
+            precision: Some(6),
+        },
+        squealy::SqlType::Time {
+            tz,
+            precision: None,
+        } => squealy::SqlType::Time {
+            tz: *tz,
+            precision: Some(6),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Folds a result-pin [`SqlType`](squealy::SqlType) to the canonical representative PostgreSQL
+/// introspection yields for it. `pg_get_viewdef` spells a result-pin cast with the same keyword for
+/// several widths, and the reverse parser (`invert_pg_cast_type` in `squealy-parse`) inverts each keyword
+/// to one representative: `smallint` (`I8`/`I16`/`U8`) → `I16`, `integer` (`I32`/`U16`) → `I32`, `bigint`
+/// (`I64`/`Isize`/`U32`/`Usize`) → `I64`, and bare `numeric` (`I128`/`U64`/`U128`) → `I128`. Mapping the
+/// desired side's narrower pin to the same representative lets a published view re-plan to empty. Text and
+/// temporal aliases fold through [`canonical_pg_sql_type`], matching how an introspected pin of those
+/// types is canonicalized; any other type is unchanged (PostgreSQL's remaining cast spellings are
+/// one-to-one).
+#[cfg(feature = "schema")]
+pub(crate) fn canonical_pg_pin_type(ty: &squealy::SqlType) -> squealy::SqlType {
+    use squealy::SqlType::{
+        Bytes, FixedBytes, I8, I16, I32, I64, I128, Isize, U8, U16, U32, U64, U128, Usize,
+    };
+    match canonical_pg_sql_type(ty) {
+        I8 | U8 => I16,
+        U16 => I32,
+        Isize | U32 | Usize => I64,
+        I128 | U64 | U128 => I128,
+        // A view output produced through a pinned expression (a `CASE`/`COALESCE`/aggregate cast) carries
+        // no length `CHECK`, so a `FixedBytes(N)` pin renders as bare `bytea` and reads back as `Bytes` —
+        // mirror `canonical_view_column_type`, which folds the same collapse for a view's output column.
+        FixedBytes(_) => Bytes,
+        other => other,
+    }
+}
+
 pub struct PostgresTransaction<'conn> {
     pub(crate) transaction: tokio_postgres::Transaction<'conn>,
 }
@@ -279,24 +333,7 @@ impl squealy::SchemaIntrospect for PostgresConnection {
     /// PostgreSQL stores at its microsecond default and introspection reads back as `Some(6)`;
     /// canonicalize `None` to `Some(6)` so the two sides compare equal.
     fn canonical_sql_type(&self, ty: &squealy::SqlType) -> squealy::SqlType {
-        match ty {
-            squealy::SqlType::Text => squealy::SqlType::String,
-            squealy::SqlType::Timestamp {
-                tz,
-                precision: None,
-            } => squealy::SqlType::Timestamp {
-                tz: *tz,
-                precision: Some(6),
-            },
-            squealy::SqlType::Time {
-                tz,
-                precision: None,
-            } => squealy::SqlType::Time {
-                tz: *tz,
-                precision: Some(6),
-            },
-            other => other.clone(),
-        }
+        canonical_pg_sql_type(ty)
     }
 
     /// A PostgreSQL view column declared `FixedBytes(N)` introspects as plain `bytea` (`Bytes`) — there
@@ -307,6 +344,15 @@ impl squealy::SchemaIntrospect for PostgresConnection {
             squealy::SqlType::FixedBytes(_) => squealy::SqlType::Bytes,
             other => other,
         }
+    }
+
+    /// Folds a reconstructed view body's result-pin types to the canonical representative PostgreSQL
+    /// introspection yields for each, so a published view whose body the reverse parser now reconstructs
+    /// re-plans to empty. Applied to both the desired and the introspected model (see
+    /// [`SchemaIntrospect::canonical_view_body`]).
+    fn canonical_view_body(&self, mut body: squealy::ViewBody) -> squealy::ViewBody {
+        body.map_result_pins(&canonical_pg_pin_type);
+        body
     }
 
     /// PostgreSQL introspection reports a plain index's access method as `btree`; map an unset
@@ -940,5 +986,127 @@ CREATE INDEX CONCURRENTLY j ON t (d);";
     fn split_ddl_statements_handles_escaped_quotes() {
         let statements = split_ddl_statements("SET x = 'a''b';\nSET y = 1;");
         assert_eq!(statements, vec!["SET x = 'a''b'", "SET y = 1"]);
+    }
+
+    #[test]
+    fn canonical_pg_pin_type_collapses_many_to_one_integer_casts() {
+        use super::canonical_pg_pin_type;
+        use squealy::SqlType::{
+            Bytes, Decimal, F64, I8, I16, I32, I64, I128, Isize, String as SqlString, Text,
+            Timestamp, U8, U16, U32, U64, U128, Usize,
+        };
+
+        // Each PostgreSQL cast keyword is many-to-one; the reverse parser inverts it to one
+        // representative, so the desired side's narrower pin must fold to the same one.
+        for ty in [I8, I16, U8] {
+            assert_eq!(canonical_pg_pin_type(&ty), I16); // smallint
+        }
+        for ty in [I32, U16] {
+            assert_eq!(canonical_pg_pin_type(&ty), I32); // integer
+        }
+        for ty in [I64, Isize, U32, Usize] {
+            assert_eq!(canonical_pg_pin_type(&ty), I64); // bigint
+        }
+        for ty in [I128, U64, U128] {
+            assert_eq!(canonical_pg_pin_type(&ty), I128); // bare numeric
+        }
+        // Text/temporal aliases fold through `canonical_pg_sql_type`.
+        assert_eq!(canonical_pg_pin_type(&Text), SqlString);
+        assert_eq!(
+            canonical_pg_pin_type(&Timestamp {
+                tz: false,
+                precision: None,
+            }),
+            Timestamp {
+                tz: false,
+                precision: Some(6),
+            }
+        );
+        // A `FixedBytes(N)` pin renders `bytea` and reads back as `Bytes` (no length CHECK on a view
+        // output), mirroring `canonical_view_column_type`.
+        assert_eq!(
+            canonical_pg_pin_type(&squealy::SqlType::FixedBytes(16)),
+            Bytes
+        );
+        // One-to-one spellings are unchanged.
+        assert_eq!(canonical_pg_pin_type(&F64), F64);
+        assert_eq!(
+            canonical_pg_pin_type(&Decimal {
+                precision: 10,
+                scale: 2,
+            }),
+            Decimal {
+                precision: 10,
+                scale: 2,
+            }
+        );
+        // Idempotent on every representative (so applying it to the already-canonical introspected side
+        // is a no-op).
+        for ty in [I16, I32, I64, I128, SqlString, F64] {
+            let once = canonical_pg_pin_type(&ty);
+            assert_eq!(canonical_pg_pin_type(&once), once);
+        }
+    }
+
+    #[test]
+    fn a_published_view_with_a_narrow_pin_replans_to_empty_after_canonicalization() {
+        use super::{Postgres, canonical_pg_pin_type};
+        use squealy::{
+            AggregateFunc, ExprNode, ProjectionItem, SourceItem, SourceRef, SqlType, ViewBody,
+            ViewColumnModel, ViewModel, ViewQueryModel,
+        };
+        use squealy_parse::{Reader, SqlDialect};
+
+        // `CREATE VIEW totals (s) AS SELECT CAST(sum(q.x) AS integer) AS s FROM public.t q` — the output
+        // column is `U16`, whose result pin PostgreSQL spells as `integer` (shared with `I32`).
+        let view = ViewModel {
+            name: "totals".to_owned(),
+            comment: None,
+            columns: vec![ViewColumnModel {
+                name: "s".to_owned(),
+                ty: SqlType::U16,
+                nullable: true,
+            }],
+            query: ViewBody::Select(Box::new(ViewQueryModel {
+                projection: vec![ProjectionItem {
+                    output_name: "s".to_owned(),
+                    expr: ExprNode::Aggregate {
+                        func: AggregateFunc::Sum,
+                        distinct: false,
+                        operand: Box::new(ExprNode::Column {
+                            alias: "q".to_owned(),
+                            column: "x".to_owned(),
+                        }),
+                        result: Some(SqlType::U16),
+                    },
+                }],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: Some("public".to_owned()),
+                    name: "t".to_owned(),
+                    alias: "q".to_owned(),
+                })),
+                ..Default::default()
+            })),
+        };
+
+        let mut sql = Vec::new();
+        squealy::render_create_view(Some("public"), &view, false, &Postgres.dialect(), &mut sql)
+            .expect("view renders");
+        let sql = std::string::String::from_utf8(sql).expect("SQL is UTF-8");
+        // The offline analog of introspection: the reverse parser reads the rendered definition back.
+        let lowered = Reader::new(SqlDialect::Postgres)
+            .read_create_view(&sql)
+            .expect("view body lowers");
+
+        // The narrow `U16` pin round-trips as the canonical `I32` (both spell `integer`), so the raw
+        // bodies differ — the churn this seam removes...
+        assert_ne!(view.query, lowered);
+        // ...and folding both sides through `canonical_pg_pin_type` (what `canonical_view_body` applies)
+        // makes them structurally equal, so the published view re-plans to empty.
+        let mut desired = view.query.clone();
+        desired.map_result_pins(&canonical_pg_pin_type);
+        let mut actual = lowered;
+        actual.map_result_pins(&canonical_pg_pin_type);
+        assert_eq!(desired, actual);
     }
 }

@@ -112,13 +112,25 @@ fn schema_from_dyn(schema: &(dyn DatabaseSchema + Sync)) -> SchemaModel {
 }
 
 fn view_from_dyn(view: &(dyn crate::ViewDef + Sync)) -> ViewModel {
+    let columns = view.columns();
+    let mut query = view.definition_model();
+    // The view's declared column list authoritatively names the outputs: the renderer emits it (`CREATE
+    // VIEW v (id, name) AS …`) and suppresses each projection's own `AS` alias, so the builder-internal
+    // projection names (`t0_id`) never reach the SQL. Set the top-level projection output names to the
+    // declared column names positionally, so the authored body matches the form introspection
+    // reconstructs — a deparse (`pg_get_viewdef`) carries no column list, so its projection is named by
+    // the view's output columns — and a published view re-plans to empty instead of churning. Lengths
+    // match by construction (the `Row` check ties each projected column to one declared output).
+    for (item, column) in query.projection.iter_mut().zip(&columns) {
+        item.output_name = column.name.clone();
+    }
     ViewModel {
         name: view.name().to_owned(),
         comment: None,
-        columns: view.columns(),
+        columns,
         // The typed view builder only produces a single `SELECT`; set-op/CTE view bodies are
         // reconstructed on introspection, not authored through the builder (Track F, a follow-up).
-        query: crate::ViewBody::Select(Box::new(view.definition_model())),
+        query: crate::ViewBody::Select(Box::new(query)),
     }
 }
 
