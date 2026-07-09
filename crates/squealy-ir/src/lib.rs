@@ -1073,48 +1073,28 @@ fn collect_body_sources<'a>(body: &'a ViewBody, sources: &mut Vec<&'a SourceRef>
                 collect_expr_sources(&order.expr, sources);
             }
         }
-        ViewBody::With {
-            recursive,
-            ctes,
-            body,
-        } => {
-            // Drop only sources that are **in-scope CTE bindings** for the body being walked — the rest are
-            // real view/table dependencies. Scope is per-body and declaration-ordered: a CTE body sees the
-            // CTEs declared *before* it (plus *itself* when the `WITH` is `RECURSIVE`); the main body sees
-            // all of them. A source matching a name NOT in that scope — e.g. a later-declared CTE's name in
-            // a non-recursive `WITH`, or a self-name in a non-recursive CTE — is an existing sibling
-            // relation and must be kept (dropping it would mis-order `ordered_views`). A **schema-qualified**
-            // source (`public.dep`) is always a real relation (a CTE reference is unqualified), so it is
-            // never dropped.
-            for (index, cte) in ctes.iter().enumerate() {
-                let mut in_scope: Vec<&str> =
-                    ctes[..index].iter().map(|cte| cte.name.as_str()).collect();
-                if *recursive {
-                    in_scope.push(cte.name.as_str());
-                }
-                collect_body_sources_dropping_ctes(&cte.body, &in_scope, sources);
+        ViewBody::With { ctes, body, .. } => {
+            // Every CTE name in a `WITH` is a local binding for every body in it — including a *later*-
+            // declared CTE (forward reference) and a CTE's own body — and it **shadows** any same-named
+            // external relation. (Verified on SQLite: a forward CTE reference resolves to the CTE and hides
+            // an external table of that name; even a non-recursive self-reference is a "circular reference",
+            // i.e. the name is in scope. PostgreSQL/MySQL reject a forward/self reference outright, so a view
+            // carrying that shape is SQLite-only, where mutual visibility holds.) So an unqualified source
+            // whose name matches ANY CTE is a local binding, not a view/table dependency, and is dropped —
+            // dropping it is what keeps `ordered_views` from creating this view after (or in a false cycle
+            // with) an unrelated sibling that merely shares a CTE's name. A **schema-qualified** source
+            // (`public.dep`) is always a real relation (a CTE reference is unqualified), so it is kept.
+            let mut inner = Vec::new();
+            for cte in ctes {
+                collect_body_sources(&cte.body, &mut inner);
             }
-            let all: Vec<&str> = ctes.iter().map(|cte| cte.name.as_str()).collect();
-            collect_body_sources_dropping_ctes(body, &all, sources);
+            collect_body_sources(body, &mut inner);
+            let bound: Vec<&str> = ctes.iter().map(|cte| cte.name.as_str()).collect();
+            sources.extend(inner.into_iter().filter(|source| {
+                source.schema.is_some() || !bound.contains(&source.name.as_str())
+            }));
         }
     }
-}
-
-/// Collects the real (non-CTE) [`SourceRef`] dependencies of `body`, dropping any *unqualified* source
-/// whose name is one of the in-scope CTE names `in_scope` (a local binding, not a dependency). Used by the
-/// [`ViewBody::With`] scoping in [`collect_body_sources`].
-fn collect_body_sources_dropping_ctes<'a>(
-    body: &'a ViewBody,
-    in_scope: &[&str],
-    sources: &mut Vec<&'a SourceRef>,
-) {
-    let mut collected = Vec::new();
-    collect_body_sources(body, &mut collected);
-    sources.extend(
-        collected
-            .into_iter()
-            .filter(|source| source.schema.is_some() || !in_scope.contains(&source.name.as_str())),
-    );
 }
 
 /// Collects every [`SourceRef`] reachable from a single `SELECT` body, recursing through subqueries.
@@ -1623,11 +1603,12 @@ mod tests {
     }
 
     #[test]
-    fn with_scoping_keeps_out_of_scope_cte_named_sources() {
-        // `WITH a AS (SELECT id FROM seed), seed AS (SELECT id FROM base) SELECT id FROM a`. In a
-        // non-recursive `WITH`, `seed` is declared AFTER `a`, so the `seed` read inside `a` is a real
-        // sibling relation (not the later CTE) and must survive as a dependency; the main body's `a`
-        // reference is an in-scope CTE binding and is dropped. So `referenced_sources` = {seed, base}.
+    fn with_scoping_drops_all_cte_named_sources_including_forward_refs() {
+        // `WITH a AS (SELECT id FROM seed), seed AS (SELECT id FROM base) SELECT id FROM a`. Every CTE name
+        // is a local binding for every body in the `WITH` and shadows any same-named external relation — so
+        // the `seed` read inside `a` (a *forward* reference to the later CTE) is the CTE, not a real
+        // relation, and is dropped; only `base` (the `seed` CTE's real source) survives. The main body's
+        // `a` reference is likewise a local CTE binding and is dropped. So `referenced_sources` = {base}.
         let select_from = |name: &str| {
             ViewBody::Select(Box::new(ViewQueryModel {
                 projection: vec![ProjectionItem {
@@ -1672,8 +1653,9 @@ mod tests {
         };
         let names: Vec<&str> = view.referenced_sources().map(|s| s.name.as_str()).collect();
         assert!(
-            names.contains(&"seed"),
-            "a later-declared CTE's name read by an earlier CTE is a real relation and must be kept: {names:?}",
+            !names.contains(&"seed"),
+            "a forward reference to the later CTE `seed` is a local binding (shadowing any external) and \
+             must be dropped: {names:?}",
         );
         assert!(
             names.contains(&"base"),
@@ -1681,7 +1663,7 @@ mod tests {
         );
         assert!(
             !names.contains(&"a"),
-            "the main body's reference to the in-scope CTE `a` must be dropped: {names:?}",
+            "the main body's reference to the CTE `a` must be dropped: {names:?}",
         );
     }
 }
