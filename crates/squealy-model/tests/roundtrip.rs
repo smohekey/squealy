@@ -1358,3 +1358,94 @@ fn view_bodies_round_trip_through_each_dialect() {
     // Every view case × every backend was exercised (12 views × 3 backends).
     assert_eq!(checked, 12 * dialects.len(), "view coverage drifted");
 }
+
+/// A recursive-CTE arm renders BARE (a recursive-CTE grammar forbids parenthesizing an arm), so an arm
+/// carrying its own `ORDER BY`/`LIMIT`/`OFFSET` — which bare rendering cannot scope to the operand — is
+/// rejected rather than emitting mis-scoped SQL, on every dialect. The standard tail-less shape is fine.
+#[test]
+fn a_recursive_cte_arm_with_a_tail_is_rejected() {
+    // `WITH RECURSIVE counter(n) AS (SELECT 1 LIMIT 1 UNION ALL SELECT counter.n + 1 FROM counter …)` —
+    // the anchor carries a per-arm `LIMIT`, which cannot be scoped under a bare arm.
+    let view = view_of(
+        "v_bad",
+        vec![("n", SqlType::I32)],
+        ViewBody::With {
+            recursive: true,
+            ctes: vec![CteModel {
+                name: "counter".to_owned(),
+                columns: vec!["n".to_owned()],
+                body: ViewBody::Set {
+                    op: ViewSetOp::Union,
+                    all: true,
+                    left: Box::new(sel(ViewQueryModel {
+                        projection: vec![proj("n", lit("1"))],
+                        // A per-arm LIMIT on the anchor — unscopable under a bare recursive arm.
+                        limit: Some(1),
+                        ..ViewQueryModel::default()
+                    })),
+                    right: Box::new(sel(ViewQueryModel {
+                        projection: vec![proj(
+                            "n",
+                            ExprNode::Binary {
+                                op: ArithmeticOp::Add,
+                                left: b(ExprNode::Column {
+                                    alias: "q0_0".to_owned(),
+                                    column: "n".to_owned(),
+                                }),
+                                right: b(lit("1")),
+                            },
+                        )],
+                        from: Some(SourceItem::Named(SourceRef {
+                            schema: None,
+                            name: "counter".to_owned(),
+                            alias: "q0_0".to_owned(),
+                        })),
+                        ..ViewQueryModel::default()
+                    })),
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                },
+            }],
+            body: Box::new(sel(ViewQueryModel {
+                projection: vec![proj(
+                    "n",
+                    ExprNode::Column {
+                        alias: "q0_0".to_owned(),
+                        column: "n".to_owned(),
+                    },
+                )],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: None,
+                    name: "counter".to_owned(),
+                    alias: "q0_0".to_owned(),
+                })),
+                ..ViewQueryModel::default()
+            })),
+        },
+    );
+    for (_name, _sql_dialect, dialect) in [
+        (
+            "postgres",
+            SqlDialect::Postgres,
+            &squealy_postgresql::Postgres.dialect() as &dyn squealy::Dialect,
+        ),
+        (
+            "mysql",
+            SqlDialect::Mysql,
+            &squealy_mysql::Mysql.dialect() as &dyn squealy::Dialect,
+        ),
+        (
+            "sqlite",
+            SqlDialect::Sqlite,
+            &squealy_sqlite::Sqlite.dialect() as &dyn squealy::Dialect,
+        ),
+    ] {
+        let mut buf = Vec::new();
+        let result = squealy::render_create_view(Some("public"), &view, false, dialect, &mut buf);
+        assert!(
+            result.is_err(),
+            "a recursive CTE arm with a per-arm LIMIT must be rejected, not rendered",
+        );
+    }
+}

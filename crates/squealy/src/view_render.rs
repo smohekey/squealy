@@ -474,10 +474,38 @@ fn render_cte_definition_body(
             order_by,
             limit,
             offset,
-        } if cte_is_self_referential(cte) => render_set(
-            *op, *all, left, right, order_by, *limit, *offset, b"", b"", dialect, writer,
-        ),
+        } if cte_is_self_referential(cte) => {
+            // A recursive-CTE arm renders BARE (no delimiters), so it cannot scope a per-arm
+            // `ORDER BY`/`LIMIT`/`OFFSET` (which would bind to the whole `UNION`) or preserve a nested
+            // compound's grouping — and a recursive-CTE grammar forbids parenthesizing an arm (SQLite has no
+            // valid scoped form). Reject an arm that is not a plain, tail-less `SELECT` rather than emit
+            // mis-scoped SQL. (The standard recursive shape — a simple anchor and recursive `SELECT` — is
+            // unaffected.)
+            reject_unscopable_recursive_arm(left)?;
+            reject_unscopable_recursive_arm(right)?;
+            render_set(
+                *op, *all, left, right, order_by, *limit, *offset, b"", b"", dialect, writer,
+            )
+        }
         _ => render_body(&cte.body, cte.columns.is_empty(), dialect, writer),
+    }
+}
+
+/// Rejects a recursive-CTE arm that a bare (un-delimited) render cannot scope: anything other than a plain
+/// `SELECT` with no per-arm `ORDER BY`/`LIMIT`/`OFFSET`. See [`render_cte_definition_body`].
+fn reject_unscopable_recursive_arm(arm: &ViewBody) -> io::Result<()> {
+    match arm {
+        ViewBody::Select(select)
+            if select.order_by.is_empty() && select.limit.is_none() && select.offset.is_none() =>
+        {
+            Ok(())
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "a recursive CTE arm must be a plain SELECT without its own ORDER BY/LIMIT/OFFSET or a \
+             nested set operation — a recursive-CTE grammar forbids parenthesizing an arm, so such an \
+             arm cannot be operand-scoped",
+        )),
     }
 }
 
