@@ -1424,28 +1424,85 @@ fn a_recursive_cte_arm_with_a_tail_is_rejected() {
             })),
         },
     );
-    for (_name, _sql_dialect, dialect) in [
-        (
-            "postgres",
-            SqlDialect::Postgres,
-            &squealy_postgresql::Postgres.dialect() as &dyn squealy::Dialect,
-        ),
-        (
-            "mysql",
-            SqlDialect::Mysql,
-            &squealy_mysql::Mysql.dialect() as &dyn squealy::Dialect,
-        ),
-        (
-            "sqlite",
-            SqlDialect::Sqlite,
-            &squealy_sqlite::Sqlite.dialect() as &dyn squealy::Dialect,
-        ),
-    ] {
+    assert_view_render_rejected_on_all_dialects(
+        &view,
+        "a recursive CTE arm with a per-arm LIMIT must be rejected, not rendered",
+    );
+}
+
+/// A recursive CTE must connect its arms with `UNION`/`UNION ALL`; an `INTERSECT`/`EXCEPT` over a
+/// self-reference is not a valid recursive CTE (SQLite rejects it as a circular reference), so it is
+/// rejected at render rather than emitting invalid DDL.
+#[test]
+fn a_recursive_cte_with_a_non_union_operator_is_rejected() {
+    let counter_col = || ExprNode::Column {
+        alias: "q0_0".to_owned(),
+        column: "n".to_owned(),
+    };
+    let view = view_of(
+        "v_bad_op",
+        vec![("n", SqlType::I32)],
+        ViewBody::With {
+            recursive: true,
+            ctes: vec![CteModel {
+                name: "counter".to_owned(),
+                columns: vec!["n".to_owned()],
+                body: ViewBody::Set {
+                    // INTERSECT over a self-referential recursive term — not a valid recursive CTE.
+                    op: ViewSetOp::Intersect,
+                    all: false,
+                    left: Box::new(sel(ViewQueryModel {
+                        projection: vec![proj("n", lit("1"))],
+                        ..ViewQueryModel::default()
+                    })),
+                    right: Box::new(sel(ViewQueryModel {
+                        projection: vec![proj(
+                            "n",
+                            ExprNode::Binary {
+                                op: ArithmeticOp::Add,
+                                left: b(counter_col()),
+                                right: b(lit("1")),
+                            },
+                        )],
+                        from: Some(SourceItem::Named(SourceRef {
+                            schema: None,
+                            name: "counter".to_owned(),
+                            alias: "q0_0".to_owned(),
+                        })),
+                        ..ViewQueryModel::default()
+                    })),
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                },
+            }],
+            body: Box::new(sel(ViewQueryModel {
+                projection: vec![proj("n", counter_col())],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: None,
+                    name: "counter".to_owned(),
+                    alias: "q0_0".to_owned(),
+                })),
+                ..ViewQueryModel::default()
+            })),
+        },
+    );
+    assert_view_render_rejected_on_all_dialects(
+        &view,
+        "a recursive CTE using INTERSECT/EXCEPT must be rejected, not rendered",
+    );
+}
+
+/// Asserts `render_create_view` fails for `view` on all three dialects.
+fn assert_view_render_rejected_on_all_dialects(view: &ViewModel, message: &str) {
+    let dialects: [&dyn squealy::Dialect; 3] = [
+        &squealy_postgresql::Postgres.dialect(),
+        &squealy_mysql::Mysql.dialect(),
+        &squealy_sqlite::Sqlite.dialect(),
+    ];
+    for dialect in dialects {
         let mut buf = Vec::new();
-        let result = squealy::render_create_view(Some("public"), &view, false, dialect, &mut buf);
-        assert!(
-            result.is_err(),
-            "a recursive CTE arm with a per-arm LIMIT must be rejected, not rendered",
-        );
+        let result = squealy::render_create_view(Some("public"), view, false, dialect, &mut buf);
+        assert!(result.is_err(), "{message}");
     }
 }

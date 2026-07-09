@@ -504,6 +504,16 @@ fn render_recursive_cte_set_body(
             limit,
             offset,
         } => {
+            // A recursive CTE must connect its anchor and recursive term with `UNION`/`UNION ALL`; an
+            // `INTERSECT`/`EXCEPT` over a self-reference is not a valid recursive CTE (SQLite rejects it as
+            // a circular reference). Reject rather than emit invalid DDL.
+            if *op != ViewSetOp::Union {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "a recursive CTE body must use UNION / UNION ALL — INTERSECT / EXCEPT cannot connect a \
+                     recursive term",
+                ));
+            }
             // A recursive-CTE arm renders BARE (no delimiters), so it cannot scope a per-arm
             // `ORDER BY`/`LIMIT`/`OFFSET` (which would bind to the whole `UNION`) or preserve a nested
             // compound's grouping — and a recursive-CTE grammar forbids parenthesizing an arm (SQLite has no
