@@ -55,7 +55,7 @@ fn expand(cte: &TableStruct, recursive: bool) -> TokenStream {
                 }
             },
             quote::quote! {
-                fn body(&self) -> ::squealy::CteBody {
+                fn body(&self) -> ::squealy::ViewBody {
                     ::squealy::recursive_cte_definition_body::<#ident <'static, ::squealy::ColumnExpr>>()
                 }
             },
@@ -69,10 +69,10 @@ fn expand(cte: &TableStruct, recursive: bool) -> TokenStream {
         (
             proc_macro2::TokenStream::new(),
             quote::quote! {
-                fn body(&self) -> ::squealy::CteBody {
-                    ::squealy::CteBody::Plain(
+                fn body(&self) -> ::squealy::ViewBody {
+                    ::squealy::ViewBody::Select(::std::boxed::Box::new(
                         ::squealy::cte_definition_model::<#ident <'static, ::squealy::ColumnExpr>>(),
-                    )
+                    ))
                 }
             },
             quote::quote! {

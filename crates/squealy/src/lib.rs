@@ -471,8 +471,8 @@ pub use column::{
 };
 pub use connection::{Connection, ConnectionWithTransaction, QueryBuilder};
 pub use cte::{
-    CteBody, CteDef, CteDefinition, RecursiveBody, RecursiveCteDefinition, RecursiveUnion,
-    SchemaCte, cte_definition_dependencies, cte_definition_model, recursive_cte_definition_body,
+    CteDef, CteDefinition, RecursiveBody, RecursiveCteDefinition, RecursiveUnion, SchemaCte,
+    cte_definition_dependencies, cte_definition_model, recursive_cte_definition_body,
     recursive_cte_definition_dependencies,
 };
 pub use database::Database;
@@ -581,6 +581,5 @@ pub use view::{ModelBackend, ModelConn, SchemaView, ViewDefinition, ViewSelect};
 #[doc(hidden)]
 pub use view::{build_ddl_predicate, lower_view, view_definition_model};
 pub use view_render::{
-    ordered_views, render_create_view, render_cte_body, render_drop_view,
-    render_recursive_cte_body, render_scalar_expr,
+    ordered_views, render_create_view, render_drop_view, render_scalar_expr, render_with_prefix,
 };

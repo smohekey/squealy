@@ -395,47 +395,22 @@ impl Dialect for TestDialect {
 /// references any CTEs. The defs are de-duplicated/ordered by `Selected::collect_ctes`; each body is
 /// parameter-free, so it adds no bind params and is rendered via the shared view renderer.
 fn write_cte_prefix(ctes: &[&'static dyn CteDef], writer: &mut dyn Write) -> io::Result<()> {
-    if ctes.is_empty() {
-        return Ok(());
-    }
-    if ctes.iter().any(|def| def.is_recursive()) {
-        writer.write_all(b"WITH RECURSIVE ")?;
-    } else {
-        writer.write_all(b"WITH ")?;
-    }
-    for (index, def) in ctes.iter().enumerate() {
-        if index > 0 {
-            writer.write_all(b", ")?;
-        }
-        write!(writer, "{} (", def.name())?;
-        for (column_index, column) in def.columns().iter().enumerate() {
-            if column_index > 0 {
-                writer.write_all(b", ")?;
-            }
-            writer.write_all(column.name.as_bytes())?;
-        }
-        writer.write_all(b") AS (")?;
-        match def.body() {
-            squealy::CteBody::Plain(model) => {
-                squealy::view_render::render_cte_body(&model, &TestDialect, writer)?;
-            }
-            squealy::CteBody::Recursive {
-                anchor,
-                union_all,
-                recursive,
-            } => {
-                squealy::view_render::render_recursive_cte_body(
-                    &anchor,
-                    union_all,
-                    &recursive,
-                    &TestDialect,
-                    writer,
-                )?;
-            }
-        }
-        writer.write_all(b")")?;
-    }
-    writer.write_all(b" ")
+    // Route through the shared `WITH` renderer (the same one a view body's `WITH` prelude uses): build a
+    // `CteModel` per collected `CteDef` and let the renderer detect a recursive CTE by self-reference.
+    let models: Vec<squealy::CteModel> = ctes
+        .iter()
+        .map(|def| squealy::CteModel {
+            name: def.name().to_string(),
+            columns: def
+                .columns()
+                .into_iter()
+                .map(|column| column.name)
+                .collect(),
+            body: def.body(),
+        })
+        .collect();
+    let recursive = ctes.iter().any(|def| def.is_recursive());
+    squealy::view_render::render_with_prefix(recursive, &models, &TestDialect, writer)
 }
 
 pub(crate) fn write_selected_into<'conn, 'scope, Conn, Base, Shape, Projection, Writer>(

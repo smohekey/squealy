@@ -1981,6 +1981,92 @@ async fn a_recursive_cte_view_is_valid_sqlite() {
     );
 }
 
+#[test]
+fn a_scoped_recursive_cte_arm_is_rejected_on_sqlite() {
+    // SQLite's recursive-CTE grammar forbids a *parenthesized* recursive arm, so an arm carrying its own
+    // ORDER BY/LIMIT/OFFSET (which can only be scoped by parenthesizing it) has no valid rendering — the
+    // renderer rejects it rather than emit DDL SQLite cannot run. (PostgreSQL/MySQL render it parenthesized.)
+    let counter_col = |column: &str| ExprNode::Column {
+        alias: "q0_0".to_owned(),
+        column: column.to_owned(),
+    };
+    let view = ViewModel {
+        name: "v_counter".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "n".to_owned(),
+            ty: SqlType::I64,
+            nullable: false,
+        }],
+        query: ViewBody::With {
+            recursive: true,
+            ctes: vec![CteModel {
+                name: "counter".to_owned(),
+                columns: vec!["n".to_owned()],
+                body: ViewBody::Set {
+                    op: ViewSetOp::Union,
+                    all: true,
+                    // A *scoped* anchor: `SELECT 1 LIMIT 1`. Bare, its LIMIT would bind to the whole UNION;
+                    // parenthesizing it is the only way to scope it, which SQLite forbids for a recursive arm.
+                    left: Box::new(ViewBody::Select(Box::new(ViewQueryModel {
+                        projection: vec![ProjectionItem {
+                            output_name: "n".to_owned(),
+                            expr: ExprNode::Literal("1".to_owned()),
+                        }],
+                        limit: Some(1),
+                        ..ViewQueryModel::default()
+                    }))),
+                    right: Box::new(ViewBody::Select(Box::new(ViewQueryModel {
+                        projection: vec![ProjectionItem {
+                            output_name: "n".to_owned(),
+                            expr: ExprNode::Binary {
+                                op: ArithmeticOp::Add,
+                                left: Box::new(counter_col("n")),
+                                right: Box::new(ExprNode::Literal("1".to_owned())),
+                            },
+                        }],
+                        from: Some(SourceItem::Named(SourceRef {
+                            schema: None,
+                            name: "counter".to_owned(),
+                            alias: "q0_0".to_owned(),
+                        })),
+                        ..ViewQueryModel::default()
+                    }))),
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                },
+            }],
+            body: Box::new(ViewBody::Select(Box::new(ViewQueryModel {
+                projection: vec![ProjectionItem {
+                    output_name: "n".to_owned(),
+                    expr: counter_col("n"),
+                }],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: None,
+                    name: "counter".to_owned(),
+                    alias: "q0_0".to_owned(),
+                })),
+                ..ViewQueryModel::default()
+            }))),
+        },
+    };
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: Vec::new(),
+            views: vec![view],
+        }],
+    };
+    let plan =
+        plan_models(&desired, &DatabaseModel::default(), DiffPolicy::ALLOW_ALL).expect("plan");
+    let mut buffer = Vec::new();
+    let error = Sqlite.render_plan(&plan, &desired, &mut buffer).expect_err(
+        "SQLite must reject a scoped recursive CTE arm — it has no valid rendering there",
+    );
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
 #[tokio::test]
 async fn a_recursive_cte_with_a_nested_with_prelude_is_valid_sqlite() {
     // A recursive CTE whose body carries its OWN leading `WITH` prelude — `WITH RECURSIVE counter(n) AS
