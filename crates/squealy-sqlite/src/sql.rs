@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use squealy::{
     CheckModel, ColumnModel, DatabaseModel, DatabasePlan, DatabasePlanStep, DefaultValue,
-    ForeignKeyModel, IndexDirection, IndexModel, SqlType, TableModel, TablePlanStep,
+    ForeignKeyModel, IndexDirection, IndexModel, SqlType, TableModel, TablePlanStep, ViewModel,
 };
 
 /// Renders ordered create-from-scratch DDL for a whole model. Statements are `;`-terminated and
@@ -258,6 +258,87 @@ pub(crate) fn write_plan(
         }
     }
 
+    // A table rebuild (create-copy-drop-rename) renames the new table into place, and — inside the
+    // executor's transaction — SQLite reparses every view when a referenced table is renamed, erroring if
+    // that view's target (or, transitively, an ancestor view) is momentarily absent. The pre-pass above
+    // drops every view the plan *changes*, but an *unchanged* view over a rebuilt table carries no
+    // `Create`/`DropView` step, so it would survive the rebuild and hit that reparse error. (Before view
+    // bodies were introspected, such a view was always re-created — and thus always pre-dropped — which
+    // masked this; now that an unchanged body compares equal, it no longer is.) Collect the tables the
+    // plan rebuilds, then the transitive closure of desired views over them: these "collateral" views are
+    // dropped here and recreated after all table work (below).
+    let rebuilt_tables: HashSet<String> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            DatabasePlanStep::AlterTable { table, change, .. } if change_needs_rebuild(change) => {
+                Some(table.to_ascii_lowercase())
+            }
+            _ => None,
+        })
+        .collect();
+    let plan_touched_views: HashSet<String> =
+        plan.steps
+            .iter()
+            .filter_map(|step| match step {
+                DatabasePlanStep::CreateView { view, .. }
+                | DatabasePlanStep::DropView { view, .. } => Some(view.name.to_ascii_lowercase()),
+                _ => None,
+            })
+            .collect();
+    let all_desired_views: Vec<(Option<&str>, &ViewModel)> = desired
+        .schemas
+        .iter()
+        .flat_map(|schema| {
+            schema
+                .views
+                .iter()
+                .map(move |view| (schema.name.as_deref(), view))
+        })
+        .collect();
+    // The transitive closure of views affected by a rebuild: seed with the rebuilt table names, then
+    // repeatedly add any desired view that references an already-affected name (a rebuilt table or an
+    // already-affected view), to a fixpoint. A **plan-touched** view stays in the closure so its own
+    // dependents still propagate (the plan already dropped it in the pre-pass), but is excluded from
+    // `collateral_views` below — the plan recreates it itself.
+    let mut affected = rebuilt_tables;
+    if !affected.is_empty() {
+        loop {
+            let mut added = false;
+            for (_, view) in &all_desired_views {
+                let key = view.name.to_ascii_lowercase();
+                if !affected.contains(&key)
+                    && view
+                        .referenced_sources()
+                        .any(|source| affected.contains(&source.name.to_ascii_lowercase()))
+                {
+                    affected.insert(key);
+                    added = true;
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+    }
+    let collateral_views: Vec<(Option<&str>, &ViewModel)> = all_desired_views
+        .iter()
+        .filter(|(_, view)| {
+            let key = view.name.to_ascii_lowercase();
+            affected.contains(&key) && !plan_touched_views.contains(&key)
+        })
+        .copied()
+        .collect();
+    for (_, view) in &collateral_views {
+        // The `table_owned_names` skip does not apply here — a collateral view is unchanged and already
+        // exists — but keep it defensively, matching the pre-pass above.
+        if !table_owned_names.contains(&view.name.to_ascii_lowercase()) {
+            statement(writer, &mut first)?;
+            writer.write_all(b"DROP VIEW IF EXISTS ")?;
+            write_quoted_ident(&view.name, writer)?;
+        }
+    }
+
     // A rebuild subsumes *all* of a table's alterations, so a table's `AlterTable` steps are handled
     // together at the first one seen; later steps for the same table are skipped.
     let mut altered_tables = HashSet::new();
@@ -313,6 +394,15 @@ pub(crate) fn write_plan(
             // The view was already dropped in the up-front view pre-pass; nothing to emit here.
             DatabasePlanStep::DropView { .. } => {}
         }
+    }
+
+    // Recreate the collateral views (unchanged views over a rebuilt table) dropped in the pre-pass, now
+    // that every rebuilt table has been renamed back into place. SQLite does not validate a view's body
+    // at `CREATE VIEW` time (only when the view is used, or a referenced table is renamed), so these need
+    // no ordering among themselves or against the plan's own `CreateView` steps.
+    for (schema, view) in &collateral_views {
+        statement(writer, &mut first)?;
+        squealy::render_create_view(*schema, view, false, &SqliteDialect, writer)?;
     }
 
     if !first {

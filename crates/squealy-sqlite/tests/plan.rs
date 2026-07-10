@@ -130,6 +130,35 @@ fn active_widgets_view() -> ViewModel {
     }
 }
 
+/// An `active_widget_ids` view over the `active_widgets` view (view-on-view) — `SELECT id FROM
+/// active_widgets`. Used to exercise the transitive-dependent handling around a table rebuild.
+fn active_widget_ids_view() -> ViewModel {
+    ViewModel {
+        name: "active_widget_ids".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "id".to_owned(),
+            ty: SqlType::I64,
+            nullable: false,
+        }],
+        query: ViewBody::Select(Box::new(ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "id".to_owned(),
+                expr: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "id".to_owned(),
+                },
+            }],
+            from: Some(SourceItem::Named(SourceRef {
+                schema: None,
+                name: "active_widgets".to_owned(),
+                alias: "q0_0".to_owned(),
+            })),
+            ..ViewQueryModel::default()
+        })),
+    }
+}
+
 /// The `widgets` table plus the `active_widgets` view over it.
 fn table_and_view() -> DatabaseModel {
     DatabaseModel {
@@ -1351,9 +1380,11 @@ async fn execute_ddl_restores_the_prior_foreign_keys_setting() {
 
 #[tokio::test]
 async fn introspects_a_published_view_by_name() {
-    // A published view is read back so the diff can see it. SQLite can't recover a view's structural body
-    // (empty projection — the "body unknown" marker) or type its columns, so each column carries the
-    // sentinel `Bytes` type and only the column *names* are meaningful.
+    // A published view is read back so the diff can see it. SQLite stores a view's verbatim `CREATE VIEW`
+    // text, so the reverse parser reconstructs its structural body straight from `sqlite_master.sql`
+    // (the schema qualifier is suppressed, so the source reads back unqualified). SQLite still cannot
+    // type a view's computed output columns, so each carries the sentinel `Bytes` type and only the
+    // column *names* are meaningful — the diff compares columns by name and bodies structurally.
     let (mut connection, _raw) = setup().await;
     publish(&table_and_view(), &Sqlite, &mut connection)
         .await
@@ -1379,11 +1410,9 @@ async fn introspects_a_published_view_by_name() {
             .collect::<Vec<_>>(),
         vec![("id", &SqlType::Bytes)],
     );
-    assert!(
-        views[0].query.is_empty(),
-        "an introspected view is body-unknown: {:?}",
-        views[0].query,
-    );
+    // The body reconstructs to the same shape the model rendered — `active_widgets_view`'s body, whose
+    // source is already unqualified (`schema: None`), so it round-trips exactly.
+    assert_eq!(views[0].query, active_widgets_view().query);
 }
 
 #[tokio::test]
@@ -1562,6 +1591,52 @@ async fn rebuilding_a_table_under_an_existing_view_succeeds() {
         count(&raw, "active_widgets").await,
         1,
         "the view still resolves and filters after the rebuild",
+    );
+}
+
+#[tokio::test]
+async fn rebuilding_a_table_under_a_chained_view_succeeds() {
+    // A rebuild of `widgets` reparses views over it. `active_widgets` selects from `widgets`, and
+    // `active_widget_ids` selects from `active_widgets` (a view-on-view chain). Both are unchanged, so
+    // the diff emits no view step. The pre-pass must drop the WHOLE transitive closure over the rebuilt
+    // table — not just the direct dependent — and recreate it, or SQLite errors reparsing the surviving
+    // indirect dependent while its (dropped) source view is momentarily absent mid-rebuild.
+    let (mut connection, raw) = setup().await;
+    let with_chain = |uniques: Vec<Constraint>| {
+        let mut widgets = widget_table();
+        widgets.uniques = uniques;
+        DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![widgets],
+                views: vec![active_widgets_view(), active_widget_ids_view()],
+            }],
+        }
+    };
+    publish(&with_chain(Vec::new()), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + chained views");
+    exec(
+        &raw,
+        "INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (1, 1), (2, 0)",
+    )
+    .await;
+
+    // Adding a UNIQUE forces a create-copy-drop-rename rebuild of widgets under the unchanged chain.
+    let v2 = with_chain(vec![Constraint {
+        name: String::new(),
+        columns: vec!["id".to_owned()],
+    }]);
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan v2");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("apply the rebuild under a chained view");
+    assert_eq!(
+        count(&raw, "active_widget_ids").await,
+        1,
+        "the chained view still resolves after the rebuild",
     );
 }
 
@@ -2186,4 +2261,67 @@ async fn a_recursive_cte_with_a_nested_with_prelude_is_valid_sqlite() {
         5,
         "the nested-WITH recursive CTE view must yield 5 counter rows",
     );
+}
+
+#[tokio::test]
+async fn replanning_a_view_with_an_ilike_filter_is_empty() {
+    // SQLite has no `ILIKE`: a view whose body filters with `ILIKE` (`case_insensitive: true`) renders as
+    // plain `LIKE`, which the reverse parser reads back as `case_insensitive: false`. Now that view bodies
+    // compare structurally, `canonical_view_body` must fold the flag on both sides (like it does for
+    // checks/index predicates), or the reconstructed body churns a perpetual `CreateView`.
+    let (mut connection, _raw) = setup().await;
+    let tbl = table(
+        "widgets",
+        vec![
+            column("id", SqlType::I64, false),
+            column("name", SqlType::Text, false),
+        ],
+    );
+    let view = ViewModel {
+        name: "named_widgets".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "name".to_owned(),
+            ty: SqlType::Text,
+            nullable: false,
+        }],
+        query: ViewBody::Select(Box::new(ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "name".to_owned(),
+                expr: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "name".to_owned(),
+                },
+            }],
+            from: Some(SourceItem::Named(SourceRef {
+                schema: None,
+                name: "widgets".to_owned(),
+                alias: "q0_0".to_owned(),
+            })),
+            filter: Some(ExprNode::Like {
+                case_insensitive: true,
+                negated: false,
+                operand: Box::new(ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "name".to_owned(),
+                }),
+                pattern: Box::new(ExprNode::Literal("'a%'".to_owned())),
+            }),
+            ..ViewQueryModel::default()
+        })),
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![tbl],
+            views: vec![view],
+        }],
+    };
+    publish(&model, &Sqlite, &mut connection)
+        .await
+        .expect("publish ilike view");
+    let plan = plan_from_database(&model, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("re-plan ilike view");
+    assert!(plan.steps.is_empty(), "ILIKE view churn: {:?}", plan.steps);
 }
