@@ -369,6 +369,15 @@ impl SchemaIntrospect for MysqlConnection {
         canonical_sql_type(ty)
     }
 
+    /// Folds a reconstructed view body's result-pin types to the canonical representative MySQL
+    /// introspection yields for each, so a published view whose body the reverse parser now reconstructs
+    /// re-plans to empty. Applied to both the desired and the introspected model (see
+    /// [`SchemaIntrospect::canonical_view_body`](squealy::SchemaIntrospect::canonical_view_body)).
+    fn canonical_view_body(&self, mut body: squealy::ViewBody) -> squealy::ViewBody {
+        body.map_result_pins(&canonical_mysql_pin_type);
+        body
+    }
+
     /// MySQL has only `AUTO_INCREMENT`: it renders any identity column that way and introspects it
     /// back as [`IdentityMode::AutoIncrement`](squealy::IdentityMode::AutoIncrement). Map every mode
     /// to that so a crate-declared `auto_increment` column (which enters the model as `ByDefault`)
@@ -419,6 +428,50 @@ fn canonical_sql_type(ty: &squealy::SqlType) -> squealy::SqlType {
             precision: Some(0),
         },
         other => other.clone(),
+    }
+}
+
+/// Folds a result-pin [`SqlType`](squealy::SqlType) to the canonical representative MySQL introspection
+/// yields for it. MySQL's `CAST(… AS <type>)` vocabulary is the lossiest of the three backends
+/// (`SIGNED` for every signed-integer width, `UNSIGNED` for every unsigned, `CHAR` for every text-like
+/// type, `BINARY` for both binary widths, `DATETIME`/`TIME` drop a timestamp/time's time zone,
+/// `DECIMAL(65, 0)` for both 128-bit ints, bare `DECIMAL` for any `Decimal`), so a view's stored
+/// `VIEW_DEFINITION` re-renders each pin's cast with the same keyword the reverse parser
+/// (`invert_mysql_cast_type` in `squealy-parse`) inverts to a single representative. Mapping the desired
+/// side's narrower pin to the same representative lets a published view re-plan to empty. This is exactly
+/// `invert_mysql_cast_type(write_cast_type(ty))`: [`canonical_sql_type`] first (String → `Varchar(255)`,
+/// Uuid → `Char(36)`, bare temporal precision → `Some(0)`), then the cast-keyword collapse.
+fn canonical_mysql_pin_type(ty: &squealy::SqlType) -> squealy::SqlType {
+    use squealy::SqlType::{
+        Bool, Bytes, Char, Decimal, F32, F64, FixedBytes, I8, I16, I32, I64, I128, Isize, Json,
+        Jsonb, Text, Time, Timestamp, U8, U16, U32, U64, U128, Usize, Uuid, Varchar,
+    };
+    match canonical_sql_type(ty) {
+        Bool | I8 | I16 | I32 | I64 | Isize => I64,
+        U8 | U16 | U32 | U64 | Usize => U64,
+        I128 | U128 => I128,
+        F32 | F64 => F64,
+        // Every text-like type casts to `CHAR`, which inverts to the canonical `Text`. (`String`/`Uuid`
+        // are already folded to `Varchar`/`Char` by `canonical_sql_type`.)
+        Text | Varchar(_) | Char(_) | Uuid | Json | Jsonb | squealy::SqlType::String => Text,
+        // Both variable- and fixed-width binary cast to `BINARY`, which inverts to the canonical `Bytes`.
+        Bytes | FixedBytes(_) => Bytes,
+        // `DATETIME(n)`/`TIME(n)` are tz-naive casts, so the canonical inverse drops the time zone.
+        Timestamp { precision, .. } => Timestamp {
+            tz: false,
+            precision,
+        },
+        Time { precision, .. } => Time {
+            tz: false,
+            precision,
+        },
+        // A `Decimal` pin renders bare `DECIMAL`, which MySQL stores (and inverts) as `DECIMAL(10, 0)` —
+        // its precision/scale cannot be recovered, so fold every `Decimal` to that representative.
+        Decimal { .. } => Decimal {
+            precision: 10,
+            scale: 0,
+        },
+        other => other,
     }
 }
 
@@ -705,6 +758,116 @@ mod tests {
         // MySQL has no native `uuid`: a `uuid::Uuid` column renders as `CHAR(36)` and introspects back
         // as `Char(36)`, so the desired side must canonicalize to that or an incremental plan churns.
         assert_eq!(canonical_sql_type(&SqlType::Uuid), SqlType::Char(36));
+    }
+
+    #[test]
+    fn canonical_mysql_pin_type_collapses_many_to_one_casts() {
+        use super::canonical_mysql_pin_type;
+        use squealy::SqlType::{
+            Bool, Bytes, Char, Decimal, F32, F64, FixedBytes, I8, I16, I32, I64, I128, Isize, Json,
+            Jsonb, Text, Time, Timestamp, U8, U16, U32, U64, U128, Usize, Uuid, Varchar,
+        };
+
+        // Every signed-integer width (and `Bool`) casts to `SIGNED`, which the reverse parser inverts to
+        // the canonical `I64`; every unsigned width casts to `UNSIGNED` → `U64`.
+        for ty in [Bool, I8, I16, I32, I64, Isize] {
+            assert_eq!(canonical_mysql_pin_type(&ty), I64);
+        }
+        for ty in [U8, U16, U32, U64, Usize] {
+            assert_eq!(canonical_mysql_pin_type(&ty), U64);
+        }
+        // Both 128-bit ints cast to `DECIMAL(65, 0)` → `I128`.
+        for ty in [I128, U128] {
+            assert_eq!(canonical_mysql_pin_type(&ty), I128);
+        }
+        // Floats cast to `DOUBLE` → `F64`.
+        for ty in [F32, F64] {
+            assert_eq!(canonical_mysql_pin_type(&ty), F64);
+        }
+        // Every text-like type casts to `CHAR` → the canonical `Text` (`String`/`Uuid` fold to
+        // `Varchar`/`Char` first via `canonical_sql_type`, then collapse here).
+        for ty in [
+            Text,
+            Varchar(64),
+            Char(36),
+            Uuid,
+            Json,
+            Jsonb,
+            SqlType::String,
+        ] {
+            assert_eq!(canonical_mysql_pin_type(&ty), Text);
+        }
+        // Both binary widths cast to `BINARY` → `Bytes`.
+        for ty in [Bytes, FixedBytes(16)] {
+            assert_eq!(canonical_mysql_pin_type(&ty), Bytes);
+        }
+        // `DATETIME(n)`/`TIME(n)` casts drop the time zone; a bare precision folds to `Some(0)`.
+        assert_eq!(
+            canonical_mysql_pin_type(&Timestamp {
+                tz: true,
+                precision: Some(6),
+            }),
+            Timestamp {
+                tz: false,
+                precision: Some(6),
+            }
+        );
+        assert_eq!(
+            canonical_mysql_pin_type(&Time {
+                tz: true,
+                precision: None,
+            }),
+            Time {
+                tz: false,
+                precision: Some(0),
+            }
+        );
+        // Any `Decimal` casts to bare `DECIMAL`, which MySQL stores and inverts as `DECIMAL(10, 0)`.
+        assert_eq!(
+            canonical_mysql_pin_type(&Decimal {
+                precision: 20,
+                scale: 4,
+            }),
+            Decimal {
+                precision: 10,
+                scale: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn canonical_mysql_pin_type_is_idempotent() {
+        use super::canonical_mysql_pin_type;
+        use squealy::SqlType::{
+            Bool, Bytes, Decimal, F32, FixedBytes, I8, I128, Text, Time, Timestamp, U16, Uuid,
+        };
+
+        for ty in [
+            Bool,
+            I8,
+            I128,
+            U16,
+            F32,
+            Text,
+            Uuid,
+            Bytes,
+            FixedBytes(8),
+            Timestamp {
+                tz: true,
+                precision: None,
+            },
+            Time {
+                tz: false,
+                precision: Some(3),
+            },
+            Decimal {
+                precision: 20,
+                scale: 4,
+            },
+        ] {
+            let once = canonical_mysql_pin_type(&ty);
+            assert_eq!(canonical_mysql_pin_type(&once), once);
+        }
     }
 
     #[test]
