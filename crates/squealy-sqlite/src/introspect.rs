@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use squealy::{
     ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyModel,
     IdentityMode, IdentityModel, IndexDirection, IndexModel, SchemaModel, SqlType, TableModel,
-    ViewBody, ViewColumnModel, ViewModel,
+    ViewColumnModel, ViewModel,
 };
 use tokio_rusqlite::rusqlite::{self, Row};
 
@@ -94,17 +94,27 @@ async fn view_names(connection: &SqliteConnection) -> Result<Vec<String>, Sqlite
     .await
 }
 
-/// Introspects one view — its name and output column names. SQLite stores a view as its verbatim
-/// `CREATE VIEW` text, which cannot be reconstructed into the structural [`ViewQueryModel`] body, so the
-/// body (and its projection) stays empty: the "introspected, body unknown" marker the diff keys on to
-/// re-apply the desired definition rather than compare bodies. `PRAGMA table_info` does report a view's
-/// column *names*, but not a usable type for a computed output (`length(x)`, `a || b` come back with an
-/// empty type), so every column is recorded as a single sentinel type ([`SqlType::Bytes`]) — the same
-/// type a desired view column canonicalizes to (see `Sqlite::canonical_view_column_type`). The diff then
-/// compares view columns by name: a column-set change (add/remove/rename) differs and forces a
-/// destructive `DropView` + re-create, while an unchanged view (including computed columns) matches and
-/// is re-applied non-destructively. The columns also let a removed or renamed view produce a `DropView`
-/// (a view invisible to introspection would otherwise linger) and take part in the one-namespace check.
+/// Introspects one view — its structural body plus its output column names.
+///
+/// SQLite stores a view as the verbatim `CREATE VIEW … AS …` text it was given (in `sqlite_master.sql`),
+/// so — unlike PostgreSQL/MySQL, which deparse a normalized `SELECT` — the reverse parser reconstructs the
+/// structural [`ViewBody`](squealy::ViewBody) straight from that stored DDL ([`read_create_view`](squealy_parse::Reader::read_create_view),
+/// which honors the `CREATE VIEW (<cols>)` list to name the outputs). A published view whose body
+/// reconstructs then compares structurally against the desired model, so it re-plans to empty (the diff's
+/// backend `canonical_view_body` folds the two remaining divergences — the suppressed schema qualifier and
+/// the many-to-one result-pin casts). A view whose text cannot be lowered (it references a dropped table,
+/// or a construct the reverse parser does not yet model) falls back to the empty [`ViewBody::default`](squealy::ViewBody::default)
+/// "body unknown" marker, so the diff re-applies the desired definition rather than comparing bodies —
+/// exactly today's behavior, so an un-analyzable view never fails the whole introspection.
+///
+/// `PRAGMA table_info` reports a view's column *names*, but not a usable type for a computed output
+/// (`length(x)`, `a || b` come back with an empty type), so every column is recorded as a single sentinel
+/// type ([`SqlType::Bytes`]) — the same type a desired view column canonicalizes to (see
+/// `Sqlite::canonical_view_column_type`). The diff then compares view columns by name: a column-set change
+/// (add/remove/rename) differs and forces a destructive `DropView` + re-create, while an unchanged view
+/// (including computed columns) matches and is re-applied non-destructively. The columns also let a removed
+/// or renamed view produce a `DropView` (a view invisible to introspection would otherwise linger) and take
+/// part in the one-namespace check.
 async fn view(connection: &SqliteConnection, name: &str) -> Result<ViewModel, SqliteError> {
     // A view whose body cannot be analyzed — it references a dropped table, or calls a function this
     // connection has not registered — makes `PRAGMA table_info` error when it reparses the view. Fall
@@ -124,12 +134,43 @@ async fn view(connection: &SqliteConnection, name: &str) -> Result<ViewModel, Sq
                 .collect()
         })
         .unwrap_or_default();
+    // Reconstruct the structural body from the stored `CREATE VIEW` DDL. A missing statement (`None`) or
+    // one the reverse parser cannot lower (`Err`) degrades to the empty body-unknown sentinel — the same
+    // graceful fallback the column probe uses, so no view can fail introspection. Dependencies come from
+    // walking a reconstructed body; the sentinel simply carries none (as it did before).
+    let query = view_sql(connection, name)
+        .await?
+        .and_then(|sql| {
+            squealy_parse::Reader::new(squealy_parse::SqlDialect::Sqlite)
+                .read_create_view(&sql)
+                .ok()
+        })
+        .unwrap_or_default();
     Ok(ViewModel {
         name: name.to_owned(),
         comment: None,
         columns,
-        query: ViewBody::default(),
+        query,
     })
+}
+
+/// The `CREATE VIEW` text SQLite stored verbatim, from which the structural [`ViewBody`](squealy::ViewBody) is reconstructed
+/// (mirrors [`table_sql`]). `None` if the view has no stored statement, which the caller treats as
+/// "body unknown".
+async fn view_sql(
+    connection: &SqliteConnection,
+    name: &str,
+) -> Result<Option<String>, SqliteError> {
+    Ok(query(
+        connection,
+        "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = ?1",
+        Some(name.to_owned()),
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .await?
+    .into_iter()
+    .next()
+    .flatten())
 }
 
 async fn table(connection: &SqliteConnection, name: &str) -> Result<TableModel, SqliteError> {

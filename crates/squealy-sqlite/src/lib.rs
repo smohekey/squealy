@@ -276,6 +276,37 @@ impl SchemaIntrospect for SqliteConnection {
         SqlType::Bytes
     }
 
+    /// Reconciles a reconstructed view body's two SQLite-specific divergences so a published view whose
+    /// body the reverse parser now recovers from `sqlite_master.sql` re-plans to empty. Applied to **both**
+    /// the desired and the introspected model (see
+    /// [`SchemaIntrospect::canonical_view_body`](squealy::SchemaIntrospect::canonical_view_body)):
+    /// - **The suppressed schema qualifier.** SQLite has no namespaces, so it renders every view source
+    ///   unqualified; the reconstructed body's every `SourceRef.schema` reads back `None`, while a
+    ///   `from_database` desired body carries the mapped `Some("app")`. Flatten both sides to `None`
+    ///   (mirrors [`canonical_schema_name`](Self::canonical_schema_name), which flattens the top-level
+    ///   schema).
+    /// - **The many-to-one result-pin casts.** A `CAST(<call> AS <type>)` pin renders with one of SQLite's
+    ///   five affinity names, so several [`SqlType`]s collapse to one on the round trip; fold each pin to
+    ///   that affinity's canonical representative (see [`canonical_sqlite_pin_type`]).
+    /// - **The `LIKE` case-sensitivity flag.** SQLite renders both `case_insensitive` states as plain
+    ///   `LIKE` (it has no `ILIKE`), which the reverse parser reads back as `false`; fold every
+    ///   [`ExprNode::Like`](squealy::ExprNode::Like) in the body to `false` so an authored `ILIKE` does not
+    ///   churn (mirrors [`canonical_check_expression`](Self::canonical_check_expression) /
+    ///   [`canonical_index_predicate`](Self::canonical_index_predicate), which fold it on checks/predicates).
+    fn canonical_view_body(&self, mut body: squealy::ViewBody) -> squealy::ViewBody {
+        body.map_sources(&|source| source.schema = None);
+        body.map_result_pins(&canonical_sqlite_pin_type);
+        body.map_exprs(&|expr| {
+            if let squealy::ExprNode::Like {
+                case_insensitive, ..
+            } = expr
+            {
+                *case_insensitive = false;
+            }
+        });
+        body
+    }
+
     /// SQLite's only identity mechanism is `AUTOINCREMENT`, which introspects back as
     /// [`IdentityMode::AutoIncrement`]. Map every declared mode to it so a crate-declared
     /// `auto_increment` column (which enters the model as `ByDefault`) does not churn as an ambiguous
@@ -407,6 +438,53 @@ impl SchemaIntrospect for SqliteConnection {
             },
             _ => default.clone(),
         }
+    }
+}
+
+/// Folds a result-pin [`SqlType`](squealy::SqlType) to the canonical representative SQLite introspection
+/// yields for it. A view body's `CAST(<call> AS <type>)` pin renders with one of SQLite's five affinity
+/// names (`write_cast_type` == [`sqlite_affinity`](crate::sql::sqlite_affinity)), the lossiest cast
+/// vocabulary of the three backends — every integer width **and `Bool`** collapse to `INTEGER`, every
+/// text-like type to `TEXT`, both binary widths to `BLOB`, and any `Decimal` to bare `NUMERIC` — so the
+/// stored DDL re-renders each pin with the same keyword the reverse parser (`invert_sqlite_cast_type` in
+/// `squealy-parse`) inverts to one representative. This is exactly `invert_sqlite_cast_type(sqlite_affinity
+/// (ty))`, written directly off `sqlite_affinity`'s groupings so mapping the desired side's narrower pin to
+/// the same representative lets a published view re-plan to empty:
+/// - `INTEGER` affinity → `I64`;
+/// - `REAL` affinity → `F64`;
+/// - `TEXT` affinity (incl. `Date`/`Time`/`Timestamp`/`Uuid`/`Json`/`Jsonb`) → `Text`;
+/// - `BLOB` affinity → `Bytes` (a view *pin* renders bare `BLOB`, so — unlike a `FixedBytes` *column*,
+///   whose width a generated length `CHECK` preserves — the pin fold collapses `FixedBytes` → `Bytes`;
+///   this deliberately differs from [`canonical_sql_type`](SqliteConnection::canonical_sql_type));
+/// - `NUMERIC` affinity → `Decimal { precision: 10, scale: 0 }` (the affinity drops the precision, which
+///   `decimal_from_exact(None)` cannot recover);
+/// - a `Raw` pin's affinity is its own text, which does not invert to a known type, so it is left unchanged.
+fn canonical_sqlite_pin_type(ty: &SqlType) -> SqlType {
+    use SqlType::{
+        Bool, Bytes, Char, Date, Decimal, F32, F64, FixedBytes, I8, I16, I32, I64, I128, Isize,
+        Json, Jsonb, Raw, String as SqlString, Text, Time, Timestamp, U8, U16, U32, U64, U128,
+        Usize, Uuid, Varchar,
+    };
+    match ty {
+        Bool | I8 | I16 | I32 | I64 | I128 | Isize | U8 | U16 | U32 | U64 | U128 | Usize => I64,
+        F32 | F64 => F64,
+        SqlString
+        | Varchar(_)
+        | Char(_)
+        | Text
+        | Date
+        | Time { .. }
+        | Timestamp { .. }
+        | Uuid
+        | Json
+        | Jsonb => Text,
+        Bytes | FixedBytes(_) => Bytes,
+        Decimal { .. } => Decimal {
+            precision: 10,
+            scale: 0,
+        },
+        // A `Raw` pin's affinity is its own text, which `invert_sqlite_cast_type` maps to `None`; leave it.
+        Raw(_) => ty.clone(),
     }
 }
 
@@ -690,6 +768,113 @@ async fn finish_transaction<T>(
                 transaction.finalize();
             }
             Err(error)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use squealy::SqlType::{
+        self, Bool, Bytes, Char, Date, Decimal, F32, F64, FixedBytes, I8, I16, I32, I64, I128,
+        Isize, Json, Jsonb, Raw, String as SqlString, Text, Time, Timestamp, U8, U16, U32, U64,
+        U128, Usize, Uuid, Varchar,
+    };
+
+    use super::canonical_sqlite_pin_type;
+
+    #[test]
+    fn canonical_sqlite_pin_type_collapses_each_affinity_group() {
+        // Every integer width and `Bool` share the `INTEGER` affinity → fold to `I64`.
+        for ty in [
+            Bool, I8, I16, I32, I64, I128, Isize, U8, U16, U32, U64, U128, Usize,
+        ] {
+            assert_eq!(
+                canonical_sqlite_pin_type(&ty),
+                I64,
+                "{ty:?} → INTEGER → I64"
+            );
+        }
+        // `REAL` affinity → `F64`.
+        for ty in [F32, F64] {
+            assert_eq!(canonical_sqlite_pin_type(&ty), F64, "{ty:?} → REAL → F64");
+        }
+        // Every text-like type (including the temporal, `Uuid`, and JSON types) → `TEXT` → `Text`.
+        for ty in [
+            SqlString,
+            Varchar(255),
+            Char(36),
+            Text,
+            Date,
+            Time {
+                tz: false,
+                precision: Some(6),
+            },
+            Timestamp {
+                tz: true,
+                precision: None,
+            },
+            Uuid,
+            Json,
+            Jsonb,
+        ] {
+            assert_eq!(canonical_sqlite_pin_type(&ty), Text, "{ty:?} → TEXT → Text");
+        }
+        // Both binary widths → `BLOB` → `Bytes` (a view pin renders bare `BLOB`, so a `FixedBytes` pin
+        // collapses too — unlike a `FixedBytes` column, whose width a generated `CHECK` preserves).
+        for ty in [Bytes, FixedBytes(16)] {
+            assert_eq!(
+                canonical_sqlite_pin_type(&ty),
+                Bytes,
+                "{ty:?} → BLOB → Bytes"
+            );
+        }
+        // Any `Decimal` → bare `NUMERIC`, whose precision is unrecoverable → `Decimal { 10, 0 }`.
+        assert_eq!(
+            canonical_sqlite_pin_type(&Decimal {
+                precision: 20,
+                scale: 4,
+            }),
+            Decimal {
+                precision: 10,
+                scale: 0,
+            },
+        );
+        // A `Raw` pin's affinity is its own text, which does not invert to a known type → left unchanged.
+        assert_eq!(
+            canonical_sqlite_pin_type(&Raw("MYTYPE".to_owned())),
+            Raw("MYTYPE".to_owned()),
+        );
+    }
+
+    #[test]
+    fn canonical_sqlite_pin_type_is_idempotent() {
+        let types: [SqlType; 12] = [
+            Bool,
+            U32,
+            F32,
+            SqlString,
+            Uuid,
+            Timestamp {
+                tz: true,
+                precision: Some(3),
+            },
+            FixedBytes(8),
+            Bytes,
+            Decimal {
+                precision: 20,
+                scale: 4,
+            },
+            Text,
+            I128,
+            Raw("MYTYPE".to_owned()),
+        ];
+        for ty in types {
+            let once = canonical_sqlite_pin_type(&ty);
+            assert_eq!(
+                canonical_sqlite_pin_type(&once),
+                once,
+                "{ty:?} did not stabilize"
+            );
         }
     }
 }
