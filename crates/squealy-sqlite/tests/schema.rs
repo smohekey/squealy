@@ -6,10 +6,12 @@
 //! bookkeeping stores.
 
 use squealy::{
-    CheckModel, ColumnExpr, ColumnMode, ColumnModel, ColumnName, Constraint, Database,
-    DatabaseModel, DdlExecutor, ForeignKeyModel, IdentityMode, IdentityModel, IndexModel, Schema,
-    SchemaConnect, SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore,
-    SchemaRefactorStore, SqlType, Table, TableModel,
+    AggregateFunc, CheckModel, ColumnExpr, ColumnMode, ColumnModel, ColumnName, CompareOp,
+    Constraint, Database, DatabaseModel, DdlExecutor, ExprNode, ForeignKeyModel, IdentityMode,
+    IdentityModel, IndexModel, ModelConn, ProjectionItem, QueryBuilder, Schema, SchemaConnect,
+    SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore, SchemaRefactorStore, SchemaView,
+    SourceItem, SourceQuery, SourceRef, SqlType, Table, TableModel, View, ViewBody,
+    ViewColumnModel, ViewDefinition, ViewModel, ViewQueryModel, ViewSelect,
 };
 use squealy_sqlite::{Sqlite, SqliteConnection};
 
@@ -56,12 +58,58 @@ struct Repository<'scope, C: ColumnMode = ColumnExpr> {
     slug: C::Type<'scope, String>,
 }
 
+// A filtered/projected single-`SELECT` view over `users`. Its body is exactly the shape
+// `read_create_view` reconstructs from SQLite's stored `CREATE VIEW` text — with the schema qualifier
+// suppressed, so the reconstructed source is unqualified (`schema: None`) while the desired body carries
+// `Some("app")`; `canonical_view_body` flattens both to `None`. The `active = true` filter renders as
+// `"active" = TRUE` on SQLite (which recognizes the `TRUE` keyword), round-tripping to a `Literal("TRUE")`
+// on both sides so it re-plans to empty.
+#[allow(dead_code)]
+#[derive(View)]
+#[schema(App)]
+struct ActiveUser<'scope, C: ColumnMode = ColumnExpr> {
+    id: C::Type<'scope, i32>,
+    name: C::Type<'scope, String>,
+}
+
+impl<'scope, C: ColumnMode> ViewDefinition for ActiveUser<'scope, C> {
+    fn definition(db: &'static ModelConn) -> impl ViewSelect<Row = <Self as SchemaView>::Row> {
+        db.from::<User>()
+            .where_(|user| user.active.equals(true))
+            .project(|(user,)| (user.id, user.name))
+    }
+}
+
+// A grouped/aggregated view: `SELECT active, count(id) … GROUP BY active`. `count(id)` renders without a
+// result-pin cast (an unpinned aggregate, `result: None`), so this exercises a `GROUP BY` body and the
+// aggregate reconstruction alongside the schema-qualifier flatten. (The pin fold itself is covered by
+// `canonical_sqlite_pin_type`'s unit tests.)
+#[allow(dead_code)]
+#[derive(View)]
+#[schema(App)]
+struct UserCountByActive<'scope, C: ColumnMode = ColumnExpr> {
+    active: C::Type<'scope, bool>,
+    count: C::Type<'scope, i64>,
+}
+
+impl<'scope, C: ColumnMode> ViewDefinition for UserCountByActive<'scope, C> {
+    fn definition(db: &'static ModelConn) -> impl ViewSelect<Row = <Self as SchemaView>::Row> {
+        db.from::<User>()
+            .group_by(|(user,)| user.active)
+            .project(|(user,)| (user.active, user.id.count()))
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Schema)]
 struct App {
     users: User<'static, ColumnName>,
     posts: Post<'static, ColumnName>,
     repositorys: Repository<'static, ColumnName>,
+    #[view]
+    active_users: ActiveUser<'static, ColumnName>,
+    #[view]
+    user_counts: UserCountByActive<'static, ColumnName>,
 }
 
 #[allow(dead_code)]
@@ -145,10 +193,100 @@ fn expected_introspected_model() -> DatabaseModel {
         })
     };
 
+    // A `q0_0`-aliased column reference on the sole `users` source, as the reverse parser reconstructs it.
+    let user_col = |column: &str| ExprNode::Column {
+        alias: "q0_0".to_owned(),
+        column: column.to_owned(),
+    };
+    let users_source = || {
+        Some(SourceItem::Named(SourceRef {
+            schema: None,
+            name: "users".to_owned(),
+            alias: "q0_0".to_owned(),
+        }))
+    };
+
     DatabaseModel {
         schemas: vec![SchemaModel {
             name: None,
-            views: Vec::new(),
+            // Views come back in `sqlite_master` name order: active_users, user_count_by_actives. SQLite
+            // reconstructs each body from the stored `CREATE VIEW` text — with the schema qualifier
+            // suppressed (source `schema: None`) and columns typed as the `Bytes` sentinel (SQLite cannot
+            // type a view output). The `active = true` filter round-trips as `Literal("TRUE")`, and
+            // `count(id)` deparses without a result-pin cast (`result: None`).
+            views: vec![
+                ViewModel {
+                    name: "active_users".to_owned(),
+                    comment: None,
+                    columns: vec![
+                        ViewColumnModel {
+                            name: "id".to_owned(),
+                            ty: SqlType::Bytes,
+                            nullable: false,
+                        },
+                        ViewColumnModel {
+                            name: "name".to_owned(),
+                            ty: SqlType::Bytes,
+                            nullable: false,
+                        },
+                    ],
+                    query: ViewBody::Select(Box::new(ViewQueryModel {
+                        projection: vec![
+                            ProjectionItem {
+                                output_name: "id".to_owned(),
+                                expr: user_col("id"),
+                            },
+                            ProjectionItem {
+                                output_name: "name".to_owned(),
+                                expr: user_col("name"),
+                            },
+                        ],
+                        from: users_source(),
+                        filter: Some(ExprNode::Compare {
+                            op: CompareOp::Equals,
+                            left: Box::new(user_col("active")),
+                            right: Box::new(ExprNode::Literal("TRUE".to_owned())),
+                        }),
+                        ..ViewQueryModel::default()
+                    })),
+                },
+                ViewModel {
+                    name: "user_count_by_actives".to_owned(),
+                    comment: None,
+                    columns: vec![
+                        ViewColumnModel {
+                            name: "active".to_owned(),
+                            ty: SqlType::Bytes,
+                            nullable: false,
+                        },
+                        ViewColumnModel {
+                            name: "count".to_owned(),
+                            ty: SqlType::Bytes,
+                            nullable: false,
+                        },
+                    ],
+                    query: ViewBody::Select(Box::new(ViewQueryModel {
+                        projection: vec![
+                            ProjectionItem {
+                                output_name: "active".to_owned(),
+                                expr: user_col("active"),
+                            },
+                            ProjectionItem {
+                                output_name: "count".to_owned(),
+                                expr: ExprNode::Aggregate {
+                                    func: AggregateFunc::Count,
+                                    distinct: false,
+                                    operand: Box::new(user_col("id")),
+                                    result: None,
+                                },
+                            },
+                        ],
+                        from: users_source(),
+                        group_by: vec![user_col("active")],
+                        ..ViewQueryModel::default()
+                    })),
+                },
+            ],
             // Tables come back in `sqlite_master` name order: posts, repositorys, users.
             tables: vec![
                 TableModel {

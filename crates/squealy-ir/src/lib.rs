@@ -763,6 +763,43 @@ impl ViewBody {
             }
         }
     }
+
+    /// Rewrites every [`SourceRef`] reachable from the body in place by applying `f`, recursing through
+    /// set-operation arms, `WITH` CTEs, derived-table subqueries, and scalar/`IN`/`EXISTS` subqueries —
+    /// the mutable analog of [`referenced_sources`](ViewModel::referenced_sources)'s traversal.
+    ///
+    /// A backend's `canonical_view_body` uses this — on **both** the desired and the introspected model —
+    /// to reconcile a source-qualifier the backend does not round-trip. SQLite has no namespaces, so it
+    /// suppresses the schema qualifier when rendering a view body: an introspected body's every
+    /// `SourceRef.schema` reads back `None`, while a `from_database` desired body carries the mapped
+    /// `Some("app")`. Flattening both sides to `None` lets a published view re-plan to empty (mirrors how
+    /// [`canonical_schema_name`](crate::SchemaIntrospect::canonical_schema_name) flattens the top-level
+    /// schema). Unlike [`referenced_sources`], this visits **every** `SourceRef` — including one bound to a
+    /// `WITH` CTE (flattening its already-unqualified schema is a no-op) and the introspected
+    /// `dependencies` — so a new source-bearing shape is handled uniformly.
+    pub fn map_sources(&mut self, f: &impl Fn(&mut SourceRef)) {
+        match self {
+            ViewBody::Select(query) => map_query_sources(query, f),
+            ViewBody::Set {
+                left,
+                right,
+                order_by,
+                ..
+            } => {
+                left.map_sources(f);
+                right.map_sources(f);
+                for order in order_by {
+                    map_expr_sources(&mut order.expr, f);
+                }
+            }
+            ViewBody::With { ctes, body, .. } => {
+                for cte in ctes {
+                    cte.body.map_sources(f);
+                }
+                body.map_sources(f);
+            }
+        }
+    }
 }
 
 /// Applies `f` to every result pin reachable from a single `SELECT` body (see
@@ -943,6 +980,153 @@ fn map_case_arms(
     }
     if let Some(else_) = else_ {
         map_expr_result_pins(else_, f);
+    }
+}
+
+/// Applies `f` to every [`SourceRef`] reachable from a single `SELECT` body, recursing through subqueries
+/// (see [`ViewBody::map_sources`]). Mirrors [`collect_query_sources`], including the introspected
+/// `dependencies`.
+fn map_query_sources(query: &mut ViewQueryModel, f: &impl Fn(&mut SourceRef)) {
+    for dependency in &mut query.dependencies {
+        f(dependency);
+    }
+    if let Some(from) = &mut query.from {
+        map_source_item_sources(from, f);
+    }
+    for join in &mut query.joins {
+        map_source_item_sources(&mut join.source, f);
+        if let Some(on) = &mut join.on {
+            map_expr_sources(on, f);
+        }
+    }
+    for item in &mut query.projection {
+        map_expr_sources(&mut item.expr, f);
+    }
+    if let Some(filter) = &mut query.filter {
+        map_expr_sources(filter, f);
+    }
+    for expr in &mut query.group_by {
+        map_expr_sources(expr, f);
+    }
+    if let Some(having) = &mut query.having {
+        map_expr_sources(having, f);
+    }
+    for order in &mut query.order_by {
+        map_expr_sources(&mut order.expr, f);
+    }
+}
+
+/// Applies `f` to the [`SourceRef`]s of a `FROM`/`JOIN` source: a named relation is one itself; a derived
+/// table's body is walked (its alias is a local binding, not a source).
+fn map_source_item_sources(source: &mut SourceItem, f: &impl Fn(&mut SourceRef)) {
+    match source {
+        SourceItem::Named(named) => f(named),
+        SourceItem::Derived { query, .. } => query.map_sources(f),
+    }
+}
+
+/// Applies `f` to every [`SourceRef`] reachable from an expression, recursing into scalar/`IN`/`EXISTS`
+/// subqueries (see [`ViewBody::map_sources`]). Exhaustive over [`ExprNode`], mirroring
+/// [`collect_expr_sources`], so a new source-bearing variant is a compile error here rather than a
+/// silently-unvisited source.
+fn map_expr_sources(expr: &mut ExprNode, f: &impl Fn(&mut SourceRef)) {
+    match expr {
+        ExprNode::Column { .. }
+        | ExprNode::BareColumn { .. }
+        | ExprNode::Literal(_)
+        | ExprNode::Raw(_)
+        | ExprNode::Now => {}
+        ExprNode::Binary { left, right, .. }
+        | ExprNode::Compare { left, right, .. }
+        | ExprNode::Logical { left, right, .. }
+        | ExprNode::Nullif { left, right, .. } => {
+            map_expr_sources(left, f);
+            map_expr_sources(right, f);
+        }
+        ExprNode::Cast { operand, .. } | ExprNode::Aggregate { operand, .. } => {
+            map_expr_sources(operand, f);
+        }
+        ExprNode::Not(operand) | ExprNode::IsNull { operand, .. } => map_expr_sources(operand, f),
+        ExprNode::Like {
+            operand, pattern, ..
+        } => {
+            map_expr_sources(operand, f);
+            map_expr_sources(pattern, f);
+        }
+        ExprNode::In { operand, items, .. } => {
+            map_expr_sources(operand, f);
+            for item in items {
+                map_expr_sources(item, f);
+            }
+        }
+        ExprNode::Between {
+            operand, low, high, ..
+        } => {
+            map_expr_sources(operand, f);
+            map_expr_sources(low, f);
+            map_expr_sources(high, f);
+        }
+        ExprNode::ScalarSubquery(subquery) | ExprNode::Exists { subquery, .. } => {
+            map_query_sources(subquery, f);
+        }
+        ExprNode::InSubquery {
+            operand, subquery, ..
+        } => {
+            map_expr_sources(operand, f);
+            map_query_sources(subquery, f);
+        }
+        ExprNode::Window {
+            args,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            for arg in args {
+                map_expr_sources(arg, f);
+            }
+            for partition in partition_by {
+                map_expr_sources(partition, f);
+            }
+            for order in order_by {
+                map_expr_sources(&mut order.expr, f);
+            }
+        }
+        ExprNode::Case { arms, else_, .. } => {
+            for arm in arms {
+                map_expr_sources(&mut arm.when, f);
+                map_expr_sources(&mut arm.then, f);
+            }
+            if let Some(else_) = else_ {
+                map_expr_sources(else_, f);
+            }
+        }
+        ExprNode::SimpleCase {
+            operand,
+            arms,
+            else_,
+            ..
+        } => {
+            map_expr_sources(operand, f);
+            for arm in arms {
+                map_expr_sources(&mut arm.when, f);
+                map_expr_sources(&mut arm.then, f);
+            }
+            if let Some(else_) = else_ {
+                map_expr_sources(else_, f);
+            }
+        }
+        ExprNode::Coalesce { args, .. }
+        | ExprNode::ScalarFn { args, .. }
+        | ExprNode::Function { args, .. } => {
+            for arg in args {
+                map_expr_sources(arg, f);
+            }
+        }
+        ExprNode::Extract { operand, .. }
+        | ExprNode::DateTrunc { operand, .. }
+        | ExprNode::ExtractSecond { operand, .. } => {
+            map_expr_sources(operand, f);
+        }
     }
 }
 
@@ -1784,6 +1968,85 @@ mod tests {
             panic!("expected a Select derived body")
         };
         assert_eq!(derived.projection[0].expr, case_pin(SqlType::I16));
+    }
+
+    fn named(schema: &str, name: &str, alias: &str) -> SourceItem {
+        SourceItem::Named(SourceRef {
+            schema: Some(schema.to_owned()),
+            name: name.to_owned(),
+            alias: alias.to_owned(),
+        })
+    }
+
+    #[test]
+    fn map_sources_flattens_every_nested_schema() {
+        // A body exercising every recursion path at once: a `WITH` whose CTE selects from a qualified
+        // source, wrapping a `UNION` whose left arm has a qualified `FROM` plus an `EXISTS` subquery over
+        // another qualified source, and whose right arm selects from a derived table over a qualified
+        // source. `map_sources` must reach and rewrite them all.
+        let cte = CteModel {
+            name: "c".to_owned(),
+            columns: Vec::new(),
+            body: ViewBody::Select(Box::new(ViewQueryModel {
+                from: Some(named("app", "base", "q0_0")),
+                ..project("b", bare("b"))
+            })),
+        };
+        let left = ViewBody::Select(Box::new(ViewQueryModel {
+            from: Some(named("app", "left", "q0_0")),
+            filter: Some(ExprNode::Exists {
+                negated: false,
+                subquery: Box::new(ViewQueryModel {
+                    from: Some(named("app", "sub", "q1_0")),
+                    ..project("s", bare("s"))
+                }),
+            }),
+            ..project("l", bare("l"))
+        }));
+        let right = ViewBody::Select(Box::new(ViewQueryModel {
+            from: Some(SourceItem::Derived {
+                query: Box::new(ViewBody::Select(Box::new(ViewQueryModel {
+                    from: Some(named("app", "derived", "q2_0")),
+                    ..project("d", bare("d"))
+                }))),
+                alias: "d".to_owned(),
+            }),
+            ..project("d", bare("d"))
+        }));
+        let mut body = ViewBody::With {
+            recursive: false,
+            ctes: vec![cte],
+            body: Box::new(ViewBody::Set {
+                op: ViewSetOp::Union,
+                all: false,
+                left: Box::new(left),
+                right: Box::new(right),
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+            }),
+        };
+
+        body.map_sources(&|source| source.schema = None);
+
+        // Every reachable source — both set arms, the EXISTS subquery, and the derived table — now
+        // carries `schema: None` (the schema-qualifier flatten a SQLite view diff needs). `collect_body_
+        // sources` drops CTE-bound names, so it does not see the CTE's own body; that is asserted below.
+        let mut sources = Vec::new();
+        collect_body_sources(&body, &mut sources);
+        assert!(!sources.is_empty());
+        assert!(sources.iter().all(|source| source.schema.is_none()));
+        // Confirm the CTE's own body (which the collector skips) was flattened too.
+        let ViewBody::With { ctes, .. } = &body else {
+            panic!("expected a WITH body")
+        };
+        let ViewBody::Select(cte_body) = &ctes[0].body else {
+            panic!("expected a Select CTE body")
+        };
+        let Some(SourceItem::Named(source)) = &cte_body.from else {
+            panic!("expected a named FROM in the CTE body")
+        };
+        assert_eq!(source.schema, None);
     }
 
     #[test]
