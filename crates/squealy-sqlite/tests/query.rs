@@ -395,3 +395,28 @@ fn sqlite_scoped_recursive_arm_to_sql_still_panics() {
         .select(|(ancestor,)| (ancestor.id, ancestor.depth));
     let _ = query.to_sql();
 }
+
+#[derive(Clone, Debug, PartialEq, Table)]
+struct Lineage<'scope, C: ColumnMode = ColumnExpr> {
+    node_id: C::Type<'scope, i32>,
+    depth: C::Type<'scope, i32>,
+}
+
+#[test]
+fn sqlite_scoped_recursive_arm_insert_select_collect_params_returns_render_error() {
+    // `INSERT … SELECT` whose source references the unrenderable recursive CTE: the params collector
+    // must surface the render reject too (not swallow it and return `Ok`), matching select/set params.
+    let query = Sqlite.to::<Lineage>().insert_select(
+        |lineage| (lineage.node_id, lineage.depth),
+        Sqlite
+            .from::<BoundedAncestor>()
+            .select(|(ancestor,)| (ancestor.id, ancestor.depth)),
+    );
+    let error = query
+        .collect_params()
+        .expect_err("SQLite cannot render a scoped recursive CTE arm in the source");
+    assert!(
+        matches!(error, SqliteError::Render(_)),
+        "expected a render error, got {error:?}"
+    );
+}

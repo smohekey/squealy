@@ -1207,6 +1207,8 @@ where
     Returning: RenderProjectable<Conn::Backend>,
 {
     let mut writer = ParamCollector::<Conn::Backend>::new(params);
+    // The source may be an unrenderable CTE shape (a scoped recursive arm on SQLite); surface that
+    // render reject rather than swallowing it, so `collect_params()` mirrors the select/set params path.
     write_insert_select_with_params::<S, Conn, _, _, _>(
         dialect,
         columns,
@@ -1214,7 +1216,7 @@ where
         returning,
         &mut writer,
     )
-    .ok();
+    .map_err(<Conn::Backend as Backend>::render_error)?;
     writer.finish()
 }
 
@@ -1578,6 +1580,8 @@ where
     Returning: RenderProjectable<B>,
 {
     let mut writer = ParamCollector::<B>::new(params);
+    // Propagate a render reject rather than swallowing it (uniform with the other params collectors),
+    // though a correlated-update source is a `SchemaTable` and so carries no unrenderable CTE shape.
     write_update_from_with_params::<S, O, B, _, _, _, _>(
         dialect,
         target_alias,
@@ -1587,7 +1591,7 @@ where
         returning,
         &mut writer,
     )
-    .ok();
+    .map_err(<B as Backend>::render_error)?;
     writer.finish()
 }
 
@@ -1765,6 +1769,8 @@ where
     Returning: RenderProjectable<B>,
 {
     let mut writer = ParamCollector::<B>::new(params);
+    // Propagate a render reject rather than swallowing it (uniform with the other params collectors),
+    // though a correlated-delete source is a `TableProjection` and so carries no unrenderable CTE shape.
     write_delete_using_with_params::<S, O, B, _, _, _>(
         dialect,
         target_alias,
@@ -1773,7 +1779,7 @@ where
         returning,
         &mut writer,
     )
-    .ok();
+    .map_err(<B as Backend>::render_error)?;
     writer.finish()
 }
 
