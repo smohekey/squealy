@@ -3,7 +3,7 @@ use std::io::{self, Write};
 
 use crate::{
     CheckModel, Constraint, DatabaseModel, DatabasePlan, DefaultValue, ForeignKeyModel,
-    IdentityMode, IndexMethod, SqlType, Table,
+    IdentityMode, IndexMethod, SqlType, Table, ViewBody,
 };
 
 /// Backend-specific row cursor used while decoding a projected row.
@@ -370,6 +370,24 @@ pub trait SchemaIntrospect {
     /// physical type as table columns (e.g. MySQL `BINARY(N)`).
     fn canonical_view_column_type(&self, ty: &SqlType) -> SqlType {
         self.canonical_sql_type(ty)
+    }
+
+    /// Canonicalizes a reconstructed view [`ViewBody`] to the structural form this backend's
+    /// introspection produces, so a squealy-published view whose body is now reconstructed by the reverse
+    /// parser re-plans to empty instead of churning a `CREATE OR REPLACE VIEW` every run.
+    ///
+    /// The one structural divergence a reconstructed body carries is the **result pin**: the renderer
+    /// wraps an aggregate / window / `EXTRACT` / `CASE` / `NULLIF` / `COALESCE` in a `CAST(<call> AS ty)`
+    /// so the output column matches the view's declared type, but a dialect's cast vocabulary is
+    /// many-to-one — several [`SqlType`]s render to the same keyword — so a narrower/tz-carrying authored
+    /// pin round-trips through `pg_get_viewdef` / `VIEW_DEFINITION` introspection as the keyword's
+    /// canonical representative. Applied — via [`ViewBody::map_result_pins`] — to **both** the desired and
+    /// the introspected model in [`canonicalize_model`](crate::canonicalize_model), an override folds each
+    /// pin to that representative on both sides so the structural comparison holds. The default is the
+    /// identity, which suits a backend whose cast spellings are one-to-one or that does not yet
+    /// reconstruct view bodies.
+    fn canonical_view_body(&self, body: ViewBody) -> ViewBody {
+        body
     }
 
     /// Canonicalizes a logical [`IdentityMode`] to the form this backend's introspection produces.

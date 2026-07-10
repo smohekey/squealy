@@ -354,7 +354,19 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
         for view in &mut schema.views {
             for column in &mut view.columns {
                 column.ty = connection.canonical_view_column_type(&column.ty);
+                // A view's DDL carries no per-column NOT NULL, and introspection cannot reliably recover
+                // nullability (PostgreSQL reports view outputs as nullable regardless of the underlying
+                // column), so it is not a distinguishing feature of a view. Normalize it to one value on
+                // both sides — otherwise a reconstructed view body, now compared structurally, would churn
+                // on a nullability difference (a non-null underlying column vs the nullable introspected
+                // output). This generalizes the body-unknown branch, which already compares view columns
+                // ignoring nullability (see `diff_models`).
+                column.nullable = true;
             }
+            // Fold the reconstructed body's result-pin types to the backend's canonical representative
+            // (many cast spellings are many-to-one), so a published view whose body is now reconstructed
+            // by the reverse parser compares equal to its introspected form instead of churning.
+            view.query = connection.canonical_view_body(std::mem::take(&mut view.query));
         }
     }
     // A schema-less backend flattens every namespace to the same (default) name, so two source schemas
@@ -917,6 +929,50 @@ mod tests {
         assert_eq!(canonical.schemas[0].views[0].columns[0].ty, SqlType::Bytes);
     }
 
+    #[test]
+    fn canonicalize_model_folds_view_body_result_pins() {
+        let view = ViewModel {
+            name: "totals".to_owned(),
+            comment: None,
+            columns: vec![ViewColumnModel {
+                name: "s".to_owned(),
+                ty: SqlType::I8,
+                nullable: false,
+            }],
+            query: ViewBody::Select(Box::new(ViewQueryModel {
+                projection: vec![ProjectionItem {
+                    output_name: "s".to_owned(),
+                    expr: ExprNode::Aggregate {
+                        func: squealy::AggregateFunc::Sum,
+                        distinct: false,
+                        operand: Box::new(ExprNode::BareColumn {
+                            column: "x".to_owned(),
+                        }),
+                        result: Some(SqlType::I8),
+                    },
+                }],
+                ..Default::default()
+            })),
+        };
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![],
+                views: vec![view],
+            }],
+        };
+
+        let canonical = canonicalize_model(&CanonBackend, &model);
+        let ViewBody::Select(query) = &canonical.schemas[0].views[0].query else {
+            panic!("expected a Select body")
+        };
+        // The backend's `canonical_view_body` folded the aggregate's `I8` result pin to the canonical `I16`.
+        let ExprNode::Aggregate { result, .. } = &query.projection[0].expr else {
+            panic!("expected an aggregate projection")
+        };
+        assert_eq!(*result, Some(SqlType::I16));
+    }
+
     /// A backend whose introspection canonical form mirrors MySQL: bare `String` reads back as
     /// `Varchar(255)`, any identity is `AUTO_INCREMENT`, and a plain index has an explicit `BTREE`
     /// method with ASC directions.
@@ -945,6 +1001,15 @@ mod tests {
 
         fn canonical_identity_mode(&self, _mode: &squealy::IdentityMode) -> squealy::IdentityMode {
             squealy::IdentityMode::AutoIncrement
+        }
+
+        // A backend whose result-pin cast vocabulary collapses `I8` to a wider canonical `I16`.
+        fn canonical_view_body(&self, mut body: squealy::ViewBody) -> squealy::ViewBody {
+            body.map_result_pins(&|ty| match ty {
+                SqlType::I8 => SqlType::I16,
+                other => other.clone(),
+            });
+            body
         }
 
         fn default_index_method(&self) -> Option<IndexMethod> {

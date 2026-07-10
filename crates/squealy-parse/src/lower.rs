@@ -84,7 +84,9 @@ pub fn lower_expr(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadErro
 /// (multiple `FROM` entries), `USING`/`NATURAL` joins, a wildcard projection, or a non-integer
 /// `LIMIT`/`OFFSET` — return [`ReadError::NotYetLowered`] (they land in later phases).
 pub fn lower_query(query: &Query, dialect: SqlDialect) -> Result<ViewBody, ReadError> {
-    lower_body(query, None, false, dialect)
+    let mut body = lower_body(query, None, false, dialect)?;
+    resolve_single_source_columns(&mut body);
+    Ok(body)
 }
 
 /// Lowers a parsed `CREATE VIEW` into its body [`ViewBody`]. When the statement carries a declared column
@@ -115,7 +117,9 @@ pub fn lower_create_view(
     } else {
         Some(names.as_slice())
     };
-    lower_body(&create_view.query, names, false, dialect)
+    let mut body = lower_body(&create_view.query, names, false, dialect)?;
+    resolve_single_source_columns(&mut body);
+    Ok(body)
 }
 
 /// The shared query-lowering core: a full [`Query`] (its `WITH`/`ORDER BY`/`LIMIT` plus a `SetExpr` body)
@@ -2213,6 +2217,234 @@ fn lower_select(
     })
 }
 
+/// Binds the unqualified column references a single-source view-body scope carries to that scope's sole
+/// source alias, turning each [`ExprNode::BareColumn`] into an [`ExprNode::Column`].
+///
+/// A deparser (PostgreSQL's `pg_get_viewdef`, and others) drops the alias qualifier from a column when the
+/// enclosing `SELECT` has a single source — the reference is unambiguous — so a bare `col` arrives where
+/// the forward path (which always qualifies) rendered `<alias>.col`. Re-binding it makes a squealy-published
+/// single-source view's reconstructed body compare structurally equal to the crate model instead of churning
+/// a `CREATE OR REPLACE VIEW` every plan. Applied only to view bodies (via [`lower_query`] /
+/// [`lower_create_view`]), never to the scalar-expression readers, whose bare columns (constraint /
+/// generated / index expressions) are genuinely unqualified.
+///
+/// Resolution is per **scope**: each `SELECT` resolves its own bare columns against its own single source,
+/// and a nested scope — a set-operation arm, a `WITH` CTE or body, a derived-table subquery, or a
+/// scalar/`IN`/`EXISTS` subquery inside an expression — resolves against its own sources, not the enclosing
+/// one. A deparser qualifies a cross-scope (correlated) reference, so a surviving bare column always belongs
+/// to its own scope's single source; a multi-source (join) scope keeps its columns as-is (already qualified,
+/// and an unqualified one has no unique alias to bind to). Idempotent: a column already in
+/// [`ExprNode::Column`] form is left untouched.
+fn resolve_single_source_columns(body: &mut ViewBody) {
+    match body {
+        ViewBody::Select(query) => resolve_query_columns(query),
+        ViewBody::Set { left, right, .. } => {
+            resolve_single_source_columns(left);
+            resolve_single_source_columns(right);
+            // A set's own `ORDER BY` references the compound output columns by name (no source scope), so it
+            // is left as the deparser emits it — matching how the renderer emits a set-level `ORDER BY`.
+        }
+        ViewBody::With { ctes, body, .. } => {
+            for cte in ctes {
+                resolve_single_source_columns(&mut cte.body);
+            }
+            resolve_single_source_columns(body);
+        }
+    }
+}
+
+/// Resolves one `SELECT` scope (see [`resolve_single_source_columns`]).
+fn resolve_query_columns(query: &mut ViewQueryModel) {
+    // This scope's sole source alias, when it is single-source (one `FROM`, no joins).
+    let alias = match (&query.from, query.joins.is_empty()) {
+        (Some(from), true) => Some(from.alias().to_owned()),
+        _ => None,
+    };
+    let alias = alias.as_deref();
+
+    // A projection expression and a `WHERE`/`ON` predicate reference only source columns, so a bare column
+    // there is always a source column.
+    for item in &mut query.projection {
+        resolve_expr_columns(&mut item.expr, alias);
+    }
+    // A derived `FROM`/`JOIN` source is its own scope; a named source binds no columns.
+    if let Some(from) = &mut query.from {
+        resolve_source_columns(from);
+    }
+    for join in &mut query.joins {
+        resolve_source_columns(&mut join.source);
+        if let Some(on) = &mut join.on {
+            // A join condition spans every source, so its columns stay as the deparser qualified them.
+            resolve_expr_columns(on, None);
+        }
+    }
+    if let Some(filter) = &mut query.filter {
+        resolve_expr_columns(filter, alias);
+    }
+
+    // `GROUP BY`/`HAVING`/`ORDER BY` can name a projection **output alias** instead of a source column.
+    // This matters only when that output is a *computed* expression (`(amount * 2) AS total`): the
+    // renderer emits `ORDER BY total` bare (it cannot re-derive the expression), so a top-level bare term
+    // naming such an output is a genuine alias reference and is left as-is. A bare term that names a
+    // plain-column projection (`q.id AS id`) is *not* left bare — the deparser merely dequalified the
+    // source column `q.id` to `id`, and the desired model qualifies it, so it must be bound to the scope
+    // alias like any other source column. (A bare column *nested* in an expression — `ORDER BY total + 1`
+    // — is a source column, not an alias, so the guard is only for the top-level term.)
+    let computed_aliases: Vec<&str> = query
+        .projection
+        .iter()
+        .filter(|item| {
+            !matches!(
+                item.expr,
+                ExprNode::Column { .. } | ExprNode::BareColumn { .. }
+            )
+        })
+        .map(|item| item.output_name.as_str())
+        .collect();
+    for expr in &mut query.group_by {
+        resolve_clause_term_columns(expr, alias, &computed_aliases);
+    }
+    if let Some(having) = &mut query.having {
+        resolve_clause_term_columns(having, alias, &computed_aliases);
+    }
+    for order in &mut query.order_by {
+        resolve_clause_term_columns(&mut order.expr, alias, &computed_aliases);
+    }
+}
+
+/// Resolves a `GROUP BY`/`HAVING`/`ORDER BY` term, leaving a top-level bare column that names a
+/// *computed* projection output alias untouched (the renderer emits it bare — see
+/// [`resolve_query_columns`]); anything else resolves like an ordinary scope expression.
+fn resolve_clause_term_columns(
+    expr: &mut ExprNode,
+    alias: Option<&str>,
+    computed_aliases: &[&str],
+) {
+    if let ExprNode::BareColumn { column } = expr
+        && computed_aliases.contains(&column.as_str())
+    {
+        return;
+    }
+    resolve_expr_columns(expr, alias);
+}
+
+/// Recurses into a derived-table source's own scope; a named source binds no columns of its own.
+fn resolve_source_columns(source: &mut SourceItem) {
+    match source {
+        SourceItem::Named(_) => {}
+        SourceItem::Derived { query, .. } => resolve_single_source_columns(query),
+    }
+}
+
+/// Resolves the bare columns of one expression against `alias` (this scope's single source, or `None`),
+/// recursing into child expressions in the same scope and into nested subqueries as new scopes. Exhaustive
+/// over [`ExprNode`] so a new variant is a compile error here rather than a silently-unresolved column.
+fn resolve_expr_columns(expr: &mut ExprNode, alias: Option<&str>) {
+    match expr {
+        ExprNode::BareColumn { column } => {
+            if let Some(alias) = alias {
+                *expr = ExprNode::Column {
+                    alias: alias.to_owned(),
+                    column: std::mem::take(column),
+                };
+            }
+        }
+        // Nested query scopes resolve against their own sources.
+        ExprNode::ScalarSubquery(query) => resolve_query_columns(query),
+        ExprNode::Exists { subquery, .. } => resolve_query_columns(subquery),
+        ExprNode::InSubquery {
+            operand, subquery, ..
+        } => {
+            resolve_expr_columns(operand, alias);
+            resolve_query_columns(subquery);
+        }
+        // Child expressions in the same scope.
+        ExprNode::Binary { left, right, .. }
+        | ExprNode::Compare { left, right, .. }
+        | ExprNode::Logical { left, right, .. }
+        | ExprNode::Nullif { left, right, .. } => {
+            resolve_expr_columns(left, alias);
+            resolve_expr_columns(right, alias);
+        }
+        ExprNode::Cast { operand, .. }
+        | ExprNode::Aggregate { operand, .. }
+        | ExprNode::Not(operand)
+        | ExprNode::IsNull { operand, .. }
+        | ExprNode::Extract { operand, .. }
+        | ExprNode::DateTrunc { operand, .. }
+        | ExprNode::ExtractSecond { operand, .. } => resolve_expr_columns(operand, alias),
+        ExprNode::Like {
+            operand, pattern, ..
+        } => {
+            resolve_expr_columns(operand, alias);
+            resolve_expr_columns(pattern, alias);
+        }
+        ExprNode::In { operand, items, .. } => {
+            resolve_expr_columns(operand, alias);
+            for item in items {
+                resolve_expr_columns(item, alias);
+            }
+        }
+        ExprNode::Between {
+            operand, low, high, ..
+        } => {
+            resolve_expr_columns(operand, alias);
+            resolve_expr_columns(low, alias);
+            resolve_expr_columns(high, alias);
+        }
+        ExprNode::Window {
+            args,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            for arg in args {
+                resolve_expr_columns(arg, alias);
+            }
+            for part in partition_by {
+                resolve_expr_columns(part, alias);
+            }
+            for order in order_by {
+                resolve_expr_columns(&mut order.expr, alias);
+            }
+        }
+        ExprNode::Case { arms, else_, .. } => resolve_case_arm_columns(arms, else_, alias),
+        ExprNode::SimpleCase {
+            operand,
+            arms,
+            else_,
+            ..
+        } => {
+            resolve_expr_columns(operand, alias);
+            resolve_case_arm_columns(arms, else_, alias);
+        }
+        ExprNode::Coalesce { args, .. }
+        | ExprNode::ScalarFn { args, .. }
+        | ExprNode::Function { args, .. } => {
+            for arg in args {
+                resolve_expr_columns(arg, alias);
+            }
+        }
+        // Leaves — no nested expression, no column to resolve.
+        ExprNode::Column { .. } | ExprNode::Literal(_) | ExprNode::Raw(_) | ExprNode::Now => {}
+    }
+}
+
+/// Resolves every `WHEN`/`THEN` arm and the optional `ELSE` of a `CASE` body against `alias`.
+fn resolve_case_arm_columns(
+    arms: &mut [CaseArm],
+    else_: &mut Option<Box<ExprNode>>,
+    alias: Option<&str>,
+) {
+    for arm in arms {
+        resolve_expr_columns(&mut arm.when, alias);
+        resolve_expr_columns(&mut arm.then, alias);
+    }
+    if let Some(else_) = else_ {
+        resolve_expr_columns(else_, alias);
+    }
+}
+
 /// Rejects the query-level clauses a [`ViewBody`] does not represent, so they surface as
 /// [`ReadError::NotYetLowered`] rather than being silently discarded (which would re-render different
 /// SQL). The clauses this path *does* lower — `WITH` (rejected separately, 2.0c) and
@@ -2596,6 +2828,57 @@ mod tests {
             ViewBody::Set { .. } => panic!("expected a single-SELECT body, got a set operation"),
             ViewBody::With { .. } => panic!("expected a single-SELECT body, got a `WITH` prelude"),
         }
+    }
+
+    #[test]
+    fn single_source_view_columns_bind_to_the_source_alias() {
+        // PostgreSQL's `pg_get_viewdef` dequalifies an unambiguous single-source column, so the reader
+        // re-binds each bare column of a single-source view body to the sole source alias — in the
+        // projection, `WHERE`, and a `GROUP BY`/`ORDER BY` term naming a plain-column output (the deparser
+        // dequalified the source column; it is not an alias reference).
+        let col = |c: &str| ExprNode::Column {
+            alias: "q0_0".to_owned(),
+            column: c.to_owned(),
+        };
+        let query = low_query(
+            "SELECT id FROM \"public\".\"users\" q0_0 WHERE active = true GROUP BY id ORDER BY id",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        assert_eq!(query.projection[0].expr, col("id"));
+        assert_eq!(
+            query.filter,
+            Some(ExprNode::Compare {
+                op: CompareOp::Equals,
+                left: Box::new(col("active")),
+                right: Box::new(ExprNode::Literal("TRUE".to_owned())),
+            })
+        );
+        assert_eq!(query.group_by, vec![col("id")]);
+        assert_eq!(query.order_by[0].expr, col("id"));
+
+        // A *computed* projection output referenced by a clause is a genuine alias reference: it stays
+        // bare (the renderer emits `ORDER BY total`, which cannot be re-derived to the source expression).
+        // The bare source column *inside* that projection expression is still bound.
+        let query = low_query(
+            "SELECT (amount * 2) AS total FROM \"public\".\"t\" q0_0 ORDER BY total",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        assert_eq!(
+            query.order_by[0].expr,
+            ExprNode::BareColumn {
+                column: "total".to_owned(),
+            }
+        );
+        assert_eq!(
+            query.projection[0].expr,
+            ExprNode::Binary {
+                op: ArithmeticOp::Multiply,
+                left: Box::new(col("amount")),
+                right: Box::new(ExprNode::Literal("2".to_owned())),
+            }
+        );
     }
 
     #[test]

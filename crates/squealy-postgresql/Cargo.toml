@@ -47,4 +47,5 @@ tracing = { version = "0.1", optional = true }
 uuid = { version = "1", optional = true }
 
 [dev-dependencies]
+squealy-model.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
