@@ -728,6 +728,222 @@ impl ViewBody {
             ViewBody::Set { .. } | ViewBody::With { .. } => &[],
         }
     }
+
+    /// Rewrites every result-pin type in the body by applying `f`, recursing through set-operation arms,
+    /// `WITH` CTEs, derived-table subqueries, and scalar/`IN`/`EXISTS` subqueries.
+    ///
+    /// A result pin is the optional `CAST(<call> AS ty)` wrapper the renderer emits around an aggregate,
+    /// window, `EXTRACT`, `CASE`, `NULLIF`, or `COALESCE` so the output column's wire type matches the
+    /// view's declared column type (the `result: Option<SqlType>` fields). Because a dialect's cast
+    /// vocabulary is many-to-one (several [`SqlType`]s render to the same keyword, so a narrower authored
+    /// pin round-trips through introspection as the keyword's canonical representative), a backend's
+    /// `canonical_view_body` calls this — on **both** the desired and the introspected model — to fold each
+    /// pin to that same representative, so a published view does not churn. A general `CAST` node's target
+    /// type is left untouched: it is a user-authored conversion, not a renderer-synthesized pin.
+    pub fn map_result_pins(&mut self, f: &impl Fn(&SqlType) -> SqlType) {
+        match self {
+            ViewBody::Select(query) => map_query_result_pins(query, f),
+            ViewBody::Set {
+                left,
+                right,
+                order_by,
+                ..
+            } => {
+                left.map_result_pins(f);
+                right.map_result_pins(f);
+                for order in order_by {
+                    map_expr_result_pins(&mut order.expr, f);
+                }
+            }
+            ViewBody::With { ctes, body, .. } => {
+                for cte in ctes {
+                    cte.body.map_result_pins(f);
+                }
+                body.map_result_pins(f);
+            }
+        }
+    }
+}
+
+/// Applies `f` to every result pin reachable from a single `SELECT` body (see
+/// [`ViewBody::map_result_pins`]).
+fn map_query_result_pins(query: &mut ViewQueryModel, f: &impl Fn(&SqlType) -> SqlType) {
+    for item in &mut query.projection {
+        map_expr_result_pins(&mut item.expr, f);
+    }
+    if let Some(from) = &mut query.from {
+        map_source_result_pins(from, f);
+    }
+    for join in &mut query.joins {
+        map_source_result_pins(&mut join.source, f);
+        if let Some(on) = &mut join.on {
+            map_expr_result_pins(on, f);
+        }
+    }
+    if let Some(filter) = &mut query.filter {
+        map_expr_result_pins(filter, f);
+    }
+    for expr in &mut query.group_by {
+        map_expr_result_pins(expr, f);
+    }
+    if let Some(having) = &mut query.having {
+        map_expr_result_pins(having, f);
+    }
+    for order in &mut query.order_by {
+        map_expr_result_pins(&mut order.expr, f);
+    }
+}
+
+/// A named source binds no expression; a derived table carries a whole sub-body to recurse into.
+fn map_source_result_pins(source: &mut SourceItem, f: &impl Fn(&SqlType) -> SqlType) {
+    match source {
+        SourceItem::Named(_) => {}
+        SourceItem::Derived { query, .. } => query.map_result_pins(f),
+    }
+}
+
+/// Applies `f` to every result pin reachable from an expression (see [`ViewBody::map_result_pins`]).
+/// Exhaustive over [`ExprNode`] so a new pin-carrying variant is a compile error here rather than a
+/// silently-unfolded pin.
+fn map_expr_result_pins(expr: &mut ExprNode, f: &impl Fn(&SqlType) -> SqlType) {
+    match expr {
+        ExprNode::Aggregate {
+            operand, result, ..
+        } => {
+            map_expr_result_pins(operand, f);
+            map_pin(result, f);
+        }
+        ExprNode::Window {
+            args,
+            partition_by,
+            order_by,
+            result,
+            ..
+        } => {
+            for arg in args {
+                map_expr_result_pins(arg, f);
+            }
+            for part in partition_by {
+                map_expr_result_pins(part, f);
+            }
+            for order in order_by {
+                map_expr_result_pins(&mut order.expr, f);
+            }
+            map_pin(result, f);
+        }
+        ExprNode::Case {
+            arms,
+            else_,
+            result,
+        } => {
+            map_case_arms(arms, else_, f);
+            map_pin(result, f);
+        }
+        ExprNode::SimpleCase {
+            operand,
+            arms,
+            else_,
+            result,
+        } => {
+            map_expr_result_pins(operand, f);
+            map_case_arms(arms, else_, f);
+            map_pin(result, f);
+        }
+        ExprNode::Nullif {
+            left,
+            right,
+            result,
+        } => {
+            map_expr_result_pins(left, f);
+            map_expr_result_pins(right, f);
+            map_pin(result, f);
+        }
+        ExprNode::Coalesce { args, result } => {
+            for arg in args {
+                map_expr_result_pins(arg, f);
+            }
+            map_pin(result, f);
+        }
+        ExprNode::Extract {
+            operand, result, ..
+        }
+        | ExprNode::ExtractSecond { operand, result } => {
+            map_expr_result_pins(operand, f);
+            map_pin(result, f);
+        }
+        ExprNode::Binary { left, right, .. }
+        | ExprNode::Compare { left, right, .. }
+        | ExprNode::Logical { left, right, .. } => {
+            map_expr_result_pins(left, f);
+            map_expr_result_pins(right, f);
+        }
+        // A general `CAST`'s target type is a user conversion, not a renderer pin — leave it.
+        ExprNode::Cast { operand, .. } => map_expr_result_pins(operand, f),
+        ExprNode::Not(operand) | ExprNode::IsNull { operand, .. } => {
+            map_expr_result_pins(operand, f)
+        }
+        ExprNode::Like {
+            operand, pattern, ..
+        } => {
+            map_expr_result_pins(operand, f);
+            map_expr_result_pins(pattern, f);
+        }
+        ExprNode::In { operand, items, .. } => {
+            map_expr_result_pins(operand, f);
+            for item in items {
+                map_expr_result_pins(item, f);
+            }
+        }
+        ExprNode::Between {
+            operand, low, high, ..
+        } => {
+            map_expr_result_pins(operand, f);
+            map_expr_result_pins(low, f);
+            map_expr_result_pins(high, f);
+        }
+        ExprNode::ScalarSubquery(query) => map_query_result_pins(query, f),
+        ExprNode::InSubquery {
+            operand, subquery, ..
+        } => {
+            map_expr_result_pins(operand, f);
+            map_query_result_pins(subquery, f);
+        }
+        ExprNode::Exists { subquery, .. } => map_query_result_pins(subquery, f),
+        ExprNode::ScalarFn { args, .. } | ExprNode::Function { args, .. } => {
+            for arg in args {
+                map_expr_result_pins(arg, f);
+            }
+        }
+        ExprNode::DateTrunc { operand, .. } => map_expr_result_pins(operand, f),
+        // Leaves — no nested expression, no result pin.
+        ExprNode::Column { .. }
+        | ExprNode::BareColumn { .. }
+        | ExprNode::Literal(_)
+        | ExprNode::Raw(_)
+        | ExprNode::Now => {}
+    }
+}
+
+/// Folds a result pin in place through `f` when present.
+fn map_pin(result: &mut Option<SqlType>, f: &impl Fn(&SqlType) -> SqlType) {
+    if let Some(ty) = result {
+        *ty = f(ty);
+    }
+}
+
+/// Applies `f` to every `WHEN`/`THEN` arm and the optional `ELSE` of a `CASE` body.
+fn map_case_arms(
+    arms: &mut [CaseArm],
+    else_: &mut Option<Box<ExprNode>>,
+    f: &impl Fn(&SqlType) -> SqlType,
+) {
+    for arm in arms {
+        map_expr_result_pins(&mut arm.when, f);
+        map_expr_result_pins(&mut arm.then, f);
+    }
+    if let Some(else_) = else_ {
+        map_expr_result_pins(else_, f);
+    }
 }
 
 /// A set operator in a view body. The base operator only; the `ALL` modifier is the separate `all` flag
@@ -1481,6 +1697,93 @@ mod tests {
             left: Box::new(left),
             right: Box::new(right),
         }
+    }
+
+    fn agg_pin(ty: SqlType) -> ExprNode {
+        ExprNode::Aggregate {
+            func: AggregateFunc::Sum,
+            distinct: false,
+            operand: Box::new(bare("x")),
+            result: Some(ty),
+        }
+    }
+
+    fn case_pin(ty: SqlType) -> ExprNode {
+        ExprNode::Case {
+            arms: vec![],
+            else_: None,
+            result: Some(ty),
+        }
+    }
+
+    fn project(name: &str, expr: ExprNode) -> ViewQueryModel {
+        ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: name.to_owned(),
+                expr,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn map_result_pins_folds_every_nested_pin() {
+        // A body exercising the recursion paths at once: a `WITH` wrapping a `UNION` whose left arm's
+        // projection carries an aggregate pin, and whose right arm selects from a derived table whose
+        // projection carries a `CASE` pin. `map_result_pins` must reach both.
+        let left = ViewBody::Select(Box::new(project("s", agg_pin(SqlType::I8))));
+        let right = ViewBody::Select(Box::new(ViewQueryModel {
+            from: Some(SourceItem::Derived {
+                query: Box::new(ViewBody::Select(Box::new(project(
+                    "c",
+                    case_pin(SqlType::I8),
+                )))),
+                alias: "d".to_owned(),
+            }),
+            ..project("c", bare("c"))
+        }));
+        let mut body = ViewBody::With {
+            recursive: false,
+            ctes: Vec::new(),
+            body: Box::new(ViewBody::Set {
+                op: ViewSetOp::Union,
+                all: false,
+                left: Box::new(left),
+                right: Box::new(right),
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+            }),
+        };
+
+        body.map_result_pins(&|ty| {
+            if *ty == SqlType::I8 {
+                SqlType::I16
+            } else {
+                ty.clone()
+            }
+        });
+
+        let ViewBody::With { body, .. } = &body else {
+            panic!("expected a WITH body")
+        };
+        let ViewBody::Set { left, right, .. } = body.as_ref() else {
+            panic!("expected a Set body")
+        };
+        let ViewBody::Select(left) = left.as_ref() else {
+            panic!("expected a Select left arm")
+        };
+        assert_eq!(left.projection[0].expr, agg_pin(SqlType::I16));
+        let ViewBody::Select(right) = right.as_ref() else {
+            panic!("expected a Select right arm")
+        };
+        let Some(SourceItem::Derived { query, .. }) = &right.from else {
+            panic!("expected a derived FROM")
+        };
+        let ViewBody::Select(derived) = query.as_ref() else {
+            panic!("expected a Select derived body")
+        };
+        assert_eq!(derived.projection[0].expr, case_pin(SqlType::I16));
     }
 
     #[test]
