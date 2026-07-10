@@ -651,12 +651,16 @@ pub fn render_selected_prepared<'conn, 'scope, Conn, Base, Shape, Projection>(
 {
     buffer.clear();
     let mut renderer = Renderer::new(dialect);
-    write_cte_prefix(
+    // An unrenderable CTE shape (a scoped recursive arm on SQLite) is captured into the buffer's error
+    // channel and surfaced from `into_parts()`, mirroring how an encode failure is reported.
+    if let Err(error) = write_cte_prefix(
         dialect,
         &selected.collect_ctes::<Conn, Conn::Backend>(),
         buffer,
-    )
-    .unwrap();
+    ) {
+        buffer.error = Some(<Conn::Backend as Backend>::render_error(error));
+        return;
+    }
     let mut sink = SelectRenderSink::<Conn::Backend, _>::new(buffer, &mut renderer).unwrap();
     selected.lower_into::<Conn, _>(&mut sink).unwrap();
     sink.finish().unwrap();
@@ -700,13 +704,14 @@ where
     let mut writer = ParamCollector::<Conn::Backend>::new(params);
     let mut renderer = Renderer::new(dialect);
     // CTE bodies are parameter-free, so the `WITH` prefix contributes no bind params; this keeps the
-    // path uniform with the SQL-text renderers (the collector ignores the emitted bytes).
+    // path uniform with the SQL-text renderers (the collector ignores the emitted bytes). It can still
+    // reject an unrenderable CTE shape (a scoped recursive arm on SQLite), surfaced as a render error.
     write_cte_prefix(
         dialect,
         &selected.collect_ctes::<Conn, Conn::Backend>(),
         &mut writer,
     )
-    .unwrap();
+    .map_err(<Conn::Backend as Backend>::render_error)?;
     let mut select_sink =
         SelectRenderSink::<Conn::Backend, _>::new(&mut writer, &mut renderer).unwrap();
     selected.lower_into::<Conn, _>(&mut select_sink).unwrap();
@@ -956,7 +961,12 @@ pub fn render_set_prepared<'conn, 'scope, Conn, Tree>(
     let mut renderer = Renderer::new(dialect);
     let mut ctes = Vec::new();
     tree.collect_set_ctes(&mut ctes);
-    write_cte_prefix(dialect, &dedup_set_ctes(ctes), buffer).unwrap();
+    // See `render_selected_prepared`: an unrenderable CTE shape is captured into the buffer's error
+    // channel rather than panicking, and surfaced from `into_parts()`.
+    if let Err(error) = write_cte_prefix(dialect, &dedup_set_ctes(ctes), buffer) {
+        buffer.error = Some(<Conn::Backend as Backend>::render_error(error));
+        return;
+    }
     tree.render_root(buffer, &mut renderer).unwrap();
     write_set_tail(dialect, tail, buffer).unwrap();
 }
@@ -995,7 +1005,8 @@ where
     let mut renderer = Renderer::new(dialect);
     let mut ctes = Vec::new();
     tree.collect_set_ctes(&mut ctes);
-    write_cte_prefix(dialect, &dedup_set_ctes(ctes), &mut writer).unwrap();
+    write_cte_prefix(dialect, &dedup_set_ctes(ctes), &mut writer)
+        .map_err(<Conn::Backend as Backend>::render_error)?;
     tree.render_root(&mut writer, &mut renderer).unwrap();
     write_set_tail(dialect, tail, &mut writer).unwrap();
     writer.finish()

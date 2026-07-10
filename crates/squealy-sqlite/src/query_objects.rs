@@ -106,7 +106,17 @@ where
         Base: RenderSelectAst<'conn, 'scope, Conn, Sqlite>,
         Projection: RenderProjectable<Sqlite>,
     {
-        rendered_sql(|writer| self.write_sql(writer))
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape SQLite cannot render, such as a
+    /// scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, SqliteError>
+    where
+        Base: RenderSelectAst<'conn, 'scope, Conn, Sqlite>,
+        Projection: RenderProjectable<Sqlite>,
+    {
+        try_rendered_sql(|writer| self.write_sql(writer)).map_err(SqliteError::Render)
     }
 
     /// Streams SQL into caller-provided storage.
@@ -179,7 +189,17 @@ where
         Rows: RenderInsertRows<Sqlite>,
         Returning: RenderProjectable<Sqlite>,
     {
-        rendered_sql(|writer| {
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape SQLite cannot render, such as a
+    /// scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, SqliteError>
+    where
+        Rows: RenderInsertRows<Sqlite>,
+        Returning: RenderProjectable<Sqlite>,
+    {
+        try_rendered_sql(|writer| {
             render::write_insert::<S, Sqlite, _, _>(
                 &SqliteDialect,
                 &self.columns,
@@ -188,6 +208,7 @@ where
                 writer,
             )
         })
+        .map_err(SqliteError::Render)
     }
 
     /// Collects bind parameters into a newly allocated vector.
@@ -239,7 +260,17 @@ where
         Filters: RenderPredicateNodes<Sqlite>,
         Returning: RenderProjectable<Sqlite>,
     {
-        rendered_sql(|writer| {
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape SQLite cannot render, such as a
+    /// scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, SqliteError>
+    where
+        Filters: RenderPredicateNodes<Sqlite>,
+        Returning: RenderProjectable<Sqlite>,
+    {
+        try_rendered_sql(|writer| {
             render::write_delete::<S, Sqlite, _, _>(
                 &SqliteDialect,
                 self.alias,
@@ -248,6 +279,7 @@ where
                 writer,
             )
         })
+        .map_err(SqliteError::Render)
     }
 
     /// Collects bind parameters into a newly allocated vector.
@@ -303,7 +335,18 @@ where
         Filters: RenderPredicateNodes<Sqlite>,
         Returning: RenderProjectable<Sqlite>,
     {
-        rendered_sql(|writer| {
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape SQLite cannot render, such as a
+    /// scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, SqliteError>
+    where
+        Columns: RenderUpdateAssignments<Sqlite>,
+        Filters: RenderPredicateNodes<Sqlite>,
+        Returning: RenderProjectable<Sqlite>,
+    {
+        try_rendered_sql(|writer| {
             render::write_update::<S, Sqlite, _, _, _>(
                 &SqliteDialect,
                 self.alias,
@@ -313,6 +356,7 @@ where
                 writer,
             )
         })
+        .map_err(SqliteError::Render)
     }
 
     /// Collects bind parameters into a newly allocated vector.
@@ -373,8 +417,11 @@ where
         Self: 'query;
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        match self.collect_params() {
-            Ok(params) => SqliteRows::query(self.connection, self.to_sql(), params),
+        match self
+            .try_to_sql()
+            .and_then(|sql| self.collect_params().map(|params| (sql, params)))
+        {
+            Ok((sql, params)) => SqliteRows::query(self.connection, sql, params),
             Err(error) => SqliteRows::error(error),
         }
     }
@@ -417,7 +464,13 @@ where
 {
     /// Renders this set query into a newly allocated SQL string.
     pub fn to_sql(&self) -> String {
-        rendered_sql(|writer| self.write_sql(writer))
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this set query, returning a render reject (a query shape SQLite cannot render, such as
+    /// a scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, SqliteError> {
+        try_rendered_sql(|writer| self.write_sql(writer)).map_err(SqliteError::Render)
     }
 
     /// Streams SQL into caller-provided storage.
@@ -451,8 +504,11 @@ where
         Self: 'query;
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        match self.collect_params() {
-            Ok(params) => SqliteRows::query(self.connection, self.to_sql(), params),
+        match self
+            .try_to_sql()
+            .and_then(|sql| self.collect_params().map(|params| (sql, params)))
+        {
+            Ok((sql, params)) => SqliteRows::query(self.connection, sql, params),
             Err(error) => SqliteRows::error(error),
         }
     }
@@ -588,7 +644,14 @@ where
 {
     /// Render this `INSERT … SELECT` into a newly allocated SQL string.
     pub fn to_sql(&self) -> String {
-        rendered_sql(|writer| {
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this `INSERT … SELECT`, returning a render reject (a query shape SQLite cannot render,
+    /// such as a scoped recursive CTE arm in the source) as an error instead of panicking like
+    /// [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, SqliteError> {
+        try_rendered_sql(|writer| {
             render::write_insert_select::<S, Conn, _, _>(
                 &SqliteDialect,
                 &self.columns,
@@ -597,6 +660,7 @@ where
                 writer,
             )
         })
+        .map_err(SqliteError::Render)
     }
 
     /// Collect bind parameters into a newly allocated vector.
@@ -619,8 +683,11 @@ where
         // One-shot execution collects only static binds, so the source must be free of runtime `param`s.
         <Tree as SetArm<'conn, 'scope, Conn>>::Params: NoRuntimeParams,
     {
-        match self.collect_params() {
-            Ok(params) => self.connection.run_execute(self.to_sql(), params),
+        match self
+            .try_to_sql()
+            .and_then(|sql| self.collect_params().map(|params| (sql, params)))
+        {
+            Ok((sql, params)) => self.connection.run_execute(sql, params),
             Err(error) => execute_error(error),
         }
     }
@@ -735,15 +802,21 @@ where
     ) -> impl Future<Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>>
     + Send
     + '_ {
-        match self.collect_params() {
-            Ok(params) => self.connection.run_execute(self.to_sql(), params),
+        match self
+            .try_to_sql()
+            .and_then(|sql| self.collect_params().map(|params| (sql, params)))
+        {
+            Ok((sql, params)) => self.connection.run_execute(sql, params),
             Err(error) => execute_error(error),
         }
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        match self.collect_params() {
-            Ok(params) => SqliteRows::query(self.connection, self.to_sql(), params),
+        match self
+            .try_to_sql()
+            .and_then(|sql| self.collect_params().map(|params| (sql, params)))
+        {
+            Ok((sql, params)) => SqliteRows::query(self.connection, sql, params),
             Err(error) => SqliteRows::error(error),
         }
     }
@@ -795,15 +868,21 @@ where
     ) -> impl Future<Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>>
     + Send
     + '_ {
-        match self.collect_params() {
-            Ok(params) => self.connection.run_execute(self.to_sql(), params),
+        match self
+            .try_to_sql()
+            .and_then(|sql| self.collect_params().map(|params| (sql, params)))
+        {
+            Ok((sql, params)) => self.connection.run_execute(sql, params),
             Err(error) => execute_error(error),
         }
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        match self.collect_params() {
-            Ok(params) => SqliteRows::query(self.connection, self.to_sql(), params),
+        match self
+            .try_to_sql()
+            .and_then(|sql| self.collect_params().map(|params| (sql, params)))
+        {
+            Ok((sql, params)) => SqliteRows::query(self.connection, sql, params),
             Err(error) => SqliteRows::error(error),
         }
     }
@@ -861,15 +940,21 @@ where
     ) -> impl Future<Output = Result<u64, <<Self::Builder as QueryBuilder>::Backend as Backend>::Error>>
     + Send
     + '_ {
-        match self.collect_params() {
-            Ok(params) => self.connection.run_execute(self.to_sql(), params),
+        match self
+            .try_to_sql()
+            .and_then(|sql| self.collect_params().map(|params| (sql, params)))
+        {
+            Ok((sql, params)) => self.connection.run_execute(sql, params),
             Err(error) => execute_error(error),
         }
     }
 
     fn fetch(&self) -> Self::RowStream<'_> {
-        match self.collect_params() {
-            Ok(params) => SqliteRows::query(self.connection, self.to_sql(), params),
+        match self
+            .try_to_sql()
+            .and_then(|sql| self.collect_params().map(|params| (sql, params)))
+        {
+            Ok((sql, params)) => SqliteRows::query(self.connection, sql, params),
             Err(error) => SqliteRows::error(error),
         }
     }
@@ -897,7 +982,14 @@ where
 {
     /// Render this correlated update into a newly allocated SQL string.
     pub fn to_sql(&self) -> String {
-        rendered_sql(|writer| {
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this correlated update, returning a render reject (a query shape SQLite cannot render,
+    /// such as a scoped recursive CTE arm in the source) as an error instead of panicking like
+    /// [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, SqliteError> {
+        try_rendered_sql(|writer| {
             render::write_update_from::<S, O, Sqlite, _, _, _>(
                 &SqliteDialect,
                 self.target_alias,
@@ -908,6 +1000,7 @@ where
                 writer,
             )
         })
+        .map_err(SqliteError::Render)
     }
 
     /// Collect bind parameters into a newly allocated vector.
@@ -967,8 +1060,11 @@ where
     Conn: SqliteExecutor + 'conn,
 {
     fn execute(&self) -> impl Future<Output = Result<u64, SqliteError>> + Send + '_ {
-        match self.collect_params() {
-            Ok(params) => self.connection.run_execute(self.to_sql(), params),
+        match self
+            .try_to_sql()
+            .and_then(|sql| self.collect_params().map(|params| (sql, params)))
+        {
+            Ok((sql, params)) => self.connection.run_execute(sql, params),
             Err(error) => execute_error(error),
         }
     }
@@ -994,7 +1090,14 @@ where
 {
     /// Render this correlated delete into a newly allocated SQL string.
     pub fn to_sql(&self) -> String {
-        rendered_sql(|writer| {
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this correlated delete, returning a render reject (a query shape SQLite cannot render,
+    /// such as a scoped recursive CTE arm in the source) as an error instead of panicking like
+    /// [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, SqliteError> {
+        try_rendered_sql(|writer| {
             render::write_delete_using::<S, O, Sqlite, _, _>(
                 &SqliteDialect,
                 self.target_alias,
@@ -1004,6 +1107,7 @@ where
                 writer,
             )
         })
+        .map_err(SqliteError::Render)
     }
 
     /// Collect bind parameters into a newly allocated vector.
@@ -1057,8 +1161,11 @@ where
     Conn: SqliteExecutor + 'conn,
 {
     fn execute(&self) -> impl Future<Output = Result<u64, SqliteError>> + Send + '_ {
-        match self.collect_params() {
-            Ok(params) => self.connection.run_execute(self.to_sql(), params),
+        match self
+            .try_to_sql()
+            .and_then(|sql| self.collect_params().map(|params| (sql, params)))
+        {
+            Ok((sql, params)) => self.connection.run_execute(sql, params),
             Err(error) => execute_error(error),
         }
     }

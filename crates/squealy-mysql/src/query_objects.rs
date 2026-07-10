@@ -100,13 +100,14 @@ where
         Base: RenderSelectAst<'conn, 'scope, Conn, Mysql>,
         Projection: RenderProjectable<Mysql>,
     {
-        let sql = rendered_sql(|writer| {
+        let sql = try_rendered_sql(|writer| {
             render::write_selected_into::<Conn, Base, Shape, Projection, _>(
                 &MysqlDialect,
                 &self.selected,
                 writer,
             )
-        });
+        })
+        .map_err(MysqlError::Render)?;
         let params = collect_mysql_params(0, |params| {
             render::write_selected_params::<Conn, Base, Shape, Projection>(
                 &MysqlDialect,
@@ -123,7 +124,17 @@ where
         Base: RenderSelectAst<'conn, 'scope, Conn, Mysql>,
         Projection: RenderProjectable<Mysql>,
     {
-        rendered_sql(|writer| self.write_sql(writer))
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape MySQL cannot render, such as a
+    /// scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, MysqlError>
+    where
+        Base: RenderSelectAst<'conn, 'scope, Conn, Mysql>,
+        Projection: RenderProjectable<Mysql>,
+    {
+        try_rendered_sql(|writer| self.write_sql(writer)).map_err(MysqlError::Render)
     }
 
     /// Streams SQL into caller-provided storage.
@@ -195,7 +206,7 @@ where
         Rows: RenderInsertRows<Mysql>,
         Returning: RenderProjectable<Mysql>,
     {
-        let sql = rendered_sql(|writer| {
+        let sql = try_rendered_sql(|writer| {
             render::write_insert::<S, Mysql, _, _>(
                 &MysqlDialect,
                 &self.columns,
@@ -203,7 +214,8 @@ where
                 self.conflict.as_ref(),
                 writer,
             )
-        });
+        })
+        .map_err(MysqlError::Render)?;
         let params =
             collect_mysql_params(self.columns.first_row_len() * self.columns.len(), |params| {
                 render::write_insert_params::<S, Mysql, _, _>(
@@ -223,7 +235,17 @@ where
         Rows: RenderInsertRows<Mysql>,
         Returning: RenderProjectable<Mysql>,
     {
-        rendered_sql(|writer| {
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape MySQL cannot render, such as a
+    /// scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, MysqlError>
+    where
+        Rows: RenderInsertRows<Mysql>,
+        Returning: RenderProjectable<Mysql>,
+    {
+        try_rendered_sql(|writer| {
             render::write_insert::<S, Mysql, _, _>(
                 &MysqlDialect,
                 &self.columns,
@@ -232,6 +254,7 @@ where
                 writer,
             )
         })
+        .map_err(MysqlError::Render)
     }
 }
 
@@ -264,7 +287,7 @@ where
         Filters: RenderPredicateNodes<Mysql>,
         Returning: RenderProjectable<Mysql>,
     {
-        let sql = rendered_sql(|writer| {
+        let sql = try_rendered_sql(|writer| {
             render::write_delete::<S, Mysql, _, _>(
                 &MysqlDialect,
                 self.alias,
@@ -272,7 +295,8 @@ where
                 &self.returning,
                 writer,
             )
-        });
+        })
+        .map_err(MysqlError::Render)?;
         let params = collect_mysql_params(self.filters.len(), |params| {
             render::write_delete_params::<S, Mysql, _, _>(
                 &MysqlDialect,
@@ -320,7 +344,7 @@ where
         Filters: RenderPredicateNodes<Mysql>,
         Returning: RenderProjectable<Mysql>,
     {
-        let sql = rendered_sql(|writer| {
+        let sql = try_rendered_sql(|writer| {
             render::write_update::<S, Mysql, _, _, _>(
                 &MysqlDialect,
                 self.alias,
@@ -329,7 +353,8 @@ where
                 &self.returning,
                 writer,
             )
-        });
+        })
+        .map_err(MysqlError::Render)?;
         let params = collect_mysql_params(self.columns.len() + self.filters.len(), |params| {
             render::write_update_params::<S, Mysql, _, _, _>(
                 &MysqlDialect,
@@ -425,9 +450,10 @@ where
     Tree: render::RenderSetArm<'conn, 'scope, Conn, Mysql>,
 {
     fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError> {
-        let sql = rendered_sql(|writer| {
+        let sql = try_rendered_sql(|writer| {
             render::write_set_into::<Conn, Tree, _>(&MysqlDialect, &self.tree, &self.tail, writer)
-        });
+        })
+        .map_err(MysqlError::Render)?;
         let params = collect_mysql_params(0, |params| {
             render::write_set_params::<Conn, Tree>(&MysqlDialect, &self.tree, &self.tail, params)
         })?;
@@ -436,7 +462,13 @@ where
 
     /// Renders this set query into a newly allocated SQL string.
     pub fn to_sql(&self) -> String {
-        rendered_sql(|writer| self.write_sql(writer))
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this set query, returning a render reject (a query shape MySQL cannot render, such as a
+    /// scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, MysqlError> {
+        try_rendered_sql(|writer| self.write_sql(writer)).map_err(MysqlError::Render)
     }
 
     /// Streams SQL into caller-provided storage.
@@ -605,7 +637,7 @@ where
     Conn: QueryBuilder<Backend = Mysql> + 'conn,
 {
     fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError> {
-        let sql = rendered_sql(|writer| {
+        let sql = try_rendered_sql(|writer| {
             render::write_insert_select::<S, Conn, _, _>(
                 &MysqlDialect,
                 &self.columns,
@@ -613,7 +645,8 @@ where
                 &self.returning,
                 writer,
             )
-        });
+        })
+        .map_err(MysqlError::Render)?;
         let params = collect_mysql_params(0, |params| {
             render::write_insert_select_params::<S, Conn, _, _>(
                 &MysqlDialect,
@@ -628,7 +661,14 @@ where
 
     /// Render this `INSERT … SELECT` into a newly allocated SQL string.
     pub fn to_sql(&self) -> String {
-        rendered_sql(|writer| {
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this `INSERT … SELECT`, returning a render reject (a query shape MySQL cannot render,
+    /// such as a scoped recursive CTE arm) as an error instead of panicking like
+    /// [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, MysqlError> {
+        try_rendered_sql(|writer| {
             render::write_insert_select::<S, Conn, _, _>(
                 &MysqlDialect,
                 &self.columns,
@@ -637,6 +677,7 @@ where
                 writer,
             )
         })
+        .map_err(MysqlError::Render)
     }
 
     /// Execute the insert, returning the number of rows affected.
@@ -922,7 +963,7 @@ where
     Filters: RenderPredicateNodes<Mysql>,
 {
     fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError> {
-        let sql = self.to_sql();
+        let sql = self.try_to_sql()?;
         let params = collect_mysql_params(0, |params| {
             render::write_update_from_params::<S, O, Mysql, _, _, _>(
                 &MysqlDialect,
@@ -939,7 +980,14 @@ where
 
     /// Render this correlated update into a newly allocated SQL string.
     pub fn to_sql(&self) -> String {
-        rendered_sql(|writer| {
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this correlated update, returning a render reject (a query shape MySQL cannot render,
+    /// such as a scoped recursive CTE arm) as an error instead of panicking like
+    /// [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, MysqlError> {
+        try_rendered_sql(|writer| {
             render::write_update_from::<S, O, Mysql, _, _, _>(
                 &MysqlDialect,
                 self.target_alias,
@@ -950,6 +998,7 @@ where
                 writer,
             )
         })
+        .map_err(MysqlError::Render)
     }
 
     /// Collect bind parameters into a newly allocated vector.
@@ -1034,7 +1083,7 @@ where
     Filters: RenderPredicateNodes<Mysql>,
 {
     fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError> {
-        let sql = self.to_sql();
+        let sql = self.try_to_sql()?;
         let params = collect_mysql_params(0, |params| {
             render::write_delete_using_params::<S, O, Mysql, _, _>(
                 &MysqlDialect,
@@ -1050,7 +1099,14 @@ where
 
     /// Render this correlated delete into a newly allocated SQL string.
     pub fn to_sql(&self) -> String {
-        rendered_sql(|writer| {
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this correlated delete, returning a render reject (a query shape MySQL cannot render,
+    /// such as a scoped recursive CTE arm) as an error instead of panicking like
+    /// [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, MysqlError> {
+        try_rendered_sql(|writer| {
             render::write_delete_using::<S, O, Mysql, _, _>(
                 &MysqlDialect,
                 self.target_alias,
@@ -1060,6 +1116,7 @@ where
                 writer,
             )
         })
+        .map_err(MysqlError::Render)
     }
 
     /// Collect bind parameters into a newly allocated vector.

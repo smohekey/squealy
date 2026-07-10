@@ -465,10 +465,14 @@ where
     }
 }
 
-fn render_sql(write: impl FnOnce(&mut Vec<u8>) -> std::io::Result<()>) -> String {
-    let mut sql = Vec::new();
-    write(&mut sql).expect("render SQL");
-    String::from_utf8(sql).expect("SQL should be valid UTF-8")
+/// Renders SQL into a freshly allocated string, returning a render reject (a query shape the dialect
+/// cannot render) as an `io::Error` instead of panicking. Backs `try_to_sql`.
+fn try_render_sql(
+    write: impl FnOnce(&mut Vec<u8>) -> std::io::Result<()>,
+) -> std::io::Result<String> {
+    let mut buffer = Vec::new();
+    write(&mut buffer)?;
+    Ok(String::from_utf8(buffer).expect("renderer emits UTF-8"))
 }
 
 impl<'conn, 'scope, Shape, Base, Projection> SelectQuery<'conn, 'scope, Base, Projection>
@@ -897,7 +901,14 @@ where
     ///
     /// Use [`Self::write_sql`] to stream SQL into caller-provided storage instead.
     pub fn to_sql(&self) -> String {
-        render_sql(|writer| self.write_sql(writer))
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape the dialect cannot render, such as
+    /// a scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, TestError> {
+        try_render_sql(|writer| self.write_sql(writer))
+            .map_err(|error| TestError::Render(error.to_string()))
     }
 
     /// Stream SQL into caller-provided storage without allocating a SQL string.
@@ -963,7 +974,14 @@ where
 {
     /// Render this set query into a newly allocated SQL string.
     pub fn to_sql(&self) -> String {
-        render_sql(|writer| self.write_sql(writer))
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape the dialect cannot render, such as
+    /// a scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, TestError> {
+        try_render_sql(|writer| self.write_sql(writer))
+            .map_err(|error| TestError::Render(error.to_string()))
     }
 
     /// Stream SQL into caller-provided storage without allocating a SQL string.
@@ -1116,7 +1134,13 @@ where
 {
     /// Render this `INSERT … SELECT` into a newly allocated SQL string.
     pub fn to_sql(&self) -> String {
-        render_sql(|writer| {
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape the dialect cannot render, such as
+    /// a scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, TestError> {
+        try_render_sql(|writer| {
             sql::write_insert_select::<S, Tree, Returning, _>(
                 &self.columns,
                 &self.source,
@@ -1124,6 +1148,7 @@ where
                 writer,
             )
         })
+        .map_err(|error| TestError::Render(error.to_string()))
     }
 
     /// Collect bind parameters (from the source query) into a newly allocated vector.
@@ -1217,7 +1242,14 @@ where
     ///
     /// Use [`Self::write_sql`] to stream SQL into caller-provided storage instead.
     pub fn to_sql(&self) -> String {
-        render_sql(|writer| self.write_sql(writer))
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape the dialect cannot render, such as
+    /// a scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, TestError> {
+        try_render_sql(|writer| self.write_sql(writer))
+            .map_err(|error| TestError::Render(error.to_string()))
     }
 
     /// Stream SQL into caller-provided storage without allocating a SQL string.
@@ -1259,7 +1291,14 @@ where
     ///
     /// Use [`Self::write_sql`] to stream SQL into caller-provided storage instead.
     pub fn to_sql(&self) -> String {
-        render_sql(|writer| self.write_sql(writer))
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape the dialect cannot render, such as
+    /// a scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, TestError> {
+        try_render_sql(|writer| self.write_sql(writer))
+            .map_err(|error| TestError::Render(error.to_string()))
     }
 
     /// Stream SQL into caller-provided storage without allocating a SQL string.
@@ -1359,7 +1398,13 @@ where
 {
     /// Render this correlated update into a newly allocated SQL string.
     pub fn to_sql(&self) -> String {
-        render_sql(|writer| {
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape the dialect cannot render, such as
+    /// a scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, TestError> {
+        try_render_sql(|writer| {
             sql::write_update_from::<S, O, _, _, _>(
                 self.target_alias,
                 self.source_alias,
@@ -1369,6 +1414,7 @@ where
                 writer,
             )
         })
+        .map_err(|error| TestError::Render(error.to_string()))
     }
 
     /// Collect bind parameters into a newly allocated vector.
@@ -1446,7 +1492,13 @@ where
 {
     /// Render this correlated delete into a newly allocated SQL string.
     pub fn to_sql(&self) -> String {
-        render_sql(|writer| {
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape the dialect cannot render, such as
+    /// a scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, TestError> {
+        try_render_sql(|writer| {
             sql::write_delete_using::<S, O, _, _>(
                 self.target_alias,
                 self.source_alias,
@@ -1455,6 +1507,7 @@ where
                 writer,
             )
         })
+        .map_err(|error| TestError::Render(error.to_string()))
     }
 
     /// Collect bind parameters into a newly allocated vector.
@@ -1483,7 +1536,14 @@ where
     ///
     /// Use [`Self::write_sql`] to stream SQL into caller-provided storage instead.
     pub fn to_sql(&self) -> String {
-        render_sql(|writer| self.write_sql(writer))
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape the dialect cannot render, such as
+    /// a scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, TestError> {
+        try_render_sql(|writer| self.write_sql(writer))
+            .map_err(|error| TestError::Render(error.to_string()))
     }
 
     /// Stream SQL into caller-provided storage without allocating a SQL string.

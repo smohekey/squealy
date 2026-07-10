@@ -42,6 +42,10 @@ impl squealy::SupportsNamedWindow for TestBackend {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TestError {
     NoRows,
+    /// A render reject surfaced by the shared renderer. Carries the `io::Error` message as a `String`
+    /// (not the `io::Error` itself, which is neither `Clone` nor `PartialEq`, both of which `TestError`
+    /// derives). The test backend never executes, so this only ever arrives via `try_to_sql`.
+    Render(String),
 }
 
 impl Backend for TestBackend {
@@ -59,6 +63,10 @@ impl Backend for TestBackend {
 
     fn no_rows_error() -> Self::Error {
         TestError::NoRows
+    }
+
+    fn render_error(error: std::io::Error) -> Self::Error {
+        TestError::Render(error.to_string())
     }
 
     fn write_table(

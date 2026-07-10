@@ -8,7 +8,7 @@
 //! (`length()`), substring (`substr()`), and string-concatenation (`||`) scalars.
 
 use squealy::*;
-use squealy_sqlite::{Sqlite, SqliteValue};
+use squealy_sqlite::{Sqlite, SqliteError, SqliteValue};
 
 #[derive(Clone, Debug, PartialEq, Table)]
 struct Widget<'scope, C: ColumnMode = ColumnExpr> {
@@ -305,4 +305,93 @@ fn sqlite_length_renders_as_length_not_char_length() {
         !sql.contains("CHAR_LENGTH"),
         "SQLite must not render CHAR_LENGTH: {sql}"
     );
+}
+
+// --- Fallible render: a scoped recursive CTE arm has no valid SQLite rendering (git-bug 1e67ff8) ---
+
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(Warehouse)]
+struct Node<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    parent_id: C::Type<'scope, Option<i32>>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct Warehouse {
+    nodes: Node<'static, ColumnName>,
+}
+
+// A recursive CTE whose anchor carries its own ORDER BY/LIMIT — a *scoped* arm. It can only be
+// scoped by parenthesizing it, which SQLite's recursive-CTE grammar forbids: no valid rendering.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, RecursiveCTE)]
+struct BoundedAncestor<'scope, C: ColumnMode = ColumnExpr> {
+    id: C::Type<'scope, i32>,
+    depth: C::Type<'scope, i32>,
+}
+
+impl<'scope, C: ColumnMode> RecursiveCteDefinition for BoundedAncestor<'scope, C> {
+    const UNION_ALL: bool = true;
+
+    fn definition(
+        db: &'static ModelConn,
+        recur: RecursiveSelf<'static, Self>,
+    ) -> impl RecursiveBody<Row = <Self as SchemaCte>::Row> {
+        let anchor = db
+            .from::<Node>()
+            .where_(|node| node.parent_id.is_null())
+            .order_by(|(node,)| node.id.asc())
+            .limit(5)
+            .project(|(node,)| (node.id, 0));
+        let step = recur
+            .from()
+            .join::<Node>()
+            .on(|(ancestor,), node| node.parent_id.equals(ancestor.id))
+            .project(|(ancestor, node)| (node.id, ancestor.depth + 1));
+        anchor.union_with(step)
+    }
+}
+
+#[test]
+fn sqlite_scoped_recursive_arm_try_to_sql_returns_render_error() {
+    // The fallible render surfaces the reject as a returned error rather than panicking.
+    let query = Sqlite
+        .from::<BoundedAncestor>()
+        .select(|(ancestor,)| (ancestor.id, ancestor.depth));
+    let error = query
+        .try_to_sql()
+        .expect_err("SQLite cannot render a scoped recursive CTE arm");
+    assert!(
+        matches!(error, SqliteError::Render(_)),
+        "expected a render error, got {error:?}"
+    );
+}
+
+#[test]
+fn sqlite_scoped_recursive_arm_collect_params_returns_render_error() {
+    // The parameter collector routes the same reject through the fallible path (it renders the WITH
+    // prefix, whose scoped arm cannot render), so it too returns an error instead of panicking.
+    let query = Sqlite
+        .from::<BoundedAncestor>()
+        .select(|(ancestor,)| (ancestor.id, ancestor.depth));
+    let error = query
+        .collect_params()
+        .expect_err("SQLite cannot render a scoped recursive CTE arm");
+    assert!(
+        matches!(error, SqliteError::Render(_)),
+        "expected a render error, got {error:?}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "render SQL")]
+fn sqlite_scoped_recursive_arm_to_sql_still_panics() {
+    // The infallible `to_sql()` still panics on an unrenderable shape (documented behaviour); callers
+    // that build dynamic CTE queries use `try_to_sql()` to recover the error instead.
+    let query = Sqlite
+        .from::<BoundedAncestor>()
+        .select(|(ancestor,)| (ancestor.id, ancestor.depth));
+    let _ = query.to_sql();
 }
