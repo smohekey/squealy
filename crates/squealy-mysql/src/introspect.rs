@@ -146,24 +146,29 @@ async fn empty_body(
 
 /// The view's `SELECT` body as MySQL deparses it (`information_schema.VIEWS.VIEW_DEFINITION`). MySQL
 /// stores a fully-qualified, alias-preserving re-render of the original body. Returns `None` if the view
-/// no longer exists (dropped out of band between listing and this fetch).
+/// no longer exists (dropped out of band between listing and this fetch), or if its definition is `NULL`
+/// (the account can see the view but lacks the `SHOW VIEW` privilege to read its body) — both fall back
+/// to the body-unknown sentinel via the caller. The column is decoded as `Option<String>` and flattened
+/// so a `NULL` definition does not surface as a decode error.
 async fn view_definition(
     conn: &mut mysql_async::Conn,
     view_ref: &TableRef,
 ) -> Result<Option<String>, MysqlError> {
-    conn.exec_first(
-        "\
+    let definition: Option<Option<String>> = conn
+        .exec_first(
+            "\
 SELECT VIEW_DEFINITION
 FROM information_schema.VIEWS
 WHERE TABLE_SCHEMA = :schema
   AND TABLE_NAME = :view",
-        params! {
-            "schema" => &view_ref.schema,
-            "view" => &view_ref.name,
-        },
-    )
-    .await
-    .map_err(MysqlError::Introspect)
+            params! {
+                "schema" => &view_ref.schema,
+                "view" => &view_ref.name,
+            },
+        )
+        .await
+        .map_err(MysqlError::Introspect)?;
+    Ok(definition.flatten())
 }
 
 /// The other views this view depends on, from `information_schema.VIEW_TABLE_USAGE` (MySQL 8.0.13+).
