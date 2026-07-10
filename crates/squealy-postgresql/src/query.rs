@@ -946,10 +946,14 @@ impl std::io::Write for StringSql {
     }
 }
 
-fn rendered_sql(write: impl FnOnce(&mut StringSql) -> std::io::Result<()>) -> String {
+/// Renders SQL into a freshly allocated string, returning a render reject (a query shape PostgreSQL
+/// cannot render) as an `io::Error` instead of panicking. Backs `try_to_sql` and the execute paths.
+fn try_rendered_sql(
+    write: impl FnOnce(&mut StringSql) -> std::io::Result<()>,
+) -> std::io::Result<String> {
     let mut sql = StringSql::new();
-    write(&mut sql).expect("render SQL");
-    sql.into_string()
+    write(&mut sql)?;
+    Ok(sql.into_string())
 }
 
 fn collect_postgres_params(
@@ -1363,13 +1367,14 @@ where
         Base: RenderSelectAst<'conn, 'scope, Conn, Postgres>,
         Projection: RenderProjectable<Postgres>,
     {
-        let sql = rendered_sql(|writer| {
+        let sql = try_rendered_sql(|writer| {
             render::write_selected_into::<Conn, Base, Shape, Projection, _>(
                 &PostgresDialect,
                 &self.selected,
                 writer,
             )
-        });
+        })
+        .map_err(PostgresError::Render)?;
         let params = collect_postgres_params(0, |params| {
             render::write_selected_params::<Conn, Base, Shape, Projection>(
                 &PostgresDialect,
@@ -1427,14 +1432,15 @@ where
     }
 
     fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
-        let sql = rendered_sql(|writer| {
+        let sql = try_rendered_sql(|writer| {
             render::write_set_into::<Conn, Tree, _>(
                 &PostgresDialect,
                 &self.tree,
                 &self.tail,
                 writer,
             )
-        });
+        })
+        .map_err(PostgresError::Render)?;
         let params = collect_postgres_params(0, |params| {
             render::write_set_params::<Conn, Tree>(&PostgresDialect, &self.tree, &self.tail, params)
         })?;
@@ -1443,7 +1449,13 @@ where
 
     /// Render this set query into a newly allocated SQL string.
     pub fn to_sql(&self) -> String {
-        rendered_sql(|writer| self.write_sql(writer))
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this set query, returning a render reject (a query shape PostgreSQL cannot render, such
+    /// as a scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, PostgresError> {
+        try_rendered_sql(|writer| self.write_sql(writer)).map_err(PostgresError::Render)
     }
 
     /// Stream SQL into caller-provided storage without allocating a SQL string.
@@ -1657,15 +1669,7 @@ where
     Conn: QueryBuilder<Backend = Postgres> + 'conn,
 {
     fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
-        let sql = rendered_sql(|writer| {
-            render::write_insert_select::<S, Conn, _, _>(
-                &PostgresDialect,
-                &self.columns,
-                &self.source,
-                &self.returning,
-                writer,
-            )
-        });
+        let sql = self.try_to_sql()?;
         let params = collect_postgres_params(0, |params| {
             render::write_insert_select_params::<S, Conn, _, _>(
                 &PostgresDialect,
@@ -1680,7 +1684,14 @@ where
 
     /// Render this `INSERT … SELECT` into a newly allocated SQL string.
     pub fn to_sql(&self) -> String {
-        rendered_sql(|writer| {
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this `INSERT … SELECT`, returning a render reject (a query shape PostgreSQL cannot
+    /// render, such as a scoped recursive CTE arm in the source) as an error instead of panicking like
+    /// [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, PostgresError> {
+        try_rendered_sql(|writer| {
             render::write_insert_select::<S, Conn, _, _>(
                 &PostgresDialect,
                 &self.columns,
@@ -1689,6 +1700,7 @@ where
                 writer,
             )
         })
+        .map_err(PostgresError::Render)
     }
 
     /// Execute the insert, returning the number of rows affected.
@@ -1731,7 +1743,7 @@ where
     Filters: RenderPredicateNodes<Postgres>,
 {
     fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
-        let sql = self.to_sql();
+        let sql = self.try_to_sql()?;
         let params = collect_postgres_params(0, |params| {
             render::write_update_from_params::<S, O, Postgres, _, _, _>(
                 &PostgresDialect,
@@ -1748,7 +1760,14 @@ where
 
     /// Render this correlated update into a newly allocated SQL string.
     pub fn to_sql(&self) -> String {
-        rendered_sql(|writer| {
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this correlated update, returning a render reject (a query shape PostgreSQL cannot
+    /// render, such as a scoped recursive CTE arm in the source) as an error instead of panicking like
+    /// [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, PostgresError> {
+        try_rendered_sql(|writer| {
             render::write_update_from::<S, O, Postgres, _, _, _>(
                 &PostgresDialect,
                 self.target_alias,
@@ -1759,6 +1778,7 @@ where
                 writer,
             )
         })
+        .map_err(PostgresError::Render)
     }
 
     /// Collect bind parameters into a newly allocated vector.
@@ -1841,7 +1861,7 @@ where
     Filters: RenderPredicateNodes<Postgres>,
 {
     fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
-        let sql = self.to_sql();
+        let sql = self.try_to_sql()?;
         let params = collect_postgres_params(0, |params| {
             render::write_delete_using_params::<S, O, Postgres, _, _>(
                 &PostgresDialect,
@@ -1857,7 +1877,14 @@ where
 
     /// Render this correlated delete into a newly allocated SQL string.
     pub fn to_sql(&self) -> String {
-        rendered_sql(|writer| {
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this correlated delete, returning a render reject (a query shape PostgreSQL cannot
+    /// render, such as a scoped recursive CTE arm in the source) as an error instead of panicking like
+    /// [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, PostgresError> {
+        try_rendered_sql(|writer| {
             render::write_delete_using::<S, O, Postgres, _, _>(
                 &PostgresDialect,
                 self.target_alias,
@@ -1867,6 +1894,7 @@ where
                 writer,
             )
         })
+        .map_err(PostgresError::Render)
     }
 
     /// Collect bind parameters into a newly allocated vector.
@@ -2054,7 +2082,7 @@ where
         Rows: RenderInsertRows<Postgres>,
         Returning: RenderProjectable<Postgres>,
     {
-        let sql = rendered_sql(|writer| {
+        let sql = try_rendered_sql(|writer| {
             render::write_insert::<S, Postgres, _, _>(
                 &PostgresDialect,
                 &self.columns,
@@ -2062,7 +2090,8 @@ where
                 self.conflict.as_ref(),
                 writer,
             )
-        });
+        })
+        .map_err(PostgresError::Render)?;
         let params = collect_postgres_params(
             self.columns.first_row_len() * self.columns.len(),
             |params| {
@@ -2125,7 +2154,7 @@ where
         Filters: RenderPredicateNodes<Postgres>,
         Returning: RenderProjectable<Postgres>,
     {
-        let sql = rendered_sql(|writer| {
+        let sql = try_rendered_sql(|writer| {
             render::write_delete::<S, Postgres, _, _>(
                 &PostgresDialect,
                 self.alias,
@@ -2133,7 +2162,8 @@ where
                 &self.returning,
                 writer,
             )
-        });
+        })
+        .map_err(PostgresError::Render)?;
         let params = collect_postgres_params(self.filters.len(), |params| {
             render::write_delete_params::<S, Postgres, _, _>(
                 &PostgresDialect,
@@ -2199,7 +2229,7 @@ where
         Filters: RenderPredicateNodes<Postgres>,
         Returning: RenderProjectable<Postgres>,
     {
-        let sql = rendered_sql(|writer| {
+        let sql = try_rendered_sql(|writer| {
             render::write_update::<S, Postgres, _, _, _>(
                 &PostgresDialect,
                 self.alias,
@@ -2208,7 +2238,8 @@ where
                 &self.returning,
                 writer,
             )
-        });
+        })
+        .map_err(PostgresError::Render)?;
         let params = collect_postgres_params(self.columns.len() + self.filters.len(), |params| {
             render::write_update_params::<S, Postgres, _, _, _>(
                 &PostgresDialect,
@@ -2735,7 +2766,13 @@ where
     ///
     /// Use [`Self::write_sql`] to stream SQL into caller-provided storage instead.
     pub fn to_sql(&self) -> String {
-        rendered_sql(|writer| self.write_sql(writer))
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape PostgreSQL cannot render, such as a
+    /// scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, PostgresError> {
+        try_rendered_sql(|writer| self.write_sql(writer)).map_err(PostgresError::Render)
     }
 
     /// Stream SQL into caller-provided storage without allocating a SQL string.
@@ -2778,7 +2815,13 @@ where
     ///
     /// Use [`Self::write_sql`] to stream SQL into caller-provided storage instead.
     pub fn to_sql(&self) -> String {
-        rendered_sql(|writer| self.write_sql(writer))
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape PostgreSQL cannot render, such as a
+    /// scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, PostgresError> {
+        try_rendered_sql(|writer| self.write_sql(writer)).map_err(PostgresError::Render)
     }
 
     /// Stream SQL into caller-provided storage without allocating a SQL string.
@@ -2825,7 +2868,13 @@ where
     ///
     /// Use [`Self::write_sql`] to stream SQL into caller-provided storage instead.
     pub fn to_sql(&self) -> String {
-        rendered_sql(|writer| self.write_sql(writer))
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape PostgreSQL cannot render, such as a
+    /// scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, PostgresError> {
+        try_rendered_sql(|writer| self.write_sql(writer)).map_err(PostgresError::Render)
     }
 
     /// Stream SQL into caller-provided storage without allocating a SQL string.
@@ -2874,7 +2923,13 @@ where
     ///
     /// Use [`Self::write_sql`] to stream SQL into caller-provided storage instead.
     pub fn to_sql(&self) -> String {
-        rendered_sql(|writer| self.write_sql(writer))
+        self.try_to_sql().expect("render SQL")
+    }
+
+    /// Renders this query, returning a render reject (a query shape PostgreSQL cannot render, such as a
+    /// scoped recursive CTE arm) as an error instead of panicking like [`to_sql`](Self::to_sql).
+    pub fn try_to_sql(&self) -> Result<String, PostgresError> {
+        try_rendered_sql(|writer| self.write_sql(writer)).map_err(PostgresError::Render)
     }
 
     /// Stream SQL into caller-provided storage without allocating a SQL string.

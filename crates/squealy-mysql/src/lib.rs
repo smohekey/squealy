@@ -266,6 +266,8 @@ pub enum MysqlError {
         #[source]
         source: mysql_async::Error,
     },
+    #[error("mysql render error: {0}")]
+    Render(#[source] std::io::Error),
 }
 
 impl SchemaConnect for Mysql {
