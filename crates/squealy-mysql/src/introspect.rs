@@ -25,11 +25,9 @@ pub(crate) async fn database(conn: &mut mysql_async::Conn) -> Result<DatabaseMod
             .push(table);
     }
 
-    // Views are introspected by name and output columns only: a stored view definition cannot be
-    // reconstructed into the structural `ViewQueryModel`, so the body stays empty and the diff matches
-    // views by name and columns (it cannot detect a pure body change against a live database). Their
-    // view-on-view dependencies are read separately (see `view_dependencies`) so the diff can still
-    // order live drops correctly.
+    // Views are introspected with their structural body reconstructed from `VIEW_DEFINITION` (see
+    // `view`); a body the reverse parser cannot yet lower falls back to name + output columns plus the
+    // view-on-view dependencies (see `view_dependencies`), so the diff can still order live drops.
     for view_ref in view_refs(conn).await? {
         let view = view(conn, &view_ref).await?;
         schema_entry(&mut schemas, &view_ref.schema)
@@ -71,17 +69,106 @@ ORDER BY TABLE_SCHEMA, TABLE_NAME",
 }
 
 async fn view(conn: &mut mysql_async::Conn, view_ref: &TableRef) -> Result<ViewModel, MysqlError> {
+    // Reconstruct the view's structural body from its `VIEW_DEFINITION` deparse so a squealy-published
+    // view re-plans to empty (the diff's structural bar), rather than re-applying it every run. MySQL's
+    // deparse is already fully-qualified and alias-preserving (unlike PostgreSQL's `pg_get_viewdef`), so
+    // no search_path handling and no single-source column resolution are needed here — the reverse parser
+    // inverts the deparse idioms it knows. A body it cannot yet lower falls back to the body-unknown
+    // sentinel (only the view-on-view dependencies, which still order live drops) — graceful, no
+    // regression versus the previous always-empty behaviour.
+    let columns = view_columns(conn, view_ref).await?;
+    let query = match view_definition(conn, view_ref).await? {
+        Some(sql) => {
+            match squealy_parse::Reader::new(squealy_parse::SqlDialect::Mysql).read_view_query(&sql)
+            {
+                // A reconstructed body's dependencies are found by walking it, so the
+                // `VIEW_TABLE_USAGE` lookup is only needed for the fallback below.
+                Ok(mut body) => {
+                    apply_view_column_names(&mut body, &columns);
+                    body
+                }
+                Err(_) => empty_body(conn, view_ref).await?,
+            }
+        }
+        None => empty_body(conn, view_ref).await?,
+    };
     Ok(ViewModel {
         name: view_ref.name.clone(),
         comment: None,
-        columns: view_columns(conn, view_ref).await?,
-        // The body can't be reconstructed, but the view-on-view dependencies can — they let the diff
-        // order live drops (drop a dependent before the view it selects from).
-        query: ViewBody::Select(Box::new(ViewQueryModel {
-            dependencies: view_dependencies(conn, view_ref).await?,
-            ..ViewQueryModel::default()
-        })),
+        columns,
+        query,
     })
+}
+
+/// MySQL's `VIEW_DEFINITION` re-derives each select-list alias from the projected expression and does
+/// **not** preserve the `CREATE VIEW (<columns>)` renaming (unlike PostgreSQL's `pg_get_viewdef`). A plain
+/// column's derived alias is its own name (so it round-trips), but an expression column — e.g.
+/// ``count(`q0_0`.`id`)`` — deparses to an auto-generated alias like ``` `COUNT(q0_0.`id`)` ```, which
+/// would not match the declared output name and would churn a re-create every plan. The view's real output
+/// names are the declared columns (read from `information_schema.COLUMNS` into `columns`, which MySQL does
+/// apply), so stamp them onto the reconstructed body's top-level projection positionally — recovering
+/// exactly what the column list names, and matching the desired model's body.
+fn apply_view_column_names(body: &mut ViewBody, columns: &[ViewColumnModel]) {
+    let Some(projection) = top_level_projection(body) else {
+        return;
+    };
+    // The column list and the projection are always the same arity for a live view; if they somehow are
+    // not, leave the reconstructed names untouched rather than mis-pairing them.
+    if projection.len() == columns.len() {
+        for (item, column) in projection.iter_mut().zip(columns) {
+            item.output_name = column.name.clone();
+        }
+    }
+}
+
+/// The top-level output projection of a reconstructed body: the `SELECT`'s projection, the leftmost arm of
+/// a set operation (whose aliases name the compound's outputs), or the inner body of a `WITH`.
+fn top_level_projection(body: &mut ViewBody) -> Option<&mut Vec<squealy::ProjectionItem>> {
+    match body {
+        ViewBody::Select(query) => Some(&mut query.projection),
+        ViewBody::Set { left, .. } => top_level_projection(left),
+        ViewBody::With { body, .. } => top_level_projection(body),
+    }
+}
+
+/// The body-unknown sentinel: an empty `SELECT` carrying only the view-on-view dependencies, so the diff
+/// can still order live drops (drop a dependent before the view it selects from) even when the body could
+/// not be reconstructed.
+async fn empty_body(
+    conn: &mut mysql_async::Conn,
+    view_ref: &TableRef,
+) -> Result<ViewBody, MysqlError> {
+    Ok(ViewBody::Select(Box::new(ViewQueryModel {
+        dependencies: view_dependencies(conn, view_ref).await?,
+        ..ViewQueryModel::default()
+    })))
+}
+
+/// The view's `SELECT` body as MySQL deparses it (`information_schema.VIEWS.VIEW_DEFINITION`). MySQL
+/// stores a fully-qualified, alias-preserving re-render of the original body. Returns `None` if the view
+/// no longer exists (dropped out of band between listing and this fetch), or if its definition is `NULL`
+/// (the account can see the view but lacks the `SHOW VIEW` privilege to read its body) — both fall back
+/// to the body-unknown sentinel via the caller. The column is decoded as `Option<String>` and flattened
+/// so a `NULL` definition does not surface as a decode error.
+async fn view_definition(
+    conn: &mut mysql_async::Conn,
+    view_ref: &TableRef,
+) -> Result<Option<String>, MysqlError> {
+    let definition: Option<Option<String>> = conn
+        .exec_first(
+            "\
+SELECT VIEW_DEFINITION
+FROM information_schema.VIEWS
+WHERE TABLE_SCHEMA = :schema
+  AND TABLE_NAME = :view",
+            params! {
+                "schema" => &view_ref.schema,
+                "view" => &view_ref.name,
+            },
+        )
+        .await
+        .map_err(MysqlError::Introspect)?;
+    Ok(definition.flatten())
 }
 
 /// The other views this view depends on, from `information_schema.VIEW_TABLE_USAGE` (MySQL 8.0.13+).

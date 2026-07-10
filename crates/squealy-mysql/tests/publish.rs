@@ -38,11 +38,52 @@ struct Part<'scope, C: ColumnMode = ColumnExpr> {
     widget_id: C::Type<'scope, i32>,
 }
 
+// A single-`SELECT` view over the table. Its body — projection, `WHERE`, and `FROM` — is exactly the
+// shape `read_view_query` reconstructs from MySQL's fully-qualified, alias-preserving `VIEW_DEFINITION`.
+#[allow(dead_code)]
+#[derive(View)]
+#[schema(Catalog)]
+struct ActiveWidget<'scope, C: ColumnMode = ColumnExpr> {
+    id: C::Type<'scope, i32>,
+    name: C::Type<'scope, String>,
+}
+
+impl<'scope, C: ColumnMode> ViewDefinition for ActiveWidget<'scope, C> {
+    fn definition(db: &'static ModelConn) -> impl ViewSelect<Row = <Self as SchemaView>::Row> {
+        db.from::<Widget>()
+            .where_(|widget| widget.seats.greater_than(0u32))
+            .project(|(widget,)| (widget.id, widget.name))
+    }
+}
+
+// A grouped/aggregated single-source view: `SELECT seats, count(id) … GROUP BY seats`. Its `count(id)`
+// carries a result pin (which MySQL casts to `SIGNED` and the reverse parser inverts to a canonical
+// `I64`), so this exercises the result-pin reconciliation end to end.
+#[allow(dead_code)]
+#[derive(View)]
+#[schema(Catalog)]
+struct WidgetSeatCount<'scope, C: ColumnMode = ColumnExpr> {
+    seats: C::Type<'scope, u32>,
+    count: C::Type<'scope, i64>,
+}
+
+impl<'scope, C: ColumnMode> ViewDefinition for WidgetSeatCount<'scope, C> {
+    fn definition(db: &'static ModelConn) -> impl ViewSelect<Row = <Self as SchemaView>::Row> {
+        db.from::<Widget>()
+            .group_by(|(widget,)| widget.seats)
+            .project(|(widget,)| (widget.seats, widget.id.count()))
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Schema)]
 struct Catalog {
     widgets: Widget<'static, ColumnName>,
     parts: Part<'static, ColumnName>,
+    #[view]
+    active_widgets: ActiveWidget<'static, ColumnName>,
+    #[view]
+    widget_seat_counts: WidgetSeatCount<'static, ColumnName>,
 }
 
 #[allow(dead_code)]
@@ -358,7 +399,109 @@ fn alter_column_desired_model() -> DatabaseModel {
 fn mysql_normalized_catalog_schema() -> SchemaModel {
     SchemaModel {
         name: Some("catalog".to_owned()),
-        views: Vec::new(),
+        views: vec![
+            // A filtered/projected view. MySQL's `VIEW_DEFINITION` deparse is fully qualified and
+            // alias-preserving, so the reverse parser reconstructs the exact structural body.
+            ViewModel {
+                name: "active_widgets".to_owned(),
+                comment: None,
+                columns: vec![
+                    ViewColumnModel {
+                        name: "id".to_owned(),
+                        ty: SqlType::I32,
+                        nullable: false,
+                    },
+                    ViewColumnModel {
+                        name: "name".to_owned(),
+                        ty: SqlType::Varchar(255),
+                        nullable: false,
+                    },
+                ],
+                query: ViewBody::Select(Box::new(ViewQueryModel {
+                    projection: vec![
+                        ProjectionItem {
+                            output_name: "id".to_owned(),
+                            expr: ExprNode::Column {
+                                alias: "q0_0".to_owned(),
+                                column: "id".to_owned(),
+                            },
+                        },
+                        ProjectionItem {
+                            output_name: "name".to_owned(),
+                            expr: ExprNode::Column {
+                                alias: "q0_0".to_owned(),
+                                column: "name".to_owned(),
+                            },
+                        },
+                    ],
+                    from: Some(SourceItem::Named(SourceRef {
+                        schema: Some("catalog".to_owned()),
+                        name: "widgets".to_owned(),
+                        alias: "q0_0".to_owned(),
+                    })),
+                    filter: Some(ExprNode::Compare {
+                        op: CompareOp::GreaterThan,
+                        left: Box::new(ExprNode::Column {
+                            alias: "q0_0".to_owned(),
+                            column: "seats".to_owned(),
+                        }),
+                        right: Box::new(ExprNode::Literal("0".to_owned())),
+                    }),
+                    ..ViewQueryModel::default()
+                })),
+            },
+            // A grouped/aggregated view: `count(id)` deparses without a result-pin cast (an unpinned
+            // `count`), and its select-list alias is re-derived from the declared column name.
+            ViewModel {
+                name: "widget_seat_counts".to_owned(),
+                comment: None,
+                columns: vec![
+                    ViewColumnModel {
+                        name: "seats".to_owned(),
+                        ty: SqlType::U32,
+                        nullable: false,
+                    },
+                    ViewColumnModel {
+                        name: "count".to_owned(),
+                        ty: SqlType::I64,
+                        nullable: false,
+                    },
+                ],
+                query: ViewBody::Select(Box::new(ViewQueryModel {
+                    projection: vec![
+                        ProjectionItem {
+                            output_name: "seats".to_owned(),
+                            expr: ExprNode::Column {
+                                alias: "q0_0".to_owned(),
+                                column: "seats".to_owned(),
+                            },
+                        },
+                        ProjectionItem {
+                            output_name: "count".to_owned(),
+                            expr: ExprNode::Aggregate {
+                                func: AggregateFunc::Count,
+                                distinct: false,
+                                operand: Box::new(ExprNode::Column {
+                                    alias: "q0_0".to_owned(),
+                                    column: "id".to_owned(),
+                                }),
+                                result: None,
+                            },
+                        },
+                    ],
+                    from: Some(SourceItem::Named(SourceRef {
+                        schema: Some("catalog".to_owned()),
+                        name: "widgets".to_owned(),
+                        alias: "q0_0".to_owned(),
+                    })),
+                    group_by: vec![ExprNode::Column {
+                        alias: "q0_0".to_owned(),
+                        column: "seats".to_owned(),
+                    }],
+                    ..ViewQueryModel::default()
+                })),
+            },
+        ],
         tables: vec![
             TableModel {
                 name: "parts".to_owned(),
