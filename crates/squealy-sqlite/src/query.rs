@@ -372,6 +372,10 @@ impl Backend for Sqlite {
         SqliteError::NoRows
     }
 
+    fn render_error(error: std::io::Error) -> Self::Error {
+        SqliteError::Render(error)
+    }
+
     fn write_table(
         &self,
         table: &(dyn Table + Sync),
@@ -381,11 +385,15 @@ impl Backend for Sqlite {
     }
 }
 
-/// Renders SQL into a freshly allocated string (the renderer only ever emits UTF-8).
-fn rendered_sql(write: impl FnOnce(&mut Vec<u8>) -> std::io::Result<()>) -> String {
+/// Renders SQL into a freshly allocated string, returning a render reject (a query shape SQLite
+/// cannot render, such as a scoped recursive CTE arm) as an [`io::Error`](std::io::Error) instead of
+/// panicking. Backs `try_to_sql` (and, through it, the infallible `to_sql` and the execute paths).
+fn try_rendered_sql(
+    write: impl FnOnce(&mut Vec<u8>) -> std::io::Result<()>,
+) -> std::io::Result<String> {
     let mut buffer = Vec::new();
-    write(&mut buffer).expect("render SQL");
-    String::from_utf8(buffer).expect("renderer emits UTF-8")
+    write(&mut buffer)?;
+    Ok(String::from_utf8(buffer).expect("renderer emits UTF-8"))
 }
 
 /// All result rows (each an owned `Vec<SqliteValue>`) plus the affected-row count. Rows are owned

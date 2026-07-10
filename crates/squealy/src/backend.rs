@@ -165,6 +165,13 @@ pub trait Backend: Sized {
 
     fn no_rows_error() -> Self::Error;
 
+    /// Construct the backend's error for a render reject — an [`io::Error`] the shared renderer
+    /// returns when a query has no valid rendering for this dialect (e.g. a recursive CTE arm that
+    /// carries its own `ORDER BY`/`LIMIT`/`OFFSET` targeting SQLite, whose grammar forbids the
+    /// parenthesized arm that scoping requires). The runtime render collectors map that `io::Error`
+    /// through this so a query render surfaces a returned error rather than panicking.
+    fn render_error(error: io::Error) -> Self::Error;
+
     /// Generate backend-specific SQL for a table.
     fn write_table(&self, table: &(dyn Table + Sync), writer: &mut impl Write) -> io::Result<()>;
 }

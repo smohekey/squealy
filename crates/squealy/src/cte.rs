@@ -174,10 +174,11 @@ where
 ///
 /// Give a recursive arm its own `ORDER BY`/`LIMIT`/`OFFSET` and it can only be scoped by parenthesizing it
 /// (`(anchor … LIMIT n) UNION ALL …`). PostgreSQL and MySQL render that; **SQLite's recursive-CTE grammar
-/// forbids a parenthesized arm**, so such a shape has no valid SQLite rendering. On SQLite it is rejected at
-/// render time — and because the runtime query render (`to_sql`) is currently infallible, that rejection
-/// surfaces as a panic rather than a returned error. Plumbing a fallible runtime render is tracked
-/// separately; until then, avoid a per-arm `ORDER BY`/`LIMIT`/`OFFSET` in a recursive CTE targeting SQLite.
+/// forbids a parenthesized arm**, so such a shape has no valid SQLite rendering and is rejected at render
+/// time. The reject surfaces as a **returned error** from the execution path (`fetch`/`execute`/`prepare`)
+/// and from each backend query object's fallible `try_to_sql` — the infallible `to_sql()` still panics on
+/// it, as documented on that method. So a recursive CTE with a per-arm `ORDER BY`/`LIMIT`/`OFFSET` remains
+/// valid on PostgreSQL and MySQL and returns a render error (rather than panicking) on SQLite.
 pub trait RecursiveCteDefinition: SchemaCte {
     /// Whether the recursive union is `UNION ALL` (keeps duplicates) rather than `UNION`.
     const UNION_ALL: bool = false;

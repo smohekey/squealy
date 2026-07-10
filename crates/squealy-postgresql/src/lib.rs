@@ -146,6 +146,8 @@ pub enum PostgresError {
     Decode(#[source] tokio_postgres::Error),
     #[error("could not convert value to {0}")]
     Conversion(&'static str),
+    #[error("postgres render error: {0}")]
+    Render(#[source] std::io::Error),
 }
 
 impl Backend for Postgres {
@@ -163,6 +165,10 @@ impl Backend for Postgres {
 
     fn no_rows_error() -> Self::Error {
         PostgresError::NoRows
+    }
+
+    fn render_error(error: std::io::Error) -> Self::Error {
+        PostgresError::Render(error)
     }
 
     fn write_table(

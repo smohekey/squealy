@@ -95,6 +95,12 @@ impl Backend for ModelBackend {
         ModelError
     }
 
+    fn render_error(_error: io::Error) -> Self::Error {
+        // `ModelError` is payload-free (it stands in for "the model backend does not execute"); a
+        // render reject discards the `io::Error` detail, as `no_rows_error` discards its context.
+        ModelError
+    }
+
     fn write_table(&self, _table: &(dyn Table + Sync), _writer: &mut impl Write) -> io::Result<()> {
         // The model backend renders views, not tables; table DDL goes through the real backends.
         unreachable!("ModelBackend does not render table DDL")

@@ -81,6 +81,8 @@ pub enum SqliteError {
     },
     #[error("could not convert value to {0}")]
     Conversion(&'static str),
+    #[error("sqlite render error: {0}")]
+    Render(#[source] std::io::Error),
 }
 
 impl SchemaBackend for Sqlite {
