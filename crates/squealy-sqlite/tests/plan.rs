@@ -2262,3 +2262,66 @@ async fn a_recursive_cte_with_a_nested_with_prelude_is_valid_sqlite() {
         "the nested-WITH recursive CTE view must yield 5 counter rows",
     );
 }
+
+#[tokio::test]
+async fn replanning_a_view_with_an_ilike_filter_is_empty() {
+    // SQLite has no `ILIKE`: a view whose body filters with `ILIKE` (`case_insensitive: true`) renders as
+    // plain `LIKE`, which the reverse parser reads back as `case_insensitive: false`. Now that view bodies
+    // compare structurally, `canonical_view_body` must fold the flag on both sides (like it does for
+    // checks/index predicates), or the reconstructed body churns a perpetual `CreateView`.
+    let (mut connection, _raw) = setup().await;
+    let tbl = table(
+        "widgets",
+        vec![
+            column("id", SqlType::I64, false),
+            column("name", SqlType::Text, false),
+        ],
+    );
+    let view = ViewModel {
+        name: "named_widgets".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "name".to_owned(),
+            ty: SqlType::Text,
+            nullable: false,
+        }],
+        query: ViewBody::Select(Box::new(ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "name".to_owned(),
+                expr: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "name".to_owned(),
+                },
+            }],
+            from: Some(SourceItem::Named(SourceRef {
+                schema: None,
+                name: "widgets".to_owned(),
+                alias: "q0_0".to_owned(),
+            })),
+            filter: Some(ExprNode::Like {
+                case_insensitive: true,
+                negated: false,
+                operand: Box::new(ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "name".to_owned(),
+                }),
+                pattern: Box::new(ExprNode::Literal("'a%'".to_owned())),
+            }),
+            ..ViewQueryModel::default()
+        })),
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![tbl],
+            views: vec![view],
+        }],
+    };
+    publish(&model, &Sqlite, &mut connection)
+        .await
+        .expect("publish ilike view");
+    let plan = plan_from_database(&model, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("re-plan ilike view");
+    assert!(plan.steps.is_empty(), "ILIKE view churn: {:?}", plan.steps);
+}

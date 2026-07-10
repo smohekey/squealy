@@ -288,9 +288,22 @@ impl SchemaIntrospect for SqliteConnection {
     /// - **The many-to-one result-pin casts.** A `CAST(<call> AS <type>)` pin renders with one of SQLite's
     ///   five affinity names, so several [`SqlType`]s collapse to one on the round trip; fold each pin to
     ///   that affinity's canonical representative (see [`canonical_sqlite_pin_type`]).
+    /// - **The `LIKE` case-sensitivity flag.** SQLite renders both `case_insensitive` states as plain
+    ///   `LIKE` (it has no `ILIKE`), which the reverse parser reads back as `false`; fold every
+    ///   [`ExprNode::Like`](squealy::ExprNode::Like) in the body to `false` so an authored `ILIKE` does not
+    ///   churn (mirrors [`canonical_check_expression`](Self::canonical_check_expression) /
+    ///   [`canonical_index_predicate`](Self::canonical_index_predicate), which fold it on checks/predicates).
     fn canonical_view_body(&self, mut body: squealy::ViewBody) -> squealy::ViewBody {
         body.map_sources(&|source| source.schema = None);
         body.map_result_pins(&canonical_sqlite_pin_type);
+        body.map_exprs(&|expr| {
+            if let squealy::ExprNode::Like {
+                case_insensitive, ..
+            } = expr
+            {
+                *case_insensitive = false;
+            }
+        });
         body
     }
 

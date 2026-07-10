@@ -800,6 +800,182 @@ impl ViewBody {
             }
         }
     }
+
+    /// Applies `f` to **every** [`ExprNode`] reachable from the body — projection, filter, join `ON`,
+    /// `GROUP BY`, `HAVING`, `ORDER BY`, and set-op `ORDER BY` keys — recursing through derived-table
+    /// subqueries, `WITH` CTEs, set-op arms, scalar/`IN`/`EXISTS` subqueries, and every nested
+    /// sub-expression (each node, then its children). Exhaustive over [`ExprNode`], so a new variant is a
+    /// compile error rather than a silently-unvisited node.
+    ///
+    /// A backend's `canonical_view_body` uses this — on **both** the desired and the introspected model —
+    /// to fold a spelling its renderer does not distinguish. SQLite (like MySQL) emits plain `LIKE` for
+    /// both `case_insensitive` states and introspects them back as `false`, so an authored `ILIKE`
+    /// (`case_insensitive: true`) in a view body must be folded to `false` here or the reconstructed body
+    /// churns a perpetual `CreateView` (mirrors `fold_like_case_insensitivity` on checks/index predicates).
+    pub fn map_exprs(&mut self, f: &impl Fn(&mut ExprNode)) {
+        match self {
+            ViewBody::Select(query) => map_query_exprs(query, f),
+            ViewBody::Set {
+                left,
+                right,
+                order_by,
+                ..
+            } => {
+                left.map_exprs(f);
+                right.map_exprs(f);
+                for order in order_by {
+                    map_expr_nodes(&mut order.expr, f);
+                }
+            }
+            ViewBody::With { ctes, body, .. } => {
+                for cte in ctes {
+                    cte.body.map_exprs(f);
+                }
+                body.map_exprs(f);
+            }
+        }
+    }
+}
+
+/// Applies `f` to every [`ExprNode`] reachable from a single `SELECT` body (see [`ViewBody::map_exprs`]).
+fn map_query_exprs(query: &mut ViewQueryModel, f: &impl Fn(&mut ExprNode)) {
+    for item in &mut query.projection {
+        map_expr_nodes(&mut item.expr, f);
+    }
+    if let Some(from) = &mut query.from {
+        map_source_exprs(from, f);
+    }
+    for join in &mut query.joins {
+        map_source_exprs(&mut join.source, f);
+        if let Some(on) = &mut join.on {
+            map_expr_nodes(on, f);
+        }
+    }
+    if let Some(filter) = &mut query.filter {
+        map_expr_nodes(filter, f);
+    }
+    for expr in &mut query.group_by {
+        map_expr_nodes(expr, f);
+    }
+    if let Some(having) = &mut query.having {
+        map_expr_nodes(having, f);
+    }
+    for order in &mut query.order_by {
+        map_expr_nodes(&mut order.expr, f);
+    }
+}
+
+/// A named source binds no expression; a derived table carries a whole sub-body to recurse into.
+fn map_source_exprs(source: &mut SourceItem, f: &impl Fn(&mut ExprNode)) {
+    match source {
+        SourceItem::Named(_) => {}
+        SourceItem::Derived { query, .. } => query.map_exprs(f),
+    }
+}
+
+/// Applies `f` to `expr` itself and then to every nested [`ExprNode`], recursing into scalar/`IN`/`EXISTS`
+/// subqueries. Exhaustive over [`ExprNode`] so a new node is a compile error here rather than an
+/// unvisited one.
+fn map_expr_nodes(expr: &mut ExprNode, f: &impl Fn(&mut ExprNode)) {
+    f(expr);
+    match expr {
+        ExprNode::Column { .. }
+        | ExprNode::BareColumn { .. }
+        | ExprNode::Literal(_)
+        | ExprNode::Raw(_)
+        | ExprNode::Now => {}
+        ExprNode::Binary { left, right, .. }
+        | ExprNode::Compare { left, right, .. }
+        | ExprNode::Logical { left, right, .. }
+        | ExprNode::Nullif { left, right, .. } => {
+            map_expr_nodes(left, f);
+            map_expr_nodes(right, f);
+        }
+        ExprNode::Cast { operand, .. } | ExprNode::Aggregate { operand, .. } => {
+            map_expr_nodes(operand, f);
+        }
+        ExprNode::Not(operand) | ExprNode::IsNull { operand, .. } => map_expr_nodes(operand, f),
+        ExprNode::Like {
+            operand, pattern, ..
+        } => {
+            map_expr_nodes(operand, f);
+            map_expr_nodes(pattern, f);
+        }
+        ExprNode::In { operand, items, .. } => {
+            map_expr_nodes(operand, f);
+            for item in items {
+                map_expr_nodes(item, f);
+            }
+        }
+        ExprNode::Between {
+            operand, low, high, ..
+        } => {
+            map_expr_nodes(operand, f);
+            map_expr_nodes(low, f);
+            map_expr_nodes(high, f);
+        }
+        ExprNode::ScalarSubquery(subquery) | ExprNode::Exists { subquery, .. } => {
+            map_query_exprs(subquery, f);
+        }
+        ExprNode::InSubquery {
+            operand, subquery, ..
+        } => {
+            map_expr_nodes(operand, f);
+            map_query_exprs(subquery, f);
+        }
+        ExprNode::Window {
+            args,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            for arg in args {
+                map_expr_nodes(arg, f);
+            }
+            for partition in partition_by {
+                map_expr_nodes(partition, f);
+            }
+            for order in order_by {
+                map_expr_nodes(&mut order.expr, f);
+            }
+        }
+        ExprNode::Case { arms, else_, .. } => {
+            for arm in arms {
+                map_expr_nodes(&mut arm.when, f);
+                map_expr_nodes(&mut arm.then, f);
+            }
+            if let Some(else_) = else_ {
+                map_expr_nodes(else_, f);
+            }
+        }
+        ExprNode::SimpleCase {
+            operand,
+            arms,
+            else_,
+            ..
+        } => {
+            map_expr_nodes(operand, f);
+            for arm in arms {
+                map_expr_nodes(&mut arm.when, f);
+                map_expr_nodes(&mut arm.then, f);
+            }
+            if let Some(else_) = else_ {
+                map_expr_nodes(else_, f);
+            }
+        }
+        ExprNode::Coalesce { args, .. }
+        | ExprNode::ScalarFn { args, .. }
+        | ExprNode::Function { args, .. } => {
+            for arg in args {
+                map_expr_nodes(arg, f);
+            }
+        }
+        ExprNode::Extract { operand, .. }
+        | ExprNode::DateTrunc { operand, .. }
+        | ExprNode::ExtractSecond { operand, .. } => {
+            map_expr_nodes(operand, f);
+        }
+    }
 }
 
 /// Applies `f` to every result pin reachable from a single `SELECT` body (see
@@ -2047,6 +2223,86 @@ mod tests {
             panic!("expected a named FROM in the CTE body")
         };
         assert_eq!(source.schema, None);
+    }
+
+    #[test]
+    fn map_exprs_visits_every_nested_expression() {
+        // A `WITH` over a `UNION` whose left arm carries a `LIKE` in its filter and whose right arm
+        // selects from a derived table with a `LIKE` inside a projected `CASE`. `map_exprs` must reach and
+        // rewrite both — the deeply-nested one proves it recurses past view-body-only nodes (`CASE`,
+        // derived tables) that `fold_like_case_insensitivity` leaves untouched.
+        let like = |ci: bool| ExprNode::Like {
+            case_insensitive: ci,
+            negated: false,
+            operand: Box::new(bare("name")),
+            pattern: Box::new(lit("'a%'")),
+        };
+        let left = ViewBody::Select(Box::new(ViewQueryModel {
+            filter: Some(like(true)),
+            ..project("n", bare("n"))
+        }));
+        let cased = ExprNode::Case {
+            arms: vec![CaseArm {
+                when: Box::new(like(true)),
+                then: Box::new(lit("1")),
+            }],
+            else_: None,
+            result: None,
+        };
+        let right = ViewBody::Select(Box::new(ViewQueryModel {
+            from: Some(SourceItem::Derived {
+                query: Box::new(ViewBody::Select(Box::new(project("c", cased)))),
+                alias: "d".to_owned(),
+            }),
+            ..project("c", bare("c"))
+        }));
+        let mut body = ViewBody::With {
+            recursive: false,
+            ctes: Vec::new(),
+            body: Box::new(ViewBody::Set {
+                op: ViewSetOp::Union,
+                all: false,
+                left: Box::new(left),
+                right: Box::new(right),
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+            }),
+        };
+
+        body.map_exprs(&|expr| {
+            if let ExprNode::Like {
+                case_insensitive, ..
+            } = expr
+            {
+                *case_insensitive = false;
+            }
+        });
+
+        // Both `LIKE`s — the left arm's filter and the derived table's `CASE` arm — are now case-sensitive.
+        let ViewBody::With { body, .. } = &body else {
+            panic!("expected a WITH body")
+        };
+        let ViewBody::Set { left, right, .. } = body.as_ref() else {
+            panic!("expected a Set body")
+        };
+        let ViewBody::Select(left) = left.as_ref() else {
+            panic!("expected a Select left arm")
+        };
+        assert_eq!(left.filter, Some(like(false)));
+        let ViewBody::Select(right) = right.as_ref() else {
+            panic!("expected a Select right arm")
+        };
+        let Some(SourceItem::Derived { query, .. }) = &right.from else {
+            panic!("expected a derived FROM")
+        };
+        let ViewBody::Select(derived) = query.as_ref() else {
+            panic!("expected a Select derived body")
+        };
+        let ExprNode::Case { arms, .. } = &derived.projection[0].expr else {
+            panic!("expected a CASE projection")
+        };
+        assert_eq!(*arms[0].when, like(false));
     }
 
     #[test]
