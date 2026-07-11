@@ -1389,23 +1389,31 @@ fn lower_cast(
 /// desired (Raw-then-re-parsed) and introspected sides route through the same per-dialect inverter, so
 /// they agree even where the inverse is a canonical representative (many-to-one on MySQL/SQLite).
 ///
-/// EXCEPT where re-rendering `ty` on this dialect would be **lossy**: MySQL and SQLite render every
-/// [`SqlType::Decimal`] as a bare `DECIMAL`/`NUMERIC`, dropping the precision/scale. Since the
-/// canonicalized expression is what planned DDL renders, structuring such a cast would silently change
-/// the deployed check/generated-column semantics (`CAST(x AS DECIMAL(10, 2))` → `CAST(x AS DECIMAL)`).
-/// So a `Decimal` cast on those dialects stays `NotYetLowered` (→ `Raw`, compared verbatim).
-/// PostgreSQL renders `numeric(p, s)` faithfully, so its casts are exact and always structure.
+/// [`invert_pin_type`] is tuned for a **result pin** — a view-output cast whose exact type is recovered
+/// from the introspected column metadata — so it maps a couple of spellings to a representative that is
+/// wrong for a general authored cast. Those cases stay `Raw` (compared verbatim) rather than misrepresent
+/// the cast in the backend-neutral model (which would corrupt a cross-dialect deploy) or the planned DDL:
+///
+/// - **`I128`/`U128`** — bare `numeric`/`decimal` (PostgreSQL) and `DECIMAL(65, 0)` (MySQL) invert to
+///   `I128`, squealy's *render target* for a 128-bit integer. As an authored cast they mean an
+///   arbitrary-precision DECIMAL — a different semantic category — and no dialect spells a native
+///   128-bit-integer cast, so an `I128`/`U128` general cast is never legitimate.
+/// - **`Decimal` on MySQL/SQLite** — those dialects render every [`SqlType::Decimal`] as a bare
+///   `DECIMAL`/`NUMERIC`, dropping the precision/scale, so structuring one would silently change the
+///   deployed semantics (`CAST(x AS DECIMAL(10, 2))` → `CAST(x AS DECIMAL)`). PostgreSQL renders
+///   `numeric(p, s)` faithfully, so its `Decimal` casts are exact and structure.
 fn general_cast(
     operand: &Expr,
     ty: SqlType,
     data_type: &DataType,
     dialect: SqlDialect,
 ) -> Result<ExprNode, ReadError> {
-    if matches!(ty, SqlType::Decimal { .. })
-        && matches!(dialect, SqlDialect::Mysql | SqlDialect::Sqlite)
-    {
+    let not_exactly_modelable = matches!(ty, SqlType::I128 | SqlType::U128)
+        || (matches!(ty, SqlType::Decimal { .. })
+            && matches!(dialect, SqlDialect::Mysql | SqlDialect::Sqlite));
+    if not_exactly_modelable {
         return Err(not_yet(format!(
-            "cast to `{data_type}` (re-renders without precision on this dialect, kept raw)"
+            "general cast to `{data_type}` cannot be modeled exactly on this dialect, kept raw"
         )));
     }
     Ok(ExprNode::Cast {
@@ -3281,16 +3289,17 @@ mod tests {
             low("(1.5)::numeric", SqlDialect::Postgres).unwrap(),
             low("1.5", SqlDialect::Generic).unwrap()
         );
-        // Every cast `redundant_cast_literal` does NOT recover as a bare literal now structures as a
-        // general `ExprNode::Cast` (rather than staying `Raw`): a *converting* literal cast (truncating,
-        // string→float/date, bounded, or any float target — never provably value-preserving) and a cast
-        // on a NON-literal operand. Both the desired (Raw-then-re-parsed) and introspected sides structure
-        // the same way, so a genuine cast round-trips; a literal cast whose authored form omits the cast
-        // (e.g. a bare `1.5` vs PostgreSQL's synthesized `(1.5)::double precision`) is the documented
-        // float-column-check churn, never corruption.
+        // Every cast `redundant_cast_literal` does NOT recover as a bare literal, and whose target IS
+        // exactly modelable, now structures as a general `ExprNode::Cast` (rather than staying `Raw`): a
+        // *converting* literal cast (truncating, string→float/date, bounded, or any float target — never
+        // provably value-preserving) and a cast on a NON-literal operand. Both the desired
+        // (Raw-then-re-parsed) and introspected sides structure the same way, so a genuine cast
+        // round-trips; a literal cast whose authored form omits the cast (e.g. a bare `1.5` vs
+        // PostgreSQL's synthesized `(1.5)::double precision`) is the documented float-column-check churn,
+        // never corruption. (A bare `::numeric` target is NOT exactly modelable — see below — so it is
+        // excluded here.)
         for converting in [
             "('-1.5')::integer",
-            "(quota)::numeric",
             "('Infinity')::float8",
             "('2020-01-01')::date",
             "(1.5)::integer",
@@ -3536,6 +3545,17 @@ mod tests {
         ));
         assert!(matches!(
             low("CAST(\"x\" AS NUMERIC(10, 2))", SqlDialect::Sqlite),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // Bare `numeric`/`decimal` inverts to the `I128` result-pin representative (squealy's render
+        // target for a 128-bit integer), a different semantic category than an authored decimal cast — so
+        // a general `I128` cast is never legitimate and stays `Raw`, on every dialect.
+        assert!(matches!(
+            low("CAST(\"x\" AS numeric)", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low("CAST(`x` AS DECIMAL(65, 0))", SqlDialect::Mysql),
             Err(ReadError::NotYetLowered(_))
         ));
     }
