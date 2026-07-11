@@ -174,6 +174,7 @@ fn arithmetic_tokens(op: ArithmeticOp) -> TokenStream {
         ArithmeticOp::Subtract => quote!(Subtract),
         ArithmeticOp::Multiply => quote!(Multiply),
         ArithmeticOp::Divide => quote!(Divide),
+        ArithmeticOp::Modulo => quote!(Modulo),
     };
     quote! { ::squealy::ArithmeticOp::#variant }
 }
@@ -221,11 +222,11 @@ mod tests {
         assert!(structural.contains("Compare"), "{structural}");
         assert!(!structural.contains("compile_error"), "{structural}");
 
-        // Valid SQL outside the structural subset (`%` modulo) is preserved verbatim as `Raw`, NOT a
-        // compile error — upgrading a table with such a check must keep compiling.
-        let raw = check_option_tokens(Some("amount % 2 = 0")).to_string();
-        assert!(raw.contains("Raw"), "{raw}");
-        assert!(!raw.contains("compile_error"), "{raw}");
+        // `%` modulo lowers structurally — a neutral `Modulo` arithmetic node, not a `Raw` string.
+        let modulo = check_option_tokens(Some("amount % 2 = 0")).to_string();
+        assert!(modulo.contains("Modulo"), "{modulo}");
+        assert!(!modulo.contains("Raw"), "{modulo}");
+        assert!(!modulo.contains("compile_error"), "{modulo}");
 
         // Backend-specific syntax (PostgreSQL JSONB) is preserved as `Raw`, never a compile error.
         let jsonb = check_option_tokens(Some("metadata ? 'key'")).to_string();

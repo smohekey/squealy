@@ -806,6 +806,7 @@ fn lower_binary(
         BinaryOperator::Minus => Some(ArithmeticOp::Subtract),
         BinaryOperator::Multiply => Some(ArithmeticOp::Multiply),
         BinaryOperator::Divide => Some(ArithmeticOp::Divide),
+        BinaryOperator::Modulo => Some(ArithmeticOp::Modulo),
         _ => None,
     };
     if let Some(op) = arithmetic {
@@ -3321,10 +3322,13 @@ mod tests {
 
     #[test]
     fn shapes_outside_the_grammar_are_not_yet_lowered() {
-        // `%` has no neutral arithmetic node.
+        // `%` lowers to the neutral `Modulo` arithmetic node (same operator on every dialect).
         assert!(matches!(
             low("(\"a\" % 2)", SqlDialect::Postgres),
-            Err(ReadError::NotYetLowered(_))
+            Ok(ExprNode::Binary {
+                op: ArithmeticOp::Modulo,
+                ..
+            })
         ));
         // A general `CAST` is deferred (dialect-ambiguous target names, e.g. MySQL `SIGNED`).
         assert!(matches!(

@@ -184,7 +184,7 @@ fn schema_with_table(t: TableModel) -> DatabaseModel {
 fn corpus() -> Vec<(&'static str, DatabaseModel)> {
     let mut cases: Vec<(&'static str, DatabaseModel)> = Vec::new();
 
-    // Arithmetic: add / subtract / multiply / the float-cast division idiom.
+    // Arithmetic: add / subtract / multiply / modulo / the float-cast division idiom.
     cases.push((
         "view/arithmetic",
         schema_with_view(view(
@@ -193,6 +193,7 @@ fn corpus() -> Vec<(&'static str, DatabaseModel)> {
                 ("added", SqlType::I64),
                 ("subbed", SqlType::I64),
                 ("mulled", SqlType::I64),
+                ("modded", SqlType::I64),
                 ("ratio", SqlType::F64),
             ],
             body(vec![
@@ -216,6 +217,14 @@ fn corpus() -> Vec<(&'static str, DatabaseModel)> {
                     "mulled",
                     ExprNode::Binary {
                         op: ArithmeticOp::Multiply,
+                        left: b(col("cnt")),
+                        right: b(lit("2")),
+                    },
+                ),
+                proj(
+                    "modded",
+                    ExprNode::Binary {
+                        op: ArithmeticOp::Modulo,
                         left: b(col("cnt")),
                         right: b(lit("2")),
                     },
@@ -913,11 +922,17 @@ fn reader_entry_points_lower_scalars_and_single_select_view_bodies() {
         },
     );
 
-    // A scalar shape outside the covered grammar (`%` has no neutral node) is reported, not mislowered.
-    match reader.read_check_expression("(\"a\" % 2)") {
-        Err(ReadError::NotYetLowered(_)) => {}
-        other => panic!("expected NotYetLowered for modulo, got: {other:?}"),
-    }
+    // `%` modulo lowers structurally to a neutral `Modulo` binary (the same operator on every dialect).
+    assert_eq!(
+        reader
+            .read_check_expression("(\"a\" % 2)")
+            .expect("modulo lowers to a neutral node"),
+        ExprNode::Binary {
+            op: ArithmeticOp::Modulo,
+            left: Box::new(bare("a")),
+            right: Box::new(lit("2")),
+        },
+    );
 
     // A CREATE VIEW body now lowers: the aliased projection `1 AS n` names the single output `n`, and a
     // constant SELECT has no `FROM`.
@@ -1033,6 +1048,21 @@ fn constraint_corpus() -> Vec<(&'static str, ExprNode)> {
                 op: ArithmeticOp::Divide,
                 left: b(bare("total")),
                 right: b(bare("qty")),
+            },
+            lit("0"),
+        ),
+    ));
+
+    // `%` modulo — the same operator on every dialect, no float-cast idiom (unlike division). This is
+    // the residual check shape that kept `canonical.rs` alive; it now round-trips structurally.
+    cases.push((
+        "modulo",
+        cmp(
+            CompareOp::Equals,
+            ExprNode::Binary {
+                op: ArithmeticOp::Modulo,
+                left: b(bare("amount")),
+                right: b(lit("2")),
             },
             lit("0"),
         ),

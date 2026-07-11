@@ -1207,6 +1207,7 @@ fn arithmetic_symbol(op: ArithmeticOp) -> &'static str {
         ArithmeticOp::Subtract => "-",
         ArithmeticOp::Multiply => "*",
         ArithmeticOp::Divide => "/",
+        ArithmeticOp::Modulo => "%",
     }
 }
 

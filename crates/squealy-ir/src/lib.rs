@@ -14,6 +14,8 @@ pub enum ArithmeticOp {
     Subtract,
     Multiply,
     Divide,
+    /// SQL `%` modulo — the same symbol on PostgreSQL, MySQL, and SQLite (no dialect divergence).
+    Modulo,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
