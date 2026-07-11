@@ -393,9 +393,11 @@ impl squealy::SchemaIntrospect for PostgresConnection {
     /// desired (Raw-then-re-parsed) and introspected sides structure identically, and equivalent checks
     /// compare equal without the former `canonical.rs` string normalizer. A residual shape the grammar
     /// still cannot invert — `IS TRUE`/`IS FALSE` (no neutral node), a cast to a non-modeled type
-    /// (`::inet`, an enum), a quoted function name, or PostgreSQL's synthesized converting literal cast
-    /// on a bare literal (e.g. `(1.5)::double precision` vs an authored `1.5`) — stays `Raw` and is
-    /// compared verbatim (a documented churn, never corruption).
+    /// (`::inet`, an enum), a quoted function name, a general function with a direct literal argument
+    /// (`my_func('x')`, which `pg_get_constraintdef` deparses as `my_func('x'::text)` — the synthesized
+    /// argument cast cannot be stripped without risking a different overload), or PostgreSQL's
+    /// synthesized converting literal cast on a bare literal (e.g. `(1.5)::double precision` vs an
+    /// authored `1.5`) — stays `Raw` and is compared verbatim (a documented churn, never corruption).
     fn canonical_check_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
         match expression {
             squealy::ExprNode::Raw(sql) => {

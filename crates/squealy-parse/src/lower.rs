@@ -1358,12 +1358,16 @@ fn lower_cast(
             lower_window(function, over, Some(ty), dialect)
         }
         // Only an aggregate call is otherwise pinned (a plain scalar/general function self-types).
+        // A non-windowed function: an AGGREGATE call is a result-pin (peel into its `result`); any other
+        // function (a scalar like `abs`/`lower`) is a general cast around the lowered function node.
         Expr::Function(function) => {
-            let func = single_unquoted_name(function)
+            match single_unquoted_name(function)
                 .as_deref()
                 .and_then(aggregate_func)
-                .ok_or_else(|| not_yet(format!("cast around function `{function}`")))?;
-            lower_aggregate(function, func, Some(ty), dialect)
+            {
+                Some(func) => lower_aggregate(function, func, Some(ty), dialect),
+                None => general_cast(inner, ty, data_type, dialect),
+            }
         }
         Expr::Extract {
             field,
@@ -1375,15 +1379,39 @@ fn lower_cast(
             field: CeilFloorKind::DateTimeField(DateTimeField::NoDateTime),
         } => lower_floored_second(expr, Some(ty), dialect),
         // Any other operand is a general user cast (a bare column, a literal a redundant-cast strip
-        // declined, an arbitrary expression). Structure it as a `Cast` node so an authored `x::ty` /
-        // `CAST(x AS ty)` check round-trips structurally instead of falling back to `Raw`. The target
-        // type is the canonical representative of this dialect's spelling (many-to-one on MySQL/SQLite);
-        // both the desired and introspected sides re-parse through this same inverter, so they agree.
-        other => Ok(ExprNode::Cast {
-            operand: b(lower(other, dialect)?),
-            ty,
-        }),
+        // declined, an arbitrary expression).
+        other => general_cast(other, ty, data_type, dialect),
     }
+}
+
+/// Structures a general user cast `CAST(operand AS ty)` as an [`ExprNode::Cast`], so an authored
+/// `x::ty` / `CAST(x AS ty)` check round-trips structurally instead of falling back to `Raw`. Both the
+/// desired (Raw-then-re-parsed) and introspected sides route through the same per-dialect inverter, so
+/// they agree even where the inverse is a canonical representative (many-to-one on MySQL/SQLite).
+///
+/// EXCEPT where re-rendering `ty` on this dialect would be **lossy**: MySQL and SQLite render every
+/// [`SqlType::Decimal`] as a bare `DECIMAL`/`NUMERIC`, dropping the precision/scale. Since the
+/// canonicalized expression is what planned DDL renders, structuring such a cast would silently change
+/// the deployed check/generated-column semantics (`CAST(x AS DECIMAL(10, 2))` → `CAST(x AS DECIMAL)`).
+/// So a `Decimal` cast on those dialects stays `NotYetLowered` (→ `Raw`, compared verbatim).
+/// PostgreSQL renders `numeric(p, s)` faithfully, so its casts are exact and always structure.
+fn general_cast(
+    operand: &Expr,
+    ty: SqlType,
+    data_type: &DataType,
+    dialect: SqlDialect,
+) -> Result<ExprNode, ReadError> {
+    if matches!(ty, SqlType::Decimal { .. })
+        && matches!(dialect, SqlDialect::Mysql | SqlDialect::Sqlite)
+    {
+        return Err(not_yet(format!(
+            "cast to `{data_type}` (re-renders without precision on this dialect, kept raw)"
+        )));
+    }
+    Ok(ExprNode::Cast {
+        operand: b(lower(operand, dialect)?),
+        ty,
+    })
 }
 
 /// Inverts a parsed cast-target [`DataType`] back to the neutral [`SqlType`] this dialect's renderer
@@ -3476,6 +3504,40 @@ mod tests {
         assert_eq!(pin("char(5)"), Some(SqlType::Char(5)));
         // Bare `numeric` is the 128-bit-integer pin; canonical `I128`.
         assert_eq!(pin("numeric"), Some(SqlType::I128));
+    }
+
+    #[test]
+    fn general_cast_covers_scalar_functions_but_skips_lossy_decimal() {
+        // A cast around a NON-aggregate function (`abs`, `lower`) structures as a general `Cast` around
+        // the lowered function node — not left `Raw` for lack of a result-pin reading.
+        assert!(matches!(
+            low("CAST(abs(\"amount\") AS bigint)", SqlDialect::Postgres).unwrap(),
+            ExprNode::Cast {
+                ty: SqlType::I64,
+                ..
+            }
+        ));
+        // PostgreSQL renders `numeric(p, s)` faithfully, so a `Decimal` cast is exact and structures.
+        assert!(matches!(
+            low("CAST(\"x\" AS numeric(10, 2))", SqlDialect::Postgres).unwrap(),
+            ExprNode::Cast {
+                ty: SqlType::Decimal {
+                    precision: 10,
+                    scale: 2,
+                },
+                ..
+            }
+        ));
+        // MySQL and SQLite render every `Decimal` as a bare `DECIMAL`/`NUMERIC`, dropping the
+        // precision/scale — structuring one would silently change the planned DDL, so it stays `Raw`.
+        assert!(matches!(
+            low("CAST(`x` AS DECIMAL(10, 2))", SqlDialect::Mysql),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low("CAST(\"x\" AS NUMERIC(10, 2))", SqlDialect::Sqlite),
+            Err(ReadError::NotYetLowered(_))
+        ));
     }
 
     #[test]
