@@ -509,6 +509,20 @@ pub trait SchemaIntrospect {
         vec![expression]
     }
 
+    /// Folds a general cast's target [`SqlType`](crate::SqlType) to this backend's canonical
+    /// representative. A dialect's cast vocabulary is many-to-one (several `SqlType`s render to the same
+    /// keyword — MySQL `SIGNED` for every signed-integer width, SQLite `INTEGER`, PostgreSQL `smallint` for
+    /// `I8`/`I16`), so a narrower authored cast round-trips through introspection as the keyword's
+    /// representative. Applied — via [`map_cast_types`](crate::map_cast_types) — to every general
+    /// [`ExprNode::Cast`](crate::ExprNode::Cast) in a check / generated / index expression on **both** the
+    /// desired and introspected model in [`canonicalize_model`](crate::canonicalize_model), so a
+    /// *structural* desired cast (from a KDL package, or a hand-built model — the macro path stores a `Raw`
+    /// that re-parses to the representative on both sides already) does not churn. The default is identity;
+    /// each real backend folds via the same mapping its `canonical_view_body` result pins use.
+    fn canonical_cast_type(&self, ty: &crate::SqlType) -> crate::SqlType {
+        ty.clone()
+    }
+
     /// Canonicalizes a schema (namespace) name to the form this backend's introspection reports.
     ///
     /// A backend with no namespaces flattens every table into one unqualified namespace: SQLite has no

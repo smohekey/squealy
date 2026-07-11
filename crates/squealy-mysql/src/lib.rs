@@ -380,6 +380,10 @@ impl SchemaIntrospect for MysqlConnection {
         body
     }
 
+    fn canonical_cast_type(&self, ty: &squealy::SqlType) -> squealy::SqlType {
+        canonical_mysql_pin_type(ty)
+    }
+
     /// MySQL has only `AUTO_INCREMENT`: it renders any identity column that way and introspects it
     /// back as [`IdentityMode::AutoIncrement`](squealy::IdentityMode::AutoIncrement). Map every mode
     /// to that so a crate-declared `auto_increment` column (which enters the model as `ByDefault`)

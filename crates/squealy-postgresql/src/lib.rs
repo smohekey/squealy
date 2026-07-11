@@ -359,6 +359,10 @@ impl squealy::SchemaIntrospect for PostgresConnection {
         body
     }
 
+    fn canonical_cast_type(&self, ty: &squealy::SqlType) -> squealy::SqlType {
+        canonical_pg_pin_type(ty)
+    }
+
     /// PostgreSQL introspection reports a plain index's access method as `btree`; map an unset
     /// method to that so a crate-declared index does not churn against the live schema.
     fn default_index_method(&self) -> Option<squealy::IndexMethod> {

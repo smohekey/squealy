@@ -309,6 +309,10 @@ impl SchemaIntrospect for SqliteConnection {
         body
     }
 
+    fn canonical_cast_type(&self, ty: &SqlType) -> SqlType {
+        canonical_sqlite_pin_type(ty)
+    }
+
     /// SQLite's only identity mechanism is `AUTOINCREMENT`, which introspects back as
     /// [`IdentityMode::AutoIncrement`]. Map every declared mode to it so a crate-declared
     /// `auto_increment` column (which enters the model as `ByDefault`) does not churn as an ambiguous

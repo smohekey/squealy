@@ -1733,6 +1733,24 @@ fn collect_source_item<'a>(source: &'a SourceItem, sources: &mut Vec<&'a SourceR
 ///
 /// Recurses through the constraint-expression node set; leaves and view-body-only nodes (which never
 /// occur in a check) are returned unchanged.
+/// Applies `f` to the target type of every general [`ExprNode::Cast`] reachable from `expr` (recursing
+/// through all sub-expressions). A backend's constraint canonicalization uses this — on **both** the
+/// desired and introspected model — to fold each general cast's target to that dialect's canonical
+/// representative (a cast vocabulary is many-to-one, so several [`SqlType`]s render to the same keyword).
+///
+/// A cast structured from a `Raw` string on both sides already agrees (both re-parse through the same
+/// inverter); this covers the STRUCTURAL-desired-cast path that never re-parses — a narrower cast in a
+/// KDL package deployed to a lossier dialect, or a hand-built model — which would otherwise churn against
+/// the introspected representative. This is the general-cast analogue of result-pin folding
+/// ([`ViewBody::map_result_pins`]), which deliberately leaves a general cast's target alone.
+pub fn map_cast_types(expr: &mut ExprNode, f: &impl Fn(&SqlType) -> SqlType) {
+    map_expr_nodes(expr, &|node| {
+        if let ExprNode::Cast { ty, .. } = node {
+            *ty = f(ty);
+        }
+    });
+}
+
 pub fn normalize_expr(expr: &ExprNode) -> ExprNode {
     match expr {
         ExprNode::Between {
@@ -1913,6 +1931,13 @@ pub fn fold_like_case_insensitivity(expr: &ExprNode) -> ExprNode {
         ExprNode::Function { name, args } => ExprNode::Function {
             name: name.clone(),
             args: args.iter().map(fold_like_case_insensitivity).collect(),
+        },
+        // A general cast carries a full expression that may contain a `Like` — recurse so a
+        // `CAST(x ILIKE 'a%' AS ty)` desired check folds to `case_insensitive: false` on MySQL/SQLite
+        // (which render both flag states as plain `LIKE`) instead of churning.
+        ExprNode::Cast { operand, ty } => ExprNode::Cast {
+            operand: Box::new(fold_like_case_insensitivity(operand)),
+            ty: ty.clone(),
         },
         other => other.clone(),
     }
@@ -2374,6 +2399,45 @@ mod tests {
         );
         assert_eq!(normalize_expr(&with_between), deparsed);
         assert_eq!(normalize_expr(&with_between), normalize_expr(&deparsed));
+    }
+
+    #[test]
+    fn map_cast_types_folds_every_general_cast_target() {
+        // Every general cast's target folds via the supplied fn, recursing through the whole expression,
+        // so a backend can canonicalize a structural desired cast to its representative on both sides.
+        let mut expr = ExprNode::Compare {
+            op: CompareOp::Equals,
+            left: Box::new(ExprNode::Cast {
+                operand: Box::new(bare("x")),
+                ty: SqlType::I8,
+            }),
+            right: Box::new(ExprNode::Cast {
+                operand: Box::new(lit("0")),
+                ty: SqlType::I64,
+            }),
+        };
+        // Fold `I8` to its representative `I16` (as PostgreSQL's `smallint` inverse does); leave the rest.
+        map_cast_types(&mut expr, &|ty| match ty {
+            SqlType::I8 => SqlType::I16,
+            other => other.clone(),
+        });
+        let ExprNode::Compare { left, right, .. } = &expr else {
+            panic!("expected a comparison");
+        };
+        assert!(matches!(
+            **left,
+            ExprNode::Cast {
+                ty: SqlType::I16,
+                ..
+            }
+        ));
+        assert!(matches!(
+            **right,
+            ExprNode::Cast {
+                ty: SqlType::I64,
+                ..
+            }
+        ));
     }
 
     #[test]
