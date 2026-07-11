@@ -1402,6 +1402,12 @@ fn lower_cast(
 ///   `DECIMAL`/`NUMERIC`, dropping the precision/scale, so structuring one would silently change the
 ///   deployed semantics (`CAST(x AS DECIMAL(10, 2))` → `CAST(x AS DECIMAL)`). PostgreSQL renders
 ///   `numeric(p, s)` faithfully, so its `Decimal` casts are exact and structure.
+///
+/// These guards key on the SOURCE parser dialect, which keeps a same-backend round-trip churn-free (the H1
+/// case: a squealy-published schema re-plans to empty on the same backend). A structural `Decimal`/`I128`
+/// cast that a PostgreSQL package carries but is then deployed **cross-dialect** to a lossier backend is a
+/// documented H2 residual (silent precision loss / churn) tracked in git-bug `8fe1530` — it was already
+/// broken (as invalid cross-dialect cast syntax) before this cast inversion landed.
 fn general_cast(
     operand: &Expr,
     ty: SqlType,
