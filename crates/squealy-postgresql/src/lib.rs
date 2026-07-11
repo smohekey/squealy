@@ -9,8 +9,6 @@ use squealy::{
 use tokio_postgres::Client;
 
 #[cfg(feature = "schema")]
-mod canonical;
-#[cfg(feature = "schema")]
 mod introspect;
 mod query;
 mod sql;
@@ -386,29 +384,23 @@ impl squealy::SchemaIntrospect for PostgresConnection {
 
     /// Structures a `Raw` check expression (a legacy package's verbatim check, or an un-invertible
     /// introspected one) by re-parsing it in the PostgreSQL dialect, so it compares equal to a freshly
-    /// introspected structural check. An already-structural expression is returned unchanged.
+    /// introspected structural check. An already-structural expression is returned unchanged. This is the
+    /// same shape as the MySQL/SQLite seams — a plain re-parse, no string normalizer.
     ///
-    /// General function calls (`jsonb_typeof(data) = 'object'`) now lower structurally to
-    /// [`squealy::ExprNode::Function`], so they converge without a string normalizer. The residual shapes
-    /// the structural grammar still cannot invert — `%` modulo (no neutral node), a general `CAST`
-    /// (dialect-ambiguous target), a quoted function name (kept faithfully rather than folded lossily) —
-    /// stay `Raw` and fall back to the [`canonical`] string normalizer, which folds pg's deparse idioms
-    /// (extra parens, synthesized literal casts, `= ANY(ARRAY[..])`) to one canonical string on both the
-    /// desired and introspected side so they do not churn. Retiring `canonical.rs` entirely needs
-    /// structural `%`/`CAST` inversion (a tracked follow-up).
+    /// The reverse parser lowers PostgreSQL's `pg_get_constraintdef` deparse idioms structurally —
+    /// general function calls, `%` modulo, `= ANY(ARRAY[..])`/`<> ALL`, `~~`/`~~*` (LIKE/ILIKE), the
+    /// `BETWEEN` expansion, synthesized redundant literal casts, and a general `CAST` — so both the
+    /// desired (Raw-then-re-parsed) and introspected sides structure identically, and equivalent checks
+    /// compare equal without the former `canonical.rs` string normalizer. A residual shape the grammar
+    /// still cannot invert — `IS TRUE`/`IS FALSE` (no neutral node), a cast to a non-modeled type
+    /// (`::inet`, an enum), a quoted function name, or PostgreSQL's synthesized converting literal cast
+    /// on a bare literal (e.g. `(1.5)::double precision` vs an authored `1.5`) — stays `Raw` and is
+    /// compared verbatim (a documented churn, never corruption).
     fn canonical_check_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
         match expression {
             squealy::ExprNode::Raw(sql) => {
-                // Try to structure it; if it stays outside the structural grammar, fall back to the string
-                // canonicalizer so the legacy/deparsed raw forms normalize to one string and do not churn.
-                match squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
                     .read_check_expression_or_raw(&sql)
-                {
-                    squealy::ExprNode::Raw(raw) => {
-                        squealy::ExprNode::Raw(canonical::canonical_check_expression(&raw))
-                    }
-                    structured => structured,
-                }
             }
             other => other,
         }
