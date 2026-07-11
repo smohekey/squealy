@@ -2960,6 +2960,7 @@ fn render_arithmetic_op(op: ArithmeticOp) -> &'static str {
         ArithmeticOp::Subtract => "-",
         ArithmeticOp::Multiply => "*",
         ArithmeticOp::Divide => "/",
+        ArithmeticOp::Modulo => "%",
     }
 }
 

@@ -1086,6 +1086,7 @@ fn arithmetic_op_str(op: ArithmeticOp) -> &'static str {
         ArithmeticOp::Subtract => "subtract",
         ArithmeticOp::Multiply => "multiply",
         ArithmeticOp::Divide => "divide",
+        ArithmeticOp::Modulo => "modulo",
     }
 }
 
@@ -2086,6 +2087,7 @@ fn arithmetic_op_from_str(value: &str) -> Result<ArithmeticOp, PackageError> {
         "subtract" => ArithmeticOp::Subtract,
         "multiply" => ArithmeticOp::Multiply,
         "divide" => ArithmeticOp::Divide,
+        "modulo" => ArithmeticOp::Modulo,
         other => return Err(malformed(format!("unknown arithmetic op `{other}`"))),
     })
 }

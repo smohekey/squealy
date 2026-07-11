@@ -14,6 +14,14 @@ pub enum ArithmeticOp {
     Subtract,
     Multiply,
     Divide,
+    /// SQL `%` modulo. Renders as `%` on every dialect, so a `%` expression round-trips structurally
+    /// (introspect → re-render is byte-identical on the same backend). **Cross-dialect caveat:** the
+    /// operand semantics are not identical — SQLite coerces both operands to integers before the
+    /// operation (`9.5 % 2` → `1`), while PostgreSQL and MySQL keep the fractional remainder
+    /// (`9.5 % 2` → `1.5`). Integer-operand modulo (the usual `col % n = 0` check) is portable; a
+    /// non-integer operand is not. Unlike [`ArithmeticOp::Divide`] (whose neutral node is forced to a
+    /// single fractional semantic per dialect), `Modulo` renders the bare operator as authored.
+    Modulo,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
