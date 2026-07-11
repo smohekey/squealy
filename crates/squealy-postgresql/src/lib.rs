@@ -356,6 +356,14 @@ impl squealy::SchemaIntrospect for PostgresConnection {
     /// [`SchemaIntrospect::canonical_view_body`]).
     fn canonical_view_body(&self, mut body: squealy::ViewBody) -> squealy::ViewBody {
         body.map_result_pins(&canonical_pg_pin_type);
+        // A general cast in a view body (now structured by the reverse parser) folds its target the same
+        // way a table check does — a many-to-one dialect spelling round-trips as the representative, so a
+        // structural desired cast does not churn.
+        body.map_exprs(&|node| {
+            if let squealy::ExprNode::Cast { ty, .. } = node {
+                *ty = canonical_pg_pin_type(ty);
+            }
+        });
         body
     }
 
@@ -1111,6 +1119,51 @@ CREATE INDEX CONCURRENTLY j ON t (d);";
         desired.map_result_pins(&canonical_pg_pin_type);
         let mut actual = lowered;
         actual.map_result_pins(&canonical_pg_pin_type);
+        assert_eq!(desired, actual);
+    }
+
+    #[test]
+    fn canonical_view_body_folds_a_general_cast_in_the_body() {
+        use super::canonical_pg_pin_type;
+        use squealy::{
+            ExprNode, ProjectionItem, SourceItem, SourceRef, SqlType, ViewBody, ViewQueryModel,
+        };
+        // A general cast in a view-body projection folds its target the same way a table check's does:
+        // a narrow `I8` and the introspected `I16` both spell `smallint`, so folding both sides through
+        // the representative makes an otherwise-identical structural view re-plan to empty.
+        let cast_view = |ty: SqlType| {
+            ViewBody::Select(Box::new(ViewQueryModel {
+                projection: vec![ProjectionItem {
+                    output_name: "c".to_owned(),
+                    expr: ExprNode::Cast {
+                        operand: Box::new(ExprNode::Column {
+                            alias: "q".to_owned(),
+                            column: "x".to_owned(),
+                        }),
+                        ty,
+                    },
+                }],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: Some("public".to_owned()),
+                    name: "t".to_owned(),
+                    alias: "q".to_owned(),
+                })),
+                ..Default::default()
+            }))
+        };
+        let mut desired = cast_view(SqlType::I8);
+        let mut actual = cast_view(SqlType::I16);
+        assert_ne!(desired, actual);
+        // The general-cast fold `canonical_view_body` applies (via `map_exprs`).
+        let fold = |body: &mut ViewBody| {
+            body.map_exprs(&|node| {
+                if let ExprNode::Cast { ty, .. } = node {
+                    *ty = canonical_pg_pin_type(ty);
+                }
+            });
+        };
+        fold(&mut desired);
+        fold(&mut actual);
         assert_eq!(desired, actual);
     }
 }

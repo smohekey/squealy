@@ -377,6 +377,13 @@ impl SchemaIntrospect for MysqlConnection {
     /// [`SchemaIntrospect::canonical_view_body`](squealy::SchemaIntrospect::canonical_view_body)).
     fn canonical_view_body(&self, mut body: squealy::ViewBody) -> squealy::ViewBody {
         body.map_result_pins(&canonical_mysql_pin_type);
+        // Fold a general cast in a view body to MySQL's canonical representative, as a table check's
+        // cast is folded — a many-to-one spelling (`SIGNED`, `CHAR`) round-trips as the representative.
+        body.map_exprs(&|node| {
+            if let squealy::ExprNode::Cast { ty, .. } = node {
+                *ty = canonical_mysql_pin_type(ty);
+            }
+        });
         body
     }
 
