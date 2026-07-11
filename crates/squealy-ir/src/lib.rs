@@ -1835,6 +1835,14 @@ pub fn normalize_expr(expr: &ExprNode) -> ExprNode {
             name: name.to_ascii_lowercase(),
             args: args.iter().map(normalize_expr).collect(),
         },
+        // Recurse through a general cast's operand — a `CAST(<expr> AS ty)` check carries a full
+        // expression that itself needs normalizing (e.g. a `BETWEEN` inside the cast must expand to its
+        // `AND` pair to match PostgreSQL's deparse), else `CAST((x BETWEEN 1 AND 2) AS boolean)` would
+        // churn against the introspected `CAST((x >= 1 AND x <= 2) AS boolean)`.
+        ExprNode::Cast { operand, ty } => ExprNode::Cast {
+            operand: Box::new(normalize_expr(operand)),
+            ty: ty.clone(),
+        },
         other => other.clone(),
     }
 }
@@ -2366,6 +2374,31 @@ mod tests {
         );
         assert_eq!(normalize_expr(&with_between), deparsed);
         assert_eq!(normalize_expr(&with_between), normalize_expr(&deparsed));
+    }
+
+    #[test]
+    fn normalize_recurses_into_a_cast_operand() {
+        // A general cast carries a full expression; a `BETWEEN` inside it must expand to its `AND` pair,
+        // so `CAST((x BETWEEN 1 AND 2) AS boolean)` normalizes to the same node as the deparsed
+        // `CAST((x >= 1 AND x <= 2) AS boolean)` rather than churning.
+        let cast_between = ExprNode::Cast {
+            operand: Box::new(ExprNode::Between {
+                negated: false,
+                operand: Box::new(bare("x")),
+                low: Box::new(lit("1")),
+                high: Box::new(lit("2")),
+            }),
+            ty: SqlType::Bool,
+        };
+        let deparsed = ExprNode::Cast {
+            operand: Box::new(and(
+                cmp(CompareOp::GreaterThanOrEquals, bare("x"), lit("1")),
+                cmp(CompareOp::LessThanOrEquals, bare("x"), lit("2")),
+            )),
+            ty: SqlType::Bool,
+        };
+        assert_eq!(normalize_expr(&cast_between), deparsed);
+        assert_eq!(normalize_expr(&cast_between), normalize_expr(&deparsed));
     }
 
     #[test]
