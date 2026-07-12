@@ -2411,7 +2411,14 @@ fn resolve_query_columns(
         resolve_clause_expr_columns(expr, alias, &computed_aliases, allow_nested_aliases);
     }
     if let Some(having) = &mut query.having {
-        resolve_clause_expr_columns(having, alias, &computed_aliases, allow_nested_aliases);
+        // PostgreSQL never exposes a SELECT alias in `HAVING` (a bare name there is a source column, which
+        // `pg_get_viewdef` qualifies), so it resolves with no alias protection; MySQL/SQLite do allow it.
+        let having_aliases: &[&str] = if allow_nested_aliases {
+            &computed_aliases
+        } else {
+            &[]
+        };
+        resolve_clause_expr_columns(having, alias, having_aliases, allow_nested_aliases);
     }
     for order in &mut query.order_by {
         resolve_clause_expr_columns(
@@ -2420,6 +2427,45 @@ fn resolve_query_columns(
             &computed_aliases,
             allow_nested_aliases,
         );
+    }
+
+    // Drop each kept inner alias that no clause term still references (a matching bare column survives the
+    // resolution above; a non-reference was bound to its source). The renderer would re-emit a needless
+    // `AS`, and a backend that stores the view discards an unreferenced alias — PostgreSQL renames the
+    // projection to its output column, MySQL's `apply_view_column_names` drops it — so keeping it would
+    // churn the view against the introspected form every plan.
+    prune_unreferenced_internal_aliases(query);
+}
+
+/// Clears each projection's [`ProjectionItem::internal_alias`] that no `GROUP BY`/`HAVING`/`ORDER BY` term
+/// references, after clause resolution has bound every non-alias bare column to its source (so a surviving
+/// [`ExprNode::BareColumn`] in a clause is a genuine alias reference). See [`resolve_query_columns`].
+fn prune_unreferenced_internal_aliases(query: &mut ViewQueryModel) {
+    if query
+        .projection
+        .iter()
+        .all(|item| item.internal_alias.is_none())
+    {
+        return;
+    }
+    let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut note = |expr: &ExprNode| {
+        if let ExprNode::BareColumn { column } = expr {
+            referenced.insert(column.clone());
+        }
+    };
+    for expr in query.group_by.iter().chain(query.having.iter()) {
+        squealy_ir::visit_scope_exprs(expr, &mut note);
+    }
+    for order in &query.order_by {
+        squealy_ir::visit_scope_exprs(&order.expr, &mut note);
+    }
+    for item in &mut query.projection {
+        if let Some(alias) = &item.internal_alias
+            && !referenced.contains(alias)
+        {
+            item.internal_alias = None;
+        }
     }
 }
 
@@ -4262,6 +4308,44 @@ mod tests {
                 }),
                 right: b(lit("1")),
             },
+        );
+    }
+
+    #[test]
+    fn an_unreferenced_suppressed_alias_is_pruned() {
+        // A column list suppresses an explicit `AS` that no clause references. Keeping it would re-emit a
+        // needless `AS` and churn against a backend that drops the alias on storage, so it is pruned to
+        // `None` (git-bug e1d0724, review).
+        let query = low_query(
+            "CREATE VIEW \"v\" (\"out\") AS SELECT 1 AS \"inner\"",
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        assert_eq!(query.projection[0].output_name, "out");
+        assert_eq!(query.projection[0].internal_alias, None);
+    }
+
+    #[test]
+    fn postgres_having_reference_binds_to_the_source_not_an_alias() {
+        // PostgreSQL never exposes a SELECT alias in `HAVING`, so a bare name there is a source column —
+        // even when it coincides with a computed projection's alias — and must bind to the source, matching
+        // what `pg_get_viewdef` reconstructs (git-bug e1d0724, review).
+        let query = low_query(
+            "SELECT count(\"q0_0\".\"id\") AS \"flag\" FROM \"t\" AS \"q0_0\" \
+             GROUP BY \"q0_0\".\"flag\" HAVING (\"flag\" > 0)",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        assert_eq!(
+            query.having,
+            Some(ExprNode::Compare {
+                op: CompareOp::GreaterThan,
+                left: b(ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "flag".to_owned(),
+                }),
+                right: b(lit("0")),
+            }),
         );
     }
 

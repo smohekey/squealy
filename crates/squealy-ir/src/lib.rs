@@ -1452,15 +1452,17 @@ pub struct ViewQueryModel {
 pub struct ProjectionItem {
     pub output_name: String,
     /// The projection's own explicit `AS <alias>` — the name the body's own `ORDER BY`/`GROUP BY`/`HAVING`
-    /// reference — kept whenever a `CREATE VIEW (<cols>)`/`WITH cte (<cols>)` list names the outputs and so
-    /// suppresses the `AS`. `None` in the common case: no column list, or a column-listed projection with no
-    /// explicit `AS` (a bare column's own name is not a suppressible `AS`). Kept even when the alias
-    /// *coincides* with [`output_name`](Self::output_name) — a column list does not introduce its names into
-    /// the `SELECT` scope, so a bare clause reference still needs the explicit `AS`. When `Some`, the renderer
-    /// re-emits `AS <internal_alias>` even under a column list so the body-local clause reference resolves
-    /// (without it the reference dangles — invalid SQL). Re-rendering a column-listed body is byte-identical
-    /// to its source. The typed view builder never produces this (its clauses reference only source columns);
-    /// it arises from external/hand-authored SQL and KDL packages.
+    /// reference — kept when a `CREATE VIEW (<cols>)`/`WITH cte (<cols>)` list names the outputs (so it
+    /// suppresses the `AS`) **and** a body clause actually references it. `None` otherwise: no column list, a
+    /// column-listed projection with no explicit `AS` (a bare column's own name is not a suppressible `AS`),
+    /// or an alias no clause references (the reverse parser prunes it, since the renderer would emit a
+    /// needless `AS` that a backend drops on storage). Kept even when the alias *coincides* with
+    /// [`output_name`](Self::output_name) — a column list does not introduce its names into the `SELECT`
+    /// scope, so a bare clause reference still needs the explicit `AS`. When `Some`, the renderer re-emits
+    /// `AS <internal_alias>` even under a column list so the body-local clause reference resolves (without it
+    /// the reference dangles — invalid SQL). Re-rendering a column-listed body is byte-identical to its
+    /// source. The typed view builder never produces this (its clauses reference only source columns); it
+    /// arises from external/hand-authored SQL and KDL packages.
     ///
     /// **Residual:** a backend that stores a view rewrites a clause's alias reference to the underlying
     /// expression on introspection (PostgreSQL `pg_get_viewdef` deparses `… AS total … ORDER BY total` as
