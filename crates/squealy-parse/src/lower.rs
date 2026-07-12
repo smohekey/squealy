@@ -2194,12 +2194,20 @@ fn lower_select(
     for (index, item) in select.projection.iter().enumerate() {
         // The projected expression, the name it would carry from its own `AS` alias or bare column, and
         // its *explicit* `AS` alias (only an explicit alias is a suppressible inner name; a bare column's
-        // own name is not).
+        // own name is not). An `AS` that merely re-states a plain column's own name (`q.id AS id`) is
+        // redundant, not a rename — the projection self-names, and a clause reference is a source column —
+        // so it is not treated as a suppressible inner alias (else it would churn against a deparse that
+        // drops it).
         let (expr, self_name, explicit_alias) = match item {
             SelectItem::UnnamedExpr(expr) => (expr, bare_column_name(expr), None),
             SelectItem::ExprWithAlias { expr, alias } => {
                 let alias = fold_ident(alias);
-                (expr, Some(alias.clone()), Some(alias))
+                let explicit_alias = if bare_column_name(expr).as_deref() == Some(alias.as_str()) {
+                    None
+                } else {
+                    Some(alias.clone())
+                };
+                (expr, Some(alias), explicit_alias)
             }
             SelectItem::Wildcard(_)
             | SelectItem::QualifiedWildcard(..)
@@ -4391,6 +4399,28 @@ mod tests {
                 op: ArithmeticOp::Add,
                 left: b(bare("total")),
                 right: b(lit("1")),
+            },
+        );
+    }
+
+    #[test]
+    fn a_redundant_same_name_column_alias_is_not_kept() {
+        // `q.id AS id` re-states the column's own name — the projection self-names, so under a column list
+        // it is not a suppressible inner alias and `ORDER BY id` is the source column (git-bug e1d0724,
+        // review). Matches what a deparse reconstructs (`q.id AS n … ORDER BY q.id`).
+        let query = low_query(
+            "CREATE VIEW \"v\" (\"n\") AS SELECT \"q0_0\".\"id\" AS \"id\" \
+             FROM \"events\" AS \"q0_0\" ORDER BY \"id\"",
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        assert_eq!(query.projection[0].output_name, "n");
+        assert_eq!(query.projection[0].internal_alias, None);
+        assert_eq!(
+            query.order_by[0].expr,
+            ExprNode::Column {
+                alias: "q0_0".to_owned(),
+                column: "id".to_owned(),
             },
         );
     }
