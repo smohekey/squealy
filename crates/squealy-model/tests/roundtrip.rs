@@ -673,6 +673,27 @@ fn corpus() -> Vec<(&'static str, DatabaseModel)> {
         )),
     ));
 
+    // A *plain-column* projection carrying an explicit `AS` (`q0_0.amount AS inner`) that the column list
+    // renames to `n`, with `ORDER BY inner` naming that suppressed alias. The kept `internal_alias` must be
+    // re-emitted even though the projection is a column, not an expression (git-bug e1d0724).
+    cases.push((
+        "view/single-select-plain-column-alias",
+        schema_with_view(view_of(
+            "v_alias_plain",
+            vec![("n", SqlType::I64)],
+            sel(ViewQueryModel {
+                projection: vec![proj_aliased("n", "inner", col("amount"))],
+                from: Some(events_source()),
+                order_by: vec![OrderItem {
+                    expr: bare("inner"),
+                    direction: None,
+                    nulls: None,
+                }],
+                ..ViewQueryModel::default()
+            }),
+        )),
+    ));
+
     // The `GROUP BY` sibling of the case above: a column-listed view whose `GROUP BY` names a computed
     // projection's inner alias (`total`), renamed to the output column `bucket`. A second, un-aliased
     // aggregate projection (`cnt`) shares the suppressing column list. `GROUP BY total` must re-resolve.
@@ -1575,8 +1596,8 @@ fn view_bodies_round_trip_through_each_dialect() {
         failures.len(),
         failures.join("\n\n")
     );
-    // Every view case × every backend was exercised (16 views × 3 backends).
-    assert_eq!(checked, 16 * dialects.len(), "view coverage drifted");
+    // Every view case × every backend was exercised (17 views × 3 backends).
+    assert_eq!(checked, 17 * dialects.len(), "view coverage drifted");
 }
 
 /// A plain, tail-less recursive-CTE arm renders BARE. An arm carrying its own `ORDER BY`/`LIMIT`/`OFFSET`

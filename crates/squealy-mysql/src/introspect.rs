@@ -133,18 +133,14 @@ fn apply_view_column_names(body: &mut ViewBody, columns: &[ViewColumnModel]) {
     }
     for (item, column) in query.projection.iter_mut().zip(columns) {
         // MySQL preserves each projection's own `AS`, so `output_name` currently holds that alias. The
-        // declared column list renames the output; when that alias belongs to a *computed* projection a
-        // body clause references, keep it as `internal_alias` so the renderer re-emits `AS <alias>` under
-        // the column list and the clause still resolves (git-bug e1d0724). This holds even when the alias
-        // already equals the declared name — the column list does not introduce that name into the `SELECT`
-        // scope, so the reference would still dangle without the explicit `AS`. A plain column's derived
-        // alias, or an unreferenced auto-derived one, is discarded as before (no clause needs it).
-        if referenced.contains(&item.output_name)
-            && !matches!(
-                item.expr,
-                ExprNode::Column { .. } | ExprNode::BareColumn { .. }
-            )
-        {
+        // declared column list renames the output; when a body clause references that alias, keep it as
+        // `internal_alias` so the renderer re-emits `AS <alias>` under the column list and the clause still
+        // resolves (git-bug e1d0724). Whatever the projection's shape — a plain `q.amount AS inner` counts
+        // as much as a computed one — since the column list renamed its output. This holds even when the
+        // alias already equals the declared name (the column list does not introduce it into the `SELECT`
+        // scope, so the reference would dangle without the explicit `AS`). An *unreferenced* auto-derived
+        // alias is discarded as before — the `referenced` gate keeps MySQL's `(amount * 2)`-style noise out.
+        if referenced.contains(&item.output_name) {
             item.internal_alias = Some(item.output_name.clone());
         }
         item.output_name = column.name.clone();

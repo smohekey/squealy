@@ -2349,33 +2349,33 @@ fn resolve_query_columns(query: &mut ViewQueryModel, outputs_column_listed: bool
         resolve_expr_columns(filter, alias);
     }
 
-    // `GROUP BY`/`HAVING`/`ORDER BY` can name a projection **output alias** instead of a source column.
-    // This matters only when that output is a *computed* expression (`(amount * 2) AS total`): the
-    // renderer emits `ORDER BY total` bare (it cannot re-derive the expression), so a top-level bare term
-    // naming such an output is a genuine alias reference and is left as-is. A bare term that names a
-    // plain-column projection (`q.id AS id`) is *not* left bare — the deparser merely dequalified the
-    // source column `q.id` to `id`, and the desired model qualifies it, so it must be bound to the scope
-    // alias like any other source column. A reference may be nested (`HAVING total > 0`, a valid SQLite
-    // view), so a computed-alias term is protected at any depth (a deparser expands its own alias references
-    // and qualifies source columns, so a surviving bare name matching a computed alias is that alias). A
-    // clause names such an output by its own SQL name: the [`ProjectionItem::internal_alias`] a column list
-    // suppressed, or — with no rename — the `output_name`.
+    // `GROUP BY`/`HAVING`/`ORDER BY` can name a projection **output alias** instead of a source column; a
+    // bare term naming one is left as-is (the renderer emits it bare — it cannot re-derive the expression),
+    // possibly nested (`HAVING total > 0`, a valid SQLite view), so it is protected at any depth. The name a
+    // clause reaches an output by is:
+    //  * its kept [`ProjectionItem::internal_alias`] — an *explicit* `AS` a column list suppressed —
+    //    whatever the projection's shape (a plain-column `q.amount AS inner` counts, since the column list
+    //    renamed its output and the clause still names `inner`); or
+    //  * otherwise, a *computed* projection's own `output_name`, and only when no column list renamed it out
+    //    of the `SELECT` scope. A plain column's own name is NOT an alias (`q.id AS id` → `ORDER BY id`
+    //    names the source `q.id`), and a column-list name with no explicit `AS` is not in scope (`ORDER BY
+    //    total` on a `(total)`-listed view with no inner alias names the source `events.total`).
     let computed_aliases: Vec<&str> = query
         .projection
         .iter()
-        .filter(|item| {
-            !matches!(
-                item.expr,
-                ExprNode::Column { .. } | ExprNode::BareColumn { .. }
-            )
-        })
-        // The scope-visible name is the kept inner alias, or — only when no column list suppressed it — the
-        // `output_name`. A column-list name with no explicit `AS` is not in scope, so a clause bare term
-        // matching it is a *source* column (e.g. `(total) AS …` absent, `ORDER BY total` names `events.total`).
         .filter_map(|item| {
-            item.internal_alias
-                .as_deref()
-                .or_else(|| (!outputs_column_listed).then_some(item.output_name.as_str()))
+            if let Some(alias) = &item.internal_alias {
+                Some(alias.as_str())
+            } else if !outputs_column_listed
+                && !matches!(
+                    item.expr,
+                    ExprNode::Column { .. } | ExprNode::BareColumn { .. }
+                )
+            {
+                Some(item.output_name.as_str())
+            } else {
+                None
+            }
         })
         .collect();
     for expr in &mut query.group_by {
@@ -4196,6 +4196,23 @@ mod tests {
                 right: b(lit("1")),
             },
         );
+    }
+
+    #[test]
+    fn column_list_keeps_a_referenced_plain_column_alias() {
+        // A *plain-column* projection carrying an explicit `AS` (`q.amount AS inner`) that a column list
+        // renames, with the body's `ORDER BY` naming that inner alias. The alias must be kept and the clause
+        // term left bare regardless of the projection being a column, not an expression (git-bug e1d0724,
+        // review) — else the resolver binds `inner` to a nonexistent source column.
+        let query = low_query(
+            "CREATE VIEW \"v\" (\"n\") AS SELECT \"q0_0\".\"amount\" AS \"inner\" \
+             FROM \"events\" AS \"q0_0\" ORDER BY \"inner\"",
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        assert_eq!(query.projection[0].output_name, "n");
+        assert_eq!(query.projection[0].internal_alias.as_deref(), Some("inner"));
+        assert_eq!(query.order_by[0].expr, bare("inner"));
     }
 
     #[test]
