@@ -1464,13 +1464,19 @@ pub struct ProjectionItem {
     /// source. The typed view builder never produces this (its clauses reference only source columns); it
     /// arises from external/hand-authored SQL and KDL packages.
     ///
-    /// **Residual:** a backend that stores a view rewrites a clause's alias reference to the underlying
-    /// expression on introspection (PostgreSQL `pg_get_viewdef` deparses `… AS total … ORDER BY total` as
-    /// `… AS n … ORDER BY (<expr>)`; MySQL expands an expression-alias clause), so a published column-listed
-    /// alias-clause view re-plans a harmless `CREATE OR REPLACE VIEW` each run on PostgreSQL/MySQL — the same
-    /// idempotent, non-destructive convergence gap the body-unknown view path already accepts. SQLite (which
-    /// stores the DDL verbatim) round-trips to empty. Removing the residual needs catalog-based name
-    /// resolution to tell a clause's alias reference from a source column (tracked separately).
+    /// **Residual (a harmless re-plan, never wrong SQL):** the reverse parser has no source-column catalog,
+    /// so it cannot always tell a clause's alias reference from a same-named source column, and a backend
+    /// that stores a view rewrites clause references on introspection. Two shapes therefore re-plan a
+    /// `CREATE OR REPLACE VIEW` each run — the same idempotent, non-destructive convergence gap the
+    /// body-unknown view path already accepts:
+    ///  * a backend rewrites a clause's alias reference to the underlying expression (PostgreSQL
+    ///    `pg_get_viewdef` deparses `… AS total … ORDER BY total` as `… AS n … ORDER BY (<expr>)`; MySQL
+    ///    expands an expression-alias clause), so the introspected body no longer carries the alias; and
+    ///  * a source column whose name collides with a computed projection alias — a bare clause reference is
+    ///    kept as an alias here, but a dialect resolves it to the source column.
+    /// SQLite (verbatim DDL) round-trips to empty except under such a collision. The re-render is always
+    /// valid SQL and preserves the view's meaning; only the diff sees a difference. Removing the residual
+    /// needs catalog-based name resolution (tracked separately).
     pub internal_alias: Option<String>,
     pub expr: ExprNode,
 }
