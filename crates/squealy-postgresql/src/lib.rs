@@ -9,8 +9,6 @@ use squealy::{
 use tokio_postgres::Client;
 
 #[cfg(feature = "schema")]
-mod canonical;
-#[cfg(feature = "schema")]
 mod introspect;
 mod query;
 mod sql;
@@ -358,7 +356,19 @@ impl squealy::SchemaIntrospect for PostgresConnection {
     /// [`SchemaIntrospect::canonical_view_body`]).
     fn canonical_view_body(&self, mut body: squealy::ViewBody) -> squealy::ViewBody {
         body.map_result_pins(&canonical_pg_pin_type);
+        // A general cast in a view body (now structured by the reverse parser) folds its target the same
+        // way a table check does — a many-to-one dialect spelling round-trips as the representative, so a
+        // structural desired cast does not churn.
+        body.map_exprs(&|node| {
+            if let squealy::ExprNode::Cast { ty, .. } = node {
+                *ty = canonical_pg_pin_type(ty);
+            }
+        });
         body
+    }
+
+    fn canonical_cast_type(&self, ty: &squealy::SqlType) -> squealy::SqlType {
+        canonical_pg_pin_type(ty)
     }
 
     /// PostgreSQL introspection reports a plain index's access method as `btree`; map an unset
@@ -386,29 +396,25 @@ impl squealy::SchemaIntrospect for PostgresConnection {
 
     /// Structures a `Raw` check expression (a legacy package's verbatim check, or an un-invertible
     /// introspected one) by re-parsing it in the PostgreSQL dialect, so it compares equal to a freshly
-    /// introspected structural check. An already-structural expression is returned unchanged.
+    /// introspected structural check. An already-structural expression is returned unchanged. This is the
+    /// same shape as the MySQL/SQLite seams — a plain re-parse, no string normalizer.
     ///
-    /// General function calls (`jsonb_typeof(data) = 'object'`) now lower structurally to
-    /// [`squealy::ExprNode::Function`], so they converge without a string normalizer. The residual shapes
-    /// the structural grammar still cannot invert — `%` modulo (no neutral node), a general `CAST`
-    /// (dialect-ambiguous target), a quoted function name (kept faithfully rather than folded lossily) —
-    /// stay `Raw` and fall back to the [`canonical`] string normalizer, which folds pg's deparse idioms
-    /// (extra parens, synthesized literal casts, `= ANY(ARRAY[..])`) to one canonical string on both the
-    /// desired and introspected side so they do not churn. Retiring `canonical.rs` entirely needs
-    /// structural `%`/`CAST` inversion (a tracked follow-up).
+    /// The reverse parser lowers PostgreSQL's `pg_get_constraintdef` deparse idioms structurally —
+    /// general function calls, `%` modulo, `= ANY(ARRAY[..])`/`<> ALL`, `~~`/`~~*` (LIKE/ILIKE), the
+    /// `BETWEEN` expansion, synthesized redundant literal casts, and a general `CAST` — so both the
+    /// desired (Raw-then-re-parsed) and introspected sides structure identically, and equivalent checks
+    /// compare equal without the former `canonical.rs` string normalizer. A residual shape the grammar
+    /// still cannot invert — `IS TRUE`/`IS FALSE` (no neutral node), a cast to a non-modeled type
+    /// (`::inet`, an enum), a quoted function name, a general function with a direct literal argument
+    /// (`my_func('x')`, which `pg_get_constraintdef` deparses as `my_func('x'::text)` — the synthesized
+    /// argument cast cannot be stripped without risking a different overload), or PostgreSQL's
+    /// synthesized converting literal cast on a bare literal (e.g. `(1.5)::double precision` vs an
+    /// authored `1.5`) — stays `Raw` and is compared verbatim (a documented churn, never corruption).
     fn canonical_check_expression(&self, expression: squealy::ExprNode) -> squealy::ExprNode {
         match expression {
             squealy::ExprNode::Raw(sql) => {
-                // Try to structure it; if it stays outside the structural grammar, fall back to the string
-                // canonicalizer so the legacy/deparsed raw forms normalize to one string and do not churn.
-                match squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
                     .read_check_expression_or_raw(&sql)
-                {
-                    squealy::ExprNode::Raw(raw) => {
-                        squealy::ExprNode::Raw(canonical::canonical_check_expression(&raw))
-                    }
-                    structured => structured,
-                }
             }
             other => other,
         }
@@ -1113,6 +1119,51 @@ CREATE INDEX CONCURRENTLY j ON t (d);";
         desired.map_result_pins(&canonical_pg_pin_type);
         let mut actual = lowered;
         actual.map_result_pins(&canonical_pg_pin_type);
+        assert_eq!(desired, actual);
+    }
+
+    #[test]
+    fn canonical_view_body_folds_a_general_cast_in_the_body() {
+        use super::canonical_pg_pin_type;
+        use squealy::{
+            ExprNode, ProjectionItem, SourceItem, SourceRef, SqlType, ViewBody, ViewQueryModel,
+        };
+        // A general cast in a view-body projection folds its target the same way a table check's does:
+        // a narrow `I8` and the introspected `I16` both spell `smallint`, so folding both sides through
+        // the representative makes an otherwise-identical structural view re-plan to empty.
+        let cast_view = |ty: SqlType| {
+            ViewBody::Select(Box::new(ViewQueryModel {
+                projection: vec![ProjectionItem {
+                    output_name: "c".to_owned(),
+                    expr: ExprNode::Cast {
+                        operand: Box::new(ExprNode::Column {
+                            alias: "q".to_owned(),
+                            column: "x".to_owned(),
+                        }),
+                        ty,
+                    },
+                }],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: Some("public".to_owned()),
+                    name: "t".to_owned(),
+                    alias: "q".to_owned(),
+                })),
+                ..Default::default()
+            }))
+        };
+        let mut desired = cast_view(SqlType::I8);
+        let mut actual = cast_view(SqlType::I16);
+        assert_ne!(desired, actual);
+        // The general-cast fold `canonical_view_body` applies (via `map_exprs`).
+        let fold = |body: &mut ViewBody| {
+            body.map_exprs(&|node| {
+                if let ExprNode::Cast { ty, .. } = node {
+                    *ty = canonical_pg_pin_type(ty);
+                }
+            });
+        };
+        fold(&mut desired);
+        fold(&mut actual);
         assert_eq!(desired, actual);
     }
 }

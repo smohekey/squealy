@@ -298,15 +298,24 @@ impl SchemaIntrospect for SqliteConnection {
     fn canonical_view_body(&self, mut body: squealy::ViewBody) -> squealy::ViewBody {
         body.map_sources(&|source| source.schema = None);
         body.map_result_pins(&canonical_sqlite_pin_type);
-        body.map_exprs(&|expr| {
-            if let squealy::ExprNode::Like {
+        body.map_exprs(&|expr| match expr {
+            squealy::ExprNode::Like {
                 case_insensitive, ..
-            } = expr
-            {
+            } => {
                 *case_insensitive = false;
             }
+            // Fold a general cast in a view body to SQLite's canonical affinity representative, as a
+            // table check's cast is folded, so a structural desired cast does not churn.
+            squealy::ExprNode::Cast { ty, .. } => {
+                *ty = canonical_sqlite_pin_type(ty);
+            }
+            _ => {}
         });
         body
+    }
+
+    fn canonical_cast_type(&self, ty: &SqlType) -> SqlType {
+        canonical_sqlite_pin_type(ty)
     }
 
     /// SQLite's only identity mechanism is `AUTOINCREMENT`, which introspects back as
