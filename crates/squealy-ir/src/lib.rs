@@ -1468,15 +1468,14 @@ pub struct ProjectionItem {
     /// so it cannot always tell a clause's alias reference from a same-named source column, and a backend
     /// that stores a view rewrites clause references on introspection. Two shapes therefore re-plan a
     /// `CREATE OR REPLACE VIEW` each run — the same idempotent, non-destructive convergence gap the
-    /// body-unknown view path already accepts:
-    ///  * a backend rewrites a clause's alias reference to the underlying expression (PostgreSQL
-    ///    `pg_get_viewdef` deparses `… AS total … ORDER BY total` as `… AS n … ORDER BY (<expr>)`; MySQL
-    ///    expands an expression-alias clause), so the introspected body no longer carries the alias; and
-    ///  * a source column whose name collides with a computed projection alias — a bare clause reference is
-    ///    kept as an alias here, but a dialect resolves it to the source column.
-    /// SQLite (verbatim DDL) round-trips to empty except under such a collision. The re-render is always
-    /// valid SQL and preserves the view's meaning; only the diff sees a difference. Removing the residual
-    /// needs catalog-based name resolution (tracked separately).
+    /// body-unknown view path already accepts. First, a backend rewrites a clause's alias reference to the
+    /// underlying expression (PostgreSQL `pg_get_viewdef` deparses `… AS total … ORDER BY total` as
+    /// `… AS n … ORDER BY (<expr>)`; MySQL expands an expression-alias clause), so the introspected body no
+    /// longer carries the alias. Second, a source column whose name collides with a computed projection
+    /// alias — a bare clause reference is kept as an alias here, but a dialect resolves it to the source
+    /// column. SQLite (verbatim DDL) round-trips to empty except under such a collision. The re-render is
+    /// always valid SQL and preserves the view's meaning; only the diff sees a difference. Removing the
+    /// residual needs catalog-based name resolution (tracked separately).
     pub internal_alias: Option<String>,
     pub expr: ExprNode,
 }
