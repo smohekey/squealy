@@ -843,6 +843,95 @@ impl ViewBody {
             }
         }
     }
+
+    /// Rewrites each scope's `GROUP BY`/`HAVING`/`ORDER BY` reference to a *computed* projection output
+    /// alias into the projection's own expression, and clears every [`ProjectionItem::internal_alias`].
+    ///
+    /// This is a canonicalization for the view diff (applied to **both** the desired and introspected model
+    /// in `canonicalize_model`). A backend that stores a view rewrites a clause's alias reference to the
+    /// underlying expression and names the projection by its output column, dropping any suppressed inner
+    /// alias — PostgreSQL's `pg_get_viewdef` deparses `… AS total … ORDER BY total` as `… AS n … ORDER BY
+    /// (<expr>)`, and MySQL expands an expression-alias `ORDER BY` likewise. So a model that *keeps* the
+    /// alias reference (a hand-built or KDL view, or a SQLite verbatim round-trip) would churn against the
+    /// introspected form every plan. Inlining both to the same alias-free shape makes them compare equal.
+    /// (A bare *constant* projection is a residual: PostgreSQL wraps it in an ordinal-disambiguating cast —
+    /// `ORDER BY 1::integer` — which this does not reproduce; the general [`ExprNode::Cast`] literal churn
+    /// covers that class.)
+    pub fn inline_clause_aliases(&mut self) {
+        match self {
+            ViewBody::Select(query) => inline_query_clause_aliases(query),
+            ViewBody::Set { left, right, .. } => {
+                left.inline_clause_aliases();
+                right.inline_clause_aliases();
+            }
+            ViewBody::With { ctes, body, .. } => {
+                for cte in ctes {
+                    cte.body.inline_clause_aliases();
+                }
+                body.inline_clause_aliases();
+            }
+        }
+    }
+}
+
+/// Inlines one `SELECT` scope's clause alias references and clears its inner aliases (see
+/// [`ViewBody::inline_clause_aliases`]). Recurses first into derived-table sources, each its own scope.
+fn inline_query_clause_aliases(query: &mut ViewQueryModel) {
+    if let Some(SourceItem::Derived { query: sub, .. }) = &mut query.from {
+        sub.inline_clause_aliases();
+    }
+    for join in &mut query.joins {
+        if let SourceItem::Derived { query: sub, .. } = &mut join.source {
+            sub.inline_clause_aliases();
+        }
+    }
+
+    // The expression a clause reaches this scope's computed projection by: its kept inner alias, else its
+    // output name. A plain column projection is skipped — its clause references resolve to a source column,
+    // not an alias, and are already qualified.
+    let aliases: std::collections::HashMap<&str, &ExprNode> = query
+        .projection
+        .iter()
+        .filter(|item| {
+            !matches!(
+                item.expr,
+                ExprNode::Column { .. } | ExprNode::BareColumn { .. }
+            )
+        })
+        .map(|item| {
+            let name = item.internal_alias.as_deref().unwrap_or(&item.output_name);
+            (name, &item.expr)
+        })
+        .collect();
+
+    if !aliases.is_empty() {
+        // Clone the referenced expressions out first: the closure below needs `&aliases` while it mutates
+        // the clause `ExprNode`s, and both borrow `query`.
+        let aliases: std::collections::HashMap<String, ExprNode> = aliases
+            .into_iter()
+            .map(|(name, expr)| (name.to_owned(), expr.clone()))
+            .collect();
+        let mut inline = |expr: &mut ExprNode| {
+            if let ExprNode::BareColumn { column } = expr
+                && let Some(replacement) = aliases.get(column)
+            {
+                *expr = replacement.clone();
+            }
+        };
+        for expr in &mut query.group_by {
+            visit_scope_exprs_mut(expr, &mut inline);
+        }
+        if let Some(having) = &mut query.having {
+            visit_scope_exprs_mut(having, &mut inline);
+        }
+        for order in &mut query.order_by {
+            visit_scope_exprs_mut(&mut order.expr, &mut inline);
+        }
+    }
+
+    for item in &mut query.projection {
+        item.internal_alias = None;
+    }
 }
 
 /// Applies `f` to every [`ExprNode`] reachable from a single `SELECT` body (see [`ViewBody::map_exprs`]).
@@ -1083,6 +1172,104 @@ pub fn visit_scope_exprs(expr: &ExprNode, f: &mut impl FnMut(&ExprNode)) {
         ExprNode::Extract { operand, .. }
         | ExprNode::DateTrunc { operand, .. }
         | ExprNode::ExtractSecond { operand, .. } => visit_scope_exprs(operand, f),
+    }
+}
+
+/// The mutable twin of [`visit_scope_exprs`]: applies `f` to `expr` and every nested [`ExprNode`] in the
+/// **same scope**, stopping at a nested subquery (its own scope). `f` may replace a node in place; the walk
+/// then descends into the replacement. Exhaustive over [`ExprNode`] so a new node is a compile error here.
+pub fn visit_scope_exprs_mut(expr: &mut ExprNode, f: &mut impl FnMut(&mut ExprNode)) {
+    f(expr);
+    match expr {
+        ExprNode::Column { .. }
+        | ExprNode::BareColumn { .. }
+        | ExprNode::Literal(_)
+        | ExprNode::Raw(_)
+        | ExprNode::Now => {}
+        ExprNode::ScalarSubquery(_) | ExprNode::Exists { .. } => {}
+        ExprNode::InSubquery { operand, .. } => visit_scope_exprs_mut(operand, f),
+        ExprNode::Binary { left, right, .. }
+        | ExprNode::Compare { left, right, .. }
+        | ExprNode::Logical { left, right, .. }
+        | ExprNode::Nullif { left, right, .. } => {
+            visit_scope_exprs_mut(left, f);
+            visit_scope_exprs_mut(right, f);
+        }
+        ExprNode::Cast { operand, .. } | ExprNode::Aggregate { operand, .. } => {
+            visit_scope_exprs_mut(operand, f)
+        }
+        ExprNode::Not(operand) | ExprNode::IsNull { operand, .. } => {
+            visit_scope_exprs_mut(operand, f)
+        }
+        ExprNode::Like {
+            operand, pattern, ..
+        } => {
+            visit_scope_exprs_mut(operand, f);
+            visit_scope_exprs_mut(pattern, f);
+        }
+        ExprNode::In { operand, items, .. } => {
+            visit_scope_exprs_mut(operand, f);
+            for item in items {
+                visit_scope_exprs_mut(item, f);
+            }
+        }
+        ExprNode::Between {
+            operand, low, high, ..
+        } => {
+            visit_scope_exprs_mut(operand, f);
+            visit_scope_exprs_mut(low, f);
+            visit_scope_exprs_mut(high, f);
+        }
+        ExprNode::Window {
+            args,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            for arg in args {
+                visit_scope_exprs_mut(arg, f);
+            }
+            for partition in partition_by {
+                visit_scope_exprs_mut(partition, f);
+            }
+            for order in order_by {
+                visit_scope_exprs_mut(&mut order.expr, f);
+            }
+        }
+        ExprNode::Case { arms, else_, .. } => {
+            for arm in arms {
+                visit_scope_exprs_mut(&mut arm.when, f);
+                visit_scope_exprs_mut(&mut arm.then, f);
+            }
+            if let Some(else_) = else_ {
+                visit_scope_exprs_mut(else_, f);
+            }
+        }
+        ExprNode::SimpleCase {
+            operand,
+            arms,
+            else_,
+            ..
+        } => {
+            visit_scope_exprs_mut(operand, f);
+            for arm in arms {
+                visit_scope_exprs_mut(&mut arm.when, f);
+                visit_scope_exprs_mut(&mut arm.then, f);
+            }
+            if let Some(else_) = else_ {
+                visit_scope_exprs_mut(else_, f);
+            }
+        }
+        ExprNode::Coalesce { args, .. }
+        | ExprNode::ScalarFn { args, .. }
+        | ExprNode::Function { args, .. } => {
+            for arg in args {
+                visit_scope_exprs_mut(arg, f);
+            }
+        }
+        ExprNode::Extract { operand, .. }
+        | ExprNode::DateTrunc { operand, .. }
+        | ExprNode::ExtractSecond { operand, .. } => visit_scope_exprs_mut(operand, f),
     }
 }
 

@@ -388,6 +388,13 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
             // (many cast spellings are many-to-one), so a published view whose body is now reconstructed
             // by the reverse parser compares equal to its introspected form instead of churning.
             view.query = connection.canonical_view_body(std::mem::take(&mut view.query));
+            // Inline each clause's reference to a computed projection alias into the projection's expression
+            // and drop the suppressed inner aliases: a backend that stores a view rewrites `ORDER BY <alias>`
+            // to `ORDER BY <expr>` and names the projection by its output column, so a model that keeps the
+            // alias reference (hand-built/KDL, or a SQLite verbatim round-trip) would otherwise churn against
+            // the introspected form. Applied to both sides here (after the pin fold, so an inlined clause
+            // carries the same canonical pins as its projection).
+            view.query.inline_clause_aliases();
         }
     }
     // A schema-less backend flattens every namespace to the same (default) name, so two source schemas
@@ -993,6 +1000,71 @@ mod tests {
             panic!("expected an aggregate projection")
         };
         assert_eq!(*result, Some(SqlType::I16));
+    }
+
+    #[test]
+    fn canonicalize_model_inlines_view_clause_aliases() {
+        // A hand-built/KDL view that *keeps* a suppressed projection alias (`internal_alias = "total"`,
+        // referenced by a bare `ORDER BY total`) and the introspected form a backend deparses it to (no
+        // inner alias, `ORDER BY` expanded to the expression) must canonicalize to the *same* body — else a
+        // published view of this shape re-plans forever (git-bug e1d0724).
+        let scaled = || ExprNode::Binary {
+            op: squealy::ArithmeticOp::Multiply,
+            left: Box::new(ExprNode::Column {
+                alias: "q0_0".to_owned(),
+                column: "amount".to_owned(),
+            }),
+            right: Box::new(ExprNode::Literal("2".to_owned())),
+        };
+        let view = |internal_alias: Option<&str>, order_expr: ExprNode| DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![],
+                views: vec![ViewModel {
+                    name: "v".to_owned(),
+                    comment: None,
+                    columns: vec![ViewColumnModel {
+                        name: "n".to_owned(),
+                        ty: SqlType::I64,
+                        nullable: true,
+                    }],
+                    query: ViewBody::Select(Box::new(ViewQueryModel {
+                        projection: vec![ProjectionItem {
+                            output_name: "n".to_owned(),
+                            internal_alias: internal_alias.map(str::to_owned),
+                            expr: scaled(),
+                        }],
+                        order_by: vec![squealy::OrderItem {
+                            expr: order_expr,
+                            direction: None,
+                            nulls: None,
+                        }],
+                        ..Default::default()
+                    })),
+                }],
+            }],
+        };
+        // Kept-alias form (bare `ORDER BY total`) vs deparsed form (expanded `ORDER BY (amount * 2)`).
+        let kept = canonicalize_model(
+            &CanonBackend,
+            &view(
+                Some("total"),
+                ExprNode::BareColumn {
+                    column: "total".to_owned(),
+                },
+            ),
+        );
+        let deparsed = canonicalize_model(&CanonBackend, &view(None, scaled()));
+        assert_eq!(
+            kept.schemas[0].views[0].query,
+            deparsed.schemas[0].views[0].query
+        );
+        // Both inline to the expression form with no inner alias.
+        let ViewBody::Select(query) = &kept.schemas[0].views[0].query else {
+            panic!("expected a Select body")
+        };
+        assert_eq!(query.projection[0].internal_alias, None);
+        assert_eq!(query.order_by[0].expr, scaled());
     }
 
     /// A backend whose introspection canonical form mirrors MySQL: bare `String` reads back as
