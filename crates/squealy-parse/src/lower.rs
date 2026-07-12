@@ -87,8 +87,17 @@ pub fn lower_query(query: &Query, dialect: SqlDialect) -> Result<ViewBody, ReadE
     let mut body = lower_body(query, None, false, dialect)?;
     // A bare `Query` (a view-body deparse or subquery) carries no `CREATE VIEW` column list, so its outputs
     // are named by the projections themselves.
-    resolve_single_source_columns(&mut body, false);
+    resolve_single_source_columns(&mut body, false, allows_nested_clause_aliases(dialect));
     Ok(body)
+}
+
+/// Whether a clause term may reference a projection output alias *nested* in an expression (`HAVING total >
+/// 0`). PostgreSQL accepts an output alias only as a standalone `GROUP BY`/`ORDER BY` item — never nested,
+/// never in `HAVING` — so a nested bare name there is always a source column (and `pg_get_viewdef`
+/// dequalifies it); MySQL and SQLite resolve a nested bare name to an output alias, so the reverse parser
+/// must leave such a term bare to round-trip. Applies to the whole parse (one dialect per read).
+fn allows_nested_clause_aliases(dialect: SqlDialect) -> bool {
+    dialect != SqlDialect::Postgres
 }
 
 /// Lowers a parsed `CREATE VIEW` into its body [`ViewBody`]. When the statement carries a declared column
@@ -122,7 +131,11 @@ pub fn lower_create_view(
     let mut body = lower_body(&create_view.query, names, false, dialect)?;
     // A declared column list renames the outputs and suppresses each projection's `AS`, so those names are
     // not visible inside the `SELECT` scope — a clause reference is protected only via a kept inner alias.
-    resolve_single_source_columns(&mut body, names.is_some());
+    resolve_single_source_columns(
+        &mut body,
+        names.is_some(),
+        allows_nested_clause_aliases(dialect),
+    );
     Ok(body)
 }
 
@@ -2296,14 +2309,20 @@ fn lower_select(
 /// to its own scope's single source; a multi-source (join) scope keeps its columns as-is (already qualified,
 /// and an unqualified one has no unique alias to bind to). Idempotent: a column already in
 /// [`ExprNode::Column`] form is left untouched.
-fn resolve_single_source_columns(body: &mut ViewBody, outputs_column_listed: bool) {
+fn resolve_single_source_columns(
+    body: &mut ViewBody,
+    outputs_column_listed: bool,
+    allow_nested_aliases: bool,
+) {
     match body {
-        ViewBody::Select(query) => resolve_query_columns(query, outputs_column_listed),
+        ViewBody::Select(query) => {
+            resolve_query_columns(query, outputs_column_listed, allow_nested_aliases)
+        }
         ViewBody::Set { left, right, .. } => {
             // Each set arm names its own outputs by its projection aliases (a column list is only a
             // *fallback* for an otherwise-unnamed arm projection), so an arm's `output_name` is scope-visible.
-            resolve_single_source_columns(left, false);
-            resolve_single_source_columns(right, false);
+            resolve_single_source_columns(left, false, allow_nested_aliases);
+            resolve_single_source_columns(right, false, allow_nested_aliases);
             // A set's own `ORDER BY` references the compound output columns by name (no source scope), so it
             // is left as the deparser emits it — matching how the renderer emits a set-level `ORDER BY`.
         }
@@ -2311,9 +2330,13 @@ fn resolve_single_source_columns(body: &mut ViewBody, outputs_column_listed: boo
             // A CTE's outputs are column-listed exactly when it declares `WITH cte (cols)`; the main body
             // inherits the enclosing view's column-list status (passed in).
             for cte in ctes {
-                resolve_single_source_columns(&mut cte.body, !cte.columns.is_empty());
+                resolve_single_source_columns(
+                    &mut cte.body,
+                    !cte.columns.is_empty(),
+                    allow_nested_aliases,
+                );
             }
-            resolve_single_source_columns(body, outputs_column_listed);
+            resolve_single_source_columns(body, outputs_column_listed, allow_nested_aliases);
         }
     }
 }
@@ -2321,7 +2344,13 @@ fn resolve_single_source_columns(body: &mut ViewBody, outputs_column_listed: boo
 /// Resolves one `SELECT` scope (see [`resolve_single_source_columns`]). `outputs_column_listed` is `true`
 /// when a declared column list renames this scope's outputs — then a projection's `output_name` is *not*
 /// visible inside the `SELECT`, so only a kept [`ProjectionItem::internal_alias`] can be a clause reference.
-fn resolve_query_columns(query: &mut ViewQueryModel, outputs_column_listed: bool) {
+/// `allow_nested_aliases` (see [`allows_nested_clause_aliases`]) protects an alias reference nested in a
+/// clause expression, not only a standalone term.
+fn resolve_query_columns(
+    query: &mut ViewQueryModel,
+    outputs_column_listed: bool,
+    allow_nested_aliases: bool,
+) {
     // This scope's sole source alias, when it is single-source (one `FROM`, no joins).
     let alias = match (&query.from, query.joins.is_empty()) {
         (Some(from), true) => Some(from.alias().to_owned()),
@@ -2332,21 +2361,21 @@ fn resolve_query_columns(query: &mut ViewQueryModel, outputs_column_listed: bool
     // A projection expression and a `WHERE`/`ON` predicate reference only source columns, so a bare column
     // there is always a source column.
     for item in &mut query.projection {
-        resolve_expr_columns(&mut item.expr, alias);
+        resolve_expr_columns(&mut item.expr, alias, allow_nested_aliases);
     }
     // A derived `FROM`/`JOIN` source is its own scope; a named source binds no columns.
     if let Some(from) = &mut query.from {
-        resolve_source_columns(from);
+        resolve_source_columns(from, allow_nested_aliases);
     }
     for join in &mut query.joins {
-        resolve_source_columns(&mut join.source);
+        resolve_source_columns(&mut join.source, allow_nested_aliases);
         if let Some(on) = &mut join.on {
             // A join condition spans every source, so its columns stay as the deparser qualified them.
-            resolve_expr_columns(on, None);
+            resolve_expr_columns(on, None, allow_nested_aliases);
         }
     }
     if let Some(filter) = &mut query.filter {
-        resolve_expr_columns(filter, alias);
+        resolve_expr_columns(filter, alias, allow_nested_aliases);
     }
 
     // `GROUP BY`/`HAVING`/`ORDER BY` can name a projection **output alias** instead of a source column; a
@@ -2379,48 +2408,76 @@ fn resolve_query_columns(query: &mut ViewQueryModel, outputs_column_listed: bool
         })
         .collect();
     for expr in &mut query.group_by {
-        resolve_clause_expr_columns(expr, alias, &computed_aliases);
+        resolve_clause_expr_columns(expr, alias, &computed_aliases, allow_nested_aliases);
     }
     if let Some(having) = &mut query.having {
-        resolve_clause_expr_columns(having, alias, &computed_aliases);
+        resolve_clause_expr_columns(having, alias, &computed_aliases, allow_nested_aliases);
     }
     for order in &mut query.order_by {
-        resolve_clause_expr_columns(&mut order.expr, alias, &computed_aliases);
+        resolve_clause_expr_columns(
+            &mut order.expr,
+            alias,
+            &computed_aliases,
+            allow_nested_aliases,
+        );
     }
 }
 
-/// Resolves a `GROUP BY`/`HAVING`/`ORDER BY` term, leaving any bare column (at any depth) that names a
-/// *computed* projection output alias untouched (the renderer emits it bare — see
-/// [`resolve_query_columns`]); anything else resolves like an ordinary scope expression.
+/// Resolves a `GROUP BY`/`HAVING`/`ORDER BY` term. A bare column naming a computed projection output alias
+/// is left untouched (the renderer emits it bare — see [`resolve_query_columns`]); anything else resolves
+/// like an ordinary scope expression. When `allow_nested_aliases` is false (PostgreSQL, whose grammar
+/// accepts an output alias only as a *standalone* clause item) only a top-level bare term is treated as an
+/// alias — a nested one is a source column and is bound like any other; otherwise a matching alias is
+/// protected at any depth (`HAVING total > 0`).
 fn resolve_clause_expr_columns(
     expr: &mut ExprNode,
     alias: Option<&str>,
     computed_aliases: &[&str],
+    allow_nested_aliases: bool,
 ) {
-    resolve_expr_columns_protected(expr, alias, computed_aliases);
+    if allow_nested_aliases {
+        resolve_expr_columns_protected(expr, alias, computed_aliases, allow_nested_aliases);
+    } else {
+        // Top-level only: a standalone bare term naming a computed alias stays bare; anything else (an
+        // expression, or a nested bare source column) resolves normally.
+        if let ExprNode::BareColumn { column } = expr
+            && computed_aliases.contains(&column.as_str())
+        {
+            return;
+        }
+        resolve_expr_columns(expr, alias, allow_nested_aliases);
+    }
 }
 
 /// Recurses into a derived-table source's own scope; a named source binds no columns of its own.
-fn resolve_source_columns(source: &mut SourceItem) {
+fn resolve_source_columns(source: &mut SourceItem, allow_nested_aliases: bool) {
     match source {
         SourceItem::Named(_) => {}
         // A derived table names its outputs by its own projection aliases (no external column list).
-        SourceItem::Derived { query, .. } => resolve_single_source_columns(query, false),
+        SourceItem::Derived { query, .. } => {
+            resolve_single_source_columns(query, false, allow_nested_aliases)
+        }
     }
 }
 
 /// Resolves the bare columns of one expression against `alias` (this scope's single source, or `None`),
 /// recursing into child expressions in the same scope and into nested subqueries as new scopes. A
 /// projection/`WHERE`/`ON` expression references only source columns, so nothing is protected.
-fn resolve_expr_columns(expr: &mut ExprNode, alias: Option<&str>) {
-    resolve_expr_columns_protected(expr, alias, &[]);
+fn resolve_expr_columns(expr: &mut ExprNode, alias: Option<&str>, allow_nested_aliases: bool) {
+    resolve_expr_columns_protected(expr, alias, &[], allow_nested_aliases);
 }
 
 /// As [`resolve_expr_columns`], but a bare column naming one of `protected` (this scope's computed
 /// projection aliases) is left untouched at any depth — a `GROUP BY`/`HAVING`/`ORDER BY` reference to an
-/// output alias, which the renderer emits bare. Exhaustive over [`ExprNode`] so a new variant is a compile
-/// error here rather than a silently-unresolved column.
-fn resolve_expr_columns_protected(expr: &mut ExprNode, alias: Option<&str>, protected: &[&str]) {
+/// output alias, which the renderer emits bare. `allow_nested_aliases` is threaded only to nested subquery
+/// scopes (their own clauses follow the same dialect rule). Exhaustive over [`ExprNode`] so a new variant
+/// is a compile error here rather than a silently-unresolved column.
+fn resolve_expr_columns_protected(
+    expr: &mut ExprNode,
+    alias: Option<&str>,
+    protected: &[&str],
+    allow_nested_aliases: bool,
+) {
     match expr {
         ExprNode::BareColumn { column } => {
             if protected.contains(&column.as_str()) {
@@ -2435,21 +2492,25 @@ fn resolve_expr_columns_protected(expr: &mut ExprNode, alias: Option<&str>, prot
         }
         // Nested query scopes resolve against their own sources and their own protected aliases; a subquery
         // names its outputs by its own projection aliases (no external column list).
-        ExprNode::ScalarSubquery(query) => resolve_query_columns(query, false),
-        ExprNode::Exists { subquery, .. } => resolve_query_columns(subquery, false),
+        ExprNode::ScalarSubquery(query) => {
+            resolve_query_columns(query, false, allow_nested_aliases)
+        }
+        ExprNode::Exists { subquery, .. } => {
+            resolve_query_columns(subquery, false, allow_nested_aliases)
+        }
         ExprNode::InSubquery {
             operand, subquery, ..
         } => {
-            resolve_expr_columns_protected(operand, alias, protected);
-            resolve_query_columns(subquery, false);
+            resolve_expr_columns_protected(operand, alias, protected, allow_nested_aliases);
+            resolve_query_columns(subquery, false, allow_nested_aliases);
         }
         // Child expressions in the same scope.
         ExprNode::Binary { left, right, .. }
         | ExprNode::Compare { left, right, .. }
         | ExprNode::Logical { left, right, .. }
         | ExprNode::Nullif { left, right, .. } => {
-            resolve_expr_columns_protected(left, alias, protected);
-            resolve_expr_columns_protected(right, alias, protected);
+            resolve_expr_columns_protected(left, alias, protected, allow_nested_aliases);
+            resolve_expr_columns_protected(right, alias, protected, allow_nested_aliases);
         }
         ExprNode::Cast { operand, .. }
         | ExprNode::Aggregate { operand, .. }
@@ -2458,26 +2519,26 @@ fn resolve_expr_columns_protected(expr: &mut ExprNode, alias: Option<&str>, prot
         | ExprNode::Extract { operand, .. }
         | ExprNode::DateTrunc { operand, .. }
         | ExprNode::ExtractSecond { operand, .. } => {
-            resolve_expr_columns_protected(operand, alias, protected)
+            resolve_expr_columns_protected(operand, alias, protected, allow_nested_aliases)
         }
         ExprNode::Like {
             operand, pattern, ..
         } => {
-            resolve_expr_columns_protected(operand, alias, protected);
-            resolve_expr_columns_protected(pattern, alias, protected);
+            resolve_expr_columns_protected(operand, alias, protected, allow_nested_aliases);
+            resolve_expr_columns_protected(pattern, alias, protected, allow_nested_aliases);
         }
         ExprNode::In { operand, items, .. } => {
-            resolve_expr_columns_protected(operand, alias, protected);
+            resolve_expr_columns_protected(operand, alias, protected, allow_nested_aliases);
             for item in items {
-                resolve_expr_columns_protected(item, alias, protected);
+                resolve_expr_columns_protected(item, alias, protected, allow_nested_aliases);
             }
         }
         ExprNode::Between {
             operand, low, high, ..
         } => {
-            resolve_expr_columns_protected(operand, alias, protected);
-            resolve_expr_columns_protected(low, alias, protected);
-            resolve_expr_columns_protected(high, alias, protected);
+            resolve_expr_columns_protected(operand, alias, protected, allow_nested_aliases);
+            resolve_expr_columns_protected(low, alias, protected, allow_nested_aliases);
+            resolve_expr_columns_protected(high, alias, protected, allow_nested_aliases);
         }
         ExprNode::Window {
             args,
@@ -2486,17 +2547,22 @@ fn resolve_expr_columns_protected(expr: &mut ExprNode, alias: Option<&str>, prot
             ..
         } => {
             for arg in args {
-                resolve_expr_columns_protected(arg, alias, protected);
+                resolve_expr_columns_protected(arg, alias, protected, allow_nested_aliases);
             }
             for part in partition_by {
-                resolve_expr_columns_protected(part, alias, protected);
+                resolve_expr_columns_protected(part, alias, protected, allow_nested_aliases);
             }
             for order in order_by {
-                resolve_expr_columns_protected(&mut order.expr, alias, protected);
+                resolve_expr_columns_protected(
+                    &mut order.expr,
+                    alias,
+                    protected,
+                    allow_nested_aliases,
+                );
             }
         }
         ExprNode::Case { arms, else_, .. } => {
-            resolve_case_arm_columns(arms, else_, alias, protected)
+            resolve_case_arm_columns(arms, else_, alias, protected, allow_nested_aliases)
         }
         ExprNode::SimpleCase {
             operand,
@@ -2504,14 +2570,14 @@ fn resolve_expr_columns_protected(expr: &mut ExprNode, alias: Option<&str>, prot
             else_,
             ..
         } => {
-            resolve_expr_columns_protected(operand, alias, protected);
-            resolve_case_arm_columns(arms, else_, alias, protected);
+            resolve_expr_columns_protected(operand, alias, protected, allow_nested_aliases);
+            resolve_case_arm_columns(arms, else_, alias, protected, allow_nested_aliases);
         }
         ExprNode::Coalesce { args, .. }
         | ExprNode::ScalarFn { args, .. }
         | ExprNode::Function { args, .. } => {
             for arg in args {
-                resolve_expr_columns_protected(arg, alias, protected);
+                resolve_expr_columns_protected(arg, alias, protected, allow_nested_aliases);
             }
         }
         // Leaves — no nested expression, no column to resolve.
@@ -2526,13 +2592,14 @@ fn resolve_case_arm_columns(
     else_: &mut Option<Box<ExprNode>>,
     alias: Option<&str>,
     protected: &[&str],
+    allow_nested_aliases: bool,
 ) {
     for arm in arms {
-        resolve_expr_columns_protected(&mut arm.when, alias, protected);
-        resolve_expr_columns_protected(&mut arm.then, alias, protected);
+        resolve_expr_columns_protected(&mut arm.when, alias, protected, allow_nested_aliases);
+        resolve_expr_columns_protected(&mut arm.then, alias, protected, allow_nested_aliases);
     }
     if let Some(else_) = else_ {
-        resolve_expr_columns_protected(else_, alias, protected);
+        resolve_expr_columns_protected(else_, alias, protected, allow_nested_aliases);
     }
 }
 
@@ -4193,6 +4260,52 @@ mod tests {
                     alias: "q0_0".to_owned(),
                     column: "total".to_owned(),
                 }),
+                right: b(lit("1")),
+            },
+        );
+    }
+
+    #[test]
+    fn postgres_nested_clause_alias_reference_binds_to_the_source() {
+        // PostgreSQL accepts an output alias only as a *standalone* `ORDER BY`/`GROUP BY` item, so a bare
+        // name *nested* in a clause expression is a source column (`pg_get_viewdef` dequalifies it). Even
+        // though a computed output is named `total`, `ORDER BY (total + 1)` names the source column and must
+        // bind to the single source, not stay bare (git-bug e1d0724, review).
+        let query = low_query(
+            "SELECT (\"q0_0\".\"amount\" * 2) AS \"total\" FROM \"events\" AS \"q0_0\" \
+             ORDER BY (\"total\" + 1)",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        assert_eq!(query.projection[0].output_name, "total");
+        assert_eq!(
+            query.order_by[0].expr,
+            ExprNode::Binary {
+                op: ArithmeticOp::Add,
+                left: b(ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "total".to_owned(),
+                }),
+                right: b(lit("1")),
+            },
+        );
+    }
+
+    #[test]
+    fn sqlite_nested_clause_alias_reference_stays_bare() {
+        // SQLite (verbatim DDL) *does* resolve a nested bare name to an output alias, so the same shape must
+        // keep `total` bare to round-trip (contrast [`postgres_nested_clause_alias_reference_binds_to_the_source`]).
+        let query = low_query(
+            "SELECT (\"q0_0\".\"amount\" * 2) AS \"total\" FROM \"events\" AS \"q0_0\" \
+             ORDER BY (\"total\" + 1)",
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        assert_eq!(
+            query.order_by[0].expr,
+            ExprNode::Binary {
+                op: ArithmeticOp::Add,
+                left: b(bare("total")),
                 right: b(lit("1")),
             },
         );
