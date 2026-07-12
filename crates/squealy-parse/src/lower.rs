@@ -4339,6 +4339,27 @@ mod tests {
     }
 
     #[test]
+    fn postgres_top_level_having_name_binds_to_the_source_even_matching_a_computed_alias() {
+        // The finding's exact shape: a computed projection aliased `active` and a source column also named
+        // `active`. On PostgreSQL a `HAVING` name is never an output alias, so `pg_get_viewdef` dequalifies
+        // `q0_0.active` to a bare `HAVING active` that still means the source column — it must bind to the
+        // source, not stay bare as the computed alias (git-bug e1d0724, review).
+        let query = low_query(
+            "SELECT (count(\"q0_0\".\"id\") > 0) AS \"active\" FROM \"events\" AS \"q0_0\" \
+             GROUP BY \"q0_0\".\"active\" HAVING \"active\"",
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        assert_eq!(
+            query.having,
+            Some(ExprNode::Column {
+                alias: "q0_0".to_owned(),
+                column: "active".to_owned(),
+            }),
+        );
+    }
+
+    #[test]
     fn postgres_having_reference_binds_to_the_source_not_an_alias() {
         // PostgreSQL never exposes a SELECT alias in `HAVING`, so a bare name there is a source column —
         // even when it coincides with a computed projection's alias — and must bind to the source, matching
