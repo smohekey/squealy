@@ -292,7 +292,13 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                     // introspected deparse) in the backend's dialect, then normalize it, so a generated
                     // column written one way and deparsed another compares equal instead of churning.
                     let expression = connection.canonical_generated_expression(expression);
-                    generated.expression = Some(squealy::normalize_expr(&expression));
+                    let mut expression = squealy::normalize_expr(&expression);
+                    // Fold each general cast's target to the backend's canonical representative (both
+                    // sides), so a structural desired cast does not churn against the introspected form.
+                    squealy::map_cast_types(&mut expression, &|ty| {
+                        connection.canonical_cast_type(ty)
+                    });
+                    generated.expression = Some(expression);
                 }
             }
             if let Some(primary_key) = &mut table.primary_key {
@@ -323,7 +329,13 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 index.expressions = std::mem::take(&mut index.expressions)
                     .into_iter()
                     .flat_map(|expression| connection.canonical_index_expression(expression))
-                    .map(|expression| squealy::normalize_expr(&expression))
+                    .map(|expression| {
+                        let mut expression = squealy::normalize_expr(&expression);
+                        squealy::map_cast_types(&mut expression, &|ty| {
+                            connection.canonical_cast_type(ty)
+                        });
+                        expression
+                    })
                     .collect();
                 canonicalize_index(index, &default_method);
                 if let Some(predicate) = index.predicate.take() {
@@ -331,7 +343,11 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                     // introspected one) in the backend's dialect, then normalize it, so a partial index
                     // written one way and deparsed another compares equal instead of churning.
                     let predicate = connection.canonical_index_predicate(*predicate);
-                    index.predicate = Some(Box::new(squealy::normalize_expr(&predicate)));
+                    let mut predicate = squealy::normalize_expr(&predicate);
+                    squealy::map_cast_types(&mut predicate, &|ty| {
+                        connection.canonical_cast_type(ty)
+                    });
+                    index.predicate = Some(Box::new(predicate));
                 }
             }
             for check in &mut table.checks {
@@ -342,6 +358,11 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 // Normalize the structural form (expand `BETWEEN`, re-nest boolean chains) so a check
                 // PostgreSQL's deparse rewrites still compares equal to the authored one.
                 check.expression = squealy::normalize_expr(&check.expression);
+                // Fold each general cast's target to the backend's canonical representative (both sides),
+                // so a structural desired cast does not churn against the introspected representative.
+                squealy::map_cast_types(&mut check.expression, &|ty| {
+                    connection.canonical_cast_type(ty)
+                });
                 // Derive the canonical name from that expression, so a backend that does not round-trip a
                 // check's name (SQLite) matches equivalent checks by expression.
                 check.name = connection.canonical_check_name(check);

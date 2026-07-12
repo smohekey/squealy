@@ -605,28 +605,16 @@ fn lower(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
             pattern: b(lower(pattern, dialect)?),
         }),
 
-        // A general user `CAST(x AS ty)` is deliberately NOT lowered here: inverting the cast target
-        // name is dialect-specific and, for MySQL, ambiguous — its cast vocabulary (`SIGNED`, `UNSIGNED`,
-        // `DOUBLE`, `CHAR`, `DECIMAL`) does not map one-to-one back to a neutral `SqlType` width. squealy
-        // emits no general cast in a scalar constraint today (the only cast in this position is the
-        // float-division idiom, peeled at the `Divide` operator via `float_cast_operand`), so a general
-        // cast falls through to `NotYetLowered`; proper cross-dialect cast inversion lands with the
-        // model-field migration that first produces such casts.
-        //
-        // EXCEPT PostgreSQL's `pg_get_constraintdef` synthesizes a `::type` cast on a LITERAL: a number to
-        // a numeric type (`0` → `(0)::numeric`), a string to a text type (`'x'` → `('x')::text`), and — for
-        // a *negative* number — a string cast to a numeric type (`-5` → `('-5')::integer`). Recover the
+        // PostgreSQL's `pg_get_constraintdef` synthesizes a redundant `::type` cast on a LITERAL: a number
+        // to a numeric type (`0` → `(0)::numeric`), a string to a text type (`'x'` → `('x')::text`), and —
+        // for a *negative* number — a string cast to a numeric type (`-5` → `('-5')::integer`). Recover the
         // bare literal only when the cast is a guaranteed value-preserving no-op (so a published check
-        // re-plans to empty); a *converting* cast (`'Infinity'::float8`, `(1.5)::integer`, `varchar(3)`, any
-        // float target) is meaningful and left `NotYetLowered` (→ `Raw`, kept comparable by canonical.rs).
-        //
-        // A `::type` cast around a NON-literal operand is deliberately NOT stripped: it is ambiguous
-        // without the operand's column type. PostgreSQL adds a value-preserving `::text` around an
-        // already-text operand (`char_length((name)::text)` on a `varchar`), but the same syntactic shape
-        // is a MEANINGFUL conversion on a non-text operand (`id::text LIKE '1%'`, `char_length(id::text)`
-        // — digit count), and the two cannot be told apart here. So it stays `Raw` (kept comparable by
-        // canonical.rs) rather than risk dropping a semantic cast. (A text-function check on an explicit
-        // `varchar` column may therefore churn — a documented limitation, never corruption.)
+        // re-plans to empty). A *converting* literal cast (`'Infinity'::float8`, `(1.5)::integer`, any float
+        // target) is not recovered — `redundant_cast_literal` declines it, and it then structures as a
+        // general `Cast` node below. (A published check comparing a bare literal against a `double`/`real`
+        // column — where PostgreSQL synthesizes `(1.5)::double precision` — therefore churns: a documented
+        // limitation, never corruption. Recovering the bare literal is unsafe because a float literal is not
+        // guaranteed value-preserving through the cast, e.g. `(0.1)::real`.)
         Expr::Cast {
             kind: CastKind::DoubleColon,
             expr,
@@ -634,28 +622,22 @@ fn lower(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadError> {
             ..
         } if dialect == SqlDialect::Postgres => {
             let inner = strip_nested(expr);
-            // A `::type` on a LITERAL is the redundant deparse cast recovered above (`(0)::numeric`).
-            // Otherwise a `::type` around a pinnable aggregate / window / `EXTRACT` is a result-pin in
-            // PostgreSQL's `pg_get_viewdef` deparse — it emits the `::` form `(sum(x))::bigint` where the
-            // renderer writes the function-style `CAST(sum(x) AS bigint)`. Peel it the same way (a `::` on
-            // any other non-literal, e.g. a bare column, stays `NotYetLowered` via `lower_result_pin`).
             match redundant_cast_literal(inner, data_type) {
                 Some(literal) => Ok(literal),
-                None => lower_result_pin(inner, data_type, dialect),
+                None => lower_cast(inner, data_type, dialect),
             }
         }
 
-        // A function-style `CAST(<call> AS ty)` is the renderer's result-pin: an OUTER cast wrapping an
-        // aggregate / window / `EXTRACT` so the output column's wire type is uniform across dialects.
-        // Peel the cast into the wrapped node's `result` field. A cast around anything else is a general
-        // user cast (dialect-ambiguous target spelling), still `NotYetLowered`.
+        // A function-style `CAST(<call> AS ty)`: first the renderer's result-pin reading (an OUTER cast
+        // wrapping an aggregate / window / `EXTRACT`, peeled into the wrapped node's `result`), else a
+        // general user cast structured as an `ExprNode::Cast` (see `lower_cast`).
         Expr::Cast {
             kind: CastKind::Cast,
             expr,
             data_type,
             format: None,
             array: false,
-        } => lower_result_pin(expr, data_type, dialect),
+        } => lower_cast(expr, data_type, dialect),
 
         // PostgreSQL deparses `x IN (a, b, c)` as `x = ANY (ARRAY[a, b, c])` and `x NOT IN (…)` as
         // `x <> ALL (ARRAY[…])`. Recover the neutral `In`. (These operators are PostgreSQL-only syntax, so
@@ -1353,12 +1335,16 @@ fn pipe_is_concatenation(dialect: SqlDialect) -> bool {
 
 // ===== view-body node lowering (aggregate / window / CASE / EXTRACT / subquery) =====
 
-/// Peels the renderer's result-pin — an OUTER `CAST(<call> AS ty)` around an aggregate / window /
-/// `EXTRACT` — into the wrapped node's `result` field. The target `ty` is inverted from the parsed
-/// [`DataType`] via this dialect's cast vocabulary; a type the vocabulary cannot map to an exact
-/// [`SqlType`] yields `NotYetLowered` (guessing a different type would churn the re-render). A cast
-/// around anything that is *not* a pinnable call is a general user cast, also `NotYetLowered`.
-fn lower_result_pin(
+/// Lowers a `CAST(x AS ty)` / `x::ty`. First tries the renderer's result-pin reading — an OUTER cast
+/// around an aggregate / window / `EXTRACT` peeled into the wrapped node's `result` field — and
+/// otherwise structures it as a general [`ExprNode::Cast`]. The target `ty` is inverted from the parsed
+/// [`DataType`] via this dialect's cast vocabulary; a type the vocabulary cannot map to a [`SqlType`]
+/// yields `NotYetLowered` (guessing a different type would churn the re-render). Because
+/// [`invert_pin_type`] returns `None` for [`SqlDialect::Generic`], a cast lowered in the `Generic`
+/// dialect (the derive macro's path) always stays `NotYetLowered` → `Raw`; the per-backend
+/// `canonical_check_expression` seam re-parses that `Raw` in the backend's own dialect, so an authored
+/// cast check and its introspected form structure to the same node on both sides (no fold needed).
+fn lower_cast(
     inner: &Expr,
     data_type: &DataType,
     dialect: SqlDialect,
@@ -1372,12 +1358,16 @@ fn lower_result_pin(
             lower_window(function, over, Some(ty), dialect)
         }
         // Only an aggregate call is otherwise pinned (a plain scalar/general function self-types).
+        // A non-windowed function: an AGGREGATE call is a result-pin (peel into its `result`); any other
+        // function (a scalar like `abs`/`lower`) is a general cast around the lowered function node.
         Expr::Function(function) => {
-            let func = single_unquoted_name(function)
+            match single_unquoted_name(function)
                 .as_deref()
                 .and_then(aggregate_func)
-                .ok_or_else(|| not_yet(format!("cast around function `{function}`")))?;
-            lower_aggregate(function, func, Some(ty), dialect)
+            {
+                Some(func) => lower_aggregate(function, func, Some(ty), dialect),
+                None => general_cast(inner, ty, data_type, dialect),
+            }
         }
         Expr::Extract {
             field,
@@ -1388,8 +1378,54 @@ fn lower_result_pin(
             expr,
             field: CeilFloorKind::DateTimeField(DateTimeField::NoDateTime),
         } => lower_floored_second(expr, Some(ty), dialect),
-        other => Err(not_yet(format!("cast around `{other}`"))),
+        // Any other operand is a general user cast (a bare column, a literal a redundant-cast strip
+        // declined, an arbitrary expression).
+        other => general_cast(other, ty, data_type, dialect),
     }
+}
+
+/// Structures a general user cast `CAST(operand AS ty)` as an [`ExprNode::Cast`], so an authored
+/// `x::ty` / `CAST(x AS ty)` check round-trips structurally instead of falling back to `Raw`. Both the
+/// desired (Raw-then-re-parsed) and introspected sides route through the same per-dialect inverter, so
+/// they agree even where the inverse is a canonical representative (many-to-one on MySQL/SQLite).
+///
+/// [`invert_pin_type`] is tuned for a **result pin** — a view-output cast whose exact type is recovered
+/// from the introspected column metadata — so it maps a couple of spellings to a representative that is
+/// wrong for a general authored cast. Those cases stay `Raw` (compared verbatim) rather than misrepresent
+/// the cast in the backend-neutral model (which would corrupt a cross-dialect deploy) or the planned DDL:
+///
+/// - **`I128`/`U128`** — bare `numeric`/`decimal` (PostgreSQL) and `DECIMAL(65, 0)` (MySQL) invert to
+///   `I128`, squealy's *render target* for a 128-bit integer. As an authored cast they mean an
+///   arbitrary-precision DECIMAL — a different semantic category — and no dialect spells a native
+///   128-bit-integer cast, so an `I128`/`U128` general cast is never legitimate.
+/// - **`Decimal` on MySQL/SQLite** — those dialects render every [`SqlType::Decimal`] as a bare
+///   `DECIMAL`/`NUMERIC`, dropping the precision/scale, so structuring one would silently change the
+///   deployed semantics (`CAST(x AS DECIMAL(10, 2))` → `CAST(x AS DECIMAL)`). PostgreSQL renders
+///   `numeric(p, s)` faithfully, so its `Decimal` casts are exact and structure.
+///
+/// These guards key on the SOURCE parser dialect, which keeps a same-backend round-trip churn-free (the H1
+/// case: a squealy-published schema re-plans to empty on the same backend). A structural `Decimal`/`I128`
+/// cast that a PostgreSQL package carries but is then deployed **cross-dialect** to a lossier backend is a
+/// documented H2 residual (silent precision loss / churn) tracked in git-bug `8fe1530` — it was already
+/// broken (as invalid cross-dialect cast syntax) before this cast inversion landed.
+fn general_cast(
+    operand: &Expr,
+    ty: SqlType,
+    data_type: &DataType,
+    dialect: SqlDialect,
+) -> Result<ExprNode, ReadError> {
+    let not_exactly_modelable = matches!(ty, SqlType::I128 | SqlType::U128)
+        || (matches!(ty, SqlType::Decimal { .. })
+            && matches!(dialect, SqlDialect::Mysql | SqlDialect::Sqlite));
+    if not_exactly_modelable {
+        return Err(not_yet(format!(
+            "general cast to `{data_type}` cannot be modeled exactly on this dialect, kept raw"
+        )));
+    }
+    Ok(ExprNode::Cast {
+        operand: b(lower(operand, dialect)?),
+        ty,
+    })
 }
 
 /// Inverts a parsed cast-target [`DataType`] back to the neutral [`SqlType`] this dialect's renderer
@@ -3224,16 +3260,21 @@ mod tests {
             low("('x')::text", SqlDialect::Postgres).unwrap(),
             low("'x'", SqlDialect::Generic).unwrap()
         );
-        // A `::text` (or any `::`) cast around a NON-literal operand is ambiguous without the operand's
-        // type — redundant on a text column, a real conversion on `id::text LIKE '1%'` — so it is NOT
-        // stripped; it stays Raw rather than risk dropping a semantic cast.
+        // A `::` cast around a NON-literal operand is now structured as a general `Cast` node (not
+        // stripped — dropping it would need the operand's column type). A genuine conversion round-trips:
+        // `id::text ~~ '1%'` re-parses to the same `Like{Cast{id, String}, …}` on both the desired
+        // (Raw-then-re-parsed) and introspected sides.
         assert!(matches!(
-            low("(char_length((name)::text) > 0)", SqlDialect::Postgres),
-            Err(ReadError::NotYetLowered(_))
+            low("(id::text ~~ '1%')", SqlDialect::Postgres).unwrap(),
+            ExprNode::Like { .. }
         ));
+        // PostgreSQL's synthesized redundant `(name)::text` around a text column also structures now (it
+        // cannot be told apart from a meaningful cast here). It therefore does NOT equal an authored
+        // `char_length(name)` with no cast — the documented text-function-on-`varchar` churn, never
+        // corruption.
         assert!(matches!(
-            low("(id::text ~~ '1%')", SqlDialect::Postgres),
-            Err(ReadError::NotYetLowered(_))
+            low("(char_length((name)::text) > 0)", SqlDialect::Postgres).unwrap(),
+            ExprNode::Compare { .. }
         ));
 
         // PostgreSQL deparses a NEGATIVE numeric literal as a string cast: `-5` → `('-5')::integer`.
@@ -3249,53 +3290,38 @@ mod tests {
             low("('-1.5')::numeric", SqlDialect::Postgres).unwrap(),
             low("-1.5", SqlDialect::Generic).unwrap()
         );
-        // …but a negative fractional string cast to an INTEGER type truncates → stays Raw.
-        assert!(matches!(
-            low("('-1.5')::integer", SqlDialect::Postgres),
-            Err(ReadError::NotYetLowered(_))
-        ));
-        // A `::` cast on a NON-literal is a real user cast, still not lowered.
-        assert!(matches!(
-            low("(quota)::numeric", SqlDialect::Postgres),
-            Err(ReadError::NotYetLowered(_))
-        ));
-        // A CONVERTING literal cast (string → float / date) is meaningful and must NOT be stripped.
-        assert!(matches!(
-            low("('Infinity')::float8", SqlDialect::Postgres),
-            Err(ReadError::NotYetLowered(_))
-        ));
-        assert!(matches!(
-            low("('2020-01-01')::date", SqlDialect::Postgres),
-            Err(ReadError::NotYetLowered(_))
-        ));
-        // A fractional literal cast to an INTEGER type truncates (`1.5::integer` = 1) → not redundant.
-        assert!(matches!(
-            low("(1.5)::integer", SqlDialect::Postgres),
-            Err(ReadError::NotYetLowered(_))
-        ));
-        // …but a fractional literal cast to a fractional type is a no-op → strips.
+        // A fractional literal cast to a fractional type is a value-preserving no-op → still strips.
         assert_eq!(
             low("(1.5)::numeric", SqlDialect::Postgres).unwrap(),
             low("1.5", SqlDialect::Generic).unwrap()
         );
-        // A LENGTH/PRECISION-bounded cast can truncate/round/pad → not stripped (stays Raw).
-        assert!(matches!(
-            low("('abcdef')::varchar(3)", SqlDialect::Postgres),
-            Err(ReadError::NotYetLowered(_))
-        ));
-        assert!(matches!(
-            low("(1.5)::numeric(2, 0)", SqlDialect::Postgres),
-            Err(ReadError::NotYetLowered(_))
-        ));
-        // A float cast is never provably value-preserving (`(16777217)::real` rounds) → stays Raw.
-        assert!(matches!(
-            low("(16777217)::real", SqlDialect::Postgres),
-            Err(ReadError::NotYetLowered(_))
-        ));
-        assert!(matches!(
-            low("(1.5)::float8", SqlDialect::Postgres),
-            Err(ReadError::NotYetLowered(_))
-        ));
+        // Every cast `redundant_cast_literal` does NOT recover as a bare literal, and whose target IS
+        // exactly modelable, now structures as a general `ExprNode::Cast` (rather than staying `Raw`): a
+        // *converting* literal cast (truncating, string→float/date, bounded, or any float target — never
+        // provably value-preserving) and a cast on a NON-literal operand. Both the desired
+        // (Raw-then-re-parsed) and introspected sides structure the same way, so a genuine cast
+        // round-trips; a literal cast whose authored form omits the cast (e.g. a bare `1.5` vs
+        // PostgreSQL's synthesized `(1.5)::double precision`) is the documented float-column-check churn,
+        // never corruption. (A bare `::numeric` target is NOT exactly modelable — see below — so it is
+        // excluded here.)
+        for converting in [
+            "('-1.5')::integer",
+            "('Infinity')::float8",
+            "('2020-01-01')::date",
+            "(1.5)::integer",
+            "('abcdef')::varchar(3)",
+            "(1.5)::numeric(2, 0)",
+            "(16777217)::real",
+            "(1.5)::float8",
+        ] {
+            assert!(
+                matches!(
+                    low(converting, SqlDialect::Postgres).unwrap(),
+                    ExprNode::Cast { .. }
+                ),
+                "expected a structural Cast for `{converting}`"
+            );
+        }
 
         // `IN` / `NOT IN` → `= ANY (ARRAY[..])` / `<> ALL (ARRAY[..])`.
         assert_eq!(
@@ -3335,9 +3361,24 @@ mod tests {
                 ..
             })
         ));
-        // A general `CAST` is deferred (dialect-ambiguous target names, e.g. MySQL `SIGNED`).
+        // A general `CAST` now structures to an `ExprNode::Cast` (the target type is inverted per
+        // dialect; `integer` → `I32` on PostgreSQL).
         assert!(matches!(
-            low("CAST(\"a\" AS integer)", SqlDialect::Postgres),
+            low("CAST(\"a\" AS integer)", SqlDialect::Postgres).unwrap(),
+            ExprNode::Cast {
+                ty: SqlType::I32,
+                ..
+            }
+        ));
+        // A cast to a type outside the modeled `SqlType` vocabulary (`::inet`, an enum, `::money`) cannot
+        // be inverted → stays `Raw` (a documented residual after retiring `canonical.rs`).
+        assert!(matches!(
+            low("((addr)::inet = (host)::inet)", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // `IS TRUE` / `IS FALSE` has no neutral node (squealy cannot render one) → stays `Raw`.
+        assert!(matches!(
+            low("((status = 1) IS TRUE)", SqlDialect::Postgres),
             Err(ReadError::NotYetLowered(_))
         ));
         // A division whose float casts are NOT the dialect's idiom type (PostgreSQL emits `double
@@ -3481,6 +3522,51 @@ mod tests {
     }
 
     #[test]
+    fn general_cast_covers_scalar_functions_but_skips_lossy_decimal() {
+        // A cast around a NON-aggregate function (`abs`, `lower`) structures as a general `Cast` around
+        // the lowered function node — not left `Raw` for lack of a result-pin reading.
+        assert!(matches!(
+            low("CAST(abs(\"amount\") AS bigint)", SqlDialect::Postgres).unwrap(),
+            ExprNode::Cast {
+                ty: SqlType::I64,
+                ..
+            }
+        ));
+        // PostgreSQL renders `numeric(p, s)` faithfully, so a `Decimal` cast is exact and structures.
+        assert!(matches!(
+            low("CAST(\"x\" AS numeric(10, 2))", SqlDialect::Postgres).unwrap(),
+            ExprNode::Cast {
+                ty: SqlType::Decimal {
+                    precision: 10,
+                    scale: 2,
+                },
+                ..
+            }
+        ));
+        // MySQL and SQLite render every `Decimal` as a bare `DECIMAL`/`NUMERIC`, dropping the
+        // precision/scale — structuring one would silently change the planned DDL, so it stays `Raw`.
+        assert!(matches!(
+            low("CAST(`x` AS DECIMAL(10, 2))", SqlDialect::Mysql),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low("CAST(\"x\" AS NUMERIC(10, 2))", SqlDialect::Sqlite),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        // Bare `numeric`/`decimal` inverts to the `I128` result-pin representative (squealy's render
+        // target for a 128-bit integer), a different semantic category than an authored decimal cast — so
+        // a general `I128` cast is never legitimate and stays `Raw`, on every dialect.
+        assert!(matches!(
+            low("CAST(\"x\" AS numeric)", SqlDialect::Postgres),
+            Err(ReadError::NotYetLowered(_))
+        ));
+        assert!(matches!(
+            low("CAST(`x` AS DECIMAL(65, 0))", SqlDialect::Mysql),
+            Err(ReadError::NotYetLowered(_))
+        ));
+    }
+
+    #[test]
     fn pg_double_colon_result_pins_peel_like_the_function_cast() {
         // PostgreSQL's `pg_get_viewdef` deparses a result-pin as the `::` form `(<call>)::type` (whereas
         // the renderer writes the function-style `CAST(<call> AS type)`). Both must peel into the node's
@@ -3508,10 +3594,14 @@ mod tests {
                 timezone: None,
             }
         );
-        // A `::` cast on a bare column is still a general cast, not a pin → not lowered (unchanged).
+        // A `::` cast on a bare column is a general cast (not a result-pin): it now structures as a
+        // `Cast` node rather than staying `NotYetLowered`.
         assert!(matches!(
-            low("(q0_0.\"amount\")::bigint", SqlDialect::Postgres),
-            Err(ReadError::NotYetLowered(_))
+            low("(q0_0.\"amount\")::bigint", SqlDialect::Postgres).unwrap(),
+            ExprNode::Cast {
+                ty: SqlType::I64,
+                ..
+            }
         ));
         // A redundant literal `::` cast is still recovered (unchanged).
         assert_eq!(low("(0)::numeric", SqlDialect::Postgres).unwrap(), lit("0"));

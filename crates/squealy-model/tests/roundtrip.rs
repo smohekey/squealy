@@ -984,11 +984,12 @@ fn reader_entry_points_lower_scalars_and_single_select_view_bodies() {
         ],
     );
 
-    // If any term cannot be lowered (a `::text` cast on a non-literal), the whole key is preserved as one
-    // verbatim `Raw` rather than a partial/garbled split.
+    // If any term cannot be lowered (here a cast to a non-modeled type — `::inet` has no `SqlType`), the
+    // whole key is preserved as one verbatim `Raw` rather than a partial/garbled split. (A `::text` cast
+    // now DOES lower to a structural `Cast`, so it no longer keeps the key Raw.)
     assert_eq!(
-        reader.read_index_expressions_or_raw("lower((slug)::text), upper(name)"),
-        vec![ExprNode::Raw("lower((slug)::text), upper(name)".to_owned())],
+        reader.read_index_expressions_or_raw("lower((slug)::inet), upper(name)"),
+        vec![ExprNode::Raw("lower((slug)::inet), upper(name)".to_owned())],
     );
 }
 
@@ -1214,6 +1215,36 @@ fn constraint_corpus() -> Vec<(&'static str, ExprNode)> {
                 }],
             },
             lit("'x'"),
+        ),
+    ));
+
+    // A general user `CAST(x AS ty)` now structures (retiring `canonical.rs`). The target type is the
+    // canonical representative of each dialect's spelling, so a cast to a type that is its OWN
+    // representative on all three dialects round-trips exactly: `I64` (bigint / SIGNED / INTEGER) and
+    // `F64` (double precision / DOUBLE / REAL). A narrower authored type (e.g. `I32`, which renders
+    // MySQL `SIGNED` and reads back `I64`) is deliberately NOT exercised here — it does not survive an
+    // exact structural round-trip, exactly as an introspected MySQL/SQLite view pin does not (that
+    // residual is why the check seam re-parses BOTH sides in the backend dialect rather than folding).
+    cases.push((
+        "cast-integer",
+        cmp(
+            CompareOp::Equals,
+            ExprNode::Cast {
+                operand: b(bare("amount")),
+                ty: SqlType::I64,
+            },
+            lit("0"),
+        ),
+    ));
+    cases.push((
+        "cast-float",
+        cmp(
+            CompareOp::GreaterThan,
+            ExprNode::Cast {
+                operand: b(bare("ratio")),
+                ty: SqlType::F64,
+            },
+            lit("0"),
         ),
     ));
 
