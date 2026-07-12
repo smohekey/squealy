@@ -1108,6 +1108,7 @@ impl ProjectionVisitor for ModelSink {
         let expr = build_expr(expr)?;
         self.query.projection.push(ProjectionItem {
             output_name: alias.into_owned(),
+            internal_alias: None,
             expr,
         });
         Ok(())
@@ -1124,6 +1125,7 @@ impl ProjectionVisitor for ModelSink {
         let expr = build_column(column)?;
         self.query.projection.push(ProjectionItem {
             output_name: alias.into_owned(),
+            internal_alias: None,
             expr,
         });
         Ok(())

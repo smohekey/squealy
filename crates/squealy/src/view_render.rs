@@ -161,6 +161,12 @@ fn render_select(
         if alias_projections {
             writer.write_all(b" AS ")?;
             dialect.write_quoted_ident(&item.output_name, writer)?;
+        } else if let Some(internal_alias) = &item.internal_alias {
+            // A `CREATE VIEW (<cols>)` list renames this projection's output and suppresses its own `AS`,
+            // but the body's own `ORDER BY`/`GROUP BY`/`HAVING` reference the inner alias — re-emit it so
+            // those clauses still resolve (else the reference dangles and the DDL is invalid).
+            writer.write_all(b" AS ")?;
+            dialect.write_quoted_ident(internal_alias, writer)?;
         }
     }
 

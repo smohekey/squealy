@@ -963,6 +963,7 @@ mod tests {
             query: ViewBody::Select(Box::new(ViewQueryModel {
                 projection: vec![ProjectionItem {
                     output_name: "s".to_owned(),
+                    internal_alias: None,
                     expr: ExprNode::Aggregate {
                         func: squealy::AggregateFunc::Sum,
                         distinct: false,

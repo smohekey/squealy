@@ -2175,10 +2175,15 @@ fn lower_select(
     }
     let mut projection = Vec::with_capacity(select.projection.len());
     for (index, item) in select.projection.iter().enumerate() {
-        // The projected expression, and the name it would carry from its own `AS` alias or bare column.
-        let (expr, self_name) = match item {
-            SelectItem::UnnamedExpr(expr) => (expr, bare_column_name(expr)),
-            SelectItem::ExprWithAlias { expr, alias } => (expr, Some(fold_ident(alias))),
+        // The projected expression, the name it would carry from its own `AS` alias or bare column, and
+        // its *explicit* `AS` alias (only an explicit alias is a suppressible inner name; a bare column's
+        // own name is not).
+        let (expr, self_name, explicit_alias) = match item {
+            SelectItem::UnnamedExpr(expr) => (expr, bare_column_name(expr), None),
+            SelectItem::ExprWithAlias { expr, alias } => {
+                let alias = fold_ident(alias);
+                (expr, Some(alias.clone()), Some(alias))
+            }
             SelectItem::Wildcard(_)
             | SelectItem::QualifiedWildcard(..)
             | SelectItem::ExprWithAliases { .. } => {
@@ -2191,15 +2196,27 @@ fn lower_select(
         // the arm's internal clauses (e.g. a per-arm `ORDER BY <alias>`) still resolve, and the list names
         // only an otherwise-unnamed projection. Without a column list the projection's own name is required
         // (an un-aliased expression with none is outside the grammar).
-        let output_name = match (output_names, column_list_is_fallback) {
-            (Some(names), false) => names[index].clone(),
-            (Some(names), true) => self_name.unwrap_or_else(|| names[index].clone()),
-            (None, _) => {
-                self_name.ok_or_else(|| not_yet(format!("un-aliased projection `{expr}`")))?
+        let (output_name, internal_alias) = match (output_names, column_list_is_fallback) {
+            // A single-`SELECT` column list renames the output authoritatively and suppresses the
+            // projection's own explicit `AS`. Keep that alias when it differs from the declared output name:
+            // the body's own `ORDER BY`/`GROUP BY`/`HAVING` reference the inner alias, so the renderer must
+            // re-emit `AS <alias>` (else the reference dangles and the DDL is invalid). Only an *explicit*
+            // alias is kept — a bare column's own name is not a suppressible `AS`, and treating it as one
+            // would spuriously re-alias `SELECT q.amount … (n)` as `q.amount AS amount`.
+            (Some(names), false) => {
+                let output_name = names[index].clone();
+                let internal_alias = explicit_alias.filter(|alias| *alias != output_name);
+                (output_name, internal_alias)
             }
+            (Some(names), true) => (self_name.unwrap_or_else(|| names[index].clone()), None),
+            (None, _) => (
+                self_name.ok_or_else(|| not_yet(format!("un-aliased projection `{expr}`")))?,
+                None,
+            ),
         };
         projection.push(ProjectionItem {
             output_name,
+            internal_alias,
             expr: lower(expr, dialect)?,
         });
     }
@@ -2331,7 +2348,9 @@ fn resolve_query_columns(query: &mut ViewQueryModel) {
     // plain-column projection (`q.id AS id`) is *not* left bare — the deparser merely dequalified the
     // source column `q.id` to `id`, and the desired model qualifies it, so it must be bound to the scope
     // alias like any other source column. (A bare column *nested* in an expression — `ORDER BY total + 1`
-    // — is a source column, not an alias, so the guard is only for the top-level term.)
+    // — is a source column, not an alias, so the guard is only for the top-level term.) A clause names such
+    // an output by its own SQL name: the [`ProjectionItem::internal_alias`] a column list suppressed, or —
+    // with no rename — the `output_name`.
     let computed_aliases: Vec<&str> = query
         .projection
         .iter()
@@ -2341,7 +2360,7 @@ fn resolve_query_columns(query: &mut ViewQueryModel) {
                 ExprNode::Column { .. } | ExprNode::BareColumn { .. }
             )
         })
-        .map(|item| item.output_name.as_str())
+        .map(|item| item.internal_alias.as_deref().unwrap_or(&item.output_name))
         .collect();
     for expr in &mut query.group_by {
         resolve_clause_term_columns(expr, alias, &computed_aliases);
@@ -4053,6 +4072,7 @@ mod tests {
                 projection: vec![
                     ProjectionItem {
                         output_name: "added".to_owned(),
+                        internal_alias: None,
                         expr: ExprNode::Binary {
                             op: ArithmeticOp::Add,
                             left: b(col("cnt")),
@@ -4061,6 +4081,7 @@ mod tests {
                     },
                     ProjectionItem {
                         output_name: "id".to_owned(),
+                        internal_alias: None,
                         expr: col("id"),
                     },
                 ],
@@ -4090,12 +4111,14 @@ mod tests {
     }
 
     #[test]
-    fn column_list_names_win_over_an_inner_projection_alias() {
-        // When a `CREATE VIEW (cols)` list is present, SQL names the outputs from the list — even if a
-        // projection also carries its own `AS` alias, the declared column name (`out`) wins over it
-        // (`inner`). (squealy never emits this combination, but external / hand-authored SQL can.)
+    fn column_list_keeps_a_referenced_inner_projection_alias() {
+        // A `CREATE VIEW (cols)` list names the outputs (`out`), which authoritatively renames each
+        // projection and suppresses its own `AS`. But the body's own `ORDER BY` references the inner alias
+        // (`inner`), so it is preserved in `internal_alias`; the renderer re-emits `AS inner` under the
+        // column list so the clause still resolves (git-bug e1d0724 — else the DDL is invalid). squealy
+        // never emits this combination through the typed builder, but external / hand-authored SQL can.
         let query = low_query(
-            "CREATE VIEW \"v\" (\"out\") AS SELECT 1 AS \"inner\"",
+            "CREATE VIEW \"v\" (\"out\") AS SELECT 1 AS \"inner\" ORDER BY \"inner\"",
             SqlDialect::Postgres,
         )
         .unwrap();
@@ -4103,7 +4126,17 @@ mod tests {
             query.projection,
             vec![ProjectionItem {
                 output_name: "out".to_owned(),
+                internal_alias: Some("inner".to_owned()),
                 expr: lit("1"),
+            }],
+        );
+        // The `ORDER BY` term stays bare (it names the projection's inner alias, not a source column).
+        assert_eq!(
+            query.order_by,
+            vec![OrderItem {
+                expr: bare("inner"),
+                direction: None,
+                nulls: None,
             }],
         );
     }

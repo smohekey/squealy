@@ -112,6 +112,17 @@ fn events_source() -> SourceItem {
 fn proj(output_name: &str, expr: ExprNode) -> ProjectionItem {
     ProjectionItem {
         output_name: output_name.to_owned(),
+        internal_alias: None,
+        expr,
+    }
+}
+
+/// A projection whose own `AS <internal_alias>` differs from the view-output column name a column list
+/// declares — the body's own clauses reference `internal_alias`, so the renderer must re-emit it.
+fn proj_aliased(output_name: &str, internal_alias: &str, expr: ExprNode) -> ProjectionItem {
+    ProjectionItem {
+        output_name: output_name.to_owned(),
+        internal_alias: Some(internal_alias.to_owned()),
         expr,
     }
 }
@@ -597,6 +608,124 @@ fn corpus() -> Vec<(&'static str, DatabaseModel)> {
                 order_by: Vec::new(),
                 limit: None,
                 offset: None,
+            },
+        )),
+    ));
+
+    // A **column-listed** single-`SELECT` view whose body's own `ORDER BY` references a *computed*
+    // projection's own `AS` alias (`total`), which the declared output column (`n`) renames — so the
+    // column list suppresses the `AS`, yet the clause still needs it. The projection keeps its inner alias
+    // in [`ProjectionItem::internal_alias`]; the renderer re-emits `AS total` under the `(n)` list so
+    // `ORDER BY total` resolves (else the DDL is invalid — git-bug e1d0724). Round-trips to itself.
+    cases.push((
+        "view/single-select-order-alias",
+        schema_with_view(view_of(
+            "v_alias_order",
+            vec![("n", SqlType::I64)],
+            sel(ViewQueryModel {
+                projection: vec![proj_aliased(
+                    "n",
+                    "total",
+                    ExprNode::Binary {
+                        op: ArithmeticOp::Multiply,
+                        left: b(col("amount")),
+                        right: b(lit("2")),
+                    },
+                )],
+                from: Some(events_source()),
+                order_by: vec![OrderItem {
+                    expr: bare("total"),
+                    direction: None,
+                    nulls: None,
+                }],
+                ..ViewQueryModel::default()
+            }),
+        )),
+    ));
+
+    // The `GROUP BY` sibling of the case above: a column-listed view whose `GROUP BY` names a computed
+    // projection's inner alias (`total`), renamed to the output column `bucket`. A second, un-aliased
+    // aggregate projection (`cnt`) shares the suppressing column list. `GROUP BY total` must re-resolve.
+    cases.push((
+        "view/single-select-group-alias",
+        schema_with_view(view_of(
+            "v_alias_group",
+            vec![("bucket", SqlType::I64), ("cnt", SqlType::I64)],
+            sel(ViewQueryModel {
+                projection: vec![
+                    proj_aliased(
+                        "bucket",
+                        "total",
+                        ExprNode::Binary {
+                            op: ArithmeticOp::Multiply,
+                            left: b(col("amount")),
+                            right: b(lit("2")),
+                        },
+                    ),
+                    proj(
+                        "cnt",
+                        ExprNode::Aggregate {
+                            func: AggregateFunc::Count,
+                            distinct: false,
+                            operand: b(col("id")),
+                            result: None,
+                        },
+                    ),
+                ],
+                from: Some(events_source()),
+                group_by: vec![bare("total")],
+                ..ViewQueryModel::default()
+            }),
+        )),
+    ));
+
+    // The same suppressed-alias shape inside a **CTE** body (`ViewBody::With` re-threads the column-list
+    // suppression to the CTE's own `SELECT`): the CTE `scaled (n)` renames its computed `total` projection,
+    // and its own `ORDER BY total` must re-resolve. The outer body selects the renamed column back out.
+    cases.push((
+        "view/cte-alias-clause",
+        schema_with_view(view_of(
+            "v_cte_alias",
+            vec![("n", SqlType::I64)],
+            ViewBody::With {
+                recursive: false,
+                ctes: vec![CteModel {
+                    name: "scaled".to_owned(),
+                    columns: vec!["n".to_owned()],
+                    body: sel(ViewQueryModel {
+                        projection: vec![proj_aliased(
+                            "n",
+                            "total",
+                            ExprNode::Binary {
+                                op: ArithmeticOp::Multiply,
+                                left: b(col("amount")),
+                                right: b(lit("2")),
+                            },
+                        )],
+                        from: Some(events_source()),
+                        order_by: vec![OrderItem {
+                            expr: bare("total"),
+                            direction: None,
+                            nulls: None,
+                        }],
+                        ..ViewQueryModel::default()
+                    }),
+                }],
+                body: Box::new(sel(ViewQueryModel {
+                    projection: vec![proj(
+                        "n",
+                        ExprNode::Column {
+                            alias: "q1_0".to_owned(),
+                            column: "n".to_owned(),
+                        },
+                    )],
+                    from: Some(SourceItem::Named(SourceRef {
+                        schema: None,
+                        name: "scaled".to_owned(),
+                        alias: "q1_0".to_owned(),
+                    })),
+                    ..ViewQueryModel::default()
+                })),
             },
         )),
     ));
@@ -1416,8 +1545,8 @@ fn view_bodies_round_trip_through_each_dialect() {
         failures.len(),
         failures.join("\n\n")
     );
-    // Every view case × every backend was exercised (12 views × 3 backends).
-    assert_eq!(checked, 12 * dialects.len(), "view coverage drifted");
+    // Every view case × every backend was exercised (15 views × 3 backends).
+    assert_eq!(checked, 15 * dialects.len(), "view coverage drifted");
 }
 
 /// A plain, tail-less recursive-CTE arm renders BARE. An arm carrying its own `ORDER BY`/`LIMIT`/`OFFSET`

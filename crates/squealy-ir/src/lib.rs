@@ -1353,6 +1353,16 @@ pub struct ViewQueryModel {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectionItem {
     pub output_name: String,
+    /// The projection's own explicit `AS <alias>` — the name the body's own `ORDER BY`/`GROUP BY`/`HAVING`
+    /// reference — kept when a `CREATE VIEW (<cols>)` list renames its output to a *different* name
+    /// ([`output_name`](Self::output_name)) and so suppresses the `AS`. `None` in the common case (the alias
+    /// coincides with `output_name`, the projection self-names as a bare/qualified column, or there is no
+    /// column list). When `Some`, the renderer re-emits `AS <internal_alias>` even under a column list so the
+    /// body-local clause reference still resolves — without it the reference dangles (invalid SQL). Only an
+    /// *explicit* alias is kept (a bare column's own name is not a suppressible `AS`), so re-rendering a
+    /// column-listed body is byte-identical to its source. The typed view builder never produces this (its
+    /// clauses reference only source columns); it arises from external/hand-authored SQL and KDL packages.
+    pub internal_alias: Option<String>,
     pub expr: ExprNode,
 }
 
@@ -2121,6 +2131,7 @@ mod tests {
         ViewQueryModel {
             projection: vec![ProjectionItem {
                 output_name: name.to_owned(),
+                internal_alias: None,
                 expr,
             }],
             ..Default::default()
@@ -2540,6 +2551,7 @@ mod tests {
             ViewBody::Select(Box::new(ViewQueryModel {
                 projection: vec![ProjectionItem {
                     output_name: "id".to_owned(),
+                    internal_alias: None,
                     expr: ExprNode::Column {
                         alias: "q".to_owned(),
                         column: "id".to_owned(),
