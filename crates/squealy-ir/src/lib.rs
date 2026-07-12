@@ -875,48 +875,61 @@ impl ViewBody {
 }
 
 /// Inlines one `SELECT` scope's clause alias references and clears its inner aliases (see
-/// [`ViewBody::inline_clause_aliases`]). Recurses first into derived-table sources, each its own scope.
+/// [`ViewBody::inline_clause_aliases`]).
 fn inline_query_clause_aliases(query: &mut ViewQueryModel) {
-    if let Some(SourceItem::Derived { query: sub, .. }) = &mut query.from {
-        sub.inline_clause_aliases();
+    // Recurse into every nested query scope first — derived-table sources and any scalar/`IN`/`EXISTS`
+    // subquery in an expression — each canonicalized against its own aliases.
+    if let Some(source) = &mut query.from {
+        inline_source_subqueries(source);
     }
     for join in &mut query.joins {
-        if let SourceItem::Derived { query: sub, .. } = &mut join.source {
-            sub.inline_clause_aliases();
+        inline_source_subqueries(&mut join.source);
+        if let Some(on) = &mut join.on {
+            inline_expr_subqueries(on);
         }
     }
+    for item in &mut query.projection {
+        inline_expr_subqueries(&mut item.expr);
+    }
+    if let Some(filter) = &mut query.filter {
+        inline_expr_subqueries(filter);
+    }
+    for expr in &mut query.group_by {
+        inline_expr_subqueries(expr);
+    }
+    if let Some(having) = &mut query.having {
+        inline_expr_subqueries(having);
+    }
+    for order in &mut query.order_by {
+        inline_expr_subqueries(&mut order.expr);
+    }
 
-    // The expression a clause reaches this scope's computed projection by: its kept inner alias, else its
-    // output name. A plain column projection is skipped — its clause references resolve to a source column,
-    // not an alias, and are already qualified.
-    let aliases: std::collections::HashMap<&str, &ExprNode> = query
+    // The expression a clause reaches a projection by: only its kept [`ProjectionItem::internal_alias`] (an
+    // *explicit* `AS` a column list suppressed). This is unambiguous — a source column of the same name is
+    // already an `ExprNode::Column`, and a bare `output_name` is NOT in scope (a bare clause term matching
+    // it is a *source* column, which some dialects even prefer over an output alias). So only an inner alias
+    // is inlined; an output-name reference is left alone.
+    let aliases: std::collections::HashMap<String, ExprNode> = query
         .projection
         .iter()
-        .filter(|item| {
-            !matches!(
-                item.expr,
-                ExprNode::Column { .. } | ExprNode::BareColumn { .. }
-            )
-        })
-        .map(|item| {
-            let name = item.internal_alias.as_deref().unwrap_or(&item.output_name);
-            (name, &item.expr)
+        .filter_map(|item| {
+            item.internal_alias
+                .as_ref()
+                .map(|alias| (alias.clone(), item.expr.clone()))
         })
         .collect();
 
     if !aliases.is_empty() {
-        // Clone the referenced expressions out first: the closure below needs `&aliases` while it mutates
-        // the clause `ExprNode`s, and both borrow `query`.
-        let aliases: std::collections::HashMap<String, ExprNode> = aliases
-            .into_iter()
-            .map(|(name, expr)| (name.to_owned(), expr.clone()))
-            .collect();
         let mut inline = |expr: &mut ExprNode| {
             if let ExprNode::BareColumn { column } = expr
                 && let Some(replacement) = aliases.get(column)
             {
                 *expr = replacement.clone();
+                // The replacement is a projection expression (possibly referencing a source column of the
+                // same name); do NOT descend into it, or an inner match would substitute forever.
+                return true;
             }
+            false
         };
         for expr in &mut query.group_by {
             visit_scope_exprs_mut(expr, &mut inline);
@@ -932,6 +945,33 @@ fn inline_query_clause_aliases(query: &mut ViewQueryModel) {
     for item in &mut query.projection {
         item.internal_alias = None;
     }
+}
+
+/// Recurses [`inline_clause_aliases`] into a derived table's own body (a named source binds no scope).
+fn inline_source_subqueries(source: &mut SourceItem) {
+    if let SourceItem::Derived { query, .. } = source {
+        query.inline_clause_aliases();
+    }
+}
+
+/// Recurses [`inline_clause_aliases`] into every scalar/`IN`/`EXISTS` subquery reachable in `expr`'s own
+/// scope (each subquery is its own scope, canonicalized against its own aliases).
+fn inline_expr_subqueries(expr: &mut ExprNode) {
+    visit_scope_exprs_mut(expr, &mut |node| match node {
+        ExprNode::ScalarSubquery(query)
+        | ExprNode::Exists {
+            subquery: query, ..
+        } => {
+            inline_query_clause_aliases(query);
+            true
+        }
+        ExprNode::InSubquery { subquery, .. } => {
+            inline_query_clause_aliases(subquery);
+            // The `operand` is same-scope; let the walk descend to reach any subquery inside it.
+            false
+        }
+        _ => false,
+    });
 }
 
 /// Applies `f` to every [`ExprNode`] reachable from a single `SELECT` body (see [`ViewBody::map_exprs`]).
@@ -1176,10 +1216,14 @@ pub fn visit_scope_exprs(expr: &ExprNode, f: &mut impl FnMut(&ExprNode)) {
 }
 
 /// The mutable twin of [`visit_scope_exprs`]: applies `f` to `expr` and every nested [`ExprNode`] in the
-/// **same scope**, stopping at a nested subquery (its own scope). `f` may replace a node in place; the walk
-/// then descends into the replacement. Exhaustive over [`ExprNode`] so a new node is a compile error here.
-pub fn visit_scope_exprs_mut(expr: &mut ExprNode, f: &mut impl FnMut(&mut ExprNode)) {
-    f(expr);
+/// **same scope**, stopping at a nested subquery (its own scope). `f` returns `true` to signal it handled
+/// the node — the walk then does **not** descend into it (so a node `f` replaced in place is not revisited,
+/// avoiding re-substituting into the replacement); `false` descends as usual. Exhaustive over [`ExprNode`]
+/// so a new node is a compile error here.
+pub fn visit_scope_exprs_mut(expr: &mut ExprNode, f: &mut impl FnMut(&mut ExprNode) -> bool) {
+    if f(expr) {
+        return;
+    }
     match expr {
         ExprNode::Column { .. }
         | ExprNode::BareColumn { .. }
@@ -2423,6 +2467,71 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    fn add(left: ExprNode, right: ExprNode) -> ExprNode {
+        ExprNode::Binary {
+            op: ArithmeticOp::Add,
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
+    fn order(expr: ExprNode) -> OrderItem {
+        OrderItem {
+            expr,
+            direction: None,
+            nulls: None,
+        }
+    }
+
+    #[test]
+    fn inline_clause_aliases_terminates_when_alias_shadows_its_own_source() {
+        // The projection expression references a bare column of the *same* name as its inner alias
+        // (`x + 1 AS x`): inlining `ORDER BY x` must replace the term once and NOT descend into the
+        // replacement (which contains `x`), or it substitutes forever (git-bug e1d0724, review).
+        let mut body = ViewBody::Select(Box::new(ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "n".to_owned(),
+                internal_alias: Some("x".to_owned()),
+                expr: add(bare("x"), lit("1")),
+            }],
+            order_by: vec![order(bare("x"))],
+            ..Default::default()
+        }));
+        body.inline_clause_aliases();
+        let ViewBody::Select(query) = &body else {
+            panic!("expected a Select body")
+        };
+        assert_eq!(query.order_by[0].expr, add(bare("x"), lit("1")));
+        assert_eq!(query.projection[0].internal_alias, None);
+    }
+
+    #[test]
+    fn inline_clause_aliases_leaves_output_name_clause_references_alone() {
+        // A bare clause term matching a projection's `output_name` (no suppressed inner alias) may be a
+        // *source* column — some dialects even prefer it over an output alias for `GROUP BY`. Only a kept
+        // `internal_alias` is inlined, so this reference is left untouched (git-bug e1d0724, review).
+        let mut body = ViewBody::Select(Box::new(ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "y".to_owned(),
+                internal_alias: None,
+                expr: add(
+                    ExprNode::Column {
+                        alias: "q".to_owned(),
+                        column: "x".to_owned(),
+                    },
+                    lit("1"),
+                ),
+            }],
+            group_by: vec![bare("y")],
+            ..Default::default()
+        }));
+        body.inline_clause_aliases();
+        let ViewBody::Select(query) = &body else {
+            panic!("expected a Select body")
+        };
+        assert_eq!(query.group_by, vec![bare("y")]);
     }
 
     #[test]
