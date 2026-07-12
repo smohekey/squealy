@@ -2194,20 +2194,14 @@ fn lower_select(
     for (index, item) in select.projection.iter().enumerate() {
         // The projected expression, the name it would carry from its own `AS` alias or bare column, and
         // its *explicit* `AS` alias (only an explicit alias is a suppressible inner name; a bare column's
-        // own name is not). An `AS` that merely re-states a plain column's own name (`q.id AS id`) is
-        // redundant, not a rename — the projection self-names, and a clause reference is a source column —
-        // so it is not treated as a suppressible inner alias (else it would churn against a deparse that
-        // drops it).
+        // own name is not). Whether an `AS` that re-states a plain column's own name (`q.id AS id`) is a
+        // suppressible alias or redundant depends on the scope (redundant when single-source, needed to
+        // disambiguate a joined column when multi-source) — [`resolve_query_columns`] decides.
         let (expr, self_name, explicit_alias) = match item {
             SelectItem::UnnamedExpr(expr) => (expr, bare_column_name(expr), None),
             SelectItem::ExprWithAlias { expr, alias } => {
                 let alias = fold_ident(alias);
-                let explicit_alias = if bare_column_name(expr).as_deref() == Some(alias.as_str()) {
-                    None
-                } else {
-                    Some(alias.clone())
-                };
-                (expr, Some(alias), explicit_alias)
+                (expr, Some(alias.clone()), Some(alias))
             }
             SelectItem::Wildcard(_)
             | SelectItem::QualifiedWildcard(..)
@@ -2401,8 +2395,19 @@ fn resolve_query_columns(
         .projection
         .iter()
         .filter_map(|item| {
-            if let Some(alias) = &item.internal_alias {
-                Some(alias.as_str())
+            if let Some(inner) = &item.internal_alias {
+                // A suppressed inner alias is a clause-referenceable name — except a same-name alias on a
+                // plain column in a *single-source* scope (`q.id AS id`), which is redundant: the clause
+                // reference is that source column, so leave it unprotected (and pruning then drops the inner
+                // alias). In a *multi-source* scope the same alias disambiguates an otherwise-ambiguous
+                // joined column, so it is kept and protected.
+                let redundant = alias.is_some()
+                    && matches!(
+                        &item.expr,
+                        ExprNode::Column { column, .. } | ExprNode::BareColumn { column }
+                            if column == inner
+                    );
+                (!redundant).then_some(inner.as_str())
             } else if outputs_column_listed {
                 None
             } else {
@@ -4417,6 +4422,24 @@ mod tests {
         .unwrap();
         assert_eq!(query.projection[0].output_name, "renamed");
         assert_eq!(query.group_by, vec![bare("renamed")]);
+    }
+
+    #[test]
+    fn a_same_name_alias_disambiguating_a_joined_column_is_kept() {
+        // In a *multi-source* scope both sources can expose `id`, so `a.id AS id` is not redundant — the
+        // explicit alias is what makes `ORDER BY id` unambiguous. It must be kept as `internal_alias` and
+        // the clause left bare, else a re-render under the column list drops the `AS` and `ORDER BY id`
+        // becomes an ambiguous-column error (git-bug e1d0724, review). Contrast the single-source case.
+        let query = low_query(
+            "CREATE VIEW \"v\" (\"n\") AS SELECT \"q0_0\".\"id\" AS \"id\" \
+             FROM \"a\" AS \"q0_0\" INNER JOIN \"b\" AS \"q0_1\" ON \"q0_0\".\"x\" = \"q0_1\".\"x\" \
+             ORDER BY \"id\"",
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        assert_eq!(query.projection[0].output_name, "n");
+        assert_eq!(query.projection[0].internal_alias.as_deref(), Some("id"));
+        assert_eq!(query.order_by[0].expr, bare("id"));
     }
 
     #[test]
