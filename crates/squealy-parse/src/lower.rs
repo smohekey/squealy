@@ -85,7 +85,9 @@ pub fn lower_expr(expr: &Expr, dialect: SqlDialect) -> Result<ExprNode, ReadErro
 /// `LIMIT`/`OFFSET` — return [`ReadError::NotYetLowered`] (they land in later phases).
 pub fn lower_query(query: &Query, dialect: SqlDialect) -> Result<ViewBody, ReadError> {
     let mut body = lower_body(query, None, false, dialect)?;
-    resolve_single_source_columns(&mut body);
+    // A bare `Query` (a view-body deparse or subquery) carries no `CREATE VIEW` column list, so its outputs
+    // are named by the projections themselves.
+    resolve_single_source_columns(&mut body, false);
     Ok(body)
 }
 
@@ -118,7 +120,9 @@ pub fn lower_create_view(
         Some(names.as_slice())
     };
     let mut body = lower_body(&create_view.query, names, false, dialect)?;
-    resolve_single_source_columns(&mut body);
+    // A declared column list renames the outputs and suppresses each projection's `AS`, so those names are
+    // not visible inside the `SELECT` scope — a clause reference is protected only via a kept inner alias.
+    resolve_single_source_columns(&mut body, names.is_some());
     Ok(body)
 }
 
@@ -2292,26 +2296,32 @@ fn lower_select(
 /// to its own scope's single source; a multi-source (join) scope keeps its columns as-is (already qualified,
 /// and an unqualified one has no unique alias to bind to). Idempotent: a column already in
 /// [`ExprNode::Column`] form is left untouched.
-fn resolve_single_source_columns(body: &mut ViewBody) {
+fn resolve_single_source_columns(body: &mut ViewBody, outputs_column_listed: bool) {
     match body {
-        ViewBody::Select(query) => resolve_query_columns(query),
+        ViewBody::Select(query) => resolve_query_columns(query, outputs_column_listed),
         ViewBody::Set { left, right, .. } => {
-            resolve_single_source_columns(left);
-            resolve_single_source_columns(right);
+            // Each set arm names its own outputs by its projection aliases (a column list is only a
+            // *fallback* for an otherwise-unnamed arm projection), so an arm's `output_name` is scope-visible.
+            resolve_single_source_columns(left, false);
+            resolve_single_source_columns(right, false);
             // A set's own `ORDER BY` references the compound output columns by name (no source scope), so it
             // is left as the deparser emits it — matching how the renderer emits a set-level `ORDER BY`.
         }
         ViewBody::With { ctes, body, .. } => {
+            // A CTE's outputs are column-listed exactly when it declares `WITH cte (cols)`; the main body
+            // inherits the enclosing view's column-list status (passed in).
             for cte in ctes {
-                resolve_single_source_columns(&mut cte.body);
+                resolve_single_source_columns(&mut cte.body, !cte.columns.is_empty());
             }
-            resolve_single_source_columns(body);
+            resolve_single_source_columns(body, outputs_column_listed);
         }
     }
 }
 
-/// Resolves one `SELECT` scope (see [`resolve_single_source_columns`]).
-fn resolve_query_columns(query: &mut ViewQueryModel) {
+/// Resolves one `SELECT` scope (see [`resolve_single_source_columns`]). `outputs_column_listed` is `true`
+/// when a declared column list renames this scope's outputs — then a projection's `output_name` is *not*
+/// visible inside the `SELECT`, so only a kept [`ProjectionItem::internal_alias`] can be a clause reference.
+fn resolve_query_columns(query: &mut ViewQueryModel, outputs_column_listed: bool) {
     // This scope's sole source alias, when it is single-source (one `FROM`, no joins).
     let alias = match (&query.from, query.joins.is_empty()) {
         (Some(from), true) => Some(from.alias().to_owned()),
@@ -2359,7 +2369,14 @@ fn resolve_query_columns(query: &mut ViewQueryModel) {
                 ExprNode::Column { .. } | ExprNode::BareColumn { .. }
             )
         })
-        .map(|item| item.internal_alias.as_deref().unwrap_or(&item.output_name))
+        // The scope-visible name is the kept inner alias, or — only when no column list suppressed it — the
+        // `output_name`. A column-list name with no explicit `AS` is not in scope, so a clause bare term
+        // matching it is a *source* column (e.g. `(total) AS …` absent, `ORDER BY total` names `events.total`).
+        .filter_map(|item| {
+            item.internal_alias
+                .as_deref()
+                .or_else(|| (!outputs_column_listed).then_some(item.output_name.as_str()))
+        })
         .collect();
     for expr in &mut query.group_by {
         resolve_clause_expr_columns(expr, alias, &computed_aliases);
@@ -2387,7 +2404,8 @@ fn resolve_clause_expr_columns(
 fn resolve_source_columns(source: &mut SourceItem) {
     match source {
         SourceItem::Named(_) => {}
-        SourceItem::Derived { query, .. } => resolve_single_source_columns(query),
+        // A derived table names its outputs by its own projection aliases (no external column list).
+        SourceItem::Derived { query, .. } => resolve_single_source_columns(query, false),
     }
 }
 
@@ -2415,14 +2433,15 @@ fn resolve_expr_columns_protected(expr: &mut ExprNode, alias: Option<&str>, prot
                 };
             }
         }
-        // Nested query scopes resolve against their own sources and their own protected aliases.
-        ExprNode::ScalarSubquery(query) => resolve_query_columns(query),
-        ExprNode::Exists { subquery, .. } => resolve_query_columns(subquery),
+        // Nested query scopes resolve against their own sources and their own protected aliases; a subquery
+        // names its outputs by its own projection aliases (no external column list).
+        ExprNode::ScalarSubquery(query) => resolve_query_columns(query, false),
+        ExprNode::Exists { subquery, .. } => resolve_query_columns(subquery, false),
         ExprNode::InSubquery {
             operand, subquery, ..
         } => {
             resolve_expr_columns_protected(operand, alias, protected);
-            resolve_query_columns(subquery);
+            resolve_query_columns(subquery, false);
         }
         // Child expressions in the same scope.
         ExprNode::Binary { left, right, .. }
@@ -4149,6 +4168,33 @@ mod tests {
                 direction: None,
                 nulls: None,
             }],
+        );
+    }
+
+    #[test]
+    fn column_list_name_without_an_explicit_alias_is_a_source_column() {
+        // A column list supplies `output_name` (`total`) without an explicit projection `AS`, so that name
+        // is NOT in the `SELECT` scope. A clause bare term `total` is therefore a *source* column and must be
+        // bound to the scope alias, not protected as a projection-alias reference (git-bug e1d0724, review).
+        let query = low_query(
+            "CREATE VIEW \"v\" (\"total\") AS SELECT (\"q0_0\".\"amount\" * 2) \
+             FROM \"events\" AS \"q0_0\" ORDER BY (\"total\" + 1)",
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        assert_eq!(query.projection[0].output_name, "total");
+        assert_eq!(query.projection[0].internal_alias, None);
+        // The nested `total` binds to the sole source, not left bare.
+        assert_eq!(
+            query.order_by[0].expr,
+            ExprNode::Binary {
+                op: ArithmeticOp::Add,
+                left: b(ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "total".to_owned(),
+                }),
+                right: b(lit("1")),
+            },
         );
     }
 
