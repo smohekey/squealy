@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use mysql_async::{params, prelude::Queryable};
 use squealy::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ForeignKeyAction,
+    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ExprNode, ForeignKeyAction,
     ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
     IdentityModel, IndexDirection, IndexMethod, IndexModel, SchemaModel, SourceRef, SqlType,
     TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
@@ -109,25 +109,55 @@ async fn view(conn: &mut mysql_async::Conn, view_ref: &TableRef) -> Result<ViewM
 /// apply), so stamp them onto the reconstructed body's top-level projection positionally — recovering
 /// exactly what the column list names, and matching the desired model's body.
 fn apply_view_column_names(body: &mut ViewBody, columns: &[ViewColumnModel]) {
-    let Some(projection) = top_level_projection(body) else {
+    let Some(query) = top_level_query(body) else {
         return;
     };
     // The column list and the projection are always the same arity for a live view; if they somehow are
     // not, leave the reconstructed names untouched rather than mis-pairing them.
-    if projection.len() == columns.len() {
-        for (item, column) in projection.iter_mut().zip(columns) {
-            item.output_name = column.name.clone();
+    if query.projection.len() != columns.len() {
+        return;
+    }
+    // Names the body's own top-level clauses reference by a bare term (a `GROUP BY x`/`HAVING x`/`ORDER BY
+    // x` that names a projection *output* alias, not a source column). MySQL keeps such a reference bare
+    // (e.g. `select 1 AS \`total\` order by \`total\``) while dropping the `CREATE VIEW (<cols>)` renaming,
+    // so stamping the declared name over `output_name` below would orphan the clause reference. Collected
+    // before the stamp; owned so it does not borrow `query` across the mutation.
+    let referenced: std::collections::HashSet<String> = query
+        .group_by
+        .iter()
+        .chain(query.having.iter())
+        .chain(query.order_by.iter().map(|order| &order.expr))
+        .filter_map(|expr| match expr {
+            ExprNode::BareColumn { column } => Some(column.clone()),
+            _ => None,
+        })
+        .collect();
+    for (item, column) in query.projection.iter_mut().zip(columns) {
+        // MySQL preserves each projection's own `AS`, so `output_name` currently holds that alias. The
+        // declared column list renames the output; when that alias belongs to a *computed* projection a
+        // body clause references, keep it as `internal_alias` so the renderer re-emits `AS <alias>` under
+        // the column list and the clause still resolves (git-bug e1d0724). A plain column's derived alias,
+        // or an unreferenced auto-derived one, is discarded as before (no clause needs it).
+        if item.output_name != column.name
+            && referenced.contains(&item.output_name)
+            && !matches!(
+                item.expr,
+                ExprNode::Column { .. } | ExprNode::BareColumn { .. }
+            )
+        {
+            item.internal_alias = Some(item.output_name.clone());
         }
+        item.output_name = column.name.clone();
     }
 }
 
-/// The top-level output projection of a reconstructed body: the `SELECT`'s projection, the leftmost arm of
-/// a set operation (whose aliases name the compound's outputs), or the inner body of a `WITH`.
-fn top_level_projection(body: &mut ViewBody) -> Option<&mut Vec<squealy::ProjectionItem>> {
+/// The top-level output query of a reconstructed body: the `SELECT` itself, the leftmost arm of a set
+/// operation (whose aliases name the compound's outputs), or the inner body of a `WITH`.
+fn top_level_query(body: &mut ViewBody) -> Option<&mut ViewQueryModel> {
     match body {
-        ViewBody::Select(query) => Some(&mut query.projection),
-        ViewBody::Set { left, .. } => top_level_projection(left),
-        ViewBody::With { body, .. } => top_level_projection(body),
+        ViewBody::Select(query) => Some(query),
+        ViewBody::Set { left, .. } => top_level_query(left),
+        ViewBody::With { body, .. } => top_level_query(body),
     }
 }
 
@@ -928,6 +958,73 @@ mod tests {
             sql_type("enum", "enum('O''Brien')"),
             SqlType::Raw("ENUM('O''Brien')".to_owned())
         );
+    }
+
+    #[test]
+    fn view_column_names_preserve_a_clause_referenced_projection_alias() {
+        // Simulates MySQL's deparse of `CREATE VIEW v (n) AS SELECT 1 AS total ORDER BY total`: the
+        // `VIEW_DEFINITION` keeps the inner `AS total` and the bare `ORDER BY total`, but drops the `(n)`
+        // column list. Stamping the declared `n` over `total` must move `total` into `internal_alias` so the
+        // renderer re-emits `AS total` and the `ORDER BY` still resolves (git-bug e1d0724).
+        let mut body = ViewBody::Select(Box::new(ViewQueryModel {
+            projection: vec![squealy::ProjectionItem {
+                output_name: "total".to_owned(),
+                internal_alias: None,
+                expr: ExprNode::Literal("1".to_owned()),
+            }],
+            order_by: vec![squealy::OrderItem {
+                expr: ExprNode::BareColumn {
+                    column: "total".to_owned(),
+                },
+                direction: None,
+                nulls: None,
+            }],
+            ..ViewQueryModel::default()
+        }));
+        apply_view_column_names(
+            &mut body,
+            &[ViewColumnModel {
+                name: "n".to_owned(),
+                ty: SqlType::I64,
+                nullable: true,
+            }],
+        );
+        let ViewBody::Select(query) = &body else {
+            panic!("expected a Select body");
+        };
+        assert_eq!(query.projection[0].output_name, "n");
+        assert_eq!(
+            query.projection[0].internal_alias.as_deref(),
+            Some("total"),
+            "the clause-referenced inner alias must be preserved"
+        );
+
+        // A plain column whose derived alias is *not* referenced by any clause keeps `internal_alias = None`
+        // (its declared name simply replaces the derived one, as before).
+        let mut plain = ViewBody::Select(Box::new(ViewQueryModel {
+            projection: vec![squealy::ProjectionItem {
+                output_name: "amount".to_owned(),
+                internal_alias: None,
+                expr: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "amount".to_owned(),
+                },
+            }],
+            ..ViewQueryModel::default()
+        }));
+        apply_view_column_names(
+            &mut plain,
+            &[ViewColumnModel {
+                name: "n".to_owned(),
+                ty: SqlType::I64,
+                nullable: true,
+            }],
+        );
+        let ViewBody::Select(query) = &plain else {
+            panic!("expected a Select body");
+        };
+        assert_eq!(query.projection[0].output_name, "n");
+        assert_eq!(query.projection[0].internal_alias, None);
     }
 
     #[test]
