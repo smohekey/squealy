@@ -1267,6 +1267,7 @@ fn mysql_renders_view_after_tables() {
                     distinct: false,
                     projection: vec![ProjectionItem {
                         output_name: "id".to_owned(),
+                        internal_alias: None,
                         expr: ExprNode::Column {
                             alias: "q0_0".to_owned(),
                             column: "id".to_owned(),
@@ -1334,6 +1335,7 @@ fn mysql_view_fragment_requoting_preserves_string_literals() {
                     distinct: false,
                     projection: vec![ProjectionItem {
                         output_name: "name".to_owned(),
+                        internal_alias: None,
                         expr: ExprNode::Column {
                             alias: "q0_0".to_owned(),
                             column: "name".to_owned(),
@@ -1391,6 +1393,7 @@ fn mysql_renders_view_plan_steps() {
             distinct: false,
             projection: vec![ProjectionItem {
                 output_name: "id".to_owned(),
+                internal_alias: None,
                 expr: ExprNode::Column {
                     alias: "q0_0".to_owned(),
                     column: "id".to_owned(),
@@ -1558,6 +1561,7 @@ fn mysql_renders_view_expression_ir_in_its_dialect() {
                     projection: vec![
                         ProjectionItem {
                             output_name: "ratio".to_owned(),
+                            internal_alias: None,
                             expr: ExprNode::Binary {
                                 op: ArithmeticOp::Divide,
                                 left: Box::new(col("count")),
@@ -1566,6 +1570,7 @@ fn mysql_renders_view_expression_ir_in_its_dialect() {
                         },
                         ProjectionItem {
                             output_name: "total".to_owned(),
+                            internal_alias: None,
                             expr: ExprNode::Aggregate {
                                 func: AggregateFunc::Sum,
                                 distinct: false,
@@ -1635,6 +1640,7 @@ fn mysql_view_now_renders_with_microsecond_precision() {
                     distinct: false,
                     projection: vec![ProjectionItem {
                         output_name: "at".to_owned(),
+                        internal_alias: None,
                         expr: ExprNode::Now,
                     }],
                     from: None,
@@ -1677,6 +1683,7 @@ fn mysql_view_order_by_drops_nulls_modifier() {
                     distinct: false,
                     projection: vec![ProjectionItem {
                         output_name: "id".to_owned(),
+                        internal_alias: None,
                         expr: ExprNode::Column {
                             alias: "q0_0".to_owned(),
                             column: "id".to_owned(),

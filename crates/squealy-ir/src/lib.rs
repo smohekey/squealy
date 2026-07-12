@@ -844,7 +844,6 @@ impl ViewBody {
         }
     }
 }
-
 /// Applies `f` to every [`ExprNode`] reachable from a single `SELECT` body (see [`ViewBody::map_exprs`]).
 fn map_query_exprs(query: &mut ViewQueryModel, f: &impl Fn(&mut ExprNode)) {
     for item in &mut query.projection {
@@ -986,6 +985,105 @@ fn map_expr_nodes(expr: &mut ExprNode, f: &impl Fn(&mut ExprNode)) {
     }
 }
 
+/// Applies `f` (read-only) to `expr` and every nested [`ExprNode`] in the **same scope**, stopping at a
+/// nested subquery (a scalar/`IN`/`EXISTS` subquery is its own scope, whose columns bind to its own
+/// sources — the [`ExprNode::InSubquery`] *operand* is same-scope and is visited). Mirrors the same-scope
+/// traversal of the reverse parser's column resolver, so a caller inspecting a clause term's own-scope
+/// column references (e.g. which projection aliases a `GROUP BY`/`HAVING`/`ORDER BY` names) sees exactly
+/// those. Exhaustive over [`ExprNode`] so a new node is a compile error here rather than an unvisited one.
+pub fn visit_scope_exprs(expr: &ExprNode, f: &mut impl FnMut(&ExprNode)) {
+    f(expr);
+    match expr {
+        ExprNode::Column { .. }
+        | ExprNode::BareColumn { .. }
+        | ExprNode::Literal(_)
+        | ExprNode::Raw(_)
+        | ExprNode::Now => {}
+        // A nested subquery is its own scope; its columns are irrelevant to the enclosing scope.
+        ExprNode::ScalarSubquery(_) | ExprNode::Exists { .. } => {}
+        ExprNode::InSubquery { operand, .. } => visit_scope_exprs(operand, f),
+        ExprNode::Binary { left, right, .. }
+        | ExprNode::Compare { left, right, .. }
+        | ExprNode::Logical { left, right, .. }
+        | ExprNode::Nullif { left, right, .. } => {
+            visit_scope_exprs(left, f);
+            visit_scope_exprs(right, f);
+        }
+        ExprNode::Cast { operand, .. } | ExprNode::Aggregate { operand, .. } => {
+            visit_scope_exprs(operand, f)
+        }
+        ExprNode::Not(operand) | ExprNode::IsNull { operand, .. } => visit_scope_exprs(operand, f),
+        ExprNode::Like {
+            operand, pattern, ..
+        } => {
+            visit_scope_exprs(operand, f);
+            visit_scope_exprs(pattern, f);
+        }
+        ExprNode::In { operand, items, .. } => {
+            visit_scope_exprs(operand, f);
+            for item in items {
+                visit_scope_exprs(item, f);
+            }
+        }
+        ExprNode::Between {
+            operand, low, high, ..
+        } => {
+            visit_scope_exprs(operand, f);
+            visit_scope_exprs(low, f);
+            visit_scope_exprs(high, f);
+        }
+        ExprNode::Window {
+            args,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            for arg in args {
+                visit_scope_exprs(arg, f);
+            }
+            for partition in partition_by {
+                visit_scope_exprs(partition, f);
+            }
+            for order in order_by {
+                visit_scope_exprs(&order.expr, f);
+            }
+        }
+        ExprNode::Case { arms, else_, .. } => {
+            for arm in arms {
+                visit_scope_exprs(&arm.when, f);
+                visit_scope_exprs(&arm.then, f);
+            }
+            if let Some(else_) = else_ {
+                visit_scope_exprs(else_, f);
+            }
+        }
+        ExprNode::SimpleCase {
+            operand,
+            arms,
+            else_,
+            ..
+        } => {
+            visit_scope_exprs(operand, f);
+            for arm in arms {
+                visit_scope_exprs(&arm.when, f);
+                visit_scope_exprs(&arm.then, f);
+            }
+            if let Some(else_) = else_ {
+                visit_scope_exprs(else_, f);
+            }
+        }
+        ExprNode::Coalesce { args, .. }
+        | ExprNode::ScalarFn { args, .. }
+        | ExprNode::Function { args, .. } => {
+            for arg in args {
+                visit_scope_exprs(arg, f);
+            }
+        }
+        ExprNode::Extract { operand, .. }
+        | ExprNode::DateTrunc { operand, .. }
+        | ExprNode::ExtractSecond { operand, .. } => visit_scope_exprs(operand, f),
+    }
+}
 /// Applies `f` to every result pin reachable from a single `SELECT` body (see
 /// [`ViewBody::map_result_pins`]).
 fn map_query_result_pins(query: &mut ViewQueryModel, f: &impl Fn(&SqlType) -> SqlType) {
@@ -1353,6 +1451,32 @@ pub struct ViewQueryModel {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectionItem {
     pub output_name: String,
+    /// The projection's own explicit `AS <alias>` — the name the body's own `ORDER BY`/`GROUP BY`/`HAVING`
+    /// reference — kept when a `CREATE VIEW (<cols>)`/`WITH cte (<cols>)` list names the outputs (so it
+    /// suppresses the `AS`) **and** a body clause actually references it. `None` otherwise: no column list, a
+    /// column-listed projection with no explicit `AS` (a bare column's own name is not a suppressible `AS`),
+    /// or an alias no clause references (the reverse parser prunes it, since the renderer would emit a
+    /// needless `AS` that a backend drops on storage). Kept even when the alias *coincides* with
+    /// [`output_name`](Self::output_name) — a column list does not introduce its names into the `SELECT`
+    /// scope, so a bare clause reference still needs the explicit `AS`. When `Some`, the renderer re-emits
+    /// `AS <internal_alias>` even under a column list so the body-local clause reference resolves (without it
+    /// the reference dangles — invalid SQL). Re-rendering a column-listed body is byte-identical to its
+    /// source. The typed view builder never produces this (its clauses reference only source columns); it
+    /// arises from external/hand-authored SQL and KDL packages.
+    ///
+    /// **Residual (a harmless re-plan, never wrong SQL):** the reverse parser has no source-column catalog,
+    /// so it cannot always tell a clause's alias reference from a same-named source column, and a backend
+    /// that stores a view rewrites clause references on introspection. Two shapes therefore re-plan a
+    /// `CREATE OR REPLACE VIEW` each run — the same idempotent, non-destructive convergence gap the
+    /// body-unknown view path already accepts. First, a backend rewrites a clause's alias reference to the
+    /// underlying expression (PostgreSQL `pg_get_viewdef` deparses `… AS total … ORDER BY total` as
+    /// `… AS n … ORDER BY (<expr>)`; MySQL expands an expression-alias clause), so the introspected body no
+    /// longer carries the alias. Second, a source column whose name collides with a computed projection
+    /// alias — a bare clause reference is kept as an alias here, but a dialect resolves it to the source
+    /// column. SQLite (verbatim DDL) round-trips to empty except under such a collision. The re-render is
+    /// always valid SQL and preserves the view's meaning; only the diff sees a difference. Removing the
+    /// residual needs catalog-based name resolution (tracked separately).
+    pub internal_alias: Option<String>,
     pub expr: ExprNode,
 }
 
@@ -2121,6 +2245,7 @@ mod tests {
         ViewQueryModel {
             projection: vec![ProjectionItem {
                 output_name: name.to_owned(),
+                internal_alias: None,
                 expr,
             }],
             ..Default::default()
@@ -2540,6 +2665,7 @@ mod tests {
             ViewBody::Select(Box::new(ViewQueryModel {
                 projection: vec![ProjectionItem {
                     output_name: "id".to_owned(),
+                    internal_alias: None,
                     expr: ExprNode::Column {
                         alias: "q".to_owned(),
                         column: "id".to_owned(),

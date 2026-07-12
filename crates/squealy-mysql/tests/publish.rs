@@ -421,6 +421,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                     projection: vec![
                         ProjectionItem {
                             output_name: "id".to_owned(),
+                            internal_alias: None,
                             expr: ExprNode::Column {
                                 alias: "q0_0".to_owned(),
                                 column: "id".to_owned(),
@@ -428,6 +429,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                         },
                         ProjectionItem {
                             output_name: "name".to_owned(),
+                            internal_alias: None,
                             expr: ExprNode::Column {
                                 alias: "q0_0".to_owned(),
                                 column: "name".to_owned(),
@@ -471,6 +473,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                     projection: vec![
                         ProjectionItem {
                             output_name: "seats".to_owned(),
+                            internal_alias: None,
                             expr: ExprNode::Column {
                                 alias: "q0_0".to_owned(),
                                 column: "seats".to_owned(),
@@ -478,6 +481,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                         },
                         ProjectionItem {
                             output_name: "count".to_owned(),
+                            internal_alias: None,
                             expr: ExprNode::Aggregate {
                                 func: AggregateFunc::Count,
                                 distinct: false,

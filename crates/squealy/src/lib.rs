@@ -570,7 +570,7 @@ pub use squealy_ir::{
     JoinItem, JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem,
     ScalarFunc, SchemaModel, SourceItem, SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel,
     ViewModel, ViewQueryModel, ViewSetOp, WindowFunc, WindowOrderTerm,
-    fold_like_case_insensitivity, map_cast_types, normalize_expr,
+    fold_like_case_insensitivity, map_cast_types, normalize_expr, visit_scope_exprs,
 };
 pub use squealy_macros::{CTE, ColumnType, Database, RecursiveCTE, Schema, Table, View};
 pub use table::{

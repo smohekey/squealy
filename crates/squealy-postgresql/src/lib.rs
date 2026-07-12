@@ -1082,6 +1082,7 @@ CREATE INDEX CONCURRENTLY j ON t (d);";
             query: ViewBody::Select(Box::new(ViewQueryModel {
                 projection: vec![ProjectionItem {
                     output_name: "s".to_owned(),
+                    internal_alias: None,
                     expr: ExprNode::Aggregate {
                         func: AggregateFunc::Sum,
                         distinct: false,
@@ -1135,6 +1136,7 @@ CREATE INDEX CONCURRENTLY j ON t (d);";
             ViewBody::Select(Box::new(ViewQueryModel {
                 projection: vec![ProjectionItem {
                     output_name: "c".to_owned(),
+                    internal_alias: None,
                     expr: ExprNode::Cast {
                         operand: Box::new(ExprNode::Column {
                             alias: "q".to_owned(),

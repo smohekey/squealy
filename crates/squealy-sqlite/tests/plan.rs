@@ -108,6 +108,7 @@ fn active_widgets_view() -> ViewModel {
             distinct: false,
             projection: vec![ProjectionItem {
                 output_name: "id".to_owned(),
+                internal_alias: None,
                 expr: widget_col("id"),
             }],
             from: Some(SourceItem::Named(SourceRef {
@@ -144,6 +145,7 @@ fn active_widget_ids_view() -> ViewModel {
         query: ViewBody::Select(Box::new(ViewQueryModel {
             projection: vec![ProjectionItem {
                 output_name: "id".to_owned(),
+                internal_alias: None,
                 expr: ExprNode::Column {
                     alias: "q0_0".to_owned(),
                     column: "id".to_owned(),
@@ -1451,6 +1453,7 @@ async fn replanning_an_unchanged_view_is_not_destructive() {
             projection: vec![
                 ProjectionItem {
                     output_name: "id".to_owned(),
+                    internal_alias: None,
                     expr: ExprNode::Column {
                         alias: "q0_0".to_owned(),
                         column: "id".to_owned(),
@@ -1458,6 +1461,7 @@ async fn replanning_an_unchanged_view_is_not_destructive() {
                 },
                 ProjectionItem {
                     output_name: "name_length".to_owned(),
+                    internal_alias: None,
                     expr: ExprNode::ScalarFn {
                         func: squealy::ScalarFunc::Length,
                         args: vec![ExprNode::Column {
@@ -1991,6 +1995,7 @@ async fn a_recursive_cte_view_is_valid_sqlite() {
                     left: Box::new(ViewBody::Select(Box::new(ViewQueryModel {
                         projection: vec![ProjectionItem {
                             output_name: "n".to_owned(),
+                            internal_alias: None,
                             expr: ExprNode::Literal("1".to_owned()),
                         }],
                         ..ViewQueryModel::default()
@@ -1999,6 +2004,7 @@ async fn a_recursive_cte_view_is_valid_sqlite() {
                     right: Box::new(ViewBody::Select(Box::new(ViewQueryModel {
                         projection: vec![ProjectionItem {
                             output_name: "n".to_owned(),
+                            internal_alias: None,
                             expr: ExprNode::Binary {
                                 op: ArithmeticOp::Add,
                                 left: Box::new(counter_col("n")),
@@ -2025,6 +2031,7 @@ async fn a_recursive_cte_view_is_valid_sqlite() {
             body: Box::new(ViewBody::Select(Box::new(ViewQueryModel {
                 projection: vec![ProjectionItem {
                     output_name: "n".to_owned(),
+                    internal_alias: None,
                     expr: counter_col("n"),
                 }],
                 from: Some(SourceItem::Named(SourceRef {
@@ -2086,6 +2093,7 @@ fn a_scoped_recursive_cte_arm_is_rejected_on_sqlite() {
                     left: Box::new(ViewBody::Select(Box::new(ViewQueryModel {
                         projection: vec![ProjectionItem {
                             output_name: "n".to_owned(),
+                            internal_alias: None,
                             expr: ExprNode::Literal("1".to_owned()),
                         }],
                         limit: Some(1),
@@ -2094,6 +2102,7 @@ fn a_scoped_recursive_cte_arm_is_rejected_on_sqlite() {
                     right: Box::new(ViewBody::Select(Box::new(ViewQueryModel {
                         projection: vec![ProjectionItem {
                             output_name: "n".to_owned(),
+                            internal_alias: None,
                             expr: ExprNode::Binary {
                                 op: ArithmeticOp::Add,
                                 left: Box::new(counter_col("n")),
@@ -2115,6 +2124,7 @@ fn a_scoped_recursive_cte_arm_is_rejected_on_sqlite() {
             body: Box::new(ViewBody::Select(Box::new(ViewQueryModel {
                 projection: vec![ProjectionItem {
                     output_name: "n".to_owned(),
+                    internal_alias: None,
                     expr: counter_col("n"),
                 }],
                 from: Some(SourceItem::Named(SourceRef {
@@ -2158,6 +2168,7 @@ async fn a_recursive_cte_with_a_nested_with_prelude_is_valid_sqlite() {
     let anchor = ViewBody::Select(Box::new(ViewQueryModel {
         projection: vec![ProjectionItem {
             output_name: "n".to_owned(),
+            internal_alias: None,
             expr: ExprNode::Column {
                 alias: "q1_0".to_owned(),
                 column: "s".to_owned(),
@@ -2174,6 +2185,7 @@ async fn a_recursive_cte_with_a_nested_with_prelude_is_valid_sqlite() {
     let recursive = ViewBody::Select(Box::new(ViewQueryModel {
         projection: vec![ProjectionItem {
             output_name: "n".to_owned(),
+            internal_alias: None,
             expr: ExprNode::Binary {
                 op: ArithmeticOp::Add,
                 left: Box::new(counter_col("n")),
@@ -2214,6 +2226,7 @@ async fn a_recursive_cte_with_a_nested_with_prelude_is_valid_sqlite() {
                         body: ViewBody::Select(Box::new(ViewQueryModel {
                             projection: vec![ProjectionItem {
                                 output_name: "s".to_owned(),
+                                internal_alias: None,
                                 expr: ExprNode::Literal("1".to_owned()),
                             }],
                             ..ViewQueryModel::default()
@@ -2233,6 +2246,7 @@ async fn a_recursive_cte_with_a_nested_with_prelude_is_valid_sqlite() {
             body: Box::new(ViewBody::Select(Box::new(ViewQueryModel {
                 projection: vec![ProjectionItem {
                     output_name: "n".to_owned(),
+                    internal_alias: None,
                     expr: counter_col("n"),
                 }],
                 from: Some(SourceItem::Named(SourceRef {
@@ -2288,6 +2302,7 @@ async fn replanning_a_view_with_an_ilike_filter_is_empty() {
         query: ViewBody::Select(Box::new(ViewQueryModel {
             projection: vec![ProjectionItem {
                 output_name: "name".to_owned(),
+                internal_alias: None,
                 expr: ExprNode::Column {
                     alias: "q0_0".to_owned(),
                     column: "name".to_owned(),

@@ -2662,6 +2662,7 @@ fn postgres_renders_views_in_dependency_order() {
                     .iter()
                     .map(|(output, column)| ProjectionItem {
                         output_name: (*output).to_owned(),
+                        internal_alias: None,
                         expr: ExprNode::Column {
                             alias: "q0_0".to_owned(),
                             column: (*column).to_owned(),
@@ -2776,6 +2777,7 @@ fn postgres_renders_view_plan_steps() {
             distinct: false,
             projection: vec![ProjectionItem {
                 output_name: "id".to_owned(),
+                internal_alias: None,
                 expr: ExprNode::Column {
                     alias: "q0_0".to_owned(),
                     column: "id".to_owned(),
@@ -2850,6 +2852,7 @@ fn postgres_renders_distinct_view_body() {
             distinct: true,
             projection: vec![ProjectionItem {
                 output_name: "name".to_owned(),
+                internal_alias: None,
                 expr: ExprNode::Column {
                     alias: "q0_0".to_owned(),
                     column: "name".to_owned(),
@@ -2906,6 +2909,7 @@ fn postgres_renders_case_view_body() {
             distinct: false,
             projection: vec![ProjectionItem {
                 output_name: "label".to_owned(),
+                internal_alias: None,
                 expr: ExprNode::Case {
                     arms: vec![CaseArm {
                         when: Box::new(ExprNode::IsNull {
@@ -3084,6 +3088,7 @@ fn postgres_renders_view_expression_ir_in_its_dialect() {
                         // count / 2 — fractional division.
                         ProjectionItem {
                             output_name: "ratio".to_owned(),
+                            internal_alias: None,
                             expr: ExprNode::Binary {
                                 op: ArithmeticOp::Divide,
                                 left: Box::new(col("count")),
@@ -3093,6 +3098,7 @@ fn postgres_renders_view_expression_ir_in_its_dialect() {
                         // SUM(amount) cast to i64 so the column wire type matches.
                         ProjectionItem {
                             output_name: "total".to_owned(),
+                            internal_alias: None,
                             expr: ExprNode::Aggregate {
                                 func: AggregateFunc::Sum,
                                 distinct: false,
@@ -3248,6 +3254,7 @@ fn postgres_view_order_by_keeps_nulls_modifier() {
                     distinct: false,
                     projection: vec![ProjectionItem {
                         output_name: "id".to_owned(),
+                        internal_alias: None,
                         expr: ExprNode::Column {
                             alias: "q0_0".to_owned(),
                             column: "id".to_owned(),
