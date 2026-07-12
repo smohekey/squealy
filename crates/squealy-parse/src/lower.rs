@@ -2389,29 +2389,29 @@ fn resolve_query_columns(
     // `GROUP BY`/`HAVING`/`ORDER BY` can name a projection **output alias** instead of a source column; a
     // bare term naming one is left as-is (the renderer emits it bare — it cannot re-derive the expression),
     // possibly nested (`HAVING total > 0`, a valid SQLite view), so it is protected at any depth. The name a
-    // clause reaches an output by is:
-    //  * its kept [`ProjectionItem::internal_alias`] — an *explicit* `AS` a column list suppressed —
-    //    whatever the projection's shape (a plain-column `q.amount AS inner` counts, since the column list
-    //    renamed its output and the clause still names `inner`); or
-    //  * otherwise, a *computed* projection's own `output_name`, and only when no column list renamed it out
-    //    of the `SELECT` scope. A plain column's own name is NOT an alias (`q.id AS id` → `ORDER BY id`
-    //    names the source `q.id`), and a column-list name with no explicit `AS` is not in scope (`ORDER BY
-    //    total` on a `(total)`-listed view with no inner alias names the source `events.total`).
+    // clause reaches an output by is its kept [`ProjectionItem::internal_alias`] (an *explicit* `AS` a
+    // column list suppressed), whatever the projection's shape; or, when no column list renamed the outputs
+    // out of the `SELECT` scope, the projection's own `output_name` — for a *computed* projection always,
+    // and for a plain/qualified column only when the output *renames* it (`q.amount AS renamed`, so the
+    // clause name is the alias). A column that self-names (`q.id AS id`, or a dequalified `q.id` → `id`) is
+    // not renamed: a matching clause term is the source column, not an alias. A column-list name with no
+    // explicit `AS` is likewise not in scope (`ORDER BY total` on a `(total)`-listed view with no inner
+    // alias names the source `events.total`).
     let computed_aliases: Vec<&str> = query
         .projection
         .iter()
         .filter_map(|item| {
             if let Some(alias) = &item.internal_alias {
                 Some(alias.as_str())
-            } else if !outputs_column_listed
-                && !matches!(
-                    item.expr,
-                    ExprNode::Column { .. } | ExprNode::BareColumn { .. }
-                )
-            {
-                Some(item.output_name.as_str())
-            } else {
+            } else if outputs_column_listed {
                 None
+            } else {
+                match &item.expr {
+                    ExprNode::Column { column, .. } | ExprNode::BareColumn { column } => {
+                        (item.output_name != *column).then_some(item.output_name.as_str())
+                    }
+                    _ => Some(item.output_name.as_str()),
+                }
             }
         })
         .collect();
@@ -4401,6 +4401,22 @@ mod tests {
                 right: b(lit("1")),
             },
         );
+    }
+
+    #[test]
+    fn a_column_less_renamed_plain_column_alias_in_a_clause_stays_bare() {
+        // A column-less body (a MySQL/PostgreSQL deparse) whose plain column is *renamed* by an explicit
+        // `AS` (`q.amount AS renamed`) and whose `GROUP BY` names that alias: the clause term is the output
+        // alias, not a source column, so it must stay bare — MySQL keeps `group by renamed` on deparse, and
+        // binding it to a nonexistent source `q.renamed` would re-render invalid SQL (git-bug e1d0724,
+        // review). Contrast a self-naming `q.id AS id`, which is a source column.
+        let query = low_query(
+            "SELECT \"q0_0\".\"amount\" AS \"renamed\" FROM \"events\" AS \"q0_0\" GROUP BY \"renamed\"",
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        assert_eq!(query.projection[0].output_name, "renamed");
+        assert_eq!(query.group_by, vec![bare("renamed")]);
     }
 
     #[test]
