@@ -49,6 +49,7 @@ fn view(filter: &str, columns: &[&str]) -> ViewModel {
                 .iter()
                 .map(|name| ProjectionItem {
                     output_name: (*name).to_owned(),
+                    internal_alias: None,
                     expr: ExprNode::Column {
                         alias: "q0_0".to_owned(),
                         column: (*name).to_owned(),

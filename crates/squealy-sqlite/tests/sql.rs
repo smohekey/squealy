@@ -553,6 +553,7 @@ fn id_view(name: &str, from: &str, filter: Option<squealy::ExprNode>) -> squealy
             distinct: false,
             projection: vec![squealy::ProjectionItem {
                 output_name: "id".to_owned(),
+                internal_alias: None,
                 expr: view_col("id"),
             }],
             from: Some(squealy::SourceItem::Named(squealy::SourceRef {
@@ -684,10 +685,12 @@ fn render_create_renders_view_expression_ir_in_sqlite_dialect() {
                     projection: vec![
                         ProjectionItem {
                             output_name: "namelen".to_owned(),
+                            internal_alias: None,
                             expr: scalar(ScalarFunc::Length, vec![view_col("name")]),
                         },
                         ProjectionItem {
                             output_name: "greeting".to_owned(),
+                            internal_alias: None,
                             expr: scalar(
                                 ScalarFunc::Concat,
                                 vec![view_col("name"), ExprNode::Literal("'!'".to_owned())],
@@ -695,6 +698,7 @@ fn render_create_renders_view_expression_ir_in_sqlite_dialect() {
                         },
                         ProjectionItem {
                             output_name: "prefix".to_owned(),
+                            internal_alias: None,
                             expr: scalar(
                                 ScalarFunc::Substring,
                                 vec![
@@ -759,6 +763,7 @@ fn rejects_intersect_all_view_body_which_sqlite_cannot_run() {
         ViewBody::Select(Box::new(ViewQueryModel {
             projection: vec![ProjectionItem {
                 output_name: "id".to_owned(),
+                internal_alias: None,
                 expr: view_col("id"),
             }],
             from: Some(SourceItem::Named(SourceRef {
@@ -812,6 +817,7 @@ fn rejects_set_body_with_an_alias_qualified_order_by_term() {
         ViewBody::Select(Box::new(ViewQueryModel {
             projection: vec![ProjectionItem {
                 output_name: "id".to_owned(),
+                internal_alias: None,
                 expr: view_col("id"),
             }],
             from: Some(SourceItem::Named(SourceRef {
@@ -875,6 +881,7 @@ fn rejects_set_body_order_by_a_name_the_left_arm_does_not_emit() {
             // Projects an *expression* aliased `total` — the compound output is named `total`.
             projection: vec![ProjectionItem {
                 output_name: "total".to_owned(),
+                internal_alias: None,
                 expr: ExprNode::Binary {
                     op: ArithmeticOp::Multiply,
                     left: Box::new(view_col("amount")),

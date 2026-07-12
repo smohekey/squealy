@@ -234,10 +234,12 @@ fn expected_introspected_model() -> DatabaseModel {
                         projection: vec![
                             ProjectionItem {
                                 output_name: "id".to_owned(),
+                                internal_alias: None,
                                 expr: user_col("id"),
                             },
                             ProjectionItem {
                                 output_name: "name".to_owned(),
+                                internal_alias: None,
                                 expr: user_col("name"),
                             },
                         ],
@@ -269,10 +271,12 @@ fn expected_introspected_model() -> DatabaseModel {
                         projection: vec![
                             ProjectionItem {
                                 output_name: "active".to_owned(),
+                                internal_alias: None,
                                 expr: user_col("active"),
                             },
                             ProjectionItem {
                                 output_name: "count".to_owned(),
+                                internal_alias: None,
                                 expr: ExprNode::Aggregate {
                                     func: AggregateFunc::Count,
                                     distinct: false,

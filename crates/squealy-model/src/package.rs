@@ -497,6 +497,11 @@ fn view_query_to_node(query: &ViewQueryModel) -> KdlNode {
     for item in &query.projection {
         let mut projection = KdlNode::new("projection");
         projection.push(KdlEntry::new(item.output_name.clone()));
+        // The projection's own `AS` alias, kept only when a column list renames its output (a body clause
+        // references the inner alias, so the renderer re-emits it — see [`ProjectionItem::internal_alias`]).
+        if let Some(internal_alias) = &item.internal_alias {
+            projection.push(KdlEntry::new_prop("internal-alias", internal_alias.clone()));
+        }
         push_child(&mut projection, expr_to_node(&item.expr));
         body.nodes_mut().push(projection);
     }
@@ -1633,6 +1638,7 @@ fn view_query_from_node(node: &KdlNode) -> Result<ViewQueryModel, PackageError> 
                 output_name: first_arg(item)
                     .ok_or_else(|| malformed("`projection` is missing its output name"))?
                     .to_owned(),
+                internal_alias: prop(item, "internal-alias").map(str::to_owned),
                 expr: first_child_expr(item)?,
             })
         })
@@ -2859,11 +2865,13 @@ mod tests {
                         projection: vec![
                             ProjectionItem {
                                 output_name: "id".to_owned(),
+                                internal_alias: None,
                                 expr: col("q0_0", "id"),
                             },
                             // A `CAST` exercises the structured cast node and its SqlType round-trip.
                             ProjectionItem {
                                 output_name: "name".to_owned(),
+                                internal_alias: None,
                                 expr: ExprNode::Cast {
                                     operand: Box::new(col("q0_1", "name")),
                                     ty: SqlType::Text,
@@ -2979,6 +2987,7 @@ mod tests {
         fn proj(name: &str, expr: ExprNode) -> ProjectionItem {
             ProjectionItem {
                 output_name: name.to_owned(),
+                internal_alias: None,
                 expr,
             }
         }
@@ -3054,6 +3063,61 @@ mod tests {
     }
 
     #[test]
+    fn kdl_round_trips_projection_internal_alias() {
+        // A column-listed view whose computed projection keeps an inner `AS total` (renamed to output `n`)
+        // referenced by the body's `ORDER BY` — `internal_alias` must survive the KDL round-trip.
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: Some("public".to_owned()),
+                tables: Vec::new(),
+                views: vec![ViewModel {
+                    name: "v_alias".to_owned(),
+                    comment: None,
+                    columns: vec![ViewColumnModel {
+                        name: "n".to_owned(),
+                        ty: SqlType::I64,
+                        nullable: true,
+                    }],
+                    query: ViewBody::Select(Box::new(ViewQueryModel {
+                        projection: vec![ProjectionItem {
+                            output_name: "n".to_owned(),
+                            internal_alias: Some("total".to_owned()),
+                            expr: ExprNode::Binary {
+                                op: ArithmeticOp::Multiply,
+                                left: Box::new(ExprNode::Column {
+                                    alias: "q0_0".to_owned(),
+                                    column: "amount".to_owned(),
+                                }),
+                                right: Box::new(ExprNode::Literal("2".to_owned())),
+                            },
+                        }],
+                        from: Some(SourceItem::Named(SourceRef {
+                            schema: Some("public".to_owned()),
+                            name: "events".to_owned(),
+                            alias: "q0_0".to_owned(),
+                        })),
+                        order_by: vec![OrderItem {
+                            expr: ExprNode::BareColumn {
+                                column: "total".to_owned(),
+                            },
+                            direction: None,
+                            nulls: None,
+                        }],
+                        ..ViewQueryModel::default()
+                    })),
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("internal-alias view model.kdl should parse");
+        assert_eq!(
+            parsed, model,
+            "internal-alias view KDL round-trip diverged:\n{kdl}"
+        );
+    }
+
+    #[test]
     fn kdl_round_trips_set_op_view_bodies() {
         fn col(alias: &str, column: &str) -> ExprNode {
             ExprNode::Column {
@@ -3065,6 +3129,7 @@ mod tests {
             ViewBody::Select(Box::new(ViewQueryModel {
                 projection: vec![ProjectionItem {
                     output_name: "id".to_owned(),
+                    internal_alias: None,
                     expr: col(alias, "id"),
                 }],
                 from: Some(SourceItem::Named(SourceRef {
@@ -3135,6 +3200,7 @@ mod tests {
         fn proj(name: &str, expr: ExprNode) -> ProjectionItem {
             ProjectionItem {
                 output_name: name.to_owned(),
+                internal_alias: None,
                 expr,
             }
         }

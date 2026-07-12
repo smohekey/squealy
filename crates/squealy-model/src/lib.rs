@@ -963,6 +963,7 @@ mod tests {
             query: ViewBody::Select(Box::new(ViewQueryModel {
                 projection: vec![ProjectionItem {
                     output_name: "s".to_owned(),
+                    internal_alias: None,
                     expr: ExprNode::Aggregate {
                         func: squealy::AggregateFunc::Sum,
                         distinct: false,
@@ -993,7 +994,6 @@ mod tests {
         };
         assert_eq!(*result, Some(SqlType::I16));
     }
-
     /// A backend whose introspection canonical form mirrors MySQL: bare `String` reads back as
     /// `Varchar(255)`, any identity is `AUTO_INCREMENT`, and a plain index has an explicit `BTREE`
     /// method with ASC directions.

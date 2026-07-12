@@ -433,6 +433,7 @@ fn dep_view(name: &str, from: &str) -> ViewModel {
             distinct: false,
             projection: vec![ProjectionItem {
                 output_name: "id".to_owned(),
+                internal_alias: None,
                 expr: ExprNode::Column {
                     alias: "q0_0".to_owned(),
                     column: "id".to_owned(),
