@@ -643,6 +643,36 @@ fn corpus() -> Vec<(&'static str, DatabaseModel)> {
         )),
     ));
 
+    // The inner alias may *coincide* with the declared output column (`total` == `total`) and still be
+    // required: a column list does not introduce its names into the `SELECT` scope, so `SELECT 1 (total)
+    // ORDER BY total` would dangle without the explicit `AS total`. The renderer re-emits it; PostgreSQL and
+    // MySQL reject the bare form, so this must round-trip with the alias present (git-bug e1d0724).
+    cases.push((
+        "view/single-select-alias-coincides-output",
+        schema_with_view(view_of(
+            "v_alias_coincide",
+            vec![("total", SqlType::I64)],
+            sel(ViewQueryModel {
+                projection: vec![proj_aliased(
+                    "total",
+                    "total",
+                    ExprNode::Binary {
+                        op: ArithmeticOp::Multiply,
+                        left: b(col("amount")),
+                        right: b(lit("2")),
+                    },
+                )],
+                from: Some(events_source()),
+                order_by: vec![OrderItem {
+                    expr: bare("total"),
+                    direction: None,
+                    nulls: None,
+                }],
+                ..ViewQueryModel::default()
+            }),
+        )),
+    ));
+
     // The `GROUP BY` sibling of the case above: a column-listed view whose `GROUP BY` names a computed
     // projection's inner alias (`total`), renamed to the output column `bucket`. A second, un-aliased
     // aggregate projection (`cnt`) shares the suppressing column list. `GROUP BY total` must re-resolve.
@@ -1545,8 +1575,8 @@ fn view_bodies_round_trip_through_each_dialect() {
         failures.len(),
         failures.join("\n\n")
     );
-    // Every view case × every backend was exercised (15 views × 3 backends).
-    assert_eq!(checked, 15 * dialects.len(), "view coverage drifted");
+    // Every view case × every backend was exercised (16 views × 3 backends).
+    assert_eq!(checked, 16 * dialects.len(), "view coverage drifted");
 }
 
 /// A plain, tail-less recursive-CTE arm renders BARE. An arm carrying its own `ORDER BY`/`LIMIT`/`OFFSET`

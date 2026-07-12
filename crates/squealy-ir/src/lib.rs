@@ -986,6 +986,106 @@ fn map_expr_nodes(expr: &mut ExprNode, f: &impl Fn(&mut ExprNode)) {
     }
 }
 
+/// Applies `f` (read-only) to `expr` and every nested [`ExprNode`] in the **same scope**, stopping at a
+/// nested subquery (a scalar/`IN`/`EXISTS` subquery is its own scope, whose columns bind to its own
+/// sources — the [`ExprNode::InSubquery`] *operand* is same-scope and is visited). Mirrors the same-scope
+/// traversal of the reverse parser's column resolver, so a caller inspecting a clause term's own-scope
+/// column references (e.g. which projection aliases a `GROUP BY`/`HAVING`/`ORDER BY` names) sees exactly
+/// those. Exhaustive over [`ExprNode`] so a new node is a compile error here rather than an unvisited one.
+pub fn visit_scope_exprs(expr: &ExprNode, f: &mut impl FnMut(&ExprNode)) {
+    f(expr);
+    match expr {
+        ExprNode::Column { .. }
+        | ExprNode::BareColumn { .. }
+        | ExprNode::Literal(_)
+        | ExprNode::Raw(_)
+        | ExprNode::Now => {}
+        // A nested subquery is its own scope; its columns are irrelevant to the enclosing scope.
+        ExprNode::ScalarSubquery(_) | ExprNode::Exists { .. } => {}
+        ExprNode::InSubquery { operand, .. } => visit_scope_exprs(operand, f),
+        ExprNode::Binary { left, right, .. }
+        | ExprNode::Compare { left, right, .. }
+        | ExprNode::Logical { left, right, .. }
+        | ExprNode::Nullif { left, right, .. } => {
+            visit_scope_exprs(left, f);
+            visit_scope_exprs(right, f);
+        }
+        ExprNode::Cast { operand, .. } | ExprNode::Aggregate { operand, .. } => {
+            visit_scope_exprs(operand, f)
+        }
+        ExprNode::Not(operand) | ExprNode::IsNull { operand, .. } => visit_scope_exprs(operand, f),
+        ExprNode::Like {
+            operand, pattern, ..
+        } => {
+            visit_scope_exprs(operand, f);
+            visit_scope_exprs(pattern, f);
+        }
+        ExprNode::In { operand, items, .. } => {
+            visit_scope_exprs(operand, f);
+            for item in items {
+                visit_scope_exprs(item, f);
+            }
+        }
+        ExprNode::Between {
+            operand, low, high, ..
+        } => {
+            visit_scope_exprs(operand, f);
+            visit_scope_exprs(low, f);
+            visit_scope_exprs(high, f);
+        }
+        ExprNode::Window {
+            args,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            for arg in args {
+                visit_scope_exprs(arg, f);
+            }
+            for partition in partition_by {
+                visit_scope_exprs(partition, f);
+            }
+            for order in order_by {
+                visit_scope_exprs(&order.expr, f);
+            }
+        }
+        ExprNode::Case { arms, else_, .. } => {
+            for arm in arms {
+                visit_scope_exprs(&arm.when, f);
+                visit_scope_exprs(&arm.then, f);
+            }
+            if let Some(else_) = else_ {
+                visit_scope_exprs(else_, f);
+            }
+        }
+        ExprNode::SimpleCase {
+            operand,
+            arms,
+            else_,
+            ..
+        } => {
+            visit_scope_exprs(operand, f);
+            for arm in arms {
+                visit_scope_exprs(&arm.when, f);
+                visit_scope_exprs(&arm.then, f);
+            }
+            if let Some(else_) = else_ {
+                visit_scope_exprs(else_, f);
+            }
+        }
+        ExprNode::Coalesce { args, .. }
+        | ExprNode::ScalarFn { args, .. }
+        | ExprNode::Function { args, .. } => {
+            for arg in args {
+                visit_scope_exprs(arg, f);
+            }
+        }
+        ExprNode::Extract { operand, .. }
+        | ExprNode::DateTrunc { operand, .. }
+        | ExprNode::ExtractSecond { operand, .. } => visit_scope_exprs(operand, f),
+    }
+}
+
 /// Applies `f` to every result pin reachable from a single `SELECT` body (see
 /// [`ViewBody::map_result_pins`]).
 fn map_query_result_pins(query: &mut ViewQueryModel, f: &impl Fn(&SqlType) -> SqlType) {

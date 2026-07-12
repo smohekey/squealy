@@ -117,29 +117,29 @@ fn apply_view_column_names(body: &mut ViewBody, columns: &[ViewColumnModel]) {
     if query.projection.len() != columns.len() {
         return;
     }
-    // Names the body's own top-level clauses reference by a bare term (a `GROUP BY x`/`HAVING x`/`ORDER BY
-    // x` that names a projection *output* alias, not a source column). MySQL keeps such a reference bare
-    // (e.g. `select 1 AS \`total\` order by \`total\``) while dropping the `CREATE VIEW (<cols>)` renaming,
-    // so stamping the declared name over `output_name` below would orphan the clause reference. Collected
-    // before the stamp; owned so it does not borrow `query` across the mutation.
-    let referenced: std::collections::HashSet<String> = query
+    // Names the body's own clauses reference by a bare term (a `GROUP BY x`/`HAVING x`/`ORDER BY x` that
+    // names a projection *output* alias, not a source column), at any depth. MySQL keeps such a reference
+    // bare (e.g. `select 1 AS \`total\` order by \`total\``) while dropping the `CREATE VIEW (<cols>)`
+    // renaming, so stamping the declared name over `output_name` below would orphan the clause reference.
+    // Collected before the stamp; owned so it does not borrow `query` across the mutation.
+    let mut referenced = std::collections::HashSet::new();
+    for expr in query
         .group_by
         .iter()
         .chain(query.having.iter())
         .chain(query.order_by.iter().map(|order| &order.expr))
-        .filter_map(|expr| match expr {
-            ExprNode::BareColumn { column } => Some(column.clone()),
-            _ => None,
-        })
-        .collect();
+    {
+        collect_bare_columns(expr, &mut referenced);
+    }
     for (item, column) in query.projection.iter_mut().zip(columns) {
         // MySQL preserves each projection's own `AS`, so `output_name` currently holds that alias. The
         // declared column list renames the output; when that alias belongs to a *computed* projection a
         // body clause references, keep it as `internal_alias` so the renderer re-emits `AS <alias>` under
-        // the column list and the clause still resolves (git-bug e1d0724). A plain column's derived alias,
-        // or an unreferenced auto-derived one, is discarded as before (no clause needs it).
-        if item.output_name != column.name
-            && referenced.contains(&item.output_name)
+        // the column list and the clause still resolves (git-bug e1d0724). This holds even when the alias
+        // already equals the declared name — the column list does not introduce that name into the `SELECT`
+        // scope, so the reference would still dangle without the explicit `AS`. A plain column's derived
+        // alias, or an unreferenced auto-derived one, is discarded as before (no clause needs it).
+        if referenced.contains(&item.output_name)
             && !matches!(
                 item.expr,
                 ExprNode::Column { .. } | ExprNode::BareColumn { .. }
@@ -149,6 +149,16 @@ fn apply_view_column_names(body: &mut ViewBody, columns: &[ViewColumnModel]) {
         }
         item.output_name = column.name.clone();
     }
+}
+
+/// Records every [`ExprNode::BareColumn`] name a clause term references in its own scope (possibly nested —
+/// `HAVING total > 0`); a nested subquery is its own scope, so its columns are not descended.
+fn collect_bare_columns(expr: &ExprNode, out: &mut std::collections::HashSet<String>) {
+    squealy::visit_scope_exprs(expr, &mut |node| {
+        if let ExprNode::BareColumn { column } = node {
+            out.insert(column.clone());
+        }
+    });
 }
 
 /// The top-level output query of a reconstructed body: the `SELECT` itself, the leftmost arm of a set
@@ -997,6 +1007,50 @@ mod tests {
             query.projection[0].internal_alias.as_deref(),
             Some("total"),
             "the clause-referenced inner alias must be preserved"
+        );
+
+        // A clause reference *nested* in an expression (`HAVING total > 0`), and the alias coinciding with
+        // the declared column name — both must still be preserved (MySQL keeps the bare reference; the
+        // column list does not introduce the name into the SELECT scope).
+        let mut nested = ViewBody::Select(Box::new(ViewQueryModel {
+            projection: vec![squealy::ProjectionItem {
+                output_name: "total".to_owned(),
+                internal_alias: None,
+                expr: ExprNode::Aggregate {
+                    func: squealy::AggregateFunc::Sum,
+                    distinct: false,
+                    operand: Box::new(ExprNode::Column {
+                        alias: "q0_0".to_owned(),
+                        column: "amount".to_owned(),
+                    }),
+                    result: None,
+                },
+            }],
+            having: Some(ExprNode::Compare {
+                op: squealy::CompareOp::GreaterThan,
+                left: Box::new(ExprNode::BareColumn {
+                    column: "total".to_owned(),
+                }),
+                right: Box::new(ExprNode::Literal("0".to_owned())),
+            }),
+            ..ViewQueryModel::default()
+        }));
+        apply_view_column_names(
+            &mut nested,
+            &[ViewColumnModel {
+                name: "total".to_owned(),
+                ty: SqlType::I64,
+                nullable: true,
+            }],
+        );
+        let ViewBody::Select(query) = &nested else {
+            panic!("expected a Select body");
+        };
+        assert_eq!(query.projection[0].output_name, "total");
+        assert_eq!(
+            query.projection[0].internal_alias.as_deref(),
+            Some("total"),
+            "a nested, name-coinciding clause reference must be preserved"
         );
 
         // A plain column whose derived alias is *not* referenced by any clause keeps `internal_alias = None`
