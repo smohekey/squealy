@@ -664,8 +664,10 @@ fn rich_model() -> DatabaseModel {
                         // PostgreSQL deparses the index expression with a `::text` operand cast, which the
                         // reverse parser now structures as a general cast — `lower(CAST(slug AS text))` —
                         // so the expected form tracks the parser (as the generated/check expressions do).
-                        expressions: squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
-                            .read_index_expressions_or_raw("lower((slug)::text)"),
+                        expressions: squealy_parse::Reader::new(
+                            squealy_parse::SqlDialect::Postgres,
+                        )
+                        .read_index_expressions_or_raw("lower((slug)::text)"),
                         include_columns: Vec::new(),
                         unique: false,
                         method: Some(IndexMethod::BTree),
