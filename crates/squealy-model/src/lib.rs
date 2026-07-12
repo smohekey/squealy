@@ -388,13 +388,6 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
             // (many cast spellings are many-to-one), so a published view whose body is now reconstructed
             // by the reverse parser compares equal to its introspected form instead of churning.
             view.query = connection.canonical_view_body(std::mem::take(&mut view.query));
-            // Inline each clause's reference to a computed projection alias into the projection's expression
-            // and drop the suppressed inner aliases: a backend that stores a view rewrites `ORDER BY <alias>`
-            // to `ORDER BY <expr>` and names the projection by its output column, so a model that keeps the
-            // alias reference (hand-built/KDL, or a SQLite verbatim round-trip) would otherwise churn against
-            // the introspected form. Applied to both sides here (after the pin fold, so an inlined clause
-            // carries the same canonical pins as its projection).
-            view.query.inline_clause_aliases();
         }
     }
     // A schema-less backend flattens every namespace to the same (default) name, so two source schemas
@@ -1003,11 +996,11 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_model_inlines_view_clause_aliases() {
+    fn diff_treats_kept_and_deparsed_view_clause_aliases_as_equal() {
         // A hand-built/KDL view that *keeps* a suppressed projection alias (`internal_alias = "total"`,
         // referenced by a bare `ORDER BY total`) and the introspected form a backend deparses it to (no
-        // inner alias, `ORDER BY` expanded to the expression) must canonicalize to the *same* body — else a
-        // published view of this shape re-plans forever (git-bug e1d0724).
+        // inner alias, `ORDER BY` expanded to the expression) must diff as *unchanged* — else a published
+        // view of this shape re-plans a `CreateView` forever (git-bug e1d0724).
         let scaled = || ExprNode::Binary {
             op: squealy::ArithmeticOp::Multiply,
             left: Box::new(ExprNode::Column {
@@ -1044,27 +1037,37 @@ mod tests {
                 }],
             }],
         };
-        // Kept-alias form (bare `ORDER BY total`) vs deparsed form (expanded `ORDER BY (amount * 2)`).
-        let kept = canonicalize_model(
-            &CanonBackend,
-            &view(
-                Some("total"),
-                ExprNode::BareColumn {
-                    column: "total".to_owned(),
-                },
-            ),
+        // Desired keeps the alias (`ORDER BY total`); introspected has the deparsed form (`ORDER BY
+        // (amount * 2)`, no inner alias). The inline-aware view comparison treats them as unchanged.
+        let desired = view(
+            Some("total"),
+            ExprNode::BareColumn {
+                column: "total".to_owned(),
+            },
         );
-        let deparsed = canonicalize_model(&CanonBackend, &view(None, scaled()));
-        assert_eq!(
-            kept.schemas[0].views[0].query,
-            deparsed.schemas[0].views[0].query
+        let deparsed = view(None, scaled());
+        let diff = diff_models(&desired, &deparsed);
+        assert!(
+            diff.changes.is_empty(),
+            "expected no view changes, got: {:?}",
+            diff.changes
         );
-        // Both inline to the expression form with no inner alias.
-        let ViewBody::Select(query) = &kept.schemas[0].views[0].query else {
-            panic!("expected a Select body")
+
+        // Emit is faithful: creating the view (here, against an empty database) carries the *original*
+        // body — the kept `internal_alias` and the bare `ORDER BY total`, NOT the inlined comparison form —
+        // so the emitted `CREATE VIEW` preserves the dialect's source-column-vs-alias shadowing.
+        let empty = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![],
+                views: vec![],
+            }],
         };
-        assert_eq!(query.projection[0].internal_alias, None);
-        assert_eq!(query.order_by[0].expr, scaled());
+        let create = diff_models(&desired, &empty);
+        let [DatabaseDiffChange::CreateView { view, .. }] = create.changes.as_slice() else {
+            panic!("expected a single CreateView, got: {:?}", create.changes)
+        };
+        assert_eq!(view.query, desired.schemas[0].views[0].query);
     }
 
     /// A backend whose introspection canonical form mirrors MySQL: bare `String` reads back as

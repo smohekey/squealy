@@ -385,6 +385,28 @@ fn view_change_key(change: &DatabaseDiffChange) -> ViewKey {
     }
 }
 
+/// Whether the desired and introspected view are the same after inlining each clause's reference to a
+/// computed projection alias into the projection's expression (see [`ViewBody::inline_clause_aliases`]). A
+/// backend that stores a view rewrites `ORDER BY <alias>` to `ORDER BY <expr>` and names the projection by
+/// its output column, so a model that keeps the alias reference (hand-built/KDL, or a SQLite verbatim
+/// round-trip) matches its introspected form only in that inlined shape. This is a **comparison-only**
+/// normalization — the [`CreateView`](DatabaseDiffChange::CreateView) still carries the original body — so
+/// the emitted DDL never rewrites a clause (which could change the dialect's source-column-vs-alias
+/// shadowing).
+fn views_equivalent(desired: &ViewModel, actual: &ViewModel) -> bool {
+    if desired.name != actual.name
+        || desired.comment != actual.comment
+        || desired.columns != actual.columns
+    {
+        return false;
+    }
+    let mut desired_body = desired.query.clone();
+    let mut actual_body = actual.query.clone();
+    desired_body.inline_clause_aliases();
+    actual_body.inline_clause_aliases();
+    desired_body == actual_body
+}
+
 fn diff_views_global(
     desired: &DatabaseModel,
     actual: &DatabaseModel,
@@ -432,13 +454,17 @@ fn diff_views_global(
                         schema,
                         view: (*desired_view).clone(),
                     });
-                } else if desired_view != actual_view {
+                } else if !views_equivalent(desired_view, actual_view) {
                     if desired_view.columns != actual_view.columns {
                         drops.push(DatabaseDiffChange::DropView {
                             schema: schema.clone(),
                             view: (*actual_view).clone(),
                         });
                     }
+                    // Emit the *original* desired body (not the inlined comparison form): a backend rewrites
+                    // a clause's alias reference to the underlying expression on storage, so the two compare
+                    // equal after inlining, but the faithful `CREATE VIEW` keeps the authored alias — which
+                    // also preserves the dialect's source-column-vs-alias shadowing, unknowable here.
                     creates.push(DatabaseDiffChange::CreateView {
                         schema,
                         view: (*desired_view).clone(),
