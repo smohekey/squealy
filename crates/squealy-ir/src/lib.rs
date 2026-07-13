@@ -232,6 +232,48 @@ pub struct ColumnModel {
     pub default: Option<DefaultValue>,
     pub identity: Option<IdentityModel>,
     pub generated: Option<GeneratedColumnModel>,
+    /// A MySQL `ON UPDATE CURRENT_TIMESTAMP` auto-update expression, structured like [`generated`]
+    /// so the backend renders it in its own dialect and the diff compares it structurally.
+    ///
+    /// MySQL is the only dialect with this attribute, and the only expression it accepts is
+    /// `CURRENT_TIMESTAMP` (so an introspected column carries [`ExprNode::Now`]); its fractional-seconds
+    /// precision is forced to equal the column's own `TIMESTAMP`/`DATETIME` precision, so the renderer
+    /// derives the fsp from the column type rather than from the node. PostgreSQL and SQLite reject a
+    /// column carrying this — they cannot represent it.
+    ///
+    /// Boxed so the rare, MySQL-only attribute does not enlarge every `ColumnModel` (which is embedded
+    /// inline in the plan/diff step enums), mirroring [`IndexModel::predicate`].
+    ///
+    /// [`generated`]: ColumnModel::generated
+    pub on_update: Option<Box<ExprNode>>,
+}
+
+impl ColumnModel {
+    /// Validates the [`on_update`](Self::on_update) attribute's shape, returning the reason it is
+    /// unrepresentable or `None` when it is absent or well-formed.
+    ///
+    /// The neutral field exists solely to represent MySQL's `ON UPDATE CURRENT_TIMESTAMP`, so the only
+    /// well-formed value is [`ExprNode::Now`] on a `TIMESTAMP`/`DATETIME` column that is not generated
+    /// (an auto-update clause on a computed column is a contradiction, and MySQL rejects it). Both the
+    /// capability preflight (for a backend that reports the attribute) and the MySQL renderer check this,
+    /// so a malformed hand-authored package fails `check` rather than only at DDL-execution time.
+    pub fn on_update_shape_error(&self) -> Option<&'static str> {
+        let on_update = self.on_update.as_deref()?;
+        if !matches!(on_update, ExprNode::Now) {
+            return Some("an `ON UPDATE` attribute only supports `CURRENT_TIMESTAMP`");
+        }
+        if !matches!(self.ty, SqlType::Timestamp { .. }) {
+            return Some(
+                "an `ON UPDATE CURRENT_TIMESTAMP` attribute is only valid on a TIMESTAMP/DATETIME column",
+            );
+        }
+        if self.generated.is_some() {
+            return Some(
+                "an `ON UPDATE CURRENT_TIMESTAMP` attribute is not allowed on a generated column",
+            );
+        }
+        None
+    }
 }
 
 /// Backend-neutral identity / auto-increment metadata.
@@ -2207,6 +2249,69 @@ fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn on_update_column(ty: SqlType, on_update: Option<ExprNode>) -> ColumnModel {
+        ColumnModel {
+            name: "updated_at".to_owned(),
+            comment: None,
+            ty,
+            collation: None,
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+            on_update: on_update.map(Box::new),
+        }
+    }
+
+    fn timestamp() -> SqlType {
+        SqlType::Timestamp {
+            tz: true,
+            precision: None,
+        }
+    }
+
+    #[test]
+    fn on_update_shape_error_accepts_now_on_a_temporal_column() {
+        assert!(
+            on_update_column(timestamp(), None)
+                .on_update_shape_error()
+                .is_none()
+        );
+        assert!(
+            on_update_column(timestamp(), Some(ExprNode::Now))
+                .on_update_shape_error()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn on_update_shape_error_rejects_a_non_now_node() {
+        assert!(
+            on_update_column(timestamp(), Some(ExprNode::Raw("now() + 1".to_owned())))
+                .on_update_shape_error()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn on_update_shape_error_rejects_a_non_temporal_column() {
+        assert!(
+            on_update_column(SqlType::I32, Some(ExprNode::Now))
+                .on_update_shape_error()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn on_update_shape_error_rejects_a_generated_column() {
+        let mut column = on_update_column(timestamp(), Some(ExprNode::Now));
+        column.generated = Some(GeneratedColumnModel {
+            expression: Some(ExprNode::Now),
+            storage: GeneratedStorage::Virtual,
+        });
+        assert!(column.on_update_shape_error().is_some());
+    }
 
     fn bare(column: &str) -> ExprNode {
         ExprNode::BareColumn {

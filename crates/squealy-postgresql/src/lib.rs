@@ -190,6 +190,7 @@ impl squealy::SupportsDateTrunc for Postgres {}
 impl squealy::SchemaBackend for Postgres {
     fn capabilities(&self) -> squealy::SchemaCapabilities {
         squealy::SchemaCapabilities {
+            columns: squealy::ColumnCapabilities { on_update: false },
             constraints: squealy::ConstraintCapabilities {
                 foreign_key_match_type: true,
                 foreign_key_deferrability: true,

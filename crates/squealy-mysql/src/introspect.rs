@@ -365,6 +365,7 @@ ORDER BY c.ORDINAL_POSITION",
                     mode: IdentityMode::AutoIncrement,
                 }),
                 generated: generated_model(&extra, generation_expression),
+                on_update: on_update_model(&extra),
             }
         },
     )
@@ -757,6 +758,18 @@ fn generated_model(extra: &str, expression: Option<String>) -> Option<GeneratedC
     })
 }
 
+/// Reads a column's MySQL `ON UPDATE CURRENT_TIMESTAMP` auto-update attribute from its (lowercased)
+/// `EXTRA` value, which reports it as `on update current_timestamp[(fsp)]` (optionally prefixed with
+/// `default_generated` when the column also has a `DEFAULT CURRENT_TIMESTAMP`). The only expression
+/// MySQL accepts here is `CURRENT_TIMESTAMP`, and its fsp is forced to equal the column's own
+/// precision, so a bare [`ExprNode::Now`] (re-rendered with the column-derived fsp) round-trips it —
+/// the parenthesized precision needs no capture.
+fn on_update_model(extra: &str) -> Option<Box<ExprNode>> {
+    extra
+        .contains("on update current_timestamp")
+        .then(|| Box::new(ExprNode::Now))
+}
+
 fn single_arg_type(column_type: &str, kind: &str) -> Option<u32> {
     let args = type_args(column_type, kind)?;
     args.trim().parse().ok()
@@ -1137,6 +1150,27 @@ mod tests {
             ),
             DefaultValue::Raw("42.00".to_owned())
         );
+    }
+
+    #[test]
+    fn reads_on_update_current_timestamp_from_extra() {
+        // `EXTRA` is lowercased before this runs; MySQL reports the attribute bare, with an fsp, and
+        // prefixed with `default_generated` when the column also carries a `DEFAULT CURRENT_TIMESTAMP`.
+        assert_eq!(
+            on_update_model("on update current_timestamp"),
+            Some(Box::new(ExprNode::Now))
+        );
+        assert_eq!(
+            on_update_model("on update current_timestamp(3)"),
+            Some(Box::new(ExprNode::Now))
+        );
+        assert_eq!(
+            on_update_model("default_generated on update current_timestamp"),
+            Some(Box::new(ExprNode::Now))
+        );
+        // A plain auto-increment / generated column carries no on-update attribute.
+        assert_eq!(on_update_model("auto_increment"), None);
+        assert_eq!(on_update_model(""), None);
     }
 
     #[test]

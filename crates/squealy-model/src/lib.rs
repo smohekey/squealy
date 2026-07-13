@@ -35,15 +35,15 @@ pub use refactor::{
     pending_refactors,
 };
 pub use squealy::{
-    CheckModel, ColumnModel, Constraint, ConstraintCapabilities, ConstraintDeferrability,
-    ConstraintEnforcement, ConstraintValidation, CteModel, DatabaseModel, DatabasePlan,
-    DatabasePlanStep, DdlExecutor, DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch,
-    ForeignKeyModel, IndexCapabilities, IndexCollation, IndexDirection, IndexMethod, IndexModel,
-    IndexNullsOrder, IndexOperatorClass, IndexPrefixLength, LogicalOp, ProjectionItem,
-    SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect, SchemaMetadataStore,
-    SchemaModel, SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore, SourceItem,
-    SourceRef, SqlType, TableModel, TablePlanStep, ViewBody, ViewColumnModel, ViewModel,
-    ViewQueryModel, ViewSetOp,
+    CheckModel, ColumnCapabilities, ColumnModel, Constraint, ConstraintCapabilities,
+    ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, CteModel, DatabaseModel,
+    DatabasePlan, DatabasePlanStep, DdlExecutor, DefaultValue, ExprNode, ForeignKeyAction,
+    ForeignKeyMatch, ForeignKeyModel, IndexCapabilities, IndexCollation, IndexDirection,
+    IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, IndexPrefixLength, LogicalOp,
+    ProjectionItem, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect,
+    SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore, SchemaPublishRecord,
+    SchemaRefactorStore, SourceItem, SourceRef, SqlType, TableModel, TablePlanStep, ViewBody,
+    ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
 };
 
 use std::collections::BTreeSet;
@@ -697,6 +697,25 @@ fn validate_capabilities(
 ) -> std::io::Result<()> {
     for schema in &model.schemas {
         for table in &schema.tables {
+            for column in &table.columns {
+                if column.on_update.is_some() && !capabilities.columns.on_update {
+                    return unsupported_column(
+                        &table.name,
+                        &column.name,
+                        "an `ON UPDATE` auto-update attribute",
+                    );
+                }
+                // For a backend that *does* carry the attribute, still reject a malformed value here so
+                // the preflight does not approve a package the renderer would reject at publish time.
+                if capabilities.columns.on_update
+                    && let Some(reason) = column.on_update_shape_error()
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("{reason} for column `{}` on `{}`", column.name, table.name),
+                    ));
+                }
+            }
             for foreign_key in &table.foreign_keys {
                 if foreign_key.match_type.is_some()
                     && !capabilities.constraints.foreign_key_match_type
@@ -785,6 +804,15 @@ fn validate_capabilities(
         }
     }
     Ok(())
+}
+
+fn unsupported_column(table: &str, column: &str, feature: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "backend cannot render and introspect {feature} for column `{column}` on `{table}`"
+        ),
+    ))
 }
 
 fn unsupported_constraint(table: &str, constraint: &str, feature: &str) -> std::io::Result<()> {
@@ -928,6 +956,7 @@ mod tests {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     }],
                     primary_key: None,
                     foreign_keys: vec![],
@@ -1188,6 +1217,7 @@ mod tests {
             default: Some(squealy::DefaultValue::Bool(true)),
             identity: None,
             generated: None,
+            on_update: None,
         });
 
         let canonical = canonicalize_model(&CanonBackend, &model);
@@ -1236,6 +1266,7 @@ mod tests {
                 mode: squealy::IdentityMode::ByDefault,
             }),
             generated: None,
+            on_update: None,
         });
         model.schemas[0].tables[0].primary_key = Some(Constraint {
             name: "pk_memberships".to_owned(),
@@ -1409,6 +1440,72 @@ mod tests {
     }
 
     #[test]
+    fn render_create_rejects_unsupported_column_on_update_capability() {
+        // A MySQL-authored package carrying `on_update` must fail the capability preflight for a backend
+        // that does not report the column capability, so `check`/`render_create` do not approve an
+        // unrenderable package (git-bug 7f4504d).
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                views: Vec::new(),
+                tables: vec![TableModel {
+                    name: "events".to_owned(),
+                    comment: None,
+                    columns: vec![ColumnModel {
+                        name: "updated_at".to_owned(),
+                        comment: None,
+                        ty: SqlType::Timestamp {
+                            tz: true,
+                            precision: None,
+                        },
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        on_update: Some(Box::new(squealy::ExprNode::Now)),
+                    }],
+                    primary_key: None,
+                    foreign_keys: vec![],
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let error = render_create_sql(
+            &model,
+            &TestBackend {
+                capabilities: SchemaCapabilities::default(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("ON UPDATE"),
+            "unexpected error: {error}"
+        );
+
+        // A backend that reports the capability accepts it.
+        let on_update_capable = TestBackend {
+            capabilities: SchemaCapabilities {
+                columns: ColumnCapabilities { on_update: true },
+                ..SchemaCapabilities::default()
+            },
+        };
+        render_create_sql(&model, &on_update_capable)
+            .expect("a backend reporting the column capability renders");
+
+        // Even a capable backend rejects a malformed value (here a non-temporal column) in preflight, so
+        // `check` does not approve a package the renderer would reject at publish time.
+        let mut malformed = model;
+        malformed.schemas[0].tables[0].columns[0].ty = SqlType::I32;
+        let error = check_create(&malformed, &on_update_capable).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
     fn render_create_allows_reported_constraint_capabilities() {
         let mut foreign_key = foreign_key();
         foreign_key.validation = Some(ConstraintValidation::NotValidated);
@@ -1420,6 +1517,7 @@ mod tests {
             &model,
             &TestBackend {
                 capabilities: SchemaCapabilities {
+                    columns: ColumnCapabilities::default(),
                     constraints: ConstraintCapabilities {
                         foreign_key_match_type: false,
                         foreign_key_deferrability: false,
@@ -1472,6 +1570,7 @@ mod tests {
             &model,
             &TestBackend {
                 capabilities: SchemaCapabilities {
+                    columns: ColumnCapabilities::default(),
                     constraints: ConstraintCapabilities::default(),
                     indexes: IndexCapabilities {
                         predicates: true,

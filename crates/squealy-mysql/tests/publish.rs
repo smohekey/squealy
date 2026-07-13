@@ -334,6 +334,7 @@ fn alter_column_baseline_model() -> DatabaseModel {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                     ColumnModel {
                         name: "status".to_owned(),
@@ -344,6 +345,7 @@ fn alter_column_baseline_model() -> DatabaseModel {
                         default: Some(DefaultValue::Text("draft".to_owned())),
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                 ],
                 primary_key: None,
@@ -374,6 +376,7 @@ fn alter_column_desired_model() -> DatabaseModel {
                         default: Some(DefaultValue::Text("new".to_owned())),
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                     ColumnModel {
                         name: "status".to_owned(),
@@ -384,6 +387,7 @@ fn alter_column_desired_model() -> DatabaseModel {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                 ],
                 primary_key: None,
@@ -522,6 +526,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                             mode: IdentityMode::AutoIncrement,
                         }),
                         generated: None,
+                        on_update: None,
                     },
                     ColumnModel {
                         name: "widget_id".to_owned(),
@@ -532,6 +537,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                 ],
                 primary_key: Some(Constraint {
@@ -583,6 +589,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                             mode: IdentityMode::AutoIncrement,
                         }),
                         generated: None,
+                        on_update: None,
                     },
                     ColumnModel {
                         name: "name".to_owned(),
@@ -593,6 +600,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                     ColumnModel {
                         name: "seats".to_owned(),
@@ -603,6 +611,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                 ],
                 primary_key: Some(Constraint {
@@ -642,6 +651,7 @@ fn rich_mysql_model() -> DatabaseModel {
                                 mode: IdentityMode::AutoIncrement,
                             }),
                             generated: None,
+                            on_update: None,
                         },
                         ColumnModel {
                             name: "tenant_id".to_owned(),
@@ -652,6 +662,7 @@ fn rich_mysql_model() -> DatabaseModel {
                             default: None,
                             identity: None,
                             generated: None,
+                            on_update: None,
                         },
                         ColumnModel {
                             name: "role_code".to_owned(),
@@ -662,6 +673,7 @@ fn rich_mysql_model() -> DatabaseModel {
                             default: Some(DefaultValue::Text("MB".to_owned())),
                             identity: None,
                             generated: None,
+                            on_update: None,
                         },
                         ColumnModel {
                             name: "quota".to_owned(),
@@ -675,6 +687,7 @@ fn rich_mysql_model() -> DatabaseModel {
                             default: Some(DefaultValue::Raw("42.00".to_owned())),
                             identity: None,
                             generated: None,
+                            on_update: None,
                         },
                         ColumnModel {
                             name: "active".to_owned(),
@@ -685,6 +698,24 @@ fn rich_mysql_model() -> DatabaseModel {
                             default: Some(DefaultValue::Bool(true)),
                             identity: None,
                             generated: None,
+                            on_update: None,
+                        },
+                        // The MySQL `DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP` idiom
+                        // (git-bug 7f4504d): the on-update attribute lives in `EXTRA` and must survive
+                        // an introspection round-trip.
+                        ColumnModel {
+                            name: "updated_at".to_owned(),
+                            comment: None,
+                            ty: SqlType::Timestamp {
+                                tz: true,
+                                precision: None,
+                            },
+                            collation: None,
+                            nullable: false,
+                            default: Some(DefaultValue::CurrentTimestamp),
+                            identity: None,
+                            generated: None,
+                            on_update: Some(Box::new(ExprNode::Now)),
                         },
                     ],
                     primary_key: Some(Constraint {
@@ -741,6 +772,7 @@ fn rich_mysql_model() -> DatabaseModel {
                                 mode: IdentityMode::AutoIncrement,
                             }),
                             generated: None,
+                            on_update: None,
                         },
                         ColumnModel {
                             name: "slug".to_owned(),
@@ -751,6 +783,7 @@ fn rich_mysql_model() -> DatabaseModel {
                             default: None,
                             identity: None,
                             generated: None,
+                            on_update: None,
                         },
                         ColumnModel {
                             name: "slug_len".to_owned(),
@@ -764,6 +797,7 @@ fn rich_mysql_model() -> DatabaseModel {
                                 expression: Some(check_expr("char_length(`slug`)")),
                                 storage: GeneratedStorage::Virtual,
                             }),
+                            on_update: None,
                         },
                         ColumnModel {
                             name: "settings".to_owned(),
@@ -774,6 +808,7 @@ fn rich_mysql_model() -> DatabaseModel {
                             default: None,
                             identity: None,
                             generated: None,
+                            on_update: None,
                         },
                     ],
                     primary_key: Some(Constraint {
@@ -813,6 +848,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                             mode: IdentityMode::AutoIncrement,
                         }),
                         generated: None,
+                        on_update: None,
                     },
                     ColumnModel {
                         name: "tenant_id".to_owned(),
@@ -823,6 +859,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                     ColumnModel {
                         name: "role_code".to_owned(),
@@ -833,6 +870,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                         default: Some(DefaultValue::Text("MB".to_owned())),
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                     ColumnModel {
                         name: "quota".to_owned(),
@@ -846,6 +884,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                         default: Some(DefaultValue::Raw("42.00".to_owned())),
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                     ColumnModel {
                         name: "active".to_owned(),
@@ -856,6 +895,24 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                         default: Some(DefaultValue::Bool(true)),
                         identity: None,
                         generated: None,
+                        on_update: None,
+                    },
+                    // Introspected form of the `DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`
+                    // column: a bare `TIMESTAMP` reads back as `tz: true`, fsp 0, and the on-update
+                    // attribute is recovered from `EXTRA` as `Now`.
+                    ColumnModel {
+                        name: "updated_at".to_owned(),
+                        comment: None,
+                        ty: SqlType::Timestamp {
+                            tz: true,
+                            precision: Some(0),
+                        },
+                        collation: None,
+                        nullable: false,
+                        default: Some(DefaultValue::CurrentTimestamp),
+                        identity: None,
+                        generated: None,
+                        on_update: Some(Box::new(ExprNode::Now)),
                     },
                 ],
                 primary_key: Some(Constraint {
@@ -912,6 +969,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                             mode: IdentityMode::AutoIncrement,
                         }),
                         generated: None,
+                        on_update: None,
                     },
                     ColumnModel {
                         name: "slug".to_owned(),
@@ -922,6 +980,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                     ColumnModel {
                         name: "slug_len".to_owned(),
@@ -935,6 +994,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                             expression: Some(check_expr("char_length(`slug`)")),
                             storage: GeneratedStorage::Virtual,
                         }),
+                        on_update: None,
                     },
                     ColumnModel {
                         name: "settings".to_owned(),
@@ -945,6 +1005,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                 ],
                 primary_key: Some(Constraint {
@@ -985,6 +1046,7 @@ fn timestamp_precision_model(precision: Option<u8>) -> DatabaseModel {
                             mode: IdentityMode::ByDefault,
                         }),
                         generated: None,
+                        on_update: None,
                     },
                     ColumnModel {
                         name: "at".to_owned(),
@@ -998,6 +1060,7 @@ fn timestamp_precision_model(precision: Option<u8>) -> DatabaseModel {
                         default: Some(DefaultValue::CurrentTimestamp),
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                 ],
                 primary_key: Some(Constraint {

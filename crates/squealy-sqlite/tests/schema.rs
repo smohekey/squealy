@@ -175,6 +175,7 @@ fn expected_introspected_model() -> DatabaseModel {
             mode: IdentityMode::AutoIncrement,
         }),
         generated: None,
+        on_update: None,
     };
     let plain = |name: &str, ty: SqlType, nullable: bool| ColumnModel {
         name: name.to_owned(),
@@ -185,6 +186,7 @@ fn expected_introspected_model() -> DatabaseModel {
         default: None,
         identity: None,
         generated: None,
+        on_update: None,
     };
     let pk = || {
         Some(Constraint {
@@ -378,6 +380,7 @@ async fn round_trips_a_partial_index_predicate() {
         default: None,
         identity: None,
         generated: None,
+        on_update: None,
     };
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
@@ -459,6 +462,7 @@ async fn round_trips_bool_and_unsigned_defaults() {
         default: Some(default),
         identity: None,
         generated: None,
+        on_update: None,
     };
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
@@ -527,6 +531,7 @@ async fn coalesces_flattened_schemas_on_replan() {
             default: None,
             identity: None,
             generated: None,
+            on_update: None,
         }],
         primary_key: None,
         foreign_keys: Vec::new(),
@@ -613,6 +618,7 @@ async fn honors_schema_qualified_table_rename_refactor() {
             default: None,
             identity: None,
             generated: None,
+            on_update: None,
         }],
         primary_key: None,
         foreign_keys: Vec::new(),
@@ -692,6 +698,7 @@ async fn round_trips_fixed_bytes_width() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -804,6 +811,7 @@ async fn round_trips_an_explicit_ascending_index_direction() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -843,6 +851,7 @@ async fn round_trips_a_partial_descending_index_direction() {
         default: None,
         identity: None,
         generated: None,
+        on_update: None,
     };
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
@@ -1043,6 +1052,7 @@ async fn round_trips_a_table_check_constraint() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -1111,6 +1121,7 @@ async fn round_trips_a_column_collation() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),

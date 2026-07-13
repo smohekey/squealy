@@ -734,6 +734,19 @@ pub(crate) mod ddl {
                  column instead",
             ));
         }
+        // `ON UPDATE CURRENT_TIMESTAMP` is a MySQL-only attribute. The incremental ALTER path renders
+        // each supported property delta piecemeal and never reaches `write_model_column`, so reject it
+        // here too — otherwise a cross-dialect package that changes `on_update` alongside a supported
+        // property would apply only the supported change and leave the schema perpetually drifting.
+        if after.on_update.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "PostgreSQL does not support an `ON UPDATE` column attribute (column `{}`)",
+                    after.name
+                ),
+            ));
+        }
 
         // Fixed-width binary length check. The byte width lives entirely in the generated named
         // `octet_length` check (the `TYPE bytea` alter below is a no-op for a width change). The stale
@@ -1047,6 +1060,18 @@ pub(crate) mod ddl {
         if let Some(default) = &column.default {
             writer.write_all(b" DEFAULT ")?;
             write_default_value(default, writer)?;
+        }
+        if column.on_update.is_some() {
+            // `ON UPDATE CURRENT_TIMESTAMP` is a MySQL-only column attribute. The incremental plan
+            // render path does not validate capabilities, so reject it here rather than silently
+            // dropping it (mirrors how the other backend-specific column features are rejected).
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "PostgreSQL does not support an `ON UPDATE` column attribute (column `{}`)",
+                    column.name
+                ),
+            ));
         }
         // Fixed-width binary has no native PostgreSQL type, so enforce the width with a named inline
         // CHECK on `octet_length`. Introspection folds this named check back into `FixedBytes(N)` (see
@@ -1560,6 +1585,7 @@ mod tests {
                             expression: None,
                             storage: GeneratedStorage::Stored,
                         }),
+                        on_update: None,
                     }],
                     primary_key: None,
                     foreign_keys: vec![],

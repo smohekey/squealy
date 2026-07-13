@@ -1886,6 +1886,7 @@ fn print_capabilities(backend: BackendKind) {
 }
 
 fn print_schema_capabilities(capabilities: SchemaCapabilities) {
+    println!("columns.on_update={}", capabilities.columns.on_update);
     println!(
         "constraints.foreign_key_match_type={}",
         capabilities.constraints.foreign_key_match_type

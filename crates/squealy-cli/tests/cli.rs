@@ -103,6 +103,7 @@ fn postgres_capabilities_are_printed() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_capability(&stdout, "backend=postgres");
+    assert_capability(&stdout, "columns.on_update=false");
     assert_capability(&stdout, "constraints.foreign_key_match_type=true");
     assert_capability(&stdout, "constraints.foreign_key_deferrability=true");
     assert_capability(&stdout, "constraints.foreign_key_validation=true");
@@ -132,6 +133,7 @@ fn mysql_capabilities_are_printed() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_capability(&stdout, "backend=mysql");
+    assert_capability(&stdout, "columns.on_update=true");
     assert_capability(&stdout, "constraints.foreign_key_match_type=false");
     assert_capability(&stdout, "constraints.foreign_key_deferrability=false");
     assert_capability(&stdout, "constraints.foreign_key_validation=false");
@@ -458,6 +460,7 @@ fn diff_reports_package_model_changes() {
             default: None,
             identity: None,
             generated: None,
+            on_update: None,
         });
     desired_model.schemas[0].tables.push(TableModel {
         name: "created".to_owned(),
@@ -1428,6 +1431,7 @@ async fn postgres_refactor_repair_records_valid_missing_refactor_ids() {
         default: None,
         identity: None,
         generated: None,
+        on_update: None,
     });
     write_package_with_refactors(&changed, &refactors, &changed_package)
         .expect("write changed package");
@@ -1993,6 +1997,7 @@ DROP SCHEMA IF EXISTS `__squealy`",
         default: None,
         identity: None,
         generated: None,
+        on_update: None,
     });
     write_package_with_refactors(&changed, &refactors, &changed_package)
         .expect("write changed package");
@@ -2239,6 +2244,7 @@ fn live_introspection_model() -> DatabaseModel {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: vec![],
@@ -2261,6 +2267,7 @@ fn live_introspection_model_with_nullable_column(name: &str) -> DatabaseModel {
         default: None,
         identity: None,
         generated: None,
+        on_update: None,
     });
     model
 }
@@ -2318,6 +2325,7 @@ fn required_text_column(name: &str) -> ColumnModel {
         default: None,
         identity: None,
         generated: None,
+        on_update: None,
     }
 }
 

@@ -31,6 +31,7 @@ fn column(name: &str, ty: SqlType, nullable: bool) -> ColumnModel {
         default: None,
         identity: None,
         generated: None,
+        on_update: None,
     }
 }
 
