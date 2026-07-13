@@ -709,6 +709,16 @@ fn write_create_index(
         // names would silently render without its `(n)`. Validate before emitting SQL.
         let mut seen = std::collections::HashSet::new();
         for prefix in &index.prefix_lengths {
+            if prefix.length == 0 {
+                // MySQL rejects `col(0)`; a prefix indexes at least one character/byte.
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "index `{}` has a zero-length prefix for key position {}",
+                        index.name, prefix.position
+                    ),
+                ));
+            }
             if prefix.position >= index.columns.len() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,

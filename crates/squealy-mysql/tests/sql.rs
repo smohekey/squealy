@@ -1297,6 +1297,19 @@ fn mysql_rejects_prefix_length_for_a_nonexistent_key_position() {
 }
 
 #[test]
+fn mysql_rejects_a_zero_length_prefix() {
+    // MySQL rejects `col(0)`; a prefix must index at least one character/byte.
+    let error = render_prefix_index_model(|index| {
+        index.prefix_lengths = vec![IndexPrefixLength {
+            position: 0,
+            length: 0,
+        }];
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
 fn mysql_rejects_duplicate_prefix_lengths_for_one_key_position() {
     let error = render_prefix_index_model(|index| {
         index.prefix_lengths = vec![
