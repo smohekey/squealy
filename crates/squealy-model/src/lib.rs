@@ -39,11 +39,11 @@ pub use squealy::{
     ConstraintEnforcement, ConstraintValidation, CteModel, DatabaseModel, DatabasePlan,
     DatabasePlanStep, DdlExecutor, DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch,
     ForeignKeyModel, IndexCapabilities, IndexCollation, IndexDirection, IndexMethod, IndexModel,
-    IndexNullsOrder, IndexOperatorClass, LogicalOp, ProjectionItem, SchemaBackend,
-    SchemaCapabilities, SchemaConnect, SchemaIntrospect, SchemaMetadataStore, SchemaModel,
-    SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore, SourceItem, SourceRef,
-    SqlType, TableModel, TablePlanStep, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
-    ViewSetOp,
+    IndexNullsOrder, IndexOperatorClass, IndexPrefixLength, LogicalOp, ProjectionItem,
+    SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect, SchemaMetadataStore,
+    SchemaModel, SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore, SourceItem,
+    SourceRef, SqlType, TableModel, TablePlanStep, ViewBody, ViewColumnModel, ViewModel,
+    ViewQueryModel, ViewSetOp,
 };
 
 use std::collections::BTreeSet;
@@ -774,6 +774,13 @@ fn validate_capabilities(
                 if !index.operator_classes.is_empty() && !capabilities.indexes.operator_classes {
                     return unsupported_index(&table.name, &index.name, "index operator classes");
                 }
+                if !index.prefix_lengths.is_empty() && !capabilities.indexes.prefix_lengths {
+                    return unsupported_index(
+                        &table.name,
+                        &index.name,
+                        "index column prefix lengths",
+                    );
+                }
             }
         }
     }
@@ -899,6 +906,7 @@ mod tests {
             nulls: vec![],
             collations: vec![],
             operator_classes: vec![],
+            prefix_lengths: vec![],
             predicate: None,
         }
     }
@@ -1379,6 +1387,10 @@ mod tests {
             position: 0,
             name: "text_pattern_ops".to_owned(),
         }];
+        index.prefix_lengths = vec![IndexPrefixLength {
+            position: 0,
+            length: 10,
+        }];
         let model = table_with_index(index);
 
         let error = render_create_sql(
@@ -1450,6 +1462,10 @@ mod tests {
             position: 0,
             name: "text_pattern_ops".to_owned(),
         }];
+        index.prefix_lengths = vec![IndexPrefixLength {
+            position: 0,
+            length: 10,
+        }];
         let model = table_with_index(index);
 
         let sql = render_create_sql(
@@ -1464,6 +1480,7 @@ mod tests {
                         null_ordering: true,
                         collations: true,
                         operator_classes: true,
+                        prefix_lengths: true,
                     },
                 },
             },

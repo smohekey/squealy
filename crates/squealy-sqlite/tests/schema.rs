@@ -341,6 +341,7 @@ fn expected_introspected_model() -> DatabaseModel {
                         nulls: Vec::new(),
                         collations: Vec::new(),
                         operator_classes: Vec::new(),
+                        prefix_lengths: Vec::new(),
                         predicate: None,
                     }],
                 },
@@ -404,6 +405,7 @@ async fn round_trips_a_partial_index_predicate() {
                     nulls: Vec::new(),
                     collations: Vec::new(),
                     operator_classes: Vec::new(),
+                    prefix_lengths: Vec::new(),
                     predicate: Some(Box::new(squealy::ExprNode::IsNull {
                         negated: false,
                         operand: Box::new(squealy::ExprNode::BareColumn {
@@ -783,6 +785,7 @@ async fn round_trips_an_explicit_ascending_index_direction() {
         nulls: Vec::new(),
         collations: Vec::new(),
         operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
         predicate: None,
     };
     let model = DatabaseModel {
@@ -864,6 +867,7 @@ async fn round_trips_a_partial_descending_index_direction() {
                     nulls: Vec::new(),
                     collations: Vec::new(),
                     operator_classes: Vec::new(),
+                    prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
             }],

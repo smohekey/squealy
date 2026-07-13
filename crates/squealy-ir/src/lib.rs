@@ -558,6 +558,8 @@ pub struct IndexModel {
     pub collations: Vec<IndexCollation>,
     /// Backend-specific operator classes by zero-based key-term position.
     pub operator_classes: Vec<IndexOperatorClass>,
+    /// Backend-specific column prefix lengths by zero-based key-term position (MySQL `col(n)`).
+    pub prefix_lengths: Vec<IndexPrefixLength>,
     /// Structural predicate for a partial index, rendered per backend (a partial-index `WHERE`). Boxed
     /// so an [`ExprNode`] (a large enum) does not bloat every `IndexModel` when the predicate is absent.
     pub predicate: Option<Box<ExprNode>>,
@@ -589,6 +591,14 @@ pub struct IndexCollation {
 pub struct IndexOperatorClass {
     pub position: usize,
     pub name: String,
+}
+
+/// Column prefix length for an indexed key term (MySQL indexes only a leading `length`-byte/character
+/// prefix of the column, rendered as `col(length)`; other backends do not support it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexPrefixLength {
+    pub position: usize,
+    pub length: u32,
 }
 
 /// Backend-neutral index access method.

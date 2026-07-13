@@ -240,6 +240,7 @@ pub struct IndexCapabilities {
     pub null_ordering: bool,
     pub collations: bool,
     pub operator_classes: bool,
+    pub prefix_lengths: bool,
 }
 
 /// Backend-specific DDL rendering driven by an owned [`DatabaseModel`].

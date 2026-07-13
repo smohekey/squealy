@@ -1106,6 +1106,13 @@ pub(crate) mod ddl {
         concurrent: bool,
         writer: &mut impl Write,
     ) -> io::Result<()> {
+        if !index.prefix_lengths.is_empty() {
+            // PostgreSQL has no column-prefix indexes (`col(n)`); it uses expression indexes instead.
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "PostgreSQL does not support index column prefix lengths",
+            ));
+        }
         writer.write_all(b"CREATE ")?;
         if index.unique {
             writer.write_all(b"UNIQUE ")?;

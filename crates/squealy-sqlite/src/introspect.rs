@@ -793,6 +793,7 @@ async fn indexes(
                     nulls: Vec::new(),
                     collations: Vec::new(),
                     operator_classes: Vec::new(),
+                    prefix_lengths: Vec::new(),
                     predicate,
                 });
             }

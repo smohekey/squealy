@@ -548,6 +548,7 @@ async fn apply_plan_with_concurrent_indexes_splits_index_creation() {
                         nulls: Vec::new(),
                         collations: Vec::new(),
                         operator_classes: Vec::new(),
+                        prefix_lengths: Vec::new(),
                         predicate: None,
                     },
                 }),
@@ -615,6 +616,7 @@ fn render_plan_with_options_reports_the_concurrent_form_it_will_apply() {
                         nulls: Vec::new(),
                         collations: Vec::new(),
                         operator_classes: Vec::new(),
+                        prefix_lengths: Vec::new(),
                         predicate: None,
                     },
                 }),
@@ -853,6 +855,7 @@ async fn plan_from_database_canonicalizes_predicates_and_checks_on_both_sides() 
                     nulls: Vec::new(),
                     collations: Vec::new(),
                     operator_classes: Vec::new(),
+                    prefix_lengths: Vec::new(),
                     predicate: Some(Box::new(check_expr(predicate))),
                 }];
                 t.checks = vec![CheckModel {
@@ -906,6 +909,7 @@ async fn plan_from_database_canonicalizes_legacy_index_predicate() {
                     nulls: Vec::new(),
                     collations: Vec::new(),
                     operator_classes: Vec::new(),
+                    prefix_lengths: Vec::new(),
                     predicate: Some(Box::new(predicate)),
                 }];
                 t
@@ -964,6 +968,7 @@ async fn plan_from_database_canonicalizes_legacy_index_expression() {
                     nulls: Vec::new(),
                     collations: Vec::new(),
                     operator_classes: Vec::new(),
+                    prefix_lengths: Vec::new(),
                     predicate: None,
                 }];
                 t

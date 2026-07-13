@@ -1925,6 +1925,10 @@ fn print_schema_capabilities(capabilities: SchemaCapabilities) {
         "indexes.operator_classes={}",
         capabilities.indexes.operator_classes
     );
+    println!(
+        "indexes.prefix_lengths={}",
+        capabilities.indexes.prefix_lengths
+    );
 }
 
 impl BackendKind {

@@ -4,8 +4,8 @@ use mysql_async::{params, prelude::Queryable};
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ExprNode, ForeignKeyAction,
     ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
-    IdentityModel, IndexDirection, IndexMethod, IndexModel, SchemaModel, SourceRef, SqlType,
-    TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
+    IdentityModel, IndexDirection, IndexMethod, IndexModel, IndexPrefixLength, SchemaModel,
+    SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
 };
 
 use crate::MysqlError;
@@ -598,7 +598,7 @@ async fn indexes(
     let rows = conn
         .exec_map(
             "\
-SELECT INDEX_NAME, NON_UNIQUE, INDEX_TYPE, COLUMN_NAME, COLLATION
+SELECT INDEX_NAME, NON_UNIQUE, INDEX_TYPE, COLUMN_NAME, COLLATION, SUB_PART
 FROM information_schema.STATISTICS s
 LEFT JOIN information_schema.TABLE_CONSTRAINTS tc
   ON tc.TABLE_SCHEMA = s.TABLE_SCHEMA
@@ -614,20 +614,21 @@ ORDER BY INDEX_NAME, SEQ_IN_INDEX",
                 "schema" => &table_ref.schema,
                 "table" => &table_ref.name,
             },
-            |(name, non_unique, index_type, column, collation): (
+            |(name, non_unique, index_type, column, collation, sub_part): (
                 String,
                 u8,
                 String,
                 Option<String>,
                 Option<String>,
-            )| { (name, non_unique, index_type, column, collation) },
+                Option<u32>,
+            )| { (name, non_unique, index_type, column, collation, sub_part) },
         )
         .await
         .map_err(MysqlError::Introspect)?;
 
     let mut grouped = BTreeMap::<String, IndexModel>::new();
     let mut has_expression = std::collections::BTreeSet::<String>::new();
-    for (name, non_unique, index_type, column, collation) in rows {
+    for (name, non_unique, index_type, column, collation, sub_part) in rows {
         // A functional key part has a NULL `COLUMN_NAME`; mark the whole index for removal.
         let Some(column) = column else {
             has_expression.insert(name);
@@ -644,10 +645,20 @@ ORDER BY INDEX_NAME, SEQ_IN_INDEX",
             nulls: Vec::new(),
             collations: Vec::new(),
             operator_classes: Vec::new(),
+            prefix_lengths: Vec::new(),
             predicate: None,
         });
+        // `SUB_PART` is the number of indexed characters/bytes for a prefix key part (`col(n)`), or NULL
+        // when the whole column is indexed. Record it by zero-based key-term position so the renderer can
+        // reproduce `col(n)`; a full-column part is left absent (a sparse list, like collations).
+        let position = index.columns.len();
         index.columns.push(column);
         index.directions.push(index_direction(collation.as_deref()));
+        if let Some(length) = sub_part {
+            index
+                .prefix_lengths
+                .push(IndexPrefixLength { position, length });
+        }
     }
     grouped.retain(|name, _| !has_expression.contains(name));
 
