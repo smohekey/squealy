@@ -531,6 +531,60 @@ fn rejects_reserved_object_name_prefix() {
     }
 }
 
+#[test]
+fn rejects_index_column_prefix_lengths() {
+    // Prefix indexes (`col(n)`) are MySQL-only; SQLite cannot render one, so a model carrying the
+    // metadata (e.g. a package authored against MySQL, deployed cross-dialect) must be rejected rather
+    // than silently rendered as a full-column index (git-bug 0e296c4).
+    use squealy::{
+        ColumnModel, DatabaseModel, IndexModel, IndexPrefixLength, SchemaModel, SqlType, TableModel,
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    comment: None,
+                    ty: SqlType::Text,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_tenants_slug".to_owned(),
+                    columns: vec!["slug".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: None,
+                    directions: Vec::new(),
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    prefix_lengths: vec![IndexPrefixLength {
+                        position: 0,
+                        length: 10,
+                    }],
+                    predicate: None,
+                }],
+            }],
+            views: Vec::new(),
+        }],
+    };
+    let mut sql = Vec::new();
+    let error = Sqlite.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
 /// A `q0_0.<column>` reference, the alias every single-source view body uses.
 fn view_col(column: &str) -> squealy::ExprNode {
     squealy::ExprNode::Column {

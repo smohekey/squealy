@@ -3839,3 +3839,54 @@ fn postgres_insert_select_renders() {
          SELECT q0_0.\"name\" AS \"name\" FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"id\" > $1)"
     );
 }
+
+#[test]
+fn postgres_rejects_index_column_prefix_lengths() {
+    // Prefix indexes (`col(n)`) are MySQL-only; PostgreSQL uses expression indexes instead. A model
+    // carrying the metadata (e.g. a package authored against MySQL, deployed cross-dialect) must be
+    // rejected rather than silently rendered as a full-column index (git-bug 0e296c4).
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("public".to_owned()),
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    comment: None,
+                    ty: SqlType::Text,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_tenants_slug".to_owned(),
+                    columns: vec!["slug".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: None,
+                    directions: Vec::new(),
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    prefix_lengths: vec![IndexPrefixLength {
+                        position: 0,
+                        length: 10,
+                    }],
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+    let mut sql = Vec::new();
+    let error = Postgres.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}

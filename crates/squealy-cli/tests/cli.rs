@@ -115,6 +115,7 @@ fn postgres_capabilities_are_printed() {
     assert_capability(&stdout, "indexes.null_ordering=true");
     assert_capability(&stdout, "indexes.collations=true");
     assert_capability(&stdout, "indexes.operator_classes=true");
+    assert_capability(&stdout, "indexes.prefix_lengths=false");
 }
 
 #[test]
@@ -143,6 +144,7 @@ fn mysql_capabilities_are_printed() {
     assert_capability(&stdout, "indexes.null_ordering=false");
     assert_capability(&stdout, "indexes.collations=false");
     assert_capability(&stdout, "indexes.operator_classes=false");
+    assert_capability(&stdout, "indexes.prefix_lengths=true");
 }
 
 #[test]
