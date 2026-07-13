@@ -705,6 +705,16 @@ fn validate_capabilities(
                         "an `ON UPDATE` auto-update attribute",
                     );
                 }
+                // For a backend that *does* carry the attribute, still reject a malformed value here so
+                // the preflight does not approve a package the renderer would reject at publish time.
+                if capabilities.columns.on_update
+                    && let Some(reason) = column.on_update_shape_error()
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("{reason} for column `{}` on `{}`", column.name, table.name),
+                    ));
+                }
             }
             for foreign_key in &table.foreign_keys {
                 if foreign_key.match_type.is_some()
@@ -1478,16 +1488,21 @@ mod tests {
         );
 
         // A backend that reports the capability accepts it.
-        render_create_sql(
-            &model,
-            &TestBackend {
-                capabilities: SchemaCapabilities {
-                    columns: ColumnCapabilities { on_update: true },
-                    ..SchemaCapabilities::default()
-                },
+        let on_update_capable = TestBackend {
+            capabilities: SchemaCapabilities {
+                columns: ColumnCapabilities { on_update: true },
+                ..SchemaCapabilities::default()
             },
-        )
-        .expect("a backend reporting the column capability renders");
+        };
+        render_create_sql(&model, &on_update_capable)
+            .expect("a backend reporting the column capability renders");
+
+        // Even a capable backend rejects a malformed value (here a non-temporal column) in preflight, so
+        // `check` does not approve a package the renderer would reject at publish time.
+        let mut malformed = model;
+        malformed.schemas[0].tables[0].columns[0].ty = SqlType::I32;
+        let error = check_create(&malformed, &on_update_capable).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]
