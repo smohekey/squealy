@@ -22,9 +22,10 @@ use squealy::{
     DateField, DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     FrameBound, FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage, IdentityMode,
     IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
-    IndexOperatorClass, JoinItem, JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls,
-    ProjectionItem, ScalarFunc, SchemaModel, SourceItem, SourceRef, SqlType, TableModel, ViewBody,
-    ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp, WindowFunc, WindowOrderTerm,
+    IndexOperatorClass, IndexPrefixLength, JoinItem, JoinKind, LogicalOp, OrderDirection,
+    OrderItem, OrderNulls, ProjectionItem, ScalarFunc, SchemaModel, SourceItem, SourceRef, SqlType,
+    TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp, WindowFunc,
+    WindowOrderTerm,
 };
 
 use crate::{CastColumn, RefactorLog, RefactorOperation, RenameColumn, RenameTable};
@@ -1276,6 +1277,7 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
         || !index.nulls.is_empty()
         || !index.collations.is_empty()
         || !index.operator_classes.is_empty()
+        || !index.prefix_lengths.is_empty()
         || index.predicate.is_some()
     {
         let mut children = KdlDocument::new();
@@ -1322,6 +1324,11 @@ fn index_to_node(index: &IndexModel) -> KdlNode {
                 .nodes_mut()
                 .push(index_operator_class_to_node(operator_class));
         }
+        for prefix_length in &index.prefix_lengths {
+            children
+                .nodes_mut()
+                .push(index_prefix_length_to_node(prefix_length));
+        }
         node.set_children(children);
     }
     node
@@ -1340,6 +1347,17 @@ fn index_operator_class_to_node(operator_class: &IndexOperatorClass) -> KdlNode 
         operator_class.position as i128,
     )));
     node.push(KdlEntry::new(operator_class.name.clone()));
+    node
+}
+
+fn index_prefix_length_to_node(prefix_length: &IndexPrefixLength) -> KdlNode {
+    let mut node = KdlNode::new("prefix-length");
+    node.push(KdlEntry::new(KdlValue::Integer(
+        prefix_length.position as i128,
+    )));
+    node.push(KdlEntry::new(KdlValue::Integer(
+        prefix_length.length as i128,
+    )));
     node
 }
 
@@ -2210,6 +2228,9 @@ fn index_from_node(node: &KdlNode) -> Result<IndexModel, PackageError> {
         operator_classes: child_nodes(node, "operator-class")
             .map(index_operator_class_from_node)
             .collect::<Result<Vec<_>, _>>()?,
+        prefix_lengths: child_nodes(node, "prefix-length")
+            .map(index_prefix_length_from_node)
+            .collect::<Result<Vec<_>, _>>()?,
         predicate: index_predicate_from_node(node)?,
     })
 }
@@ -2638,6 +2659,27 @@ fn index_collation_from_node(node: &KdlNode) -> Result<IndexCollation, PackageEr
     Ok(IndexCollation { position, name })
 }
 
+fn index_prefix_length_from_node(node: &KdlNode) -> Result<IndexPrefixLength, PackageError> {
+    let mut args = node
+        .entries()
+        .iter()
+        .filter(|entry| entry.name().is_none())
+        .map(KdlEntry::value);
+    let position = args
+        .next()
+        .and_then(KdlValue::as_integer)
+        .ok_or_else(|| malformed("`prefix-length` is missing integer position"))?;
+    let position = usize::try_from(position)
+        .map_err(|_| malformed("`prefix-length` position is out of range for usize"))?;
+    let length = args
+        .next()
+        .and_then(KdlValue::as_integer)
+        .ok_or_else(|| malformed("`prefix-length` is missing integer length"))?;
+    let length = u32::try_from(length)
+        .map_err(|_| malformed("`prefix-length` length is out of range for u32"))?;
+    Ok(IndexPrefixLength { position, length })
+}
+
 fn positioned_index_metadata_from_node(
     node: &KdlNode,
     kind: &str,
@@ -2762,6 +2804,7 @@ mod tests {
                             nulls: Vec::new(),
                             collations: Vec::new(),
                             operator_classes: Vec::new(),
+                            prefix_lengths: Vec::new(),
                             predicate: None,
                         }],
                     },
@@ -4246,6 +4289,7 @@ mod tests {
                 nulls: Vec::new(),
                 collations: Vec::new(),
                 operator_classes: Vec::new(),
+                prefix_lengths: Vec::new(),
                 predicate: Some(Box::new(squealy::ExprNode::IsNull {
                     negated: true,
                     operand: Box::new(squealy::ExprNode::BareColumn {
@@ -4312,6 +4356,10 @@ mod tests {
                             position: 0,
                             name: "text_pattern_ops".to_owned(),
                         }],
+                        prefix_lengths: vec![IndexPrefixLength {
+                            position: 0,
+                            length: 8,
+                        }],
                         predicate: None,
                     }],
                 }],
@@ -4351,6 +4399,7 @@ mod tests {
                         nulls: vec![IndexNullsOrder::Last],
                         collations: Vec::new(),
                         operator_classes: Vec::new(),
+                        prefix_lengths: Vec::new(),
                         predicate: None,
                     }],
                 }],

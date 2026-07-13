@@ -729,6 +729,14 @@ fn write_index_columns(index: &IndexModel, writer: &mut impl Write) -> io::Resul
             writer.write_all(b", ")?;
         }
         write_quoted_ident(column, writer)?;
+        // A prefix index keys only a leading `length`-character/byte prefix of the column: `col(length)`.
+        if let Some(prefix) = index
+            .prefix_lengths
+            .iter()
+            .find(|prefix| prefix.position == position)
+        {
+            write!(writer, "({})", prefix.length)?;
+        }
         match index.directions.get(position) {
             Some(squealy::IndexDirection::Asc) => writer.write_all(b" ASC")?,
             Some(squealy::IndexDirection::Desc) => writer.write_all(b" DESC")?,

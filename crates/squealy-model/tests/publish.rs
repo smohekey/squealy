@@ -570,6 +570,7 @@ fn rich_model() -> DatabaseModel {
                         nulls: vec![IndexNullsOrder::First],
                         collations: Vec::new(),
                         operator_classes: Vec::new(),
+                        prefix_lengths: Vec::new(),
                         // PostgreSQL deparses this partial-index predicate as `(quota > (0)::numeric)`; the
                         // reverse parser strips the redundant unbounded-numeric cast on the integer literal,
                         // so the canonical structural form is `quota > 0`.
@@ -681,6 +682,7 @@ fn rich_model() -> DatabaseModel {
                             position: 0,
                             name: "text_pattern_ops".to_owned(),
                         }],
+                        prefix_lengths: Vec::new(),
                         predicate: None,
                     }],
                 },

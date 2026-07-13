@@ -567,9 +567,9 @@ pub use squealy_ir::{
     DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, FrameBound,
     FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
     IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
-    JoinItem, JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem,
-    ScalarFunc, SchemaModel, SourceItem, SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel,
-    ViewModel, ViewQueryModel, ViewSetOp, WindowFunc, WindowOrderTerm,
+    IndexPrefixLength, JoinItem, JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls,
+    ProjectionItem, ScalarFunc, SchemaModel, SourceItem, SourceRef, SqlType, TableModel, ViewBody,
+    ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp, WindowFunc, WindowOrderTerm,
     fold_like_case_insensitivity, map_cast_types, normalize_expr, visit_scope_exprs,
 };
 pub use squealy_macros::{CTE, ColumnType, Database, RecursiveCTE, Schema, Table, View};

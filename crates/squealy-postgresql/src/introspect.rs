@@ -685,6 +685,8 @@ ORDER BY idx.relname",
                 nulls,
                 collations,
                 operator_classes,
+                // PostgreSQL has no column-prefix indexes (`col(n)`); it uses expression indexes instead.
+                prefix_lengths: Vec::new(),
                 predicate: row.get::<_, Option<String>>(11).map(|predicate| {
                     Box::new(
                         squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)

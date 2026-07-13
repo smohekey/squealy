@@ -404,6 +404,7 @@ fn index(name: &str, columns: &[&str]) -> IndexModel {
         nulls: vec![],
         collations: vec![],
         operator_classes: vec![],
+        prefix_lengths: Vec::new(),
         predicate: None,
     }
 }

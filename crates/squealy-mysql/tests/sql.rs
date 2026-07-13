@@ -96,6 +96,7 @@ fn mysql_renders_incremental_schema_plan() {
                         nulls: Vec::new(),
                         collations: Vec::new(),
                         operator_classes: Vec::new(),
+                        prefix_lengths: Vec::new(),
                         predicate: None,
                     }],
                 }),
@@ -131,6 +132,7 @@ fn mysql_renders_incremental_schema_plan() {
                         nulls: Vec::new(),
                         collations: Vec::new(),
                         operator_classes: Vec::new(),
+                        prefix_lengths: Vec::new(),
                         predicate: None,
                     },
                 }),
@@ -269,6 +271,7 @@ fn mysql_renders_changed_constraints_and_indexes_in_schema_plan() {
                         nulls: Vec::new(),
                         collations: Vec::new(),
                         operator_classes: Vec::new(),
+                        prefix_lengths: Vec::new(),
                         predicate: None,
                     },
                     after: IndexModel {
@@ -282,6 +285,7 @@ fn mysql_renders_changed_constraints_and_indexes_in_schema_plan() {
                         nulls: Vec::new(),
                         collations: Vec::new(),
                         operator_classes: Vec::new(),
+                        prefix_lengths: Vec::new(),
                         predicate: None,
                     },
                 }),
@@ -890,6 +894,7 @@ fn mysql_rejects_partial_index_predicates() {
                     nulls: Vec::new(),
                     collations: Vec::new(),
                     operator_classes: Vec::new(),
+                    prefix_lengths: Vec::new(),
                     predicate: Some(Box::new(squealy::ExprNode::Compare {
                         op: squealy::CompareOp::GreaterThan,
                         left: Box::new(squealy::ExprNode::BareColumn {
@@ -946,6 +951,7 @@ fn mysql_rejects_expression_indexes() {
                     nulls: Vec::new(),
                     collations: Vec::new(),
                     operator_classes: Vec::new(),
+                    prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
             }],
@@ -1003,6 +1009,7 @@ fn mysql_rejects_covering_index_include_columns() {
                     nulls: Vec::new(),
                     collations: Vec::new(),
                     operator_classes: Vec::new(),
+                    prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
             }],
@@ -1048,6 +1055,7 @@ fn mysql_rejects_index_null_ordering() {
                     nulls: vec![IndexNullsOrder::First],
                     collations: Vec::new(),
                     operator_classes: Vec::new(),
+                    prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
             }],
@@ -1096,6 +1104,7 @@ fn mysql_rejects_index_operator_classes() {
                         position: 0,
                         name: "text_pattern_ops".to_owned(),
                     }],
+                    prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
             }],
@@ -1144,6 +1153,7 @@ fn mysql_rejects_index_collations() {
                         name: "C".to_owned(),
                     }],
                     operator_classes: Vec::new(),
+                    prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
             }],
@@ -1153,6 +1163,60 @@ fn mysql_rejects_index_collations() {
     let mut sql = Vec::new();
     let error = Mysql.render_create(&model, &mut sql).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mysql_renders_index_column_prefix_lengths() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    comment: None,
+                    ty: SqlType::Text,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![IndexModel {
+                    name: "idx_tenants_slug".to_owned(),
+                    columns: vec!["slug".to_owned()],
+                    expressions: Vec::new(),
+                    include_columns: Vec::new(),
+                    unique: false,
+                    method: None,
+                    directions: Vec::new(),
+                    nulls: Vec::new(),
+                    collations: Vec::new(),
+                    operator_classes: Vec::new(),
+                    prefix_lengths: vec![IndexPrefixLength {
+                        position: 0,
+                        length: 10,
+                    }],
+                    predicate: None,
+                }],
+            }],
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Mysql.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains("CREATE INDEX `idx_tenants_slug` ON `shop`.`tenants` (`slug`(10))"),
+        "unexpected SQL: {sql}"
+    );
 }
 
 /// Builds a single-column `id` table optionally referencing `references_table` via a foreign key, for

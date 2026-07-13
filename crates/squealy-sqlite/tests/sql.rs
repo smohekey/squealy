@@ -333,6 +333,7 @@ fn rejects_index_name_collision_across_tables() {
         nulls: Vec::new(),
         collations: Vec::new(),
         operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
         predicate: None,
     };
     let table = |name: &str| TableModel {

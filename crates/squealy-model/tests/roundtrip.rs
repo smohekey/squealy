@@ -952,6 +952,7 @@ fn corpus() -> Vec<(&'static str, DatabaseModel)> {
         nulls: Vec::new(),
         collations: Vec::new(),
         operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
         predicate: Some(Box::new(ExprNode::Compare {
             op: CompareOp::Equals,
             left: Box::new(bare("level")),
