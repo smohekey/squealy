@@ -1219,6 +1219,101 @@ fn mysql_renders_index_column_prefix_lengths() {
     );
 }
 
+/// Builds a single-`slug`-column table carrying one index whose fields are set by `mutate`, then
+/// renders it and returns the result (used by the prefix-length rejection tests).
+fn render_prefix_index_model(mutate: impl FnOnce(&mut IndexModel)) -> std::io::Result<Vec<u8>> {
+    let mut index = IndexModel {
+        name: "idx_tenants_slug".to_owned(),
+        columns: vec!["slug".to_owned()],
+        expressions: Vec::new(),
+        include_columns: Vec::new(),
+        unique: false,
+        method: None,
+        directions: Vec::new(),
+        nulls: Vec::new(),
+        collations: Vec::new(),
+        operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
+        predicate: None,
+    };
+    mutate(&mut index);
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "tenants".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "slug".to_owned(),
+                    comment: None,
+                    ty: SqlType::Text,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: vec![index],
+            }],
+        }],
+    };
+    let mut sql = Vec::new();
+    Mysql.render_create(&model, &mut sql)?;
+    Ok(sql)
+}
+
+#[test]
+fn mysql_rejects_a_unique_prefix_index_it_cannot_round_trip() {
+    // MySQL exposes a unique index as a `UNIQUE` constraint (no prefix length in introspection), so a
+    // unique prefix index cannot round-trip; the renderer rejects it rather than emit churning DDL.
+    let error = render_prefix_index_model(|index| {
+        index.unique = true;
+        index.prefix_lengths = vec![IndexPrefixLength {
+            position: 0,
+            length: 10,
+        }];
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mysql_rejects_prefix_length_for_a_nonexistent_key_position() {
+    // A KDL package could carry `prefix-length 1 10` for a one-column index; the out-of-range position
+    // would silently render without its `(n)`, so it is rejected.
+    let error = render_prefix_index_model(|index| {
+        index.prefix_lengths = vec![IndexPrefixLength {
+            position: 1,
+            length: 10,
+        }];
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mysql_rejects_duplicate_prefix_lengths_for_one_key_position() {
+    let error = render_prefix_index_model(|index| {
+        index.prefix_lengths = vec![
+            IndexPrefixLength {
+                position: 0,
+                length: 10,
+            },
+            IndexPrefixLength {
+                position: 0,
+                length: 20,
+            },
+        ];
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
 /// Builds a single-column `id` table optionally referencing `references_table` via a foreign key, for
 /// the multi-table create-ordering test below.
 fn fk_test_table(name: &str, references_table: Option<&str>) -> Box<TableModel> {

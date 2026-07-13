@@ -704,6 +704,48 @@ fn write_create_index(
             "MySQL does not support index collation overrides",
         ));
     }
+    if !index.prefix_lengths.is_empty() {
+        // Every prefix length must reference a real key-term position (and only once), or the term it
+        // names would silently render without its `(n)`. Validate before emitting SQL.
+        let mut seen = std::collections::HashSet::new();
+        for prefix in &index.prefix_lengths {
+            if prefix.position >= index.columns.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "index `{}` has a prefix length for key position {} but only {} column(s)",
+                        index.name,
+                        prefix.position,
+                        index.columns.len()
+                    ),
+                ));
+            }
+            if !seen.insert(prefix.position) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "index `{}` has duplicate prefix lengths for key position {}",
+                        index.name, prefix.position
+                    ),
+                ));
+            }
+        }
+        // A unique index renders `CREATE UNIQUE INDEX`, which MySQL exposes as a `UNIQUE` row in
+        // `information_schema.TABLE_CONSTRAINTS`; introspection reconstructs it as a neutral unique
+        // `Constraint`, which carries no prefix length. So a unique prefix index cannot round-trip
+        // (it would replan as prefix-less churn). Reject it rather than emit un-introspectable DDL;
+        // full support needs a prefix on the unique-constraint model (git-bug follow-up).
+        if index.unique {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "MySQL cannot round-trip a unique index with column prefix lengths \
+                     (index `{}`): it introspects back as a unique constraint without the prefix",
+                    index.name
+                ),
+            ));
+        }
+    }
 
     writer.write_all(b"CREATE ")?;
     if index.unique {
