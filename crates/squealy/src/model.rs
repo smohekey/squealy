@@ -323,6 +323,7 @@ fn index_from_dyn(table: &str, index: &dyn Index) -> IndexModel {
         nulls: Vec::new(),
         collations: Vec::new(),
         operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
         predicate: index.predicate().map(|predicate| Box::new(predicate())),
     }
 }
@@ -346,6 +347,7 @@ fn partial_unique_index(
         nulls: Vec::new(),
         collations: Vec::new(),
         operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
         predicate: Some(Box::new(predicate())),
     }
 }

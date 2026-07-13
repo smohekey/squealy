@@ -205,6 +205,7 @@ impl squealy::SchemaBackend for Postgres {
                 null_ordering: true,
                 collations: true,
                 operator_classes: true,
+                prefix_lengths: false,
             },
         }
     }

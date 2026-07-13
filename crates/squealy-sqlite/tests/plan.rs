@@ -338,6 +338,7 @@ fn rebuild_recreates_the_target_indexes() {
         nulls: Vec::new(),
         collations: Vec::new(),
         operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
         predicate: None,
     };
     let mut actual_table = table(
@@ -912,6 +913,7 @@ async fn rebuild_with_concurrent_index_option_does_not_double_create() {
         nulls: Vec::new(),
         collations: Vec::new(),
         operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
         predicate: None,
     });
 
@@ -1094,6 +1096,7 @@ fn rejects_a_target_with_a_duplicate_index_name() {
         nulls: Vec::new(),
         collations: Vec::new(),
         operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
         predicate: None,
     };
     let mut target = table(
@@ -1131,6 +1134,7 @@ async fn applies_an_index_name_swap_between_tables() {
         nulls: Vec::new(),
         collations: Vec::new(),
         operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
         predicate: None,
     };
     let (mut connection, raw) = setup().await;
@@ -1303,6 +1307,7 @@ async fn drops_a_table_before_reusing_its_name_for_an_index() {
         nulls: Vec::new(),
         collations: Vec::new(),
         operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
         predicate: None,
     };
     let (mut connection, raw) = setup().await;

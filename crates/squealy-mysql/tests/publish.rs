@@ -564,6 +564,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                     nulls: Vec::new(),
                     collations: Vec::new(),
                     operator_classes: Vec::new(),
+                    prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
             },
@@ -721,6 +722,7 @@ fn rich_mysql_model() -> DatabaseModel {
                         nulls: Vec::new(),
                         collations: Vec::new(),
                         operator_classes: Vec::new(),
+                        prefix_lengths: Vec::new(),
                         predicate: None,
                     }],
                 },
@@ -891,6 +893,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                     nulls: Vec::new(),
                     collations: Vec::new(),
                     operator_classes: Vec::new(),
+                    prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
             },
@@ -1136,6 +1139,82 @@ async fn introspects_an_enum_column_and_a_functional_index_without_crashing() {
 
     connection
         .execute_ddl("DROP SCHEMA IF EXISTS `catalog_enum`")
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore]
+async fn introspects_and_round_trips_an_index_column_prefix_length() {
+    // A prefix index (`INDEX(name(10))`) records the indexed prefix length in
+    // `information_schema.STATISTICS.SUB_PART`. Dropping it read the index back as a full-column index,
+    // so re-rendering produced a wider index and the plan never converged. Introspection must recover
+    // the prefix length and re-planning against the published schema must be empty.
+    let _db_guard = db_lock().lock().await;
+    let mut connection = Mysql
+        .connect(&database_url())
+        .await
+        .expect("connect to MySQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog_prefix`")
+        .await
+        .expect("drop schema");
+    connection
+        .execute_ddl("CREATE SCHEMA `catalog_prefix`")
+        .await
+        .expect("create schema");
+    connection
+        .execute_ddl(
+            "CREATE TABLE `catalog_prefix`.`items` (\
+`id` INT NOT NULL PRIMARY KEY, \
+`name` VARCHAR(255) NOT NULL, \
+INDEX `items_name_prefix` (`name`(10)))",
+        )
+        .await
+        .expect("create table with a prefix index");
+
+    let actual = squealy_model::introspect(&mut connection)
+        .await
+        .expect("introspect prefix index");
+    let index = actual
+        .schemas
+        .iter()
+        .find(|schema| schema.name.as_deref() == Some("catalog_prefix"))
+        .and_then(|schema| schema.tables.iter().find(|table| table.name == "items"))
+        .and_then(|table| {
+            table
+                .indexes
+                .iter()
+                .find(|index| index.name == "items_name_prefix")
+        })
+        .expect("prefix index should be introspected");
+    assert_eq!(
+        index.prefix_lengths,
+        vec![IndexPrefixLength {
+            position: 0,
+            length: 10,
+        }],
+        "the index prefix length must be recovered, got: {:?}",
+        index,
+    );
+
+    // Re-planning the introspected model against the same database must converge to an empty plan —
+    // the prefix index round-trips exactly.
+    let plan = squealy_model::plan_from_database(
+        &actual,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan against published schema");
+    assert!(
+        plan.steps.is_empty(),
+        "expected empty plan for a round-tripped prefix index, got: {:?}",
+        plan.steps
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog_prefix`")
         .await
         .expect("cleanup");
 }

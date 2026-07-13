@@ -1171,6 +1171,12 @@ fn write_create_index(table: &str, index: &IndexModel, writer: &mut impl Write) 
             "SQLite index null ordering is not supported yet",
         ));
     }
+    if !index.prefix_lengths.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "SQLite does not support index column prefix lengths",
+        ));
+    }
     if index.method.is_some() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
