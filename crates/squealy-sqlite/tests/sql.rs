@@ -632,6 +632,51 @@ fn rejects_on_update_current_timestamp() {
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
 }
 
+#[test]
+fn rejects_on_update_on_an_autoincrement_primary_key_column() {
+    // An integer AUTOINCREMENT primary-key column is rendered by the `INTEGER PRIMARY KEY AUTOINCREMENT`
+    // special case, which bypasses the general column renderer, so it must reject `on_update` too rather
+    // than silently drop it and rebuild the table on every plan (git-bug 7f4504d).
+    use squealy::{
+        ColumnModel, Constraint, DatabaseModel, ExprNode, IdentityMode, IdentityModel, SchemaModel,
+        SqlType, TableModel,
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![TableModel {
+                name: "events".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "id".to_owned(),
+                    comment: None,
+                    ty: SqlType::I64,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: Some(IdentityModel {
+                        mode: IdentityMode::AutoIncrement,
+                    }),
+                    generated: None,
+                    on_update: Some(Box::new(ExprNode::Now)),
+                }],
+                primary_key: Some(Constraint {
+                    name: "pk".to_owned(),
+                    columns: vec!["id".to_owned()],
+                }),
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+            views: Vec::new(),
+        }],
+    };
+    let mut sql = Vec::new();
+    let error = Sqlite.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
 /// A `q0_0.<column>` reference, the alias every single-source view body uses.
 fn view_col(column: &str) -> squealy::ExprNode {
     squealy::ExprNode::Column {
