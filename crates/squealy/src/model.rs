@@ -288,6 +288,9 @@ fn column_from_dyn(column: &dyn Column) -> ColumnModel {
             expression: None,
             storage: GeneratedStorage::Unknown,
         }),
+        // The derive macro has no `ON UPDATE` attribute; the value arrives only from introspection or a
+        // KDL package.
+        on_update: None,
     }
 }
 

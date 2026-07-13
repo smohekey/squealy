@@ -1048,6 +1048,18 @@ pub(crate) mod ddl {
             writer.write_all(b" DEFAULT ")?;
             write_default_value(default, writer)?;
         }
+        if column.on_update.is_some() {
+            // `ON UPDATE CURRENT_TIMESTAMP` is a MySQL-only column attribute. The incremental plan
+            // render path does not validate capabilities, so reject it here rather than silently
+            // dropping it (mirrors how the other backend-specific column features are rejected).
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "PostgreSQL does not support an `ON UPDATE` column attribute (column `{}`)",
+                    column.name
+                ),
+            ));
+        }
         // Fixed-width binary has no native PostgreSQL type, so enforce the width with a named inline
         // CHECK on `octet_length`. Introspection folds this named check back into `FixedBytes(N)` (see
         // `introspect`), so it never appears as a standalone check in the model — keeping publish/status
@@ -1560,6 +1572,7 @@ mod tests {
                             expression: None,
                             storage: GeneratedStorage::Stored,
                         }),
+                        on_update: None,
                     }],
                     primary_key: None,
                     foreign_keys: vec![],

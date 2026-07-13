@@ -1187,6 +1187,11 @@ fn column_to_node(column: &ColumnModel) -> KdlNode {
             node.push(KdlEntry::new_prop("default-value", value));
         }
     }
+    // MySQL `ON UPDATE CURRENT_TIMESTAMP`, stored structurally (an `on-update-expr { … }` child) like
+    // `generated-expr`, so it round-trips as the same `ExprNode`.
+    if let Some(on_update) = &column.on_update {
+        push_child(&mut node, wrap_expr("on-update-expr", on_update));
+    }
     node
 }
 
@@ -2154,7 +2159,18 @@ fn column_from_node(node: &KdlNode) -> Result<ColumnModel, PackageError> {
         default,
         identity: identity_from_node(node)?,
         generated: generated_from_node(node)?,
+        on_update: on_update_from_node(node)?,
     })
+}
+
+/// Reads a column's MySQL `ON UPDATE CURRENT_TIMESTAMP` expression from its structural
+/// `on-update-expr { … }` child (the inverse of the `on-update-expr` write in [`column_to_node`]).
+fn on_update_from_node(node: &KdlNode) -> Result<Option<Box<ExprNode>>, PackageError> {
+    child_nodes(node, "on-update-expr")
+        .next()
+        .map(first_child_expr)
+        .transpose()
+        .map(|expr| expr.map(Box::new))
 }
 
 fn constraint_from_node(node: &KdlNode) -> Result<Constraint, PackageError> {
@@ -2756,6 +2772,7 @@ mod tests {
                                     mode: IdentityMode::ByDefault,
                                 }),
                                 generated: None,
+                                on_update: None,
                             },
                             ColumnModel {
                                 name: "slug".to_owned(),
@@ -2766,6 +2783,7 @@ mod tests {
                                 default: Some(DefaultValue::Text("acme".to_owned())),
                                 identity: None,
                                 generated: None,
+                                on_update: None,
                             },
                             ColumnModel {
                                 name: "metadata".to_owned(),
@@ -2776,6 +2794,7 @@ mod tests {
                                 default: Some(DefaultValue::Raw("'{}'::jsonb".to_owned())),
                                 identity: None,
                                 generated: None,
+                                on_update: None,
                             },
                         ],
                         primary_key: Some(Constraint {
@@ -2821,6 +2840,7 @@ mod tests {
                                 default: None,
                                 identity: None,
                                 generated: None,
+                                on_update: None,
                             },
                             // A fixed-width binary column exercises the `FixedBytes(N)` KDL round-trip.
                             ColumnModel {
@@ -2832,6 +2852,7 @@ mod tests {
                                 default: None,
                                 identity: None,
                                 generated: None,
+                                on_update: None,
                             },
                         ],
                         primary_key: None,
@@ -3798,6 +3819,7 @@ mod tests {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     }],
                     primary_key: None,
                     foreign_keys: vec![ForeignKeyModel {
@@ -3872,6 +3894,7 @@ mod tests {
                 default: None,
                 identity: None,
                 generated: None,
+                on_update: None,
             })
             .collect();
 
@@ -3911,6 +3934,7 @@ mod tests {
                     mode: IdentityMode::Always,
                 }),
                 generated: None,
+                on_update: None,
             },
             ColumnModel {
                 name: "id_by_default".to_owned(),
@@ -3923,6 +3947,7 @@ mod tests {
                     mode: IdentityMode::ByDefault,
                 }),
                 generated: None,
+                on_update: None,
             },
             ColumnModel {
                 name: "id_auto_increment".to_owned(),
@@ -3935,6 +3960,7 @@ mod tests {
                     mode: IdentityMode::AutoIncrement,
                 }),
                 generated: None,
+                on_update: None,
             },
             ColumnModel {
                 name: "virtual_generated".to_owned(),
@@ -3948,6 +3974,7 @@ mod tests {
                     expression: Some(check_expr("length(slug)")),
                     storage: GeneratedStorage::Virtual,
                 }),
+                on_update: None,
             },
             ColumnModel {
                 name: "stored_generated".to_owned(),
@@ -3961,6 +3988,7 @@ mod tests {
                     expression: Some(check_expr("char_length(slug)")),
                     storage: GeneratedStorage::Stored,
                 }),
+                on_update: None,
             },
             ColumnModel {
                 name: "unknown_generated".to_owned(),
@@ -3974,6 +4002,7 @@ mod tests {
                     expression: None,
                     storage: GeneratedStorage::Unknown,
                 }),
+                on_update: None,
             },
         ];
         let model = DatabaseModel {
@@ -3999,6 +4028,45 @@ mod tests {
             parsed, model,
             "identity/generated round-trip diverged:\n{kdl}"
         );
+    }
+
+    #[test]
+    fn kdl_round_trips_on_update_current_timestamp() {
+        // A MySQL `ON UPDATE CURRENT_TIMESTAMP` column serializes its structural `on-update-expr` child
+        // and reads back as the same `ExprNode`.
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                views: Vec::new(),
+                tables: vec![TableModel {
+                    name: "events".to_owned(),
+                    comment: None,
+                    columns: vec![ColumnModel {
+                        name: "updated_at".to_owned(),
+                        comment: None,
+                        ty: SqlType::Timestamp {
+                            tz: false,
+                            precision: None,
+                        },
+                        collation: None,
+                        nullable: false,
+                        default: Some(DefaultValue::CurrentTimestamp),
+                        identity: None,
+                        generated: None,
+                        on_update: Some(Box::new(ExprNode::Now)),
+                    }],
+                    primary_key: None,
+                    foreign_keys: vec![],
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        let parsed = from_kdl(&kdl).expect("parse");
+        assert_eq!(parsed, model, "on_update round-trip diverged:\n{kdl}");
     }
 
     #[test]

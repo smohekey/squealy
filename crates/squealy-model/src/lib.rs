@@ -928,6 +928,7 @@ mod tests {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     }],
                     primary_key: None,
                     foreign_keys: vec![],
@@ -1188,6 +1189,7 @@ mod tests {
             default: Some(squealy::DefaultValue::Bool(true)),
             identity: None,
             generated: None,
+            on_update: None,
         });
 
         let canonical = canonicalize_model(&CanonBackend, &model);
@@ -1236,6 +1238,7 @@ mod tests {
                 mode: squealy::IdentityMode::ByDefault,
             }),
             generated: None,
+            on_update: None,
         });
         model.schemas[0].tables[0].primary_key = Some(Constraint {
             name: "pk_memberships".to_owned(),

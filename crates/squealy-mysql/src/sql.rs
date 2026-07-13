@@ -462,6 +462,9 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
         writer.write_all(b" DEFAULT ")?;
         write_default_value(default, &column.ty, writer)?;
     }
+    if let Some(on_update) = &column.on_update {
+        write_on_update(&column.name, on_update, &column.ty, writer)?;
+    }
     if column.identity.is_some() {
         writer.write_all(b" AUTO_INCREMENT")?;
     }
@@ -627,6 +630,31 @@ fn write_default_value(
         }
         DefaultValue::Raw(value) => writer.write_all(value.as_bytes()),
     }
+}
+
+/// Renders a column's `ON UPDATE CURRENT_TIMESTAMP` auto-update clause. MySQL accepts only
+/// `CURRENT_TIMESTAMP` here, and forces its fractional-seconds precision to equal the column's own —
+/// so the fsp is taken from the column type (like [`write_default_value`]'s `CurrentTimestamp` arm),
+/// not from the node, and any other expression is rejected as unrepresentable.
+fn write_on_update(
+    column_name: &str,
+    on_update: &squealy::ExprNode,
+    column_ty: &SqlType,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    if !matches!(on_update, squealy::ExprNode::Now) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "MySQL only supports `ON UPDATE CURRENT_TIMESTAMP`, not another expression on column `{column_name}`"
+            ),
+        ));
+    }
+    writer.write_all(b" ON UPDATE CURRENT_TIMESTAMP")?;
+    if let Some(precision) = current_temporal_precision(column_ty) {
+        write!(writer, "({precision})")?;
+    }
+    Ok(())
 }
 
 fn write_named_constraint(
@@ -1341,6 +1369,7 @@ mod tests {
                             expression: None,
                             storage: GeneratedStorage::Stored,
                         }),
+                        on_update: None,
                     }],
                     primary_key: None,
                     foreign_keys: vec![],
@@ -1422,6 +1451,85 @@ mod tests {
             default_sql(DefaultValue::CurrentTime, time_none),
             "(CURRENT_TIME)"
         );
+    }
+
+    fn on_update_sql(ty: SqlType) -> String {
+        let mut out = Vec::new();
+        write_on_update("ts", &squealy::ExprNode::Now, &ty, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn mysql_on_update_current_timestamp_carries_column_precision() {
+        // The `ON UPDATE CURRENT_TIMESTAMP` fsp is forced to equal the column's own precision, so it is
+        // derived from the column type (like a `CURRENT_TIMESTAMP` default), not from the node.
+        assert_eq!(
+            on_update_sql(SqlType::Timestamp {
+                tz: false,
+                precision: Some(6),
+            }),
+            " ON UPDATE CURRENT_TIMESTAMP(6)"
+        );
+        // fsp 0 and an unspecified precision take the bare spelling.
+        assert_eq!(
+            on_update_sql(SqlType::Timestamp {
+                tz: false,
+                precision: Some(0),
+            }),
+            " ON UPDATE CURRENT_TIMESTAMP"
+        );
+        assert_eq!(
+            on_update_sql(SqlType::Timestamp {
+                tz: false,
+                precision: None,
+            }),
+            " ON UPDATE CURRENT_TIMESTAMP"
+        );
+    }
+
+    #[test]
+    fn mysql_column_renders_default_then_on_update() {
+        // The canonical MySQL idiom `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE
+        // CURRENT_TIMESTAMP` — the `ON UPDATE` clause follows the `DEFAULT`, both matching the column fsp.
+        use squealy::ColumnModel;
+        let column = ColumnModel {
+            name: "updated_at".to_owned(),
+            comment: None,
+            ty: SqlType::Timestamp {
+                tz: true,
+                precision: Some(3),
+            },
+            collation: None,
+            nullable: false,
+            default: Some(DefaultValue::CurrentTimestamp),
+            identity: None,
+            generated: None,
+            on_update: Some(Box::new(squealy::ExprNode::Now)),
+        };
+        let mut out = Vec::new();
+        write_column(&column, &mut out).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "`updated_at` TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)"
+        );
+    }
+
+    #[test]
+    fn mysql_rejects_a_non_current_timestamp_on_update() {
+        // MySQL accepts only `CURRENT_TIMESTAMP` in an `ON UPDATE` clause.
+        let mut out = Vec::new();
+        let error = write_on_update(
+            "ts",
+            &squealy::ExprNode::Raw("now() + interval 1 day".to_owned()),
+            &SqlType::Timestamp {
+                tz: false,
+                precision: None,
+            },
+            &mut out,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("ts"), "{error}");
     }
 
     #[test]

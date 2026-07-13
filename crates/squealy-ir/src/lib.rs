@@ -232,6 +232,20 @@ pub struct ColumnModel {
     pub default: Option<DefaultValue>,
     pub identity: Option<IdentityModel>,
     pub generated: Option<GeneratedColumnModel>,
+    /// A MySQL `ON UPDATE CURRENT_TIMESTAMP` auto-update expression, structured like [`generated`]
+    /// so the backend renders it in its own dialect and the diff compares it structurally.
+    ///
+    /// MySQL is the only dialect with this attribute, and the only expression it accepts is
+    /// `CURRENT_TIMESTAMP` (so an introspected column carries [`ExprNode::Now`]); its fractional-seconds
+    /// precision is forced to equal the column's own `TIMESTAMP`/`DATETIME` precision, so the renderer
+    /// derives the fsp from the column type rather than from the node. PostgreSQL and SQLite reject a
+    /// column carrying this — they cannot represent it.
+    ///
+    /// Boxed so the rare, MySQL-only attribute does not enlarge every `ColumnModel` (which is embedded
+    /// inline in the plan/diff step enums), mirroring [`IndexModel::predicate`].
+    ///
+    /// [`generated`]: ColumnModel::generated
+    pub on_update: Option<Box<ExprNode>>,
 }
 
 /// Backend-neutral identity / auto-increment metadata.

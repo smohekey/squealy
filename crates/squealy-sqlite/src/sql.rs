@@ -995,6 +995,18 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
             ),
         ));
     }
+    if column.on_update.is_some() {
+        // `ON UPDATE CURRENT_TIMESTAMP` is a MySQL-only column attribute; SQLite cannot represent it.
+        // The incremental plan render path does not validate capabilities, so reject it here rather
+        // than silently dropping it.
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite does not support an `ON UPDATE` column attribute (column `{}`)",
+                column.name
+            ),
+        ));
+    }
     if column.comment.is_some() {
         // Like a table comment, a column comment is not introspectable, so it would churn every plan.
         return Err(io::Error::new(
