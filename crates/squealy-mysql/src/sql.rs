@@ -633,9 +633,11 @@ fn write_default_value(
 }
 
 /// Renders a column's `ON UPDATE CURRENT_TIMESTAMP` auto-update clause. MySQL accepts only
-/// `CURRENT_TIMESTAMP` here, and forces its fractional-seconds precision to equal the column's own —
-/// so the fsp is taken from the column type (like [`write_default_value`]'s `CurrentTimestamp` arm),
-/// not from the node, and any other expression is rejected as unrepresentable.
+/// `CURRENT_TIMESTAMP` here, on a `TIMESTAMP`/`DATETIME` column only, and forces its fractional-seconds
+/// precision to equal the column's own — so the fsp is taken from the column type (like
+/// [`write_default_value`]'s `CurrentTimestamp` arm), not from the node, and an expression or column
+/// type MySQL would reject is rejected here rather than at DDL-execution time (which may follow earlier
+/// auto-committed statements).
 fn write_on_update(
     column_name: &str,
     on_update: &squealy::ExprNode,
@@ -647,6 +649,16 @@ fn write_on_update(
             io::ErrorKind::InvalidInput,
             format!(
                 "MySQL only supports `ON UPDATE CURRENT_TIMESTAMP`, not another expression on column `{column_name}`"
+            ),
+        ));
+    }
+    // `TIMESTAMP` (tz-aware) and `DATETIME` (naive) both map to `SqlType::Timestamp`; MySQL rejects the
+    // auto-update clause on any other column type.
+    if !matches!(column_ty, SqlType::Timestamp { .. }) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "MySQL `ON UPDATE CURRENT_TIMESTAMP` is only valid on a TIMESTAMP/DATETIME column, not on column `{column_name}`"
             ),
         ));
     }
@@ -1512,6 +1524,18 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "`updated_at` TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)"
         );
+    }
+
+    #[test]
+    fn mysql_rejects_on_update_on_a_non_temporal_column() {
+        // `ON UPDATE CURRENT_TIMESTAMP` is only valid on TIMESTAMP/DATETIME; a package attaching it to
+        // an integer/date column must be rejected during rendering, not left to fail at DDL time.
+        for ty in [SqlType::I32, SqlType::Date] {
+            let mut out = Vec::new();
+            let error = write_on_update("ts", &squealy::ExprNode::Now, &ty, &mut out).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("ts"), "{error}");
+        }
     }
 
     #[test]

@@ -555,6 +555,48 @@ fn postgres_rejects_adding_a_generated_column_in_place() {
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
 }
 
+#[test]
+fn postgres_rejects_on_update_in_an_incremental_alter() {
+    // The incremental ALTER path renders each supported property delta piecemeal and never reaches the
+    // create-path column renderer, so it must reject `on_update` too — otherwise a change touching a
+    // supported property alongside `on_update` would apply partially and drift forever (git-bug 7f4504d).
+    let before = ColumnModel {
+        name: "updated_at".to_owned(),
+        comment: None,
+        ty: SqlType::Timestamp {
+            tz: true,
+            precision: None,
+        },
+        collation: None,
+        nullable: true,
+        default: None,
+        identity: None,
+        generated: None,
+        on_update: None,
+    };
+    let after = ColumnModel {
+        nullable: false,
+        on_update: Some(Box::new(squealy::ExprNode::Now)),
+        ..before.clone()
+    };
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterTable {
+            schema: Some("public".to_owned()),
+            table: "events".to_owned(),
+            change: Box::new(TablePlanStep::AlterColumn {
+                before,
+                after,
+                type_cast: None,
+            }),
+        }],
+    };
+
+    let error = Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut Vec::new())
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
 fn fixed_bytes_column(name: &str, width: u32) -> ColumnModel {
     ColumnModel {
         name: name.to_owned(),

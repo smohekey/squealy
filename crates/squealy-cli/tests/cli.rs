@@ -103,6 +103,7 @@ fn postgres_capabilities_are_printed() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_capability(&stdout, "backend=postgres");
+    assert_capability(&stdout, "columns.on_update=false");
     assert_capability(&stdout, "constraints.foreign_key_match_type=true");
     assert_capability(&stdout, "constraints.foreign_key_deferrability=true");
     assert_capability(&stdout, "constraints.foreign_key_validation=true");
@@ -132,6 +133,7 @@ fn mysql_capabilities_are_printed() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_capability(&stdout, "backend=mysql");
+    assert_capability(&stdout, "columns.on_update=true");
     assert_capability(&stdout, "constraints.foreign_key_match_type=false");
     assert_capability(&stdout, "constraints.foreign_key_deferrability=false");
     assert_capability(&stdout, "constraints.foreign_key_validation=false");

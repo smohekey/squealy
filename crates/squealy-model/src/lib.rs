@@ -35,15 +35,15 @@ pub use refactor::{
     pending_refactors,
 };
 pub use squealy::{
-    CheckModel, ColumnModel, Constraint, ConstraintCapabilities, ConstraintDeferrability,
-    ConstraintEnforcement, ConstraintValidation, CteModel, DatabaseModel, DatabasePlan,
-    DatabasePlanStep, DdlExecutor, DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch,
-    ForeignKeyModel, IndexCapabilities, IndexCollation, IndexDirection, IndexMethod, IndexModel,
-    IndexNullsOrder, IndexOperatorClass, IndexPrefixLength, LogicalOp, ProjectionItem,
-    SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect, SchemaMetadataStore,
-    SchemaModel, SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore, SourceItem,
-    SourceRef, SqlType, TableModel, TablePlanStep, ViewBody, ViewColumnModel, ViewModel,
-    ViewQueryModel, ViewSetOp,
+    CheckModel, ColumnCapabilities, ColumnModel, Constraint, ConstraintCapabilities,
+    ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, CteModel, DatabaseModel,
+    DatabasePlan, DatabasePlanStep, DdlExecutor, DefaultValue, ExprNode, ForeignKeyAction,
+    ForeignKeyMatch, ForeignKeyModel, IndexCapabilities, IndexCollation, IndexDirection,
+    IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, IndexPrefixLength, LogicalOp,
+    ProjectionItem, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect,
+    SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore, SchemaPublishRecord,
+    SchemaRefactorStore, SourceItem, SourceRef, SqlType, TableModel, TablePlanStep, ViewBody,
+    ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
 };
 
 use std::collections::BTreeSet;
@@ -697,6 +697,15 @@ fn validate_capabilities(
 ) -> std::io::Result<()> {
     for schema in &model.schemas {
         for table in &schema.tables {
+            for column in &table.columns {
+                if column.on_update.is_some() && !capabilities.columns.on_update {
+                    return unsupported_column(
+                        &table.name,
+                        &column.name,
+                        "an `ON UPDATE` auto-update attribute",
+                    );
+                }
+            }
             for foreign_key in &table.foreign_keys {
                 if foreign_key.match_type.is_some()
                     && !capabilities.constraints.foreign_key_match_type
@@ -785,6 +794,15 @@ fn validate_capabilities(
         }
     }
     Ok(())
+}
+
+fn unsupported_column(table: &str, column: &str, feature: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "backend cannot render and introspect {feature} for column `{column}` on `{table}`"
+        ),
+    ))
 }
 
 fn unsupported_constraint(table: &str, constraint: &str, feature: &str) -> std::io::Result<()> {
@@ -1412,6 +1430,67 @@ mod tests {
     }
 
     #[test]
+    fn render_create_rejects_unsupported_column_on_update_capability() {
+        // A MySQL-authored package carrying `on_update` must fail the capability preflight for a backend
+        // that does not report the column capability, so `check`/`render_create` do not approve an
+        // unrenderable package (git-bug 7f4504d).
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                views: Vec::new(),
+                tables: vec![TableModel {
+                    name: "events".to_owned(),
+                    comment: None,
+                    columns: vec![ColumnModel {
+                        name: "updated_at".to_owned(),
+                        comment: None,
+                        ty: SqlType::Timestamp {
+                            tz: true,
+                            precision: None,
+                        },
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        on_update: Some(Box::new(squealy::ExprNode::Now)),
+                    }],
+                    primary_key: None,
+                    foreign_keys: vec![],
+                    uniques: vec![],
+                    checks: vec![],
+                    indexes: vec![],
+                }],
+            }],
+        };
+
+        let error = render_create_sql(
+            &model,
+            &TestBackend {
+                capabilities: SchemaCapabilities::default(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("ON UPDATE"),
+            "unexpected error: {error}"
+        );
+
+        // A backend that reports the capability accepts it.
+        render_create_sql(
+            &model,
+            &TestBackend {
+                capabilities: SchemaCapabilities {
+                    columns: ColumnCapabilities { on_update: true },
+                    ..SchemaCapabilities::default()
+                },
+            },
+        )
+        .expect("a backend reporting the column capability renders");
+    }
+
+    #[test]
     fn render_create_allows_reported_constraint_capabilities() {
         let mut foreign_key = foreign_key();
         foreign_key.validation = Some(ConstraintValidation::NotValidated);
@@ -1423,6 +1502,7 @@ mod tests {
             &model,
             &TestBackend {
                 capabilities: SchemaCapabilities {
+                    columns: ColumnCapabilities::default(),
                     constraints: ConstraintCapabilities {
                         foreign_key_match_type: false,
                         foreign_key_deferrability: false,
@@ -1475,6 +1555,7 @@ mod tests {
             &model,
             &TestBackend {
                 capabilities: SchemaCapabilities {
+                    columns: ColumnCapabilities::default(),
                     constraints: ConstraintCapabilities::default(),
                     indexes: IndexCapabilities {
                         predicates: true,

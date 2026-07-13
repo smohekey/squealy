@@ -734,6 +734,19 @@ pub(crate) mod ddl {
                  column instead",
             ));
         }
+        // `ON UPDATE CURRENT_TIMESTAMP` is a MySQL-only attribute. The incremental ALTER path renders
+        // each supported property delta piecemeal and never reaches `write_model_column`, so reject it
+        // here too — otherwise a cross-dialect package that changes `on_update` alongside a supported
+        // property would apply only the supported change and leave the schema perpetually drifting.
+        if after.on_update.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "PostgreSQL does not support an `ON UPDATE` column attribute (column `{}`)",
+                    after.name
+                ),
+            ));
+        }
 
         // Fixed-width binary length check. The byte width lives entirely in the generated named
         // `octet_length` check (the `TYPE bytea` alter below is a no-op for a width change). The stale
