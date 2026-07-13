@@ -387,6 +387,7 @@ fn fixed_bytes_width_model(width: u32) -> DatabaseModel {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -416,6 +417,7 @@ fn alter_column_baseline_model() -> DatabaseModel {
                         default: Some(DefaultValue::Text("old".to_owned())),
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                     ColumnModel {
                         name: "status".to_owned(),
@@ -426,6 +428,7 @@ fn alter_column_baseline_model() -> DatabaseModel {
                         default: Some(DefaultValue::Text("draft".to_owned())),
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                 ],
                 primary_key: None,
@@ -456,6 +459,7 @@ fn alter_column_desired_model() -> DatabaseModel {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                     ColumnModel {
                         name: "status".to_owned(),
@@ -466,6 +470,7 @@ fn alter_column_desired_model() -> DatabaseModel {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                 ],
                 primary_key: None,
@@ -499,6 +504,7 @@ fn rich_model() -> DatabaseModel {
                                 mode: IdentityMode::ByDefault,
                             }),
                             generated: None,
+                            on_update: None,
                         },
                         ColumnModel {
                             name: "tenant_id".to_owned(),
@@ -509,6 +515,7 @@ fn rich_model() -> DatabaseModel {
                             default: None,
                             identity: None,
                             generated: None,
+                            on_update: None,
                         },
                         ColumnModel {
                             name: "role_code".to_owned(),
@@ -519,6 +526,7 @@ fn rich_model() -> DatabaseModel {
                             default: Some(DefaultValue::Text("MB".to_owned())),
                             identity: None,
                             generated: None,
+                            on_update: None,
                         },
                         ColumnModel {
                             name: "quota".to_owned(),
@@ -532,6 +540,7 @@ fn rich_model() -> DatabaseModel {
                             default: Some(DefaultValue::Raw("42.00".to_owned())),
                             identity: None,
                             generated: None,
+                            on_update: None,
                         },
                     ],
                     primary_key: Some(Constraint {
@@ -598,6 +607,7 @@ fn rich_model() -> DatabaseModel {
                                 mode: IdentityMode::ByDefault,
                             }),
                             generated: None,
+                            on_update: None,
                         },
                         ColumnModel {
                             name: "slug".to_owned(),
@@ -608,6 +618,7 @@ fn rich_model() -> DatabaseModel {
                             default: None,
                             identity: None,
                             generated: None,
+                            on_update: None,
                         },
                         ColumnModel {
                             name: "slug_len".to_owned(),
@@ -624,6 +635,7 @@ fn rich_model() -> DatabaseModel {
                                 ),
                                 storage: GeneratedStorage::Stored,
                             }),
+                            on_update: None,
                         },
                         ColumnModel {
                             name: "settings".to_owned(),
@@ -634,6 +646,7 @@ fn rich_model() -> DatabaseModel {
                             default: None,
                             identity: None,
                             generated: None,
+                            on_update: None,
                         },
                         // Fixed-width binary: published as `bytea` + a generated `octet_length` CHECK,
                         // which introspection folds back to `FixedBytes(32)` (the check must not survive
@@ -647,6 +660,7 @@ fn rich_model() -> DatabaseModel {
                             default: None,
                             identity: None,
                             generated: None,
+                            on_update: None,
                         },
                     ],
                     primary_key: Some(Constraint {

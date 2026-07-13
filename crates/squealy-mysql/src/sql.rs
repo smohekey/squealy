@@ -462,6 +462,18 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
         writer.write_all(b" DEFAULT ")?;
         write_default_value(default, &column.ty, writer)?;
     }
+    if let Some(reason) = column.on_update_shape_error() {
+        // A malformed `on_update` (a non-`CURRENT_TIMESTAMP` node, a non-temporal column, or a generated
+        // column) would render invalid MySQL DDL, which might fail only at execution after earlier
+        // auto-committed statements — reject it here (and in the capability preflight) instead.
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("MySQL {reason} (column `{}`)", column.name),
+        ));
+    }
+    if column.on_update.is_some() {
+        write_on_update(&column.ty, writer)?;
+    }
     if column.identity.is_some() {
         writer.write_all(b" AUTO_INCREMENT")?;
     }
@@ -627,6 +639,19 @@ fn write_default_value(
         }
         DefaultValue::Raw(value) => writer.write_all(value.as_bytes()),
     }
+}
+
+/// Renders a column's `ON UPDATE CURRENT_TIMESTAMP` auto-update clause. The value is validated by
+/// [`ColumnModel::on_update_shape_error`] before this is called (only `CURRENT_TIMESTAMP` on a
+/// `TIMESTAMP`/`DATETIME` non-generated column is representable), so this only renders. MySQL forces the
+/// clause's fractional-seconds precision to equal the column's own, so the fsp is taken from the column
+/// type (like [`write_default_value`]'s `CurrentTimestamp` arm), not from the node.
+fn write_on_update(column_ty: &SqlType, writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(b" ON UPDATE CURRENT_TIMESTAMP")?;
+    if let Some(precision) = current_temporal_precision(column_ty) {
+        write!(writer, "({precision})")?;
+    }
+    Ok(())
 }
 
 fn write_named_constraint(
@@ -1341,6 +1366,7 @@ mod tests {
                             expression: None,
                             storage: GeneratedStorage::Stored,
                         }),
+                        on_update: None,
                     }],
                     primary_key: None,
                     foreign_keys: vec![],
@@ -1422,6 +1448,128 @@ mod tests {
             default_sql(DefaultValue::CurrentTime, time_none),
             "(CURRENT_TIME)"
         );
+    }
+
+    fn on_update_sql(ty: SqlType) -> String {
+        let mut out = Vec::new();
+        write_on_update(&ty, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn mysql_on_update_current_timestamp_carries_column_precision() {
+        // The `ON UPDATE CURRENT_TIMESTAMP` fsp is forced to equal the column's own precision, so it is
+        // derived from the column type (like a `CURRENT_TIMESTAMP` default), not from the node.
+        assert_eq!(
+            on_update_sql(SqlType::Timestamp {
+                tz: false,
+                precision: Some(6),
+            }),
+            " ON UPDATE CURRENT_TIMESTAMP(6)"
+        );
+        // fsp 0 and an unspecified precision take the bare spelling.
+        assert_eq!(
+            on_update_sql(SqlType::Timestamp {
+                tz: false,
+                precision: Some(0),
+            }),
+            " ON UPDATE CURRENT_TIMESTAMP"
+        );
+        assert_eq!(
+            on_update_sql(SqlType::Timestamp {
+                tz: false,
+                precision: None,
+            }),
+            " ON UPDATE CURRENT_TIMESTAMP"
+        );
+    }
+
+    #[test]
+    fn mysql_column_renders_default_then_on_update() {
+        // The canonical MySQL idiom `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE
+        // CURRENT_TIMESTAMP` — the `ON UPDATE` clause follows the `DEFAULT`, both matching the column fsp.
+        use squealy::ColumnModel;
+        let column = ColumnModel {
+            name: "updated_at".to_owned(),
+            comment: None,
+            ty: SqlType::Timestamp {
+                tz: true,
+                precision: Some(3),
+            },
+            collation: None,
+            nullable: false,
+            default: Some(DefaultValue::CurrentTimestamp),
+            identity: None,
+            generated: None,
+            on_update: Some(Box::new(squealy::ExprNode::Now)),
+        };
+        let mut out = Vec::new();
+        write_column(&column, &mut out).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "`updated_at` TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)"
+        );
+    }
+
+    #[test]
+    fn mysql_write_column_rejects_a_malformed_on_update() {
+        // The shape invariant lives on `ColumnModel::on_update_shape_error` (unit-tested in squealy-ir);
+        // `write_column` must enforce it so a malformed hand-authored package is rejected during
+        // rendering rather than left to fail at DDL-execution time.
+        use squealy::ColumnModel;
+        let temporal = SqlType::Timestamp {
+            tz: true,
+            precision: None,
+        };
+        let malformed = [
+            // A non-`CURRENT_TIMESTAMP` node.
+            ColumnModel {
+                ty: temporal.clone(),
+                on_update: Some(Box::new(squealy::ExprNode::Raw(
+                    "now() + interval 1 day".to_owned(),
+                ))),
+                ..plain_column("ts")
+            },
+            // A non-temporal column type.
+            ColumnModel {
+                ty: SqlType::I32,
+                on_update: Some(Box::new(squealy::ExprNode::Now)),
+                ..plain_column("ts")
+            },
+            // A generated column.
+            ColumnModel {
+                ty: temporal,
+                on_update: Some(Box::new(squealy::ExprNode::Now)),
+                generated: Some(squealy::GeneratedColumnModel {
+                    expression: Some(squealy::ExprNode::Now),
+                    storage: GeneratedStorage::Virtual,
+                }),
+                ..plain_column("ts")
+            },
+        ];
+        for column in malformed {
+            let mut out = Vec::new();
+            let error = write_column(&column, &mut out).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("ts"), "{error}");
+        }
+    }
+
+    fn plain_column(name: &str) -> squealy::ColumnModel {
+        squealy::ColumnModel {
+            name: name.to_owned(),
+            comment: None,
+            ty: SqlType::Timestamp {
+                tz: true,
+                precision: None,
+            },
+            collation: None,
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+            on_update: None,
+        }
     }
 
     #[test]

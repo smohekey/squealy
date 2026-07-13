@@ -980,7 +980,25 @@ fn entry(writer: &mut impl Write, first: &mut bool) -> io::Result<()> {
 
 /// Renders the auto-increment column as `"name" INTEGER PRIMARY KEY AUTOINCREMENT` — the SQLite rowid
 /// alias. `PRIMARY KEY` implies `NOT NULL`, and identity columns carry no default.
+/// Rejects an `ON UPDATE CURRENT_TIMESTAMP` attribute, which is MySQL-only and SQLite cannot represent.
+/// The incremental plan render path does not validate capabilities, so both column-rendering paths
+/// (the general one and the `INTEGER PRIMARY KEY AUTOINCREMENT` special case) reject it rather than
+/// silently dropping it — which would churn a table rebuild on every plan.
+fn reject_on_update(column: &ColumnModel) -> io::Result<()> {
+    if column.on_update.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite does not support an `ON UPDATE` column attribute (column `{}`)",
+                column.name
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn write_autoincrement_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()> {
+    reject_on_update(column)?;
     write_quoted_ident(&column.name, writer)?;
     writer.write_all(b" INTEGER PRIMARY KEY AUTOINCREMENT")
 }
@@ -995,6 +1013,7 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
             ),
         ));
     }
+    reject_on_update(column)?;
     if column.comment.is_some() {
         // Like a table comment, a column comment is not introspectable, so it would churn every plan.
         return Err(io::Error::new(

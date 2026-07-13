@@ -92,6 +92,7 @@ impl SchemaBackend for Sqlite {
         // metadata. Without advertising `predicates`, the schema engine's `check_create` would reject a
         // partial index before this backend ever rendered it.
         squealy::SchemaCapabilities {
+            columns: squealy::ColumnCapabilities::default(),
             constraints: squealy::ConstraintCapabilities::default(),
             indexes: squealy::IndexCapabilities {
                 predicates: true,

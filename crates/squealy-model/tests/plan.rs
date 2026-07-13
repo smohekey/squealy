@@ -1170,5 +1170,6 @@ fn column(name: &str, ty: SqlType) -> ColumnModel {
         default: None,
         identity: None,
         generated: None,
+        on_update: None,
     }
 }

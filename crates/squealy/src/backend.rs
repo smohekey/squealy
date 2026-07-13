@@ -215,8 +215,18 @@ pub trait SupportsExtract: Backend {}
 /// management, because it would make publish-then-introspect lose model facts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SchemaCapabilities {
+    pub columns: ColumnCapabilities,
     pub constraints: ConstraintCapabilities,
     pub indexes: IndexCapabilities,
+}
+
+/// Per-column metadata capabilities for backend-specific column attributes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ColumnCapabilities {
+    /// A MySQL `ON UPDATE CURRENT_TIMESTAMP` auto-update attribute ([`ColumnModel::on_update`]).
+    ///
+    /// [`ColumnModel::on_update`]: crate::ColumnModel::on_update
+    pub on_update: bool,
 }
 
 /// Constraint metadata capabilities, split by constraint kind because SQL backends often expose

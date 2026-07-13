@@ -126,6 +126,7 @@ fn postgres_renders_incremental_schema_plan() {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     }],
                     primary_key: None,
                     foreign_keys: Vec::new(),
@@ -160,6 +161,7 @@ fn postgres_renders_incremental_schema_plan() {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                 }),
             },
@@ -381,6 +383,7 @@ fn postgres_renders_changed_columns_in_schema_plan() {
                         default: Some(DefaultValue::Text("old".to_owned())),
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                     after: ColumnModel {
                         name: "description".to_owned(),
@@ -391,6 +394,7 @@ fn postgres_renders_changed_columns_in_schema_plan() {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                 }),
             },
@@ -408,6 +412,7 @@ fn postgres_renders_changed_columns_in_schema_plan() {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                     after: ColumnModel {
                         name: "status".to_owned(),
@@ -418,6 +423,7 @@ fn postgres_renders_changed_columns_in_schema_plan() {
                         default: Some(DefaultValue::Text("new".to_owned())),
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                 }),
             },
@@ -453,6 +459,7 @@ fn postgres_renders_identity_and_generated_transitions() {
         default: None,
         identity: None,
         generated: None,
+        on_update: None,
     };
     let with_identity = |name: &str, mode: IdentityMode| ColumnModel {
         identity: Some(IdentityModel { mode }),
@@ -486,6 +493,7 @@ fn postgres_renders_identity_and_generated_transitions() {
                         expression: Some(check_expr("1 + 1")),
                         storage: GeneratedStorage::Stored,
                     }),
+                    on_update: None,
                     ..plain("d")
                 },
                 plain("d"),
@@ -519,18 +527,62 @@ fn postgres_rejects_adding_a_generated_column_in_place() {
         default: None,
         identity: None,
         generated: None,
+        on_update: None,
     };
     let after = ColumnModel {
         generated: Some(GeneratedColumnModel {
             expression: Some(check_expr("price * qty")),
             storage: GeneratedStorage::Stored,
         }),
+        on_update: None,
         ..before.clone()
     };
     let plan = DatabasePlan {
         steps: vec![DatabasePlanStep::AlterTable {
             schema: Some("public".to_owned()),
             table: "orders".to_owned(),
+            change: Box::new(TablePlanStep::AlterColumn {
+                before,
+                after,
+                type_cast: None,
+            }),
+        }],
+    };
+
+    let error = Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut Vec::new())
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
+fn postgres_rejects_on_update_in_an_incremental_alter() {
+    // The incremental ALTER path renders each supported property delta piecemeal and never reaches the
+    // create-path column renderer, so it must reject `on_update` too — otherwise a change touching a
+    // supported property alongside `on_update` would apply partially and drift forever (git-bug 7f4504d).
+    let before = ColumnModel {
+        name: "updated_at".to_owned(),
+        comment: None,
+        ty: SqlType::Timestamp {
+            tz: true,
+            precision: None,
+        },
+        collation: None,
+        nullable: true,
+        default: None,
+        identity: None,
+        generated: None,
+        on_update: None,
+    };
+    let after = ColumnModel {
+        nullable: false,
+        on_update: Some(Box::new(squealy::ExprNode::Now)),
+        ..before.clone()
+    };
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterTable {
+            schema: Some("public".to_owned()),
+            table: "events".to_owned(),
             change: Box::new(TablePlanStep::AlterColumn {
                 before,
                 after,
@@ -555,6 +607,7 @@ fn fixed_bytes_column(name: &str, width: u32) -> ColumnModel {
         default: None,
         identity: None,
         generated: None,
+        on_update: None,
     }
 }
 
@@ -677,6 +730,7 @@ fn postgres_drops_identity_before_setting_a_default() {
             mode: IdentityMode::ByDefault,
         }),
         generated: None,
+        on_update: None,
     };
     let after = ColumnModel {
         identity: None,
@@ -827,6 +881,7 @@ fn column(name: &str) -> ColumnModel {
         default: None,
         identity: None,
         generated: None,
+        on_update: None,
     }
 }
 
@@ -2019,6 +2074,7 @@ fn postgres_renders_table_and_column_comments() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -2061,6 +2117,7 @@ fn postgres_renders_foreign_key_match_type() {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     }],
                     primary_key: None,
                     foreign_keys: vec![ForeignKeyModel {
@@ -2092,6 +2149,7 @@ fn postgres_renders_foreign_key_match_type() {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     }],
                     primary_key: None,
                     foreign_keys: Vec::new(),
@@ -2137,6 +2195,7 @@ fn postgres_renders_partial_indexes() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -2196,6 +2255,7 @@ fn postgres_renders_expression_indexes() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -2257,6 +2317,7 @@ fn postgres_renders_raw_expression_index_verbatim() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -2311,6 +2372,7 @@ fn postgres_renders_covering_indexes() {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                     ColumnModel {
                         name: "role_code".to_owned(),
@@ -2321,6 +2383,7 @@ fn postgres_renders_covering_indexes() {
                         default: None,
                         identity: None,
                         generated: None,
+                        on_update: None,
                     },
                 ],
                 primary_key: None,
@@ -2375,6 +2438,7 @@ fn postgres_renders_index_null_ordering() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -2428,6 +2492,7 @@ fn postgres_renders_index_operator_classes() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -2484,6 +2549,7 @@ fn postgres_renders_index_collations() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -2556,6 +2622,7 @@ fn fk_test_table(name: &str, references_table: Option<&str>) -> Box<TableModel> 
             default: None,
             identity: None,
             generated: None,
+            on_update: None,
         }],
         primary_key: None,
         foreign_keys,
@@ -2711,6 +2778,7 @@ fn postgres_renders_views_in_dependency_order() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -3861,6 +3929,7 @@ fn postgres_rejects_index_column_prefix_lengths() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -3883,6 +3952,45 @@ fn postgres_rejects_index_column_prefix_lengths() {
                     }],
                     predicate: None,
                 }],
+            }],
+        }],
+    };
+    let mut sql = Vec::new();
+    let error = Postgres.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
+fn postgres_rejects_on_update_current_timestamp() {
+    // `ON UPDATE CURRENT_TIMESTAMP` is a MySQL-only column attribute; PostgreSQL has no equivalent
+    // (a trigger is used instead). A model carrying it (e.g. a package authored against MySQL,
+    // deployed cross-dialect) must be rejected rather than silently dropped (git-bug 7f4504d).
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("public".to_owned()),
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "events".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "updated_at".to_owned(),
+                    comment: None,
+                    ty: SqlType::Timestamp {
+                        tz: false,
+                        precision: None,
+                    },
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                    on_update: Some(Box::new(squealy::ExprNode::Now)),
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
             }],
         }],
     };

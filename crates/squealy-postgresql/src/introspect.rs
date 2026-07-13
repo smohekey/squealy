@@ -393,6 +393,8 @@ ORDER BY a.attnum",
                     .map(|value| default_value(&ty, &value)),
                 identity: identity_model(&identity),
                 generated: generated_model(&generated, default),
+                // PostgreSQL has no `ON UPDATE` column auto-update attribute.
+                on_update: None,
             }
         })
         .collect())
@@ -1079,6 +1081,7 @@ mod tests {
                 default: None,
                 identity: None,
                 generated: None,
+                on_update: None,
             }
         }
         fn check(name: &str, expression: &str) -> CheckModel {
@@ -1124,6 +1127,7 @@ mod tests {
             default: None,
             identity: None,
             generated: None,
+            on_update: None,
         }];
         let mut checks = vec![CheckModel {
             name: "my_key_len".to_owned(),

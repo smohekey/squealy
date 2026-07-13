@@ -163,6 +163,7 @@ impl squealy::SupportsNamedWindow for Mysql {}
 impl SchemaBackend for Mysql {
     fn capabilities(&self) -> squealy::SchemaCapabilities {
         squealy::SchemaCapabilities {
+            columns: squealy::ColumnCapabilities { on_update: true },
             constraints: squealy::ConstraintCapabilities::default(),
             indexes: squealy::IndexCapabilities {
                 prefix_lengths: true,

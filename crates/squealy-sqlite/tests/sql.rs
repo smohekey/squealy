@@ -196,6 +196,7 @@ fn rejects_non_integer_autoincrement_column() {
                         mode: IdentityMode::AutoIncrement,
                     }),
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: Some(Constraint {
                     name: "pk".to_owned(),
@@ -234,6 +235,7 @@ fn fixed_bytes_column_enforces_width_with_a_check() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -321,6 +323,7 @@ fn rejects_index_name_collision_across_tables() {
         default: None,
         identity: None,
         generated: None,
+        on_update: None,
     };
     let index = || IndexModel {
         name: "idx_x".to_owned(),
@@ -380,6 +383,7 @@ fn renders_table_check_constraint() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -428,6 +432,7 @@ fn rejects_check_constraint_validation_or_enforcement_metadata() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -481,6 +486,7 @@ fn renders_column_collation() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -554,6 +560,7 @@ fn rejects_index_column_prefix_lengths() {
                     default: None,
                     identity: None,
                     generated: None,
+                    on_update: None,
                 }],
                 primary_key: None,
                 foreign_keys: Vec::new(),
@@ -576,6 +583,91 @@ fn rejects_index_column_prefix_lengths() {
                     }],
                     predicate: None,
                 }],
+            }],
+            views: Vec::new(),
+        }],
+    };
+    let mut sql = Vec::new();
+    let error = Sqlite.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
+fn rejects_on_update_current_timestamp() {
+    // `ON UPDATE CURRENT_TIMESTAMP` is a MySQL-only column attribute; SQLite cannot render it, so a
+    // model carrying it (e.g. a package authored against MySQL, deployed cross-dialect) must be
+    // rejected rather than silently dropped (git-bug 7f4504d).
+    use squealy::{ColumnModel, DatabaseModel, ExprNode, SchemaModel, SqlType, TableModel};
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![TableModel {
+                name: "events".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "updated_at".to_owned(),
+                    comment: None,
+                    ty: SqlType::Timestamp {
+                        tz: false,
+                        precision: None,
+                    },
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                    on_update: Some(Box::new(ExprNode::Now)),
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+            views: Vec::new(),
+        }],
+    };
+    let mut sql = Vec::new();
+    let error = Sqlite.render_create(&model, &mut sql).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
+fn rejects_on_update_on_an_autoincrement_primary_key_column() {
+    // An integer AUTOINCREMENT primary-key column is rendered by the `INTEGER PRIMARY KEY AUTOINCREMENT`
+    // special case, which bypasses the general column renderer, so it must reject `on_update` too rather
+    // than silently drop it and rebuild the table on every plan (git-bug 7f4504d).
+    use squealy::{
+        ColumnModel, Constraint, DatabaseModel, ExprNode, IdentityMode, IdentityModel, SchemaModel,
+        SqlType, TableModel,
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![TableModel {
+                name: "events".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "id".to_owned(),
+                    comment: None,
+                    ty: SqlType::I64,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: Some(IdentityModel {
+                        mode: IdentityMode::AutoIncrement,
+                    }),
+                    generated: None,
+                    on_update: Some(Box::new(ExprNode::Now)),
+                }],
+                primary_key: Some(Constraint {
+                    name: "pk".to_owned(),
+                    columns: vec!["id".to_owned()],
+                }),
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
             }],
             views: Vec::new(),
         }],
@@ -641,6 +733,7 @@ fn id_table(name: &str) -> squealy::TableModel {
             default: None,
             identity: None,
             generated: None,
+            on_update: None,
         }],
         primary_key: None,
         foreign_keys: Vec::new(),

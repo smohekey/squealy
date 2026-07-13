@@ -225,6 +225,7 @@ async fn table(connection: &SqliteConnection, name: &str) -> Result<TableModel, 
                 mode: IdentityMode::AutoIncrement,
             }),
             generated: None,
+            on_update: None,
         });
     }
 
