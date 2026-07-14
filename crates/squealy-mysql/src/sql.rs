@@ -686,46 +686,23 @@ fn write_constraint_columns(constraint: &Constraint, writer: &mut impl Write) ->
     Ok(())
 }
 
-/// Validates a sparse list of column prefix lengths (an index's or a constraint's) before rendering:
-/// each must key at least one character/byte (`col(0)` is invalid in MySQL) and name a real key-term
-/// position exactly once, or the term it references would silently render without its `(n)`. `owner` is a
-/// pre-formatted label for error messages (e.g. `` index `foo` `` / `` constraint `bar` ``).
+/// Validates a sparse list of column prefix lengths (an index's or a constraint's) before rendering,
+/// surfacing the shared [`squealy::prefix_length_shape_error`] as an `io::Error`. `owner` is a
+/// pre-formatted label for the message (e.g. `` index `foo` `` / `` constraint `bar` ``). The capability
+/// preflight runs the same check, but the incremental plan render path skips it, so each renderer
+/// validates here too.
 fn validate_prefix_lengths(
     owner: &str,
     num_columns: usize,
     prefix_lengths: &[IndexPrefixLength],
 ) -> io::Result<()> {
-    let mut seen = std::collections::HashSet::new();
-    for prefix in prefix_lengths {
-        if prefix.length == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "{owner} has a zero-length prefix for key position {}",
-                    prefix.position
-                ),
-            ));
-        }
-        if prefix.position >= num_columns {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "{owner} has a prefix length for key position {} but only {num_columns} column(s)",
-                    prefix.position
-                ),
-            ));
-        }
-        if !seen.insert(prefix.position) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "{owner} has duplicate prefix lengths for key position {}",
-                    prefix.position
-                ),
-            ));
-        }
+    match squealy::prefix_length_shape_error(num_columns, prefix_lengths) {
+        Some(reason) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{owner} {reason}"),
+        )),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn write_check(check: &CheckModel, writer: &mut impl Write) -> io::Result<()> {

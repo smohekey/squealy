@@ -303,9 +303,16 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
             }
             if let Some(primary_key) = &mut table.primary_key {
                 primary_key.name = connection.canonical_primary_key_name(&primary_key.name);
+                // A constraint's prefix lengths are keyed by column position and render order-independently,
+                // but introspection reconstructs them in column order — sort so a package listing them in a
+                // different order does not diff as a spurious constraint alteration.
+                primary_key
+                    .prefix_lengths
+                    .sort_by_key(|prefix| prefix.position);
             }
             for unique in &mut table.uniques {
                 unique.name = connection.canonical_unique_name(unique);
+                unique.prefix_lengths.sort_by_key(|prefix| prefix.position);
             }
             for foreign_key in &mut table.foreign_keys {
                 // Flatten a cross-schema reference the same way the referenced table's own schema name is
@@ -717,13 +724,30 @@ fn validate_capabilities(
                 }
             }
             for constraint in table.primary_key.iter().chain(&table.uniques) {
-                if !constraint.prefix_lengths.is_empty() && !capabilities.constraints.prefix_lengths
-                {
+                if constraint.prefix_lengths.is_empty() {
+                    continue;
+                }
+                if !capabilities.constraints.prefix_lengths {
                     return unsupported_constraint(
                         &table.name,
                         &constraint.name,
                         "constraint column prefix lengths",
                     );
+                }
+                // For a backend that *does* carry the metadata, still reject a malformed shape here so
+                // the preflight does not approve a package the renderer rejects at publish time (mirrors
+                // the `on_update` shape check above).
+                if let Some(reason) = squealy::prefix_length_shape_error(
+                    constraint.columns.len(),
+                    &constraint.prefix_lengths,
+                ) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "constraint `{}` {reason} on `{}`",
+                            constraint.name, table.name
+                        ),
+                    ));
                 }
             }
             for foreign_key in &table.foreign_keys {
@@ -1213,6 +1237,68 @@ mod tests {
         let foreign_key = &canonical.schemas[0].tables[0].foreign_keys[0];
         assert_eq!(foreign_key.on_delete, None);
         assert_eq!(foreign_key.on_update, Some(ForeignKeyAction::Cascade));
+    }
+
+    #[test]
+    fn canonicalize_model_sorts_constraint_prefix_lengths_by_position() {
+        // Prefix lengths are keyed by column position and render order-independently, and introspection
+        // reconstructs them in column order — a package listing them reversed must canonicalize to the
+        // same order, else it diffs as a spurious constraint alteration every plan. Backend-neutral.
+        let mut model = table_with_constraints(foreign_key(), check());
+        model.schemas[0].tables[0].uniques = vec![Constraint {
+            name: "uq_reversed".to_owned(),
+            columns: vec!["a".to_owned(), "b".to_owned()],
+            prefix_lengths: vec![
+                IndexPrefixLength {
+                    position: 1,
+                    length: 4,
+                },
+                IndexPrefixLength {
+                    position: 0,
+                    length: 8,
+                },
+            ],
+        }];
+
+        let canonical = canonicalize_model(&DefaultBackend, &model);
+        assert_eq!(
+            canonical.schemas[0].tables[0].uniques[0].prefix_lengths,
+            vec![
+                IndexPrefixLength {
+                    position: 0,
+                    length: 8,
+                },
+                IndexPrefixLength {
+                    position: 1,
+                    length: 4,
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn render_create_rejects_malformed_constraint_prefix_length_shape() {
+        // A backend that *advertises* the prefix-length capability must still reject a malformed shape at
+        // the preflight, so `check` fails fast rather than the later `script`/`publish` render.
+        let mut model = table_with_constraints(foreign_key(), check());
+        model.schemas[0].tables[0].uniques = vec![Constraint {
+            name: "uq_bad".to_owned(),
+            columns: vec!["slug".to_owned()],
+            prefix_lengths: vec![IndexPrefixLength {
+                position: 0,
+                length: 0,
+            }],
+        }];
+        let mut capabilities = SchemaCapabilities::default();
+        capabilities.constraints.prefix_lengths = true;
+
+        let error = render_create_sql(&model, &TestBackend { capabilities }).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("zero-length prefix"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
