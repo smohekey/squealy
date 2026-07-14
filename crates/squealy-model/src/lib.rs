@@ -749,6 +749,45 @@ fn validate_capabilities(
                         ),
                     ));
                 }
+                // A prefix must reference a string/binary column and stay under a bounded column's width,
+                // or MySQL cannot store it as a prefix (it errors, or normalizes to a full-column key that
+                // introspects back prefix-less and churns). The shape check above guarantees each position
+                // is in range, so the column lookup is safe. Column context is only available here, not in
+                // the incremental `AddUnique`/`AddPrimaryKey` render path.
+                for prefix in &constraint.prefix_lengths {
+                    let column_name = &constraint.columns[prefix.position];
+                    let Some(column) = table
+                        .columns
+                        .iter()
+                        .find(|column| &column.name == column_name)
+                    else {
+                        continue;
+                    };
+                    match prefix_column_support(&column.ty) {
+                        PrefixColumnSupport::Unsupported => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                format!(
+                                    "constraint `{}` has a column prefix on `{column_name}`, which is \
+                                     not a string or binary column, on `{}`",
+                                    constraint.name, table.name
+                                ),
+                            ));
+                        }
+                        PrefixColumnSupport::Bounded(width) if prefix.length >= width => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                format!(
+                                    "constraint `{}` prefix length {} for `{column_name}` is not \
+                                     shorter than the column width {width}; MySQL would store it as a \
+                                     full-column key that does not round-trip, on `{}`",
+                                    constraint.name, prefix.length, table.name
+                                ),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
             }
             for foreign_key in &table.foreign_keys {
                 if foreign_key.match_type.is_some()
@@ -847,6 +886,35 @@ fn unsupported_column(table: &str, column: &str, feature: &str) -> std::io::Resu
             "backend cannot render and introspect {feature} for column `{column}` on `{table}`"
         ),
     ))
+}
+
+/// MySQL column-prefix support for a column type. A `col(n)` prefix requires a string/binary column, and
+/// its length must stay strictly under a bounded column's declared width — MySQL normalizes a full/over-
+/// width prefix to a full-column key (`STATISTICS.SUB_PART` reads back `NULL`), so the `(n)` would not
+/// round-trip.
+enum PrefixColumnSupport {
+    /// A string/binary column with no declared max (`TEXT`/`BLOB`) — any positive prefix is fine.
+    Unbounded,
+    /// A string/binary column with a declared width (`VARCHAR(n)`/`CHAR(n)`/`BINARY(n)`); a prefix must
+    /// be `< n`.
+    Bounded(u32),
+    /// Not a string/binary column — a prefix is invalid.
+    Unsupported,
+}
+
+fn prefix_column_support(ty: &squealy::SqlType) -> PrefixColumnSupport {
+    match ty {
+        squealy::SqlType::String | squealy::SqlType::Text | squealy::SqlType::Bytes => {
+            PrefixColumnSupport::Unbounded
+        }
+        squealy::SqlType::Varchar(width)
+        | squealy::SqlType::Char(width)
+        | squealy::SqlType::FixedBytes(width) => PrefixColumnSupport::Bounded(*width),
+        // A backend-specific type name could be any string/binary form; leave it to MySQL to validate at
+        // publish rather than guess a width.
+        squealy::SqlType::Raw(_) => PrefixColumnSupport::Unbounded,
+        _ => PrefixColumnSupport::Unsupported,
+    }
 }
 
 fn unsupported_constraint(table: &str, constraint: &str, feature: &str) -> std::io::Result<()> {
@@ -1299,6 +1367,90 @@ mod tests {
             error.to_string().contains("zero-length prefix"),
             "unexpected error: {error}"
         );
+    }
+
+    /// A one-table model whose sole `UNIQUE` carries a single-column prefix over `column`.
+    fn model_with_prefix_unique(column: ColumnModel, length: u32) -> DatabaseModel {
+        let name = column.name.clone();
+        DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                views: Vec::new(),
+                tables: vec![TableModel {
+                    name: "items".to_owned(),
+                    comment: None,
+                    columns: vec![column],
+                    primary_key: None,
+                    foreign_keys: Vec::new(),
+                    uniques: vec![Constraint {
+                        name: "uq_items".to_owned(),
+                        columns: vec![name],
+                        prefix_lengths: vec![IndexPrefixLength {
+                            position: 0,
+                            length,
+                        }],
+                    }],
+                    checks: Vec::new(),
+                    indexes: Vec::new(),
+                }],
+            }],
+        }
+    }
+
+    fn typed_column(name: &str, ty: SqlType) -> ColumnModel {
+        ColumnModel {
+            name: name.to_owned(),
+            comment: None,
+            ty,
+            collation: None,
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+            on_update: None,
+        }
+    }
+
+    fn prefix_capable_backend() -> TestBackend {
+        let mut capabilities = SchemaCapabilities::default();
+        capabilities.constraints.prefix_lengths = true;
+        TestBackend { capabilities }
+    }
+
+    #[test]
+    fn render_create_rejects_a_prefix_on_a_non_string_column() {
+        // MySQL rejects `col(n)` on a non-string/binary column; catch it at the preflight.
+        let model = model_with_prefix_unique(typed_column("n", SqlType::I32), 4);
+        let error = render_create_sql(&model, &prefix_capable_backend()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("not a string or binary column"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn render_create_rejects_a_full_width_prefix() {
+        // A prefix equal to a bounded column's width is normalized by MySQL to a full-column key
+        // (SUB_PART NULL on introspection → churn); reject it. A shorter prefix is accepted.
+        let full = model_with_prefix_unique(typed_column("code", SqlType::Varchar(8)), 8);
+        let error = render_create_sql(&full, &prefix_capable_backend()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("not shorter than the column width"),
+            "unexpected error: {error}"
+        );
+
+        let shorter = model_with_prefix_unique(typed_column("code", SqlType::Varchar(8)), 4);
+        render_create_sql(&shorter, &prefix_capable_backend())
+            .expect("a prefix shorter than the column width is accepted");
+
+        // An unbounded text column accepts any positive prefix.
+        let text = model_with_prefix_unique(typed_column("body", SqlType::Text), 100);
+        render_create_sql(&text, &prefix_capable_backend())
+            .expect("a prefix on an unbounded text column is accepted");
     }
 
     #[test]
