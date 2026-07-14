@@ -65,57 +65,86 @@ impl PostgresConnection {
 }
 
 /// Canonicalizes a logical [`SqlType`](squealy::SqlType) to the form PostgreSQL introspection reports:
-/// `Text` → `String` (both render `text`), and a bare (`None`) `Timestamp`/`Time` precision →
-/// microseconds (`Some(6)`, PostgreSQL's stored default). The trait
+/// `Text` → `String` (both render `text`), a bare (`None`) `Timestamp`/`Time` precision → microseconds
+/// (`Some(6)`, PostgreSQL's stored default), and each narrow/unsigned/128-bit integer width → the signed
+/// type its rendered PostgreSQL type introspects back to.
+///
+/// PostgreSQL has only `smallint`/`integer`/`bigint`/`numeric` for integers, so the neutral model's
+/// twelve integer widths render to — and read back from — one of those four: `smallint` (`I8`/`I16`/`U8`)
+/// → `I16`, `integer` (`I32`/`U16`) → `I32`, `bigint` (`I64`/`Isize`/`U32`/`Usize`) → `I64`, and bare
+/// `numeric` (`I128`/`U64`/`U128`) → `I128`. Folding each desired width to that representative on both
+/// sides of the diff lets a published column re-plan to empty. The stored column is genuinely that width;
+/// the neutral type is lossy on PostgreSQL (a `U8` column is planned as `smallint`). The trait
 /// [`canonical_sql_type`](squealy::SchemaIntrospect::canonical_sql_type) delegates here so the pure
 /// mapping is reusable by [`canonical_pg_pin_type`] and unit-testable without a live connection.
 #[cfg(feature = "schema")]
 pub(crate) fn canonical_pg_sql_type(ty: &squealy::SqlType) -> squealy::SqlType {
+    use squealy::SqlType::{
+        I8, I16, I32, I64, I128, Isize, String as SqlString, Text, Time, Timestamp, U8, U16, U32,
+        U64, U128, Usize,
+    };
     match ty {
-        squealy::SqlType::Text => squealy::SqlType::String,
-        squealy::SqlType::Timestamp {
+        Text => SqlString,
+        Timestamp {
             tz,
             precision: None,
-        } => squealy::SqlType::Timestamp {
+        } => Timestamp {
             tz: *tz,
             precision: Some(6),
         },
-        squealy::SqlType::Time {
+        Time {
             tz,
             precision: None,
-        } => squealy::SqlType::Time {
+        } => Time {
             tz: *tz,
             precision: Some(6),
         },
+        I8 | U8 => I16,
+        U16 => I32,
+        Isize | U32 | Usize => I64,
+        I128 | U64 | U128 => I128,
         other => other.clone(),
     }
 }
 
 /// Folds a result-pin [`SqlType`](squealy::SqlType) to the canonical representative PostgreSQL
-/// introspection yields for it. `pg_get_viewdef` spells a result-pin cast with the same keyword for
-/// several widths, and the reverse parser (`invert_pg_cast_type` in `squealy-parse`) inverts each keyword
-/// to one representative: `smallint` (`I8`/`I16`/`U8`) → `I16`, `integer` (`I32`/`U16`) → `I32`, `bigint`
-/// (`I64`/`Isize`/`U32`/`Usize`) → `I64`, and bare `numeric` (`I128`/`U64`/`U128`) → `I128`. Mapping the
-/// desired side's narrower pin to the same representative lets a published view re-plan to empty. Text and
-/// temporal aliases fold through [`canonical_pg_sql_type`], matching how an introspected pin of those
-/// types is canonicalized; any other type is unchanged (PostgreSQL's remaining cast spellings are
-/// one-to-one).
+/// introspection yields for it. The many-to-one integer cast keywords (`smallint`/`integer`/`bigint`/bare
+/// `numeric`) and the text/temporal aliases fold through [`canonical_pg_sql_type`]. The one collapse a pin
+/// needs beyond a column's is `FixedBytes(N)` → `Bytes`: a view output produced through a pinned
+/// expression (a `CASE`/`COALESCE`/aggregate cast) carries no length `CHECK`, so it renders as bare
+/// `bytea` and reads back as `Bytes` — mirroring `canonical_view_column_type`. Any other type is unchanged
+/// (PostgreSQL's remaining cast spellings are one-to-one).
 #[cfg(feature = "schema")]
 pub(crate) fn canonical_pg_pin_type(ty: &squealy::SqlType) -> squealy::SqlType {
-    use squealy::SqlType::{
-        Bytes, FixedBytes, I8, I16, I32, I64, I128, Isize, U8, U16, U32, U64, U128, Usize,
-    };
+    use squealy::SqlType::{Bytes, FixedBytes};
     match canonical_pg_sql_type(ty) {
-        I8 | U8 => I16,
-        U16 => I32,
-        Isize | U32 | Usize => I64,
-        I128 | U64 | U128 => I128,
-        // A view output produced through a pinned expression (a `CASE`/`COALESCE`/aggregate cast) carries
-        // no length `CHECK`, so a `FixedBytes(N)` pin renders as bare `bytea` and reads back as `Bytes` —
-        // mirror `canonical_view_column_type`, which folds the same collapse for a view's output column.
         FixedBytes(_) => Bytes,
         other => other,
     }
+}
+
+/// Canonicalizes a column default to the form PostgreSQL introspection reports for it. Every PostgreSQL
+/// integer column reads back as a signed neutral type (`smallint` → `I16`, `integer` → `I32`, `bigint` →
+/// `I64`, bare `numeric` → `I128`) whose default parses as a signed [`Int`](squealy::DefaultValue::Int).
+/// So once [`canonical_pg_sql_type`] has folded a desired unsigned column's type to its signed
+/// representative, fold an unsigned literal default the same way, otherwise the column re-plans to churn on
+/// the default alone. `ty` is the already-canonicalized column type (see
+/// [`canonicalize_model`](squealy::canonicalize_model)), so an integer column is one of
+/// `I16`/`I32`/`I64`/`I128`. A value above `i128::MAX` (only reachable on a `U128` default) has no `Int`
+/// (`i128`) representation; introspection reads it back as `Raw`, an accepted residual.
+#[cfg(feature = "schema")]
+pub(crate) fn canonical_pg_default(
+    ty: &squealy::SqlType,
+    default: &squealy::DefaultValue,
+) -> squealy::DefaultValue {
+    use squealy::SqlType::{I16, I32, I64, I128};
+    if matches!(ty, I16 | I32 | I64 | I128)
+        && let squealy::DefaultValue::UInt(value) = default
+        && let Ok(signed) = i128::try_from(*value)
+    {
+        return squealy::DefaultValue::Int(signed);
+    }
+    default.clone()
 }
 
 pub struct PostgresTransaction<'conn> {
@@ -340,6 +369,22 @@ impl squealy::SchemaIntrospect for PostgresConnection {
     /// canonicalize `None` to `Some(6)` so the two sides compare equal.
     fn canonical_sql_type(&self, ty: &squealy::SqlType) -> squealy::SqlType {
         canonical_pg_sql_type(ty)
+    }
+
+    /// Every PostgreSQL integer column introspects back as a signed neutral type (`smallint` → `I16`,
+    /// `integer` → `I32`, `bigint` → `I64`, bare `numeric` → `I128`) whose default reads as a signed
+    /// [`Int`](squealy::DefaultValue::Int). So once [`canonical_sql_type`](Self::canonical_sql_type) has
+    /// folded a desired unsigned column's type to its signed representative, fold an unsigned literal
+    /// default the same way, otherwise the column re-plans to churn on the default alone. `ty` is already
+    /// canonicalized (see [`canonicalize_model`](squealy::canonicalize_model)), so an integer column is
+    /// one of `I16`/`I32`/`I64`/`I128`. A value above `i128::MAX` (only reachable on a `U128` default) has
+    /// no `Int` (`i128`) representation; introspection reads it back as `Raw`, an accepted residual.
+    fn canonical_default(
+        &self,
+        ty: &squealy::SqlType,
+        default: &squealy::DefaultValue,
+    ) -> squealy::DefaultValue {
+        canonical_pg_default(ty, default)
     }
 
     /// A PostgreSQL view column declared `FixedBytes(N)` introspects as plain `bytea` (`Bytes`) — there
@@ -1060,6 +1105,61 @@ CREATE INDEX CONCURRENTLY j ON t (d);";
             let once = canonical_pg_pin_type(&ty);
             assert_eq!(canonical_pg_pin_type(&once), once);
         }
+    }
+
+    #[test]
+    fn canonical_pg_sql_type_collapses_narrow_and_wide_integer_columns() {
+        use super::canonical_pg_sql_type;
+        use squealy::SqlType::{I8, I16, I32, I64, I128, Isize, U8, U16, U32, U64, U128, Usize};
+
+        // The neutral model's twelve integer widths render to PostgreSQL's four integer types, so a
+        // column must canonicalize to the signed representative its rendered type introspects back to.
+        for ty in [I8, I16, U8] {
+            assert_eq!(canonical_pg_sql_type(&ty), I16); // smallint
+        }
+        for ty in [I32, U16] {
+            assert_eq!(canonical_pg_sql_type(&ty), I32); // integer
+        }
+        for ty in [I64, Isize, U32, Usize] {
+            assert_eq!(canonical_pg_sql_type(&ty), I64); // bigint
+        }
+        for ty in [I128, U64, U128] {
+            assert_eq!(canonical_pg_sql_type(&ty), I128); // bare numeric
+        }
+        // Idempotent on each representative — the introspected side is already canonical.
+        for ty in [I16, I32, I64, I128] {
+            assert_eq!(canonical_pg_sql_type(&ty), ty);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "schema")]
+    fn canonical_default_folds_unsigned_integer_defaults_to_signed() {
+        use super::canonical_pg_default;
+        use squealy::DefaultValue::{Int, Text, UInt};
+        use squealy::SqlType::{I16, I32, I64, I128, String as SqlString};
+
+        // An unsigned default on an (already-canonicalized) integer column folds to the signed `Int` form
+        // introspection produces, so an unsigned column with a default re-plans to empty.
+        assert_eq!(canonical_pg_default(&I16, &UInt(200)), Int(200));
+        assert_eq!(canonical_pg_default(&I32, &UInt(70_000)), Int(70_000));
+        assert_eq!(canonical_pg_default(&I64, &UInt(5)), Int(5));
+        assert_eq!(canonical_pg_default(&I128, &UInt(5)), Int(5));
+        // A `u64::MAX` default (the widest `U64` value) still fits `i128` and folds.
+        assert_eq!(
+            canonical_pg_default(&I128, &UInt(u64::MAX as u128)),
+            Int(u64::MAX as i128)
+        );
+        // A value above `i128::MAX` (only reachable on `U128`) has no `Int` form — left as-is (an
+        // accepted residual; introspection reads such a default back as `Raw`).
+        let huge = UInt(u128::MAX);
+        assert_eq!(canonical_pg_default(&I128, &huge), huge);
+        // A signed default and a non-integer column are untouched.
+        assert_eq!(canonical_pg_default(&I64, &Int(-5)), Int(-5));
+        assert_eq!(
+            canonical_pg_default(&SqlString, &Text("x".to_owned())),
+            Text("x".to_owned())
+        );
     }
 
     #[test]

@@ -706,6 +706,11 @@ fn sql_type(db_type: &str) -> SqlType {
         "smallint" => SqlType::I16,
         "integer" => SqlType::I32,
         "bigint" => SqlType::I64,
+        // A bare `numeric` (no typmod) is what the model renders for `I128`/`U64`/`U128` — the widths PG
+        // has no native integer type for. Recover it as the `I128` representative those widths canonicalize
+        // to (see `canonical_pg_sql_type`) so a published wide/unsigned integer column re-plans to empty.
+        // A `numeric(p,s)` (a genuine `Decimal`) still carries its typmod and is recovered below.
+        "numeric" | "decimal" => SqlType::I128,
         "real" => SqlType::F32,
         "double precision" => SqlType::F64,
         "text" => SqlType::String,
@@ -960,6 +965,10 @@ mod tests {
         assert_eq!(sql_type("smallint"), SqlType::I16);
         assert_eq!(sql_type("integer"), SqlType::I32);
         assert_eq!(sql_type("bigint"), SqlType::I64);
+        // A bare `numeric` (rendered for `I128`/`U64`/`U128`) recovers as the `I128` representative; a
+        // `numeric(p,s)` keeps its typmod and recovers as `Decimal` (see the parametric-types test).
+        assert_eq!(sql_type("numeric"), SqlType::I128);
+        assert_eq!(sql_type("decimal"), SqlType::I128);
         assert_eq!(sql_type("real"), SqlType::F32);
         assert_eq!(sql_type("double precision"), SqlType::F64);
         assert_eq!(sql_type("text"), SqlType::String);
