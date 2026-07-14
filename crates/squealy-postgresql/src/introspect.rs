@@ -960,6 +960,11 @@ mod tests {
         assert_eq!(sql_type("smallint"), SqlType::I16);
         assert_eq!(sql_type("integer"), SqlType::I32);
         assert_eq!(sql_type("bigint"), SqlType::I64);
+        // A bare `numeric` (no typmod) introspects faithfully as `Raw("numeric")` — it may hold arbitrary-
+        // precision decimals, so introspection (which feeds `squealy extract`) must not narrow it to an
+        // integer. Diff convergence with a published `I128`/`U64`/`U128` (or explicit `Raw("numeric")`)
+        // column happens in `canonical_pg_sql_type`, not here. A `numeric(p,s)` recovers as `Decimal`.
+        assert_eq!(sql_type("numeric"), SqlType::Raw("numeric".to_owned()));
         assert_eq!(sql_type("real"), SqlType::F32);
         assert_eq!(sql_type("double precision"), SqlType::F64);
         assert_eq!(sql_type("text"), SqlType::String);
