@@ -233,3 +233,87 @@ async fn publishing_an_on_search_path_view_then_replanning_is_empty() {
 
     reset_fixtures(&mut connection).await;
 }
+
+// A table exercising every neutral integer width PostgreSQL has no dedicated type for, so each renders to
+// `smallint`/`integer`/`bigint`/`numeric` and must introspect back to the signed representative it
+// canonicalizes to (`canonical_pg_sql_type`). Two unsigned columns carry defaults to exercise the matching
+// `canonical_pg_default` fold (`DefaultValue::UInt` → the `Int` introspection reads back). The three
+// natively-round-tripping widths (`i16`/`i32`/`i64`) are covered by the other fixtures.
+#[derive(Clone, Debug, PartialEq, Table)]
+#[schema(PublishInts)]
+struct PublishIntWidths<'scope, C: ColumnMode = ColumnExpr> {
+    #[column(primary_key, auto_increment)]
+    id: C::Type<'scope, i32>,
+    tiny_signed: C::Type<'scope, i8>,      // smallint → I16
+    tiny_unsigned: C::Type<'scope, u8>,    // smallint → I16
+    small_unsigned: C::Type<'scope, u16>,  // integer  → I32
+    medium_unsigned: C::Type<'scope, u32>, // bigint   → I64
+    size_signed: C::Type<'scope, isize>,   // bigint   → I64
+    size_unsigned: C::Type<'scope, usize>, // bigint   → I64
+    big_unsigned: C::Type<'scope, u64>,    // numeric  → I128
+    huge_signed: C::Type<'scope, i128>,    // numeric  → I128
+    huge_unsigned: C::Type<'scope, u128>,  // numeric  → I128
+    // An explicit arbitrary-precision numeric column reaches the model as `Raw("numeric")` and renders to
+    // bare `numeric` too, so it must fold to the same `I128` representative introspection reads back.
+    #[column(db_type = "numeric")]
+    explicit_numeric: C::Type<'scope, i128>,
+    #[column(default = value(7))]
+    tiny_unsigned_default: C::Type<'scope, u8>,
+    #[column(default = value(9))]
+    big_unsigned_default: C::Type<'scope, u64>,
+}
+
+#[allow(dead_code)]
+#[derive(Schema)]
+struct PublishInts {
+    int_widths: PublishIntWidths<'static, ColumnName>,
+}
+
+#[allow(dead_code)]
+#[derive(Database)]
+struct PublishIntsDatabase {
+    ints: PublishInts,
+}
+
+#[tokio::test]
+#[ignore]
+async fn publishing_narrow_and_wide_integer_columns_then_replanning_is_empty() {
+    // A `u8`/`u16`/`u32`/`u64`/`u128`/`i8`/`i128`/`isize`/`usize` column renders to one of PostgreSQL's
+    // four integer types (lossily — twelve neutral widths, four PG types). Before this fix, introspection
+    // read each back as a different width (`smallint` → I16, bare `numeric` → `Raw("numeric")`), so the
+    // diff re-issued a spurious `AlterColumn` on every plan. Now the desired widths canonicalize to the
+    // signed representative introspection yields, and the round-trip converges to an empty plan.
+    let _guard = db_lock().lock().await;
+    let model = DatabaseModel::from_database::<PublishIntsDatabase>();
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_ints CASCADE")
+        .await
+        .expect("reset int-widths fixture");
+
+    squealy_model::publish(&model, &Postgres, &mut connection)
+        .await
+        .expect("publish create-from-scratch");
+
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect("re-plan against published schema");
+    assert!(
+        plan.steps.is_empty(),
+        "expected empty plan after publishing narrow/wide integer columns, got: {:?}",
+        plan.steps
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_ints CASCADE")
+        .await
+        .expect("clean up int-widths fixture");
+}
