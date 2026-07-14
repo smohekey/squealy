@@ -74,14 +74,21 @@ impl PostgresConnection {
 /// → `I16`, `integer` (`I32`/`U16`) → `I32`, `bigint` (`I64`/`Isize`/`U32`/`Usize`) → `I64`, and bare
 /// `numeric` (`I128`/`U64`/`U128`) → `I128`. Folding each desired width to that representative on both
 /// sides of the diff lets a published column re-plan to empty. The stored column is genuinely that width;
-/// the neutral type is lossy on PostgreSQL (a `U8` column is planned as `smallint`). The trait
-/// [`canonical_sql_type`](squealy::SchemaIntrospect::canonical_sql_type) delegates here so the pure
-/// mapping is reusable by [`canonical_pg_pin_type`] and unit-testable without a live connection.
+/// the neutral type is lossy on PostgreSQL (a `U8` column is planned as `smallint`).
+///
+/// An explicit `#[column(db_type = "numeric")]` reaches the model as `Raw("numeric")` (or `Raw("decimal")`)
+/// and renders — like `I128`/`U64`/`U128` — to bare `numeric`, which introspection reads back as `I128`.
+/// Fold that spelling to the same `I128` representative so an explicit arbitrary-precision numeric column
+/// also re-plans to empty rather than churning against the introspected `I128`. Any other `Raw` (a typmod'd
+/// `numeric(p,s)` is a distinct `Decimal`, not `Raw`) is left untouched.
+///
+/// The trait [`canonical_sql_type`](squealy::SchemaIntrospect::canonical_sql_type) delegates here so the
+/// pure mapping is reusable by [`canonical_pg_pin_type`] and unit-testable without a live connection.
 #[cfg(feature = "schema")]
 pub(crate) fn canonical_pg_sql_type(ty: &squealy::SqlType) -> squealy::SqlType {
     use squealy::SqlType::{
-        I8, I16, I32, I64, I128, Isize, String as SqlString, Text, Time, Timestamp, U8, U16, U32,
-        U64, U128, Usize,
+        I8, I16, I32, I64, I128, Isize, Raw, String as SqlString, Text, Time, Timestamp, U8, U16,
+        U32, U64, U128, Usize,
     };
     match ty {
         Text => SqlString,
@@ -103,6 +110,7 @@ pub(crate) fn canonical_pg_sql_type(ty: &squealy::SqlType) -> squealy::SqlType {
         U16 => I32,
         Isize | U32 | Usize => I64,
         I128 | U64 | U128 => I128,
+        Raw(name) if matches!(name.as_str(), "numeric" | "decimal") => I128,
         other => other.clone(),
     }
 }
@@ -1126,6 +1134,19 @@ CREATE INDEX CONCURRENTLY j ON t (d);";
         for ty in [I128, U64, U128] {
             assert_eq!(canonical_pg_sql_type(&ty), I128); // bare numeric
         }
+        // An explicit `db_type = "numeric"`/`"decimal"` (`Raw`) renders to bare numeric too, so it folds
+        // to the same `I128` representative — an explicit arbitrary-precision numeric column re-plans to
+        // empty instead of churning against the introspected `I128`. A different `Raw` is left alone.
+        for name in ["numeric", "decimal"] {
+            assert_eq!(
+                canonical_pg_sql_type(&squealy::SqlType::Raw(name.to_owned())),
+                I128
+            );
+        }
+        assert_eq!(
+            canonical_pg_sql_type(&squealy::SqlType::Raw("citext".to_owned())),
+            squealy::SqlType::Raw("citext".to_owned())
+        );
         // Idempotent on each representative — the introspected side is already canonical.
         for ty in [I16, I32, I64, I128] {
             assert_eq!(canonical_pg_sql_type(&ty), ty);

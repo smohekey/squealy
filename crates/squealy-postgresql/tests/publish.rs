@@ -253,6 +253,10 @@ struct PublishIntWidths<'scope, C: ColumnMode = ColumnExpr> {
     big_unsigned: C::Type<'scope, u64>,    // numeric  → I128
     huge_signed: C::Type<'scope, i128>,    // numeric  → I128
     huge_unsigned: C::Type<'scope, u128>,  // numeric  → I128
+    // An explicit arbitrary-precision numeric column reaches the model as `Raw("numeric")` and renders to
+    // bare `numeric` too, so it must fold to the same `I128` representative introspection reads back.
+    #[column(db_type = "numeric")]
+    explicit_numeric: C::Type<'scope, i128>,
     #[column(default = value(7))]
     tiny_unsigned_default: C::Type<'scope, u8>,
     #[column(default = value(9))]
