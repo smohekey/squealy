@@ -2185,17 +2185,12 @@ fn on_update_from_node(node: &KdlNode) -> Result<Option<Box<ExprNode>>, PackageE
 }
 
 fn constraint_from_node(node: &KdlNode) -> Result<Constraint, PackageError> {
-    let mut prefix_lengths = child_nodes(node, "prefix-length")
-        .map(index_prefix_length_from_node)
-        .collect::<Result<Vec<_>, _>>()?;
-    // Prefix lengths render order-independently (keyed by position); sort on read so an offline
-    // package-vs-package `diff`/`plan` (which does not run `canonicalize_model`) does not report a
-    // spurious constraint alteration for two equivalent packages that list them in different orders.
-    prefix_lengths.sort_by_key(|prefix| prefix.position);
     Ok(Constraint {
         name: required_prop(node, "name")?,
         columns: args(node),
-        prefix_lengths,
+        prefix_lengths: child_nodes(node, "prefix-length")
+            .map(index_prefix_length_from_node)
+            .collect::<Result<Vec<_>, _>>()?,
     })
 }
 
@@ -2980,80 +2975,6 @@ mod tests {
         assert!(kdl.contains("prefix-length 0 8"), "{kdl}");
         let parsed = from_kdl(&kdl).expect("prefix-constraint model.kdl should parse");
         assert_eq!(parsed, model, "KDL round-trip diverged:\n{kdl}");
-    }
-
-    #[test]
-    fn from_kdl_sorts_constraint_prefix_lengths_by_position() {
-        // Two packages that list a multi-column constraint's `prefix-length` children in different orders
-        // are equivalent (each is keyed by position); parsing sorts them so an offline package-vs-package
-        // `diff`/`plan` — which never runs `canonicalize_model` — does not see a spurious alteration.
-        let mut model = DatabaseModel {
-            schemas: vec![SchemaModel {
-                name: Some("shop".to_owned()),
-                tables: vec![TableModel {
-                    name: "items".to_owned(),
-                    comment: None,
-                    columns: vec![
-                        ColumnModel {
-                            name: "a".to_owned(),
-                            comment: None,
-                            ty: SqlType::Varchar(64),
-                            collation: None,
-                            nullable: false,
-                            default: None,
-                            identity: None,
-                            generated: None,
-                            on_update: None,
-                        },
-                        ColumnModel {
-                            name: "b".to_owned(),
-                            comment: None,
-                            ty: SqlType::Varchar(64),
-                            collation: None,
-                            nullable: false,
-                            default: None,
-                            identity: None,
-                            generated: None,
-                            on_update: None,
-                        },
-                    ],
-                    primary_key: None,
-                    foreign_keys: Vec::new(),
-                    // Prefixes deliberately listed reversed (position 1 before 0).
-                    uniques: vec![Constraint {
-                        name: "uq_items".to_owned(),
-                        columns: vec!["a".to_owned(), "b".to_owned()],
-                        prefix_lengths: vec![
-                            IndexPrefixLength {
-                                position: 1,
-                                length: 4,
-                            },
-                            IndexPrefixLength {
-                                position: 0,
-                                length: 8,
-                            },
-                        ],
-                    }],
-                    checks: Vec::new(),
-                    indexes: Vec::new(),
-                }],
-                views: Vec::new(),
-            }],
-        };
-
-        let parsed = from_kdl(&to_kdl(&model)).expect("reversed-prefix package should parse");
-        // Parsing sorts the prefixes by position, so the parsed model is the sorted form.
-        model.schemas[0].tables[0].uniques[0].prefix_lengths = vec![
-            IndexPrefixLength {
-                position: 0,
-                length: 8,
-            },
-            IndexPrefixLength {
-                position: 1,
-                length: 4,
-            },
-        ];
-        assert_eq!(parsed, model);
     }
 
     #[test]

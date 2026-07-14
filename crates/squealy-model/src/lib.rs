@@ -303,16 +303,9 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
             }
             if let Some(primary_key) = &mut table.primary_key {
                 primary_key.name = connection.canonical_primary_key_name(&primary_key.name);
-                // A constraint's prefix lengths are keyed by column position and render order-independently,
-                // but introspection reconstructs them in column order — sort so a package listing them in a
-                // different order does not diff as a spurious constraint alteration.
-                primary_key
-                    .prefix_lengths
-                    .sort_by_key(|prefix| prefix.position);
             }
             for unique in &mut table.uniques {
                 unique.name = connection.canonical_unique_name(unique);
-                unique.prefix_lengths.sort_by_key(|prefix| prefix.position);
             }
             for foreign_key in &mut table.foreign_keys {
                 // Flatten a cross-schema reference the same way the referenced table's own schema name is
@@ -904,9 +897,10 @@ enum PrefixColumnSupport {
 
 fn prefix_column_support(ty: &squealy::SqlType) -> PrefixColumnSupport {
     match ty {
-        squealy::SqlType::String | squealy::SqlType::Text | squealy::SqlType::Bytes => {
-            PrefixColumnSupport::Unbounded
-        }
+        squealy::SqlType::Text | squealy::SqlType::Bytes => PrefixColumnSupport::Unbounded,
+        // MySQL renders `String` as `VARCHAR(255)`, so it is bounded at 255 — a prefix of 255 is
+        // normalized to a full-column key like any other full-width prefix.
+        squealy::SqlType::String => PrefixColumnSupport::Bounded(255),
         squealy::SqlType::Varchar(width)
         | squealy::SqlType::Char(width)
         | squealy::SqlType::FixedBytes(width) => PrefixColumnSupport::Bounded(*width),
@@ -1308,43 +1302,6 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_model_sorts_constraint_prefix_lengths_by_position() {
-        // Prefix lengths are keyed by column position and render order-independently, and introspection
-        // reconstructs them in column order — a package listing them reversed must canonicalize to the
-        // same order, else it diffs as a spurious constraint alteration every plan. Backend-neutral.
-        let mut model = table_with_constraints(foreign_key(), check());
-        model.schemas[0].tables[0].uniques = vec![Constraint {
-            name: "uq_reversed".to_owned(),
-            columns: vec!["a".to_owned(), "b".to_owned()],
-            prefix_lengths: vec![
-                IndexPrefixLength {
-                    position: 1,
-                    length: 4,
-                },
-                IndexPrefixLength {
-                    position: 0,
-                    length: 8,
-                },
-            ],
-        }];
-
-        let canonical = canonicalize_model(&DefaultBackend, &model);
-        assert_eq!(
-            canonical.schemas[0].tables[0].uniques[0].prefix_lengths,
-            vec![
-                IndexPrefixLength {
-                    position: 0,
-                    length: 8,
-                },
-                IndexPrefixLength {
-                    position: 1,
-                    length: 4,
-                },
-            ],
-        );
-    }
-
-    #[test]
     fn render_create_rejects_malformed_constraint_prefix_length_shape() {
         // A backend that *advertises* the prefix-length capability must still reject a malformed shape at
         // the preflight, so `check` fails fast rather than the later `script`/`publish` render.
@@ -1447,8 +1404,21 @@ mod tests {
         render_create_sql(&shorter, &prefix_capable_backend())
             .expect("a prefix shorter than the column width is accepted");
 
+        // `String` renders as `VARCHAR(255)`, so a 255-length prefix is a full-width prefix too.
+        let full_string = model_with_prefix_unique(typed_column("code", SqlType::String), 255);
+        let error = render_create_sql(&full_string, &prefix_capable_backend()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not shorter than the column width"),
+            "unexpected error: {error}"
+        );
+        let short_string = model_with_prefix_unique(typed_column("code", SqlType::String), 32);
+        render_create_sql(&short_string, &prefix_capable_backend())
+            .expect("a 32-length prefix on a String (VARCHAR(255)) column is accepted");
+
         // An unbounded text column accepts any positive prefix.
-        let text = model_with_prefix_unique(typed_column("body", SqlType::Text), 100);
+        let text = model_with_prefix_unique(typed_column("body", SqlType::Text), 1000);
         render_create_sql(&text, &prefix_capable_backend())
             .expect("a prefix on an unbounded text column is accepted");
     }
