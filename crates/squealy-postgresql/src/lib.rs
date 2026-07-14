@@ -136,26 +136,41 @@ pub(crate) fn canonical_pg_pin_type(ty: &squealy::SqlType) -> squealy::SqlType {
     }
 }
 
-/// Canonicalizes a column default to the form PostgreSQL introspection reports for it. Every PostgreSQL
-/// integer column reads back as a signed neutral type (`smallint` → `I16`, `integer` → `I32`, `bigint` →
-/// `I64`, bare `numeric` → `I128`) whose default parses as a signed [`Int`](squealy::DefaultValue::Int).
-/// So once [`canonical_pg_sql_type`] has folded a desired unsigned column's type to its signed
-/// representative, fold an unsigned literal default the same way, otherwise the column re-plans to churn on
-/// the default alone. `ty` is the already-canonicalized column type (see
+/// Canonicalizes an integer column's default to the signed [`Int`](squealy::DefaultValue::Int) both sides
+/// of the diff converge on. `ty` is the already-canonicalized column type (see
 /// [`canonicalize_model`](squealy::canonicalize_model)), so an integer column is one of
-/// `I16`/`I32`/`I64`/`I128`. A value above `i128::MAX` (only reachable on a `U128` default) has no `Int`
-/// (`i128`) representation; introspection reads it back as `Raw`, an accepted residual.
+/// `I16`/`I32`/`I64`/`I128` — including a bare-`numeric` column, whose introspected type
+/// `Raw("numeric")` folds to `I128` in [`canonical_pg_sql_type`]. Two representations must be reconciled to
+/// `Int`:
+///
+///  - A desired **unsigned** literal (`UInt`, on a `U8`..`U128`/`Usize` column) — the signed column reads
+///    its default back as `Int`, so fold it when it fits `i128`.
+///  - An introspected **`Raw` integer string** — a `smallint`/`integer`/`bigint` column parses its default
+///    to `Int` during introspection, but a bare-`numeric` column (introspected as `Raw("numeric")`) has no
+///    integer type at read time, so its default reads back as `Raw("9")`. Parse it to `Int` so a published
+///    `I128`/`U64`/`U128` column with a default re-plans to empty. A non-integer `Raw` default
+///    (`nextval(...)`, a genuine `9.5` decimal) does not parse and is left as-is.
+///
+/// A `UInt` above `i128::MAX` (only reachable on a `U128` default) has no `Int` representation and is left
+/// as-is, an accepted residual.
 #[cfg(feature = "schema")]
 pub(crate) fn canonical_pg_default(
     ty: &squealy::SqlType,
     default: &squealy::DefaultValue,
 ) -> squealy::DefaultValue {
+    use squealy::DefaultValue::{Int, Raw, UInt};
     use squealy::SqlType::{I16, I32, I64, I128};
-    if matches!(ty, I16 | I32 | I64 | I128)
-        && let squealy::DefaultValue::UInt(value) = default
-        && let Ok(signed) = i128::try_from(*value)
-    {
-        return squealy::DefaultValue::Int(signed);
+    if matches!(ty, I16 | I32 | I64 | I128) {
+        if let UInt(value) = default
+            && let Ok(signed) = i128::try_from(*value)
+        {
+            return Int(signed);
+        }
+        if let Raw(text) = default
+            && let Ok(signed) = text.trim().parse::<i128>()
+        {
+            return Int(signed);
+        }
     }
     default.clone()
 }
@@ -384,14 +399,10 @@ impl squealy::SchemaIntrospect for PostgresConnection {
         canonical_pg_sql_type(ty)
     }
 
-    /// Every PostgreSQL integer column introspects back as a signed neutral type (`smallint` → `I16`,
-    /// `integer` → `I32`, `bigint` → `I64`, bare `numeric` → `I128`) whose default reads as a signed
-    /// [`Int`](squealy::DefaultValue::Int). So once [`canonical_sql_type`](Self::canonical_sql_type) has
-    /// folded a desired unsigned column's type to its signed representative, fold an unsigned literal
-    /// default the same way, otherwise the column re-plans to churn on the default alone. `ty` is already
-    /// canonicalized (see [`canonicalize_model`](squealy::canonicalize_model)), so an integer column is
-    /// one of `I16`/`I32`/`I64`/`I128`. A value above `i128::MAX` (only reachable on a `U128` default) has
-    /// no `Int` (`i128`) representation; introspection reads it back as `Raw`, an accepted residual.
+    /// Reconciles an integer column's default across the diff — see [`canonical_pg_default`]. A desired
+    /// unsigned literal (`UInt`) and an introspected bare-`numeric` `Raw("9")` both fold to the signed
+    /// `Int` a `smallint`/`integer`/`bigint`/`numeric` column reads its default back as, so an unsigned or
+    /// wide-integer column with a default re-plans to empty.
     fn canonical_default(
         &self,
         ty: &squealy::SqlType,
@@ -1161,13 +1172,13 @@ CREATE INDEX CONCURRENTLY j ON t (d);";
 
     #[test]
     #[cfg(feature = "schema")]
-    fn canonical_default_folds_unsigned_integer_defaults_to_signed() {
+    fn canonical_default_reconciles_integer_defaults_to_signed() {
         use super::canonical_pg_default;
-        use squealy::DefaultValue::{Int, Text, UInt};
+        use squealy::DefaultValue::{Int, Raw, Text, UInt};
         use squealy::SqlType::{I16, I32, I64, I128, String as SqlString};
 
-        // An unsigned default on an (already-canonicalized) integer column folds to the signed `Int` form
-        // introspection produces, so an unsigned column with a default re-plans to empty.
+        // A desired unsigned default on an (already-canonicalized) integer column folds to the signed
+        // `Int` form introspection produces, so an unsigned column with a default re-plans to empty.
         assert_eq!(canonical_pg_default(&I16, &UInt(200)), Int(200));
         assert_eq!(canonical_pg_default(&I32, &UInt(70_000)), Int(70_000));
         assert_eq!(canonical_pg_default(&I64, &UInt(5)), Int(5));
@@ -1181,11 +1192,30 @@ CREATE INDEX CONCURRENTLY j ON t (d);";
         // accepted residual; introspection reads such a default back as `Raw`).
         let huge = UInt(u128::MAX);
         assert_eq!(canonical_pg_default(&I128, &huge), huge);
+        // A bare-`numeric` column (`I128` after canonicalization) reads its integer default back as a
+        // `Raw` string — parse it to the same signed `Int` so a wide-integer column with a default
+        // converges. A negative default parses too; a non-integer `Raw` (a real decimal / an expression)
+        // is left untouched.
+        assert_eq!(canonical_pg_default(&I128, &Raw("9".to_owned())), Int(9));
+        assert_eq!(canonical_pg_default(&I64, &Raw(" -5 ".to_owned())), Int(-5));
+        assert_eq!(
+            canonical_pg_default(&I128, &Raw("9.5".to_owned())),
+            Raw("9.5".to_owned())
+        );
+        assert_eq!(
+            canonical_pg_default(&I128, &Raw("nextval('s')".to_owned())),
+            Raw("nextval('s')".to_owned())
+        );
         // A signed default and a non-integer column are untouched.
         assert_eq!(canonical_pg_default(&I64, &Int(-5)), Int(-5));
         assert_eq!(
             canonical_pg_default(&SqlString, &Text("x".to_owned())),
             Text("x".to_owned())
+        );
+        // A `Raw` on a non-integer column is not parsed.
+        assert_eq!(
+            canonical_pg_default(&SqlString, &Raw("9".to_owned())),
+            Raw("9".to_owned())
         );
     }
 
