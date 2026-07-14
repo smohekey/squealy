@@ -234,10 +234,12 @@ fn postgres_renders_changed_constraints_and_indexes_in_schema_plan() {
                 table: "events".to_owned(),
                 change: Box::new(TablePlanStep::AlterPrimaryKey {
                     before: Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "pk_events".to_owned(),
                         columns: vec!["id".to_owned()],
                     },
                     after: Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "pk_events".to_owned(),
                         columns: vec!["event_id".to_owned()],
                     },
@@ -248,10 +250,12 @@ fn postgres_renders_changed_constraints_and_indexes_in_schema_plan() {
                 table: "events".to_owned(),
                 change: Box::new(TablePlanStep::AlterUnique {
                     before: Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "uq_events_name".to_owned(),
                         columns: vec!["name".to_owned()],
                     },
                     after: Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "uq_events_name".to_owned(),
                         columns: vec!["slug".to_owned()],
                     },
@@ -3997,4 +4001,34 @@ fn postgres_rejects_on_update_current_timestamp() {
     let mut sql = Vec::new();
     let error = Postgres.render_create(&model, &mut sql).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
+fn postgres_rejects_a_constraint_column_prefix_length() {
+    // PostgreSQL has no `col(n)` constraint prefix. The incremental plan path skips
+    // `validate_capabilities`, so the renderer itself must reject a prefix-carrying constraint rather
+    // than silently drop the `(n)` and emit a full-column constraint that would never round-trip.
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterTable {
+            schema: None,
+            table: "items".to_owned(),
+            change: Box::new(TablePlanStep::AddUnique {
+                constraint: Constraint {
+                    name: "uq_items_name".to_owned(),
+                    columns: vec!["name".to_owned()],
+                    prefix_lengths: vec![IndexPrefixLength {
+                        position: 0,
+                        length: 10,
+                    }],
+                },
+            }),
+        }],
+    };
+    let error = Postgres
+        .render_plan(&plan, &DatabaseModel::default(), &mut Vec::new())
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("prefix length"),
+        "unexpected error: {error}"
+    );
 }

@@ -286,6 +286,7 @@ fn primary_key(columns: &[ColumnRow]) -> Option<Constraint> {
     }
     key_columns.sort_by_key(|column| column.pk);
     Some(Constraint {
+        prefix_lengths: Vec::new(),
         name: String::new(),
         columns: key_columns
             .into_iter()
@@ -761,6 +762,7 @@ async fn indexes(
             // A `UNIQUE` constraint: only the column set is meaningful (its auto-index name and any
             // ordering are SQLite-internal), so it becomes an unnamed table-level constraint.
             "u" => uniques.push(Constraint {
+                prefix_lengths: Vec::new(),
                 name: String::new(),
                 columns,
             }),

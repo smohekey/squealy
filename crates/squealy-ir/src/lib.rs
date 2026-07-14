@@ -390,6 +390,10 @@ pub enum DefaultValue {
 pub struct Constraint {
     pub name: String,
     pub columns: Vec<String>,
+    /// Backend-specific column prefix lengths by zero-based column position (MySQL `col(n)`, on a
+    /// `UNIQUE`/`PRIMARY KEY` over a leading prefix of a string column). Sparse, like
+    /// [`IndexModel::prefix_lengths`]; other backends reject a constraint carrying it.
+    pub prefix_lengths: Vec<IndexPrefixLength>,
 }
 
 /// A named foreign-key constraint.

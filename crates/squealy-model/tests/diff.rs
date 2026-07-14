@@ -357,6 +357,7 @@ fn column(name: &str, ty: SqlType) -> ColumnModel {
 
 fn constraint(name: &str, columns: &[&str]) -> Constraint {
     Constraint {
+        prefix_lengths: Vec::new(),
         name: name.to_owned(),
         columns: columns.iter().map(|column| (*column).to_owned()).collect(),
     }

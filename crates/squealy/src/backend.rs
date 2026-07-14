@@ -239,6 +239,11 @@ pub struct ConstraintCapabilities {
     pub foreign_key_enforcement: bool,
     pub check_validation: bool,
     pub check_enforcement: bool,
+    /// Column prefix lengths on a `UNIQUE`/`PRIMARY KEY` constraint (MySQL `col(n)`,
+    /// [`Constraint::prefix_lengths`]).
+    ///
+    /// [`Constraint::prefix_lengths`]: crate::Constraint::prefix_lengths
+    pub prefix_lengths: bool,
 }
 
 /// Index metadata capabilities for features that are not uniformly available across SQL backends.

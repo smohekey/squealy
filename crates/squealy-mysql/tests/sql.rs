@@ -185,10 +185,12 @@ fn mysql_renders_changed_constraints_and_indexes_in_schema_plan() {
                 table: "events".to_owned(),
                 change: Box::new(TablePlanStep::AlterPrimaryKey {
                     before: Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "pk_events".to_owned(),
                         columns: vec!["id".to_owned()],
                     },
                     after: Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "pk_events".to_owned(),
                         columns: vec!["event_id".to_owned()],
                     },
@@ -199,10 +201,12 @@ fn mysql_renders_changed_constraints_and_indexes_in_schema_plan() {
                 table: "events".to_owned(),
                 change: Box::new(TablePlanStep::AlterUnique {
                     before: Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "uq_events_name".to_owned(),
                         columns: vec!["name".to_owned()],
                     },
                     after: Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "uq_events_name".to_owned(),
                         columns: vec!["slug".to_owned()],
                     },
@@ -314,6 +318,107 @@ ALTER TABLE `shop`.`events` ADD CONSTRAINT `ck_events_id` CHECK ((`event_id` > 0
 DROP INDEX `idx_events_name` ON `shop`.`events`;\n\
 CREATE UNIQUE INDEX `idx_events_name` ON `shop`.`events` (`slug`);"
     );
+}
+
+#[test]
+fn mysql_renders_constraint_column_prefix_lengths() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AddUnique {
+                    constraint: Constraint {
+                        name: "uq_events_slug".to_owned(),
+                        columns: vec!["slug".to_owned(), "region".to_owned()],
+                        // Only the first key column is a prefix; the second is a whole-column part.
+                        prefix_lengths: vec![IndexPrefixLength {
+                            position: 0,
+                            length: 20,
+                        }],
+                    },
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AddPrimaryKey {
+                    constraint: Constraint {
+                        name: "pk_events".to_owned(),
+                        columns: vec!["code".to_owned()],
+                        prefix_lengths: vec![IndexPrefixLength {
+                            position: 0,
+                            length: 8,
+                        }],
+                    },
+                }),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Mysql
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "ALTER TABLE `shop`.`events` ADD CONSTRAINT `uq_events_slug` UNIQUE (`slug`(20), `region`);\n\
+ALTER TABLE `shop`.`events` ADD CONSTRAINT `pk_events` PRIMARY KEY (`code`(8));"
+    );
+}
+
+#[test]
+fn mysql_rejects_malformed_constraint_prefix_lengths() {
+    let render = |prefix_lengths: Vec<IndexPrefixLength>| {
+        let plan = DatabasePlan {
+            steps: vec![DatabasePlanStep::AlterTable {
+                schema: None,
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AddUnique {
+                    constraint: Constraint {
+                        name: "uq".to_owned(),
+                        columns: vec!["slug".to_owned()],
+                        prefix_lengths,
+                    },
+                }),
+            }],
+        };
+        Mysql
+            .render_plan(&plan, &squealy::DatabaseModel::default(), &mut Vec::new())
+            .map(|_| ())
+    };
+
+    // A zero-length prefix (`col(0)`) is invalid in MySQL.
+    let error = render(vec![IndexPrefixLength {
+        position: 0,
+        length: 0,
+    }])
+    .unwrap_err();
+    assert!(error.to_string().contains("zero-length prefix"), "{error}");
+
+    // A prefix naming a key position past the last column.
+    let error = render(vec![IndexPrefixLength {
+        position: 3,
+        length: 4,
+    }])
+    .unwrap_err();
+    assert!(error.to_string().contains("but only 1 column"), "{error}");
+
+    // Two prefixes for the same key position.
+    let error = render(vec![
+        IndexPrefixLength {
+            position: 0,
+            length: 4,
+        },
+        IndexPrefixLength {
+            position: 0,
+            length: 8,
+        },
+    ])
+    .unwrap_err();
+    assert!(error.to_string().contains("duplicate prefix"), "{error}");
 }
 
 #[test]

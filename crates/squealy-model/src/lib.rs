@@ -716,6 +716,16 @@ fn validate_capabilities(
                     ));
                 }
             }
+            for constraint in table.primary_key.iter().chain(&table.uniques) {
+                if !constraint.prefix_lengths.is_empty() && !capabilities.constraints.prefix_lengths
+                {
+                    return unsupported_constraint(
+                        &table.name,
+                        &constraint.name,
+                        "constraint column prefix lengths",
+                    );
+                }
+            }
             for foreign_key in &table.foreign_keys {
                 if foreign_key.match_type.is_some()
                     && !capabilities.constraints.foreign_key_match_type
@@ -1231,6 +1241,7 @@ mod tests {
         model.schemas[0].name = Some("app".to_owned());
         model.schemas[0].tables[0].foreign_keys[0].references_schema = Some("app".to_owned());
         model.schemas[0].tables[0].uniques.push(Constraint {
+            prefix_lengths: Vec::new(),
             name: "uq_memberships_tenant_id".to_owned(),
             columns: vec!["tenant_id".to_owned()],
         });
@@ -1269,6 +1280,7 @@ mod tests {
             on_update: None,
         });
         model.schemas[0].tables[0].primary_key = Some(Constraint {
+            prefix_lengths: Vec::new(),
             name: "pk_memberships".to_owned(),
             columns: vec!["id".to_owned()],
         });
@@ -1367,6 +1379,37 @@ mod tests {
             error
                 .to_string()
                 .contains("foreign key validation metadata"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn render_create_rejects_unsupported_constraint_prefix_length_capability() {
+        // A backend that does not carry constraint column prefix lengths must reject a `UNIQUE`/
+        // `PRIMARY KEY` carrying one at the capability preflight, before it is rendered.
+        let mut model = table_with_constraints(foreign_key(), check());
+        model.schemas[0].tables[0].uniques = vec![Constraint {
+            name: "uq_memberships_slug".to_owned(),
+            columns: vec!["slug".to_owned()],
+            prefix_lengths: vec![IndexPrefixLength {
+                position: 0,
+                length: 8,
+            }],
+        }];
+
+        let error = render_create_sql(
+            &model,
+            &TestBackend {
+                capabilities: SchemaCapabilities::default(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("constraint column prefix lengths"),
             "unexpected error: {error}"
         );
     }
@@ -1525,6 +1568,7 @@ mod tests {
                         foreign_key_enforcement: false,
                         check_validation: false,
                         check_enforcement: true,
+                        prefix_lengths: false,
                     },
                     indexes: IndexCapabilities::default(),
                 },

@@ -866,6 +866,21 @@ fn write_create_table(table: &TableModel, writer: &mut impl Write) -> io::Result
         ));
     }
 
+    // SQLite has no column prefix lengths (`col(n)`), and a constraint change rebuilds through here, so
+    // reject a `UNIQUE`/`PRIMARY KEY` carrying one rather than silently drop it and emit a full-column
+    // constraint that would never round-trip (mirrors the index-metadata reject in `write_create_index`).
+    for constraint in table.primary_key.iter().chain(&table.uniques) {
+        if !constraint.prefix_lengths.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "SQLite does not support constraint column prefix lengths (constraint `{}`)",
+                    constraint.name
+                ),
+            ));
+        }
+    }
+
     // SQLite carries auto-increment as `INTEGER PRIMARY KEY AUTOINCREMENT` on a single column (the
     // rowid alias), so it must be the sole, single-column primary key — and the table-level primary
     // key constraint is then omitted.

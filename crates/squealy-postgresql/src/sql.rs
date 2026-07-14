@@ -265,9 +265,9 @@ pub(crate) mod ddl {
     use std::io::{self, Write};
 
     use squealy::{
-        CheckModel, ColumnModel, ConstraintEnforcement, ConstraintValidation, DatabaseModel,
-        DatabasePlan, DatabasePlanStep, DefaultValue, ForeignKeyModel, IdentityMode, IndexModel,
-        TableModel, TablePlanStep,
+        CheckModel, ColumnModel, Constraint, ConstraintEnforcement, ConstraintValidation,
+        DatabaseModel, DatabasePlan, DatabasePlanStep, DefaultValue, ForeignKeyModel, IdentityMode,
+        IndexModel, TableModel, TablePlanStep,
     };
 
     use super::{write_pg_sql_type, write_qualified_name, write_quoted_ident, write_quoted_text};
@@ -616,12 +616,7 @@ pub(crate) mod ddl {
                 writer.write_all(b"ALTER TABLE ")?;
                 write_qualified_name(schema, table, writer)?;
                 writer.write_all(b" ADD ")?;
-                write_named_constraint(
-                    "PRIMARY KEY",
-                    &constraint.name,
-                    &constraint.columns,
-                    writer,
-                )?;
+                write_named_constraint("PRIMARY KEY", constraint, writer)?;
             }
             TablePlanStep::DropPrimaryKey { constraint }
             | TablePlanStep::DropUnique { constraint } => {
@@ -631,7 +626,7 @@ pub(crate) mod ddl {
                 writer.write_all(b"ALTER TABLE ")?;
                 write_qualified_name(schema, table, writer)?;
                 writer.write_all(b" ADD ")?;
-                write_named_constraint("UNIQUE", &constraint.name, &constraint.columns, writer)?;
+                write_named_constraint("UNIQUE", constraint, writer)?;
             }
             TablePlanStep::AddForeignKey { foreign_key } => {
                 write_add_foreign_key(schema, table, foreign_key, writer)?;
@@ -661,7 +656,7 @@ pub(crate) mod ddl {
                 writer.write_all(b"ALTER TABLE ")?;
                 write_qualified_name(schema, table, writer)?;
                 writer.write_all(b" ADD ")?;
-                write_named_constraint("PRIMARY KEY", &after.name, &after.columns, writer)?;
+                write_named_constraint("PRIMARY KEY", after, writer)?;
             }
             TablePlanStep::AlterUnique { before, after } => {
                 write_drop_constraint(schema, table, &before.name, writer)?;
@@ -669,7 +664,7 @@ pub(crate) mod ddl {
                 writer.write_all(b"ALTER TABLE ")?;
                 write_qualified_name(schema, table, writer)?;
                 writer.write_all(b" ADD ")?;
-                write_named_constraint("UNIQUE", &after.name, &after.columns, writer)?;
+                write_named_constraint("UNIQUE", after, writer)?;
             }
             TablePlanStep::AlterForeignKey { before, after } => {
                 write_drop_constraint(schema, table, &before.name, writer)?;
@@ -970,16 +965,11 @@ pub(crate) mod ddl {
         }
         if let Some(primary_key) = &table.primary_key {
             entry(writer, &mut first_entry)?;
-            write_named_constraint(
-                "PRIMARY KEY",
-                &primary_key.name,
-                &primary_key.columns,
-                writer,
-            )?;
+            write_named_constraint("PRIMARY KEY", primary_key, writer)?;
         }
         for unique in &table.uniques {
             entry(writer, &mut first_entry)?;
-            write_named_constraint("UNIQUE", &unique.name, &unique.columns, writer)?;
+            write_named_constraint("UNIQUE", unique, writer)?;
         }
         for check in &table.checks {
             entry(writer, &mut first_entry)?;
@@ -1103,14 +1093,25 @@ pub(crate) mod ddl {
 
     fn write_named_constraint(
         kind: &str,
-        name: &str,
-        columns: &[String],
+        constraint: &Constraint,
         writer: &mut impl Write,
     ) -> io::Result<()> {
+        // The incremental plan render path skips `validate_capabilities`, so reject a constraint
+        // carrying MySQL-only column prefix lengths here too, rather than silently drop the `(n)` and
+        // emit a full-column constraint that would never round-trip (mirrors the index-metadata rejects).
+        if !constraint.prefix_lengths.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "PostgreSQL does not support constraint column prefix lengths (constraint `{}`)",
+                    constraint.name
+                ),
+            ));
+        }
         writer.write_all(b"CONSTRAINT ")?;
-        write_quoted_ident(name, writer)?;
+        write_quoted_ident(&constraint.name, writer)?;
         write!(writer, " {kind} (")?;
-        write_quoted_ident_list(columns, writer)?;
+        write_quoted_ident_list(&constraint.columns, writer)?;
         writer.write_all(b")")
     }
 

@@ -190,6 +190,7 @@ fn expected_introspected_model() -> DatabaseModel {
     };
     let pk = || {
         Some(Constraint {
+            prefix_lengths: Vec::new(),
             name: String::new(),
             columns: vec!["id".to_owned()],
         })
@@ -328,6 +329,7 @@ fn expected_introspected_model() -> DatabaseModel {
                     primary_key: pk(),
                     foreign_keys: Vec::new(),
                     uniques: vec![Constraint {
+                        prefix_lengths: Vec::new(),
                         name: String::new(),
                         columns: vec!["organization_id".to_owned(), "slug".to_owned()],
                     }],
