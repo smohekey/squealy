@@ -78,8 +78,9 @@ impl PostgresConnection {
 ///
 /// An explicit `#[column(db_type = "numeric")]` reaches the model as `Raw("numeric")` (or `Raw("decimal")`)
 /// and renders — like `I128`/`U64`/`U128` — to bare `numeric`, which introspection reads back as `I128`.
-/// Fold that spelling to the same `I128` representative so an explicit arbitrary-precision numeric column
-/// also re-plans to empty rather than churning against the introspected `I128`. Any other `Raw` (a typmod'd
+/// Fold that spelling (case-insensitively — `parse_db_type` preserves the user's casing in the `Raw`
+/// fallback) to the same `I128` representative so an explicit arbitrary-precision numeric column also
+/// re-plans to empty rather than churning against the introspected `I128`. Any other `Raw` (a typmod'd
 /// `numeric(p,s)` is a distinct `Decimal`, not `Raw`) is left untouched.
 ///
 /// The trait [`canonical_sql_type`](squealy::SchemaIntrospect::canonical_sql_type) delegates here so the
@@ -110,7 +111,11 @@ pub(crate) fn canonical_pg_sql_type(ty: &squealy::SqlType) -> squealy::SqlType {
         U16 => I32,
         Isize | U32 | Usize => I64,
         I128 | U64 | U128 => I128,
-        Raw(name) if matches!(name.as_str(), "numeric" | "decimal") => I128,
+        Raw(name)
+            if name.eq_ignore_ascii_case("numeric") || name.eq_ignore_ascii_case("decimal") =>
+        {
+            I128
+        }
         other => other.clone(),
     }
 }
@@ -1137,7 +1142,8 @@ CREATE INDEX CONCURRENTLY j ON t (d);";
         // An explicit `db_type = "numeric"`/`"decimal"` (`Raw`) renders to bare numeric too, so it folds
         // to the same `I128` representative — an explicit arbitrary-precision numeric column re-plans to
         // empty instead of churning against the introspected `I128`. A different `Raw` is left alone.
-        for name in ["numeric", "decimal"] {
+        // Case-insensitive — `parse_db_type` preserves the user's casing in the `Raw` fallback.
+        for name in ["numeric", "decimal", "NUMERIC", "Decimal"] {
             assert_eq!(
                 canonical_pg_sql_type(&squealy::SqlType::Raw(name.to_owned())),
                 I128
