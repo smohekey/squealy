@@ -255,6 +255,7 @@ impl squealy::SchemaBackend for Postgres {
                 foreign_key_enforcement: false,
                 check_validation: true,
                 check_enforcement: false,
+                prefix_lengths: false,
             },
             indexes: squealy::IndexCapabilities {
                 predicates: true,

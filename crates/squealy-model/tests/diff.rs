@@ -1,8 +1,9 @@
 use squealy_model::{
     ChangeRisk, CheckModel, ColumnModel, Constraint, DatabaseDiffChange, DatabaseModel,
     DefaultValue, DiffPolicy, ExprNode, ForeignKeyAction, ForeignKeyModel, IndexModel,
-    ProjectionItem, SchemaModel, SourceItem, SourceRef, SqlType, TableDiffChange, TableModel,
-    ViewBody, ViewColumnModel, ViewModel, ViewQueryModel, check_diff_policy, diff_models,
+    IndexPrefixLength, ProjectionItem, SchemaModel, SourceItem, SourceRef, SqlType,
+    TableDiffChange, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
+    check_diff_policy, diff_models,
 };
 
 #[test]
@@ -318,6 +319,48 @@ fn diff_policy_allows_all_risks_when_requested() {
     assert!(check_diff_policy(&diff, DiffPolicy::ALLOW_ALL).is_ok());
 }
 
+#[test]
+fn constraint_prefix_length_order_does_not_diff() {
+    // Prefix lengths are keyed by column position and render order-independently. Two models whose only
+    // difference is the order of a unique constraint's prefix lengths must diff empty (no spurious
+    // AlterUnique) — this is the direct `diff_models` path, which never runs `canonicalize_model`.
+    let unique = |prefixes: Vec<IndexPrefixLength>| {
+        let mut table = table("items");
+        table.uniques = vec![Constraint {
+            name: "uq_items".to_owned(),
+            columns: vec!["a".to_owned(), "b".to_owned()],
+            prefix_lengths: prefixes,
+        }];
+        model_with_tables("public", vec![table])
+    };
+    let ascending = unique(vec![
+        IndexPrefixLength {
+            position: 0,
+            length: 8,
+        },
+        IndexPrefixLength {
+            position: 1,
+            length: 4,
+        },
+    ]);
+    let reversed = unique(vec![
+        IndexPrefixLength {
+            position: 1,
+            length: 4,
+        },
+        IndexPrefixLength {
+            position: 0,
+            length: 8,
+        },
+    ]);
+
+    assert!(
+        diff_models(&ascending, &reversed).changes.is_empty(),
+        "reordered prefix lengths must not diff: {:?}",
+        diff_models(&ascending, &reversed).changes
+    );
+}
+
 fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
@@ -357,6 +400,7 @@ fn column(name: &str, ty: SqlType) -> ColumnModel {
 
 fn constraint(name: &str, columns: &[&str]) -> Constraint {
     Constraint {
+        prefix_lengths: Vec::new(),
         name: name.to_owned(),
         columns: columns.iter().map(|column| (*column).to_owned()).collect(),
     }

@@ -8,9 +8,9 @@
 use std::io::{self, Write};
 
 use squealy::{
-    CheckModel, ColumnDefault, ColumnModel, DatabaseModel, DatabasePlan, DatabasePlanStep,
-    DefaultValue, ForeignKeyModel, GeneratedStorage, IndexModel, SqlType, Table, TableModel,
-    TablePlanStep,
+    CheckModel, ColumnDefault, ColumnModel, Constraint, DatabaseModel, DatabasePlan,
+    DatabasePlanStep, DefaultValue, ForeignKeyModel, GeneratedStorage, IndexModel,
+    IndexPrefixLength, SqlType, Table, TableModel, TablePlanStep,
 };
 
 /// Renders ordered create-from-scratch DDL for a whole model. Statements are `;`-terminated and
@@ -259,7 +259,7 @@ fn write_table_plan_step(
             writer.write_all(b"ALTER TABLE ")?;
             write_qualified_name(schema, table, writer)?;
             writer.write_all(b" ADD ")?;
-            write_named_constraint("PRIMARY KEY", &constraint.name, &constraint.columns, writer)?;
+            write_named_constraint("PRIMARY KEY", constraint, writer)?;
         }
         TablePlanStep::DropPrimaryKey { .. } => {
             writer.write_all(b"ALTER TABLE ")?;
@@ -270,7 +270,7 @@ fn write_table_plan_step(
             writer.write_all(b"ALTER TABLE ")?;
             write_qualified_name(schema, table, writer)?;
             writer.write_all(b" ADD ")?;
-            write_named_constraint("UNIQUE", &constraint.name, &constraint.columns, writer)?;
+            write_named_constraint("UNIQUE", constraint, writer)?;
         }
         TablePlanStep::DropUnique { constraint } => {
             writer.write_all(b"ALTER TABLE ")?;
@@ -316,7 +316,7 @@ fn write_table_plan_step(
             writer.write_all(b"ALTER TABLE ")?;
             write_qualified_name(schema, table, writer)?;
             writer.write_all(b" ADD ")?;
-            write_named_constraint("PRIMARY KEY", &after.name, &after.columns, writer)?;
+            write_named_constraint("PRIMARY KEY", after, writer)?;
         }
         TablePlanStep::AlterUnique { before, after } => {
             writer.write_all(b"ALTER TABLE ")?;
@@ -327,7 +327,7 @@ fn write_table_plan_step(
             writer.write_all(b"ALTER TABLE ")?;
             write_qualified_name(schema, table, writer)?;
             writer.write_all(b" ADD ")?;
-            write_named_constraint("UNIQUE", &after.name, &after.columns, writer)?;
+            write_named_constraint("UNIQUE", after, writer)?;
         }
         TablePlanStep::AlterForeignKey { before, after } => {
             writer.write_all(b"ALTER TABLE ")?;
@@ -414,16 +414,11 @@ fn write_create_table(
     }
     if let Some(primary_key) = &table.primary_key {
         entry(writer, &mut first_entry)?;
-        write_named_constraint(
-            "PRIMARY KEY",
-            &primary_key.name,
-            &primary_key.columns,
-            writer,
-        )?;
+        write_named_constraint("PRIMARY KEY", primary_key, writer)?;
     }
     for unique in &table.uniques {
         entry(writer, &mut first_entry)?;
-        write_named_constraint("UNIQUE", &unique.name, &unique.columns, writer)?;
+        write_named_constraint("UNIQUE", unique, writer)?;
     }
     for check in &table.checks {
         entry(writer, &mut first_entry)?;
@@ -656,15 +651,58 @@ fn write_on_update(column_ty: &SqlType, writer: &mut impl Write) -> io::Result<(
 
 fn write_named_constraint(
     kind: &str,
-    name: &str,
-    columns: &[String],
+    constraint: &Constraint,
     writer: &mut impl Write,
 ) -> io::Result<()> {
+    // A `UNIQUE`/`PRIMARY KEY` over a leading column prefix renders `(col(n))`, like a prefix index.
+    validate_prefix_lengths(
+        &format!("constraint `{}`", constraint.name),
+        constraint.columns.len(),
+        &constraint.prefix_lengths,
+    )?;
     writer.write_all(b"CONSTRAINT ")?;
-    write_quoted_ident(name, writer)?;
+    write_quoted_ident(&constraint.name, writer)?;
     write!(writer, " {kind} (")?;
-    write_quoted_ident_list(columns, writer)?;
+    write_constraint_columns(constraint, writer)?;
     writer.write_all(b")")
+}
+
+/// Writes a constraint's key columns, injecting `(n)` after a column indexed over only a leading prefix
+/// (MySQL `col(n)`). Mirrors [`write_index_columns`] for the constraint model.
+fn write_constraint_columns(constraint: &Constraint, writer: &mut impl Write) -> io::Result<()> {
+    for (position, column) in constraint.columns.iter().enumerate() {
+        if position > 0 {
+            writer.write_all(b", ")?;
+        }
+        write_quoted_ident(column, writer)?;
+        if let Some(prefix) = constraint
+            .prefix_lengths
+            .iter()
+            .find(|prefix| prefix.position == position)
+        {
+            write!(writer, "({})", prefix.length)?;
+        }
+    }
+    Ok(())
+}
+
+/// Validates a sparse list of column prefix lengths (an index's or a constraint's) before rendering,
+/// surfacing the shared [`squealy::prefix_length_shape_error`] as an `io::Error`. `owner` is a
+/// pre-formatted label for the message (e.g. `` index `foo` `` / `` constraint `bar` ``). The capability
+/// preflight runs the same check, but the incremental plan render path skips it, so each renderer
+/// validates here too.
+fn validate_prefix_lengths(
+    owner: &str,
+    num_columns: usize,
+    prefix_lengths: &[IndexPrefixLength],
+) -> io::Result<()> {
+    match squealy::prefix_length_shape_error(num_columns, prefix_lengths) {
+        Some(reason) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{owner} {reason}"),
+        )),
+        None => Ok(()),
+    }
 }
 
 fn write_check(check: &CheckModel, writer: &mut impl Write) -> io::Result<()> {
@@ -730,52 +768,24 @@ fn write_create_index(
         ));
     }
     if !index.prefix_lengths.is_empty() {
-        // Every prefix length must reference a real key-term position (and only once), or the term it
-        // names would silently render without its `(n)`. Validate before emitting SQL.
-        let mut seen = std::collections::HashSet::new();
-        for prefix in &index.prefix_lengths {
-            if prefix.length == 0 {
-                // MySQL rejects `col(0)`; a prefix indexes at least one character/byte.
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "index `{}` has a zero-length prefix for key position {}",
-                        index.name, prefix.position
-                    ),
-                ));
-            }
-            if prefix.position >= index.columns.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "index `{}` has a prefix length for key position {} but only {} column(s)",
-                        index.name,
-                        prefix.position,
-                        index.columns.len()
-                    ),
-                ));
-            }
-            if !seen.insert(prefix.position) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "index `{}` has duplicate prefix lengths for key position {}",
-                        index.name, prefix.position
-                    ),
-                ));
-            }
-        }
+        validate_prefix_lengths(
+            &format!("index `{}`", index.name),
+            index.columns.len(),
+            &index.prefix_lengths,
+        )?;
         // A unique index renders `CREATE UNIQUE INDEX`, which MySQL exposes as a `UNIQUE` row in
         // `information_schema.TABLE_CONSTRAINTS`; introspection reconstructs it as a neutral unique
-        // `Constraint`, which carries no prefix length. So a unique prefix index cannot round-trip
-        // (it would replan as prefix-less churn). Reject it rather than emit un-introspectable DDL;
-        // full support needs a prefix on the unique-constraint model (git-bug follow-up).
+        // `Constraint` (which now carries prefix lengths — see `write_named_constraint`), NOT an
+        // `IndexModel`. So a unique *index* with a prefix cannot round-trip as an index — it would
+        // replan as a constraint. Reject it and steer the caller to a `#[unique]`/`UNIQUE` constraint,
+        // which does round-trip the prefix (git-bug 1847e75).
         if index.unique {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
                     "MySQL cannot round-trip a unique index with column prefix lengths \
-                     (index `{}`): it introspects back as a unique constraint without the prefix",
+                     (index `{}`): it introspects back as a unique constraint, not an index — \
+                     use a unique constraint to carry the prefix",
                     index.name
                 ),
             ));

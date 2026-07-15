@@ -390,6 +390,10 @@ pub enum DefaultValue {
 pub struct Constraint {
     pub name: String,
     pub columns: Vec<String>,
+    /// Backend-specific column prefix lengths by zero-based column position (MySQL `col(n)`, on a
+    /// `UNIQUE`/`PRIMARY KEY` over a leading prefix of a string column). Sparse, like
+    /// [`IndexModel::prefix_lengths`]; other backends reject a constraint carrying it.
+    pub prefix_lengths: Vec<IndexPrefixLength>,
 }
 
 /// A named foreign-key constraint.
@@ -641,6 +645,39 @@ pub struct IndexOperatorClass {
 pub struct IndexPrefixLength {
     pub position: usize,
     pub length: u32,
+}
+
+/// Validates a sparse list of column prefix lengths (an index's or a constraint's) against the key's
+/// column count, returning a human-readable reason if malformed or `None` if valid. Each prefix must key
+/// at least one character/byte (`col(0)` is invalid in MySQL) and name a real key-term position exactly
+/// once. Shared by the capability preflight (so `check` fails fast) and each renderer (the plan path
+/// skips the preflight) so both agree on what is renderable.
+pub fn prefix_length_shape_error(
+    num_columns: usize,
+    prefix_lengths: &[IndexPrefixLength],
+) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    for prefix in prefix_lengths {
+        if prefix.length == 0 {
+            return Some(format!(
+                "has a zero-length prefix for key position {}",
+                prefix.position
+            ));
+        }
+        if prefix.position >= num_columns {
+            return Some(format!(
+                "has a prefix length for key position {} but only {num_columns} column(s)",
+                prefix.position
+            ));
+        }
+        if !seen.insert(prefix.position) {
+            return Some(format!(
+                "has duplicate prefix lengths for key position {}",
+                prefix.position
+            ));
+        }
+    }
+    None
 }
 
 /// Backend-neutral index access method.

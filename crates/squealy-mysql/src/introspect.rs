@@ -401,19 +401,30 @@ async fn key_constraints(
     conn: &mut mysql_async::Conn,
     table_ref: &TableRef,
 ) -> Result<(Option<Constraint>, Vec<Constraint>), MysqlError> {
+    // `STATISTICS.SUB_PART` carries the prefix length (`col(n)`) for a key part, keyed by the same
+    // `INDEX_NAME` MySQL gives a constraint's backing index (`PRIMARY` for the primary key, the
+    // constraint name for a unique). Left-join it in so a `UNIQUE`/`PRIMARY KEY` over a leading column
+    // prefix round-trips its `(n)`; `KEY_COLUMN_USAGE` alone has no prefix length. The join key includes
+    // the column, and a column appears once per index, so it does not multiply rows.
     let rows = conn
         .exec_map(
             "\
 SELECT
     tc.CONSTRAINT_NAME,
     tc.CONSTRAINT_TYPE,
-    kcu.COLUMN_NAME
+    kcu.COLUMN_NAME,
+    s.SUB_PART
 FROM information_schema.TABLE_CONSTRAINTS tc
 JOIN information_schema.KEY_COLUMN_USAGE kcu
   ON kcu.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
  AND kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
  AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
  AND kcu.TABLE_NAME = tc.TABLE_NAME
+LEFT JOIN information_schema.STATISTICS s
+  ON s.TABLE_SCHEMA = tc.TABLE_SCHEMA
+ AND s.TABLE_NAME = tc.TABLE_NAME
+ AND s.INDEX_NAME = tc.CONSTRAINT_NAME
+ AND s.COLUMN_NAME = kcu.COLUMN_NAME
 WHERE tc.TABLE_SCHEMA = :schema
   AND tc.TABLE_NAME = :table
   AND tc.CONSTRAINT_TYPE IN ('PRIMARY KEY', 'UNIQUE')
@@ -422,34 +433,41 @@ ORDER BY tc.CONSTRAINT_TYPE, tc.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
                 "schema" => &table_ref.schema,
                 "table" => &table_ref.name,
             },
-            |(name, kind, column): (String, String, String)| (name, kind, column),
+            |(name, kind, column, sub_part): (String, String, String, Option<u32>)| {
+                (name, kind, column, sub_part)
+            },
         )
         .await
         .map_err(MysqlError::Introspect)?;
 
     let mut primary_key = None::<Constraint>;
-    let mut uniques = BTreeMap::<String, Vec<String>>::new();
-    for (name, kind, column) in rows {
-        if kind == "PRIMARY KEY" {
-            primary_key
-                .get_or_insert_with(|| Constraint {
-                    name,
-                    columns: Vec::new(),
-                })
-                .columns
-                .push(column);
+    let mut uniques = BTreeMap::<String, Constraint>::new();
+    for (name, kind, column, sub_part) in rows {
+        let constraint = if kind == "PRIMARY KEY" {
+            primary_key.get_or_insert_with(|| Constraint {
+                name,
+                columns: Vec::new(),
+                prefix_lengths: Vec::new(),
+            })
         } else {
-            uniques.entry(name).or_default().push(column);
+            uniques.entry(name.clone()).or_insert_with(|| Constraint {
+                name,
+                columns: Vec::new(),
+                prefix_lengths: Vec::new(),
+            })
+        };
+        // `SUB_PART` is the indexed prefix length for `col(n)`, or NULL for a whole-column part; record
+        // it by zero-based position (a sparse list, like the secondary-index path).
+        let position = constraint.columns.len();
+        constraint.columns.push(column);
+        if let Some(length) = sub_part {
+            constraint
+                .prefix_lengths
+                .push(IndexPrefixLength { position, length });
         }
     }
 
-    Ok((
-        primary_key,
-        uniques
-            .into_iter()
-            .map(|(name, columns)| Constraint { name, columns })
-            .collect(),
-    ))
+    Ok((primary_key, uniques.into_values().collect()))
 }
 
 async fn foreign_keys(

@@ -185,10 +185,12 @@ fn mysql_renders_changed_constraints_and_indexes_in_schema_plan() {
                 table: "events".to_owned(),
                 change: Box::new(TablePlanStep::AlterPrimaryKey {
                     before: Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "pk_events".to_owned(),
                         columns: vec!["id".to_owned()],
                     },
                     after: Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "pk_events".to_owned(),
                         columns: vec!["event_id".to_owned()],
                     },
@@ -199,10 +201,12 @@ fn mysql_renders_changed_constraints_and_indexes_in_schema_plan() {
                 table: "events".to_owned(),
                 change: Box::new(TablePlanStep::AlterUnique {
                     before: Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "uq_events_name".to_owned(),
                         columns: vec!["name".to_owned()],
                     },
                     after: Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "uq_events_name".to_owned(),
                         columns: vec!["slug".to_owned()],
                     },
@@ -314,6 +318,107 @@ ALTER TABLE `shop`.`events` ADD CONSTRAINT `ck_events_id` CHECK ((`event_id` > 0
 DROP INDEX `idx_events_name` ON `shop`.`events`;\n\
 CREATE UNIQUE INDEX `idx_events_name` ON `shop`.`events` (`slug`);"
     );
+}
+
+#[test]
+fn mysql_renders_constraint_column_prefix_lengths() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AddUnique {
+                    constraint: Constraint {
+                        name: "uq_events_slug".to_owned(),
+                        columns: vec!["slug".to_owned(), "region".to_owned()],
+                        // Only the first key column is a prefix; the second is a whole-column part.
+                        prefix_lengths: vec![IndexPrefixLength {
+                            position: 0,
+                            length: 20,
+                        }],
+                    },
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AddPrimaryKey {
+                    constraint: Constraint {
+                        name: "pk_events".to_owned(),
+                        columns: vec!["code".to_owned()],
+                        prefix_lengths: vec![IndexPrefixLength {
+                            position: 0,
+                            length: 8,
+                        }],
+                    },
+                }),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Mysql
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert_eq!(
+        sql,
+        "ALTER TABLE `shop`.`events` ADD CONSTRAINT `uq_events_slug` UNIQUE (`slug`(20), `region`);\n\
+ALTER TABLE `shop`.`events` ADD CONSTRAINT `pk_events` PRIMARY KEY (`code`(8));"
+    );
+}
+
+#[test]
+fn mysql_rejects_malformed_constraint_prefix_lengths() {
+    let render = |prefix_lengths: Vec<IndexPrefixLength>| {
+        let plan = DatabasePlan {
+            steps: vec![DatabasePlanStep::AlterTable {
+                schema: None,
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AddUnique {
+                    constraint: Constraint {
+                        name: "uq".to_owned(),
+                        columns: vec!["slug".to_owned()],
+                        prefix_lengths,
+                    },
+                }),
+            }],
+        };
+        Mysql
+            .render_plan(&plan, &squealy::DatabaseModel::default(), &mut Vec::new())
+            .map(|_| ())
+    };
+
+    // A zero-length prefix (`col(0)`) is invalid in MySQL.
+    let error = render(vec![IndexPrefixLength {
+        position: 0,
+        length: 0,
+    }])
+    .unwrap_err();
+    assert!(error.to_string().contains("zero-length prefix"), "{error}");
+
+    // A prefix naming a key position past the last column.
+    let error = render(vec![IndexPrefixLength {
+        position: 3,
+        length: 4,
+    }])
+    .unwrap_err();
+    assert!(error.to_string().contains("but only 1 column"), "{error}");
+
+    // Two prefixes for the same key position.
+    let error = render(vec![
+        IndexPrefixLength {
+            position: 0,
+            length: 4,
+        },
+        IndexPrefixLength {
+            position: 0,
+            length: 8,
+        },
+    ])
+    .unwrap_err();
+    assert!(error.to_string().contains("duplicate prefix"), "{error}");
 }
 
 #[test]
@@ -2118,5 +2223,149 @@ fn mysql_delete_using_renders_join() {
         delete.to_sql(),
         "DELETE q0_0 FROM `shop`.`memberships` AS q0_0 \
          JOIN `shop`.`tenants` AS q0_1 ON (q0_0.`tenant_id` = q0_1.`id`)"
+    );
+}
+
+/// A one-table model whose sole `UNIQUE` carries a single-column prefix over a column of the given type.
+fn model_with_prefix_unique(column_ty: SqlType, length: u32) -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "items".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "code".to_owned(),
+                    comment: None,
+                    ty: column_ty,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                    on_update: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: vec![Constraint {
+                    name: "uq_items".to_owned(),
+                    columns: vec!["code".to_owned()],
+                    prefix_lengths: vec![IndexPrefixLength {
+                        position: 0,
+                        length,
+                    }],
+                }],
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    }
+}
+
+#[test]
+fn mysql_rejects_a_prefix_on_a_non_string_column() {
+    // MySQL cannot index a leading prefix of a non-string/binary column; `render_create` self-validates.
+    let error = Mysql
+        .render_create(&model_with_prefix_unique(SqlType::I32, 4), &mut Vec::new())
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cannot index by a leading prefix"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn mysql_rejects_a_full_width_constraint_prefix() {
+    // A prefix equal to (or over) a bounded column's rendered width is normalized by MySQL to a
+    // full-column key (SUB_PART NULL on introspection → churn); reject it. A shorter prefix is fine.
+    for (ty, full, ok) in [
+        (SqlType::Varchar(8), 8, 4),
+        (SqlType::Char(8), 8, 4),
+        (SqlType::FixedBytes(8), 8, 4),
+        // MySQL renders `String` as `VARCHAR(255)` and `Uuid` as `CHAR(36)`.
+        (SqlType::String, 255, 32),
+        (SqlType::Uuid, 36, 8),
+    ] {
+        let error = Mysql
+            .render_create(&model_with_prefix_unique(ty.clone(), full), &mut Vec::new())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not shorter than the column width"),
+            "expected a full-width rejection for {ty:?}, got: {error}"
+        );
+        Mysql
+            .render_create(&model_with_prefix_unique(ty.clone(), ok), &mut Vec::new())
+            .unwrap_or_else(|error| panic!("a shorter prefix on {ty:?} should render: {error}"));
+    }
+
+    // Unbounded text/blob columns accept any positive prefix.
+    for ty in [SqlType::Text, SqlType::Bytes] {
+        Mysql
+            .render_create(&model_with_prefix_unique(ty.clone(), 1000), &mut Vec::new())
+            .unwrap_or_else(|error| panic!("a prefix on unbounded {ty:?} should render: {error}"));
+    }
+}
+
+#[test]
+fn mysql_validates_prefixes_on_recognized_raw_string_and_binary_types() {
+    // MySQL string/binary types with no neutral variant introspect as `Raw` (keywords upper-cased). A
+    // prefix on a recognized one must round-trip: bounded `VARBINARY(n)` (prefix < n), unbounded
+    // `TINYTEXT`/`MEDIUMBLOB`/etc.
+    let raw = |name: &str| SqlType::Raw(name.to_owned());
+
+    // A shorter-than-width `VARBINARY(8)` prefix renders; a full-width one is rejected.
+    Mysql
+        .render_create(
+            &model_with_prefix_unique(raw("VARBINARY(8)"), 4),
+            &mut Vec::new(),
+        )
+        .expect("a VARBINARY(8) prefix of 4 should render");
+    let error = Mysql
+        .render_create(
+            &model_with_prefix_unique(raw("VARBINARY(8)"), 8),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("not shorter than the column width"),
+        "unexpected error: {error}"
+    );
+
+    // TEXT/BLOB (LOB) families are unbounded here — a LOB key always carries a prefix and is never a
+    // whole-column key, so any positive prefix passes static validation. MySQL's row-format/charset-
+    // dependent index key-length limit is enforced by the server at execution, not statically (a loud
+    // error, not silent churn), so it is deliberately not modelled.
+    for name in [
+        "TINYTEXT",
+        "MEDIUMTEXT",
+        "LONGTEXT",
+        "TINYBLOB",
+        "MEDIUMBLOB",
+        "LONGBLOB",
+    ] {
+        Mysql
+            .render_create(&model_with_prefix_unique(raw(name), 255), &mut Vec::new())
+            .unwrap_or_else(|error| panic!("a prefix on {name} should render: {error}"));
+    }
+
+    // An un-prefixable raw type (ENUM) is still rejected.
+    let error = Mysql
+        .render_create(
+            &model_with_prefix_unique(raw("ENUM('a','b')"), 1),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cannot index by a leading prefix"),
+        "unexpected error: {error}"
     );
 }

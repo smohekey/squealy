@@ -164,7 +164,10 @@ impl SchemaBackend for Mysql {
     fn capabilities(&self) -> squealy::SchemaCapabilities {
         squealy::SchemaCapabilities {
             columns: squealy::ColumnCapabilities { on_update: true },
-            constraints: squealy::ConstraintCapabilities::default(),
+            constraints: squealy::ConstraintCapabilities {
+                prefix_lengths: true,
+                ..squealy::ConstraintCapabilities::default()
+            },
             indexes: squealy::IndexCapabilities {
                 prefix_lengths: true,
                 ..squealy::IndexCapabilities::default()
@@ -172,20 +175,137 @@ impl SchemaBackend for Mysql {
         }
     }
 
+    /// Rejects a `UNIQUE`/`PRIMARY KEY` column prefix MySQL cannot store as a prefix: it requires a
+    /// string/binary column, and its length must stay under the width MySQL renders that column at, or
+    /// MySQL errors (a non-string column) or normalizes a full/over-width prefix to a full-column key
+    /// (`STATISTICS.SUB_PART` reads back `NULL`) that does not round-trip. The width per neutral type is
+    /// MySQL's own (`String` → `VARCHAR(255)`, `Uuid` → `CHAR(36)`, `Varchar(n)`/`Char(n)`/`FixedBytes(n)`
+    /// → their `n`, `Text`/`Bytes` → unbounded `TEXT`/`BLOB`); a `Raw` type is emitted verbatim with an
+    /// unknown width, so a prefix on it cannot be shown round-trip-safe and is rejected.
+    fn validate_constraint_prefixes(&self, table: &squealy::TableModel) -> std::io::Result<()> {
+        for constraint in table.primary_key.iter().chain(&table.uniques) {
+            for prefix in &constraint.prefix_lengths {
+                // The caller runs the neutral shape check, but this can be reached directly (via
+                // `render_create`/`render_plan`), so guard the lookups rather than index.
+                let Some(column_name) = constraint.columns.get(prefix.position) else {
+                    continue;
+                };
+                let Some(column) = table.columns.iter().find(|c| &c.name == column_name) else {
+                    continue;
+                };
+                match mysql_prefix_column(&column.ty) {
+                    MysqlPrefixColumn::Unsupported => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!(
+                                "constraint `{}` has a column prefix on `{column_name}`, which MySQL \
+                                 cannot index by a leading prefix (not a fixed-width-known string or \
+                                 binary column), on `{}`",
+                                constraint.name, table.name
+                            ),
+                        ));
+                    }
+                    MysqlPrefixColumn::Bounded(width) if prefix.length >= width => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!(
+                                "constraint `{}` prefix length {} for `{column_name}` is not shorter \
+                                 than the column width {width}; MySQL would store it as a full-column \
+                                 key that does not round-trip, on `{}`",
+                                constraint.name, prefix.length, table.name
+                            ),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn render_create(&self, model: &DatabaseModel, writer: &mut impl Write) -> std::io::Result<()> {
+        // Self-validate so a direct `render_create` (bypassing `squealy_model::check_create`) cannot emit
+        // a non-round-trippable prefix; harmlessly re-validates when reached through the model engine.
+        for schema in &model.schemas {
+            for table in &schema.tables {
+                self.validate_constraint_prefixes(table)?;
+            }
+        }
         sql::write_database(model, writer)
     }
 
     fn render_plan(
         &self,
         plan: &squealy::DatabasePlan,
-        // MySQL renders each step's delta in place (`ALTER TABLE … MODIFY COLUMN …`), so it does not
-        // need the full target model that table-rebuild backends (SQLite) rely on.
-        _desired: &DatabaseModel,
+        // MySQL renders each step's delta in place (`ALTER TABLE … MODIFY COLUMN …`), so it does not need
+        // the full target model that table-rebuild backends (SQLite) rely on for *rendering* — but it is
+        // the only source of the column types a prefix constraint's validation needs, so validate against
+        // it (a direct caller bypasses `squealy_model::render_plan_sql`, which would otherwise do this).
+        desired: &DatabaseModel,
         writer: &mut impl Write,
     ) -> std::io::Result<()> {
+        for schema in &desired.schemas {
+            for table in &schema.tables {
+                self.validate_constraint_prefixes(table)?;
+            }
+        }
         sql::write_plan(plan, writer)
     }
+}
+
+/// MySQL's column-prefix support for a neutral column type. A `col(n)` prefix indexes a leading `n`
+/// characters/bytes; a fixed-max-width column (`VARCHAR(n)`/`CHAR(n)`/`BINARY(n)`/`VARBINARY(n)`, and
+/// `String`→`VARCHAR(255)` / `Uuid`→`CHAR(36)`) becomes a whole-column key at its full width (introspecting
+/// with `SUB_PART` NULL, which does not round-trip), so a prefix must be strictly `< width`. A `TEXT`/`BLOB`
+/// (LOB) column *requires* a prefix and can never be a whole-column key, so it is unbounded here — its
+/// only limit is MySQL's row-format/charset-dependent index key length, which the neutral model cannot
+/// know and which the server enforces at execution (a loud error, not silent churn). See
+/// [`Mysql::validate_constraint_prefixes`].
+enum MysqlPrefixColumn {
+    /// A `TEXT`/`BLOB` family column — any positive prefix passes static validation.
+    Unbounded,
+    /// A fixed-max-width column — a prefix must be strictly `< width`.
+    Bounded(u32),
+    /// Not a string/binary column MySQL can index by a leading prefix.
+    Unsupported,
+}
+
+fn mysql_prefix_column(ty: &squealy::SqlType) -> MysqlPrefixColumn {
+    use squealy::SqlType;
+    match ty {
+        SqlType::Text | SqlType::Bytes => MysqlPrefixColumn::Unbounded,
+        SqlType::String => MysqlPrefixColumn::Bounded(255),
+        SqlType::Uuid => MysqlPrefixColumn::Bounded(36),
+        SqlType::Varchar(width) | SqlType::Char(width) | SqlType::FixedBytes(width) => {
+            MysqlPrefixColumn::Bounded(*width)
+        }
+        // Several MySQL string/binary types have no neutral variant and introspect as `Raw` (keywords
+        // upper-cased by `raw_column_type`): the `TINY`/`MEDIUM`/`LONG` text and blob families (LOBs,
+        // unbounded here) and `VARBINARY(n)` (bounded). Any other `Raw` (`ENUM`/`SET`/an unknown
+        // spelling) is not prefix-round-trip-safe.
+        SqlType::Raw(raw) => mysql_raw_prefix_column(raw),
+        _ => MysqlPrefixColumn::Unsupported,
+    }
+}
+
+fn mysql_raw_prefix_column(raw: &str) -> MysqlPrefixColumn {
+    let lower = raw.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "tinytext" | "mediumtext" | "longtext" | "tinyblob" | "mediumblob" | "longblob" => {
+            return MysqlPrefixColumn::Unbounded;
+        }
+        _ => {}
+    }
+    // A bounded `varbinary(n)` — a prefix must stay under `n` like any other fixed-width column.
+    if let Some(width) = lower
+        .strip_prefix("varbinary")
+        .and_then(|rest| rest.trim().strip_prefix('('))
+        .and_then(|rest| rest.strip_suffix(')'))
+        .and_then(|inner| inner.trim().parse::<u32>().ok())
+    {
+        return MysqlPrefixColumn::Bounded(width);
+    }
+    MysqlPrefixColumn::Unsupported
 }
 
 /// A live MySQL connection for schema management and query execution.

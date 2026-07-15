@@ -146,6 +146,7 @@ pub fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
     // name); otherwise hoist every column marked `#[column(primary_key)]` into one constraint.
     let primary_key = match table.primary_key() {
         Some(pk) => Some(Constraint {
+            prefix_lengths: Vec::new(),
             name: pk.name.map(str::to_owned).unwrap_or_else(|| pk_name(&name)),
             columns: pk
                 .columns
@@ -160,6 +161,7 @@ pub fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
                 .map(|column| column.name().to_owned())
                 .collect::<Vec<_>>();
             (!pk_columns.is_empty()).then(|| Constraint {
+                prefix_lengths: Vec::new(),
                 name: pk_name(&name),
                 columns: pk_columns,
             })
@@ -175,6 +177,7 @@ pub fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
         .iter()
         .filter(|column| column.unique() && column.unique_predicate().is_none())
         .map(|column| Constraint {
+            prefix_lengths: Vec::new(),
             name: uq_name(&name, &[column.name()]),
             columns: vec![column.name().to_owned()],
         })
@@ -184,6 +187,7 @@ pub fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
                 .iter()
                 .filter(|unique| unique.predicate.is_none())
                 .map(|unique| Constraint {
+                    prefix_lengths: Vec::new(),
                     name: unique
                         .name
                         .map(str::to_owned)
@@ -450,6 +454,7 @@ mod tests {
         assert_eq!(
             users.primary_key,
             Some(Constraint {
+                prefix_lengths: Vec::new(),
                 name: "pk_users".to_owned(),
                 columns: vec!["id".to_owned()],
             })
@@ -457,6 +462,7 @@ mod tests {
         assert_eq!(
             users.uniques,
             vec![Constraint {
+                prefix_lengths: Vec::new(),
                 name: "uq_users_email".to_owned(),
                 columns: vec!["email".to_owned()],
             }]
@@ -546,6 +552,7 @@ mod tests {
         assert_eq!(
             memberships.primary_key,
             Some(Constraint {
+                prefix_lengths: Vec::new(),
                 name: "pk_memberships".to_owned(),
                 columns: vec!["tenant_id".to_owned(), "id".to_owned()],
             })
@@ -560,6 +567,7 @@ mod tests {
         assert_eq!(
             named.primary_key,
             Some(Constraint {
+                prefix_lengths: Vec::new(),
                 name: "membership_pk".to_owned(),
                 columns: vec!["tenant_id".to_owned(), "id".to_owned()],
             })
@@ -574,6 +582,7 @@ mod tests {
         assert_eq!(
             repository.uniques,
             vec![Constraint {
+                prefix_lengths: Vec::new(),
                 name: "uq_repositorys_organization_id_slug".to_owned(),
                 columns: vec!["organization_id".to_owned(), "slug".to_owned()],
             }]
@@ -591,14 +600,17 @@ mod tests {
             widget.uniques,
             vec![
                 Constraint {
+                    prefix_lengths: Vec::new(),
                     name: "uq_widgets_tenant_id".to_owned(),
                     columns: vec!["tenant_id".to_owned()],
                 },
                 Constraint {
+                    prefix_lengths: Vec::new(),
                     name: "uq_widget_sku".to_owned(),
                     columns: vec!["tenant_id".to_owned(), "sku".to_owned()],
                 },
                 Constraint {
+                    prefix_lengths: Vec::new(),
                     name: "uq_widgets_tenant_id_label".to_owned(),
                     columns: vec!["tenant_id".to_owned(), "label".to_owned()],
                 },

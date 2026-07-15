@@ -8,8 +8,9 @@
 use squealy::{
     ArithmeticOp, ColumnModel, CompareOp, Constraint, CteModel, DatabaseModel, DatabasePlan,
     DatabasePlanStep, DdlExecutor, ExprNode, ForeignKeyAction, ForeignKeyModel, IdentityMode,
-    IdentityModel, IndexModel, ProjectionItem, SchemaBackend, SchemaModel, SourceItem, SourceRef,
-    SqlType, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
+    IdentityModel, IndexModel, IndexPrefixLength, ProjectionItem, SchemaBackend, SchemaModel,
+    SourceItem, SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel, ViewModel,
+    ViewQueryModel, ViewSetOp,
 };
 use squealy_model::{
     CastColumn, DiffPolicy, PlanApplyOptions, RefactorLog, RefactorOperation, RenameColumn,
@@ -309,6 +310,7 @@ fn adds_a_unique_constraint_via_rebuild() {
         ],
     );
     desired_table.uniques.push(Constraint {
+        prefix_lengths: Vec::new(),
         name: String::new(),
         columns: vec!["slug".to_owned()],
     });
@@ -615,6 +617,7 @@ async fn rebuild_preserves_rows_when_adding_a_unique() {
     // Adding a UNIQUE constraint is inline-only in SQLite, so this rebuilds the table.
     let mut v2 = introspect(&mut connection).await.expect("introspect");
     v2.schemas[0].tables[0].uniques.push(Constraint {
+        prefix_lengths: Vec::new(),
         name: String::new(),
         columns: vec!["slug".to_owned()],
     });
@@ -653,6 +656,7 @@ async fn rebuild_preserves_child_rows_despite_on_delete_cascade() {
         vec![autoincrement_id(), column("code", SqlType::Text, false)],
     );
     parents.primary_key = Some(Constraint {
+        prefix_lengths: Vec::new(),
         name: String::new(),
         columns: vec!["id".to_owned()],
     });
@@ -661,6 +665,7 @@ async fn rebuild_preserves_child_rows_despite_on_delete_cascade() {
         vec![autoincrement_id(), column("parent_id", SqlType::I64, false)],
     );
     children.primary_key = Some(Constraint {
+        prefix_lengths: Vec::new(),
         name: String::new(),
         columns: vec!["id".to_owned()],
     });
@@ -707,6 +712,7 @@ async fn rebuild_preserves_child_rows_despite_on_delete_cascade() {
         .expect("parents table")
         .uniques
         .push(Constraint {
+            prefix_lengths: Vec::new(),
             name: String::new(),
             columns: vec!["code".to_owned()],
         });
@@ -747,6 +753,7 @@ async fn foreign_key_check_rejects_a_violating_change() {
     let (mut connection, raw) = setup().await;
     let mut parents = table("parents", vec![autoincrement_id()]);
     parents.primary_key = Some(Constraint {
+        prefix_lengths: Vec::new(),
         name: String::new(),
         columns: vec!["id".to_owned()],
     });
@@ -755,6 +762,7 @@ async fn foreign_key_check_rejects_a_violating_change() {
         vec![autoincrement_id(), column("parent_id", SqlType::I64, false)],
     );
     children.primary_key = Some(Constraint {
+        prefix_lengths: Vec::new(),
         name: String::new(),
         columns: vec!["id".to_owned()],
     });
@@ -821,6 +829,7 @@ async fn rebuild_preserves_the_autoincrement_high_water_mark() {
         vec![autoincrement_id(), column("v", SqlType::Text, false)],
     );
     widgets.primary_key = Some(Constraint {
+        prefix_lengths: Vec::new(),
         name: String::new(),
         columns: vec!["id".to_owned()],
     });
@@ -838,6 +847,7 @@ async fn rebuild_preserves_the_autoincrement_high_water_mark() {
     // Rebuild by adding a UNIQUE constraint.
     let mut v2 = introspect(&mut connection).await.expect("introspect");
     v2.schemas[0].tables[0].uniques.push(Constraint {
+        prefix_lengths: Vec::new(),
         name: String::new(),
         columns: vec!["v".to_owned()],
     });
@@ -1575,6 +1585,7 @@ async fn rebuilding_a_table_under_an_existing_view_succeeds() {
     // with the active_widgets view over widgets still present.
     let mut widgets = widget_table();
     widgets.uniques.push(Constraint {
+        prefix_lengths: Vec::new(),
         name: String::new(),
         columns: vec!["id".to_owned()],
     });
@@ -1634,6 +1645,7 @@ async fn rebuilding_a_table_under_a_chained_view_succeeds() {
 
     // Adding a UNIQUE forces a create-copy-drop-rename rebuild of widgets under the unchanged chain.
     let v2 = with_chain(vec![Constraint {
+        prefix_lengths: Vec::new(),
         name: String::new(),
         columns: vec!["id".to_owned()],
     }]);
@@ -2345,4 +2357,27 @@ async fn replanning_a_view_with_an_ilike_filter_is_empty() {
         .await
         .expect("re-plan ilike view");
     assert!(plan.steps.is_empty(), "ILIKE view churn: {:?}", plan.steps);
+}
+
+#[test]
+fn sqlite_rejects_a_constraint_column_prefix_length() {
+    // SQLite has no `col(n)` constraint prefix. A constraint change rebuilds the table through
+    // `write_create_table`, so the reject must live there — not silently drop the `(n)` and emit a
+    // full-column constraint that would never round-trip.
+    let mut items = table("items", vec![column("name", SqlType::Text, false)]);
+    items.uniques = vec![Constraint {
+        name: "uq_items_name".to_owned(),
+        columns: vec!["name".to_owned()],
+        prefix_lengths: vec![IndexPrefixLength {
+            position: 0,
+            length: 10,
+        }],
+    }];
+    let error = Sqlite
+        .render_create(&one_table(items), &mut Vec::new())
+        .expect_err("a prefix constraint must be rejected");
+    assert!(
+        error.to_string().contains("prefix length"),
+        "unexpected error: {error}"
+    );
 }

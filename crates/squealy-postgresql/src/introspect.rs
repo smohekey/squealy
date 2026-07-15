@@ -451,6 +451,7 @@ ORDER BY con.contype, con.conname",
     let mut uniques = Vec::new();
     for row in rows {
         let constraint = Constraint {
+            prefix_lengths: Vec::new(),
             name: row.get(0),
             columns: row.get(2),
         };

@@ -544,6 +544,7 @@ fn rich_model() -> DatabaseModel {
                         },
                     ],
                     primary_key: Some(Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "pk_memberships".to_owned(),
                         columns: vec!["id".to_owned()],
                     }),
@@ -664,11 +665,13 @@ fn rich_model() -> DatabaseModel {
                         },
                     ],
                     primary_key: Some(Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "pk_tenants".to_owned(),
                         columns: vec!["id".to_owned()],
                     }),
                     foreign_keys: Vec::new(),
                     uniques: vec![Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "uq_tenants_slug".to_owned(),
                         columns: vec!["slug".to_owned()],
                     }],

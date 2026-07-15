@@ -73,6 +73,18 @@ pub fn render_plan_sql<B: SchemaBackend>(
     desired: &DatabaseModel,
     backend: &B,
 ) -> std::io::Result<String> {
+    // The incremental path does not run `check_create`, but a constraint's column prefix lengths can only
+    // be validated against the referenced column types, which the per-change plan steps do not carry —
+    // `desired` does. Validate them here (neutral capability + shape, then the backend's column type/width
+    // rules) so an incremental `AddUnique`/`AddPrimaryKey` cannot slip an unrenderable/non-round-tripping
+    // prefix past the create preflight into `render`/`apply`.
+    let capabilities = backend.capabilities();
+    for schema in &desired.schemas {
+        for table in &schema.tables {
+            validate_table_constraint_prefixes(table, &capabilities)?;
+        }
+    }
+    validate_backend_constraint_prefixes(desired, backend)?;
     let mut buffer = Vec::new();
     backend.render_plan(plan, desired, &mut buffer)?;
     bytes_to_sql(buffer)
@@ -126,7 +138,24 @@ fn bytes_to_sql(buffer: Vec<u8>) -> std::io::Result<String> {
 /// This validates backend capabilities against the neutral model, so callers can fail fast when a
 /// package contains metadata the target backend cannot round-trip.
 pub fn check_create<B: SchemaBackend>(model: &DatabaseModel, backend: &B) -> std::io::Result<()> {
-    validate_capabilities(model, backend.capabilities())
+    validate_capabilities(model, backend.capabilities())?;
+    validate_backend_constraint_prefixes(model, backend)
+}
+
+/// Dispatches the backend-specific column type/width validation of constraint prefix lengths (see
+/// [`SchemaBackend::validate_constraint_prefixes`]) over every table. The neutral capability + shape
+/// checks run in [`validate_capabilities`]; this is the backend-owned half, shared by [`check_create`]
+/// and [`render_plan_sql`].
+fn validate_backend_constraint_prefixes<B: SchemaBackend>(
+    model: &DatabaseModel,
+    backend: &B,
+) -> std::io::Result<()> {
+    for schema in &model.schemas {
+        for table in &schema.tables {
+            backend.validate_constraint_prefixes(table)?;
+        }
+    }
+    Ok(())
 }
 
 /// Renders create-from-scratch DDL straight from a compile-time [`Database`].
@@ -716,6 +745,7 @@ fn validate_capabilities(
                     ));
                 }
             }
+            validate_table_constraint_prefixes(table, &capabilities)?;
             for foreign_key in &table.foreign_keys {
                 if foreign_key.match_type.is_some()
                     && !capabilities.constraints.foreign_key_match_type
@@ -813,6 +843,42 @@ fn unsupported_column(table: &str, column: &str, feature: &str) -> std::io::Resu
             "backend cannot render and introspect {feature} for column `{column}` on `{table}`"
         ),
     ))
+}
+
+/// Validates a table's `UNIQUE`/`PRIMARY KEY` column prefix lengths against the backend-neutral rules:
+/// the capability gate (does the backend carry prefixes at all) and the sparse-list shape
+/// ([`squealy::prefix_length_shape_error`] — no zero length, each position in range and once). The
+/// backend-specific column type/width validation is dispatched separately to
+/// [`SchemaBackend::validate_constraint_prefixes`]. Shared by the create preflight
+/// ([`validate_capabilities`]) and the incremental render path ([`render_plan_sql`]).
+fn validate_table_constraint_prefixes(
+    table: &squealy::TableModel,
+    capabilities: &SchemaCapabilities,
+) -> std::io::Result<()> {
+    for constraint in table.primary_key.iter().chain(&table.uniques) {
+        if constraint.prefix_lengths.is_empty() {
+            continue;
+        }
+        if !capabilities.constraints.prefix_lengths {
+            return unsupported_constraint(
+                &table.name,
+                &constraint.name,
+                "constraint column prefix lengths",
+            );
+        }
+        if let Some(reason) =
+            squealy::prefix_length_shape_error(constraint.columns.len(), &constraint.prefix_lengths)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "constraint `{}` {reason} on `{}`",
+                    constraint.name, table.name
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn unsupported_constraint(table: &str, constraint: &str, feature: &str) -> std::io::Result<()> {
@@ -1206,6 +1272,118 @@ mod tests {
     }
 
     #[test]
+    fn render_create_rejects_malformed_constraint_prefix_length_shape() {
+        // A backend that *advertises* the prefix-length capability must still reject a malformed shape at
+        // the preflight, so `check` fails fast rather than the later `script`/`publish` render.
+        let mut model = table_with_constraints(foreign_key(), check());
+        model.schemas[0].tables[0].uniques = vec![Constraint {
+            name: "uq_bad".to_owned(),
+            columns: vec!["slug".to_owned()],
+            prefix_lengths: vec![IndexPrefixLength {
+                position: 0,
+                length: 0,
+            }],
+        }];
+        let mut capabilities = SchemaCapabilities::default();
+        capabilities.constraints.prefix_lengths = true;
+
+        let error = render_create_sql(&model, &TestBackend { capabilities }).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("zero-length prefix"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A one-table model whose sole `UNIQUE` carries a single-column prefix over a text column.
+    fn model_with_text_prefix_unique(length: u32) -> DatabaseModel {
+        DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                views: Vec::new(),
+                tables: vec![TableModel {
+                    name: "items".to_owned(),
+                    comment: None,
+                    columns: vec![ColumnModel {
+                        name: "body".to_owned(),
+                        comment: None,
+                        ty: SqlType::Text,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        on_update: None,
+                    }],
+                    primary_key: None,
+                    foreign_keys: Vec::new(),
+                    uniques: vec![Constraint {
+                        name: "uq_items".to_owned(),
+                        columns: vec!["body".to_owned()],
+                        prefix_lengths: vec![IndexPrefixLength {
+                            position: 0,
+                            length,
+                        }],
+                    }],
+                    checks: Vec::new(),
+                    indexes: Vec::new(),
+                }],
+            }],
+        }
+    }
+
+    /// A prefix-capable backend whose column-aware `validate_constraint_prefixes` rejects every prefix,
+    /// so a test can prove the engine dispatches to it (the type/width rules themselves live in — and are
+    /// tested by — each backend crate).
+    struct RejectingPrefixBackend;
+
+    impl SchemaBackend for RejectingPrefixBackend {
+        fn capabilities(&self) -> SchemaCapabilities {
+            let mut capabilities = SchemaCapabilities::default();
+            capabilities.constraints.prefix_lengths = true;
+            capabilities
+        }
+
+        fn validate_constraint_prefixes(
+            &self,
+            _table: &squealy::TableModel,
+        ) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "backend rejects this prefix",
+            ))
+        }
+
+        fn render_create(
+            &self,
+            _model: &DatabaseModel,
+            writer: &mut impl std::io::Write,
+        ) -> std::io::Result<()> {
+            writer.write_all(b"-- rendered")
+        }
+    }
+
+    #[test]
+    fn check_create_dispatches_column_aware_prefix_validation_to_the_backend() {
+        // The neutral engine defers the type/width validation to the backend; `check_create` and the
+        // incremental `render_plan_sql` must both call it.
+        let model = model_with_text_prefix_unique(10);
+        let error = render_create_sql(&model, &RejectingPrefixBackend).unwrap_err();
+        assert!(
+            error.to_string().contains("backend rejects this prefix"),
+            "{error}"
+        );
+
+        let plan = DatabasePlan { steps: Vec::new() };
+        let error = render_plan_sql(&plan, &model, &RejectingPrefixBackend).unwrap_err();
+        assert!(
+            error.to_string().contains("backend rejects this prefix"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn canonicalize_model_applies_default_hook() {
         let mut model = table_with_index(index());
         model.schemas[0].tables[0].columns.push(ColumnModel {
@@ -1231,6 +1409,7 @@ mod tests {
         model.schemas[0].name = Some("app".to_owned());
         model.schemas[0].tables[0].foreign_keys[0].references_schema = Some("app".to_owned());
         model.schemas[0].tables[0].uniques.push(Constraint {
+            prefix_lengths: Vec::new(),
             name: "uq_memberships_tenant_id".to_owned(),
             columns: vec!["tenant_id".to_owned()],
         });
@@ -1269,6 +1448,7 @@ mod tests {
             on_update: None,
         });
         model.schemas[0].tables[0].primary_key = Some(Constraint {
+            prefix_lengths: Vec::new(),
             name: "pk_memberships".to_owned(),
             columns: vec!["id".to_owned()],
         });
@@ -1367,6 +1547,37 @@ mod tests {
             error
                 .to_string()
                 .contains("foreign key validation metadata"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn render_create_rejects_unsupported_constraint_prefix_length_capability() {
+        // A backend that does not carry constraint column prefix lengths must reject a `UNIQUE`/
+        // `PRIMARY KEY` carrying one at the capability preflight, before it is rendered.
+        let mut model = table_with_constraints(foreign_key(), check());
+        model.schemas[0].tables[0].uniques = vec![Constraint {
+            name: "uq_memberships_slug".to_owned(),
+            columns: vec!["slug".to_owned()],
+            prefix_lengths: vec![IndexPrefixLength {
+                position: 0,
+                length: 8,
+            }],
+        }];
+
+        let error = render_create_sql(
+            &model,
+            &TestBackend {
+                capabilities: SchemaCapabilities::default(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("constraint column prefix lengths"),
             "unexpected error: {error}"
         );
     }
@@ -1525,6 +1736,7 @@ mod tests {
                         foreign_key_enforcement: false,
                         check_validation: false,
                         check_enforcement: true,
+                        prefix_lengths: false,
                     },
                     indexes: IndexCapabilities::default(),
                 },
