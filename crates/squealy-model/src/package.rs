@@ -1201,6 +1201,17 @@ fn constraint_to_node(kind: &str, constraint: &Constraint) -> KdlNode {
         node.push(KdlEntry::new(column.clone()));
     }
     node.push(KdlEntry::new_prop("name", constraint.name.clone()));
+    // A MySQL `UNIQUE`/`PRIMARY KEY` over a leading column prefix stores each `col(n)` as a
+    // `prefix-length <position> <length>` child, reusing the index encoding.
+    if !constraint.prefix_lengths.is_empty() {
+        let mut children = KdlDocument::new();
+        for prefix_length in &constraint.prefix_lengths {
+            children
+                .nodes_mut()
+                .push(index_prefix_length_to_node(prefix_length));
+        }
+        node.set_children(children);
+    }
     node
 }
 
@@ -2177,6 +2188,9 @@ fn constraint_from_node(node: &KdlNode) -> Result<Constraint, PackageError> {
     Ok(Constraint {
         name: required_prop(node, "name")?,
         columns: args(node),
+        prefix_lengths: child_nodes(node, "prefix-length")
+            .map(index_prefix_length_from_node)
+            .collect::<Result<Vec<_>, _>>()?,
     })
 }
 
@@ -2798,11 +2812,13 @@ mod tests {
                             },
                         ],
                         primary_key: Some(Constraint {
+                            prefix_lengths: Vec::new(),
                             name: "pk_orgs".to_owned(),
                             columns: vec!["id".to_owned()],
                         }),
                         foreign_keys: vec![],
                         uniques: vec![Constraint {
+                            prefix_lengths: Vec::new(),
                             name: "uq_orgs_slug".to_owned(),
                             columns: vec!["slug".to_owned()],
                         }],
@@ -2893,6 +2909,72 @@ mod tests {
     fn kdl_is_deterministic() {
         let model = sample_model();
         assert_eq!(to_kdl(&model), to_kdl(&model));
+    }
+
+    #[test]
+    fn kdl_round_trips_constraint_column_prefix_lengths() {
+        // A MySQL `UNIQUE`/`PRIMARY KEY` over a leading column prefix stores each `col(n)` as a
+        // `prefix-length <position> <length>` child on the constraint node; it must survive a package
+        // round-trip so a published prefix constraint re-plans to empty.
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: Some("shop".to_owned()),
+                tables: vec![TableModel {
+                    name: "items".to_owned(),
+                    comment: None,
+                    columns: vec![
+                        ColumnModel {
+                            name: "code".to_owned(),
+                            comment: None,
+                            ty: SqlType::Varchar(64),
+                            collation: None,
+                            nullable: false,
+                            default: None,
+                            identity: None,
+                            generated: None,
+                            on_update: None,
+                        },
+                        ColumnModel {
+                            name: "name".to_owned(),
+                            comment: None,
+                            ty: SqlType::Varchar(255),
+                            collation: None,
+                            nullable: false,
+                            default: None,
+                            identity: None,
+                            generated: None,
+                            on_update: None,
+                        },
+                    ],
+                    primary_key: Some(Constraint {
+                        name: "pk_items".to_owned(),
+                        columns: vec!["code".to_owned()],
+                        prefix_lengths: vec![IndexPrefixLength {
+                            position: 0,
+                            length: 8,
+                        }],
+                    }),
+                    foreign_keys: Vec::new(),
+                    uniques: vec![Constraint {
+                        name: "uq_items_name".to_owned(),
+                        columns: vec!["name".to_owned()],
+                        prefix_lengths: vec![IndexPrefixLength {
+                            position: 0,
+                            length: 10,
+                        }],
+                    }],
+                    checks: Vec::new(),
+                    indexes: Vec::new(),
+                }],
+                views: Vec::new(),
+            }],
+        };
+
+        let kdl = to_kdl(&model);
+        assert!(kdl.contains("prefix-length 0 10"), "{kdl}");
+        assert!(kdl.contains("prefix-length 0 8"), "{kdl}");
+        let parsed = from_kdl(&kdl).expect("prefix-constraint model.kdl should parse");
+        assert_eq!(parsed, model, "KDL round-trip diverged:\n{kdl}");
     }
 
     #[test]

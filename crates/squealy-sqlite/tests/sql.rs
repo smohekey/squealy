@@ -199,6 +199,7 @@ fn rejects_non_integer_autoincrement_column() {
                     on_update: None,
                 }],
                 primary_key: Some(Constraint {
+                    prefix_lengths: Vec::new(),
                     name: "pk".to_owned(),
                     columns: vec!["id".to_owned()],
                 }),
@@ -661,6 +662,7 @@ fn rejects_on_update_on_an_autoincrement_primary_key_column() {
                     on_update: Some(Box::new(ExprNode::Now)),
                 }],
                 primary_key: Some(Constraint {
+                    prefix_lengths: Vec::new(),
                     name: "pk".to_owned(),
                     columns: vec!["id".to_owned()],
                 }),

@@ -1911,6 +1911,10 @@ fn print_schema_capabilities(capabilities: SchemaCapabilities) {
         "constraints.check_enforcement={}",
         capabilities.constraints.check_enforcement
     );
+    println!(
+        "constraints.prefix_lengths={}",
+        capabilities.constraints.prefix_lengths
+    );
     println!("indexes.predicates={}", capabilities.indexes.predicates);
     println!("indexes.expressions={}", capabilities.indexes.expressions);
     println!(

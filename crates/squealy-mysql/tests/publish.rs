@@ -541,6 +541,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                     },
                 ],
                 primary_key: Some(Constraint {
+                    prefix_lengths: Vec::new(),
                     name: "PRIMARY".to_owned(),
                     columns: vec!["id".to_owned()],
                 }),
@@ -615,11 +616,13 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                     },
                 ],
                 primary_key: Some(Constraint {
+                    prefix_lengths: Vec::new(),
                     name: "PRIMARY".to_owned(),
                     columns: vec!["id".to_owned()],
                 }),
                 foreign_keys: Vec::new(),
                 uniques: vec![Constraint {
+                    prefix_lengths: Vec::new(),
                     name: "uq_widgets_name".to_owned(),
                     columns: vec!["name".to_owned()],
                 }],
@@ -719,6 +722,7 @@ fn rich_mysql_model() -> DatabaseModel {
                         },
                     ],
                     primary_key: Some(Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "pk_memberships".to_owned(),
                         columns: vec!["id".to_owned()],
                     }),
@@ -812,11 +816,13 @@ fn rich_mysql_model() -> DatabaseModel {
                         },
                     ],
                     primary_key: Some(Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "pk_tenants".to_owned(),
                         columns: vec!["id".to_owned()],
                     }),
                     foreign_keys: Vec::new(),
                     uniques: vec![Constraint {
+                        prefix_lengths: Vec::new(),
                         name: "uq_tenants_slug".to_owned(),
                         columns: vec!["slug".to_owned()],
                     }],
@@ -916,6 +922,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                     },
                 ],
                 primary_key: Some(Constraint {
+                    prefix_lengths: Vec::new(),
                     name: "PRIMARY".to_owned(),
                     columns: vec!["id".to_owned()],
                 }),
@@ -1009,11 +1016,13 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                     },
                 ],
                 primary_key: Some(Constraint {
+                    prefix_lengths: Vec::new(),
                     name: "PRIMARY".to_owned(),
                     columns: vec!["id".to_owned()],
                 }),
                 foreign_keys: Vec::new(),
                 uniques: vec![Constraint {
+                    prefix_lengths: Vec::new(),
                     name: "uq_tenants_slug".to_owned(),
                     columns: vec!["slug".to_owned()],
                 }],
@@ -1064,6 +1073,7 @@ fn timestamp_precision_model(precision: Option<u8>) -> DatabaseModel {
                     },
                 ],
                 primary_key: Some(Constraint {
+                    prefix_lengths: Vec::new(),
                     name: "PRIMARY".to_owned(),
                     columns: vec!["id".to_owned()],
                 }),
@@ -1278,6 +1288,109 @@ INDEX `items_name_prefix` (`name`(10)))",
 
     connection
         .execute_ddl("DROP SCHEMA IF EXISTS `catalog_prefix`")
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore]
+async fn introspects_and_round_trips_constraint_column_prefix_lengths() {
+    // MySQL exposes a `UNIQUE`/`PRIMARY KEY` over a leading column prefix as a `UNIQUE`/`PRIMARY KEY`
+    // row in `information_schema.TABLE_CONSTRAINTS`, with the prefix length recorded only in
+    // `STATISTICS.SUB_PART`. `key_constraints` must recover it onto the neutral `Constraint`, else a
+    // published unique/pk prefix reads back as a full-column constraint and never converges.
+    let _db_guard = db_lock().lock().await;
+    let mut connection = Mysql
+        .connect(&database_url())
+        .await
+        .expect("connect to MySQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog_cprefix`")
+        .await
+        .expect("drop schema");
+    connection
+        .execute_ddl("CREATE SCHEMA `catalog_cprefix`")
+        .await
+        .expect("create schema");
+    connection
+        .execute_ddl(
+            "CREATE TABLE `catalog_cprefix`.`items` (\
+`code` VARCHAR(64) NOT NULL, \
+`name` VARCHAR(255) NOT NULL, \
+`blob_key` VARBINARY(32) NOT NULL, \
+PRIMARY KEY (`code`(8)), \
+UNIQUE KEY `uq_items_name` (`name`(10)), \
+UNIQUE KEY `uq_items_blob` (`blob_key`(8)))",
+        )
+        .await
+        .expect("create table with prefix constraints");
+
+    let actual = squealy_model::introspect(&mut connection)
+        .await
+        .expect("introspect prefix constraints");
+    let table = actual
+        .schemas
+        .iter()
+        .find(|schema| schema.name.as_deref() == Some("catalog_cprefix"))
+        .and_then(|schema| schema.tables.iter().find(|table| table.name == "items"))
+        .expect("items table should be introspected");
+    assert_eq!(
+        table
+            .primary_key
+            .as_ref()
+            .expect("a primary key")
+            .prefix_lengths,
+        vec![IndexPrefixLength {
+            position: 0,
+            length: 8,
+        }],
+        "the primary key prefix length must be recovered, got: {:?}",
+        table.primary_key,
+    );
+    let unique = table
+        .uniques
+        .iter()
+        .find(|unique| unique.name == "uq_items_name")
+        .expect("the unique constraint");
+    assert_eq!(
+        unique.prefix_lengths,
+        vec![IndexPrefixLength {
+            position: 0,
+            length: 10,
+        }],
+        "the unique constraint prefix length must be recovered, got: {unique:?}",
+    );
+    // A `VARBINARY(32)` column introspects as `Raw` — its prefix must round-trip too.
+    let blob_unique = table
+        .uniques
+        .iter()
+        .find(|unique| unique.name == "uq_items_blob")
+        .expect("the varbinary unique constraint");
+    assert_eq!(
+        blob_unique.prefix_lengths,
+        vec![IndexPrefixLength {
+            position: 0,
+            length: 8,
+        }],
+        "the varbinary unique constraint prefix length must be recovered, got: {blob_unique:?}",
+    );
+
+    // Re-planning the introspected model against the same database must converge to an empty plan.
+    let plan = squealy_model::plan_from_database(
+        &actual,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan against published schema");
+    assert!(
+        plan.steps.is_empty(),
+        "expected empty plan for round-tripped prefix constraints, got: {:?}",
+        plan.steps
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog_cprefix`")
         .await
         .expect("cleanup");
 }

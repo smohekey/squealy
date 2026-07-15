@@ -597,11 +597,27 @@ pub(crate) fn diff_table(desired: &TableModel, actual: &TableModel) -> Vec<Table
         &mut changes,
     );
 
-    diff_primary_key(&desired.primary_key, &actual.primary_key, &mut changes);
+    // A constraint's prefix lengths are keyed by column position and render order-independently, but
+    // `Constraint` derives order-sensitive `PartialEq`. Normalize the order before comparing so two
+    // equivalent constraints — from a hand-built model diffed directly, a package, or introspection —
+    // do not diff as a spurious `Alter{PrimaryKey,Unique}`. This is the single behavioral point where
+    // prefix order matters, so normalization lives here rather than at every model entry point.
+    let sort_prefixes = |constraint: &Constraint| {
+        let mut constraint = constraint.clone();
+        constraint
+            .prefix_lengths
+            .sort_by_key(|prefix| prefix.position);
+        constraint
+    };
+    let desired_primary_key = desired.primary_key.as_ref().map(&sort_prefixes);
+    let actual_primary_key = actual.primary_key.as_ref().map(&sort_prefixes);
+    diff_primary_key(&desired_primary_key, &actual_primary_key, &mut changes);
 
+    let desired_uniques: Vec<Constraint> = desired.uniques.iter().map(&sort_prefixes).collect();
+    let actual_uniques: Vec<Constraint> = actual.uniques.iter().map(&sort_prefixes).collect();
     diff_named_vec(
-        &desired.uniques,
-        &actual.uniques,
+        &desired_uniques,
+        &actual_uniques,
         |constraint| constraint.name.clone(),
         |constraint| TableDiffChange::AddUnique {
             constraint: constraint.clone(),

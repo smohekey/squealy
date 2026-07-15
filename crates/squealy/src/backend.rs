@@ -3,7 +3,7 @@ use std::io::{self, Write};
 
 use crate::{
     CheckModel, Constraint, DatabaseModel, DatabasePlan, DefaultValue, ForeignKeyModel,
-    IdentityMode, IndexMethod, SqlType, Table, ViewBody,
+    IdentityMode, IndexMethod, SqlType, Table, TableModel, ViewBody,
 };
 
 /// Backend-specific row cursor used while decoding a projected row.
@@ -239,6 +239,11 @@ pub struct ConstraintCapabilities {
     pub foreign_key_enforcement: bool,
     pub check_validation: bool,
     pub check_enforcement: bool,
+    /// Column prefix lengths on a `UNIQUE`/`PRIMARY KEY` constraint (MySQL `col(n)`,
+    /// [`Constraint::prefix_lengths`]).
+    ///
+    /// [`Constraint::prefix_lengths`]: crate::Constraint::prefix_lengths
+    pub prefix_lengths: bool,
 }
 
 /// Index metadata capabilities for features that are not uniformly available across SQL backends.
@@ -267,6 +272,27 @@ pub trait SchemaBackend {
     /// backend opts in.
     fn capabilities(&self) -> SchemaCapabilities {
         SchemaCapabilities::default()
+    }
+
+    /// Validates a table's `UNIQUE`/`PRIMARY KEY` column prefix lengths ([`Constraint::prefix_lengths`])
+    /// against this backend's own column rendering.
+    ///
+    /// A column prefix (`col(n)`) indexes only a leading `n` characters/bytes; it is meaningful only for
+    /// a backend that supports it (MySQL), and only on a column type that backend renders as a
+    /// string/binary type, with `n` under the rendered width — otherwise the backend errors or normalizes
+    /// the prefix to a full-column key that does not round-trip. Because the neutral-type→physical-type
+    /// mapping is backend-specific (`String` is `VARCHAR(255)` on MySQL but a different width elsewhere;
+    /// `Uuid` is `CHAR(36)` on MySQL but a native 16-byte type on some backends), this validation lives in
+    /// the backend rather than the neutral engine, so a new backend supplies its own rules.
+    ///
+    /// The caller ([`check_create`](crate) / `render_plan_sql`, and the backend's own render paths) has
+    /// already applied the neutral capability gate and the sparse-list shape check
+    /// ([`prefix_length_shape_error`](crate::prefix_length_shape_error)), so every prefix position is in
+    /// range. The default accepts everything: a backend without prefix support rejects prefixes via
+    /// [`SchemaCapabilities`] instead, so it never reaches a renderable prefix here.
+    fn validate_constraint_prefixes(&self, table: &TableModel) -> io::Result<()> {
+        let _ = table;
+        Ok(())
     }
 
     /// Renders ordered create-from-scratch DDL for the whole model into `writer`.
