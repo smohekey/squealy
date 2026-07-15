@@ -1592,6 +1592,20 @@ fn unfaithful_general_casts_are_rejected_at_render() {
             "{name} should reject a u128 general cast"
         );
     }
+
+    // MySQL's DECIMAL is limited to precision <= 65, scale <= 30, and scale <= precision, so a decimal cast
+    // outside that range (e.g. a PostgreSQL-valid `numeric(100, 50)` in a cross-dialect package) has no
+    // faithful MySQL rendering and is rejected at render, not left to fail at DDL execution.
+    for (precision, scale) in [(100, 50), (10, 20), (70, 0)] {
+        let wide = ExprNode::Cast {
+            operand: b(bare("amount")),
+            ty: SqlType::Decimal { precision, scale },
+        };
+        assert!(
+            render_scalar_result(&wide, mysql).is_err(),
+            "MySQL should reject a general cast to DECIMAL({precision}, {scale}) (out of range)"
+        );
+    }
 }
 
 // ---- single-SELECT view-body round-trip -----------------------------------------------------------
