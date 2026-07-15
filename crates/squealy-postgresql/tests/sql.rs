@@ -4032,3 +4032,109 @@ fn postgres_rejects_a_constraint_column_prefix_length() {
         "unexpected error: {error}"
     );
 }
+
+// --- Index-shape render lock-in tests (git-bug 108fdfc) -------------------------------------------
+//
+// PostgreSQL renders and introspects functional indexes, INCLUDE (covering) columns, NULLS FIRST/LAST
+// ordering, and operator classes (they round-trip via the live
+// `publish_then_introspect_preserves_richer_schema_facts` test), but the render side had no fast unit
+// coverage. These assert the exact DDL each shape emits through `write_create_index`.
+
+fn base_index(name: &str, columns: &[&str]) -> IndexModel {
+    IndexModel {
+        name: name.to_owned(),
+        columns: columns.iter().map(|c| (*c).to_owned()).collect(),
+        expressions: Vec::new(),
+        include_columns: Vec::new(),
+        unique: false,
+        method: None,
+        directions: Vec::new(),
+        nulls: Vec::new(),
+        collations: Vec::new(),
+        operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
+        predicate: None,
+    }
+}
+
+fn render_add_index(index: IndexModel) -> String {
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterTable {
+            schema: Some("public".to_owned()),
+            table: "t".to_owned(),
+            change: Box::new(TablePlanStep::AddIndex { index }),
+        }],
+    };
+    let mut sql = Vec::new();
+    Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
+    String::from_utf8(sql).unwrap()
+}
+
+#[test]
+fn postgres_renders_a_functional_index() {
+    // A structural expression key term is wrapped in parentheses (introspected from `pg_get_expr`).
+    let mut index = base_index("idx_lower_name", &[]);
+    index.expressions = squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+        .read_index_expressions_or_raw("lower(name)");
+    assert_eq!(
+        render_add_index(index),
+        "CREATE INDEX \"idx_lower_name\" ON \"public\".\"t\" ((LOWER(\"name\")));"
+    );
+}
+
+#[test]
+fn postgres_renders_a_covering_index() {
+    let mut index = base_index("idx_cover", &["a"]);
+    index.include_columns = vec!["b".to_owned(), "c".to_owned()];
+    assert_eq!(
+        render_add_index(index),
+        "CREATE INDEX \"idx_cover\" ON \"public\".\"t\" (\"a\") INCLUDE (\"b\", \"c\");"
+    );
+}
+
+#[test]
+fn postgres_renders_index_direction_and_nulls_ordering() {
+    // The non-default ordering for a DESC key term is `NULLS LAST` (PostgreSQL defaults DESC to FIRST).
+    let mut index = base_index("idx_nulls", &["a"]);
+    index.directions = vec![IndexDirection::Desc];
+    index.nulls = vec![IndexNullsOrder::Last];
+    assert_eq!(
+        render_add_index(index),
+        "CREATE INDEX \"idx_nulls\" ON \"public\".\"t\" (\"a\" DESC NULLS LAST);"
+    );
+}
+
+#[test]
+fn postgres_renders_an_operator_class_index() {
+    // Method (`USING gin`) precedes the term list; the operator class follows the key term.
+    let mut index = base_index("idx_gin", &["settings"]);
+    index.method = Some(IndexMethod::Gin);
+    index.operator_classes = vec![IndexOperatorClass {
+        position: 0,
+        name: "jsonb_path_ops".to_owned(),
+    }];
+    assert_eq!(
+        render_add_index(index),
+        "CREATE INDEX \"idx_gin\" ON \"public\".\"t\" USING gin (\"settings\" jsonb_path_ops);"
+    );
+}
+
+#[test]
+fn postgres_renders_a_collation_and_operator_class_index() {
+    // A key term carries `COLLATE` then its operator class, in that order.
+    let mut index = base_index("idx_slug", &["slug"]);
+    index.collations = vec![IndexCollation {
+        position: 0,
+        name: "C".to_owned(),
+    }];
+    index.operator_classes = vec![IndexOperatorClass {
+        position: 0,
+        name: "text_pattern_ops".to_owned(),
+    }];
+    assert_eq!(
+        render_add_index(index),
+        "CREATE INDEX \"idx_slug\" ON \"public\".\"t\" (\"slug\" COLLATE \"C\" text_pattern_ops);"
+    );
+}
