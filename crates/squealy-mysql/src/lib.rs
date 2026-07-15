@@ -193,8 +193,8 @@ impl SchemaBackend for Mysql {
                 let Some(column) = table.columns.iter().find(|c| &c.name == column_name) else {
                     continue;
                 };
-                match mysql_prefix_column_width(&column.ty) {
-                    None => {
+                match mysql_prefix_column(&column.ty) {
+                    MysqlPrefixColumn::Unsupported => {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::InvalidInput,
                             format!(
@@ -205,7 +205,7 @@ impl SchemaBackend for Mysql {
                             ),
                         ));
                     }
-                    Some(width) if prefix.length >= width => {
+                    MysqlPrefixColumn::Bounded(width) if prefix.length >= width => {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::InvalidInput,
                             format!(
@@ -253,43 +253,59 @@ impl SchemaBackend for Mysql {
     }
 }
 
-/// The maximum width a `col(n)` prefix on a neutral column type may reference — a prefix must be strictly
-/// less, or MySQL errors (over the column's capacity) or normalizes a full-width prefix to a full-column
-/// key that does not round-trip. `None` means the type cannot carry a prefix. Widths are MySQL's own
-/// physical capacities (`String` → `VARCHAR(255)`, `Uuid` → `CHAR(36)`, `Text`/`Bytes` → `TEXT`/`BLOB`
-/// 65535). (This bounds by column capacity; a prefix within capacity can still exceed MySQL's row-format-
-/// dependent index key-length limit, which only the server can decide — a loud execution error, not
-/// silent churn.) See [`Mysql::validate_constraint_prefixes`].
-fn mysql_prefix_column_width(ty: &squealy::SqlType) -> Option<u32> {
+/// MySQL's column-prefix support for a neutral column type. A `col(n)` prefix indexes a leading `n`
+/// characters/bytes; a fixed-max-width column (`VARCHAR(n)`/`CHAR(n)`/`BINARY(n)`/`VARBINARY(n)`, and
+/// `String`→`VARCHAR(255)` / `Uuid`→`CHAR(36)`) becomes a whole-column key at its full width (introspecting
+/// with `SUB_PART` NULL, which does not round-trip), so a prefix must be strictly `< width`. A `TEXT`/`BLOB`
+/// (LOB) column *requires* a prefix and can never be a whole-column key, so it is unbounded here — its
+/// only limit is MySQL's row-format/charset-dependent index key length, which the neutral model cannot
+/// know and which the server enforces at execution (a loud error, not silent churn). See
+/// [`Mysql::validate_constraint_prefixes`].
+enum MysqlPrefixColumn {
+    /// A `TEXT`/`BLOB` family column — any positive prefix passes static validation.
+    Unbounded,
+    /// A fixed-max-width column — a prefix must be strictly `< width`.
+    Bounded(u32),
+    /// Not a string/binary column MySQL can index by a leading prefix.
+    Unsupported,
+}
+
+fn mysql_prefix_column(ty: &squealy::SqlType) -> MysqlPrefixColumn {
     use squealy::SqlType;
     match ty {
-        SqlType::String => Some(255),
-        SqlType::Uuid => Some(36),
-        SqlType::Text | SqlType::Bytes => Some(65_535),
-        SqlType::Varchar(width) | SqlType::Char(width) | SqlType::FixedBytes(width) => Some(*width),
+        SqlType::Text | SqlType::Bytes => MysqlPrefixColumn::Unbounded,
+        SqlType::String => MysqlPrefixColumn::Bounded(255),
+        SqlType::Uuid => MysqlPrefixColumn::Bounded(36),
+        SqlType::Varchar(width) | SqlType::Char(width) | SqlType::FixedBytes(width) => {
+            MysqlPrefixColumn::Bounded(*width)
+        }
         // Several MySQL string/binary types have no neutral variant and introspect as `Raw` (keywords
-        // upper-cased by `raw_column_type`): the `TINY`/`MEDIUM`/`LONG` text and blob families and
-        // `VARBINARY(n)`, each with its own capacity. Any other `Raw` (`ENUM`/`SET`/an unknown spelling)
-        // is not prefix-round-trip-safe.
-        SqlType::Raw(raw) => mysql_raw_prefix_width(raw),
-        _ => None,
+        // upper-cased by `raw_column_type`): the `TINY`/`MEDIUM`/`LONG` text and blob families (LOBs,
+        // unbounded here) and `VARBINARY(n)` (bounded). Any other `Raw` (`ENUM`/`SET`/an unknown
+        // spelling) is not prefix-round-trip-safe.
+        SqlType::Raw(raw) => mysql_raw_prefix_column(raw),
+        _ => MysqlPrefixColumn::Unsupported,
     }
 }
 
-fn mysql_raw_prefix_width(raw: &str) -> Option<u32> {
+fn mysql_raw_prefix_column(raw: &str) -> MysqlPrefixColumn {
     let lower = raw.trim().to_ascii_lowercase();
     match lower.as_str() {
-        "tinytext" | "tinyblob" => return Some(255),
-        "mediumtext" | "mediumblob" => return Some(16_777_215),
-        "longtext" | "longblob" => return Some(u32::MAX),
+        "tinytext" | "mediumtext" | "longtext" | "tinyblob" | "mediumblob" | "longblob" => {
+            return MysqlPrefixColumn::Unbounded;
+        }
         _ => {}
     }
-    // A bounded `varbinary(n)`.
-    lower
+    // A bounded `varbinary(n)` — a prefix must stay under `n` like any other fixed-width column.
+    if let Some(width) = lower
         .strip_prefix("varbinary")
         .and_then(|rest| rest.trim().strip_prefix('('))
         .and_then(|rest| rest.strip_suffix(')'))
         .and_then(|inner| inner.trim().parse::<u32>().ok())
+    {
+        return MysqlPrefixColumn::Bounded(width);
+    }
+    MysqlPrefixColumn::Unsupported
 }
 
 /// A live MySQL connection for schema management and query execution.
