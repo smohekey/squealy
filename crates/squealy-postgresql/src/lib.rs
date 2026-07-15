@@ -136,6 +136,22 @@ pub(crate) fn canonical_pg_pin_type(ty: &squealy::SqlType) -> squealy::SqlType {
     }
 }
 
+/// Folds a **general** authored cast's target type for PostgreSQL. Identical to [`canonical_pg_pin_type`]
+/// except [`U64`](squealy::SqlType::U64) is preserved rather than folded to the `I128` representative:
+/// PostgreSQL renders both as bare `numeric`, so the pin fold collapses `U64` → `I128` — but a general
+/// `U64` cast is *not* rejected at render (only the 128-bit casts are), so folding it here would make the
+/// incremental plan path (which canonicalizes before rendering) hit the 128-bit reject while a direct
+/// render succeeds. Preserving `U64` keeps the two paths consistent (both render bare `numeric`). A general
+/// `U64` cast still does not re-plan to empty — `numeric` re-introspects as the `I128` representative and
+/// the reverse parser keeps it `Raw` — but that residual churn predates and is orthogonal to 8fe1530.
+#[cfg(feature = "schema")]
+pub(crate) fn canonical_pg_cast_type(ty: &squealy::SqlType) -> squealy::SqlType {
+    match ty {
+        squealy::SqlType::U64 => ty.clone(),
+        other => canonical_pg_pin_type(other),
+    }
+}
+
 /// Canonicalizes an integer column's default to the signed [`Int`](squealy::DefaultValue::Int) both sides
 /// of the diff converge on. `ty` is the already-canonicalized column type (see
 /// [`canonicalize_model`](squealy::canonicalize_model)), so an integer column is one of
@@ -433,14 +449,14 @@ impl squealy::SchemaIntrospect for PostgresConnection {
         // structural desired cast does not churn.
         body.map_exprs(&|node| {
             if let squealy::ExprNode::Cast { ty, .. } = node {
-                *ty = canonical_pg_pin_type(ty);
+                *ty = canonical_pg_cast_type(ty);
             }
         });
         body
     }
 
     fn canonical_cast_type(&self, ty: &squealy::SqlType) -> squealy::SqlType {
-        canonical_pg_pin_type(ty)
+        canonical_pg_cast_type(ty)
     }
 
     /// PostgreSQL introspection reports a plain index's access method as `btree`; map an unset
@@ -1168,6 +1184,23 @@ CREATE INDEX CONCURRENTLY j ON t (d);";
         // Idempotent on each representative — the introspected side is already canonical.
         for ty in [I16, I32, I64, I128] {
             assert_eq!(canonical_pg_sql_type(&ty), ty);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "schema")]
+    fn canonical_pg_cast_type_preserves_u64_so_a_general_cast_is_not_spuriously_rejected() {
+        use super::{canonical_pg_cast_type, canonical_pg_pin_type};
+        use squealy::SqlType::{I32, I64, I128, U32, U64, U128};
+
+        // A general `U64` cast renders bare `numeric` and is NOT rejected at render (only the 128-bit casts
+        // are), so it must be preserved — not folded to the `I128` representative the pin canonicalizer uses
+        // — else the plan path (which canonicalizes before rendering) would spuriously hit the 128-bit
+        // reject while a direct render succeeds. git-bug 8fe1530.
+        assert_eq!(canonical_pg_cast_type(&U64), U64);
+        // Every other width folds exactly like the pin canonicalizer (so a genuine round-trip converges).
+        for ty in [I32, I64, I128, U32, U128] {
+            assert_eq!(canonical_pg_cast_type(&ty), canonical_pg_pin_type(&ty));
         }
     }
 
