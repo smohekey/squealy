@@ -2225,3 +2225,106 @@ fn mysql_delete_using_renders_join() {
          JOIN `shop`.`tenants` AS q0_1 ON (q0_0.`tenant_id` = q0_1.`id`)"
     );
 }
+
+/// A one-table model whose sole `UNIQUE` carries a single-column prefix over a column of the given type.
+fn model_with_prefix_unique(column_ty: SqlType, length: u32) -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "items".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "code".to_owned(),
+                    comment: None,
+                    ty: column_ty,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                    on_update: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: vec![Constraint {
+                    name: "uq_items".to_owned(),
+                    columns: vec!["code".to_owned()],
+                    prefix_lengths: vec![IndexPrefixLength {
+                        position: 0,
+                        length,
+                    }],
+                }],
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+        }],
+    }
+}
+
+#[test]
+fn mysql_rejects_a_prefix_on_a_non_string_column() {
+    // MySQL cannot index a leading prefix of a non-string/binary column; `render_create` self-validates.
+    let error = Mysql
+        .render_create(&model_with_prefix_unique(SqlType::I32, 4), &mut Vec::new())
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cannot index by a leading prefix"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn mysql_rejects_a_full_width_constraint_prefix() {
+    // A prefix equal to (or over) a bounded column's rendered width is normalized by MySQL to a
+    // full-column key (SUB_PART NULL on introspection → churn); reject it. A shorter prefix is fine.
+    for (ty, full, ok) in [
+        (SqlType::Varchar(8), 8, 4),
+        (SqlType::Char(8), 8, 4),
+        (SqlType::FixedBytes(8), 8, 4),
+        // MySQL renders `String` as `VARCHAR(255)` and `Uuid` as `CHAR(36)`.
+        (SqlType::String, 255, 32),
+        (SqlType::Uuid, 36, 8),
+    ] {
+        let error = Mysql
+            .render_create(&model_with_prefix_unique(ty.clone(), full), &mut Vec::new())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not shorter than the column width"),
+            "expected a full-width rejection for {ty:?}, got: {error}"
+        );
+        Mysql
+            .render_create(&model_with_prefix_unique(ty.clone(), ok), &mut Vec::new())
+            .unwrap_or_else(|error| panic!("a shorter prefix on {ty:?} should render: {error}"));
+    }
+
+    // Unbounded text/blob columns accept any positive prefix.
+    for ty in [SqlType::Text, SqlType::Bytes] {
+        Mysql
+            .render_create(&model_with_prefix_unique(ty.clone(), 1000), &mut Vec::new())
+            .unwrap_or_else(|error| panic!("a prefix on unbounded {ty:?} should render: {error}"));
+    }
+}
+
+#[test]
+fn mysql_rejects_a_prefix_on_a_raw_typed_column() {
+    // A `Raw` type is emitted verbatim with an unknown width (e.g. `VARBINARY(8)` normalizes a full-width
+    // prefix to a full-column key), so a prefix on it cannot be shown round-trip-safe and is rejected.
+    let error = Mysql
+        .render_create(
+            &model_with_prefix_unique(SqlType::Raw("VARBINARY(8)".to_owned()), 4),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cannot index by a leading prefix"),
+        "unexpected error: {error}"
+    );
+}
