@@ -1436,6 +1436,11 @@ fn general_cast(
     data_type: &DataType,
     dialect: SqlDialect,
 ) -> Result<ExprNode, ReadError> {
+    // For a GENERAL cast an explicit-precision `DECIMAL(p, s)`/`NUMERIC(p, s)` is always a real decimal —
+    // including MySQL's maximum `DECIMAL(65, 0)`, which the result-pin inverse (`invert_mysql_cast_type`)
+    // reserves as the 128-bit-integer representative `I128`. Prefer the faithful `Decimal` here so the
+    // max-precision decimal cast round-trips instead of being rejected as an `I128` cast (git-bug 8fe1530).
+    let ty = general_cast_decimal_type(data_type).unwrap_or(ty);
     let not_exactly_modelable = matches!(ty, SqlType::I128 | SqlType::U128)
         || (matches!(ty, SqlType::Decimal { .. }) && matches!(dialect, SqlDialect::Sqlite));
     if not_exactly_modelable {
@@ -1447,6 +1452,23 @@ fn general_cast(
         operand: b(lower(operand, dialect)?),
         ty,
     })
+}
+
+/// The target type for a **general** cast to an explicit-precision `DECIMAL(p, s)`/`NUMERIC(p, s)`/
+/// `DEC(p, s)`. A general cast keeps the precision/scale (unlike the result-pin inverse, which collapses
+/// MySQL's `DECIMAL(65, 0)` to the 128-bit-integer representative). `None` for any other spelling — the
+/// pin inverse is correct there (bare `numeric` → the 128-bit representative, `SIGNED` → `I64`, …).
+fn general_cast_decimal_type(data_type: &DataType) -> Option<SqlType> {
+    use sqlparser::ast::ExactNumberInfo::PrecisionAndScale;
+    match data_type {
+        DataType::Decimal(PrecisionAndScale(p, s))
+        | DataType::Numeric(PrecisionAndScale(p, s))
+        | DataType::Dec(PrecisionAndScale(p, s)) => Some(SqlType::Decimal {
+            precision: *p as u32,
+            scale: *s as u32,
+        }),
+        _ => None,
+    }
 }
 
 /// Inverts a parsed cast-target [`DataType`] back to the neutral [`SqlType`] this dialect's renderer
@@ -3746,9 +3768,17 @@ mod tests {
             low("CAST(\"x\" AS numeric)", SqlDialect::Postgres),
             Err(ReadError::NotYetLowered(_))
         ));
+        // But an EXPLICIT `DECIMAL(65, 0)` (MySQL's maximum precision) is a real decimal, not the 128-bit
+        // representative — a general cast keeps it faithful so it round-trips (git-bug 8fe1530).
         assert!(matches!(
-            low("CAST(`x` AS DECIMAL(65, 0))", SqlDialect::Mysql),
-            Err(ReadError::NotYetLowered(_))
+            low("CAST(`x` AS DECIMAL(65, 0))", SqlDialect::Mysql).unwrap(),
+            ExprNode::Cast {
+                ty: SqlType::Decimal {
+                    precision: 65,
+                    scale: 0,
+                },
+                ..
+            }
         ));
     }
 
