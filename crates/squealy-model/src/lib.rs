@@ -73,6 +73,16 @@ pub fn render_plan_sql<B: SchemaBackend>(
     desired: &DatabaseModel,
     backend: &B,
 ) -> std::io::Result<String> {
+    // The incremental path does not run `check_create`, but a constraint's column prefix lengths can only
+    // be validated against the referenced column types, which the per-change plan steps do not carry —
+    // `desired` does. Validate them here so an incremental `AddUnique`/`AddPrimaryKey` cannot slip an
+    // unrenderable/non-round-tripping prefix past the create preflight into `render`/`apply`.
+    let capabilities = backend.capabilities();
+    for schema in &desired.schemas {
+        for table in &schema.tables {
+            validate_table_constraint_prefixes(table, &capabilities)?;
+        }
+    }
     let mut buffer = Vec::new();
     backend.render_plan(plan, desired, &mut buffer)?;
     bytes_to_sql(buffer)
@@ -716,72 +726,7 @@ fn validate_capabilities(
                     ));
                 }
             }
-            for constraint in table.primary_key.iter().chain(&table.uniques) {
-                if constraint.prefix_lengths.is_empty() {
-                    continue;
-                }
-                if !capabilities.constraints.prefix_lengths {
-                    return unsupported_constraint(
-                        &table.name,
-                        &constraint.name,
-                        "constraint column prefix lengths",
-                    );
-                }
-                // For a backend that *does* carry the metadata, still reject a malformed shape here so
-                // the preflight does not approve a package the renderer rejects at publish time (mirrors
-                // the `on_update` shape check above).
-                if let Some(reason) = squealy::prefix_length_shape_error(
-                    constraint.columns.len(),
-                    &constraint.prefix_lengths,
-                ) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        format!(
-                            "constraint `{}` {reason} on `{}`",
-                            constraint.name, table.name
-                        ),
-                    ));
-                }
-                // A prefix must reference a string/binary column and stay under a bounded column's width,
-                // or MySQL cannot store it as a prefix (it errors, or normalizes to a full-column key that
-                // introspects back prefix-less and churns). The shape check above guarantees each position
-                // is in range, so the column lookup is safe. Column context is only available here, not in
-                // the incremental `AddUnique`/`AddPrimaryKey` render path.
-                for prefix in &constraint.prefix_lengths {
-                    let column_name = &constraint.columns[prefix.position];
-                    let Some(column) = table
-                        .columns
-                        .iter()
-                        .find(|column| &column.name == column_name)
-                    else {
-                        continue;
-                    };
-                    match prefix_column_support(&column.ty) {
-                        PrefixColumnSupport::Unsupported => {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidInput,
-                                format!(
-                                    "constraint `{}` has a column prefix on `{column_name}`, which is \
-                                     not a string or binary column, on `{}`",
-                                    constraint.name, table.name
-                                ),
-                            ));
-                        }
-                        PrefixColumnSupport::Bounded(width) if prefix.length >= width => {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidInput,
-                                format!(
-                                    "constraint `{}` prefix length {} for `{column_name}` is not \
-                                     shorter than the column width {width}; MySQL would store it as a \
-                                     full-column key that does not round-trip, on `{}`",
-                                    constraint.name, prefix.length, table.name
-                                ),
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-            }
+            validate_table_constraint_prefixes(table, &capabilities)?;
             for foreign_key in &table.foreign_keys {
                 if foreign_key.match_type.is_some()
                     && !capabilities.constraints.foreign_key_match_type
@@ -901,6 +846,9 @@ fn prefix_column_support(ty: &squealy::SqlType) -> PrefixColumnSupport {
         // MySQL renders `String` as `VARCHAR(255)`, so it is bounded at 255 — a prefix of 255 is
         // normalized to a full-column key like any other full-width prefix.
         squealy::SqlType::String => PrefixColumnSupport::Bounded(255),
+        // MySQL stores `Uuid` as `CHAR(36)` (see `canonical_sql_type`), so a prefix shorter than 36 is
+        // renderable and round-trippable.
+        squealy::SqlType::Uuid => PrefixColumnSupport::Bounded(36),
         squealy::SqlType::Varchar(width)
         | squealy::SqlType::Char(width)
         | squealy::SqlType::FixedBytes(width) => PrefixColumnSupport::Bounded(*width),
@@ -909,6 +857,78 @@ fn prefix_column_support(ty: &squealy::SqlType) -> PrefixColumnSupport {
         squealy::SqlType::Raw(_) => PrefixColumnSupport::Unbounded,
         _ => PrefixColumnSupport::Unsupported,
     }
+}
+
+/// Validates a table's `UNIQUE`/`PRIMARY KEY` column prefix lengths (`Constraint::prefix_lengths`)
+/// against the backend capability, the prefix shape, and the referenced column types. Shared by the
+/// create preflight ([`validate_capabilities`]) and the incremental render path
+/// ([`render_plan_sql`]) — `SchemaBackend::render_plan` receives the full `desired` model, so a plan that
+/// bypasses `check_create` still validates prefixes against their columns here (a prefix must reference a
+/// string/binary column and stay under a bounded column's width, or MySQL errors or normalizes it to a
+/// prefix-less key that churns).
+fn validate_table_constraint_prefixes(
+    table: &squealy::TableModel,
+    capabilities: &SchemaCapabilities,
+) -> std::io::Result<()> {
+    for constraint in table.primary_key.iter().chain(&table.uniques) {
+        if constraint.prefix_lengths.is_empty() {
+            continue;
+        }
+        if !capabilities.constraints.prefix_lengths {
+            return unsupported_constraint(
+                &table.name,
+                &constraint.name,
+                "constraint column prefix lengths",
+            );
+        }
+        if let Some(reason) =
+            squealy::prefix_length_shape_error(constraint.columns.len(), &constraint.prefix_lengths)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "constraint `{}` {reason} on `{}`",
+                    constraint.name, table.name
+                ),
+            ));
+        }
+        // The shape check above guarantees each position is in range, so the column lookup is safe.
+        for prefix in &constraint.prefix_lengths {
+            let column_name = &constraint.columns[prefix.position];
+            let Some(column) = table
+                .columns
+                .iter()
+                .find(|column| &column.name == column_name)
+            else {
+                continue;
+            };
+            match prefix_column_support(&column.ty) {
+                PrefixColumnSupport::Unsupported => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "constraint `{}` has a column prefix on `{column_name}`, which is not a \
+                             string or binary column, on `{}`",
+                            constraint.name, table.name
+                        ),
+                    ));
+                }
+                PrefixColumnSupport::Bounded(width) if prefix.length >= width => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "constraint `{}` prefix length {} for `{column_name}` is not shorter than \
+                             the column width {width}; MySQL would store it as a full-column key that \
+                             does not round-trip, on `{}`",
+                            constraint.name, prefix.length, table.name
+                        ),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 fn unsupported_constraint(table: &str, constraint: &str, feature: &str) -> std::io::Result<()> {
@@ -1421,6 +1441,46 @@ mod tests {
         let text = model_with_prefix_unique(typed_column("body", SqlType::Text), 1000);
         render_create_sql(&text, &prefix_capable_backend())
             .expect("a prefix on an unbounded text column is accepted");
+    }
+
+    #[test]
+    fn render_create_prefix_on_uuid_is_bounded_at_36() {
+        // MySQL stores `Uuid` as `CHAR(36)`, so a prefix shorter than 36 is renderable and round-trippable
+        // (must not be rejected), but a 36-length prefix is full-width.
+        let short = model_with_prefix_unique(typed_column("id", SqlType::Uuid), 8);
+        render_create_sql(&short, &prefix_capable_backend())
+            .expect("a prefix shorter than 36 on a Uuid (CHAR(36)) column is accepted");
+
+        let full = model_with_prefix_unique(typed_column("id", SqlType::Uuid), 36);
+        let error = render_create_sql(&full, &prefix_capable_backend()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not shorter than the column width"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn render_plan_validates_constraint_prefixes_against_desired_columns() {
+        // The incremental render/apply path skips `check_create`, but `desired` carries the columns, so a
+        // bad prefix reaching an incremental plan is still rejected (`render_plan` receives `desired`).
+        let desired = model_with_prefix_unique(typed_column("n", SqlType::I32), 4);
+        let plan = DatabasePlan { steps: Vec::new() };
+        let error = render_plan_sql(&plan, &desired, &prefix_capable_backend()).unwrap_err();
+        assert!(
+            error.to_string().contains("not a string or binary column"),
+            "unexpected error: {error}"
+        );
+
+        // A valid prefix passes the incremental prefix validation (any later error is not about it).
+        let ok = model_with_prefix_unique(typed_column("code", SqlType::Varchar(64)), 8);
+        if let Err(error) = render_plan_sql(&plan, &ok, &prefix_capable_backend()) {
+            assert!(
+                !error.to_string().contains("prefix"),
+                "a valid prefix must not be rejected: {error}"
+            );
+        }
     }
 
     #[test]
