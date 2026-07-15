@@ -2338,7 +2338,7 @@ fn mysql_validates_prefixes_on_recognized_raw_string_and_binary_types() {
         "unexpected error: {error}"
     );
 
-    // Unbounded text/blob families accept any positive prefix.
+    // Text/blob families accept a prefix under their capacity.
     for name in [
         "TINYTEXT",
         "MEDIUMTEXT",
@@ -2350,6 +2350,18 @@ fn mysql_validates_prefixes_on_recognized_raw_string_and_binary_types() {
         Mysql
             .render_create(&model_with_prefix_unique(raw(name), 50), &mut Vec::new())
             .unwrap_or_else(|error| panic!("a prefix on {name} should render: {error}"));
+    }
+    // `TINYTEXT`/`TINYBLOB` hold at most 255 bytes, so a 255-length (full-capacity) prefix is rejected.
+    for name in ["TINYTEXT", "TINYBLOB"] {
+        let error = Mysql
+            .render_create(&model_with_prefix_unique(raw(name), 255), &mut Vec::new())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not shorter than the column width"),
+            "expected a full-capacity rejection for {name}, got: {error}"
+        );
     }
 
     // An un-prefixable raw type (ENUM) is still rejected.
