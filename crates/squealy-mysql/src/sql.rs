@@ -1011,16 +1011,16 @@ impl squealy::Dialect for MysqlDialect {
         // MySQL's `CAST` accepts `DECIMAL(M, D)`, so a cross-dialect-deployed decimal cast keeps its scale
         // and round-trips (the reverse parser's `general_cast` now structures MySQL `Decimal` casts). 8fe1530.
         if let SqlType::Decimal { precision, scale } = ty {
-            // MySQL's DECIMAL is limited to precision <= 65, scale <= 30, and scale <= precision. A general
-            // cast to a wider decimal (e.g. a PostgreSQL `numeric(100, 50)` in a cross-dialect package) has
-            // no faithful MySQL rendering — reject it at the fidelity boundary rather than emit DDL that
-            // errors only at execution.
-            if *precision > 65 || *scale > 30 || scale > precision {
+            // MySQL's DECIMAL is limited to 1 <= precision <= 65, scale <= 30, and scale <= precision. A
+            // general cast outside that range (e.g. a PostgreSQL `numeric(100, 50)` in a cross-dialect
+            // package, or a hand-built zero-precision decimal) has no faithful MySQL rendering — reject it at
+            // the fidelity boundary rather than emit DDL that errors only at execution.
+            if *precision == 0 || *precision > 65 || *scale > 30 || scale > precision {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     format!(
                         "MySQL cannot render a general CAST to DECIMAL({precision}, {scale}) \
-                         (DECIMAL is limited to precision <= 65, scale <= 30, and scale <= precision)"
+                         (DECIMAL is limited to 1 <= precision <= 65, scale <= 30, and scale <= precision)"
                     ),
                 ));
             }
