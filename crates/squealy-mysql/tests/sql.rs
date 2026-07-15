@@ -2312,12 +2312,50 @@ fn mysql_rejects_a_full_width_constraint_prefix() {
 }
 
 #[test]
-fn mysql_rejects_a_prefix_on_a_raw_typed_column() {
-    // A `Raw` type is emitted verbatim with an unknown width (e.g. `VARBINARY(8)` normalizes a full-width
-    // prefix to a full-column key), so a prefix on it cannot be shown round-trip-safe and is rejected.
+fn mysql_validates_prefixes_on_recognized_raw_string_and_binary_types() {
+    // MySQL string/binary types with no neutral variant introspect as `Raw` (keywords upper-cased). A
+    // prefix on a recognized one must round-trip: bounded `VARBINARY(n)` (prefix < n), unbounded
+    // `TINYTEXT`/`MEDIUMBLOB`/etc.
+    let raw = |name: &str| SqlType::Raw(name.to_owned());
+
+    // A shorter-than-width `VARBINARY(8)` prefix renders; a full-width one is rejected.
+    Mysql
+        .render_create(
+            &model_with_prefix_unique(raw("VARBINARY(8)"), 4),
+            &mut Vec::new(),
+        )
+        .expect("a VARBINARY(8) prefix of 4 should render");
     let error = Mysql
         .render_create(
-            &model_with_prefix_unique(SqlType::Raw("VARBINARY(8)".to_owned()), 4),
+            &model_with_prefix_unique(raw("VARBINARY(8)"), 8),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("not shorter than the column width"),
+        "unexpected error: {error}"
+    );
+
+    // Unbounded text/blob families accept any positive prefix.
+    for name in [
+        "TINYTEXT",
+        "MEDIUMTEXT",
+        "LONGTEXT",
+        "TINYBLOB",
+        "MEDIUMBLOB",
+        "LONGBLOB",
+    ] {
+        Mysql
+            .render_create(&model_with_prefix_unique(raw(name), 50), &mut Vec::new())
+            .unwrap_or_else(|error| panic!("a prefix on {name} should render: {error}"));
+    }
+
+    // An un-prefixable raw type (ENUM) is still rejected.
+    let error = Mysql
+        .render_create(
+            &model_with_prefix_unique(raw("ENUM('a','b')"), 1),
             &mut Vec::new(),
         )
         .unwrap_err();

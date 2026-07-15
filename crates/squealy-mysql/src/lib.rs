@@ -274,8 +274,33 @@ fn mysql_prefix_column(ty: &squealy::SqlType) -> MysqlPrefixColumn {
         SqlType::Varchar(width) | SqlType::Char(width) | SqlType::FixedBytes(width) => {
             MysqlPrefixColumn::Bounded(*width)
         }
+        // Several MySQL string/binary types have no neutral variant and introspect as `Raw` (keywords
+        // upper-cased by `raw_column_type`): the `TINY`/`MEDIUM`/`LONG` text and blob families (unbounded),
+        // and `VARBINARY(n)` (bounded). Recognize those so a prefix on a just-introspected column is not
+        // rejected; any other `Raw` (`ENUM`/`SET`/an unknown spelling) is not prefix-round-trip-safe.
+        SqlType::Raw(raw) => mysql_raw_prefix_column(raw),
         _ => MysqlPrefixColumn::Unsupported,
     }
+}
+
+fn mysql_raw_prefix_column(raw: &str) -> MysqlPrefixColumn {
+    let lower = raw.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "tinytext" | "mediumtext" | "longtext" | "tinyblob" | "mediumblob" | "longblob" => {
+            return MysqlPrefixColumn::Unbounded;
+        }
+        _ => {}
+    }
+    // A bounded `varbinary(n)` — a prefix must stay under `n` like any other bounded column.
+    if let Some(inner) = lower
+        .strip_prefix("varbinary")
+        .and_then(|rest| rest.trim().strip_prefix('('))
+        .and_then(|rest| rest.strip_suffix(')'))
+        && let Ok(width) = inner.trim().parse::<u32>()
+    {
+        return MysqlPrefixColumn::Bounded(width);
+    }
+    MysqlPrefixColumn::Unsupported
 }
 
 /// A live MySQL connection for schema management and query execution.

@@ -1317,8 +1317,10 @@ async fn introspects_and_round_trips_constraint_column_prefix_lengths() {
             "CREATE TABLE `catalog_cprefix`.`items` (\
 `code` VARCHAR(64) NOT NULL, \
 `name` VARCHAR(255) NOT NULL, \
+`blob_key` VARBINARY(32) NOT NULL, \
 PRIMARY KEY (`code`(8)), \
-UNIQUE KEY `uq_items_name` (`name`(10)))",
+UNIQUE KEY `uq_items_name` (`name`(10)), \
+UNIQUE KEY `uq_items_blob` (`blob_key`(8)))",
         )
         .await
         .expect("create table with prefix constraints");
@@ -1357,6 +1359,20 @@ UNIQUE KEY `uq_items_name` (`name`(10)))",
             length: 10,
         }],
         "the unique constraint prefix length must be recovered, got: {unique:?}",
+    );
+    // A `VARBINARY(32)` column introspects as `Raw` — its prefix must round-trip too.
+    let blob_unique = table
+        .uniques
+        .iter()
+        .find(|unique| unique.name == "uq_items_blob")
+        .expect("the varbinary unique constraint");
+    assert_eq!(
+        blob_unique.prefix_lengths,
+        vec![IndexPrefixLength {
+            position: 0,
+            length: 8,
+        }],
+        "the varbinary unique constraint prefix length must be recovered, got: {blob_unique:?}",
     );
 
     // Re-planning the introspected model against the same database must converge to an empty plan.
