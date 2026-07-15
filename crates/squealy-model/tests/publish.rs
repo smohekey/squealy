@@ -676,32 +676,52 @@ fn rich_model() -> DatabaseModel {
                         columns: vec!["slug".to_owned()],
                     }],
                     checks: Vec::new(),
-                    indexes: vec![IndexModel {
-                        name: "idx_tenants_lower_slug".to_owned(),
-                        columns: Vec::new(),
-                        // PostgreSQL deparses the index expression with a `::text` operand cast, which the
-                        // reverse parser now structures as a general cast — `lower(CAST(slug AS text))` —
-                        // so the expected form tracks the parser (as the generated/check expressions do).
-                        expressions: squealy_parse::Reader::new(
-                            squealy_parse::SqlDialect::Postgres,
-                        )
-                        .read_index_expressions_or_raw("lower((slug)::text)"),
-                        include_columns: Vec::new(),
-                        unique: false,
-                        method: Some(IndexMethod::BTree),
-                        directions: vec![IndexDirection::Asc],
-                        nulls: Vec::new(),
-                        collations: vec![IndexCollation {
-                            position: 0,
-                            name: "C".to_owned(),
-                        }],
-                        operator_classes: vec![IndexOperatorClass {
-                            position: 0,
-                            name: "text_pattern_ops".to_owned(),
-                        }],
-                        prefix_lengths: Vec::new(),
-                        predicate: None,
-                    }],
+                    indexes: vec![
+                        // A plain-column index with a non-default ordering: `DESC` + `NULLS LAST`
+                        // (PostgreSQL defaults DESC to NULLS FIRST, so LAST is recorded rather than
+                        // collapsed to empty). Sorts before `idx_tenants_lower_slug` by name, matching the
+                        // introspection query's `ORDER BY idx.relname`.
+                        IndexModel {
+                            name: "idx_tenants_id_desc".to_owned(),
+                            columns: vec!["id".to_owned()],
+                            expressions: Vec::new(),
+                            include_columns: Vec::new(),
+                            unique: false,
+                            method: Some(IndexMethod::BTree),
+                            directions: vec![IndexDirection::Desc],
+                            nulls: vec![IndexNullsOrder::Last],
+                            collations: Vec::new(),
+                            operator_classes: Vec::new(),
+                            prefix_lengths: Vec::new(),
+                            predicate: None,
+                        },
+                        IndexModel {
+                            name: "idx_tenants_lower_slug".to_owned(),
+                            columns: Vec::new(),
+                            // PostgreSQL deparses the index expression with a `::text` operand cast, which the
+                            // reverse parser now structures as a general cast — `lower(CAST(slug AS text))` —
+                            // so the expected form tracks the parser (as the generated/check expressions do).
+                            expressions: squealy_parse::Reader::new(
+                                squealy_parse::SqlDialect::Postgres,
+                            )
+                            .read_index_expressions_or_raw("lower((slug)::text)"),
+                            include_columns: Vec::new(),
+                            unique: false,
+                            method: Some(IndexMethod::BTree),
+                            directions: vec![IndexDirection::Asc],
+                            nulls: Vec::new(),
+                            collations: vec![IndexCollation {
+                                position: 0,
+                                name: "C".to_owned(),
+                            }],
+                            operator_classes: vec![IndexOperatorClass {
+                                position: 0,
+                                name: "text_pattern_ops".to_owned(),
+                            }],
+                            prefix_lengths: Vec::new(),
+                            predicate: None,
+                        },
+                    ],
                 },
             ],
         }],
