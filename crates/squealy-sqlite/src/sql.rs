@@ -1360,6 +1360,22 @@ impl squealy::Dialect for SqliteDialect {
         writer.write_all(sqlite_affinity(ty).as_bytes())
     }
 
+    fn write_general_cast_type(&self, ty: &SqlType, writer: &mut dyn Write) -> io::Result<()> {
+        squealy::reject_128bit_general_cast(ty)?;
+        // SQLite's `CAST` uses affinity names only (`NUMERIC`), which drop a decimal's precision and scale,
+        // so a general `CAST(x AS DECIMAL(10, 2))` cannot be rendered faithfully; reject it rather than
+        // silently narrow it (the reverse parser's `general_cast` keeps SQLite `Decimal` casts `Raw` for the
+        // same reason, so a structural one could only arrive via a cross-dialect deploy). See 8fe1530.
+        if matches!(ty, SqlType::Decimal { .. }) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "SQLite cannot render a general CAST to DECIMAL/NUMERIC faithfully (its NUMERIC affinity \
+                 drops precision and scale); author it as a Raw expression if a SQLite spelling is intended",
+            ));
+        }
+        self.write_cast_type(ty, writer)
+    }
+
     fn unary_string_fn_name(&self, func: squealy::UnaryStringFunc) -> &'static str {
         match func {
             // SQLite has no `CHAR_LENGTH`; `length()` counts characters for TEXT values.

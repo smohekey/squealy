@@ -1004,6 +1004,18 @@ impl squealy::Dialect for MysqlDialect {
         writer.write_all(name.as_bytes())
     }
 
+    fn write_general_cast_type(&self, ty: &SqlType, writer: &mut dyn Write) -> io::Result<()> {
+        squealy::reject_128bit_general_cast(ty)?;
+        // A general authored cast spells the precision/scale faithfully — `CAST(x AS DECIMAL(10, 2))` —
+        // unlike a result-pin cast (bare `DECIMAL`, whose exact type is recovered from the output column).
+        // MySQL's `CAST` accepts `DECIMAL(M, D)`, so a cross-dialect-deployed decimal cast keeps its scale
+        // and round-trips (the reverse parser's `general_cast` now structures MySQL `Decimal` casts). 8fe1530.
+        if let SqlType::Decimal { precision, scale } = ty {
+            return write!(writer, "DECIMAL({precision}, {scale})");
+        }
+        self.write_cast_type(ty, writer)
+    }
+
     fn integer_division_needs_float_cast(&self) -> bool {
         // MySQL `/` is always floating-point division; `DIV` is the integer form.
         false

@@ -1408,23 +1408,28 @@ fn lower_cast(
 ///
 /// [`invert_pin_type`] is tuned for a **result pin** — a view-output cast whose exact type is recovered
 /// from the introspected column metadata — so it maps a couple of spellings to a representative that is
-/// wrong for a general authored cast. Those cases stay `Raw` (compared verbatim) rather than misrepresent
-/// the cast in the backend-neutral model (which would corrupt a cross-dialect deploy) or the planned DDL:
+/// wrong for a general authored cast. A target type a backend cannot represent *faithfully* stays `Raw`
+/// (compared verbatim) rather than misrepresent the cast in the backend-neutral model (which would corrupt
+/// a cross-dialect deploy) or the planned DDL:
 ///
 /// - **`I128`/`U128`** — bare `numeric`/`decimal` (PostgreSQL) and `DECIMAL(65, 0)` (MySQL) invert to
 ///   `I128`, squealy's *render target* for a 128-bit integer. As an authored cast they mean an
 ///   arbitrary-precision DECIMAL — a different semantic category — and no dialect spells a native
-///   128-bit-integer cast, so an `I128`/`U128` general cast is never legitimate.
-/// - **`Decimal` on MySQL/SQLite** — those dialects render every [`SqlType::Decimal`] as a bare
-///   `DECIMAL`/`NUMERIC`, dropping the precision/scale, so structuring one would silently change the
-///   deployed semantics (`CAST(x AS DECIMAL(10, 2))` → `CAST(x AS DECIMAL)`). PostgreSQL renders
-///   `numeric(p, s)` faithfully, so its `Decimal` casts are exact and structure.
+///   128-bit-integer cast, so an `I128`/`U128` general cast is never legitimate (kept `Raw` on every
+///   dialect; a *structural* one is also rejected at render, see [`reject_128bit_general_cast`]).
+/// - **`Decimal` on SQLite** — SQLite's `CAST` uses affinity names only, rendering every
+///   [`SqlType::Decimal`] as a bare `NUMERIC` that drops the precision/scale, so structuring one would
+///   silently change the deployed semantics (`CAST(x AS DECIMAL(10, 2))` → `CAST(x AS NUMERIC)`). PostgreSQL
+///   (`numeric(p, s)`) and MySQL (`DECIMAL(p, s)`, via [`Dialect::write_general_cast_type`]) both render a
+///   general decimal cast faithfully, so their `Decimal` casts structure and round-trip.
 ///
 /// These guards key on the SOURCE parser dialect, which keeps a same-backend round-trip churn-free (the H1
-/// case: a squealy-published schema re-plans to empty on the same backend). A structural `Decimal`/`I128`
-/// cast that a PostgreSQL package carries but is then deployed **cross-dialect** to a lossier backend is a
-/// documented H2 residual (silent precision loss / churn) tracked in git-bug `8fe1530` — it was already
-/// broken (as invalid cross-dialect cast syntax) before this cast inversion landed.
+/// case: a squealy-published schema re-plans to empty on the same backend). A structural `Decimal` cast a
+/// PostgreSQL package carries is now deployed **cross-dialect** to MySQL faithfully; SQLite (and any
+/// 128-bit cast) is rejected loud at render rather than silently narrowed (git-bug `8fe1530`).
+///
+/// [`reject_128bit_general_cast`]: squealy::reject_128bit_general_cast
+/// [`Dialect::write_general_cast_type`]: squealy::Dialect::write_general_cast_type
 fn general_cast(
     operand: &Expr,
     ty: SqlType,
@@ -1432,8 +1437,7 @@ fn general_cast(
     dialect: SqlDialect,
 ) -> Result<ExprNode, ReadError> {
     let not_exactly_modelable = matches!(ty, SqlType::I128 | SqlType::U128)
-        || (matches!(ty, SqlType::Decimal { .. })
-            && matches!(dialect, SqlDialect::Mysql | SqlDialect::Sqlite));
+        || (matches!(ty, SqlType::Decimal { .. }) && matches!(dialect, SqlDialect::Sqlite));
     if not_exactly_modelable {
         return Err(not_yet(format!(
             "general cast to `{data_type}` cannot be modeled exactly on this dialect, kept raw"
@@ -3707,7 +3711,8 @@ mod tests {
                 ..
             }
         ));
-        // PostgreSQL renders `numeric(p, s)` faithfully, so a `Decimal` cast is exact and structures.
+        // PostgreSQL (`numeric(p, s)`) and MySQL (`DECIMAL(p, s)`) render a `Decimal` cast faithfully, so
+        // it is exact and structures — the precision/scale survive the round-trip (git-bug 8fe1530).
         assert!(matches!(
             low("CAST(\"x\" AS numeric(10, 2))", SqlDialect::Postgres).unwrap(),
             ExprNode::Cast {
@@ -3718,12 +3723,18 @@ mod tests {
                 ..
             }
         ));
-        // MySQL and SQLite render every `Decimal` as a bare `DECIMAL`/`NUMERIC`, dropping the
-        // precision/scale — structuring one would silently change the planned DDL, so it stays `Raw`.
         assert!(matches!(
-            low("CAST(`x` AS DECIMAL(10, 2))", SqlDialect::Mysql),
-            Err(ReadError::NotYetLowered(_))
+            low("CAST(`x` AS DECIMAL(10, 2))", SqlDialect::Mysql).unwrap(),
+            ExprNode::Cast {
+                ty: SqlType::Decimal {
+                    precision: 10,
+                    scale: 2,
+                },
+                ..
+            }
         ));
+        // SQLite renders every `Decimal` as a bare `NUMERIC` affinity, dropping the precision/scale —
+        // structuring one would silently change the planned DDL, so it stays `Raw`.
         assert!(matches!(
             low("CAST(\"x\" AS NUMERIC(10, 2))", SqlDialect::Sqlite),
             Err(ReadError::NotYetLowered(_))

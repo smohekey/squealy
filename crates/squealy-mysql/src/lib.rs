@@ -505,14 +505,14 @@ impl SchemaIntrospect for MysqlConnection {
         // cast is folded — a many-to-one spelling (`SIGNED`, `CHAR`) round-trips as the representative.
         body.map_exprs(&|node| {
             if let squealy::ExprNode::Cast { ty, .. } = node {
-                *ty = canonical_mysql_pin_type(ty);
+                *ty = canonical_mysql_cast_type(ty);
             }
         });
         body
     }
 
     fn canonical_cast_type(&self, ty: &squealy::SqlType) -> squealy::SqlType {
-        canonical_mysql_pin_type(ty)
+        canonical_mysql_cast_type(ty)
     }
 
     /// MySQL has only `AUTO_INCREMENT`: it renders any identity column that way and introspects it
@@ -609,6 +609,19 @@ fn canonical_mysql_pin_type(ty: &squealy::SqlType) -> squealy::SqlType {
             scale: 0,
         },
         other => other,
+    }
+}
+
+/// Folds a **general** authored cast's target type to the canonical representative MySQL round-trips to.
+/// Identical to [`canonical_mysql_pin_type`] except a [`Decimal`](squealy::SqlType::Decimal) is preserved
+/// exactly: a general cast renders `DECIMAL(p, s)` faithfully (via
+/// [`write_general_cast_type`](squealy::Dialect::write_general_cast_type)) and reads its precision/scale
+/// back exactly, so folding to the bare-`DECIMAL` representative would mask a genuine scale change. Every
+/// other spelling stays many-to-one (`SIGNED`, `CHAR`, `DATETIME`), as for a result pin. See 8fe1530.
+fn canonical_mysql_cast_type(ty: &squealy::SqlType) -> squealy::SqlType {
+    match ty {
+        squealy::SqlType::Decimal { .. } => ty.clone(),
+        other => canonical_mysql_pin_type(other),
     }
 }
 
