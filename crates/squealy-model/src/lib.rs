@@ -292,12 +292,88 @@ where
 /// applies this to **both** the desired and the introspected model before diffing, so equivalent
 /// expressions written one way and deparsed another compare equal. It is exposed so callers that
 /// diff against a live schema directly (e.g. `status --check-schema`) can align both sides the same.
+/// One relation (table or view) in the source-column catalog: its namespace, name, and column names.
+struct CatalogEntry {
+    schema: Option<String>,
+    name: String,
+    columns: Vec<String>,
+}
+
+/// The column names every table and view in a model exposes, so [`canonicalize_view_clause_aliases`] can
+/// resolve a view body's clause references against real source columns (git-bug 823ae69). Relation names
+/// are matched exactly (case-sensitively): a view renders quoted identifiers, so `"Events"` and `"events"`
+/// are distinct relations that must not be conflated.
+struct ViewSourceCatalog {
+    entries: Vec<CatalogEntry>,
+}
+
+impl ViewSourceCatalog {
+    fn from_model(model: &DatabaseModel) -> Self {
+        let mut entries = Vec::new();
+        for schema in &model.schemas {
+            for table in &schema.tables {
+                entries.push(CatalogEntry {
+                    schema: schema.name.clone(),
+                    name: table.name.clone(),
+                    columns: table.columns.iter().map(|c| c.name.clone()).collect(),
+                });
+            }
+            for view in &schema.views {
+                // A view exposes its declared output columns; when it declares none, the renderer names its
+                // outputs from the body's projections, so derive them from the body (else a source view would
+                // appear to expose zero columns and miss real clause collisions).
+                let columns = if view.columns.is_empty() {
+                    squealy::view_body_output_names(&view.query)
+                } else {
+                    view.columns.iter().map(|c| c.name.clone()).collect()
+                };
+                entries.push(CatalogEntry {
+                    schema: schema.name.clone(),
+                    name: view.name.clone(),
+                    columns,
+                });
+            }
+        }
+        Self { entries }
+    }
+}
+
+impl squealy::ViewSourceColumns for ViewSourceCatalog {
+    fn source_columns(&self, source: &SourceRef) -> Option<Vec<String>> {
+        let by_name: Vec<&CatalogEntry> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.name == source.name)
+            .collect();
+        match &source.schema {
+            // A qualified source resolves ONLY within its own namespace — a failed lookup returns `None`
+            // rather than falling back to a same-named relation in another schema (which could be an
+            // unrelated, externally managed table whose columns would misclassify the clause).
+            Some(schema) => by_name
+                .into_iter()
+                .find(|entry| entry.schema.as_deref() == Some(schema.as_str()))
+                .map(|entry| entry.columns.clone()),
+            // An unqualified source (SQLite suppresses the schema; a single-namespace model needs no
+            // qualifier) resolves only when the name is unique — otherwise it is ambiguous, so leave it to
+            // the reverse parser's classification (treat as no colliding source column) rather than guess.
+            None => match by_name.as_slice() {
+                [entry] => Some(entry.columns.clone()),
+                _ => None,
+            },
+        }
+    }
+}
+
 pub fn canonicalize_model<C: SchemaIntrospect>(
     connection: &C,
     model: &DatabaseModel,
 ) -> DatabaseModel {
     let default_method = connection.default_index_method();
     let mut model = model.clone();
+    // A source-column catalog for the whole model, so the view clause-alias canonicalizer can tell a
+    // genuine source-column reference from a projection-alias reference (git-bug 823ae69). Column names do
+    // not change under canonicalization, so it is built once from the cloned model before the passes below.
+    let catalog = ViewSourceCatalog::from_model(&model);
     for schema in &mut model.schemas {
         // Flatten the namespace for a backend without schemas (SQLite), so a `#[schema(App)]` model does
         // not diff as a wholesale move of every table into the default namespace after each publish.
@@ -417,6 +493,22 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
             // (many cast spellings are many-to-one), so a published view whose body is now reconstructed
             // by the reverse parser compares equal to its introspected form instead of churning.
             view.query = connection.canonical_view_body(std::mem::take(&mut view.query));
+            // Converge clause terms that reference a projection output alias with the form the backend
+            // deparser produces (a standalone alias → its expression; a nested source-column collision →
+            // the source column), so a view whose `GROUP BY`/`HAVING`/`ORDER BY` names an alias re-plans
+            // to empty. Applied on both sides (this fn runs on desired + introspected). See git-bug 823ae69.
+            squealy::canonicalize_view_clause_aliases(
+                &mut view.query,
+                &catalog,
+                squealy::ViewClauseDialect {
+                    identifier_case: connection.identifier_case(),
+                    cte_forward_references_visible: connection.cte_forward_references_visible(),
+                    recursive_exposes_forward_ctes: connection.recursive_exposes_forward_ctes(),
+                },
+                // A view with no declared columns renders each projection `AS output_name`, so its output
+                // names ARE in-scope aliases; a declared column list suppresses them.
+                !view.columns.is_empty(),
+            );
         }
     }
     // A schema-less backend flattens every namespace to the same (default) name, so two source schemas
@@ -1097,6 +1189,112 @@ mod tests {
         };
         assert_eq!(*result, Some(SqlType::I16));
     }
+
+    #[test]
+    fn canonicalize_model_converges_a_clause_alias_view_with_its_deparsed_form() {
+        // The git-bug 823ae69 churn: a view `SELECT (amount*2) AS total FROM events q ORDER BY total`
+        // whose desired model names the projection alias (`ORDER BY total`), and whose introspected model
+        // carries the deparser's expansion (`ORDER BY (q.amount*2)`), must canonicalize to the SAME body.
+        // The source table even has a colliding `total` column — a standalone alias still wins.
+        fn events_table() -> TableModel {
+            TableModel {
+                name: "events".to_owned(),
+                comment: None,
+                columns: vec![
+                    ColumnModel {
+                        name: "amount".to_owned(),
+                        comment: None,
+                        ty: SqlType::I64,
+                        collation: None,
+                        nullable: true,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        on_update: None,
+                    },
+                    ColumnModel {
+                        name: "total".to_owned(),
+                        comment: None,
+                        ty: SqlType::I64,
+                        collation: None,
+                        nullable: true,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        on_update: None,
+                    },
+                ],
+                primary_key: None,
+                foreign_keys: vec![],
+                uniques: vec![],
+                checks: vec![],
+                indexes: vec![],
+            }
+        }
+        fn amount_times_two() -> ExprNode {
+            ExprNode::Binary {
+                op: squealy::ArithmeticOp::Multiply,
+                left: Box::new(ExprNode::Column {
+                    alias: "q".to_owned(),
+                    column: "amount".to_owned(),
+                }),
+                right: Box::new(ExprNode::Literal("2".to_owned())),
+            }
+        }
+        fn view(internal_alias: Option<&str>, order_expr: ExprNode) -> ViewModel {
+            ViewModel {
+                name: "v".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "total".to_owned(),
+                    ty: SqlType::I64,
+                    nullable: true,
+                }],
+                query: ViewBody::Select(Box::new(ViewQueryModel {
+                    projection: vec![ProjectionItem {
+                        output_name: "total".to_owned(),
+                        internal_alias: internal_alias.map(str::to_owned),
+                        expr: amount_times_two(),
+                    }],
+                    from: Some(SourceItem::Named(SourceRef {
+                        schema: None,
+                        name: "events".to_owned(),
+                        alias: "q".to_owned(),
+                    })),
+                    order_by: vec![squealy::OrderItem {
+                        expr: order_expr,
+                        direction: None,
+                        nulls: None,
+                    }],
+                    ..Default::default()
+                })),
+            }
+        }
+        let model = |v: ViewModel| DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: vec![events_table()],
+                views: vec![v],
+            }],
+        };
+        // Desired: names the alias. Introspected: the deparser expanded it.
+        let desired = canonicalize_model(
+            &CanonBackend,
+            &model(view(
+                Some("total"),
+                ExprNode::BareColumn {
+                    column: "total".to_owned(),
+                },
+            )),
+        );
+        let introspected =
+            canonicalize_model(&CanonBackend, &model(view(None, amount_times_two())));
+        assert_eq!(
+            desired.schemas[0].views[0].query, introspected.schemas[0].views[0].query,
+            "clause-alias view must converge with its deparsed form"
+        );
+    }
+
     /// A backend whose introspection canonical form mirrors MySQL: bare `String` reads back as
     /// `Varchar(255)`, any identity is `AUTO_INCREMENT`, and a plain index has an explicit `BTREE`
     /// method with ASC directions.

@@ -316,6 +316,117 @@ async fn replan_after_publish_is_empty() {
         .expect("cleanup");
 }
 
+/// A hand-built model for a view whose `ORDER BY` names a **projection output alias** — a shape the typed
+/// `#[view]` builder cannot express. MySQL's `VIEW_DEFINITION` deparses the standalone `ORDER BY total` to
+/// the underlying expression (`order by (q0_0.amount * 2)`), and the source table carries a colliding
+/// `total` column (a standalone alias still wins). The clause-alias canonicalizer (git-bug 823ae69) must
+/// converge the two so the re-plan is empty.
+fn clause_alias_mysql_model() -> DatabaseModel {
+    fn column(name: &str) -> ColumnModel {
+        ColumnModel {
+            name: name.to_owned(),
+            comment: None,
+            ty: SqlType::I64,
+            collation: None,
+            nullable: true,
+            default: None,
+            identity: None,
+            generated: None,
+            on_update: None,
+        }
+    }
+    let amount_times_two = ExprNode::Binary {
+        op: ArithmeticOp::Multiply,
+        left: Box::new(ExprNode::Column {
+            alias: "q0_0".to_owned(),
+            column: "amount".to_owned(),
+        }),
+        right: Box::new(ExprNode::Literal("2".to_owned())),
+    };
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("ca_mysql".to_owned()),
+            tables: vec![TableModel {
+                name: "ca_events".to_owned(),
+                comment: None,
+                columns: vec![column("amount"), column("total")],
+                primary_key: None,
+                foreign_keys: vec![],
+                uniques: vec![],
+                checks: vec![],
+                indexes: vec![],
+            }],
+            views: vec![ViewModel {
+                name: "ca_v".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "total".to_owned(),
+                    ty: SqlType::I64,
+                    nullable: true,
+                }],
+                query: ViewBody::Select(Box::new(ViewQueryModel {
+                    projection: vec![ProjectionItem {
+                        output_name: "total".to_owned(),
+                        internal_alias: Some("total".to_owned()),
+                        expr: amount_times_two,
+                    }],
+                    from: Some(SourceItem::Named(SourceRef {
+                        schema: Some("ca_mysql".to_owned()),
+                        name: "ca_events".to_owned(),
+                        alias: "q0_0".to_owned(),
+                    })),
+                    order_by: vec![OrderItem {
+                        expr: ExprNode::BareColumn {
+                            column: "total".to_owned(),
+                        },
+                        direction: None,
+                        nulls: None,
+                    }],
+                    ..ViewQueryModel::default()
+                })),
+            }],
+        }],
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn publishing_a_clause_alias_view_then_replanning_is_empty() {
+    let _db_guard = db_lock().lock().await;
+    let model = clause_alias_mysql_model();
+    let mut connection = Mysql
+        .connect(&database_url())
+        .await
+        .expect("connect to MySQL");
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `ca_mysql`")
+        .await
+        .expect("drop schema");
+
+    squealy_model::publish(&model, &Mysql, &mut connection)
+        .await
+        .expect("publish create-from-scratch");
+
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan against published schema");
+    assert!(
+        plan.steps.is_empty(),
+        "expected empty plan after publishing a clause-alias view, got: {:?}",
+        plan.steps
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `ca_mysql`")
+        .await
+        .expect("cleanup");
+}
+
 fn alter_column_baseline_model() -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {

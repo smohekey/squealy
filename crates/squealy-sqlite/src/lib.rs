@@ -319,6 +319,16 @@ impl SchemaIntrospect for SqliteConnection {
         canonical_sqlite_cast_type(ty)
     }
 
+    /// SQLite resolves identifiers case-insensitively over ASCII only.
+    fn identifier_case(&self) -> squealy::IdentifierCase {
+        squealy::IdentifierCase::AsciiInsensitive
+    }
+
+    /// SQLite makes every CTE in a `WITH` mutually visible, so a CTE may forward-reference a later sibling.
+    fn cte_forward_references_visible(&self) -> bool {
+        true
+    }
+
     /// SQLite's only identity mechanism is `AUTOINCREMENT`, which introspects back as
     /// [`IdentityMode::AutoIncrement`]. Map every declared mode to it so a crate-declared
     /// `auto_increment` column (which enters the model as `ByDefault`) does not churn as an ambiguous
