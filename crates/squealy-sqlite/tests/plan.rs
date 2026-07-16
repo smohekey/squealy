@@ -6,10 +6,10 @@
 //! foreign-key child's rows, which a naive drop-and-recreate would cascade-delete.
 
 use squealy::{
-    ArithmeticOp, ColumnModel, CompareOp, Constraint, CteModel, DatabaseModel, DatabasePlan,
-    DatabasePlanStep, DdlExecutor, ExprNode, ForeignKeyAction, ForeignKeyModel, IdentityMode,
-    IdentityModel, IndexModel, IndexPrefixLength, ProjectionItem, SchemaBackend, SchemaModel,
-    SourceItem, SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel, ViewModel,
+    ArithmeticOp, CheckModel, ColumnModel, CompareOp, Constraint, CteModel, DatabaseModel,
+    DatabasePlan, DatabasePlanStep, DdlExecutor, ExprNode, ForeignKeyAction, ForeignKeyModel,
+    IdentityMode, IdentityModel, IndexModel, IndexPrefixLength, ProjectionItem, SchemaBackend,
+    SchemaModel, SourceItem, SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel, ViewModel,
     ViewQueryModel, ViewSetOp,
 };
 use squealy_model::{
@@ -542,6 +542,46 @@ async fn index_table(raw: &RawConnection, index: &'static str) -> String {
     })
     .await
     .expect("index table")
+}
+
+/// A general `CAST(x AS ty)` SQLite cannot spell faithfully must be rejected *through the plan path*,
+/// not only on a direct `render_create`. The incremental plan path canonicalizes the desired model before
+/// rendering, so a fold that narrowed the un-renderable type (e.g. `I128` → the `I64` affinity) would let
+/// a lossy `CAST(x AS INTEGER)` render silently. `canonical_sqlite_cast_type` keeps such a cast un-folded
+/// so the render-time reject still fires here. git-bug 8fe1530.
+#[tokio::test]
+async fn an_unfaithful_general_cast_check_is_rejected_through_the_plan_path() {
+    let unrenderable = [
+        SqlType::I128,
+        SqlType::U128,
+        SqlType::Decimal {
+            precision: 10,
+            scale: 2,
+        },
+    ];
+    for ty in unrenderable {
+        let (mut connection, _raw) = setup().await;
+        let mut widget = table(
+            "t",
+            vec![autoincrement_id(), column("x", SqlType::I64, false)],
+        );
+        widget.checks = vec![CheckModel {
+            name: "ck_x".to_owned(),
+            expression: ExprNode::Cast {
+                operand: Box::new(ExprNode::BareColumn {
+                    column: "x".to_owned(),
+                }),
+                ty: ty.clone(),
+            },
+            validation: None,
+            enforcement: None,
+        }];
+        let result = publish(&one_table(widget), &Sqlite, &mut connection).await;
+        assert!(
+            result.is_err(),
+            "a general cast to {ty:?} must be rejected through the plan path, not silently narrowed"
+        );
+    }
 }
 
 #[tokio::test]

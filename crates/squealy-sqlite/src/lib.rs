@@ -308,7 +308,7 @@ impl SchemaIntrospect for SqliteConnection {
             // Fold a general cast in a view body to SQLite's canonical affinity representative, as a
             // table check's cast is folded, so a structural desired cast does not churn.
             squealy::ExprNode::Cast { ty, .. } => {
-                *ty = canonical_sqlite_pin_type(ty);
+                *ty = canonical_sqlite_cast_type(ty);
             }
             _ => {}
         });
@@ -316,7 +316,7 @@ impl SchemaIntrospect for SqliteConnection {
     }
 
     fn canonical_cast_type(&self, ty: &SqlType) -> SqlType {
-        canonical_sqlite_pin_type(ty)
+        canonical_sqlite_cast_type(ty)
     }
 
     /// SQLite's only identity mechanism is `AUTOINCREMENT`, which introspects back as
@@ -497,6 +497,20 @@ fn canonical_sqlite_pin_type(ty: &SqlType) -> SqlType {
         },
         // A `Raw` pin's affinity is its own text, which `invert_sqlite_cast_type` maps to `None`; leave it.
         Raw(_) => ty.clone(),
+    }
+}
+
+/// Folds a **general** authored cast's target type for SQLite. Identical to [`canonical_sqlite_pin_type`]
+/// except a 128-bit-integer cast is preserved (not folded to the `I64` affinity representative): SQLite
+/// cannot spell it, so [`SqliteDialect::write_general_cast_type`](crate::sql::SqliteDialect) rejects it at
+/// render — but the incremental plan path canonicalizes the model *before* rendering, so folding `I128` to
+/// `I64` here would let a `CAST(x AS INTEGER)` render silently instead. Keeping it 128-bit makes the render
+/// reject fire on both the direct and plan paths. A `Decimal` still folds to the `NUMERIC` representative
+/// (also rejected at render regardless of its precision). See git-bug 8fe1530.
+fn canonical_sqlite_cast_type(ty: &SqlType) -> SqlType {
+    match ty {
+        SqlType::I128 | SqlType::U128 => ty.clone(),
+        other => canonical_sqlite_pin_type(other),
     }
 }
 
