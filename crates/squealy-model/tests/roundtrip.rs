@@ -1494,6 +1494,121 @@ fn constraint_expressions_round_trip_through_each_dialect() {
     );
 }
 
+/// Renders a scalar node fallibly (the general-cast reject surfaces as an `Err`, not a panic).
+fn render_scalar_result(node: &ExprNode, dialect: &dyn squealy::Dialect) -> io::Result<String> {
+    let mut buf = Vec::new();
+    squealy::render_scalar_expr(node, dialect, &mut buf)?;
+    Ok(String::from_utf8(buf).expect("rendered SQL is valid UTF-8"))
+}
+
+fn decimal_cast() -> ExprNode {
+    ExprNode::Cast {
+        operand: b(bare("amount")),
+        ty: SqlType::Decimal {
+            precision: 10,
+            scale: 2,
+        },
+    }
+}
+
+/// A general `CAST(x AS DECIMAL(p, s))` round-trips *exactly* (precision AND scale preserved) on the
+/// backends that render it faithfully — PostgreSQL (`numeric(p, s)`) and MySQL (`DECIMAL(p, s)`). This is
+/// the cross-dialect deploy the epic's H2 needs: a decimal cast a PostgreSQL package carries deploys to
+/// MySQL without silent precision loss and re-plans to empty. SQLite (which cannot spell it) is covered by
+/// `unfaithful_general_casts_are_rejected_at_render`. git-bug 8fe1530.
+#[test]
+fn decimal_general_cast_round_trips_on_faithful_backends() {
+    let node = decimal_cast();
+    let backends: [(&str, SqlDialect, &dyn squealy::Dialect, &str); 2] = [
+        (
+            "postgres",
+            SqlDialect::Postgres,
+            &squealy_postgresql::Postgres.dialect(),
+            "numeric(10,2)",
+        ),
+        (
+            "mysql",
+            SqlDialect::Mysql,
+            &squealy_mysql::Mysql.dialect(),
+            "DECIMAL(10, 2)",
+        ),
+    ];
+    for (backend, sql_dialect, dialect, faithful_spelling) in backends {
+        let rendered = render_scalar_result(&node, dialect)
+            .unwrap_or_else(|err| panic!("{backend}: decimal cast should render: {err}"));
+        assert!(
+            rendered.contains(faithful_spelling),
+            "{backend}: decimal cast dropped its precision/scale: {rendered}"
+        );
+        let lowered = Reader::new(sql_dialect)
+            .read_check_expression(&rendered)
+            .unwrap_or_else(|err| panic!("{backend}: read failed: {err}\n  SQL: {rendered}"));
+        assert_eq!(
+            lowered, node,
+            "{backend}: decimal cast did not round-trip structurally\n  SQL: {rendered}"
+        );
+        assert_eq!(
+            render_scalar_result(&lowered, dialect).unwrap(),
+            rendered,
+            "{backend}: re-rendered decimal cast differs"
+        );
+    }
+}
+
+/// A general cast a backend cannot spell faithfully is rejected at render (loud) rather than silently
+/// narrowed: a `Decimal` cast on SQLite (its `NUMERIC` affinity drops precision/scale) and a
+/// 128-bit-integer cast on *every* backend (no dialect has a native spelling, and it re-introspects to a
+/// different type). PostgreSQL and MySQL still render a decimal cast fine. git-bug 8fe1530.
+#[test]
+fn unfaithful_general_casts_are_rejected_at_render() {
+    let i128_cast = ExprNode::Cast {
+        operand: b(bare("amount")),
+        ty: SqlType::I128,
+    };
+    let u128_cast = ExprNode::Cast {
+        operand: b(bare("amount")),
+        ty: SqlType::U128,
+    };
+    let pg = &squealy_postgresql::Postgres.dialect() as &dyn squealy::Dialect;
+    let mysql = &squealy_mysql::Mysql.dialect() as &dyn squealy::Dialect;
+    let sqlite = &squealy_sqlite::Sqlite.dialect() as &dyn squealy::Dialect;
+
+    // SQLite rejects a decimal cast; PostgreSQL/MySQL render it faithfully.
+    assert!(
+        render_scalar_result(&decimal_cast(), sqlite).is_err(),
+        "SQLite should reject a general decimal cast (NUMERIC affinity drops the scale)"
+    );
+    assert!(render_scalar_result(&decimal_cast(), pg).is_ok());
+    assert!(render_scalar_result(&decimal_cast(), mysql).is_ok());
+
+    // Every backend rejects a 128-bit-integer cast.
+    for (name, dialect) in [("postgres", pg), ("mysql", mysql), ("sqlite", sqlite)] {
+        assert!(
+            render_scalar_result(&i128_cast, dialect).is_err(),
+            "{name} should reject an i128 general cast"
+        );
+        assert!(
+            render_scalar_result(&u128_cast, dialect).is_err(),
+            "{name} should reject a u128 general cast"
+        );
+    }
+
+    // MySQL's DECIMAL is limited to 1 <= precision <= 65, scale <= 30, and scale <= precision, so a decimal
+    // cast outside that range (e.g. a PostgreSQL-valid `numeric(100, 50)` in a cross-dialect package, or a
+    // zero-precision decimal) has no faithful MySQL rendering and is rejected at render, not left to fail at
+    // DDL execution.
+    for (precision, scale) in [(100, 50), (10, 20), (70, 0), (0, 0)] {
+        let wide = ExprNode::Cast {
+            operand: b(bare("amount")),
+            ty: SqlType::Decimal { precision, scale },
+        };
+        assert!(
+            render_scalar_result(&wide, mysql).is_err(),
+            "MySQL should reject a general cast to DECIMAL({precision}, {scale}) (out of range)"
+        );
+    }
+}
+
 // ---- single-SELECT view-body round-trip -----------------------------------------------------------
 
 /// Renders a view's `CREATE VIEW` for `dialect` (schema `public`, no `OR REPLACE`).

@@ -1086,6 +1086,120 @@ fn timestamp_precision_model(precision: Option<u8>) -> DatabaseModel {
     }
 }
 
+/// A one-table `catalog_dc` model whose table CHECK carries a general decimal cast
+/// (`CAST(quota AS DECIMAL(10, scale)) > 0`) — the H2 shape from git-bug 8fe1530 (a decimal cast a
+/// PostgreSQL package carries, deployed to MySQL). MySQL now renders `DECIMAL(p, s)` faithfully, so a
+/// crate/package-authored decimal cast keeps its scale and round-trips.
+fn decimal_cast_check_model(scale: u32) -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog_dc".to_owned()),
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "quotas".to_owned(),
+                comment: None,
+                columns: vec![
+                    ColumnModel {
+                        name: "id".to_owned(),
+                        comment: None,
+                        ty: SqlType::I32,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: Some(IdentityModel {
+                            mode: IdentityMode::ByDefault,
+                        }),
+                        generated: None,
+                        on_update: None,
+                    },
+                    ColumnModel {
+                        name: "quota".to_owned(),
+                        comment: None,
+                        ty: SqlType::Decimal {
+                            precision: 10,
+                            scale: 2,
+                        },
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        on_update: None,
+                    },
+                ],
+                primary_key: Some(Constraint {
+                    prefix_lengths: Vec::new(),
+                    name: "PRIMARY".to_owned(),
+                    columns: vec!["id".to_owned()],
+                }),
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: vec![CheckModel {
+                    name: "ck_quota_positive".to_owned(),
+                    expression: check_expr(&format!("CAST(quota AS DECIMAL(10, {scale})) > 0")),
+                    validation: None,
+                    enforcement: None,
+                }],
+                indexes: Vec::new(),
+            }],
+        }],
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn decimal_cast_check_round_trips_and_scale_change_migrates() {
+    let _db_guard = db_lock().lock().await;
+    let mut connection = Mysql
+        .connect(&database_url())
+        .await
+        .expect("connect to MySQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog_dc`")
+        .await
+        .expect("drop schema");
+
+    // Publish a table CHECK carrying a general `CAST(quota AS DECIMAL(10, 2))`, then re-plan: MySQL
+    // renders the precision/scale faithfully and reads it back structurally, so the cast re-plans empty
+    // (no silent precision loss, no churn) — the cross-dialect deploy git-bug 8fe1530 fixes.
+    let two = decimal_cast_check_model(2);
+    squealy_model::publish(&two, &Mysql, &mut connection)
+        .await
+        .expect("publish decimal-cast check");
+    let replan = squealy_model::plan_from_database(
+        &two,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan decimal-cast check");
+    assert!(
+        replan.steps.is_empty(),
+        "decimal-cast check must re-plan empty, got: {:?}",
+        replan.steps
+    );
+
+    // A genuine scale change (`DECIMAL(10, 2)` -> `DECIMAL(10, 4)`) must diff — the canonical cast fold
+    // preserves a general cast's scale rather than folding both sides to a bare representative.
+    let four = decimal_cast_check_model(4);
+    let changed = squealy_model::plan_from_database(
+        &four,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("plan scale change");
+    assert!(
+        !changed.steps.is_empty(),
+        "a decimal cast scale change (2 -> 4) must diff"
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog_dc`")
+        .await
+        .expect("cleanup");
+}
+
 #[tokio::test]
 #[ignore]
 async fn timestamp_precision_round_trips_and_migrates() {

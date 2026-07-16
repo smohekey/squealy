@@ -704,7 +704,9 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
             writer.write_all(b"CAST(")?;
             render_expr(operand, dialect, writer)?;
             writer.write_all(b" AS ")?;
-            dialect.write_cast_type(ty, writer)?;
+            // A general authored cast must render faithfully (its precision/scale is the semantics),
+            // unlike the result-pin casts below which use `write_cast_type`. See git-bug 8fe1530.
+            dialect.write_general_cast_type(ty, writer)?;
             writer.write_all(b")")
         }
         ExprNode::Aggregate {

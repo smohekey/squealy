@@ -20,7 +20,27 @@ pub trait Dialect {
 
     /// Writes the type name for a `CAST(expr AS <type>)`. Dialects spell these differently — for
     /// example PostgreSQL's `double precision` versus MySQL's numeric cast types.
+    ///
+    /// This is the spelling for a **result-pin** cast — a view/query output whose exact type is recovered
+    /// from the introspected output column, so a many-to-one representative (bare `DECIMAL`, `SIGNED`) is
+    /// correct. A **general** authored cast renders through
+    /// [`write_general_cast_type`](Self::write_general_cast_type) instead, which must be faithful.
     fn write_cast_type(&self, ty: &SqlType, writer: &mut dyn Write) -> io::Result<()>;
+
+    /// Writes the type name for a **general** `CAST(expr AS <type>)` — an authored
+    /// [`ExprNode::Cast`](crate::ExprNode::Cast) whose precision/scale *is* the semantics, as opposed to a
+    /// result-pin cast (which pins a wire type and recovers the exact type from the output column, so a bare
+    /// `DECIMAL`/`NUMERIC` is fine there). A general cast must render *faithfully*: a backend that cannot
+    /// spell the target type exactly rejects it here rather than silently narrow it (which would change the
+    /// deployed semantics and churn every re-plan). The default rejects only the universally un-renderable
+    /// 128-bit-integer cast (see [`reject_128bit_general_cast`]) and otherwise defers to
+    /// [`write_cast_type`](Self::write_cast_type), which is exact on PostgreSQL (`numeric(p, s)`). MySQL
+    /// overrides it to spell `DECIMAL(p, s)` faithfully; SQLite overrides it to reject a `Decimal` cast (its
+    /// `NUMERIC` affinity drops precision/scale). See git-bug 8fe1530.
+    fn write_general_cast_type(&self, ty: &SqlType, writer: &mut dyn Write) -> io::Result<()> {
+        reject_128bit_general_cast(ty)?;
+        self.write_cast_type(ty, writer)
+    }
 
     /// Whether `/` performs integer division when both operands are integers, so the renderer must
     /// cast operands to floating point to get the query builder's always-fractional division.
@@ -286,6 +306,26 @@ pub trait Dialect {
     fn supports_parenthesized_recursive_cte_arm(&self) -> bool {
         true
     }
+}
+
+/// Rejects a **general** `CAST(x AS ty)` whose target type no backend can render faithfully: a 128-bit
+/// integer ([`SqlType::I128`]/[`SqlType::U128`]). No dialect spells a native 128-bit-integer cast —
+/// PostgreSQL renders bare `numeric`, MySQL `DECIMAL(65, 0)`, SQLite `INTEGER` — and each of those
+/// re-introspects to a *different* type (the reverse parser's `general_cast` guard keeps it `Raw`), so a
+/// structural `Cast { ty: I128 | U128 }` cannot round-trip on any backend. Rendering rejects it rather than
+/// emit a lossy, non-round-tripping cast; author it as a [`ExprNode::Raw`](crate::ExprNode::Raw) if a
+/// specific dialect spelling is intended. Shared by every backend's
+/// [`Dialect::write_general_cast_type`]. See git-bug 8fe1530.
+pub fn reject_128bit_general_cast(ty: &SqlType) -> io::Result<()> {
+    if matches!(ty, SqlType::I128 | SqlType::U128) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "a general CAST to a 128-bit integer type cannot be rendered faithfully on any backend \
+             (no dialect has a native 128-bit-integer cast); author it as a Raw expression if a \
+             specific dialect spelling is intended",
+        ));
+    }
+    Ok(())
 }
 
 /// The two shapes a correlated `UPDATE … <source>` / `DELETE … <source>` takes across dialects (see

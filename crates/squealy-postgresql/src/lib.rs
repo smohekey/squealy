@@ -136,6 +136,30 @@ pub(crate) fn canonical_pg_pin_type(ty: &squealy::SqlType) -> squealy::SqlType {
     }
 }
 
+/// Folds a **general** authored cast's target type for PostgreSQL. Identical to [`canonical_pg_pin_type`]
+/// except a target that only the *pin* fold collapses into the `I128` representative — every other
+/// bare-`numeric` render target: `U64`, and an explicit `Raw("numeric")`/`Raw("decimal")` — is preserved.
+/// A general cast only REJECTS `I128`/`U128` at render (see
+/// [`reject_128bit_general_cast`](squealy::reject_128bit_general_cast)); folding one of those *other* targets
+/// to `I128` would make the incremental plan path (which canonicalizes before rendering) spuriously hit the
+/// 128-bit reject while a direct render succeeds. Keeping them as authored keeps the two paths consistent
+/// (all render bare `numeric`). Such a cast still does not re-plan to empty — `numeric` re-introspects as the
+/// `I128` representative and the reverse parser keeps it `Raw` — but that residual churn predates and is
+/// orthogonal to 8fe1530. `I128`/`U128` themselves stay folded (both paths then reject consistently).
+#[cfg(feature = "schema")]
+pub(crate) fn canonical_pg_cast_type(ty: &squealy::SqlType) -> squealy::SqlType {
+    use squealy::SqlType::{I128, U128};
+    let folded = canonical_pg_pin_type(ty);
+    // The pin fold sends `U64`/`Raw("numeric")`/`Raw("decimal")` — all render-OK general casts — to `I128`,
+    // which would then be rejected on the plan path. Preserve any such target; keep the genuinely-rejected
+    // `I128`/`U128` folded so both render paths reject them alike.
+    if folded == I128 && !matches!(ty, I128 | U128) {
+        ty.clone()
+    } else {
+        folded
+    }
+}
+
 /// Canonicalizes an integer column's default to the signed [`Int`](squealy::DefaultValue::Int) both sides
 /// of the diff converge on. `ty` is the already-canonicalized column type (see
 /// [`canonicalize_model`](squealy::canonicalize_model)), so an integer column is one of
@@ -433,14 +457,14 @@ impl squealy::SchemaIntrospect for PostgresConnection {
         // structural desired cast does not churn.
         body.map_exprs(&|node| {
             if let squealy::ExprNode::Cast { ty, .. } = node {
-                *ty = canonical_pg_pin_type(ty);
+                *ty = canonical_pg_cast_type(ty);
             }
         });
         body
     }
 
     fn canonical_cast_type(&self, ty: &squealy::SqlType) -> squealy::SqlType {
-        canonical_pg_pin_type(ty)
+        canonical_pg_cast_type(ty)
     }
 
     /// PostgreSQL introspection reports a plain index's access method as `btree`; map an unset
@@ -1168,6 +1192,28 @@ CREATE INDEX CONCURRENTLY j ON t (d);";
         // Idempotent on each representative — the introspected side is already canonical.
         for ty in [I16, I32, I64, I128] {
             assert_eq!(canonical_pg_sql_type(&ty), ty);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "schema")]
+    fn canonical_pg_cast_type_preserves_render_ok_bare_numeric_targets() {
+        use super::{canonical_pg_cast_type, canonical_pg_pin_type};
+        use squealy::SqlType::{I32, I64, I128, Raw, U32, U64, U128};
+
+        // The bare-`numeric` general-cast targets that render fine but are NOT rejected at render (only the
+        // 128-bit casts are) must be preserved — not folded to the `I128` representative the pin canonicalizer
+        // uses — else the plan path (which canonicalizes before rendering) would spuriously hit the 128-bit
+        // reject while a direct render succeeds. git-bug 8fe1530.
+        assert_eq!(canonical_pg_cast_type(&U64), U64);
+        for name in ["numeric", "decimal", "NUMERIC"] {
+            let raw = Raw(name.to_owned());
+            assert_eq!(canonical_pg_cast_type(&raw), raw);
+        }
+        // The genuinely-rejected 128-bit casts stay folded (both render paths then reject them alike), and
+        // every other width folds exactly like the pin canonicalizer (so a genuine round-trip converges).
+        for ty in [I32, I64, I128, U32, U128] {
+            assert_eq!(canonical_pg_cast_type(&ty), canonical_pg_pin_type(&ty));
         }
     }
 
