@@ -1680,15 +1680,116 @@ fn resolve_clause_term(
     scope: &ClauseScope<'_>,
     is_order_by: bool,
 ) {
-    if let ExprNode::BareColumn { .. } = expr {
-        resolve_clause_leaf(expr, projection, scope, true, is_order_by);
+    resolve_clause_scope(expr, projection, scope, is_order_by, true);
+}
+
+/// Resolves every bare column in one clause term's own scope. A `BareColumn` is resolved as a LEAF — its
+/// replacement (a projection expression, already source-resolved by [`expand_alias`]) is NOT re-descended,
+/// which both avoids redundant work and prevents unbounded recursion on a degenerate self-referential alias
+/// (`x + 1 AS x`). `standalone` is true only for the whole clause term; nested references are not. Recurses
+/// same-scope children, stopping at a nested subquery (its own scope, canonicalized separately). Exhaustive
+/// over [`ExprNode`] so a new node is a compile error here.
+fn resolve_clause_scope(
+    node: &mut ExprNode,
+    projection: &[ProjectionItem],
+    scope: &ClauseScope<'_>,
+    is_order_by: bool,
+    standalone: bool,
+) {
+    if let ExprNode::BareColumn { .. } = node {
+        resolve_clause_leaf(node, projection, scope, standalone, is_order_by);
         return;
     }
-    map_scope_exprs_mut(expr, &mut |node| {
-        if let ExprNode::BareColumn { .. } = node {
-            resolve_clause_leaf(node, projection, scope, false, is_order_by);
+    let recurse =
+        |child: &mut ExprNode| resolve_clause_scope(child, projection, scope, is_order_by, false);
+    match node {
+        ExprNode::Column { .. }
+        | ExprNode::BareColumn { .. }
+        | ExprNode::Literal(_)
+        | ExprNode::Raw(_)
+        | ExprNode::Now => {}
+        // A nested subquery is its own scope, canonicalized separately.
+        ExprNode::ScalarSubquery(_) | ExprNode::Exists { .. } => {}
+        ExprNode::InSubquery { operand, .. } => recurse(operand),
+        ExprNode::Binary { left, right, .. }
+        | ExprNode::Compare { left, right, .. }
+        | ExprNode::Logical { left, right, .. }
+        | ExprNode::Nullif { left, right, .. } => {
+            recurse(left);
+            recurse(right);
         }
-    });
+        ExprNode::Cast { operand, .. } | ExprNode::Aggregate { operand, .. } => recurse(operand),
+        ExprNode::Not(operand) | ExprNode::IsNull { operand, .. } => recurse(operand),
+        ExprNode::Like {
+            operand, pattern, ..
+        } => {
+            recurse(operand);
+            recurse(pattern);
+        }
+        ExprNode::In { operand, items, .. } => {
+            recurse(operand);
+            for item in items {
+                recurse(item);
+            }
+        }
+        ExprNode::Between {
+            operand, low, high, ..
+        } => {
+            recurse(operand);
+            recurse(low);
+            recurse(high);
+        }
+        ExprNode::Window {
+            args,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            for arg in args {
+                recurse(arg);
+            }
+            for partition in partition_by {
+                recurse(partition);
+            }
+            for order in order_by {
+                recurse(&mut order.expr);
+            }
+        }
+        ExprNode::Case { arms, else_, .. } => {
+            for arm in arms {
+                recurse(&mut arm.when);
+                recurse(&mut arm.then);
+            }
+            if let Some(else_) = else_ {
+                recurse(else_);
+            }
+        }
+        ExprNode::SimpleCase {
+            operand,
+            arms,
+            else_,
+            ..
+        } => {
+            recurse(operand);
+            for arm in arms {
+                recurse(&mut arm.when);
+                recurse(&mut arm.then);
+            }
+            if let Some(else_) = else_ {
+                recurse(else_);
+            }
+        }
+        ExprNode::Coalesce { args, .. }
+        | ExprNode::ScalarFn { args, .. }
+        | ExprNode::Function { args, .. } => {
+            for arg in args {
+                recurse(arg);
+            }
+        }
+        ExprNode::Extract { operand, .. }
+        | ExprNode::DateTrunc { operand, .. }
+        | ExprNode::ExtractSecond { operand, .. } => recurse(operand),
+    }
 }
 
 /// Expands a clause alias reference to its projection expression, or rebinds a source-column reference to its
@@ -3170,6 +3271,47 @@ mod tests {
             ExprNode::Binary {
                 op: ArithmeticOp::Add,
                 left: Box::new(amount_times_two()),
+                right: Box::new(lit("0")),
+            }
+        );
+    }
+
+    #[test]
+    fn a_self_referential_alias_expands_once_and_terminates() {
+        // A degenerate hand-authored/KDL projection whose alias names itself (`x + 1 AS x`, no source column
+        // `x`), referenced nested in a clause. Expansion inserts the projection expression, which carries a
+        // bare `x` again — so a walker that re-descended into its own replacement would expand forever and
+        // blow the stack. The inserted expression is a resolved leaf: `x` expands ONCE, and the bare `x`
+        // inside the replacement is left alone (no source exposes it to bind to).
+        let self_ref = ExprNode::Binary {
+            op: ArithmeticOp::Add,
+            left: Box::new(bare("x")),
+            right: Box::new(lit("1")),
+        };
+        let query = ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "x".to_owned(),
+                internal_alias: Some("x".to_owned()),
+                expr: self_ref.clone(),
+            }],
+            from: Some(q_source()),
+            order_by: vec![OrderItem {
+                expr: ExprNode::Binary {
+                    op: ArithmeticOp::Add,
+                    left: Box::new(bare("x")),
+                    right: Box::new(lit("0")),
+                },
+                direction: None,
+                nulls: None,
+            }],
+            ..ViewQueryModel::default()
+        };
+        let out = canon(query, &QCatalog(vec!["amount".to_owned()]));
+        assert_eq!(
+            out.order_by[0].expr,
+            ExprNode::Binary {
+                op: ArithmeticOp::Add,
+                left: Box::new(self_ref),
                 right: Box::new(lit("0")),
             }
         );

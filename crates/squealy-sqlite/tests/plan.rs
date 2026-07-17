@@ -1561,6 +1561,83 @@ async fn replanning_an_unchanged_view_is_not_destructive() {
 }
 
 #[tokio::test]
+async fn replanning_a_clause_alias_colliding_with_a_source_column_is_empty() {
+    // git-bug 823ae69, the collision shape: `total` names BOTH a computed projection alias and a real
+    // `totals.total` source column, and the `ORDER BY total + 0` reference is *nested*.
+    //
+    // Unlike PostgreSQL/MySQL, this shape does NOT churn on SQLite and never did: SQLite stores the view's
+    // verbatim `CREATE VIEW` text, so introspection parses the clause back into the same bare form the
+    // desired model authored, and the two compare equal with or without the clause-alias canonicalization.
+    // (Verified by disabling the pass — this test still passes; the PostgreSQL live test fails.) So this
+    // pins the *negative* result the earlier handoff got wrong by naming SQLite the cleanest repro: the
+    // catalog pass must keep SQLite's already-converged shape converged, i.e. never rewrite one side only.
+    let (mut connection, _raw) = setup().await;
+    let mut model = one_table(table(
+        "totals",
+        vec![
+            column("id", SqlType::I64, false),
+            column("total", SqlType::I64, false),
+        ],
+    ));
+    let source_total = ExprNode::Column {
+        alias: "q0_0".to_owned(),
+        column: "total".to_owned(),
+    };
+    model.schemas[0].views.push(ViewModel {
+        name: "doubled_totals".to_owned(),
+        comment: None,
+        // A declared column list suppresses each projection's own `AS`, so only the kept internal alias is
+        // an in-scope clause name — the shape `internal_alias` exists for (git-bug e1d0724).
+        columns: vec![ViewColumnModel {
+            name: "total".to_owned(),
+            ty: SqlType::I64,
+            nullable: false,
+        }],
+        query: ViewBody::Select(Box::new(ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "total".to_owned(),
+                internal_alias: Some("total".to_owned()),
+                expr: ExprNode::Binary {
+                    op: ArithmeticOp::Multiply,
+                    left: Box::new(source_total),
+                    right: Box::new(ExprNode::Literal("2".to_owned())),
+                },
+            }],
+            from: Some(SourceItem::Named(SourceRef {
+                schema: None,
+                name: "totals".to_owned(),
+                alias: "q0_0".to_owned(),
+            })),
+            order_by: vec![squealy::OrderItem {
+                expr: ExprNode::Binary {
+                    op: ArithmeticOp::Add,
+                    left: Box::new(ExprNode::BareColumn {
+                        column: "total".to_owned(),
+                    }),
+                    right: Box::new(ExprNode::Literal("0".to_owned())),
+                },
+                direction: None,
+                nulls: None,
+            }],
+            ..ViewQueryModel::default()
+        })),
+    });
+
+    publish(&model, &Sqlite, &mut connection)
+        .await
+        .expect("publish table + clause-alias view");
+
+    let plan = plan_from_database(&model, &mut connection, DiffPolicy::BLOCK_RISKY)
+        .await
+        .expect("re-plan the unchanged clause-alias view");
+    assert!(
+        plan.steps.is_empty(),
+        "a published clause-alias view must re-plan empty: {:?}",
+        plan.steps,
+    );
+}
+
+#[tokio::test]
 async fn removing_a_view_drops_it() {
     // Removing a view from the desired model must drop the live view. Before views were introspected the
     // view was invisible to the diff, so no `DropView` was emitted and the stale view lingered (and could
