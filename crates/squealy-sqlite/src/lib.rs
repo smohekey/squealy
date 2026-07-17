@@ -70,6 +70,13 @@ pub enum SqliteError {
     Introspect(#[source] tokio_rusqlite::Error),
     #[error("sqlite query error: {0}")]
     Query(#[source] tokio_rusqlite::Error),
+    #[error(
+        "refusing to apply: SQLite must drop and recreate a view to apply this plan, which would \
+         destroy INSTEAD OF triggers squealy does not model and cannot recreate ({}). Recreate them \
+         yourself after applying, and re-run with a policy that allows destructive changes to proceed.",
+        triggers.join(", ")
+    )]
+    DependentTriggers { triggers: Vec<String> },
     #[error("query returned no rows")]
     NoRows,
     #[error("row is missing column {0}")]
@@ -221,6 +228,77 @@ impl DdlExecutor for SqliteConnection {
             })
             .await
             .map_err(SqliteError::Execute)
+    }
+
+    /// Refuses a plan that would silently destroy a view's `INSTEAD OF` triggers (git-bug 6a3940a).
+    ///
+    /// SQLite has no `CREATE OR REPLACE VIEW`, so every view change applies as `DROP VIEW` +
+    /// `CREATE VIEW`, and a rebuild of a table under a view drops that view too (see
+    /// [`plan_view_drops`](crate::sql::plan_view_drops)) — `DROP VIEW` takes the view's `INSTEAD OF`
+    /// triggers with it, and squealy has no trigger model, so nothing recreates them. Writes through a
+    /// writeable view then fail, with no step in the plan naming the view.
+    ///
+    /// This bites two paths the neutral risk classification calls safe: a view-body change (one
+    /// `CreateView` step, classified `Safe` because it is `CREATE OR REPLACE` on PostgreSQL/MySQL), and
+    /// a table rebuild forced by a change that is genuinely safe elsewhere (`ADD CHECK`/`ADD UNIQUE`,
+    /// which SQLite cannot `ALTER ... ADD CONSTRAINT`), whose plan need not mention the view at all.
+    /// So this refuses rather than reclassifies: the drop set is a rendering decision only this backend
+    /// can compute, and the trigger is only visible in the live database.
+    ///
+    /// Preserving the triggers is NOT attempted. Replaying their captured DDL was tried and retired
+    /// (PR #81): a trigger's real dependency surface is its body, so a replay cannot be validated
+    /// without modelling triggers — a batch can rebuild a base table, leave the view byte-identical,
+    /// and leave the trigger body referencing dropped columns. Refusing loudly is what this backend can
+    /// honestly promise until triggers are modelled (epic acb1c6d Phase 3).
+    async fn preflight_plan(
+        &mut self,
+        plan: &DatabasePlan,
+        desired: &DatabaseModel,
+        allow_destructive: bool,
+    ) -> Result<(), SqliteError> {
+        if allow_destructive {
+            return Ok(());
+        }
+        let dropped: Vec<String> = sql::plan_view_drops(plan, desired)
+            .dropped()
+            .map(|view| view.name.clone())
+            .collect();
+        if dropped.is_empty() {
+            return Ok(());
+        }
+        let doomed = self.view_triggers(&dropped).await?;
+        if doomed.is_empty() {
+            return Ok(());
+        }
+        Err(SqliteError::DependentTriggers { triggers: doomed })
+    }
+}
+
+impl SqliteConnection {
+    /// The names of live triggers attached to any of `views`, as `trigger ON view` pairs — the triggers
+    /// a `DROP VIEW` of those views would destroy. Matched case-insensitively, as SQLite resolves
+    /// identifiers. A trigger's target is `sqlite_master.tbl_name`.
+    async fn view_triggers(&mut self, views: &[String]) -> Result<Vec<String>, SqliteError> {
+        let wanted: Vec<String> = views.iter().map(|name| name.to_lowercase()).collect();
+        self.conn
+            .call(move |conn| {
+                let mut statement = conn.prepare(
+                    "SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger' ORDER BY name",
+                )?;
+                let rows = statement.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+                let mut found = Vec::new();
+                for row in rows {
+                    let (trigger, target) = row?;
+                    if wanted.contains(&target.to_lowercase()) {
+                        found.push(format!("{trigger} ON {target}"));
+                    }
+                }
+                Ok(found)
+            })
+            .await
+            .map_err(SqliteError::Introspect)
     }
 }
 
