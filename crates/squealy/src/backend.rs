@@ -3,7 +3,7 @@ use std::io::{self, Write};
 
 use crate::{
     CheckModel, Constraint, DatabaseModel, DatabasePlan, DefaultValue, ForeignKeyModel,
-    IdentityMode, IndexMethod, SqlType, Table, TableModel, ViewBody,
+    IdentifierCase, IdentityMode, IndexMethod, SqlType, Table, TableModel, ViewBody,
 };
 
 /// Backend-specific row cursor used while decoding a projected row.
@@ -432,6 +432,28 @@ pub trait SchemaIntrospect {
     /// reconstruct view bodies.
     fn canonical_view_body(&self, body: ViewBody) -> ViewBody {
         body
+    }
+
+    /// How this backend resolves the case of a SQL identifier, used by the view clause-alias canonicalizer
+    /// ([`canonicalize_view_clause_aliases`](crate::canonicalize_view_clause_aliases)) to decide whether a
+    /// clause name collides with a source column. The default is [`IdentifierCase::Sensitive`] (PostgreSQL).
+    fn identifier_case(&self) -> IdentifierCase {
+        IdentifierCase::Sensitive
+    }
+
+    /// Whether a plain (non-recursive) `WITH` item may forward-reference a LATER sibling CTE (SQLite makes
+    /// every CTE in a `WITH` mutually visible; PostgreSQL/MySQL only expose PRECEDING siblings outside `WITH
+    /// RECURSIVE`). Used by the view clause-alias canonicalizer to bound each CTE body's visible scope. The
+    /// default is `false` (declaration order, PostgreSQL/MySQL).
+    fn cte_forward_references_visible(&self) -> bool {
+        false
+    }
+
+    /// Whether `WITH RECURSIVE` additionally exposes a later-sibling (forward) CTE reference — PostgreSQL
+    /// yes, MySQL no (SQLite already exposes forward references via
+    /// [`cte_forward_references_visible`](Self::cte_forward_references_visible)). The default is `false`.
+    fn recursive_exposes_forward_ctes(&self) -> bool {
+        false
     }
 
     /// Canonicalizes a logical [`IdentityMode`] to the form this backend's introspection produces.
