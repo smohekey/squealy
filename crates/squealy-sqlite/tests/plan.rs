@@ -1791,6 +1791,126 @@ async fn a_destructive_policy_lets_the_trigger_wiping_view_change_through() {
 }
 
 #[tokio::test]
+async fn a_temp_trigger_on_a_dropped_view_is_also_refused() {
+    // A TEMP trigger against a main-schema view lives in `sqlite_temp_master`, NOT `sqlite_master` —
+    // but `DROP VIEW` destroys it just the same (verified), so a guard reading only `sqlite_master`
+    // would permit exactly the silent loss it exists to prevent.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+    exec(
+        &raw,
+        "CREATE TEMP TRIGGER \"aw_temp\" INSTEAD OF INSERT ON \"active_widgets\" \
+         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
+    )
+    .await;
+    let temp_triggers = |raw: RawConnection| async move {
+        raw.call(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_temp_master WHERE type = 'trigger'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .await
+        .expect("count temp triggers")
+    };
+    assert_eq!(temp_triggers(raw.clone()).await, 1, "temp trigger created");
+    assert_eq!(
+        trigger_count(&raw).await,
+        0,
+        "and it is invisible in sqlite_master — the point of this test"
+    );
+
+    let v2 = changed_view_model();
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::BLOCK_RISKY)
+        .await
+        .expect("plan the changed view");
+    let error = apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect_err("applying must refuse to wipe the temp trigger");
+
+    assert!(
+        error.to_string().contains("aw_temp"),
+        "the error must name the temp trigger: {error}"
+    );
+    assert_eq!(
+        temp_triggers(raw.clone()).await,
+        1,
+        "temp trigger intact after refusal"
+    );
+}
+
+#[tokio::test]
+async fn a_trigger_on_a_non_ascii_case_variant_view_does_not_block() {
+    // SQLite folds identifiers ASCII-only, so `"Ä"` and `"ä"` are DISTINCT views (verified). Folding
+    // the guard's names with Unicode `to_lowercase` would conflate them and refuse a plan over a
+    // trigger belonging to an unrelated view.
+    let (mut connection, raw) = setup().await;
+    let mut model = one_table(table("t", vec![column("x", SqlType::I64, false)]));
+    let view = |name: &str| ViewModel {
+        name: name.to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "x".to_owned(),
+            ty: SqlType::I64,
+            nullable: false,
+        }],
+        query: ViewBody::Select(Box::new(ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "x".to_owned(),
+                internal_alias: None,
+                expr: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "x".to_owned(),
+                },
+            }],
+            from: Some(SourceItem::Named(SourceRef {
+                schema: None,
+                name: "t".to_owned(),
+                alias: "q0_0".to_owned(),
+            })),
+            ..ViewQueryModel::default()
+        })),
+    };
+    model.schemas[0].views.push(view("Ä"));
+    model.schemas[0].views.push(view("ä"));
+    publish(&model, &Sqlite, &mut connection)
+        .await
+        .expect("publish two case-variant views");
+
+    // The trigger belongs to `ä`; the plan only changes `Ä`.
+    exec(
+        &raw,
+        "CREATE TRIGGER \"lower_ins\" INSTEAD OF INSERT ON \"ä\" \
+         BEGIN INSERT INTO \"t\" (\"x\") VALUES (NEW.\"x\"); END",
+    )
+    .await;
+    let mut v2 = model.clone();
+    view_select_mut(&mut v2.schemas[0].views[0]).filter = Some(ExprNode::Compare {
+        op: CompareOp::GreaterThan,
+        left: Box::new(ExprNode::Column {
+            alias: "q0_0".to_owned(),
+            column: "x".to_owned(),
+        }),
+        right: Box::new(ExprNode::Literal("0".to_owned())),
+    });
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::BLOCK_RISKY)
+        .await
+        .expect("plan the change to the upper-case view");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("a trigger on the distinct lower-case view must not refuse this plan");
+    assert_eq!(
+        trigger_count(&raw).await,
+        1,
+        "the other view's trigger stands"
+    );
+}
+
+#[tokio::test]
 async fn a_plan_touching_a_trigger_free_view_is_not_refused() {
     // The preflight must not block ordinary work: no triggers, no refusal.
     let (mut connection, _raw) = setup().await;

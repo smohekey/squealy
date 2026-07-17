@@ -684,10 +684,10 @@ pub struct PlanApplyOptions {
     /// (PostgreSQL `CREATE INDEX CONCURRENTLY`). Index-add steps are applied after the transactional
     /// steps, each on its own connection round-trip, so they are not part of the atomic batch.
     pub concurrent_indexes: bool,
-    /// The risk policy the plan was built under, forwarded to the backend's apply-time preflight
-    /// ([`DdlExecutor::preflight_plan`]) so it can refuse a plan whose application would destroy a live
-    /// object squealy does not model — which only the backend and the live database together can see,
-    /// so the plan's own step classification cannot express it.
+    /// The risk policy the plan was built under, forwarded to the backend's guarded apply
+    /// ([`DdlExecutor::execute_plan_ddl`]) so it can refuse a batch whose application would destroy a
+    /// live object squealy does not model — which only the backend and the live database together can
+    /// see, so the plan's own step classification cannot express it.
     ///
     /// Defaults to [`DiffPolicy::BLOCK_RISKY`], so an apply refuses such a plan unless the caller opts
     /// in exactly as they would for any other destructive change. Pass the same policy the plan was
@@ -742,14 +742,10 @@ where
     }
     // Let the backend refuse a plan whose application would silently destroy a live object squealy does
     // not model (SQLite drops a view's INSTEAD OF triggers with the view). Before any DDL runs.
-    connection
-        .preflight_plan(plan, desired, options.policy.allow_destructive)
-        .await
-        .map_err(PublishError::Execute)?;
     if !options.concurrent_indexes || !backend.supports_concurrent_index_creation() {
         let sql = render_plan_sql(plan, desired, backend).map_err(PublishError::Render)?;
         return connection
-            .execute_ddl(&sql)
+            .execute_plan_ddl(&sql, plan, desired, options.policy.allow_destructive)
             .await
             .map_err(PublishError::Execute);
     }
@@ -759,7 +755,12 @@ where
         let sql =
             render_plan_sql(&transactional, desired, backend).map_err(PublishError::Render)?;
         connection
-            .execute_ddl(&sql)
+            .execute_plan_ddl(
+                &sql,
+                &transactional,
+                desired,
+                options.policy.allow_destructive,
+            )
             .await
             .map_err(PublishError::Execute)?;
     }
