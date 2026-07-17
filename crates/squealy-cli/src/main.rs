@@ -570,7 +570,17 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             yes,
             concurrent_indexes,
         } => {
-            let apply_options = PlanApplyOptions { concurrent_indexes };
+            // One policy for both halves: the diff classifies steps with it, and the apply-time
+            // preflight uses it to decide whether a backend may destroy a live object squealy does not
+            // model (SQLite's view triggers) — so `--allow-destructive` governs both.
+            let policy = DiffPolicy {
+                allow_destructive,
+                allow_ambiguous,
+            };
+            let apply_options = PlanApplyOptions {
+                concurrent_indexes,
+                policy,
+            };
             let loaded = source.load_with_refactors()?;
             // Create-from-scratch dry-run: render the DDL without touching a database.
             if report && !incremental {
@@ -614,10 +624,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                                 &loaded.model,
                                 &loaded.refactors,
                                 &mut connection,
-                                DiffPolicy {
-                                    allow_destructive,
-                                    allow_ambiguous,
-                                },
+                                policy,
                             )
                             .await,
                         )?;
@@ -675,10 +682,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                                 &loaded.model,
                                 &loaded.refactors,
                                 &mut connection,
-                                DiffPolicy {
-                                    allow_destructive,
-                                    allow_ambiguous,
-                                },
+                                policy,
                             )
                             .await,
                         )?;

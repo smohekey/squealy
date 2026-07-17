@@ -978,6 +978,7 @@ async fn rebuild_with_concurrent_index_option_does_not_double_create() {
         &mut connection,
         PlanApplyOptions {
             concurrent_indexes: true,
+            ..PlanApplyOptions::default()
         },
     )
     .await
@@ -1635,6 +1636,329 @@ async fn replanning_a_clause_alias_colliding_with_a_source_column_is_empty() {
         "a published clause-alias view must re-plan empty: {:?}",
         plan.steps,
     );
+}
+
+/// Counts the live triggers in the database.
+async fn trigger_count(raw: &RawConnection) -> i64 {
+    raw.call(|conn| {
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'trigger'",
+            [],
+            |row| row.get(0),
+        )
+    })
+    .await
+    .expect("count triggers")
+}
+
+/// Publishes `widgets` + the `active_widgets` view, then makes the view writeable the only way SQLite
+/// allows — an out-of-band `INSTEAD OF` trigger, which squealy does not model.
+async fn setup_view_with_trigger() -> (SqliteConnection, RawConnection) {
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+    exec(
+        &raw,
+        "CREATE TRIGGER \"active_widgets_insert\" INSTEAD OF INSERT ON \"active_widgets\" \
+         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
+    )
+    .await;
+    assert_eq!(trigger_count(&raw).await, 1, "trigger created");
+    (connection, raw)
+}
+
+/// `table_and_view()` with the view's body changed (same column set) — one `CreateView` step, which the
+/// neutral classification calls `Safe` because it is `CREATE OR REPLACE` on PostgreSQL/MySQL.
+fn changed_view_model() -> DatabaseModel {
+    let mut model = table_and_view();
+    view_select_mut(&mut model.schemas[0].views[0]).filter = Some(ExprNode::Compare {
+        op: CompareOp::GreaterThan,
+        left: Box::new(ExprNode::Column {
+            alias: "q0_0".to_owned(),
+            column: "id".to_owned(),
+        }),
+        right: Box::new(ExprNode::Literal("5".to_owned())),
+    });
+    model
+}
+
+/// `table_and_view()` with a CHECK added to the base table. `AddCheck` is classified `Safe`, but SQLite
+/// cannot `ALTER ... ADD CONSTRAINT`, so it rebuilds the table — which displaces the *unchanged* view
+/// above it. The resulting plan never mentions the view.
+fn added_check_model() -> DatabaseModel {
+    let mut model = table_and_view();
+    model.schemas[0].tables[0].checks.push(CheckModel {
+        name: "widgets_active_bool".to_owned(),
+        expression: ExprNode::Compare {
+            op: CompareOp::GreaterThanOrEquals,
+            left: Box::new(ExprNode::BareColumn {
+                column: "active".to_owned(),
+            }),
+            right: Box::new(ExprNode::Literal("0".to_owned())),
+        },
+        validation: None,
+        enforcement: None,
+    });
+    model
+}
+
+#[tokio::test]
+async fn changing_a_view_is_refused_when_it_carries_triggers() {
+    // git-bug 6a3940a. SQLite has no `CREATE OR REPLACE VIEW`, so this `Safe` CreateView applies as
+    // DROP + CREATE and takes the user's INSTEAD OF trigger with it. squealy cannot recreate what it
+    // does not model, so the apply-time preflight refuses rather than destroy it silently.
+    let (mut connection, raw) = setup_view_with_trigger().await;
+    let v2 = changed_view_model();
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::BLOCK_RISKY)
+        .await
+        .expect("planning is not what refuses — the trigger is invisible to the diff");
+    let error = apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect_err("applying must refuse to wipe the trigger");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("active_widgets_insert ON active_widgets"),
+        "the error must name the trigger it refused to destroy: {message}"
+    );
+    assert_eq!(
+        trigger_count(&raw).await,
+        1,
+        "the refused apply must leave the trigger intact"
+    );
+}
+
+#[tokio::test]
+async fn rebuilding_a_table_is_refused_when_a_collateral_view_carries_triggers() {
+    // The nastier path: the view is UNCHANGED and the plan never mentions it. A `Safe`-classified
+    // AddCheck forces a table rebuild, which displaces the view above it — wiping its triggers under
+    // the DEFAULT policy. The preflight sees this because it asks the renderer's own drop set.
+    let (mut connection, raw) = setup_view_with_trigger().await;
+    let v2 = added_check_model();
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::BLOCK_RISKY)
+        .await
+        .expect("plan the rebuild");
+    assert!(
+        !plan.steps.iter().any(|step| matches!(
+            step,
+            DatabasePlanStep::CreateView { .. } | DatabasePlanStep::DropView { .. }
+        )),
+        "this plan must not mention the view at all — that is what makes it dangerous: {:?}",
+        plan.steps,
+    );
+    let error = apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect_err("applying must refuse to wipe the collateral view's trigger");
+
+    assert!(
+        error.to_string().contains("active_widgets_insert"),
+        "the error must name the trigger: {error}"
+    );
+    assert_eq!(trigger_count(&raw).await, 1, "trigger intact after refusal");
+}
+
+#[tokio::test]
+async fn a_destructive_policy_lets_the_trigger_wiping_view_change_through() {
+    // The opt-in, and the honest cost of taking it: with `allow_destructive` the caller has accepted
+    // destructive changes, so the apply proceeds — and the trigger is gone. This documents the loss.
+    let (mut connection, raw) = setup_view_with_trigger().await;
+    let v2 = changed_view_model();
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::ALLOW_ALL)
+        .await
+        .expect("plan the changed view");
+    apply_plan_with_options(
+        &plan,
+        &v2,
+        &Sqlite,
+        &mut connection,
+        PlanApplyOptions {
+            policy: DiffPolicy::ALLOW_ALL,
+            ..PlanApplyOptions::default()
+        },
+    )
+    .await
+    .expect("an allow-destructive apply proceeds");
+
+    assert_eq!(
+        trigger_count(&raw).await,
+        0,
+        "the trigger is destroyed — the opt-in makes that the caller's choice, not a silent loss"
+    );
+}
+
+#[tokio::test]
+async fn a_temp_trigger_on_a_dropped_view_is_also_refused() {
+    // A TEMP trigger against a main-schema view lives in `sqlite_temp_master`, NOT `sqlite_master` —
+    // but `DROP VIEW` destroys it just the same (verified), so a guard reading only `sqlite_master`
+    // would permit exactly the silent loss it exists to prevent.
+    let (mut connection, raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+    exec(
+        &raw,
+        "CREATE TEMP TRIGGER \"aw_temp\" INSTEAD OF INSERT ON \"active_widgets\" \
+         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
+    )
+    .await;
+    let temp_triggers = |raw: RawConnection| async move {
+        raw.call(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_temp_master WHERE type = 'trigger'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .await
+        .expect("count temp triggers")
+    };
+    assert_eq!(temp_triggers(raw.clone()).await, 1, "temp trigger created");
+    assert_eq!(
+        trigger_count(&raw).await,
+        0,
+        "and it is invisible in sqlite_master — the point of this test"
+    );
+
+    let v2 = changed_view_model();
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::BLOCK_RISKY)
+        .await
+        .expect("plan the changed view");
+    let error = apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect_err("applying must refuse to wipe the temp trigger");
+
+    assert!(
+        error.to_string().contains("aw_temp"),
+        "the error must name the temp trigger: {error}"
+    );
+    assert_eq!(
+        temp_triggers(raw.clone()).await,
+        1,
+        "temp trigger intact after refusal"
+    );
+}
+
+#[tokio::test]
+async fn a_trigger_on_a_non_ascii_case_variant_view_does_not_block() {
+    // SQLite folds identifiers ASCII-only, so `"Ä"` and `"ä"` are DISTINCT views (verified). Folding
+    // the guard's names with Unicode `to_lowercase` would conflate them and refuse a plan over a
+    // trigger belonging to an unrelated view.
+    let (mut connection, raw) = setup().await;
+    let mut model = one_table(table("t", vec![column("x", SqlType::I64, false)]));
+    let view = |name: &str| ViewModel {
+        name: name.to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "x".to_owned(),
+            ty: SqlType::I64,
+            nullable: false,
+        }],
+        query: ViewBody::Select(Box::new(ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "x".to_owned(),
+                internal_alias: None,
+                expr: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "x".to_owned(),
+                },
+            }],
+            from: Some(SourceItem::Named(SourceRef {
+                schema: None,
+                name: "t".to_owned(),
+                alias: "q0_0".to_owned(),
+            })),
+            ..ViewQueryModel::default()
+        })),
+    };
+    model.schemas[0].views.push(view("Ä"));
+    model.schemas[0].views.push(view("ä"));
+    publish(&model, &Sqlite, &mut connection)
+        .await
+        .expect("publish two case-variant views");
+
+    // The trigger belongs to `ä`; the plan only changes `Ä`.
+    exec(
+        &raw,
+        "CREATE TRIGGER \"lower_ins\" INSTEAD OF INSERT ON \"ä\" \
+         BEGIN INSERT INTO \"t\" (\"x\") VALUES (NEW.\"x\"); END",
+    )
+    .await;
+    let mut v2 = model.clone();
+    view_select_mut(&mut v2.schemas[0].views[0]).filter = Some(ExprNode::Compare {
+        op: CompareOp::GreaterThan,
+        left: Box::new(ExprNode::Column {
+            alias: "q0_0".to_owned(),
+            column: "x".to_owned(),
+        }),
+        right: Box::new(ExprNode::Literal("0".to_owned())),
+    });
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::BLOCK_RISKY)
+        .await
+        .expect("plan the change to the upper-case view");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("a trigger on the distinct lower-case view must not refuse this plan");
+    assert_eq!(
+        trigger_count(&raw).await,
+        1,
+        "the other view's trigger stands"
+    );
+}
+
+#[tokio::test]
+async fn a_plan_touching_a_trigger_free_view_is_not_refused() {
+    // The preflight must not block ordinary work: no triggers, no refusal.
+    let (mut connection, _raw) = setup().await;
+    publish(&table_and_view(), &Sqlite, &mut connection)
+        .await
+        .expect("publish table + view");
+    let v2 = changed_view_model();
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::BLOCK_RISKY)
+        .await
+        .expect("plan the changed view");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("a view change with no triggers attached applies under the default policy");
+}
+
+#[tokio::test]
+async fn a_trigger_on_an_undisplaced_view_does_not_block_a_plan() {
+    // The preflight must only consider views the plan actually drops. A trigger on a view this plan
+    // never displaces is irrelevant — blocking on it would let one trigger freeze the whole schema.
+    let (mut connection, raw) = setup().await;
+    let mut model = table_and_view();
+    model.schemas[0]
+        .tables
+        .push(table("gadgets", vec![column("id", SqlType::I64, false)]));
+    publish(&model, &Sqlite, &mut connection)
+        .await
+        .expect("publish");
+    exec(
+        &raw,
+        "CREATE TRIGGER \"active_widgets_insert\" INSTEAD OF INSERT ON \"active_widgets\" \
+         BEGIN INSERT INTO \"widgets\" (\"id\", \"active\") VALUES (NEW.\"id\", 1); END",
+    )
+    .await;
+
+    // Add a column to the UNRELATED `gadgets` table: no view is displaced.
+    let mut v2 = model.clone();
+    v2.schemas[0].tables[1]
+        .columns
+        .push(column("label", SqlType::Text, true));
+
+    let plan = plan_from_database(&v2, &mut connection, DiffPolicy::BLOCK_RISKY)
+        .await
+        .expect("plan the unrelated column add");
+    apply_plan(&plan, &v2, &Sqlite, &mut connection)
+        .await
+        .expect("a plan that displaces no view must not be refused");
+    assert_eq!(trigger_count(&raw).await, 1, "trigger untouched");
 }
 
 #[tokio::test]

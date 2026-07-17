@@ -570,6 +570,7 @@ async fn apply_plan_with_concurrent_indexes_splits_index_creation() {
         &mut connection,
         PlanApplyOptions {
             concurrent_indexes: true,
+            ..PlanApplyOptions::default()
         },
     )
     .await
@@ -632,6 +633,7 @@ fn render_plan_with_options_reports_the_concurrent_form_it_will_apply() {
         &Postgres,
         PlanApplyOptions {
             concurrent_indexes: true,
+            ..PlanApplyOptions::default()
         },
     )
     .expect("render concurrent report");
