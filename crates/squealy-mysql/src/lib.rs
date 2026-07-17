@@ -515,6 +515,11 @@ impl SchemaIntrospect for MysqlConnection {
         canonical_mysql_cast_type(ty)
     }
 
+    /// MySQL resolves column identifiers case-insensitively, with Unicode case folding.
+    fn identifier_case(&self) -> squealy::IdentifierCase {
+        squealy::IdentifierCase::UnicodeInsensitive
+    }
+
     /// MySQL has only `AUTO_INCREMENT`: it renders any identity column that way and introspects it
     /// back as [`IdentityMode::AutoIncrement`](squealy::IdentityMode::AutoIncrement). Map every mode
     /// to that so a crate-declared `auto_increment` column (which enters the model as `ByDefault`)

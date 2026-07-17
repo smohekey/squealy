@@ -467,6 +467,12 @@ impl squealy::SchemaIntrospect for PostgresConnection {
         canonical_pg_cast_type(ty)
     }
 
+    /// PostgreSQL's `WITH RECURSIVE` makes every CTE in the list mutually visible, so a CTE may
+    /// forward-reference a later sibling.
+    fn recursive_exposes_forward_ctes(&self) -> bool {
+        true
+    }
+
     /// PostgreSQL introspection reports a plain index's access method as `btree`; map an unset
     /// method to that so a crate-declared index does not churn against the live schema.
     fn default_index_method(&self) -> Option<squealy::IndexMethod> {

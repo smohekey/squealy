@@ -1173,6 +1173,771 @@ pub fn visit_scope_exprs(expr: &ExprNode, f: &mut impl FnMut(&ExprNode)) {
         | ExprNode::ExtractSecond { operand, .. } => visit_scope_exprs(operand, f),
     }
 }
+
+/// Mutable twin of [`visit_scope_exprs`]: applies `f` to `expr` and every nested [`ExprNode`] in the **same
+/// scope**, stopping at a nested subquery (its own scope). `f` may replace `*node` in place. Exhaustive over
+/// [`ExprNode`] so a new node is a compile error here.
+fn map_scope_exprs_mut(expr: &mut ExprNode, f: &mut impl FnMut(&mut ExprNode)) {
+    f(expr);
+    match expr {
+        ExprNode::Column { .. }
+        | ExprNode::BareColumn { .. }
+        | ExprNode::Literal(_)
+        | ExprNode::Raw(_)
+        | ExprNode::Now => {}
+        // A nested subquery is its own scope; its columns are irrelevant to the enclosing scope.
+        ExprNode::ScalarSubquery(_) | ExprNode::Exists { .. } => {}
+        ExprNode::InSubquery { operand, .. } => map_scope_exprs_mut(operand, f),
+        ExprNode::Binary { left, right, .. }
+        | ExprNode::Compare { left, right, .. }
+        | ExprNode::Logical { left, right, .. }
+        | ExprNode::Nullif { left, right, .. } => {
+            map_scope_exprs_mut(left, f);
+            map_scope_exprs_mut(right, f);
+        }
+        ExprNode::Cast { operand, .. } | ExprNode::Aggregate { operand, .. } => {
+            map_scope_exprs_mut(operand, f)
+        }
+        ExprNode::Not(operand) | ExprNode::IsNull { operand, .. } => {
+            map_scope_exprs_mut(operand, f)
+        }
+        ExprNode::Like {
+            operand, pattern, ..
+        } => {
+            map_scope_exprs_mut(operand, f);
+            map_scope_exprs_mut(pattern, f);
+        }
+        ExprNode::In { operand, items, .. } => {
+            map_scope_exprs_mut(operand, f);
+            for item in items {
+                map_scope_exprs_mut(item, f);
+            }
+        }
+        ExprNode::Between {
+            operand, low, high, ..
+        } => {
+            map_scope_exprs_mut(operand, f);
+            map_scope_exprs_mut(low, f);
+            map_scope_exprs_mut(high, f);
+        }
+        ExprNode::Window {
+            args,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            for arg in args {
+                map_scope_exprs_mut(arg, f);
+            }
+            for partition in partition_by {
+                map_scope_exprs_mut(partition, f);
+            }
+            for order in order_by {
+                map_scope_exprs_mut(&mut order.expr, f);
+            }
+        }
+        ExprNode::Case { arms, else_, .. } => {
+            for arm in arms {
+                map_scope_exprs_mut(&mut arm.when, f);
+                map_scope_exprs_mut(&mut arm.then, f);
+            }
+            if let Some(else_) = else_ {
+                map_scope_exprs_mut(else_, f);
+            }
+        }
+        ExprNode::SimpleCase {
+            operand,
+            arms,
+            else_,
+            ..
+        } => {
+            map_scope_exprs_mut(operand, f);
+            for arm in arms {
+                map_scope_exprs_mut(&mut arm.when, f);
+                map_scope_exprs_mut(&mut arm.then, f);
+            }
+            if let Some(else_) = else_ {
+                map_scope_exprs_mut(else_, f);
+            }
+        }
+        ExprNode::Coalesce { args, .. }
+        | ExprNode::ScalarFn { args, .. }
+        | ExprNode::Function { args, .. } => {
+            for arg in args {
+                map_scope_exprs_mut(arg, f);
+            }
+        }
+        ExprNode::Extract { operand, .. }
+        | ExprNode::DateTrunc { operand, .. }
+        | ExprNode::ExtractSecond { operand, .. } => map_scope_exprs_mut(operand, f),
+    }
+}
+
+/// Looks up the column names a named view-body source (a table or another view) exposes, so the clause-name
+/// canonicalizer can tell a genuine source-column reference from a projection-alias reference. `None` when
+/// the source is unknown to the catalog (e.g. a CTE-bound name or a source not in the introspected model) —
+/// treated as "no colliding source column", so the reference resolves as the reverse parser classified it.
+pub trait ViewSourceColumns {
+    /// The column names `source` exposes, or `None` if the source is not in the catalog.
+    fn source_columns(&self, source: &SourceRef) -> Option<Vec<String>>;
+}
+
+/// Converges a view body's clause terms (`GROUP BY`/`HAVING`/`ORDER BY`) to the structural form each backend
+/// deparser produces, so a published view whose clause references a projection output **alias** re-plans to
+/// empty instead of churning a `CREATE OR REPLACE VIEW` (git-bug 823ae69).
+///
+/// A backend that stores a view rewrites a clause's alias reference on introspection: a **standalone** alias
+/// deparses to the projection's underlying **expression** (PostgreSQL `pg_get_viewdef`; MySQL `ORDER BY`),
+/// while a **nested** reference (`ORDER BY total + 1`) deparses to the underlying **source column** (every
+/// dialect resolves a nested reference to the source, not the output alias — verified live). The reverse
+/// parser already applies each dialect's *position* rules when it decides whether a clause term is a kept
+/// alias ([`ExprNode::BareColumn`]) or a bound source column ([`ExprNode::Column`]); what it cannot do is
+/// distinguish a **nested** bare name that collides with a real source column from a projection alias, since
+/// it has no source-column catalog. This pass, given that catalog, finishes the job:
+///
+/// - a clause reference to a projection alias is **expanded** to that projection's expression (the standalone
+///   deparser form), and
+/// - a clause name the (single) source relation actually exposes is **rebound** to `Column{source_alias,
+///   name}` wherever that dialect resolves the name to the source column rather than the alias.
+///
+/// The one dialect subtlety, verified live: a name that collides with *both* a projection alias and a source
+/// column resolves to the **alias** only as a standalone top-level `ORDER BY` term; a standalone `GROUP BY`
+/// or `HAVING` name, and any *nested* reference, resolve to the **source column** (PostgreSQL, MySQL, and
+/// SQLite agree). A name with no source collision is always the alias.
+///
+/// Then unreferenced [`ProjectionItem::internal_alias`]es are pruned. Applied to BOTH the desired and the
+/// introspected model in `canonicalize_model`, so the two converge. The canonical model is the plan payload
+/// (a `CreateView` for a changed view renders the canonicalized body), so every rewrite here must be
+/// **semantically equivalent** to the original — an expanded alias (`ORDER BY total` → `ORDER BY (amount*2)`)
+/// and a rebound source column are the same value the deparser would emit, matching the existing
+/// `canonical_check_expression`/`normalize_expr` precedent (the canonical form is also rendered there). The
+/// resolver is conservative — an ambiguous or unresolved source leaves a clause name unchanged rather than
+/// risk a non-equivalent rewrite. Dialect-agnostic beyond a single `identifiers_case_insensitive` flag: the
+/// parser encoded the dialect *position* rules already, so this needs only the catalog + the (structural)
+/// standalone-vs-nested position and clause kind.
+pub fn canonicalize_view_clause_aliases(
+    body: &mut ViewBody,
+    catalog: &dyn ViewSourceColumns,
+    dialect: ViewClauseDialect,
+    top_level_column_listed: bool,
+) {
+    // `top_level_column_listed` is `true` when the view declares an output column list (`view.columns` is
+    // non-empty, which `render_create_view` emits as `CREATE VIEW (<columns>)`), suppressing each
+    // projection's own `AS` — so only a kept `internal_alias` is an in-scope clause alias. When the view has
+    // NO declared columns the renderer emits each projection `AS output_name`, so `output_name` IS visible.
+    let ctx = ClauseCtx { catalog, dialect };
+    canonicalize_view_body_scoped(
+        body,
+        &ctx,
+        &std::collections::BTreeMap::new(),
+        top_level_column_listed,
+    );
+}
+
+/// How a backend resolves the case of a SQL identifier, for the view clause-alias canonicalizer's
+/// collision/alias matching.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentifierCase {
+    /// Case-sensitive (PostgreSQL, for quoted identifiers).
+    Sensitive,
+    /// Case-insensitive over ASCII only (SQLite).
+    AsciiInsensitive,
+    /// Case-insensitive with Unicode case folding (MySQL).
+    UnicodeInsensitive,
+}
+
+/// The dialect properties the view clause-alias canonicalizer needs: how identifiers compare, whether a plain
+/// `WITH` exposes a forward (later-sibling) CTE reference, and whether `WITH RECURSIVE` additionally does.
+#[derive(Clone, Copy, Debug)]
+pub struct ViewClauseDialect {
+    pub identifier_case: IdentifierCase,
+    /// A plain (non-recursive) `WITH` item may reference a LATER sibling — SQLite yes, PostgreSQL/MySQL no.
+    pub cte_forward_references_visible: bool,
+    /// `WITH RECURSIVE` additionally exposes later siblings — PostgreSQL yes, MySQL no (SQLite already yes via
+    /// the field above).
+    pub recursive_exposes_forward_ctes: bool,
+}
+
+/// The top-level output column names a view body projects (its declared output schema, as an enclosing scope
+/// or catalog sees them) — used to resolve a view referenced as a source that declares no explicit columns.
+pub fn view_body_output_names(body: &ViewBody) -> Vec<String> {
+    derived_output_names(body)
+}
+
+/// A map from a `WITH`-bound CTE name to what it exposes for clause resolution, shadowing the global catalog.
+/// `Some(columns)` is a CTE VISIBLE from the current scope; `None` marks a local CTE that exists in the
+/// enclosing `WITH` but is NOT visible here (a forward reference the dialect disallows, or a non-recursive
+/// self-reference) — such a name resolves to nothing rather than falling back to a same-named catalog table,
+/// so a dialect-specific visibility difference can never bind a clause to the wrong relation and emit
+/// different DDL. It only leaves the clause name un-canonicalized (a harmless re-plan).
+type CteScope = std::collections::BTreeMap<String, Option<Vec<String>>>;
+
+/// Inserts a CTE binding into `scope`, first removing any existing key that is the SAME identifier under this
+/// backend's rules (a case-insensitive `foo` must shadow an outer `Foo`, not coexist with it — else a lookup
+/// could return the wrong binding).
+fn insert_cte(scope: &mut CteScope, name: &str, columns: Option<Vec<String>>, ctx: &ClauseCtx<'_>) {
+    scope.retain(|key, _| !ctx.eq_ident(key, name));
+    scope.insert(name.to_owned(), columns);
+}
+
+/// The invariant context threaded through the clause-alias canonicalization: the source-column catalog and
+/// the backend's dialect properties.
+struct ClauseCtx<'a> {
+    catalog: &'a dyn ViewSourceColumns,
+    dialect: ViewClauseDialect,
+}
+
+impl ClauseCtx<'_> {
+    /// Compares two column/relation identifiers per this backend's case rules — exact (PostgreSQL), ASCII
+    /// case-insensitive (SQLite), or Unicode case-insensitive (MySQL).
+    fn eq_ident(&self, a: &str, b: &str) -> bool {
+        match self.dialect.identifier_case {
+            IdentifierCase::Sensitive => a == b,
+            IdentifierCase::AsciiInsensitive => a.eq_ignore_ascii_case(b),
+            // Unicode case folding: `to_lowercase` folds the full Unicode range (`Ä` == `ä`), as MySQL
+            // resolves identifiers, so a non-ASCII clause name still collides with its source column.
+            IdentifierCase::UnicodeInsensitive => {
+                a.eq_ignore_ascii_case(b) || a.to_lowercase() == b.to_lowercase()
+            }
+        }
+    }
+}
+
+/// `outputs_column_listed` is `true` when an outer column list renames this scope's outputs (the top-level
+/// view, a `WITH cte (columns)`, or the main body under the view's column list) — then a projection's own
+/// `AS` is not in the `SELECT` scope, so only a kept `internal_alias` is a clause alias. It is `false` for a
+/// scope whose projection aliases ARE in scope (a set arm, a column-list-less CTE, a derived table, a
+/// subquery) — there a computed `output_name` is a referenceable alias. Mirrors the reverse parser's own
+/// `outputs_column_listed` threading.
+fn canonicalize_view_body_scoped(
+    body: &mut ViewBody,
+    ctx: &ClauseCtx<'_>,
+    ctes: &CteScope,
+    outputs_column_listed: bool,
+) {
+    match body {
+        ViewBody::Select(query) => {
+            canonicalize_query_clause_aliases(query, ctx, ctes, outputs_column_listed)
+        }
+        ViewBody::Set { left, right, .. } => {
+            // A set's own trailing `ORDER BY` names the compound output columns by name (no source scope), so
+            // it is left as-is; each arm names its own outputs by its projection aliases (a column list is
+            // only a fallback), so an arm's `output_name` IS scope-visible.
+            canonicalize_view_body_scoped(left, ctx, ctes, false);
+            canonicalize_view_body_scoped(right, ctx, ctes, false);
+        }
+        ViewBody::With {
+            recursive,
+            ctes: cte_defs,
+            body,
+        } => {
+            // A CTE body's VISIBLE siblings depend on the dialect: every dialect exposes a PRECEDING sibling;
+            // SQLite also exposes a LATER sibling (a forward reference — `cte_forward_references_visible`),
+            // while PostgreSQL/MySQL do not (and their `WITH RECURSIVE` forward-visibility differs, so it is
+            // NOT inferred from `recursive`); a CTE body sees ITSELF only under `RECURSIVE`. Every LOCAL CTE
+            // name is inserted into each body's scope either VISIBLE (`Some(columns)`) or HIDDEN (`None`) — a
+            // hidden name resolves to nothing rather than a same-named catalog table, so a dialect-visibility
+            // difference never binds a clause to the wrong relation (it only leaves the name bare, a harmless
+            // re-plan). A CTE's own outputs are its declared column list, else its body's projection names.
+            let recursive = *recursive;
+            // Forward (later-sibling) visibility: a plain `WITH` exposes it on SQLite only; `WITH RECURSIVE`
+            // additionally exposes it on PostgreSQL (but NOT MySQL). Both are per-backend properties, so this
+            // is never inferred from `recursive` alone. (The hidden-vs-catalog distinction keeps a
+            // mis-scoped source safe regardless — it resolves to nothing, never the wrong relation.)
+            let forward = ctx.dialect.cte_forward_references_visible
+                || (recursive && ctx.dialect.recursive_exposes_forward_ctes);
+            let local: Vec<(String, Vec<String>)> = cte_defs
+                .iter()
+                .map(|cte| {
+                    let columns = if cte.columns.is_empty() {
+                        derived_output_names(&cte.body)
+                    } else {
+                        cte.columns.clone()
+                    };
+                    (cte.name.clone(), columns)
+                })
+                .collect();
+            for (index, cte) in cte_defs.iter_mut().enumerate() {
+                let mut body_scope = ctes.clone();
+                for (other, (name, columns)) in local.iter().enumerate() {
+                    let visible = other < index
+                        || (forward && other > index)
+                        || (other == index && recursive);
+                    insert_cte(&mut body_scope, name, visible.then(|| columns.clone()), ctx);
+                }
+                // A CTE's outputs are column-listed exactly when it declares `WITH cte (columns)`.
+                canonicalize_view_body_scoped(
+                    &mut cte.body,
+                    ctx,
+                    &body_scope,
+                    !cte.columns.is_empty(),
+                );
+            }
+            // The main body sees every CTE; it inherits the enclosing view's column-list status.
+            let mut main_scope = ctes.clone();
+            for (name, columns) in &local {
+                insert_cte(&mut main_scope, name, Some(columns.clone()), ctx);
+            }
+            canonicalize_view_body_scoped(body, ctx, &main_scope, outputs_column_listed);
+        }
+    }
+}
+
+/// Canonicalizes one `SELECT` scope's clause terms (see [`canonicalize_view_clause_aliases`]).
+fn canonicalize_query_clause_aliases(
+    query: &mut ViewQueryModel,
+    ctx: &ClauseCtx<'_>,
+    ctes: &CteScope,
+    outputs_column_listed: bool,
+) {
+    // Recurse the nested scopes first: derived-table sources and any subqueries in this scope's expressions
+    // (including its clause expressions) each resolve against their own sources.
+    if let Some(from) = &mut query.from {
+        canonicalize_source_clause_aliases(from, ctx, ctes);
+    }
+    for join in &mut query.joins {
+        canonicalize_source_clause_aliases(&mut join.source, ctx, ctes);
+    }
+    let mut recurse_subqueries = |expr: &mut ExprNode| {
+        if let Some(subquery) = expr_subquery_mut(expr) {
+            // A subquery's own projection aliases are in scope (no outer column list).
+            canonicalize_query_clause_aliases(subquery, ctx, ctes, false);
+        }
+    };
+    for item in &mut query.projection {
+        map_scope_exprs_mut(&mut item.expr, &mut recurse_subqueries);
+    }
+    if let Some(filter) = &mut query.filter {
+        map_scope_exprs_mut(filter, &mut recurse_subqueries);
+    }
+    for join in &mut query.joins {
+        if let Some(on) = &mut join.on {
+            map_scope_exprs_mut(on, &mut recurse_subqueries);
+        }
+    }
+    for expr in &mut query.group_by {
+        map_scope_exprs_mut(expr, &mut recurse_subqueries);
+    }
+    if let Some(having) = &mut query.having {
+        map_scope_exprs_mut(having, &mut recurse_subqueries);
+    }
+    for order in &mut query.order_by {
+        map_scope_exprs_mut(&mut order.expr, &mut recurse_subqueries);
+    }
+
+    // Each of this scope's sources as `(alias, columns)`, in FROM-then-JOIN order (a `None` column set is a
+    // source this pass cannot resolve — a missing/external relation).
+    let mut sources: Vec<(String, Option<Vec<String>>)> = Vec::new();
+    if let Some(from) = &query.from {
+        sources.push((
+            from.alias().to_owned(),
+            source_item_columns(from, ctx, ctes),
+        ));
+    }
+    for join in &query.joins {
+        sources.push((
+            join.source.alias().to_owned(),
+            source_item_columns(&join.source, ctx, ctes),
+        ));
+    }
+    let scope = ClauseScope {
+        ctx,
+        sources: &sources,
+        outputs_column_listed,
+    };
+
+    let projection = query.projection.clone();
+    for expr in &mut query.group_by {
+        resolve_clause_term(expr, &projection, &scope, false);
+    }
+    if let Some(having) = &mut query.having {
+        resolve_clause_term(having, &projection, &scope, false);
+    }
+    for order in &mut query.order_by {
+        resolve_clause_term(&mut order.expr, &projection, &scope, true);
+    }
+
+    prune_unreferenced_clause_aliases(query, ctx);
+}
+
+/// What a clause-name resolver needs to know about the enclosing `SELECT` scope's sources.
+struct ClauseScope<'a> {
+    ctx: &'a ClauseCtx<'a>,
+    /// Every source as `(alias, columns)` (`None` columns = unresolvable), used to detect a collision and to
+    /// bind a name to the unique source that exposes it.
+    sources: &'a [(String, Option<Vec<String>>)],
+    outputs_column_listed: bool,
+}
+
+impl ClauseScope<'_> {
+    /// Whether `name` matches a column of any *resolved* source (a possible collision), per this backend's
+    /// identifier rules — a case-insensitive match on MySQL/SQLite, exact on PostgreSQL.
+    fn collides(&self, name: &str) -> bool {
+        self.sources
+            .iter()
+            .filter_map(|(_, columns)| columns.as_ref())
+            .any(|columns| columns.iter().any(|c| self.ctx.eq_ident(c, name)))
+    }
+
+    /// The `(alias, column)` of the single resolved source that exposes `name`, or `None` if none or more than
+    /// one does (an ambiguous join reference is left as the deparser qualified it). SQL binds a name a single
+    /// source exposes to that source, and every dialect deparses it as a qualified column. The returned
+    /// `column` is the source's OWN spelling (which may differ in case from the clause reference on a
+    /// case-insensitive backend) — the form the deparser emits, so the rebound node matches introspection.
+    fn unique_binding(&self, name: &str) -> Option<(&str, &str)> {
+        let mut found = None;
+        for (alias, columns) in self.sources {
+            if let Some(column) = columns
+                .as_ref()
+                .and_then(|columns| columns.iter().find(|c| self.ctx.eq_ident(c, name)))
+            {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some((alias.as_str(), column.as_str()));
+            }
+        }
+        found
+    }
+
+    /// Whether every source resolved — so a name that does not collide is definitely not a source column.
+    fn all_sources_resolved(&self) -> bool {
+        self.sources.iter().all(|(_, columns)| columns.is_some())
+    }
+}
+
+/// The columns a `FROM`/`JOIN` source exposes: a derived table's own projection names, a `WITH`-bound CTE's
+/// columns (shadowing the global catalog), else the global catalog's table/view.
+fn source_item_columns(
+    source: &SourceItem,
+    ctx: &ClauseCtx<'_>,
+    ctes: &CteScope,
+) -> Option<Vec<String>> {
+    match source {
+        SourceItem::Derived { query, .. } => Some(derived_output_names(query)),
+        SourceItem::Named(source) => {
+            // A local CTE name (unqualified) shadows the global catalog, matched under this backend's
+            // identifier rules (case-insensitive on MySQL/SQLite). A VISIBLE CTE yields its columns; a HIDDEN
+            // local CTE (`None`) yields nothing — it is NOT resolved against a same-named catalog table, so a
+            // dialect-visibility difference cannot bind a clause to the wrong relation. Only a name that is not
+            // a local CTE at all falls through to the catalog.
+            if source.schema.is_none()
+                && let Some((_, columns)) = ctes
+                    .iter()
+                    .find(|(name, _)| ctx.eq_ident(name, &source.name))
+            {
+                return columns.clone();
+            }
+            ctx.catalog.source_columns(source)
+        }
+    }
+}
+
+/// Recurses into a derived-table source's own scope; a named source binds no columns of its own.
+fn canonicalize_source_clause_aliases(
+    source: &mut SourceItem,
+    ctx: &ClauseCtx<'_>,
+    ctes: &CteScope,
+) {
+    if let SourceItem::Derived { query, .. } = source {
+        // A derived table's projection aliases are in scope (no outer column list).
+        canonicalize_view_body_scoped(query, ctx, ctes, false);
+    }
+}
+
+/// The mutable inner [`ViewQueryModel`] of a subquery node, or `None` for a non-subquery.
+fn expr_subquery_mut(expr: &mut ExprNode) -> Option<&mut ViewQueryModel> {
+    match expr {
+        ExprNode::ScalarSubquery(query)
+        | ExprNode::Exists {
+            subquery: query, ..
+        } => Some(query),
+        ExprNode::InSubquery { subquery, .. } => Some(subquery),
+        _ => None,
+    }
+}
+
+/// The top-level output names a derived-table body projects (its columns, as an enclosing scope sees them).
+fn derived_output_names(body: &ViewBody) -> Vec<String> {
+    match body {
+        ViewBody::Select(query) => query
+            .projection
+            .iter()
+            .map(|item| item.output_name.clone())
+            .collect(),
+        ViewBody::Set { left, .. } => derived_output_names(left),
+        ViewBody::With { body, .. } => derived_output_names(body),
+    }
+}
+
+/// Resolves one clause term (see [`canonicalize_view_clause_aliases`]). `is_order_by` distinguishes an
+/// `ORDER BY` term (whose *standalone* alias reference wins a source-column collision) from a `GROUP BY` /
+/// `HAVING` term (whose collision resolves to the source column). A term that is *itself* a bare name is
+/// standalone; a bare name nested in a larger expression is not.
+fn resolve_clause_term(
+    expr: &mut ExprNode,
+    projection: &[ProjectionItem],
+    scope: &ClauseScope<'_>,
+    is_order_by: bool,
+) {
+    resolve_clause_scope(expr, projection, scope, is_order_by, true);
+}
+
+/// Resolves every bare column in one clause term's own scope. A `BareColumn` is resolved as a LEAF — its
+/// replacement (a projection expression, already source-resolved by [`expand_alias`]) is NOT re-descended,
+/// which both avoids redundant work and prevents unbounded recursion on a degenerate self-referential alias
+/// (`x + 1 AS x`). `standalone` is true only for the whole clause term; nested references are not. Recurses
+/// same-scope children, stopping at a nested subquery (its own scope, canonicalized separately). Exhaustive
+/// over [`ExprNode`] so a new node is a compile error here.
+fn resolve_clause_scope(
+    node: &mut ExprNode,
+    projection: &[ProjectionItem],
+    scope: &ClauseScope<'_>,
+    is_order_by: bool,
+    standalone: bool,
+) {
+    if let ExprNode::BareColumn { .. } = node {
+        resolve_clause_leaf(node, projection, scope, standalone, is_order_by);
+        return;
+    }
+    let recurse =
+        |child: &mut ExprNode| resolve_clause_scope(child, projection, scope, is_order_by, false);
+    match node {
+        ExprNode::Column { .. }
+        | ExprNode::BareColumn { .. }
+        | ExprNode::Literal(_)
+        | ExprNode::Raw(_)
+        | ExprNode::Now => {}
+        // A nested subquery is its own scope, canonicalized separately.
+        ExprNode::ScalarSubquery(_) | ExprNode::Exists { .. } => {}
+        ExprNode::InSubquery { operand, .. } => recurse(operand),
+        ExprNode::Binary { left, right, .. }
+        | ExprNode::Compare { left, right, .. }
+        | ExprNode::Logical { left, right, .. }
+        | ExprNode::Nullif { left, right, .. } => {
+            recurse(left);
+            recurse(right);
+        }
+        ExprNode::Cast { operand, .. } | ExprNode::Aggregate { operand, .. } => recurse(operand),
+        ExprNode::Not(operand) | ExprNode::IsNull { operand, .. } => recurse(operand),
+        ExprNode::Like {
+            operand, pattern, ..
+        } => {
+            recurse(operand);
+            recurse(pattern);
+        }
+        ExprNode::In { operand, items, .. } => {
+            recurse(operand);
+            for item in items {
+                recurse(item);
+            }
+        }
+        ExprNode::Between {
+            operand, low, high, ..
+        } => {
+            recurse(operand);
+            recurse(low);
+            recurse(high);
+        }
+        ExprNode::Window {
+            args,
+            partition_by,
+            order_by,
+            ..
+        } => {
+            for arg in args {
+                recurse(arg);
+            }
+            for partition in partition_by {
+                recurse(partition);
+            }
+            for order in order_by {
+                recurse(&mut order.expr);
+            }
+        }
+        ExprNode::Case { arms, else_, .. } => {
+            for arm in arms {
+                recurse(&mut arm.when);
+                recurse(&mut arm.then);
+            }
+            if let Some(else_) = else_ {
+                recurse(else_);
+            }
+        }
+        ExprNode::SimpleCase {
+            operand,
+            arms,
+            else_,
+            ..
+        } => {
+            recurse(operand);
+            for arm in arms {
+                recurse(&mut arm.when);
+                recurse(&mut arm.then);
+            }
+            if let Some(else_) = else_ {
+                recurse(else_);
+            }
+        }
+        ExprNode::Coalesce { args, .. }
+        | ExprNode::ScalarFn { args, .. }
+        | ExprNode::Function { args, .. } => {
+            for arg in args {
+                recurse(arg);
+            }
+        }
+        ExprNode::Extract { operand, .. }
+        | ExprNode::DateTrunc { operand, .. }
+        | ExprNode::ExtractSecond { operand, .. } => recurse(operand),
+    }
+}
+
+/// Expands a clause alias reference to its projection expression, or rebinds a source-column reference to its
+/// source. A name colliding with a source column resolves to the **alias** only as a standalone `ORDER BY`
+/// term; a standalone `GROUP BY`/`HAVING` name and any nested reference resolve to the **source column**. An
+/// alias is expanded only after ruling out a hidden source collision across *all* sources, so an unknown or
+/// join source leaves a possibly-source name bare rather than risk a false-equal.
+fn resolve_clause_leaf(
+    node: &mut ExprNode,
+    projection: &[ProjectionItem],
+    scope: &ClauseScope<'_>,
+    standalone: bool,
+    is_order_by: bool,
+) {
+    let ExprNode::BareColumn { column } = node else {
+        return;
+    };
+    let name = column.clone();
+    let alias_expr =
+        referenceable_alias_expr(projection, &name, scope.outputs_column_listed, scope.ctx);
+
+    // A standalone `ORDER BY` alias wins a source-column collision on every dialect (verified live), so it
+    // expands regardless of the sources.
+    if standalone && is_order_by {
+        if let Some(expr) = alias_expr {
+            expand_alias(node, expr, scope);
+            return;
+        }
+        bind_source_column(node, scope, &name);
+        return;
+    }
+
+    // Otherwise (a `GROUP BY`/`HAVING` term, or any nested reference) a name colliding with a source column is
+    // that source column. It is safe to expand an alias only when NO source exposes the name AND every source
+    // resolved — else a hidden collision (an unknown, or one of several join sources) could make two distinct
+    // views compare equal.
+    if scope.collides(&name) {
+        bind_source_column(node, scope, &name);
+        return;
+    }
+    if scope.all_sources_resolved()
+        && let Some(expr) = alias_expr
+    {
+        expand_alias(node, expr, scope);
+    }
+    // A non-colliding name with an unresolved source is left bare (a harmless re-plan beats a false-equal); a
+    // source column no single source uniquely exposes stays as the deparser qualified it.
+}
+
+/// Replaces a clause alias reference with the projection's expression, then binds any unqualified source
+/// column the inserted expression carries (a hand-built/KDL projection may reference a source column bare) —
+/// so the result is fully resolved and canonicalization is idempotent with the deparser's qualified form.
+fn expand_alias(node: &mut ExprNode, expr: &ExprNode, scope: &ClauseScope<'_>) {
+    *node = expr.clone();
+    map_scope_exprs_mut(node, &mut |inserted| {
+        if let ExprNode::BareColumn { column } = inserted {
+            let name = column.clone();
+            bind_source_column(inserted, scope, &name);
+        }
+    });
+}
+
+/// Rebinds a bare source-column reference to `Column{alias, name}` when exactly one resolved source exposes
+/// the name; an ambiguous (or unresolved) reference is left as the deparser qualified it.
+fn bind_source_column(node: &mut ExprNode, scope: &ClauseScope<'_>, name: &str) {
+    if let Some((alias, column)) = scope.unique_binding(name) {
+        *node = ExprNode::Column {
+            alias: alias.to_owned(),
+            column: column.to_owned(),
+        };
+    }
+}
+
+/// The expression of the projection a clause name references as an output alias, or `None` if none does. A
+/// kept [`ProjectionItem::internal_alias`] (the explicit `AS` recorded because a clause references it) is
+/// always an in-scope alias. A projection's own `output_name` is an in-scope alias only when this scope's
+/// outputs are NOT renamed by an outer column list (`!outputs_column_listed`) — a set arm, a column-list-less
+/// CTE, a derived table, or a subquery — and only for a *computed* or *renamed* projection (a plain column
+/// named after itself, `q.id AS id`, is the source column, not an alias). Mirrors the reverse parser's
+/// `computed_aliases`. Name matching follows the backend's identifier rules (case-insensitive on
+/// MySQL/SQLite), the same as source-column collision detection.
+fn referenceable_alias_expr<'a>(
+    projection: &'a [ProjectionItem],
+    name: &str,
+    outputs_column_listed: bool,
+    ctx: &ClauseCtx<'_>,
+) -> Option<&'a ExprNode> {
+    if let Some(item) = projection.iter().find(|item| {
+        item.internal_alias
+            .as_deref()
+            .is_some_and(|a| ctx.eq_ident(a, name))
+    }) {
+        return Some(&item.expr);
+    }
+    if outputs_column_listed {
+        return None;
+    }
+    projection.iter().find_map(|item| {
+        let self_named = matches!(
+            &item.expr,
+            ExprNode::Column { column, .. } | ExprNode::BareColumn { column } if ctx.eq_ident(column, name)
+        );
+        (item.internal_alias.is_none() && ctx.eq_ident(&item.output_name, name) && !self_named)
+            .then_some(&item.expr)
+    })
+}
+
+/// Clears each [`ProjectionItem::internal_alias`] no remaining clause term references (expansion above
+/// removed the references that were expanded); a backend that stores the view drops such an alias, so keeping
+/// it would churn. Mirrors the reverse parser's own pruning.
+fn prune_unreferenced_clause_aliases(query: &mut ViewQueryModel, ctx: &ClauseCtx<'_>) {
+    if query
+        .projection
+        .iter()
+        .all(|item| item.internal_alias.is_none())
+    {
+        return;
+    }
+    let mut referenced: Vec<String> = Vec::new();
+    // An opaque `Raw` clause (a legacy-package or hand-built body) may reference an alias by name that this
+    // structural scan cannot see, so treat any `Raw` in a clause as referencing every alias — retain them all
+    // rather than emit a `CREATE VIEW` whose clause dangles.
+    let mut has_raw = false;
+    let mut note = |expr: &ExprNode| match expr {
+        ExprNode::BareColumn { column } => referenced.push(column.clone()),
+        ExprNode::Raw(_) => has_raw = true,
+        _ => {}
+    };
+    for expr in query.group_by.iter().chain(query.having.iter()) {
+        visit_scope_exprs(expr, &mut note);
+    }
+    for order in &query.order_by {
+        visit_scope_exprs(&order.expr, &mut note);
+    }
+    if has_raw {
+        return;
+    }
+    for item in &mut query.projection {
+        // An alias is referenced when a remaining clause bare name matches it under this backend's identifier
+        // rules (case-insensitive on MySQL/SQLite), the same comparison alias lookup uses.
+        if let Some(alias) = &item.internal_alias
+            && !referenced.iter().any(|name| ctx.eq_ident(name, alias))
+        {
+            item.internal_alias = None;
+        }
+    }
+}
+
 /// Applies `f` to every result pin reachable from a single `SELECT` body (see
 /// [`ViewBody::map_result_pins`]).
 fn map_query_result_pins(query: &mut ViewQueryModel, f: &impl Fn(&SqlType) -> SqlType) {
@@ -2358,6 +3123,974 @@ mod tests {
 
     fn lit(text: &str) -> ExprNode {
         ExprNode::Literal(text.to_owned())
+    }
+
+    // ---- clause-alias canonicalization (git-bug 823ae69) ------------------------------------------
+
+    /// A catalog exposing a fixed column set for the single source alias `q`, and nothing else.
+    struct QCatalog(Vec<String>);
+    impl ViewSourceColumns for QCatalog {
+        fn source_columns(&self, source: &SourceRef) -> Option<Vec<String>> {
+            (source.name == "t").then(|| self.0.clone())
+        }
+    }
+
+    fn q_source() -> SourceItem {
+        SourceItem::Named(SourceRef {
+            schema: None,
+            name: "t".to_owned(),
+            alias: "q".to_owned(),
+        })
+    }
+
+    fn q_col(column: &str) -> ExprNode {
+        ExprNode::Column {
+            alias: "q".to_owned(),
+            column: column.to_owned(),
+        }
+    }
+
+    /// `amount * 2` over source `q`.
+    fn amount_times_two() -> ExprNode {
+        ExprNode::Binary {
+            op: ArithmeticOp::Multiply,
+            left: Box::new(q_col("amount")),
+            right: Box::new(lit("2")),
+        }
+    }
+
+    /// A single-source `SELECT (amount*2) AS total FROM t q` carrying the given clause `order_by`.
+    fn total_view(internal_alias: Option<&str>, order_by: Vec<ExprNode>) -> ViewQueryModel {
+        ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "total".to_owned(),
+                internal_alias: internal_alias.map(str::to_owned),
+                expr: amount_times_two(),
+            }],
+            from: Some(q_source()),
+            order_by: order_by
+                .into_iter()
+                .map(|expr| OrderItem {
+                    expr,
+                    direction: None,
+                    nulls: None,
+                })
+                .collect(),
+            ..ViewQueryModel::default()
+        }
+    }
+
+    /// A test dialect: `identifier_case` per the argument (fixtures use lower-case names so the choice is
+    /// usually inert), with the given plain-`WITH` forward visibility and no recursive-forward exposure.
+    fn test_dialect(identifier_case: IdentifierCase, forward: bool) -> ViewClauseDialect {
+        ViewClauseDialect {
+            identifier_case,
+            cte_forward_references_visible: forward,
+            recursive_exposes_forward_ctes: false,
+        }
+    }
+
+    fn canon(query: ViewQueryModel, catalog: &dyn ViewSourceColumns) -> ViewQueryModel {
+        let mut body = ViewBody::Select(Box::new(query));
+        // Case-sensitive identifiers (PostgreSQL); the fixtures use lower-case names, so the choice is inert.
+        canonicalize_view_clause_aliases(
+            &mut body,
+            catalog,
+            test_dialect(IdentifierCase::Sensitive, false),
+            true,
+        );
+        match body {
+            ViewBody::Select(query) => *query,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn standalone_order_by_alias_expands_to_the_projection_expression() {
+        // `... AS total ... ORDER BY total` — no source column `total`. The alias expands to `amount*2`,
+        // and the now-unreferenced internal alias is pruned. (Matches PG/MySQL `pg_get_viewdef`/deparse.)
+        let out = canon(
+            total_view(Some("total"), vec![bare("total")]),
+            &QCatalog(vec!["amount".to_owned()]),
+        );
+        assert_eq!(out.order_by[0].expr, amount_times_two());
+        assert_eq!(out.projection[0].internal_alias, None);
+    }
+
+    #[test]
+    fn standalone_order_by_alias_expands_even_when_a_source_column_collides() {
+        // Source `t` also has a `total` column. A *standalone* `ORDER BY total` is the alias on every dialect
+        // (verified live), so it still expands to the projection expression, not the source column.
+        let out = canon(
+            total_view(Some("total"), vec![bare("total")]),
+            &QCatalog(vec!["amount".to_owned(), "total".to_owned()]),
+        );
+        assert_eq!(out.order_by[0].expr, amount_times_two());
+    }
+
+    #[test]
+    fn nested_order_by_name_colliding_with_a_source_column_rebinds_to_the_source() {
+        // `ORDER BY total + 0` with a source column `total`: every dialect resolves the *nested* reference to
+        // the source column (MySQL deparses `t.total + 0`), so it rebinds to `q.total`, not the alias.
+        let nested = ExprNode::Binary {
+            op: ArithmeticOp::Add,
+            left: Box::new(bare("total")),
+            right: Box::new(lit("0")),
+        };
+        let out = canon(
+            total_view(Some("total"), vec![nested]),
+            &QCatalog(vec!["amount".to_owned(), "total".to_owned()]),
+        );
+        assert_eq!(
+            out.order_by[0].expr,
+            ExprNode::Binary {
+                op: ArithmeticOp::Add,
+                left: Box::new(q_col("total")),
+                right: Box::new(lit("0")),
+            }
+        );
+        // The internal alias no clause references is pruned.
+        assert_eq!(out.projection[0].internal_alias, None);
+    }
+
+    #[test]
+    fn nested_pure_alias_without_a_source_collision_expands() {
+        // `ORDER BY total + 0` with NO source column `total` (MySQL/SQLite allow a nested alias here): the
+        // reference is the alias, so it expands.
+        let nested = ExprNode::Binary {
+            op: ArithmeticOp::Add,
+            left: Box::new(bare("total")),
+            right: Box::new(lit("0")),
+        };
+        let out = canon(
+            total_view(Some("total"), vec![nested]),
+            &QCatalog(vec!["amount".to_owned()]),
+        );
+        assert_eq!(
+            out.order_by[0].expr,
+            ExprNode::Binary {
+                op: ArithmeticOp::Add,
+                left: Box::new(amount_times_two()),
+                right: Box::new(lit("0")),
+            }
+        );
+    }
+
+    #[test]
+    fn a_self_referential_alias_expands_once_and_terminates() {
+        // A degenerate hand-authored/KDL projection whose alias names itself (`x + 1 AS x`, no source column
+        // `x`), referenced nested in a clause. Expansion inserts the projection expression, which carries a
+        // bare `x` again — so a walker that re-descended into its own replacement would expand forever and
+        // blow the stack. The inserted expression is a resolved leaf: `x` expands ONCE, and the bare `x`
+        // inside the replacement is left alone (no source exposes it to bind to).
+        let self_ref = ExprNode::Binary {
+            op: ArithmeticOp::Add,
+            left: Box::new(bare("x")),
+            right: Box::new(lit("1")),
+        };
+        let query = ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "x".to_owned(),
+                internal_alias: Some("x".to_owned()),
+                expr: self_ref.clone(),
+            }],
+            from: Some(q_source()),
+            order_by: vec![OrderItem {
+                expr: ExprNode::Binary {
+                    op: ArithmeticOp::Add,
+                    left: Box::new(bare("x")),
+                    right: Box::new(lit("0")),
+                },
+                direction: None,
+                nulls: None,
+            }],
+            ..ViewQueryModel::default()
+        };
+        let out = canon(query, &QCatalog(vec!["amount".to_owned()]));
+        assert_eq!(
+            out.order_by[0].expr,
+            ExprNode::Binary {
+                op: ArithmeticOp::Add,
+                left: Box::new(self_ref),
+                right: Box::new(lit("0")),
+            }
+        );
+    }
+
+    #[test]
+    fn a_standalone_source_column_order_by_is_left_as_a_bound_column() {
+        // `ORDER BY amount` names a source column, not an alias — it binds to `q.amount` (idempotent: the
+        // desired side already carries `Column`, the introspected bare form converges to it).
+        let out = canon(
+            total_view(None, vec![bare("amount")]),
+            &QCatalog(vec!["amount".to_owned()]),
+        );
+        assert_eq!(out.order_by[0].expr, q_col("amount"));
+    }
+
+    #[test]
+    fn an_already_expanded_introspected_clause_is_unchanged() {
+        // The introspected side already carries the expression (the deparser expanded it): the pass is a
+        // no-op, so it converges with the expanded desired side.
+        let out = canon(
+            total_view(None, vec![amount_times_two()]),
+            &QCatalog(vec!["amount".to_owned(), "total".to_owned()]),
+        );
+        assert_eq!(out.order_by[0].expr, amount_times_two());
+    }
+
+    #[test]
+    fn adversarial_two_distinct_views_do_not_collapse() {
+        // A view ordering by the ALIAS and one ordering by a genuine SOURCE column `total` must NOT
+        // canonicalize to the same body — else a real change would be a false-EQUAL and skip a replacement.
+        let by_alias = canon(
+            total_view(Some("total"), vec![bare("total")]),
+            &QCatalog(vec!["amount".to_owned(), "total".to_owned()]),
+        );
+        // The second view genuinely orders by the source column (nested, so it is the source).
+        let by_source_nested = canon(
+            total_view(
+                Some("total"),
+                vec![ExprNode::Binary {
+                    op: ArithmeticOp::Add,
+                    left: Box::new(bare("total")),
+                    right: Box::new(lit("0")),
+                }],
+            ),
+            &QCatalog(vec!["amount".to_owned(), "total".to_owned()]),
+        );
+        assert_ne!(by_alias.order_by[0].expr, by_source_nested.order_by[0].expr);
+    }
+
+    #[test]
+    fn group_by_and_having_alias_references_expand() {
+        let mut query = total_view(Some("total"), Vec::new());
+        query.group_by = vec![bare("total")];
+        query.having = Some(bare("total"));
+        let out = canon(query, &QCatalog(vec!["amount".to_owned()]));
+        assert_eq!(out.group_by[0], amount_times_two());
+        assert_eq!(out.having, Some(amount_times_two()));
+    }
+
+    #[test]
+    fn standalone_group_by_colliding_with_a_source_column_rebinds_to_source() {
+        // Unlike `ORDER BY`, a standalone `GROUP BY total` colliding with a source column `total` resolves to
+        // the SOURCE column on PostgreSQL/MySQL/SQLite (verified live) — it must rebind, not expand, or two
+        // semantically different grouped views would collapse (false-equal).
+        let mut query = total_view(Some("total"), Vec::new());
+        query.group_by = vec![bare("total")];
+        let out = canon(
+            query,
+            &QCatalog(vec!["amount".to_owned(), "total".to_owned()]),
+        );
+        assert_eq!(out.group_by[0], q_col("total"));
+    }
+
+    #[test]
+    fn standalone_having_colliding_with_a_source_column_rebinds_to_source() {
+        let mut query = total_view(Some("total"), Vec::new());
+        query.having = Some(bare("total"));
+        let out = canon(
+            query,
+            &QCatalog(vec!["amount".to_owned(), "total".to_owned()]),
+        );
+        assert_eq!(out.having, Some(q_col("total")));
+    }
+
+    #[test]
+    fn a_column_list_output_name_is_not_a_referenceable_alias() {
+        // A view always renders a `(<columns>)` list, suppressing each projection's `AS`; so an output name
+        // with NO kept internal alias is not an in-scope alias. A clause bare name matching it is the source
+        // column (rebind), never the projection expression.
+        let mut query = total_view(None, vec![bare("total")]); // internal_alias: None, output_name: "total"
+        query.order_by[0].expr = bare("total");
+        let out = canon(
+            query,
+            &QCatalog(vec!["amount".to_owned(), "total".to_owned()]),
+        );
+        assert_eq!(out.order_by[0].expr, q_col("total"));
+    }
+
+    #[test]
+    fn output_name_is_referenceable_only_without_a_column_list() {
+        let cs = ClauseCtx {
+            catalog: &QCatalog(vec![]),
+            dialect: test_dialect(IdentifierCase::Sensitive, false),
+        };
+        // Column-listed scope (top-level view / `WITH cte (cols)`): output_name is NOT an in-scope alias.
+        let computed = vec![ProjectionItem {
+            output_name: "total".to_owned(),
+            internal_alias: None,
+            expr: amount_times_two(),
+        }];
+        assert!(referenceable_alias_expr(&computed, "total", true, &cs).is_none());
+        // Non-column-listed scope (set arm / column-list-less CTE / derived table / subquery): it IS.
+        assert_eq!(
+            referenceable_alias_expr(&computed, "total", false, &cs),
+            Some(&amount_times_two())
+        );
+        // A kept internal alias is referenceable regardless of the column list.
+        let aliased = vec![ProjectionItem {
+            output_name: "n".to_owned(),
+            internal_alias: Some("total".to_owned()),
+            expr: amount_times_two(),
+        }];
+        assert_eq!(
+            referenceable_alias_expr(&aliased, "total", true, &cs),
+            Some(&amount_times_two())
+        );
+        // A plain column named after itself is a source column, not an alias.
+        let self_named = vec![ProjectionItem {
+            output_name: "amount".to_owned(),
+            internal_alias: None,
+            expr: q_col("amount"),
+        }];
+        assert!(referenceable_alias_expr(&self_named, "amount", false, &cs).is_none());
+        // Case-insensitive backend: an alias `Total` is referenceable by `total`.
+        let ci = ClauseCtx {
+            catalog: &QCatalog(vec![]),
+            dialect: test_dialect(IdentifierCase::AsciiInsensitive, false),
+        };
+        let mixed = vec![ProjectionItem {
+            output_name: "n".to_owned(),
+            internal_alias: Some("Total".to_owned()),
+            expr: amount_times_two(),
+        }];
+        assert_eq!(
+            referenceable_alias_expr(&mixed, "total", true, &ci),
+            Some(&amount_times_two())
+        );
+    }
+
+    #[test]
+    fn a_join_group_by_binds_to_the_unique_source_that_exposes_the_name() {
+        // Two-source join `FROM t q JOIN u u`: `t` exposes `amount`, `u` exposes `total`. A `GROUP BY total`
+        // colliding with the `total` alias resolves to the source column (GROUP BY), and exactly one source
+        // (`u`) exposes it, so it binds to `u.total` — matching the deparser's qualified form.
+        struct MultiCatalog;
+        impl ViewSourceColumns for MultiCatalog {
+            fn source_columns(&self, source: &SourceRef) -> Option<Vec<String>> {
+                match source.name.as_str() {
+                    "t" => Some(vec!["amount".to_owned()]),
+                    "u" => Some(vec!["total".to_owned()]),
+                    _ => None,
+                }
+            }
+        }
+        let query = ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "total".to_owned(),
+                internal_alias: Some("total".to_owned()),
+                expr: amount_times_two(),
+            }],
+            from: Some(q_source()),
+            joins: vec![JoinItem {
+                kind: JoinKind::Inner,
+                source: SourceItem::Named(SourceRef {
+                    schema: None,
+                    name: "u".to_owned(),
+                    alias: "u".to_owned(),
+                }),
+                on: None,
+            }],
+            group_by: vec![bare("total")],
+            ..ViewQueryModel::default()
+        };
+        let out = canon(query, &MultiCatalog);
+        assert_eq!(
+            out.group_by[0],
+            ExprNode::Column {
+                alias: "u".to_owned(),
+                column: "total".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_unresolved_source_leaves_a_group_by_alias_bare() {
+        // When a source cannot be resolved (an unknown/external relation, or a join scope), a `GROUP BY` /
+        // nested name that might be a hidden source column is left bare rather than expanded — a harmless
+        // re-plan, never a false-equal.
+        struct EmptyCatalog;
+        impl ViewSourceColumns for EmptyCatalog {
+            fn source_columns(&self, _source: &SourceRef) -> Option<Vec<String>> {
+                None
+            }
+        }
+        let mut query = total_view(Some("total"), Vec::new());
+        query.group_by = vec![bare("total")];
+        let mut body = ViewBody::Select(Box::new(query));
+        canonicalize_view_clause_aliases(
+            &mut body,
+            &EmptyCatalog,
+            test_dialect(IdentifierCase::Sensitive, false),
+            true,
+        );
+        let ViewBody::Select(query) = body else {
+            unreachable!()
+        };
+        assert_eq!(query.group_by[0], bare("total"));
+    }
+
+    #[test]
+    fn a_standalone_order_by_alias_expands_even_with_an_unresolved_source() {
+        // A standalone `ORDER BY` alias wins any collision on every dialect, so it expands even when the
+        // source is unresolved.
+        struct EmptyCatalog;
+        impl ViewSourceColumns for EmptyCatalog {
+            fn source_columns(&self, _source: &SourceRef) -> Option<Vec<String>> {
+                None
+            }
+        }
+        let query = total_view(Some("total"), vec![bare("total")]);
+        let mut body = ViewBody::Select(Box::new(query));
+        canonicalize_view_clause_aliases(
+            &mut body,
+            &EmptyCatalog,
+            test_dialect(IdentifierCase::Sensitive, false),
+            true,
+        );
+        let ViewBody::Select(query) = body else {
+            unreachable!()
+        };
+        assert_eq!(query.order_by[0].expr, amount_times_two());
+    }
+
+    #[test]
+    fn case_sensitivity_governs_collision_detection() {
+        // Source column `Total` (mixed case) vs projection alias `total`, nested `ORDER BY total + 0`.
+        // MySQL/SQLite fold case: `total` collides with `Total` and rebinds to the source. PostgreSQL is
+        // case-sensitive: they are distinct, so the alias expands.
+        let nested = || ExprNode::Binary {
+            op: ArithmeticOp::Add,
+            left: Box::new(bare("total")),
+            right: Box::new(lit("0")),
+        };
+        let run = |case_insensitive: bool| {
+            let mut body = ViewBody::Select(Box::new(total_view(Some("total"), vec![nested()])));
+            let case = if case_insensitive {
+                IdentifierCase::AsciiInsensitive
+            } else {
+                IdentifierCase::Sensitive
+            };
+            canonicalize_view_clause_aliases(
+                &mut body,
+                &QCatalog(vec!["amount".to_owned(), "Total".to_owned()]),
+                test_dialect(case, false),
+                true,
+            );
+            let ViewBody::Select(query) = body else {
+                unreachable!()
+            };
+            query.order_by[0].expr.clone()
+        };
+        // Case-insensitive (MySQL/SQLite): rebind to the source column, using the source's OWN spelling
+        // (`Total`) — the form the deparser emits — not the clause reference's casing (`total`).
+        assert_eq!(
+            run(true),
+            ExprNode::Binary {
+                op: ArithmeticOp::Add,
+                left: Box::new(ExprNode::Column {
+                    alias: "q".to_owned(),
+                    column: "Total".to_owned(),
+                }),
+                right: Box::new(lit("0")),
+            }
+        );
+        // Case-sensitive (PostgreSQL): no collision, the alias expands.
+        assert_eq!(
+            run(false),
+            ExprNode::Binary {
+                op: ArithmeticOp::Add,
+                left: Box::new(amount_times_two()),
+                right: Box::new(lit("0")),
+            }
+        );
+    }
+
+    #[test]
+    fn unicode_case_folding_detects_a_non_ascii_collision_on_mysql() {
+        // MySQL folds the full Unicode range: a nested `ORDER BY total` where the source column is `TOTAL`
+        // is caught by ASCII folding, but a source column `TÖTAL` vs clause `tötal` needs Unicode folding —
+        // it must be recognised as a collision and rebound to the source, not expanded to the alias.
+        let nested = ExprNode::Binary {
+            op: ArithmeticOp::Add,
+            left: Box::new(bare("tötal")),
+            right: Box::new(lit("0")),
+        };
+        let mut body = ViewBody::Select(Box::new(ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "tötal".to_owned(),
+                internal_alias: Some("tötal".to_owned()),
+                expr: amount_times_two(),
+            }],
+            from: Some(q_source()),
+            order_by: vec![OrderItem {
+                expr: nested,
+                direction: None,
+                nulls: None,
+            }],
+            ..ViewQueryModel::default()
+        }));
+        canonicalize_view_clause_aliases(
+            &mut body,
+            &QCatalog(vec!["amount".to_owned(), "TÖTAL".to_owned()]),
+            test_dialect(IdentifierCase::UnicodeInsensitive, false),
+            true,
+        );
+        let ViewBody::Select(query) = body else {
+            unreachable!()
+        };
+        // Unicode folding recognised `tötal` == `TÖTAL`, so the nested reference rebinds to the source column.
+        assert_eq!(
+            query.order_by[0].expr,
+            ExprNode::Binary {
+                op: ArithmeticOp::Add,
+                left: Box::new(ExprNode::Column {
+                    alias: "q".to_owned(),
+                    column: "TÖTAL".to_owned(),
+                }),
+                right: Box::new(lit("0")),
+            }
+        );
+    }
+
+    #[test]
+    fn a_non_recursive_cte_body_does_not_see_itself() {
+        // `WITH c AS (SELECT (q.amount*2) AS total FROM t q ORDER BY total + 0)` — non-recursive, so `c` is
+        // not in scope inside its own body; the nested `total` resolves against `t` (which has no `total`),
+        // so it is the projection alias and expands. (A recursive CTE, whose body DOES see itself, is
+        // exercised by the round-trip corpus.)
+        let cte_body = ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "total".to_owned(),
+                internal_alias: Some("total".to_owned()),
+                expr: amount_times_two(),
+            }],
+            from: Some(q_source()),
+            order_by: vec![OrderItem {
+                expr: ExprNode::Binary {
+                    op: ArithmeticOp::Add,
+                    left: Box::new(bare("total")),
+                    right: Box::new(lit("0")),
+                },
+                direction: None,
+                nulls: None,
+            }],
+            ..ViewQueryModel::default()
+        };
+        let mut body = ViewBody::With {
+            recursive: false,
+            ctes: vec![CteModel {
+                name: "c".to_owned(),
+                columns: vec!["total".to_owned()],
+                body: ViewBody::Select(Box::new(cte_body)),
+            }],
+            body: Box::new(ViewBody::Select(Box::new(ViewQueryModel {
+                projection: vec![ProjectionItem {
+                    output_name: "total".to_owned(),
+                    internal_alias: None,
+                    expr: ExprNode::Column {
+                        alias: "c".to_owned(),
+                        column: "total".to_owned(),
+                    },
+                }],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: None,
+                    name: "c".to_owned(),
+                    alias: "c".to_owned(),
+                })),
+                ..ViewQueryModel::default()
+            }))),
+        };
+        // `t` exposes only `amount` (no `total`), so the CTE body's nested `total` is the alias and expands.
+        canonicalize_view_clause_aliases(
+            &mut body,
+            &QCatalog(vec!["amount".to_owned()]),
+            test_dialect(IdentifierCase::Sensitive, false),
+            true,
+        );
+        let ViewBody::With { ctes, .. } = &body else {
+            unreachable!()
+        };
+        let ViewBody::Select(cte_query) = &ctes[0].body else {
+            unreachable!()
+        };
+        assert_eq!(
+            cte_query.order_by[0].expr,
+            ExprNode::Binary {
+                op: ArithmeticOp::Add,
+                left: Box::new(amount_times_two()),
+                right: Box::new(lit("0")),
+            }
+        );
+    }
+
+    #[test]
+    fn a_forward_cte_reference_is_visible_only_when_the_dialect_allows_it() {
+        // `WITH a AS (SELECT (bq.x*2) AS total FROM b bq ORDER BY total + 0), b (total) AS (...)` — CTE `a`
+        // forward-references later sibling `b`, which exposes `total`. On SQLite (forward refs visible) the
+        // nested `total` is `b`'s source column and rebinds to `bq.total`; on PostgreSQL/MySQL `b` is not
+        // visible to `a`, so the source is unresolved and the name is left bare (a harmless re-plan).
+        struct EmptyCatalog;
+        impl ViewSourceColumns for EmptyCatalog {
+            fn source_columns(&self, _source: &SourceRef) -> Option<Vec<String>> {
+                None
+            }
+        }
+        let make = |recursive: bool| {
+            let a_body = ViewQueryModel {
+                projection: vec![ProjectionItem {
+                    output_name: "total".to_owned(),
+                    internal_alias: Some("total".to_owned()),
+                    expr: ExprNode::Binary {
+                        op: ArithmeticOp::Multiply,
+                        left: Box::new(ExprNode::Column {
+                            alias: "bq".to_owned(),
+                            column: "x".to_owned(),
+                        }),
+                        right: Box::new(lit("2")),
+                    },
+                }],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: None,
+                    name: "b".to_owned(),
+                    alias: "bq".to_owned(),
+                })),
+                order_by: vec![OrderItem {
+                    expr: ExprNode::Binary {
+                        op: ArithmeticOp::Add,
+                        left: Box::new(bare("total")),
+                        right: Box::new(lit("0")),
+                    },
+                    direction: None,
+                    nulls: None,
+                }],
+                ..ViewQueryModel::default()
+            };
+            let b_body = ViewQueryModel {
+                projection: vec![ProjectionItem {
+                    output_name: "total".to_owned(),
+                    internal_alias: None,
+                    expr: ExprNode::Column {
+                        alias: "tq".to_owned(),
+                        column: "total".to_owned(),
+                    },
+                }],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: None,
+                    name: "t".to_owned(),
+                    alias: "tq".to_owned(),
+                })),
+                ..ViewQueryModel::default()
+            };
+            ViewBody::With {
+                recursive,
+                ctes: vec![
+                    CteModel {
+                        name: "a".to_owned(),
+                        columns: Vec::new(),
+                        body: ViewBody::Select(Box::new(a_body)),
+                    },
+                    CteModel {
+                        name: "b".to_owned(),
+                        columns: vec!["total".to_owned()],
+                        body: ViewBody::Select(Box::new(b_body)),
+                    },
+                ],
+                body: Box::new(ViewBody::Select(Box::new(ViewQueryModel {
+                    projection: vec![ProjectionItem {
+                        output_name: "total".to_owned(),
+                        internal_alias: None,
+                        expr: ExprNode::Column {
+                            alias: "aq".to_owned(),
+                            column: "total".to_owned(),
+                        },
+                    }],
+                    from: Some(SourceItem::Named(SourceRef {
+                        schema: None,
+                        name: "a".to_owned(),
+                        alias: "aq".to_owned(),
+                    })),
+                    ..ViewQueryModel::default()
+                }))),
+            }
+        };
+        let a_order = |recursive: bool, forward_flag: bool, recursive_forward: bool| {
+            let mut body = make(recursive);
+            canonicalize_view_clause_aliases(
+                &mut body,
+                &EmptyCatalog,
+                ViewClauseDialect {
+                    identifier_case: IdentifierCase::AsciiInsensitive,
+                    cte_forward_references_visible: forward_flag,
+                    recursive_exposes_forward_ctes: recursive_forward,
+                },
+                true,
+            );
+            let ViewBody::With { ctes, .. } = body else {
+                unreachable!()
+            };
+            let ViewBody::Select(a) = &ctes[0].body else {
+                unreachable!()
+            };
+            a.order_by[0].expr.clone()
+        };
+        let rebound = ExprNode::Binary {
+            op: ArithmeticOp::Add,
+            left: Box::new(ExprNode::Column {
+                alias: "bq".to_owned(),
+                column: "total".to_owned(),
+            }),
+            right: Box::new(lit("0")),
+        };
+        let left_bare = ExprNode::Binary {
+            op: ArithmeticOp::Add,
+            left: Box::new(bare("total")),
+            right: Box::new(lit("0")),
+        };
+        // SQLite (plain `WITH` forward refs visible): the nested `total` is `b.total`, rebound to `bq.total`.
+        assert_eq!(a_order(false, true, false), rebound);
+        // PostgreSQL/MySQL plain `WITH` (no forward refs): `b` is a HIDDEN local CTE, so it resolves to
+        // nothing (not a same-named catalog table) and `total` is left bare — a harmless re-plan, never wrong DDL.
+        assert_eq!(a_order(false, false, false), left_bare);
+        // MySQL `WITH RECURSIVE` (does NOT expose later siblings): still hidden, so left bare.
+        assert_eq!(a_order(true, false, false), left_bare);
+        // PostgreSQL `WITH RECURSIVE` (DOES expose later siblings): `b` is visible, so it rebinds.
+        assert_eq!(a_order(true, false, true), rebound);
+    }
+
+    #[test]
+    fn a_column_list_less_view_treats_output_name_as_an_alias() {
+        // A view with NO declared columns renders each projection `AS output_name`, so `ORDER BY total` names
+        // the computed alias and expands (top_level_column_listed = false) — even though `total` is also a
+        // source column, a standalone `ORDER BY` alias wins.
+        let query = total_view(None, vec![bare("total")]);
+        let mut body = ViewBody::Select(Box::new(query));
+        canonicalize_view_clause_aliases(
+            &mut body,
+            &QCatalog(vec!["amount".to_owned(), "total".to_owned()]),
+            test_dialect(IdentifierCase::Sensitive, false),
+            false, // no declared column list
+        );
+        let ViewBody::Select(query) = body else {
+            unreachable!()
+        };
+        assert_eq!(query.order_by[0].expr, amount_times_two());
+    }
+
+    #[test]
+    fn expanding_an_alias_binds_its_bare_source_columns() {
+        // Projection `(b + 1) AS a` carrying a BARE source column `b` (a hand-built/KDL body); a standalone
+        // `ORDER BY a` expands to `b + 1`, and the inserted `b` must bind to `q.b` so the canonical form is
+        // fully resolved (idempotent with the deparser's qualified output).
+        let query = ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "a".to_owned(),
+                internal_alias: Some("a".to_owned()),
+                expr: ExprNode::Binary {
+                    op: ArithmeticOp::Add,
+                    left: Box::new(bare("b")),
+                    right: Box::new(lit("1")),
+                },
+            }],
+            from: Some(q_source()),
+            order_by: vec![OrderItem {
+                expr: bare("a"),
+                direction: None,
+                nulls: None,
+            }],
+            ..ViewQueryModel::default()
+        };
+        let out = canon(query, &QCatalog(vec!["b".to_owned()]));
+        assert_eq!(
+            out.order_by[0].expr,
+            ExprNode::Binary {
+                op: ArithmeticOp::Add,
+                left: Box::new(q_col("b")),
+                right: Box::new(lit("1")),
+            }
+        );
+    }
+
+    #[test]
+    fn a_raw_clause_retains_internal_aliases() {
+        // An opaque `Raw` clause (a legacy-package or hand-built body) may reference an alias by name the
+        // structural scan cannot see; pruning must conservatively retain every internal alias.
+        let mut query = total_view(Some("total"), Vec::new());
+        query.order_by = vec![OrderItem {
+            expr: ExprNode::Raw("total".to_owned()),
+            direction: None,
+            nulls: None,
+        }];
+        let out = canon(query, &QCatalog(vec!["amount".to_owned()]));
+        assert_eq!(out.projection[0].internal_alias.as_deref(), Some("total"));
+    }
+
+    #[test]
+    fn a_cte_lookup_is_case_insensitive_on_folding_backends() {
+        // A CTE declared `C` referenced as `c` must still shadow the global catalog on MySQL/SQLite.
+        struct EmptyCatalog;
+        impl ViewSourceColumns for EmptyCatalog {
+            fn source_columns(&self, _source: &SourceRef) -> Option<Vec<String>> {
+                None
+            }
+        }
+        let inner = ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "total".to_owned(),
+                internal_alias: None,
+                expr: q_col("x"),
+            }],
+            from: Some(q_source()),
+            ..ViewQueryModel::default()
+        };
+        let outer = ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "total".to_owned(),
+                internal_alias: Some("total".to_owned()),
+                expr: ExprNode::Binary {
+                    op: ArithmeticOp::Multiply,
+                    left: Box::new(ExprNode::Column {
+                        alias: "c".to_owned(),
+                        column: "total".to_owned(),
+                    }),
+                    right: Box::new(lit("2")),
+                },
+            }],
+            from: Some(SourceItem::Named(SourceRef {
+                schema: None,
+                name: "c".to_owned(), // referenced lower-case...
+                alias: "c".to_owned(),
+            })),
+            order_by: vec![OrderItem {
+                expr: ExprNode::Binary {
+                    op: ArithmeticOp::Add,
+                    left: Box::new(bare("total")),
+                    right: Box::new(lit("0")),
+                },
+                direction: None,
+                nulls: None,
+            }],
+            ..ViewQueryModel::default()
+        };
+        let mut body = ViewBody::With {
+            recursive: false,
+            ctes: vec![CteModel {
+                name: "C".to_owned(), // ...declared upper-case
+                columns: vec!["total".to_owned()],
+                body: ViewBody::Select(Box::new(inner)),
+            }],
+            body: Box::new(ViewBody::Select(Box::new(outer))),
+        };
+        // Case-insensitive backend: `c` resolves to CTE `C`, so nested `total` is its source column (rebind).
+        canonicalize_view_clause_aliases(
+            &mut body,
+            &EmptyCatalog,
+            test_dialect(IdentifierCase::AsciiInsensitive, false),
+            true,
+        );
+        let ViewBody::With { body, .. } = &body else {
+            unreachable!()
+        };
+        let ViewBody::Select(query) = body.as_ref() else {
+            unreachable!()
+        };
+        assert_eq!(
+            query.order_by[0].expr,
+            ExprNode::Binary {
+                op: ArithmeticOp::Add,
+                left: Box::new(ExprNode::Column {
+                    alias: "c".to_owned(),
+                    column: "total".to_owned(),
+                }),
+                right: Box::new(lit("0")),
+            }
+        );
+    }
+
+    #[test]
+    fn a_cte_source_column_shadows_the_global_catalog() {
+        // `WITH c AS (...) SELECT (q.x * 2) AS total FROM c q ORDER BY total + 0` — the CTE `c` exposes a
+        // `total` column, so the nested `total` is a source column and rebinds, even though the global
+        // catalog has no such table.
+        struct EmptyCatalog;
+        impl ViewSourceColumns for EmptyCatalog {
+            fn source_columns(&self, _source: &SourceRef) -> Option<Vec<String>> {
+                None
+            }
+        }
+        let inner = ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "total".to_owned(),
+                internal_alias: None,
+                expr: q_col("x"),
+            }],
+            from: Some(q_source()),
+            ..ViewQueryModel::default()
+        };
+        let outer = ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "total".to_owned(),
+                internal_alias: Some("total".to_owned()),
+                expr: ExprNode::Binary {
+                    op: ArithmeticOp::Multiply,
+                    left: Box::new(ExprNode::Column {
+                        alias: "c".to_owned(),
+                        column: "x".to_owned(),
+                    }),
+                    right: Box::new(lit("2")),
+                },
+            }],
+            from: Some(SourceItem::Named(SourceRef {
+                schema: None,
+                name: "c".to_owned(),
+                alias: "c".to_owned(),
+            })),
+            order_by: vec![OrderItem {
+                expr: ExprNode::Binary {
+                    op: ArithmeticOp::Add,
+                    left: Box::new(bare("total")),
+                    right: Box::new(lit("0")),
+                },
+                direction: None,
+                nulls: None,
+            }],
+            ..ViewQueryModel::default()
+        };
+        let mut body = ViewBody::With {
+            recursive: false,
+            ctes: vec![CteModel {
+                name: "c".to_owned(),
+                columns: vec!["total".to_owned()],
+                body: ViewBody::Select(Box::new(inner)),
+            }],
+            body: Box::new(ViewBody::Select(Box::new(outer))),
+        };
+        canonicalize_view_clause_aliases(
+            &mut body,
+            &EmptyCatalog,
+            test_dialect(IdentifierCase::Sensitive, false),
+            true,
+        );
+        let ViewBody::With { body, .. } = &body else {
+            unreachable!()
+        };
+        let ViewBody::Select(query) = body.as_ref() else {
+            unreachable!()
+        };
+        // The nested `total` rebound to the CTE source column `c.total`, not the projection expression.
+        assert_eq!(
+            query.order_by[0].expr,
+            ExprNode::Binary {
+                op: ArithmeticOp::Add,
+                left: Box::new(ExprNode::Column {
+                    alias: "c".to_owned(),
+                    column: "total".to_owned(),
+                }),
+                right: Box::new(lit("0")),
+            }
+        );
     }
 
     fn cmp(op: CompareOp, left: ExprNode, right: ExprNode) -> ExprNode {

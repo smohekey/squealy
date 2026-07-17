@@ -567,13 +567,14 @@ pub use squealy_ir::{
     AggregateFunc, ArithmeticOp, CaseArm, CheckModel, ColumnModel, CompareOp, Constraint,
     ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, CteModel, DateField,
     DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, FrameBound,
-    FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
-    IndexPrefixLength, JoinItem, JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls,
-    ProjectionItem, ScalarFunc, SchemaModel, SourceItem, SourceRef, SqlType, TableModel, ViewBody,
-    ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp, WindowFunc, WindowOrderTerm,
+    FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage, IdentifierCase, IdentityMode,
+    IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
+    IndexOperatorClass, IndexPrefixLength, JoinItem, JoinKind, LogicalOp, OrderDirection,
+    OrderItem, OrderNulls, ProjectionItem, ScalarFunc, SchemaModel, SourceItem, SourceRef, SqlType,
+    TableModel, ViewBody, ViewClauseDialect, ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
+    ViewSourceColumns, WindowFunc, WindowOrderTerm, canonicalize_view_clause_aliases,
     fold_like_case_insensitivity, map_cast_types, normalize_expr, prefix_length_shape_error,
-    visit_scope_exprs,
+    view_body_output_names, visit_scope_exprs,
 };
 pub use squealy_macros::{CTE, ColumnType, Database, RecursiveCTE, Schema, Table, View};
 pub use table::{
