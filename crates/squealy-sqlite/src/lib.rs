@@ -70,6 +70,13 @@ pub enum SqliteError {
     Introspect(#[source] tokio_rusqlite::Error),
     #[error("sqlite query error: {0}")]
     Query(#[source] tokio_rusqlite::Error),
+    #[error(
+        "refusing to apply: SQLite must drop and recreate a view to apply this plan, which would \
+         destroy INSTEAD OF triggers squealy does not model and cannot recreate ({}). Recreate them \
+         yourself after applying, and re-run with a policy that allows destructive changes to proceed.",
+        triggers.join(", ")
+    )]
+    DependentTriggers { triggers: Vec<String> },
     #[error("query returned no rows")]
     NoRows,
     #[error("row is missing column {0}")]
@@ -222,6 +229,147 @@ impl DdlExecutor for SqliteConnection {
             .await
             .map_err(SqliteError::Execute)
     }
+
+    /// Refuses a plan that would silently destroy a view's `INSTEAD OF` triggers (git-bug 6a3940a).
+    ///
+    /// SQLite has no `CREATE OR REPLACE VIEW`, so every view change applies as `DROP VIEW` +
+    /// `CREATE VIEW`, and a rebuild of a table under a view drops that view too (see
+    /// [`plan_view_drops`](crate::sql::plan_view_drops)) — `DROP VIEW` takes the view's `INSTEAD OF`
+    /// triggers with it, and squealy has no trigger model, so nothing recreates them. Writes through a
+    /// writeable view then fail, with no step in the plan naming the view.
+    ///
+    /// This bites two paths the neutral risk classification calls safe: a view-body change (one
+    /// `CreateView` step, classified `Safe` because it is `CREATE OR REPLACE` on PostgreSQL/MySQL), and
+    /// a table rebuild forced by a change that is genuinely safe elsewhere (`ADD CHECK`/`ADD UNIQUE`,
+    /// which SQLite cannot `ALTER ... ADD CONSTRAINT`), whose plan need not mention the view at all.
+    /// So this refuses rather than reclassifies: the drop set is a rendering decision only this backend
+    /// can compute, and the trigger is only visible in the live database.
+    ///
+    /// Preserving the triggers is NOT attempted. Replaying their captured DDL was tried and retired
+    /// (PR #81): a trigger's real dependency surface is its body, so a replay cannot be validated
+    /// without modelling triggers — a batch can rebuild a base table, leave the view byte-identical,
+    /// and leave the trigger body referencing dropped columns. Refusing loudly is what this backend can
+    /// honestly promise until triggers are modelled (epic acb1c6d Phase 3).
+    ///
+    /// The check runs **inside the batch's own transaction**, immediately before the DDL: checked in a
+    /// separate round-trip, a concurrent connection could create a trigger after the check cleared the
+    /// view and the batch would destroy it regardless — the silent loss this exists to prevent.
+    async fn execute_plan_ddl(
+        &mut self,
+        sql: &str,
+        plan: &DatabasePlan,
+        desired: &DatabaseModel,
+        allow_destructive: bool,
+    ) -> Result<(), SqliteError> {
+        // The drop set is pure (plan + desired), so compute it before entering the connection thread;
+        // only the trigger lookup needs the live catalog, and that happens inside the transaction.
+        let guarded: Vec<String> = if allow_destructive {
+            Vec::new()
+        } else {
+            sql::plan_view_drops(plan, desired)
+                .dropped()
+                .map(|view| view.name.clone())
+                .collect()
+        };
+        let sql = sql.to_owned();
+        // A refusal is an outcome, not a SQLite failure: the closure yields the doomed trigger names
+        // rather than an error, so the ordinary error type (and its mapping) is untouched.
+        let refused = self
+            .conn
+            .call(move |conn| {
+                let was_on: bool =
+                    conn.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))? != 0;
+                conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+                let result = apply_guarded_ddl_batch(conn, &sql, &guarded);
+                let restore = if was_on {
+                    "PRAGMA foreign_keys = ON"
+                } else {
+                    "PRAGMA foreign_keys = OFF"
+                };
+                let restored = conn.execute_batch(restore);
+                // A batch failure outranks a failure to restore the pragma, as before.
+                match result {
+                    Err(error) => Err(error),
+                    Ok(outcome) => restored.map(|()| outcome),
+                }
+            })
+            .await
+            .map_err(SqliteError::Execute)?;
+        match refused {
+            Some(triggers) => Err(SqliteError::DependentTriggers { triggers }),
+            None => Ok(()),
+        }
+    }
+}
+
+/// [`apply_ddl_batch`], preceded by the view-trigger guard — in the same transaction, so a trigger
+/// created concurrently after the guard cleared cannot be silently destroyed by the batch (another
+/// writer cannot commit while this transaction holds its read, and a WAL snapshot conflict fails the
+/// batch loudly rather than losing the trigger).
+///
+/// Returns `Ok(Some(triggers))` when the batch is REFUSED — no DDL ran, and dropping the transaction
+/// rolls back the read. `Ok(None)` means the batch applied and committed. `guarded` is empty when the
+/// caller allowed destructive changes, which makes this exactly [`apply_ddl_batch`].
+fn apply_guarded_ddl_batch(
+    conn: &mut rusqlite::Connection,
+    sql: &str,
+    guarded: &[String],
+) -> rusqlite::Result<Option<Vec<String>>> {
+    let transaction = conn.transaction()?;
+    let doomed = view_triggers(&transaction, guarded)?;
+    if !doomed.is_empty() {
+        return Ok(Some(doomed));
+    }
+    transaction.execute_batch(sql)?;
+    let has_violation = {
+        let mut check = transaction.prepare("PRAGMA foreign_key_check")?;
+        let mut rows = check.query([])?;
+        rows.next()?.is_some()
+    };
+    if has_violation {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+            Some("foreign key constraint violation after applying the schema change".to_owned()),
+        ));
+    }
+    transaction.commit().map(|()| None)
+}
+
+/// The live triggers attached to any of `views`, as `trigger ON view` pairs — what a `DROP VIEW` of
+/// those views would destroy.
+///
+/// Reads **both** trigger catalogs: a `TEMP` trigger on a main-schema view lives in
+/// `sqlite_temp_master`, not `sqlite_master`, and `DROP VIEW` destroys it just the same (verified).
+/// Temp objects are per-connection, so this sees exactly the ones this connection's `DROP VIEW` would
+/// take. (PR #81 abandoned TEMP handling, but that was for *replaying* triggers, where a temp/main
+/// same-name collision could resurrect one onto the wrong object; merely reporting what is about to be
+/// destroyed carries no such ambiguity.)
+///
+/// Names are folded ASCII-only, as SQLite resolves identifiers and as `plan_view_drops` already does:
+/// `"Ä"` and `"ä"` are *distinct* views (verified), so Unicode folding would refuse a plan over a
+/// trigger belonging to an unrelated view.
+fn view_triggers(conn: &rusqlite::Connection, views: &[String]) -> rusqlite::Result<Vec<String>> {
+    if views.is_empty() {
+        return Ok(Vec::new());
+    }
+    let wanted: Vec<String> = views.iter().map(|name| name.to_ascii_lowercase()).collect();
+    let mut statement = conn.prepare(
+        "SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger' \
+         UNION ALL \
+         SELECT name, tbl_name FROM sqlite_temp_master WHERE type = 'trigger' \
+         ORDER BY name",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut found = Vec::new();
+    for row in rows {
+        let (trigger, target) = row?;
+        if wanted.contains(&target.to_ascii_lowercase()) {
+            found.push(format!("{trigger} ON {target}"));
+        }
+    }
+    Ok(found)
 }
 
 /// Applies a DDL batch inside a transaction, re-validating foreign keys before committing. The caller

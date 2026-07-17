@@ -379,6 +379,35 @@ pub trait DdlExecutor {
     ) -> impl Future<Output = Result<(), Self::Error>> {
         self.execute_ddl(sql)
     }
+
+    /// Executes `sql`, already rendered from `plan`, refusing it if applying it would silently destroy
+    /// a live object squealy does not model.
+    ///
+    /// This is [`execute_ddl`](Self::execute_ddl) plus the plan that produced `sql`, so a backend can
+    /// guard the batch against destroying something the neutral engine cannot see. Such a guard needs
+    /// BOTH the live database (to find the unmodelled object) and the backend's own knowledge of what
+    /// its rendering will do — so it belongs here, on the backend's connection, where it can neither be
+    /// bypassed nor drift from the renderer. It also has to run in the **same transaction** as the DDL:
+    /// checked in a separate round-trip, a concurrent connection could create the very object the check
+    /// just cleared, and the batch would destroy it anyway.
+    ///
+    /// `allow_destructive` mirrors the caller's `DiffPolicy::allow_destructive`: when set, the caller
+    /// has already accepted destructive changes, so a backend should let the batch through. (The engine
+    /// crate owns `DiffPolicy` and depends on this one, so the flag crosses as a plain `bool`.)
+    ///
+    /// The default just executes the batch. SQLite overrides it: it has no `CREATE OR REPLACE VIEW`, so
+    /// it applies a view change as `DROP VIEW` + `CREATE VIEW`, and `DROP VIEW` takes that view's
+    /// `INSTEAD OF` triggers with it — triggers squealy has no model for and therefore cannot recreate
+    /// (git-bug 6a3940a).
+    fn execute_plan_ddl(
+        &mut self,
+        sql: &str,
+        _plan: &DatabasePlan,
+        _desired: &DatabaseModel,
+        _allow_destructive: bool,
+    ) -> impl Future<Output = Result<(), Self::Error>> {
+        self.execute_ddl(sql)
+    }
 }
 
 /// Reads a live database schema into the neutral [`DatabaseModel`].
