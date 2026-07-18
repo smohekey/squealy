@@ -521,9 +521,11 @@ async fn publishing_an_enum_then_replanning_is_empty() {
 
 #[tokio::test]
 #[ignore]
-async fn adding_an_enum_label_migrates_additively_then_replans_empty() {
-    // Appending a label is an in-place `ALTER TYPE ... ADD VALUE`: the change applies, then re-plans
-    // empty. (Non-additive changes are covered by the recreate test below.)
+async fn changing_enum_labels_is_rejected_for_now() {
+    // Enum-label migration (append, remove, or reorder) is not supported yet: a correct migration needs
+    // live-schema and whole-plan awareness (live defaults, dependent views/foreign keys, ordering around
+    // table changes, PostgreSQL's ADD VALUE-in-transaction rule). Until then, changing an enum's labels
+    // is refused loudly rather than emitting SQL PostgreSQL would reject or applying a partial migration.
     let _guard = db_lock().lock().await;
     let mut connection = Postgres
         .connect(&database_url())
@@ -538,33 +540,20 @@ async fn adding_an_enum_label_migrates_additively_then_replans_empty() {
         .await
         .expect("publish base enum");
 
-    let extended = enum_fixture(&["sad", "ok", "happy"]);
+    let changed = enum_fixture(&["sad", "ok", "happy"]);
     let plan = squealy_model::plan_from_database(
-        &extended,
+        &changed,
         &mut connection,
-        squealy_model::DiffPolicy::default(),
+        squealy_model::DiffPolicy::ALLOW_ALL,
     )
     .await
-    .expect("plan the label addition");
-    assert!(
-        !plan.steps.is_empty(),
-        "appending a label must produce a plan step"
-    );
-    squealy_model::apply_plan(&plan, &extended, &Postgres, &mut connection)
+    .expect("plan the label change (the diff still detects it)");
+    let error = squealy_model::apply_plan(&plan, &changed, &Postgres, &mut connection)
         .await
-        .expect("apply the label addition");
-
-    let replan = squealy_model::plan_from_database(
-        &extended,
-        &mut connection,
-        squealy_model::DiffPolicy::default(),
-    )
-    .await
-    .expect("re-plan after the label addition");
+        .expect_err("applying an enum label change must be refused");
     assert!(
-        replan.steps.is_empty(),
-        "after appending a label the enum must re-plan empty, got: {:?}",
-        replan.steps
+        error.to_string().contains("mood"),
+        "the refusal must name the enum: {error}"
     );
 
     connection
@@ -575,10 +564,13 @@ async fn adding_an_enum_label_migrates_additively_then_replans_empty() {
 
 #[tokio::test]
 #[ignore]
-async fn reordering_enum_labels_recreates_the_type_then_replans_empty() {
-    // A non-additive change (reorder) cannot use ADD VALUE: the type is recreated and its column
-    // rewritten through text. A pre-existing row keeps its value, and the change re-plans empty.
+async fn publishing_an_enum_column_with_a_default_replans_empty() {
+    // An enum column with a DEFAULT round-trips: PostgreSQL stores the default as `'label'::type`, which
+    // introspection converts back to `DefaultValue::Text(label)` — including a label containing `::`
+    // (`'a::b'::type`), which lives inside the quotes — so it re-plans empty instead of churning.
     let _guard = db_lock().lock().await;
+    let mut model = enum_fixture(&["sad", "ok", "a::b"]);
+    model.schemas[0].tables[0].columns[1].default = Some(DefaultValue::Text("a::b".to_owned()));
     let mut connection = Postgres
         .connect(&database_url())
         .await
@@ -588,102 +580,20 @@ async fn reordering_enum_labels_recreates_the_type_then_replans_empty() {
         .await
         .expect("reset enum fixture");
 
-    squealy_model::publish(
-        &enum_fixture(&["sad", "ok", "happy"]),
-        &Postgres,
-        &mut connection,
-    )
-    .await
-    .expect("publish base enum");
-    connection
-        .execute_ddl("INSERT INTO publish_enums.readings (m) VALUES ('happy')")
+    squealy_model::publish(&model, &Postgres, &mut connection)
         .await
-        .expect("insert a row using the enum");
-
-    // Reorder the labels — a destructive recreate (rename old, create new, rewrite column, drop old).
-    let reordered = enum_fixture(&["happy", "ok", "sad"]);
+        .expect("publish enum + defaulted column");
     let plan = squealy_model::plan_from_database(
-        &reordered,
+        &model,
         &mut connection,
-        squealy_model::DiffPolicy::ALLOW_ALL,
+        squealy_model::DiffPolicy::default(),
     )
     .await
-    .expect("plan the reorder");
-    // The recreate rewrites the column through `USING m::text::mood`; the pre-existing 'happy' row must
-    // survive (its value is still a valid label), so the apply succeeds rather than failing the cast.
-    squealy_model::apply_plan(&plan, &reordered, &Postgres, &mut connection)
-        .await
-        .expect("apply the reorder recreate (the existing row's value must survive the text cast)");
-
-    let replan = squealy_model::plan_from_database(
-        &reordered,
-        &mut connection,
-        squealy_model::DiffPolicy::ALLOW_ALL,
-    )
-    .await
-    .expect("re-plan after the reorder");
+    .expect("re-plan against the defaulted enum column");
     assert!(
-        replan.steps.is_empty(),
-        "after reordering labels the enum must re-plan empty, got: {:?}",
-        replan.steps
-    );
-
-    connection
-        .execute_ddl("DROP SCHEMA IF EXISTS publish_enums CASCADE")
-        .await
-        .expect("clean up enum fixture");
-}
-
-/// `enum_fixture` with a `DEFAULT` on the enum column, so the recreate must drop and restore it.
-fn enum_fixture_with_default(labels: &[&str], default: &str) -> DatabaseModel {
-    let mut model = enum_fixture(labels);
-    model.schemas[0].tables[0].columns[1].default = Some(DefaultValue::Text(default.to_owned()));
-    model
-}
-
-#[tokio::test]
-#[ignore]
-async fn recreating_an_enum_with_a_default_column_drops_and_restores_the_default() {
-    // A column default cannot auto-cast to the recreated type, so the recreate drops it before the type
-    // change and restores the desired default after. The migration must apply and then re-plan empty.
-    let _guard = db_lock().lock().await;
-    let mut connection = Postgres
-        .connect(&database_url())
-        .await
-        .expect("connect to PostgreSQL");
-    connection
-        .execute_ddl("DROP SCHEMA IF EXISTS publish_enums CASCADE")
-        .await
-        .expect("reset enum fixture");
-
-    let base = enum_fixture_with_default(&["sad", "ok", "happy"], "ok");
-    squealy_model::publish(&base, &Postgres, &mut connection)
-        .await
-        .expect("publish enum with a defaulted column");
-
-    let reordered = enum_fixture_with_default(&["happy", "ok", "sad"], "ok");
-    let plan = squealy_model::plan_from_database(
-        &reordered,
-        &mut connection,
-        squealy_model::DiffPolicy::ALLOW_ALL,
-    )
-    .await
-    .expect("plan the reorder");
-    squealy_model::apply_plan(&plan, &reordered, &Postgres, &mut connection)
-        .await
-        .expect("apply the recreate with a default (drop + restore)");
-
-    let replan = squealy_model::plan_from_database(
-        &reordered,
-        &mut connection,
-        squealy_model::DiffPolicy::ALLOW_ALL,
-    )
-    .await
-    .expect("re-plan after the recreate");
-    assert!(
-        replan.steps.is_empty(),
-        "a recreated enum with a restored default must re-plan empty, got: {:?}",
-        replan.steps
+        plan.steps.is_empty(),
+        "an enum column with a default must re-plan empty, got: {:?}",
+        plan.steps
     );
 
     connection

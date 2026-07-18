@@ -526,9 +526,9 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
     // schema left with no tables or views — otherwise a desired model carrying an empty namespace diffs
     // as a spurious `CreateSchema` on every run. A backend with real schemas keeps them.
     if !connection.has_namespaces() {
-        model
-            .schemas
-            .retain(|schema| !schema.tables.is_empty() || !schema.views.is_empty());
+        model.schemas.retain(|schema| {
+            !schema.tables.is_empty() || !schema.views.is_empty() || !schema.enums.is_empty()
+        });
     }
     model
 }
@@ -546,6 +546,7 @@ fn coalesce_schemas_by_name(schemas: &mut Vec<SchemaModel>) {
             Some(existing) => {
                 existing.tables.extend(schema.tables);
                 existing.views.extend(schema.views);
+                existing.enums.extend(schema.enums);
             }
             None => coalesced.push(schema),
         }
@@ -1480,6 +1481,31 @@ mod tests {
         // A backend with real schemas (DefaultBackend uses the trait defaults) keeps the empty schema.
         let with_schemas = canonicalize_model(&DefaultBackend, &model);
         assert_eq!(with_schemas.schemas.len(), 2);
+    }
+
+    #[test]
+    fn canonicalize_model_keeps_a_schema_with_only_an_enum() {
+        // A schema-less backend prunes empty schemas, but a schema carrying only an enum type is NOT
+        // empty — dropping it would hide the enum from the diff, so a cross-dialect enum model deployed
+        // to such a backend would silently no-op instead of reaching the backend's enum rejection.
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: Some("app".to_owned()),
+                tables: Vec::new(),
+                views: Vec::new(),
+                enums: vec![EnumModel {
+                    name: "mood".to_owned(),
+                    labels: vec!["sad".to_owned(), "ok".to_owned()],
+                }],
+            }],
+        };
+        let canonical = canonicalize_model(&CanonBackend, &model);
+        assert_eq!(
+            canonical.schemas.len(),
+            1,
+            "an enum-only schema must be kept"
+        );
+        assert_eq!(canonical.schemas[0].enums[0].name, "mood");
     }
 
     #[test]

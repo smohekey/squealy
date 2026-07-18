@@ -904,11 +904,12 @@ fn default_value(ty: &SqlType, value: &str) -> DefaultValue {
 
     // An enum column's default is stored as `'label'::<type>` (e.g. `'sad'::publish_enums.mood`); recover
     // the bare label as text so a desired `DefaultValue::Text("sad")` compares equal instead of churning.
-    if let SqlType::Enum(_) = ty {
-        let literal = trimmed.split("::").next().unwrap_or(trimmed).trim();
-        if let Some(text) = postgres_string_literal(literal) {
-            return DefaultValue::Text(text);
-        }
+    // `postgres_string_literal` parses the leading quoted literal and tolerates the trailing `::<type>`
+    // cast — including a label that itself contains `::` (`'a::b'::mood`), which lives inside the quotes.
+    if let SqlType::Enum(_) = ty
+        && let Some(text) = postgres_string_literal(trimmed)
+    {
+        return DefaultValue::Text(text);
     }
 
     match ty {

@@ -58,6 +58,17 @@ impl squealy::Dialect for PostgresDialect {
     }
 
     fn write_cast_type(&self, ty: &SqlType, mut writer: &mut dyn Write) -> io::Result<()> {
+        if let SqlType::Enum(name) = ty {
+            // A cast to an enum type inside an expression (a check/generated/index/view body) has no
+            // schema context here, so it would render an unqualified `AS "mood"` that fails to resolve
+            // when the enum's schema is off `search_path`. Reject rather than emit unresolvable SQL.
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "squealy does not support casting to the enum type `{name}` in an expression"
+                ),
+            ));
+        }
         write_pg_sql_type(ty, &mut writer)
     }
 
@@ -367,13 +378,8 @@ pub(crate) mod ddl {
         Ok(())
     }
 
-    /// Renders an ordered incremental DDL plan. `desired` is the target model, used by a destructive
-    /// enum recreate to find the columns of the type it must rewrite.
-    pub(crate) fn write_plan(
-        plan: &DatabasePlan,
-        desired: &DatabaseModel,
-        writer: &mut impl Write,
-    ) -> io::Result<()> {
+    /// Renders an ordered incremental DDL plan.
+    pub(crate) fn write_plan(plan: &DatabasePlan, writer: &mut impl Write) -> io::Result<()> {
         let mut first = true;
         if plan.steps.iter().any(plan_step_has_refactor_id) {
             statement(writer, &mut first)?;
@@ -382,7 +388,7 @@ pub(crate) mod ddl {
             write_create_refactor_log_table(writer)?;
         }
         for step in &plan.steps {
-            write_plan_step(step, desired, plan, writer, &mut first)?;
+            write_plan_step(step, writer, &mut first)?;
         }
         write_deferred_foreign_keys(plan, writer, &mut first)?;
         if !first {
@@ -396,7 +402,6 @@ pub(crate) mod ddl {
     /// requires. Non-index steps fall back to normal rendering (the planner partitions them out).
     pub(crate) fn write_plan_concurrent(
         plan: &DatabasePlan,
-        desired: &DatabaseModel,
         writer: &mut impl Write,
     ) -> io::Result<()> {
         let mut first = true;
@@ -411,7 +416,7 @@ pub(crate) mod ddl {
                 statement(writer, &mut first)?;
                 write_create_index(schema.as_deref(), table, index, true, writer)?;
             } else {
-                write_plan_step(step, desired, plan, writer, &mut first)?;
+                write_plan_step(step, writer, &mut first)?;
             }
         }
         write_deferred_foreign_keys(plan, writer, &mut first)?;
@@ -423,8 +428,6 @@ pub(crate) mod ddl {
 
     fn write_plan_step(
         step: &DatabasePlanStep,
-        desired: &DatabaseModel,
-        plan: &DatabasePlan,
         writer: &mut impl Write,
         first: &mut bool,
     ) -> io::Result<()> {
@@ -504,156 +507,23 @@ pub(crate) mod ddl {
                 writer.write_all(b"DROP TYPE ")?;
                 write_qualified_name(schema.as_deref(), &enum_type.name, writer)?;
             }
-            DatabasePlanStep::AlterEnum {
-                schema,
-                before,
-                after,
-                ..
-            } => {
-                write_alter_enum(
-                    schema.as_deref(),
-                    before,
-                    after,
-                    desired,
-                    plan,
-                    writer,
-                    first,
-                )?;
+            DatabasePlanStep::AlterEnum { after, .. } => {
+                // Changing an enum's labels (append, remove, or reorder) is not supported yet. A correct
+                // migration needs live-schema and whole-plan awareness — dropping/restoring live column
+                // defaults, rebuilding dependent foreign keys, dropping dependent views, and ordering
+                // around table changes and PostgreSQL's `ADD VALUE`-in-transaction rule. That is tracked
+                // as its own follow-up; for now, refuse rather than emit SQL PostgreSQL would reject.
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "squealy does not yet support changing the labels of the enum type `{}`; \
+                         recreate the type manually or add labels out of band",
+                        after.name
+                    ),
+                ));
             }
         }
         Ok(())
-    }
-
-    /// Renders an enum-label change.
-    ///
-    /// An **additive** change (the desired labels extend the actual ones) is applied in place with one
-    /// `ALTER TYPE ... ADD VALUE` per new label — atomic and non-destructive.
-    ///
-    /// A **non-additive** change (a label removed, reordered, or inserted mid-list) cannot be done in
-    /// place: PostgreSQL only appends enum values. The type is recreated and every column of the type
-    /// rewritten through `text`:
-    ///   `ALTER TYPE x RENAME TO x__squealy_old; CREATE TYPE x AS ENUM (...);
-    ///    ALTER TABLE t ALTER COLUMN c TYPE x USING c::text::x; ...; DROP TYPE x__squealy_old`
-    /// The columns to rewrite are every enum-typed column of `x` in the desired model (their table
-    /// structure is unchanged — only the enum's labels differ). A row whose value is a dropped label
-    /// fails the `::x` cast, which correctly aborts the migration.
-    fn write_alter_enum(
-        schema: Option<&str>,
-        before: &EnumModel,
-        after: &EnumModel,
-        desired: &DatabaseModel,
-        plan: &DatabasePlan,
-        writer: &mut impl Write,
-        first: &mut bool,
-    ) -> io::Result<()> {
-        // A change is additive when the desired labels only *append* to the actual ones (an in-place
-        // `ALTER TYPE ... ADD VALUE`); anything else recreates the type. (Matches `diff_enums_global`.)
-        let additive = after.labels.starts_with(&before.labels);
-        let columns: Vec<(&TableModel, &ColumnModel)> =
-            enum_columns(desired, schema, &after.name).collect();
-
-        if additive {
-            // `ALTER TYPE ... ADD VALUE` cannot run in the same transaction that then uses the new value.
-            // If this plan also creates a table with a column of the enum, that column's default/check
-            // could reference the new label, so refuse rather than risk the batch failing mid-way.
-            let created = tables_created_or_dropped(plan);
-            if columns
-                .iter()
-                .any(|(table, _)| created.contains(table.name.as_str()))
-            {
-                return Err(enum_migration_error(
-                    &after.name,
-                    "appending a label in the same plan that creates a table using the enum is not \
-                     supported (PostgreSQL cannot use a new enum value until the transaction commits)",
-                ));
-            }
-            for label in &after.labels[before.labels.len()..] {
-                statement(writer, first)?;
-                writer.write_all(b"ALTER TYPE ")?;
-                write_qualified_name(schema, &after.name, writer)?;
-                writer.write_all(b" ADD VALUE ")?;
-                write_quoted_text(label, writer)?;
-            }
-            return Ok(());
-        }
-
-        // A destructive recreate rewrites every column of the type. Refuse the combinations squealy does
-        // not yet order correctly: a dependent column's table also created/dropped in this plan (the
-        // rewrite would run before the create or after the drop), or a view over such a table (PostgreSQL
-        // forbids `ALTER COLUMN TYPE` while a dependent view's rule exists).
-        let touched = tables_created_or_dropped(plan);
-        if columns
-            .iter()
-            .any(|(table, _)| touched.contains(table.name.as_str()))
-        {
-            return Err(enum_migration_error(
-                &after.name,
-                "recreating the type while a table that uses it is created or dropped in the same plan \
-                 is not supported",
-            ));
-        }
-        let dependent_tables: std::collections::HashSet<&str> = columns
-            .iter()
-            .map(|(table, _)| table.name.as_str())
-            .collect();
-        let has_dependent_view = desired.schemas.iter().flat_map(|s| &s.views).any(|view| {
-            view.referenced_sources()
-                .any(|source| dependent_tables.contains(source.name.as_str()))
-        });
-        if has_dependent_view {
-            return Err(enum_migration_error(
-                &after.name,
-                "recreating the type is not supported while a view depends on a column of the type \
-                 (PostgreSQL forbids altering a column's type under a view)",
-            ));
-        }
-
-        let old_name = format!("{}__squealy_old", after.name);
-        statement(writer, first)?;
-        writer.write_all(b"ALTER TYPE ")?;
-        write_qualified_name(schema, &after.name, writer)?;
-        writer.write_all(b" RENAME TO ")?;
-        write_quoted_ident(&old_name, writer)?;
-
-        statement(writer, first)?;
-        write_create_enum(schema, after, writer)?;
-
-        for (table, column) in &columns {
-            // A column default cannot auto-cast to the recreated type, so drop it before the type change
-            // and restore the desired default after.
-            if column.default.is_some() {
-                statement(writer, first)?;
-                writer.write_all(b"ALTER TABLE ")?;
-                write_qualified_name(schema, &table.name, writer)?;
-                writer.write_all(b" ALTER COLUMN ")?;
-                write_quoted_ident(&column.name, writer)?;
-                writer.write_all(b" DROP DEFAULT")?;
-            }
-            statement(writer, first)?;
-            writer.write_all(b"ALTER TABLE ")?;
-            write_qualified_name(schema, &table.name, writer)?;
-            writer.write_all(b" ALTER COLUMN ")?;
-            write_quoted_ident(&column.name, writer)?;
-            writer.write_all(b" TYPE ")?;
-            write_qualified_name(schema, &after.name, writer)?;
-            writer.write_all(b" USING ")?;
-            write_quoted_ident(&column.name, writer)?;
-            writer.write_all(b"::text::")?;
-            write_qualified_name(schema, &after.name, writer)?;
-            if let Some(default) = &column.default {
-                statement(writer, first)?;
-                writer.write_all(b"ALTER TABLE ")?;
-                write_qualified_name(schema, &table.name, writer)?;
-                writer.write_all(b" ALTER COLUMN ")?;
-                write_quoted_ident(&column.name, writer)?;
-                writer.write_all(b" SET DEFAULT ")?;
-                write_default_value(default, writer)?;
-            }
-        }
-
-        statement(writer, first)?;
-        writer.write_all(b"DROP TYPE ")?;
-        write_qualified_name(schema, &old_name, writer)
     }
 
     fn write_create_table_extras(
@@ -1120,48 +990,6 @@ pub(crate) mod ddl {
             writer.write_all(b";\n")?;
         }
         Ok(())
-    }
-
-    /// Every `(table, column)` in `schema` of the desired model whose column type is the enum `name`.
-    fn enum_columns<'a>(
-        desired: &'a DatabaseModel,
-        schema: Option<&str>,
-        name: &'a str,
-    ) -> impl Iterator<Item = (&'a TableModel, &'a ColumnModel)> {
-        desired
-            .schemas
-            .iter()
-            .filter(move |s| s.name.as_deref() == schema)
-            .flat_map(|s| &s.tables)
-            .flat_map(move |table| {
-                table.columns.iter().filter_map(move |column| {
-                    matches!(&column.ty, SqlType::Enum(enum_name) if enum_name == name)
-                        .then_some((table, column))
-                })
-            })
-    }
-
-    fn enum_migration_error(name: &str, reason: &str) -> io::Error {
-        io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "squealy cannot yet migrate the enum type `{name}` in this plan: {reason}. Apply the \
-                 enum change in a separate migration from the dependent objects."
-            ),
-        )
-    }
-
-    /// The names of tables the plan creates or drops (either would leave the destructive enum recreate's
-    /// dependent-column set out of step with the live schema).
-    fn tables_created_or_dropped(plan: &DatabasePlan) -> std::collections::HashSet<&str> {
-        plan.steps
-            .iter()
-            .filter_map(|step| match step {
-                DatabasePlanStep::CreateTable { table, .. } => Some(table.name.as_str()),
-                DatabasePlanStep::DropTable { table, .. } => Some(table.name.as_str()),
-                _ => None,
-            })
-            .collect()
     }
 
     /// Renders `CREATE TYPE <name> AS ENUM ('a', 'b', ...)`. Labels are single-quoted string literals in
