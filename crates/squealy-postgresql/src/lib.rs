@@ -290,6 +290,8 @@ impl squealy::SchemaBackend for Postgres {
                 operator_classes: true,
                 prefix_lengths: false,
             },
+            // PostgreSQL has `CREATE TYPE ... AS ENUM`.
+            enums: true,
         }
     }
 

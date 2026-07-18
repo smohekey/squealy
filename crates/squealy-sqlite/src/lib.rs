@@ -105,6 +105,8 @@ impl SchemaBackend for Sqlite {
                 predicates: true,
                 ..squealy::IndexCapabilities::default()
             },
+            // SQLite has no user-defined enum type.
+            enums: false,
         }
     }
 
@@ -655,6 +657,8 @@ fn canonical_sqlite_pin_type(ty: &SqlType) -> SqlType {
         },
         // A `Raw` pin's affinity is its own text, which `invert_sqlite_cast_type` maps to `None`; leave it.
         Raw(_) => ty.clone(),
+        // An enum is never a SQLite pin type (enum columns are rejected at render); leave it unchanged.
+        SqlType::Enum(_) => ty.clone(),
     }
 }
 

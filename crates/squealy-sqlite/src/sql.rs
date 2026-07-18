@@ -23,6 +23,17 @@ use squealy::{
 /// newline-separated: tables (with inline PK/unique/check/foreign-keys), then indexes, then views in
 /// dependency order. SQLite has no schemas, so schema names are dropped and all tables are flattened.
 pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> io::Result<()> {
+    // SQLite has no user-defined enum type. Reject a model declaring one up front (even an unused
+    // standalone type), so a direct `render_create` call cannot silently omit it.
+    if let Some(enum_type) = model.schemas.iter().flat_map(|schema| &schema.enums).next() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite does not support the user-defined enum type `{}`",
+                enum_type.name
+            ),
+        ));
+    }
     // SQLite keeps tables, indexes and views in one database-wide object namespace (there are no
     // schemas), so once schemas are flattened every table, index and view name must be unique —
     // including a table name that matches an index or a view. A model that relies on schema/table
@@ -290,6 +301,27 @@ pub(crate) fn write_plan(
             }
             // The view was already dropped in the up-front view pre-pass; nothing to emit here.
             DatabasePlanStep::DropView { .. } => {}
+            // SQLite has no user-defined enum type. The create path rejects an enum model via
+            // capabilities; the incremental plan path skips that check, so reject here too.
+            DatabasePlanStep::CreateEnum { enum_type, .. }
+            | DatabasePlanStep::DropEnum { enum_type, .. } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "SQLite does not support the user-defined enum type `{}`",
+                        enum_type.name
+                    ),
+                ));
+            }
+            DatabasePlanStep::AlterEnum { after, .. } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "SQLite does not support the user-defined enum type `{}`",
+                        after.name
+                    ),
+                ));
+            }
         }
     }
 
@@ -1070,6 +1102,18 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
         ));
     }
     reject_on_update(column)?;
+    if let SqlType::Enum(name) = &column.ty {
+        // SQLite has no user-defined enum type. An enum column would otherwise render as a bare `TEXT`
+        // affinity, silently discarding the type, so reject it (the incremental plan path skips
+        // `validate_capabilities`, so the renderer must guard this itself).
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite does not support the user-defined enum type `{name}` (column `{}`)",
+                column.name
+            ),
+        ));
+    }
     if column.comment.is_some() {
         // Like a table comment, a column comment is not introspectable, so it would churn every plan.
         return Err(io::Error::new(
@@ -1319,6 +1363,9 @@ pub(crate) fn sqlite_affinity(ty: &SqlType) -> &str {
         | SqlType::Json
         | SqlType::Jsonb => "TEXT",
         SqlType::Bytes | SqlType::FixedBytes(_) => "BLOB",
+        // An enum column is rejected at `write_column`; its affinity (only reached via cast/canonical
+        // reuse) is text-like.
+        SqlType::Enum(_) => "TEXT",
         SqlType::Raw(raw) => raw.as_str(),
     }
 }
@@ -1397,6 +1444,15 @@ impl squealy::Dialect for SqliteDialect {
     }
 
     fn write_cast_type(&self, ty: &SqlType, writer: &mut dyn Write) -> io::Result<()> {
+        // A user-defined enum is a PostgreSQL-only type. SQLite has no equivalent, and `sqlite_affinity`
+        // would silently collapse it to `TEXT` — reject it instead (the enum column class is already
+        // refused up front; this catches an enum buried in a cast expression).
+        if let SqlType::Enum(name) = ty {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("SQLite cannot render a CAST to the user-defined enum type `{name}`"),
+            ));
+        }
         // `CAST(expr AS <type>)` uses SQLite's affinity names, the same mapping as the column type.
         writer.write_all(sqlite_affinity(ty).as_bytes())
     }
@@ -1472,8 +1528,28 @@ impl squealy::Dialect for SqliteDialect {
 
 #[cfg(test)]
 mod tests {
-    use super::sqlite_affinity;
-    use squealy::SqlType;
+    use super::{SqliteDialect, sqlite_affinity};
+    use squealy::{Dialect, SqlType};
+
+    #[test]
+    fn sqlite_rejects_a_cast_to_an_enum_type() {
+        // An enum column is refused up front, but an enum buried in a cast expression reaches the cast
+        // renderer, where `sqlite_affinity` would silently collapse it to `TEXT`.
+        let enum_ty = SqlType::Enum("mood".to_owned());
+        let error = SqliteDialect
+            .write_cast_type(&enum_ty, &mut Vec::new())
+            .expect_err("SQLite must reject a CAST to an enum type");
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("mood"), "{error}");
+
+        // The general (authored) cast path delegates to the same rejection.
+        assert!(
+            SqliteDialect
+                .write_general_cast_type(&enum_ty, &mut Vec::new())
+                .is_err(),
+            "general cast to an enum must also be rejected"
+        );
+    }
 
     #[test]
     fn affinities_map_neutral_types() {

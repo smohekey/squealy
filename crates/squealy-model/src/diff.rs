@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use squealy::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, ForeignKeyModel, IndexModel, SchemaModel,
-    TableModel, ViewColumnModel, ViewModel,
+    CheckModel, ColumnModel, Constraint, DatabaseModel, EnumModel, ForeignKeyModel, IndexModel,
+    SchemaModel, TableModel, ViewColumnModel, ViewModel,
 };
 
 /// The structured diff from an actual database model to a desired database model.
@@ -88,6 +88,104 @@ pub struct DiffPolicyError {
     pub blocked: Vec<ClassifiedDatabaseDiffChange>,
 }
 
+/// Error returned when a relation (table or view) and an enum share a name across the actual and
+/// desired models — a collision PostgreSQL cannot represent, since every relation implicitly owns a
+/// composite type of the same name.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{} is used as both a relation (table or view) and an enum across the current and desired \
+     schemas; PostgreSQL creates an implicit composite type for every relation, so a relation and \
+     an enum cannot share a name. If you are replacing one with the other, split it into separate \
+     migrations that fully drop and apply one before introducing the other.",
+    qualified_name(schema, name)
+)]
+pub struct EnumRelationCollisionError {
+    pub schema: Option<String>,
+    pub name: String,
+}
+
+fn qualified_name(schema: &Option<String>, name: &str) -> String {
+    match schema {
+        Some(schema) => format!("{schema}.{name}"),
+        None => name.to_string(),
+    }
+}
+
+/// Rejects a migration in which a single `(schema, name)` is a relation (table or view) on one side
+/// and an enum on the other — or is both within a single model. PostgreSQL auto-creates a composite
+/// type per relation, so a relation and an enum can never coexist under one name, and correctly
+/// ordering a same-name relation↔enum *swap* plus its arbitrary dependents is deferred as a separate
+/// feature. Detecting the collision here keeps `diff_models` from emitting an un-applyable plan.
+pub fn reject_enum_relation_name_collision(
+    desired: &DatabaseModel,
+    actual: &DatabaseModel,
+) -> Result<(), EnumRelationCollisionError> {
+    let mut relations: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+    let mut enums: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+    for model in [desired, actual] {
+        for schema in &model.schemas {
+            for table in &schema.tables {
+                relations.insert((schema.name.clone(), table.name.clone()));
+            }
+            for view in &schema.views {
+                relations.insert((schema.name.clone(), view.name.clone()));
+            }
+            for enum_type in &schema.enums {
+                enums.insert((schema.name.clone(), enum_type.name.clone()));
+            }
+        }
+    }
+    if let Some((schema, name)) = relations.intersection(&enums).next() {
+        return Err(EnumRelationCollisionError {
+            schema: schema.clone(),
+            name: name.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Rejects a precomputed diff that touches a single `(schema, name)` as both an enum and a relation
+/// (table or view). [`reject_enum_relation_name_collision`] catches the collision from a model pair;
+/// this catches it from a diff a caller assembled and handed to [`plan_diff`](crate::plan_diff)
+/// directly (e.g. a same-name relation↔enum swap, whose `CreateEnum`/`DropTable` the flattener would
+/// otherwise emit in an order PostgreSQL rejects over the relation's implicit composite type).
+pub fn reject_enum_relation_collision_in_diff(
+    diff: &DatabaseDiff,
+) -> Result<(), EnumRelationCollisionError> {
+    let mut relations: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+    let mut enums: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+    for change in &diff.changes {
+        match change {
+            DatabaseDiffChange::CreateTable { schema, table }
+            | DatabaseDiffChange::DropTable { schema, table } => {
+                relations.insert((schema.clone(), table.name.clone()));
+            }
+            DatabaseDiffChange::AlterTable { schema, table, .. } => {
+                relations.insert((schema.clone(), table.clone()));
+            }
+            DatabaseDiffChange::CreateView { schema, view }
+            | DatabaseDiffChange::DropView { schema, view } => {
+                relations.insert((schema.clone(), view.name.clone()));
+            }
+            DatabaseDiffChange::CreateEnum { schema, enum_type }
+            | DatabaseDiffChange::DropEnum { schema, enum_type } => {
+                enums.insert((schema.clone(), enum_type.name.clone()));
+            }
+            DatabaseDiffChange::AlterEnum { schema, after, .. } => {
+                enums.insert((schema.clone(), after.name.clone()));
+            }
+            DatabaseDiffChange::CreateSchema { .. } | DatabaseDiffChange::DropSchema { .. } => {}
+        }
+    }
+    if let Some((schema, name)) = relations.intersection(&enums).next() {
+        return Err(EnumRelationCollisionError {
+            schema: schema.clone(),
+            name: name.clone(),
+        });
+    }
+    Ok(())
+}
+
 /// Checks whether `diff` is allowed by `policy`.
 pub fn check_diff_policy(diff: &DatabaseDiff, policy: DiffPolicy) -> Result<(), DiffPolicyError> {
     let blocked = diff
@@ -135,6 +233,25 @@ pub enum DatabaseDiffChange {
         schema: Option<String>,
         view: ViewModel,
     },
+    /// Create a new enum type. Rendered before any table so a column can reference it.
+    CreateEnum {
+        schema: Option<String>,
+        enum_type: EnumModel,
+    },
+    /// Drop an enum type. Rendered after any table that referenced it is gone.
+    DropEnum {
+        schema: Option<String>,
+        enum_type: EnumModel,
+    },
+    /// Change an enum's labels. Appending labels is a safe in-place `ALTER TYPE ... ADD VALUE`; any other
+    /// change (removing or reordering labels) requires recreating the type and rewriting its columns —
+    /// destructive. `additive` distinguishes the two for risk classification.
+    AlterEnum {
+        schema: Option<String>,
+        before: EnumModel,
+        after: EnumModel,
+        additive: bool,
+    },
 }
 
 impl DatabaseDiffChange {
@@ -143,10 +260,20 @@ impl DatabaseDiffChange {
             DatabaseDiffChange::CreateSchema { .. }
             | DatabaseDiffChange::CreateTable { .. }
             // Create-or-replace of a view loses no data and can be re-run.
-            | DatabaseDiffChange::CreateView { .. } => ChangeRisk::Safe,
+            | DatabaseDiffChange::CreateView { .. }
+            | DatabaseDiffChange::CreateEnum { .. } => ChangeRisk::Safe,
             DatabaseDiffChange::DropSchema { .. }
             | DatabaseDiffChange::DropTable { .. }
-            | DatabaseDiffChange::DropView { .. } => ChangeRisk::Destructive,
+            | DatabaseDiffChange::DropView { .. }
+            | DatabaseDiffChange::DropEnum { .. } => ChangeRisk::Destructive,
+            // Appending enum labels is safe; recreating the type (remove/reorder) rewrites columns.
+            DatabaseDiffChange::AlterEnum { additive, .. } => {
+                if *additive {
+                    ChangeRisk::Safe
+                } else {
+                    ChangeRisk::Destructive
+                }
+            }
             DatabaseDiffChange::AlterTable { changes, .. } => classify_table_changes(changes),
         }
     }
@@ -280,6 +407,32 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     // being dropped) and creates run after all of them (a view may select from a table or schema being
     // added); the two phases bracket the per-schema table work below.
     let (view_drops, view_creates) = diff_views_global(desired, actual);
+
+    // Enum types bracket the table work the *opposite* way to views: a `CREATE TYPE` (and any label
+    // change) must precede the tables whose columns reference it, and a `DROP TYPE` must follow the
+    // tables that referenced it. But a new enum still needs its schema to exist, and a dropped schema
+    // must outlive its enum — so `CREATE SCHEMA` is hoisted *before* enum creates and `DROP SCHEMA`
+    // *after* enum drops. Overall order: create schemas → create/alter enums → drop views → per-schema
+    // table work → create views → drop enums → drop schemas.
+    //
+    // (An enum name colliding with a same-named table/view being replaced in the same migration is
+    // rejected earlier by `reject_enum_relation_name_collision`, so no cross-object-kind ordering is
+    // needed here — PostgreSQL auto-creates a composite type per relation, and correctly ordering that
+    // swap plus its arbitrary dependents is deferred as a separate feature.)
+    let (enum_creates, enum_drops) = diff_enums_global(desired, actual);
+
+    for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
+        if let (Some(desired_schema), None) = (
+            desired_schemas.get(&schema_key),
+            actual_schemas.get(&schema_key),
+        ) {
+            changes.push(DatabaseDiffChange::CreateSchema {
+                schema: desired_schema.name.clone(),
+            });
+        }
+    }
+
+    changes.extend(enum_creates);
     changes.extend(view_drops);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
@@ -288,28 +441,21 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
             actual_schemas.get(&schema_key),
         ) {
             (Some(desired_schema), None) => {
-                changes.push(DatabaseDiffChange::CreateSchema {
-                    schema: desired_schema.name.clone(),
-                });
+                // The schema was created in the hoisted phase above; create its tables here.
                 for table in &desired_schema.tables {
                     changes.push(DatabaseDiffChange::CreateTable {
                         schema: desired_schema.name.clone(),
                         table: table.clone(),
                     });
                 }
-                // This schema's views are created in the global create phase, after every table exists.
             }
             (None, Some(actual_schema)) => {
-                // This schema's views are dropped in the global drop phase, before any table.
                 for table in &actual_schema.tables {
                     changes.push(DatabaseDiffChange::DropTable {
                         schema: actual_schema.name.clone(),
                         table: table.clone(),
                     });
                 }
-                changes.push(DatabaseDiffChange::DropSchema {
-                    schema: actual_schema.name.clone(),
-                });
             }
             (Some(desired_schema), Some(actual_schema)) => {
                 diff_schema_tables(desired_schema, actual_schema, &mut changes);
@@ -319,7 +465,87 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     }
 
     changes.extend(view_creates);
+    changes.extend(enum_drops);
+
+    for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
+        if let (None, Some(actual_schema)) = (
+            desired_schemas.get(&schema_key),
+            actual_schemas.get(&schema_key),
+        ) {
+            changes.push(DatabaseDiffChange::DropSchema {
+                schema: actual_schema.name.clone(),
+            });
+        }
+    }
+
     DatabaseDiff { changes }
+}
+
+/// Diffs enum types across the whole model, returning `(creates_and_alters, drops)`. Identity is
+/// `(schema, name)`. A label change is an `AlterEnum`, flagged `additive` when the actual labels are a
+/// prefix of the desired ones (an append-only change PostgreSQL can apply in place with
+/// `ALTER TYPE ... ADD VALUE`); any other change (removal, reorder, mid-insert) is non-additive and
+/// requires recreating the type.
+fn diff_enums_global(
+    desired: &DatabaseModel,
+    actual: &DatabaseModel,
+) -> (Vec<DatabaseDiffChange>, Vec<DatabaseDiffChange>) {
+    let desired_enums = keyed_enums(desired);
+    let actual_enums = keyed_enums(actual);
+    let mut creates = Vec::new();
+    let mut drops = Vec::new();
+
+    for (key, desired_enum) in &desired_enums {
+        match actual_enums.get(key) {
+            None => creates.push(DatabaseDiffChange::CreateEnum {
+                schema: key.0.clone(),
+                enum_type: (*desired_enum).clone(),
+            }),
+            Some(actual_enum) if actual_enum.labels != desired_enum.labels => {
+                // A change is additive when every existing label is preserved in order — i.e. the actual
+                // labels are an ordered *subsequence* of the desired ones (PostgreSQL can insert a value
+                // anywhere with `ALTER TYPE ... ADD VALUE ... BEFORE/AFTER`, so a mid-list insertion is
+                // still non-destructive). A removal or reorder breaks the subsequence and is destructive.
+                let additive = is_ordered_subsequence(&actual_enum.labels, &desired_enum.labels);
+                creates.push(DatabaseDiffChange::AlterEnum {
+                    schema: key.0.clone(),
+                    before: (*actual_enum).clone(),
+                    after: (*desired_enum).clone(),
+                    additive,
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    for (key, actual_enum) in &actual_enums {
+        if !desired_enums.contains_key(key) {
+            drops.push(DatabaseDiffChange::DropEnum {
+                schema: key.0.clone(),
+                enum_type: (*actual_enum).clone(),
+            });
+        }
+    }
+    (creates, drops)
+}
+
+/// Whether `subset` appears as an ordered subsequence of `sequence` (every element of `subset` occurs
+/// in `sequence`, in the same relative order).
+fn is_ordered_subsequence(subset: &[String], sequence: &[String]) -> bool {
+    let mut iter = sequence.iter();
+    subset
+        .iter()
+        .all(|item| iter.any(|candidate| candidate == item))
+}
+
+/// Keys every enum in the model by `(schema, name)`.
+fn keyed_enums(model: &DatabaseModel) -> BTreeMap<(Option<String>, String), &EnumModel> {
+    let mut enums = BTreeMap::new();
+    for schema in &model.schemas {
+        for enum_type in &schema.enums {
+            enums.insert((schema.name.clone(), enum_type.name.clone()), enum_type);
+        }
+    }
+    enums
 }
 
 fn diff_schema_tables(

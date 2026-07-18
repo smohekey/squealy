@@ -1,6 +1,6 @@
 use squealy::{
     CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintValidation,
-    DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
+    DatabaseModel, DefaultValue, EnumModel, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
     IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, SchemaModel,
     SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
@@ -50,7 +50,57 @@ pub(crate) async fn database(client: &Client) -> Result<DatabaseModel, PostgresE
         schema_entry(&mut schemas, &schema).views.push(view);
     }
 
+    for (schema, enum_type) in introspect_enums(client).await? {
+        schema_entry(&mut schemas, &schema).enums.push(enum_type);
+    }
+
     Ok(DatabaseModel { schemas })
+}
+
+/// Introspects every user-defined enum type (`CREATE TYPE ... AS ENUM`), paired with its schema. Labels
+/// are ordered by `enumsortorder`, the order PostgreSQL renders and compares them in.
+async fn introspect_enums(client: &Client) -> Result<Vec<(String, EnumModel)>, PostgresError> {
+    // LEFT JOIN so a label-less enum (`CREATE TYPE t AS ENUM ()`, which PostgreSQL permits) still returns
+    // one row (with a NULL label) and is not silently omitted — otherwise it would churn a `CreateEnum`
+    // every plan and fail because the type already exists.
+    let rows = client
+        .query(
+            "\
+SELECT n.nspname, t.typname, e.enumlabel
+FROM pg_type t
+JOIN pg_namespace n ON n.oid = t.typnamespace
+LEFT JOIN pg_enum e ON e.enumtypid = t.oid
+WHERE t.typtype = 'e'
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', '__squealy')
+  AND n.nspname NOT LIKE 'pg_toast%'
+ORDER BY n.nspname, t.typname, e.enumsortorder",
+            &[],
+        )
+        .await?;
+
+    // Rows arrive grouped by (schema, typname) in label order; fold consecutive rows into one enum. A
+    // label-less enum contributes a single row with a NULL label — start it with an empty label list.
+    let mut enums: Vec<(String, EnumModel)> = Vec::new();
+    for row in rows {
+        let schema: String = row.get(0);
+        let name: String = row.get(1);
+        let label: Option<String> = row.get(2);
+        match enums.last_mut() {
+            Some((last_schema, last_enum)) if *last_schema == schema && last_enum.name == name => {
+                if let Some(label) = label {
+                    last_enum.labels.push(label);
+                }
+            }
+            _ => enums.push((
+                schema,
+                EnumModel {
+                    name,
+                    labels: label.into_iter().collect(),
+                },
+            )),
+        }
+    }
+    Ok(enums)
 }
 
 /// Introspects every view, pairing each with the name of the schema it belongs to. Called with an
@@ -76,6 +126,7 @@ fn schema_entry<'a>(schemas: &'a mut Vec<SchemaModel>, name: &str) -> &'a mut Sc
         name: Some(name.to_owned()),
         tables: Vec::new(),
         views: Vec::new(),
+        enums: Vec::new(),
     });
     schemas.last_mut().expect("schema just pushed")
 }
@@ -213,10 +264,13 @@ async fn view_columns(
     let rows = client
         .query(
             "\
-SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull
+SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, typ.typtype::text, typ.typname,
+       tn.nspname, format('%I.%I', tn.nspname, typ.typname)
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_attribute a ON a.attrelid = c.oid
+JOIN pg_type typ ON typ.oid = a.atttypid
+JOIN pg_namespace tn ON tn.oid = typ.typnamespace
 WHERE n.nspname = $1
   AND c.relname = $2
   AND c.relkind = 'v'
@@ -231,9 +285,21 @@ ORDER BY a.attnum",
         .into_iter()
         .map(|row| {
             let db_type: String = row.get(1);
+            let typtype: String = row.get(3);
+            let type_name: String = row.get(4);
+            let type_schema: String = row.get(5);
+            let type_qualified: String = row.get(6);
+            let ty = enum_or_sql_type(
+                &typtype,
+                &type_schema,
+                &type_name,
+                &type_qualified,
+                &view_ref.schema,
+                &db_type,
+            );
             ViewColumnModel {
                 name: row.get(0),
-                ty: sql_type(&db_type),
+                ty,
                 nullable: !row.get::<_, bool>(2),
             }
         })
@@ -356,11 +422,16 @@ SELECT
     a.attidentity::text,
     a.attgenerated::text,
     pg_get_expr(ad.adbin, ad.adrelid),
-    col_description(c.oid, a.attnum)
+    col_description(c.oid, a.attnum),
+    typ.typtype::text,
+    typ.typname,
+    tn.nspname,
+    format('%I.%I', tn.nspname, typ.typname)
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_attribute a ON a.attrelid = c.oid
 JOIN pg_type typ ON typ.oid = a.atttypid
+JOIN pg_namespace tn ON tn.oid = typ.typnamespace
 LEFT JOIN pg_collation coll ON coll.oid = a.attcollation
 LEFT JOIN pg_attrdef ad ON ad.adrelid = c.oid AND ad.adnum = a.attnum
 WHERE n.nspname = $1
@@ -377,7 +448,25 @@ ORDER BY a.attnum",
         .into_iter()
         .map(|row| {
             let db_type: String = row.get(1);
-            let ty = sql_type(&db_type);
+            let typtype: String = row.get(8);
+            let type_schema: String = row.get(10);
+            let type_name: String = row.get(9);
+            let type_qualified: String = row.get(11);
+            let ty = enum_or_sql_type(
+                &typtype,
+                &type_schema,
+                &type_name,
+                &type_qualified,
+                &table_ref.schema,
+                &db_type,
+            );
+            // Parse the default as an enum label whenever the catalog says the column IS an enum — even
+            // a cross-schema one (which is represented as `Raw`, so `default_value` alone would miss it).
+            let default_ty = if typtype == "e" {
+                SqlType::Enum(type_name.clone())
+            } else {
+                ty.clone()
+            };
             let identity: String = row.get(4);
             let generated: String = row.get(5);
             let default: Option<String> = row.get(6);
@@ -390,7 +479,7 @@ ORDER BY a.attnum",
                 default: (generated != "s")
                     .then(|| default.clone())
                     .flatten()
-                    .map(|value| default_value(&ty, &value)),
+                    .map(|value| default_value(&default_ty, &value)),
                 identity: identity_model(&identity),
                 generated: generated_model(&generated, default),
                 // PostgreSQL has no `ON UPDATE` column auto-update attribute.
@@ -834,6 +923,16 @@ fn default_value(ty: &SqlType, value: &str) -> DefaultValue {
         return DefaultValue::Text(text);
     }
 
+    // An enum column's default is stored as `'label'::<type>` (e.g. `'sad'::publish_enums.mood`); recover
+    // the bare label as text so a desired `DefaultValue::Text("sad")` compares equal instead of churning.
+    // `postgres_string_literal` parses the leading quoted literal and tolerates the trailing `::<type>`
+    // cast — including a label that itself contains `::` (`'a::b'::mood`), which lives inside the quotes.
+    if let SqlType::Enum(_) = ty
+        && let Some(text) = postgres_string_literal(trimmed)
+    {
+        return DefaultValue::Text(text);
+    }
+
     match ty {
         SqlType::I8
         | SqlType::I16
@@ -858,6 +957,33 @@ fn default_value(ty: &SqlType, value: &str) -> DefaultValue {
             .map(DefaultValue::Float)
             .unwrap_or_else(|_| DefaultValue::Raw(value.to_owned())),
         _ => DefaultValue::Raw(value.to_owned()),
+    }
+}
+
+/// Resolves a column's [`SqlType`] from the catalog. An enum in the **same** schema as its relation
+/// becomes [`SqlType::Enum`] (rendered qualified with the relation's schema). A **cross-schema** enum
+/// becomes a schema-qualified [`SqlType::Raw`] built from the catalog (`type_schema.type_name`) — NOT the
+/// `format_type` string, which drops the qualifier when the enum's schema is on `search_path` (e.g.
+/// `public`) and would then churn against a desired qualified `Raw`. Non-enum types use `sql_type`.
+fn enum_or_sql_type(
+    typtype: &str,
+    type_schema: &str,
+    type_name: &str,
+    type_qualified: &str,
+    relation_schema: &str,
+    db_type: &str,
+) -> SqlType {
+    if typtype == "e" {
+        if type_schema == relation_schema {
+            SqlType::Enum(type_name.to_owned())
+        } else {
+            // `type_qualified` is PostgreSQL's `format('%I.%I', schema, name)` — quoted only where an
+            // identifier requires it (`"Types"."Mood Type"`, but bare `types.mood`), so the round-trips
+            // as a renderable, correctly-quoted `Raw`.
+            SqlType::Raw(type_qualified.to_owned())
+        }
+    } else {
+        sql_type(db_type)
     }
 }
 

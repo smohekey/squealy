@@ -202,6 +202,19 @@ pub struct SchemaModel {
     /// Views declared in this namespace. A view is a named `SELECT` with a typed output schema and a
     /// backend-neutral structural body; see [`ViewModel`].
     pub views: Vec<ViewModel>,
+    /// Enum types declared in this namespace (PostgreSQL `CREATE TYPE ... AS ENUM`); see [`EnumModel`].
+    /// A column of an enum type carries [`SqlType::Enum`] naming it. Backends without a user-enum type
+    /// (MySQL, SQLite) reject a model that declares one.
+    pub enums: Vec<EnumModel>,
+}
+
+/// A named enumerated type (PostgreSQL `CREATE TYPE <name> AS ENUM (<labels>)`). Its labels are ordered;
+/// PostgreSQL stores and compares them by `enumsortorder`, and can only *append* a label in place
+/// (`ALTER TYPE ... ADD VALUE`) — a removal or reorder requires recreating the type.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnumModel {
+    pub name: String,
+    pub labels: Vec<String>,
 }
 
 /// A table and its table-level, named constraints.
@@ -365,6 +378,10 @@ pub enum SqlType {
     /// A fixed-width binary column of `N` bytes (`[u8; N]`): PostgreSQL `bytea` + a generated
     /// `CHECK (octet_length(col) = N)`; MySQL `BINARY(N)`.
     FixedBytes(u32),
+    /// A column typed as a named user-defined enum (PostgreSQL `CREATE TYPE ... AS ENUM`). The `String`
+    /// is the enum type's name, resolved against the schema's [`EnumModel`]s. Backends without a
+    /// user-enum type reject it.
+    Enum(String),
     /// A backend-specific type name, emitted verbatim into DDL.
     Raw(String),
 }

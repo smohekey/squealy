@@ -80,6 +80,7 @@ fn model(views: Vec<ViewModel>) -> DatabaseModel {
             name: Some("public".to_owned()),
             tables: vec![users_table()],
             views,
+            enums: Vec::new(),
         }],
     }
 }
@@ -279,6 +280,7 @@ fn cross_schema_dependent_is_dropped_and_recreated() {
             name: Some(name.to_owned()),
             tables: Vec::new(),
             views,
+            enums: Vec::new(),
         }
     }
 

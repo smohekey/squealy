@@ -306,6 +306,7 @@ fn clause_alias_model() -> DatabaseModel {
                     ..Default::default()
                 })),
             }],
+            enums: Vec::new(),
         }],
     }
 }
@@ -424,4 +425,263 @@ async fn publishing_narrow_and_wide_integer_columns_then_replanning_is_empty() {
         .execute_ddl("DROP SCHEMA IF EXISTS publish_ints CASCADE")
         .await
         .expect("clean up int-widths fixture");
+}
+
+/// A `publish_enums` schema with a `mood` enum of `labels` and a table with a `mood`-typed column.
+/// Enums are not expressible through the derive macro, so this is hand-built.
+fn enum_fixture(labels: &[&str]) -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("publish_enums".to_owned()),
+            tables: vec![TableModel {
+                name: "readings".to_owned(),
+                comment: None,
+                columns: vec![
+                    ColumnModel {
+                        name: "id".to_owned(),
+                        comment: None,
+                        ty: SqlType::I32,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: Some(IdentityModel {
+                            mode: IdentityMode::ByDefault,
+                        }),
+                        generated: None,
+                        on_update: None,
+                    },
+                    ColumnModel {
+                        name: "m".to_owned(),
+                        comment: None,
+                        ty: SqlType::Enum("mood".to_owned()),
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        on_update: None,
+                    },
+                ],
+                primary_key: Some(Constraint {
+                    prefix_lengths: Vec::new(),
+                    name: "pk_readings".to_owned(),
+                    columns: vec!["id".to_owned()],
+                }),
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "mood".to_owned(),
+                labels: labels.iter().map(|s| s.to_string()).collect(),
+            }],
+        }],
+    }
+}
+
+#[test]
+fn creating_an_enum_column_without_a_declared_type_is_rejected() {
+    // A bare `SqlType::Enum("mood")` column names an enum in its own schema; if no such enum is
+    // declared, the create preflight must reject it rather than emit a table referencing a type that
+    // was never created. (No database needed — this is a render-time preflight.)
+    let mut model = enum_fixture(&["sad", "ok", "happy"]);
+    model.schemas[0].enums.clear();
+    let error = squealy_model::render_create_sql(&model, &Postgres)
+        .expect_err("an enum column with no declared type must be rejected");
+    assert!(error.to_string().contains("mood"), "{error}");
+}
+
+#[test]
+fn creating_a_same_named_relation_and_enum_is_rejected() {
+    // PostgreSQL owns a composite type per relation, so a table and an enum cannot share a name even in
+    // a single create-from-scratch model. The create preflight must reject it.
+    let mut model = enum_fixture(&["sad", "ok", "happy"]);
+    model.schemas[0].tables[0].name = "mood".to_owned();
+    let error = squealy_model::render_create_sql(&model, &Postgres)
+        .expect_err("a relation sharing an enum name must be rejected");
+    assert!(error.to_string().contains("mood"), "{error}");
+}
+
+#[test]
+fn creating_a_view_column_of_an_undeclared_enum_is_rejected() {
+    // The enum-declaration check must cover view output columns, not just table columns. The view has a
+    // fully renderable body (so the only reason to reject it is the undeclared enum output column), and
+    // the table's own enum column is removed so the collision is isolated to the view.
+    let mut model = enum_fixture(&["sad", "ok", "happy"]);
+    model.schemas[0].enums.clear();
+    model.schemas[0].tables[0]
+        .columns
+        .retain(|column| column.name == "id");
+    model.schemas[0].views.push(ViewModel {
+        name: "reading_ids".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "id".to_owned(),
+            ty: SqlType::Enum("mood".to_owned()),
+            nullable: false,
+        }],
+        query: ViewBody::Select(Box::new(ViewQueryModel {
+            dependencies: Vec::new(),
+            distinct: false,
+            projection: vec![ProjectionItem {
+                output_name: "id".to_owned(),
+                internal_alias: None,
+                expr: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "id".to_owned(),
+                },
+            }],
+            from: Some(SourceItem::Named(SourceRef {
+                schema: Some("publish_enums".to_owned()),
+                name: "readings".to_owned(),
+                alias: "q0_0".to_owned(),
+            })),
+            joins: Vec::new(),
+            filter: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        })),
+    });
+    let error = squealy_model::render_create_sql(&model, &Postgres)
+        .expect_err("a view column of an undeclared enum must be rejected");
+    assert!(error.to_string().contains("mood"), "{error}");
+}
+
+#[test]
+fn incremental_rendering_rejects_an_undeclared_enum_column() {
+    // The incremental render path does not run `check_create`, so it must independently reject a column
+    // typed as an enum the desired schema never declares — otherwise offline `squealy plan` emits a
+    // qualified type reference that fails at execution.
+    let mut model = enum_fixture(&["sad", "ok", "happy"]);
+    model.schemas[0].enums.clear();
+    let plan = squealy_model::DatabasePlan { steps: Vec::new() };
+    let error = squealy_model::render_plan_sql(&plan, &model, &Postgres)
+        .expect_err("an incremental plan referencing an undeclared enum must be rejected");
+    assert!(error.to_string().contains("mood"), "{error}");
+}
+
+#[tokio::test]
+#[ignore]
+async fn publishing_an_enum_then_replanning_is_empty() {
+    // A published enum type + a column of that type must re-plan to empty: the CREATE TYPE round-trips
+    // (introspected from pg_enum), and the column rebinds from Raw("mood") to Enum("mood").
+    let _guard = db_lock().lock().await;
+    let model = enum_fixture(&["sad", "ok", "happy"]);
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_enums CASCADE")
+        .await
+        .expect("reset enum fixture");
+
+    squealy_model::publish(&model, &Postgres, &mut connection)
+        .await
+        .expect("publish enum + column");
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect("re-plan against the published enum");
+    assert!(
+        plan.steps.is_empty(),
+        "a published enum must re-plan empty, got: {:?}",
+        plan.steps
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_enums CASCADE")
+        .await
+        .expect("clean up enum fixture");
+}
+
+#[tokio::test]
+#[ignore]
+async fn changing_enum_labels_is_rejected_for_now() {
+    // Enum-label migration (append, remove, or reorder) is not supported yet: a correct migration needs
+    // live-schema and whole-plan awareness (live defaults, dependent views/foreign keys, ordering around
+    // table changes, PostgreSQL's ADD VALUE-in-transaction rule). Until then, changing an enum's labels
+    // is refused loudly rather than emitting SQL PostgreSQL would reject or applying a partial migration.
+    let _guard = db_lock().lock().await;
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_enums CASCADE")
+        .await
+        .expect("reset enum fixture");
+
+    squealy_model::publish(&enum_fixture(&["sad", "ok"]), &Postgres, &mut connection)
+        .await
+        .expect("publish base enum");
+
+    let changed = enum_fixture(&["sad", "ok", "happy"]);
+    let plan = squealy_model::plan_from_database(
+        &changed,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("plan the label change (the diff still detects it)");
+    let error = squealy_model::apply_plan(&plan, &changed, &Postgres, &mut connection)
+        .await
+        .expect_err("applying an enum label change must be refused");
+    assert!(
+        error.to_string().contains("mood"),
+        "the refusal must name the enum: {error}"
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_enums CASCADE")
+        .await
+        .expect("clean up enum fixture");
+}
+
+#[tokio::test]
+#[ignore]
+async fn publishing_an_enum_column_with_a_default_replans_empty() {
+    // An enum column with a DEFAULT round-trips: PostgreSQL stores the default as `'label'::type`, which
+    // introspection converts back to `DefaultValue::Text(label)` — including a label containing `::`
+    // (`'a::b'::type`), which lives inside the quotes — so it re-plans empty instead of churning.
+    let _guard = db_lock().lock().await;
+    let mut model = enum_fixture(&["sad", "ok", "a::b"]);
+    model.schemas[0].tables[0].columns[1].default = Some(DefaultValue::Text("a::b".to_owned()));
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_enums CASCADE")
+        .await
+        .expect("reset enum fixture");
+
+    squealy_model::publish(&model, &Postgres, &mut connection)
+        .await
+        .expect("publish enum + defaulted column");
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect("re-plan against the defaulted enum column");
+    assert!(
+        plan.steps.is_empty(),
+        "an enum column with a default must re-plan empty, got: {:?}",
+        plan.steps
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_enums CASCADE")
+        .await
+        .expect("clean up enum fixture");
 }

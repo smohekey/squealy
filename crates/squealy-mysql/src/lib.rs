@@ -175,6 +175,8 @@ impl SchemaBackend for Mysql {
                 prefix_lengths: true,
                 ..squealy::IndexCapabilities::default()
             },
+            // MySQL has inline column `ENUM(...)` but no standalone `CREATE TYPE` object.
+            enums: false,
         }
     }
 
