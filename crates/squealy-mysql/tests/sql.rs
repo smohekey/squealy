@@ -50,7 +50,8 @@ fn mysql_reports_schema_capabilities() {
     assert!(!capabilities.constraints.foreign_key_validation);
     assert!(!capabilities.constraints.foreign_key_enforcement);
     assert!(!capabilities.constraints.check_validation);
-    assert!(!capabilities.constraints.check_enforcement);
+    // MySQL 8.0.16+ supports `CHECK (...) NOT ENFORCED`.
+    assert!(capabilities.constraints.check_enforcement);
     assert!(!capabilities.indexes.predicates);
     assert!(!capabilities.indexes.expressions);
     assert!(!capabilities.indexes.include_columns);
@@ -317,6 +318,89 @@ ALTER TABLE `shop`.`events` DROP CHECK `ck_events_id`;\n\
 ALTER TABLE `shop`.`events` ADD CONSTRAINT `ck_events_id` CHECK ((`event_id` > 0));\n\
 DROP INDEX `idx_events_name` ON `shop`.`events`;\n\
 CREATE UNIQUE INDEX `idx_events_name` ON `shop`.`events` (`slug`);"
+    );
+}
+
+#[test]
+fn mysql_enforcement_only_check_change_uses_atomic_alter_check() {
+    // Same name and expression, only the enforcement differs: render the in-place `ALTER CHECK` toggle,
+    // NOT the non-atomic DROP + ADD (whose committed DROP would lose the check if enabling enforcement
+    // then failed validation). An expression change still uses DROP + ADD (covered by the plan test
+    // above). Cover both toggle directions and the enforced-default keyword.
+    let alter = |before_enf, after_enf| {
+        let plan = DatabasePlan {
+            steps: vec![DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterCheck {
+                    before: CheckModel {
+                        name: "ck_n".to_owned(),
+                        expression: check_expr("n > 0"),
+                        validation: None,
+                        enforcement: before_enf,
+                    },
+                    after: CheckModel {
+                        name: "ck_n".to_owned(),
+                        expression: check_expr("n > 0"),
+                        validation: None,
+                        enforcement: after_enf,
+                    },
+                }),
+            }],
+        };
+        let mut sql = Vec::new();
+        Mysql
+            .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+            .unwrap();
+        String::from_utf8(sql).unwrap()
+    };
+
+    // Enabling enforcement (NOT ENFORCED -> the enforced default `None`).
+    assert_eq!(
+        alter(Some(ConstraintEnforcement::NotEnforced), None),
+        "ALTER TABLE `shop`.`events` ALTER CHECK `ck_n` ENFORCED;"
+    );
+    // Disabling enforcement (enforced default -> NOT ENFORCED).
+    assert_eq!(
+        alter(None, Some(ConstraintEnforcement::NotEnforced)),
+        "ALTER TABLE `shop`.`events` ALTER CHECK `ck_n` NOT ENFORCED;"
+    );
+}
+
+#[test]
+fn mysql_alter_check_with_validation_is_rejected_not_silently_toggled() {
+    // Same name and expression, but the desired side carries `NOT VALID` (a PostgreSQL concept MySQL
+    // cannot represent). The enforcement-only fast path must NOT swallow this — it must fall to
+    // DROP + ADD, whose `write_check` rejects the validation, so an unrepresentable state fails loudly
+    // instead of re-planning forever. The incremental plan path skips `validate_capabilities`, so the
+    // renderer is the only guard.
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterTable {
+            schema: Some("shop".to_owned()),
+            table: "events".to_owned(),
+            change: Box::new(TablePlanStep::AlterCheck {
+                before: CheckModel {
+                    name: "ck_n".to_owned(),
+                    expression: check_expr("n > 0"),
+                    validation: None,
+                    enforcement: Some(ConstraintEnforcement::NotEnforced),
+                },
+                after: CheckModel {
+                    name: "ck_n".to_owned(),
+                    expression: check_expr("n > 0"),
+                    validation: Some(ConstraintValidation::NotValidated),
+                    enforcement: None,
+                },
+            }),
+        }],
+    };
+    let error = Mysql
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut Vec::new())
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        error.to_string().contains("validation"),
+        "unexpected error: {error}"
     );
 }
 
@@ -938,7 +1022,7 @@ fn mysql_rejects_deferrable_foreign_keys() {
 }
 
 #[test]
-fn mysql_rejects_check_constraint_enforcement() {
+fn mysql_renders_check_constraint_not_enforced() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("shop".to_owned()),
@@ -971,9 +1055,16 @@ fn mysql_rejects_check_constraint_enforcement() {
         }],
     };
 
+    // MySQL 8.0.16+ supports it, so this renders rather than rejecting (git-bug acb1c6d Phase 3).
     let mut sql = Vec::new();
-    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    Mysql
+        .render_create(&model, &mut sql)
+        .expect("render NOT ENFORCED check");
+    let sql = String::from_utf8(sql).unwrap();
+    assert!(
+        sql.contains("CHECK ((`tenant_id` > 0)) NOT ENFORCED"),
+        "expected a NOT ENFORCED check in:\n{sql}"
+    );
 }
 
 #[test]

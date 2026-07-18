@@ -8,8 +8,8 @@
 use std::io::{self, Write};
 
 use squealy::{
-    CheckModel, ColumnDefault, ColumnModel, Constraint, DatabaseModel, DatabasePlan,
-    DatabasePlanStep, DefaultValue, ForeignKeyModel, GeneratedStorage, IndexModel,
+    CheckModel, ColumnDefault, ColumnModel, Constraint, ConstraintEnforcement, DatabaseModel,
+    DatabasePlan, DatabasePlanStep, DefaultValue, ForeignKeyModel, GeneratedStorage, IndexModel,
     IndexPrefixLength, SqlType, Table, TableModel, TablePlanStep,
 };
 
@@ -338,15 +338,35 @@ fn write_table_plan_step(
             write_add_foreign_key(schema, table, after, writer)?;
         }
         TablePlanStep::AlterCheck { before, after } => {
-            writer.write_all(b"ALTER TABLE ")?;
-            write_qualified_name(schema, table, writer)?;
-            writer.write_all(b" DROP CHECK ")?;
-            write_quoted_ident(&before.name, writer)?;
-            statement(writer, first)?;
-            writer.write_all(b"ALTER TABLE ")?;
-            write_qualified_name(schema, table, writer)?;
-            writer.write_all(b" ADD ")?;
-            write_check(after, writer)?;
+            if before.name == after.name
+                && before.expression == after.expression
+                && after.validation.is_none()
+            {
+                // Only the enforcement changed. Toggle it in place with `ALTER CHECK`, which is atomic:
+                // enabling enforcement on a check whose rows violate it fails and LEAVES the check
+                // intact. The DROP + ADD below would instead commit the DROP (MySQL auto-commits DDL)
+                // and then fail the re-add's validation, silently losing the constraint. The
+                // `after.validation.is_none()` guard is required: MySQL has no validation metadata, so a
+                // desired check carrying it must reach `write_check` (via DROP + ADD) to be rejected —
+                // the incremental plan path skips `validate_capabilities`, so this fast path would
+                // otherwise silently emit an enforcement toggle and re-plan the ignored validation
+                // forever.
+                writer.write_all(b"ALTER TABLE ")?;
+                write_qualified_name(schema, table, writer)?;
+                writer.write_all(b" ALTER CHECK ")?;
+                write_quoted_ident(&after.name, writer)?;
+                write_alter_check_enforcement(&after.enforcement, writer)?;
+            } else {
+                writer.write_all(b"ALTER TABLE ")?;
+                write_qualified_name(schema, table, writer)?;
+                writer.write_all(b" DROP CHECK ")?;
+                write_quoted_ident(&before.name, writer)?;
+                statement(writer, first)?;
+                writer.write_all(b"ALTER TABLE ")?;
+                write_qualified_name(schema, table, writer)?;
+                writer.write_all(b" ADD ")?;
+                write_check(after, writer)?;
+            }
         }
         TablePlanStep::AlterIndex { before, after } => {
             writer.write_all(b"DROP INDEX ")?;
@@ -707,22 +727,54 @@ fn validate_prefix_lengths(
 
 fn write_check(check: &CheckModel, writer: &mut impl Write) -> io::Result<()> {
     if check.validation.is_some() {
+        // MySQL has no `NOT VALID` (deferred validation) — that is a PostgreSQL concept.
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "MySQL does not support constraint validation metadata",
-        ));
-    }
-    if check.enforcement.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "MySQL check constraint enforcement metadata is not supported by squealy yet",
         ));
     }
     writer.write_all(b"CONSTRAINT ")?;
     write_quoted_ident(&check.name, writer)?;
     writer.write_all(b" CHECK (")?;
     squealy::render_scalar_expr(&check.expression, &MysqlDialect, writer)?;
-    writer.write_all(b")")
+    writer.write_all(b")")?;
+    write_constraint_enforcement(&check.enforcement, writer)
+}
+
+/// Renders a check constraint's `[NOT] ENFORCED` clause in a `CHECK (...)` definition (MySQL 8.0.16+).
+/// The default, `ENFORCED`, renders bare so a plain check round-trips (introspection folds the enforced
+/// default to `None`, mirroring how PostgreSQL renders `validation`); only `NOT ENFORCED` is a
+/// meaningful, rendered difference.
+fn write_constraint_enforcement(
+    enforcement: &Option<ConstraintEnforcement>,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    match enforcement {
+        Some(ConstraintEnforcement::NotEnforced) => writer.write_all(b" NOT ENFORCED")?,
+        Some(ConstraintEnforcement::Raw(enforcement)) => {
+            writer.write_all(b" ")?;
+            writer.write_all(enforcement.as_bytes())?;
+        }
+        Some(ConstraintEnforcement::Enforced) | None => {}
+    }
+    Ok(())
+}
+
+/// Renders the enforcement keyword for an in-place `ALTER TABLE ... ALTER CHECK <name> ...` toggle. Unlike
+/// the `CHECK (...)` clause above, `ALTER CHECK` requires an explicit keyword, so the enforced default
+/// renders `ENFORCED` rather than bare.
+fn write_alter_check_enforcement(
+    enforcement: &Option<ConstraintEnforcement>,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    match enforcement {
+        Some(ConstraintEnforcement::NotEnforced) => writer.write_all(b" NOT ENFORCED"),
+        Some(ConstraintEnforcement::Raw(enforcement)) => {
+            writer.write_all(b" ")?;
+            writer.write_all(enforcement.as_bytes())
+        }
+        Some(ConstraintEnforcement::Enforced) | None => writer.write_all(b" ENFORCED"),
+    }
 }
 
 fn write_create_index(
@@ -1416,6 +1468,43 @@ mod tests {
         let error = write_database(&model, &mut out).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("full_name"), "{error}");
+    }
+
+    #[test]
+    fn mysql_check_enforcement_renders_only_the_non_default() {
+        let check = |enforcement| CheckModel {
+            name: "c_pos".to_owned(),
+            expression: squealy::ExprNode::Compare {
+                op: squealy::CompareOp::GreaterThan,
+                left: Box::new(squealy::ExprNode::BareColumn {
+                    column: "n".to_owned(),
+                }),
+                right: Box::new(squealy::ExprNode::Literal("0".to_owned())),
+            },
+            validation: None,
+            enforcement,
+        };
+        let render = |enforcement| {
+            let mut out = Vec::new();
+            write_check(&check(enforcement), &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+
+        // NOT ENFORCED is the only meaningful, rendered difference; the enforced default (and None)
+        // render bare so a plain check round-trips against the introspected form.
+        assert_eq!(
+            render(Some(ConstraintEnforcement::NotEnforced)),
+            "CONSTRAINT `c_pos` CHECK ((`n` > 0)) NOT ENFORCED"
+        );
+        assert_eq!(
+            render(Some(ConstraintEnforcement::Enforced)),
+            "CONSTRAINT `c_pos` CHECK ((`n` > 0))"
+        );
+        assert_eq!(render(None), "CONSTRAINT `c_pos` CHECK ((`n` > 0))");
+        assert_eq!(
+            render(Some(ConstraintEnforcement::Raw("NOT ENFORCED".to_owned()))),
+            "CONSTRAINT `c_pos` CHECK ((`n` > 0)) NOT ENFORCED"
+        );
     }
 
     #[test]

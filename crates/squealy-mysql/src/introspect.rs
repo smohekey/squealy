@@ -2,10 +2,11 @@ use std::collections::BTreeMap;
 
 use mysql_async::{params, prelude::Queryable};
 use squealy::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, DefaultValue, ExprNode, ForeignKeyAction,
-    ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode,
-    IdentityModel, IndexDirection, IndexMethod, IndexModel, IndexPrefixLength, SchemaModel,
-    SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
+    CheckModel, ColumnModel, Constraint, ConstraintEnforcement, DatabaseModel, DefaultValue,
+    ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, GeneratedColumnModel,
+    GeneratedStorage, IdentityMode, IdentityModel, IndexDirection, IndexMethod, IndexModel,
+    IndexPrefixLength, SchemaModel, SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel,
+    ViewModel, ViewQueryModel,
 };
 
 use crate::MysqlError;
@@ -573,13 +574,20 @@ fn match_type(value: &str) -> Option<ForeignKeyMatch> {
     }
 }
 
+/// Maps `information_schema.TABLE_CONSTRAINTS.ENFORCED` (`YES`/`NO`) to the neutral enforcement state.
+/// The enforced default folds to `None` so a plain `CHECK (...)` compares equal to its introspected form
+/// — only `NOT ENFORCED` is a meaningful difference (mirrors PostgreSQL's `validation` default fold).
+fn check_enforcement(enforced: &str) -> Option<ConstraintEnforcement> {
+    (!enforced.eq_ignore_ascii_case("YES")).then_some(ConstraintEnforcement::NotEnforced)
+}
+
 async fn checks(
     conn: &mut mysql_async::Conn,
     table_ref: &TableRef,
 ) -> Result<Vec<CheckModel>, MysqlError> {
     conn.exec_map(
         "\
-SELECT cc.CONSTRAINT_NAME, cc.CHECK_CLAUSE
+SELECT cc.CONSTRAINT_NAME, cc.CHECK_CLAUSE, tc.ENFORCED
 FROM information_schema.TABLE_CONSTRAINTS tc
 JOIN information_schema.CHECK_CONSTRAINTS cc
   ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
@@ -592,12 +600,12 @@ ORDER BY cc.CONSTRAINT_NAME",
             "schema" => &table_ref.schema,
             "table" => &table_ref.name,
         },
-        |(name, expression): (String, String)| CheckModel {
+        |(name, expression, enforced): (String, String, String)| CheckModel {
             name,
             expression: squealy_parse::Reader::new(squealy_parse::SqlDialect::Mysql)
                 .read_check_expression_or_raw(&expression),
             validation: None,
-            enforcement: None,
+            enforcement: check_enforcement(&enforced),
         },
     )
     .await
