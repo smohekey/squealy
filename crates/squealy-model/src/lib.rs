@@ -18,7 +18,7 @@ pub mod diff;
 pub use diff::{
     ChangeRisk, ClassifiedDatabaseDiffChange, DatabaseDiff, DatabaseDiffChange, DiffPolicy,
     DiffPolicyError, EnumRelationCollisionError, TableDiffChange, check_diff_policy, diff_models,
-    reject_enum_relation_name_collision,
+    reject_enum_relation_collision_in_diff, reject_enum_relation_name_collision,
 };
 pub use package::{
     FORMAT_VERSION, PACKAGE_CONTENT_HASH_METADATA_KEY, PACKAGE_FORMAT_VERSION_METADATA_KEY,

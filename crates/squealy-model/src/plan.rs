@@ -3,7 +3,9 @@
 //! A plan is the ordered, policy-checked form of a [`DatabaseDiff`]. It is still backend-neutral:
 //! backend crates remain responsible for deciding whether and how individual steps can be rendered.
 
-use crate::diff::{diff_table, reject_enum_relation_name_collision};
+use crate::diff::{
+    diff_table, reject_enum_relation_collision_in_diff, reject_enum_relation_name_collision,
+};
 use crate::{
     CastColumn, ChangeRisk, ClassifiedDatabaseDiffChange, DatabaseDiff, DatabaseDiffChange,
     DatabaseModel, DiffPolicy, DiffPolicyError, EnumRelationCollisionError, RefactorLog,
@@ -98,7 +100,12 @@ pub fn table_plan_step_risk(step: &TablePlanStep) -> ChangeRisk {
 }
 
 /// Builds a policy-checked plan from a precomputed diff.
-pub fn plan_diff(diff: &DatabaseDiff, policy: DiffPolicy) -> Result<DatabasePlan, DiffPolicyError> {
+///
+/// Besides policy checking, this rejects a diff that touches one `(schema, name)` as both a relation
+/// and an enum — the un-orderable relation↔enum swap — so a caller that assembles a diff directly
+/// cannot smuggle in a plan PostgreSQL would refuse.
+pub fn plan_diff(diff: &DatabaseDiff, policy: DiffPolicy) -> Result<DatabasePlan, PlanError> {
+    reject_enum_relation_collision_in_diff(diff)?;
     check_diff_policy(diff, policy)?;
     Ok(DatabasePlan {
         steps: flatten_diff(diff),
@@ -112,7 +119,7 @@ pub fn plan_models(
     policy: DiffPolicy,
 ) -> Result<DatabasePlan, PlanError> {
     reject_enum_relation_name_collision(desired, actual)?;
-    Ok(plan_diff(&diff_models(desired, actual), policy)?)
+    plan_diff(&diff_models(desired, actual), policy)
 }
 
 /// Diffs `desired` against `actual`, applies explicit refactor intent, then builds a policy-checked

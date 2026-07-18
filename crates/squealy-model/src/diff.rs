@@ -144,6 +144,48 @@ pub fn reject_enum_relation_name_collision(
     Ok(())
 }
 
+/// Rejects a precomputed diff that touches a single `(schema, name)` as both an enum and a relation
+/// (table or view). [`reject_enum_relation_name_collision`] catches the collision from a model pair;
+/// this catches it from a diff a caller assembled and handed to [`plan_diff`](crate::plan_diff)
+/// directly (e.g. a same-name relation↔enum swap, whose `CreateEnum`/`DropTable` the flattener would
+/// otherwise emit in an order PostgreSQL rejects over the relation's implicit composite type).
+pub fn reject_enum_relation_collision_in_diff(
+    diff: &DatabaseDiff,
+) -> Result<(), EnumRelationCollisionError> {
+    let mut relations: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+    let mut enums: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+    for change in &diff.changes {
+        match change {
+            DatabaseDiffChange::CreateTable { schema, table }
+            | DatabaseDiffChange::DropTable { schema, table } => {
+                relations.insert((schema.clone(), table.name.clone()));
+            }
+            DatabaseDiffChange::AlterTable { schema, table, .. } => {
+                relations.insert((schema.clone(), table.clone()));
+            }
+            DatabaseDiffChange::CreateView { schema, view }
+            | DatabaseDiffChange::DropView { schema, view } => {
+                relations.insert((schema.clone(), view.name.clone()));
+            }
+            DatabaseDiffChange::CreateEnum { schema, enum_type }
+            | DatabaseDiffChange::DropEnum { schema, enum_type } => {
+                enums.insert((schema.clone(), enum_type.name.clone()));
+            }
+            DatabaseDiffChange::AlterEnum { schema, after, .. } => {
+                enums.insert((schema.clone(), after.name.clone()));
+            }
+            DatabaseDiffChange::CreateSchema { .. } | DatabaseDiffChange::DropSchema { .. } => {}
+        }
+    }
+    if let Some((schema, name)) = relations.intersection(&enums).next() {
+        return Err(EnumRelationCollisionError {
+            schema: schema.clone(),
+            name: name.clone(),
+        });
+    }
+    Ok(())
+}
+
 /// Checks whether `diff` is allowed by `policy`.
 pub fn check_diff_policy(diff: &DatabaseDiff, policy: DiffPolicy) -> Result<(), DiffPolicyError> {
     let blocked = diff

@@ -3,10 +3,10 @@ use squealy::{
 };
 use squealy_model::{
     AppliedRefactorError, CastColumn, ChangeRisk, CheckModel, ColumnModel, DatabaseModel,
-    DatabasePlanStep, DdlExecutor, DiffPolicy, IndexModel, PlanApplyOptions, PlanError,
+    DatabasePlanStep, DdlExecutor, DiffPolicy, EnumModel, IndexModel, PlanApplyOptions, PlanError,
     RefactorLog, RefactorOperation, RenameColumn, RenameTable, SchemaIntrospect, SchemaModel,
     SchemaRefactorStore, SqlType, TableModel, TablePlanStep, apply_plan, apply_plan_with_options,
-    classified_plan_steps, pending_refactors, plan_from_database,
+    classified_plan_steps, diff_models, pending_refactors, plan_diff, plan_from_database,
     plan_from_database_with_refactors, plan_models, plan_models_with_refactors, render_plan_sql,
     render_plan_with_options, repair_refactor_metadata,
 };
@@ -1144,6 +1144,32 @@ fn cast_column_applies_after_rename_regardless_of_log_order() {
         sql.contains("USING old_total::numeric"),
         "cast must survive being listed before the rename: {sql}"
     );
+}
+
+#[test]
+fn plan_diff_rejects_a_relation_enum_swap_from_a_precomputed_diff() {
+    // A caller that assembles a diff directly and hands it to `plan_diff` (bypassing `plan_models`'s
+    // model-level guard) must still be refused: a same-name relation<->enum swap flattens to
+    // `CreateEnum` before `DropTable`, which PostgreSQL rejects over the relation's composite type.
+    let actual = model_with_tables("app", vec![table("status")]);
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "status".to_owned(),
+                labels: vec!["open".to_owned()],
+            }],
+        }],
+    };
+    let diff = diff_models(&desired, &actual);
+    let error = plan_diff(&diff, DiffPolicy::ALLOW_ALL)
+        .expect_err("a precomputed relation<->enum swap must be rejected");
+    let PlanError::Collision(error) = error else {
+        panic!("expected a collision, got {error:?}");
+    };
+    assert_eq!(error.name, "status");
 }
 
 fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {
