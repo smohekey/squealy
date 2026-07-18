@@ -368,6 +368,43 @@ fn mysql_enforcement_only_check_change_uses_atomic_alter_check() {
 }
 
 #[test]
+fn mysql_alter_check_with_validation_is_rejected_not_silently_toggled() {
+    // Same name and expression, but the desired side carries `NOT VALID` (a PostgreSQL concept MySQL
+    // cannot represent). The enforcement-only fast path must NOT swallow this — it must fall to
+    // DROP + ADD, whose `write_check` rejects the validation, so an unrepresentable state fails loudly
+    // instead of re-planning forever. The incremental plan path skips `validate_capabilities`, so the
+    // renderer is the only guard.
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterTable {
+            schema: Some("shop".to_owned()),
+            table: "events".to_owned(),
+            change: Box::new(TablePlanStep::AlterCheck {
+                before: CheckModel {
+                    name: "ck_n".to_owned(),
+                    expression: check_expr("n > 0"),
+                    validation: None,
+                    enforcement: Some(ConstraintEnforcement::NotEnforced),
+                },
+                after: CheckModel {
+                    name: "ck_n".to_owned(),
+                    expression: check_expr("n > 0"),
+                    validation: Some(ConstraintValidation::NotValidated),
+                    enforcement: None,
+                },
+            }),
+        }],
+    };
+    let error = Mysql
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut Vec::new())
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        error.to_string().contains("validation"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn mysql_renders_constraint_column_prefix_lengths() {
     let plan = DatabasePlan {
         steps: vec![

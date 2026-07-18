@@ -338,12 +338,19 @@ fn write_table_plan_step(
             write_add_foreign_key(schema, table, after, writer)?;
         }
         TablePlanStep::AlterCheck { before, after } => {
-            if before.name == after.name && before.expression == after.expression {
-                // Only the enforcement changed (on MySQL a check carries no other alterable metadata —
-                // validation is a PostgreSQL concept). Toggle it in place with `ALTER CHECK`, which is
-                // atomic: enabling enforcement on a check whose rows violate it fails and LEAVES the
-                // check intact. The DROP + ADD below would instead commit the DROP (MySQL auto-commits
-                // DDL) and then fail the re-add's validation, silently losing the constraint.
+            if before.name == after.name
+                && before.expression == after.expression
+                && after.validation.is_none()
+            {
+                // Only the enforcement changed. Toggle it in place with `ALTER CHECK`, which is atomic:
+                // enabling enforcement on a check whose rows violate it fails and LEAVES the check
+                // intact. The DROP + ADD below would instead commit the DROP (MySQL auto-commits DDL)
+                // and then fail the re-add's validation, silently losing the constraint. The
+                // `after.validation.is_none()` guard is required: MySQL has no validation metadata, so a
+                // desired check carrying it must reach `write_check` (via DROP + ADD) to be rejected —
+                // the incremental plan path skips `validate_capabilities`, so this fast path would
+                // otherwise silently emit an enforcement toggle and re-plan the ignored validation
+                // forever.
                 writer.write_all(b"ALTER TABLE ")?;
                 write_qualified_name(schema, table, writer)?;
                 writer.write_all(b" ALTER CHECK ")?;
