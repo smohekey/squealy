@@ -1063,6 +1063,15 @@ impl squealy::Dialect for MysqlDialect {
     }
 
     fn write_cast_type(&self, ty: &SqlType, writer: &mut dyn Write) -> io::Result<()> {
+        // A user-defined enum is a PostgreSQL-only type; MySQL has no equivalent CAST target, and the
+        // `_ => "CHAR"` fall-through below would silently rewrite the cast's semantics. Reject it (the
+        // enum column class is already refused up front — this catches an enum buried in an expression).
+        if let SqlType::Enum(name) = ty {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("MySQL cannot render a CAST to the user-defined enum type `{name}`"),
+            ));
+        }
         // `CAST(expr AS <type>)` accepts a restricted vocabulary in MySQL, distinct from column types
         // (e.g. `SIGNED`/`UNSIGNED`/`CHAR`, not `INT`/`VARCHAR`).
         let name = match ty {
@@ -1433,6 +1442,24 @@ mod tests {
         assert!(
             !MysqlDialect.integer_division_needs_float_cast(),
             "MySQL `/` is already float division"
+        );
+    }
+
+    #[test]
+    fn mysql_rejects_a_cast_to_an_enum_type() {
+        // An enum column is refused up front, but an enum buried in a cast expression reaches the cast
+        // renderer, where the `_ => "CHAR"` fall-through would silently rewrite its semantics.
+        let enum_ty = SqlType::Enum("mood".to_owned());
+        let result = MysqlDialect.write_cast_type(&enum_ty, &mut Vec::new());
+        let error = result.expect_err("MySQL must reject a CAST to an enum type");
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("mood"), "{error}");
+
+        // The general (authored) cast path delegates to the same rejection.
+        let result = MysqlDialect.write_general_cast_type(&enum_ty, &mut Vec::new());
+        assert!(
+            result.is_err(),
+            "general cast to an enum must also be rejected"
         );
     }
 

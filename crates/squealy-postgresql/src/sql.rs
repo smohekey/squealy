@@ -796,14 +796,15 @@ pub(crate) mod ddl {
         let drop_fixed_bytes_check = before_width && before.ty != after.ty;
         let add_fixed_bytes_check = after_width && before.ty != after.ty;
 
-        // A default attached to the old type cannot be automatically cast to a new enum type, so
-        // PostgreSQL rejects `ALTER COLUMN ... TYPE <enum>` while the column still carries one (even with
-        // a `USING` clause, which only converts the stored rows, not the default expression). Drop the
-        // existing default before the type change; the `SET DEFAULT` below restores the desired default,
-        // forced on when the default is otherwise unchanged across the conversion.
-        let drop_default_before_enum_type_change = before.default.is_some()
-            && before.ty != after.ty
-            && matches!(after.ty, squealy::SqlType::Enum(_));
+        // PostgreSQL validates an existing column default against the *new* type independently of the
+        // `USING` clause (which only converts the stored rows), so a default the target type cannot
+        // accept — an enum/`text` conversion in either direction, a cross-schema enum carried as `Raw`,
+        // and so on — makes `ALTER COLUMN ... TYPE` fail while the old default is still attached. Rather
+        // than enumerate which conversions PostgreSQL happens to accept in place, drop the existing
+        // default before *any* type change and let the `SET DEFAULT` below restore the desired default
+        // (forced on when the default is otherwise unchanged across the conversion). Restoring always
+        // succeeds because the desired default is by definition valid for the desired type.
+        let drop_default_before_type_change = before.default.is_some() && before.ty != after.ty;
 
         let mut wrote = false;
         if drop_fixed_bytes_check {
@@ -815,7 +816,7 @@ pub(crate) mod ddl {
             )?;
             wrote = true;
         }
-        if drop_default_before_enum_type_change {
+        if drop_default_before_type_change {
             if wrote {
                 statement(writer, first)?;
             }
@@ -874,10 +875,7 @@ pub(crate) mod ddl {
             writer.write_all(b" DROP IDENTITY IF EXISTS")?;
             wrote = true;
         }
-        if before.default.is_some()
-            && after.default.is_none()
-            && !drop_default_before_enum_type_change
-        {
+        if before.default.is_some() && after.default.is_none() && !drop_default_before_type_change {
             if wrote {
                 statement(writer, first)?;
             }
@@ -903,7 +901,7 @@ pub(crate) mod ddl {
             wrote = true;
         }
         if let Some(default) = &after.default
-            && (before.default.as_ref() != Some(default) || drop_default_before_enum_type_change)
+            && (before.default.as_ref() != Some(default) || drop_default_before_type_change)
         {
             if wrote {
                 statement(writer, first)?;
