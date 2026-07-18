@@ -23,6 +23,17 @@ use squealy::{
 /// newline-separated: tables (with inline PK/unique/check/foreign-keys), then indexes, then views in
 /// dependency order. SQLite has no schemas, so schema names are dropped and all tables are flattened.
 pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> io::Result<()> {
+    // SQLite has no user-defined enum type. Reject a model declaring one up front (even an unused
+    // standalone type), so a direct `render_create` call cannot silently omit it.
+    if let Some(enum_type) = model.schemas.iter().flat_map(|schema| &schema.enums).next() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite does not support the user-defined enum type `{}`",
+                enum_type.name
+            ),
+        ));
+    }
     // SQLite keeps tables, indexes and views in one database-wide object namespace (there are no
     // schemas), so once schemas are flattened every table, index and view name must be unique —
     // including a table name that matches an index or a view. A model that relies on schema/table

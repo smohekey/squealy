@@ -19,6 +19,19 @@ use squealy::{
 pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> io::Result<()> {
     let mut first = true;
 
+    // MySQL has no standalone `CREATE TYPE`. A model declaring an enum type is rejected up front (even an
+    // unused one), so a direct `render_create` call cannot silently omit it. An enum *column* is also
+    // rejected when rendered, but this guard covers a schema that declares only the type.
+    if let Some(enum_type) = model.schemas.iter().flat_map(|schema| &schema.enums).next() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "MySQL does not support the user-defined enum type `{}`",
+                enum_type.name
+            ),
+        ));
+    }
+
     for schema in &model.schemas {
         if let Some(name) = schema.name.as_deref() {
             statement(writer, &mut first)?;

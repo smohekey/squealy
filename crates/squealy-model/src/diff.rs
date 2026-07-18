@@ -340,31 +340,44 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
         }
     }
 
-    // A view depending on a colliding relation must be dropped before that relation is dropped, and a
-    // view depending on a colliding replacement relation must be created after it. Split the (already
-    // dependency-ordered) view drops/creates into the dependent closure and the rest. A colliding view
-    // itself is emitted by `push_relation_drops`/`push_relation_creates`, so exclude those keys here.
+    // Classify each view drop/create — all keeping the diff's dependency order (dependents-before-sources
+    // for drops, the reverse for creates):
+    //  - colliding: a view replaced by / replacing a same-named enum, emitted with the colliding relation
+    //    drops/creates (views before tables on drop, tables before views on create).
+    //  - dependent: a view depending on a colliding relation — dropped before / created after it.
+    //  - other: normal, in its usual phase.
     let drop_dependent_views = views_depending_on(actual, &enum_create_keys);
     let create_dependent_views = views_depending_on(desired, &enum_drop_keys);
-    let is_dependent = |change: &DatabaseDiffChange,
-                        closure: &BTreeSet<(Option<String>, String)>| {
-        matches!(
-            change,
-            DatabaseDiffChange::CreateView { .. } | DatabaseDiffChange::DropView { .. }
-        ) && closure.contains(&view_change_key(change))
-    };
-    let (dependent_view_drops, other_view_drops): (Vec<_>, Vec<_>) = view_drops
-        .into_iter()
-        .filter(|change| !change_collides(change, &enum_create_keys))
-        .partition(|change| is_dependent(change, &drop_dependent_views));
-    let (dependent_view_creates, other_view_creates): (Vec<_>, Vec<_>) = view_creates
-        .into_iter()
-        .filter(|change| !change_collides(change, &enum_drop_keys))
-        .partition(|change| is_dependent(change, &create_dependent_views));
+    let mut colliding_view_drops = Vec::new();
+    let mut dependent_view_drops = Vec::new();
+    let mut other_view_drops = Vec::new();
+    for change in view_drops {
+        if change_collides(&change, &enum_create_keys) {
+            colliding_view_drops.push(change);
+        } else if drop_dependent_views.contains(&view_change_key(&change)) {
+            dependent_view_drops.push(change);
+        } else {
+            other_view_drops.push(change);
+        }
+    }
+    let mut colliding_view_creates = Vec::new();
+    let mut dependent_view_creates = Vec::new();
+    let mut other_view_creates = Vec::new();
+    for change in view_creates {
+        if change_collides(&change, &enum_drop_keys) {
+            colliding_view_creates.push(change);
+        } else if create_dependent_views.contains(&view_change_key(&change)) {
+            dependent_view_creates.push(change);
+        } else {
+            other_view_creates.push(change);
+        }
+    }
 
-    // Drop views depending on a to-be-replaced relation, then the relation, then create the enums.
+    // Drop views depending on a to-be-replaced relation, then the colliding relations themselves (their
+    // own dependent views first, then their tables), then create the enums.
     changes.extend(dependent_view_drops);
-    push_relation_drops(actual, desired, &enum_create_keys, &mut changes);
+    changes.extend(colliding_view_drops);
+    push_relation_table_drops(actual, &enum_create_keys, &mut changes);
     changes.extend(enum_creates);
     changes.extend(other_view_drops);
 
@@ -414,9 +427,11 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
 
     changes.extend(other_view_creates);
     changes.extend(enum_drops);
-    // Colliding relation creates (a table/view replacing a same-named enum) — after the enum drops —
-    // then the views that depend on the new relation.
-    push_relation_creates(desired, actual, &enum_drop_keys, &mut changes);
+    // Colliding relation creates (a table/view replacing a same-named enum) — after the enum drops: the
+    // colliding tables first, then the colliding views (which may select from them), then the views that
+    // depend on the new relation.
+    push_relation_table_creates(desired, &enum_drop_keys, &mut changes);
+    changes.extend(colliding_view_creates);
     changes.extend(dependent_view_creates);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
@@ -499,9 +514,11 @@ fn views_depending_on(
         for (schema, view) in &all_views {
             let key = (schema.clone(), view.name.clone());
             if !affected.contains(&key)
-                && view
-                    .referenced_sources()
-                    .any(|source| affected.contains(&(source.schema.clone(), source.name.clone())))
+                && view.referenced_sources().any(|source| {
+                    // An unqualified source resolves against the view's own schema.
+                    let source_schema = source.schema.clone().or_else(|| schema.clone());
+                    affected.contains(&(source_schema, source.name.clone()))
+                })
             {
                 affected.insert(key);
                 added = true;
@@ -543,13 +560,11 @@ fn change_collides(change: &DatabaseDiffChange, keys: &BTreeSet<(Option<String>,
     }
 }
 
-/// Pushes a `DropTable`/`DropView` for every relation in `actual` whose `(schema, name)` is in `keys` (a
-/// relation being replaced by a same-named enum). Such a relation is absent from `desired` (a name is not
-/// both a relation and an enum in one schema), so it is unconditionally dropped. `_desired` documents the
-/// invariant.
-fn push_relation_drops(
+/// Pushes a `DropTable` for every table in `actual` whose `(schema, name)` is in `keys` (a table being
+/// replaced by a same-named enum). Colliding *views* are emitted separately, in dependency order, from
+/// the diff's ordered view drops.
+fn push_relation_table_drops(
     actual: &DatabaseModel,
-    _desired: &DatabaseModel,
     keys: &BTreeSet<(Option<String>, String)>,
     changes: &mut Vec<DatabaseDiffChange>,
 ) {
@@ -562,22 +577,14 @@ fn push_relation_drops(
                 });
             }
         }
-        for view in &schema.views {
-            if keys.contains(&(schema.name.clone(), view.name.clone())) {
-                changes.push(DatabaseDiffChange::DropView {
-                    schema: schema.name.clone(),
-                    view: view.clone(),
-                });
-            }
-        }
     }
 }
 
-/// Pushes a `CreateTable`/`CreateView` for every relation in `desired` whose `(schema, name)` is in
-/// `keys` (a relation replacing a same-named enum being dropped).
-fn push_relation_creates(
+/// Pushes a `CreateTable` for every table in `desired` whose `(schema, name)` is in `keys` (a table
+/// replacing a same-named enum being dropped). Colliding views are emitted separately, in dependency
+/// order, from the diff's ordered view creates.
+fn push_relation_table_creates(
     desired: &DatabaseModel,
-    _actual: &DatabaseModel,
     keys: &BTreeSet<(Option<String>, String)>,
     changes: &mut Vec<DatabaseDiffChange>,
 ) {
@@ -587,14 +594,6 @@ fn push_relation_creates(
                 changes.push(DatabaseDiffChange::CreateTable {
                     schema: schema.name.clone(),
                     table: table.clone(),
-                });
-            }
-        }
-        for view in &schema.views {
-            if keys.contains(&(schema.name.clone(), view.name.clone())) {
-                changes.push(DatabaseDiffChange::CreateView {
-                    schema: schema.name.clone(),
-                    view: view.clone(),
                 });
             }
         }
