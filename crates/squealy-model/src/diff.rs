@@ -373,9 +373,20 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
         }
     }
 
+    // Before a colliding relation can be dropped, every remaining dependency on it must be severed — a
+    // kept view whose source moved off it needs an explicit `DropView` the normal diff does not emit
+    // (its recreate is the diff's `CreateView`, deferred), and a still-present foreign key referencing it
+    // must go. `sever_collision_drops` produces those severing changes and the set of table drops it
+    // hoisted (excluded from the per-schema phase below so they are not emitted twice).
+    let already_dropped_views: BTreeSet<ViewKey> =
+        dependent_view_drops.iter().map(view_change_key).collect();
+    let (severing_drops, hoisted_table_drops) =
+        sever_collision_drops(actual, desired, &enum_create_keys, &already_dropped_views);
+
     // Drop views depending on a to-be-replaced relation, then the colliding relations themselves (their
     // own dependent views first, then their tables), then create the enums.
     changes.extend(dependent_view_drops);
+    changes.extend(severing_drops);
     changes.extend(colliding_view_drops);
     push_relation_table_drops(actual, &enum_create_keys, &mut changes);
     changes.extend(enum_creates);
@@ -400,11 +411,12 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
                 }
             }
             (None, Some(actual_schema)) => {
-                // Drop this schema's tables here — except one replaced by a same-named enum, already
-                // dropped in the hoisted phase above.
+                // Drop this schema's tables here — except one replaced by a same-named enum (dropped in
+                // the hoisted phase above) or one whose drop was hoisted to sever a colliding relation's
+                // foreign-key dependency.
                 for table in &actual_schema.tables {
-                    if !enum_create_keys.contains(&(actual_schema.name.clone(), table.name.clone()))
-                    {
+                    let key = (actual_schema.name.clone(), table.name.clone());
+                    if !enum_create_keys.contains(&key) && !hoisted_table_drops.contains(&key) {
                         changes.push(DatabaseDiffChange::DropTable {
                             schema: actual_schema.name.clone(),
                             table: table.clone(),
@@ -418,6 +430,7 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
                     actual_schema,
                     &enum_create_keys,
                     &enum_drop_keys,
+                    &hoisted_table_drops,
                     &mut changes,
                 );
             }
@@ -493,6 +506,129 @@ fn diff_enums_global(
         }
     }
     (creates, drops)
+}
+
+/// Produces the changes that must precede a colliding relation's drop to sever every remaining
+/// dependency on it, and the set of table keys whose drop was hoisted here (so the caller can skip
+/// dropping them again in the normal phase).
+///
+/// `colliding` is the `(schema, name)` set of relations being replaced by a same-named enum (they are
+/// dropped just after these severing changes). Two kinds of dependency are severed:
+///  - a **view** that still selects (transitively) from a colliding relation — a kept, repointed view
+///    gets an explicit `DropView` here (its recreate is the diff's own `CreateView`, deferred to after
+///    the enum drop); a view the diff already drops is skipped (`already_dropped_views`);
+///  - a **table** that references a colliding relation with a foreign key and is itself being dropped —
+///    its `DropTable` is hoisted here (a kept referencer's key would need its FK dropped instead, which
+///    is not yet handled — such a plan is rare and PostgreSQL rejects it clearly).
+///
+/// Both are ordered by distance from the seed (furthest dependents first), so a chain (grandchild →
+/// child → colliding) drops leaves-first.
+fn sever_collision_drops(
+    actual: &DatabaseModel,
+    desired: &DatabaseModel,
+    colliding: &BTreeSet<(Option<String>, String)>,
+    already_dropped_views: &BTreeSet<ViewKey>,
+) -> (Vec<DatabaseDiffChange>, BTreeSet<(Option<String>, String)>) {
+    if colliding.is_empty() {
+        return (Vec::new(), BTreeSet::new());
+    }
+    let desired_relations: BTreeSet<(Option<String>, String)> = desired
+        .schemas
+        .iter()
+        .flat_map(|schema| {
+            schema
+                .tables
+                .iter()
+                .map(|table| &table.name)
+                .chain(schema.views.iter().map(|view| &view.name))
+                .map(|name| (schema.name.clone(), name.clone()))
+        })
+        .collect();
+
+    // BFS over actual relations depending on a colliding relation, tracking distance from the seed.
+    let mut distance: BTreeMap<(Option<String>, String), usize> =
+        colliding.iter().map(|key| (key.clone(), 0)).collect();
+    loop {
+        let mut added = false;
+        for schema in &actual.schemas {
+            for view in &schema.views {
+                let key = (schema.name.clone(), view.name.clone());
+                if distance.contains_key(&key) {
+                    continue;
+                }
+                let dep = view.referenced_sources().filter_map(|source| {
+                    let src_schema = source.schema.clone().or_else(|| schema.name.clone());
+                    distance.get(&(src_schema, source.name.clone())).copied()
+                });
+                if let Some(min) = dep.min() {
+                    distance.insert(key, min + 1);
+                    added = true;
+                }
+            }
+            for table in &schema.tables {
+                let key = (schema.name.clone(), table.name.clone());
+                if distance.contains_key(&key) {
+                    continue;
+                }
+                let dep = table.foreign_keys.iter().filter_map(|fk| {
+                    let ref_schema = fk.references_schema.clone().or_else(|| schema.name.clone());
+                    distance
+                        .get(&(ref_schema, fk.references_table.clone()))
+                        .copied()
+                });
+                if let Some(min) = dep.min() {
+                    distance.insert(key, min + 1);
+                    added = true;
+                }
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+
+    let mut severing: Vec<(usize, DatabaseDiffChange)> = Vec::new();
+    let mut hoisted = BTreeSet::new();
+    for schema in &actual.schemas {
+        for view in &schema.views {
+            let key = (schema.name.clone(), view.name.clone());
+            if let Some(&dist) = distance.get(&key)
+                && dist > 0
+                && desired_relations.contains(&key)
+                && !already_dropped_views.contains(&key)
+            {
+                severing.push((
+                    dist,
+                    DatabaseDiffChange::DropView {
+                        schema: schema.name.clone(),
+                        view: view.clone(),
+                    },
+                ));
+            }
+        }
+        for table in &schema.tables {
+            let key = (schema.name.clone(), table.name.clone());
+            if let Some(&dist) = distance.get(&key)
+                && dist > 0
+                && !desired_relations.contains(&key)
+            {
+                severing.push((
+                    dist,
+                    DatabaseDiffChange::DropTable {
+                        schema: schema.name.clone(),
+                        table: table.clone(),
+                    },
+                ));
+                hoisted.insert(key);
+            }
+        }
+    }
+    // Furthest dependents first (leaves before the relations they reference).
+    severing.sort_by_key(|(distance, _)| std::cmp::Reverse(*distance));
+    (
+        severing.into_iter().map(|(_, change)| change).collect(),
+        hoisted,
+    )
 }
 
 /// The transitive closure of views in `model` that depend (directly or through another view) on any
@@ -629,6 +765,9 @@ fn diff_schema_tables(
     // correct order relative to the enum.
     enum_create_keys: &BTreeSet<(Option<String>, String)>,
     enum_drop_keys: &BTreeSet<(Option<String>, String)>,
+    // Tables whose drop was hoisted before a colliding relation drop (to sever a foreign key referencing
+    // it) — skip the drop here so it is not emitted twice.
+    hoisted_table_drops: &BTreeSet<(Option<String>, String)>,
     changes: &mut Vec<DatabaseDiffChange>,
 ) {
     let desired_tables = keyed_tables(&desired.tables);
@@ -642,6 +781,7 @@ fn diff_schema_tables(
         ) {
             (Some(_), None) if enum_drop_keys.contains(&collision_key) => {}
             (None, Some(_)) if enum_create_keys.contains(&collision_key) => {}
+            (None, Some(_)) if hoisted_table_drops.contains(&collision_key) => {}
             (Some(desired_table), None) => changes.push(DatabaseDiffChange::CreateTable {
                 schema: desired.name.clone(),
                 table: (*desired_table).clone(),

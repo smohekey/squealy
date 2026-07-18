@@ -581,6 +581,109 @@ fn creating_a_relation_replacing_an_enum_creates_its_dependent_view_last() {
     );
 }
 
+#[test]
+fn dropping_a_relation_replaced_by_an_enum_hoists_a_foreign_key_child_drop() {
+    // Replace table `status` with enum `status`, while a child table with a foreign key to `status` is
+    // also dropped. The child (whose FK still references `status`) must be dropped before `status`.
+    let mut child = table("orders");
+    child.foreign_keys = vec![ForeignKeyModel {
+        name: "fk_orders_status".to_owned(),
+        columns: vec!["status".to_owned()],
+        references_schema: Some("app".to_owned()),
+        references_table: "status".to_owned(),
+        references_columns: vec!["id".to_owned()],
+        match_type: None,
+        deferrability: None,
+        validation: None,
+        enforcement: None,
+        on_delete: None,
+        on_update: None,
+    }];
+    let actual = model_with_tables("app", vec![table("status"), child]);
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "status".to_owned(),
+                labels: vec!["open".to_owned()],
+            }],
+        }],
+    };
+    let changes = diff_models(&desired, &actual).changes;
+    let drop_child = changes
+        .iter()
+        .position(
+            |c| matches!(c, DatabaseDiffChange::DropTable { table, .. } if table.name == "orders"),
+        )
+        .expect("drop of the FK-child table");
+    let drop_status = changes
+        .iter()
+        .position(
+            |c| matches!(c, DatabaseDiffChange::DropTable { table, .. } if table.name == "status"),
+        )
+        .expect("drop of the status table");
+    assert!(
+        drop_child < drop_status,
+        "the foreign-key child must be dropped before the referenced table: {changes:?}"
+    );
+    // The child must not be dropped twice (once hoisted, once in the normal phase).
+    assert_eq!(
+        changes
+            .iter()
+            .filter(|c| matches!(c, DatabaseDiffChange::DropTable { table, .. } if table.name == "orders"))
+            .count(),
+        1,
+        "the hoisted child drop must not be duplicated: {changes:?}"
+    );
+}
+
+#[test]
+fn dropping_a_relation_replaced_by_an_enum_drops_a_kept_repointed_view_first() {
+    // Replace table `status` with enum `status`; a view `v` that selected from `status` is KEPT but
+    // repointed to a `codes` table. The diff only queues a CreateView (replace) for `v`, so a DropView
+    // must be materialized before `status` is dropped (its recreate is the deferred CreateView).
+    let actual = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![table("status"), table("codes")],
+            views: vec![view_over("v", "status")],
+            enums: Vec::new(),
+        }],
+    };
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![table("codes")],
+            views: vec![view_over("v", "codes")],
+            enums: vec![EnumModel {
+                name: "status".to_owned(),
+                labels: vec!["open".to_owned()],
+            }],
+        }],
+    };
+    let changes = diff_models(&desired, &actual).changes;
+    let drop_v = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::DropView { view, .. } if view.name == "v"))
+        .expect("a materialized DropView for the kept, repointed view");
+    let drop_status = changes
+        .iter()
+        .position(
+            |c| matches!(c, DatabaseDiffChange::DropTable { table, .. } if table.name == "status"),
+        )
+        .expect("drop of the status table");
+    let create_v = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::CreateView { view, .. } if view.name == "v"))
+        .expect("recreate of the repointed view");
+    assert!(
+        drop_v < drop_status && drop_status < create_v,
+        "the kept view is dropped before the table, then recreated after: {changes:?}"
+    );
+}
+
 fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
