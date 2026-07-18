@@ -139,6 +139,12 @@ fn bytes_to_sql(buffer: Vec<u8>) -> std::io::Result<String> {
 /// This validates backend capabilities against the neutral model, so callers can fail fast when a
 /// package contains metadata the target backend cannot round-trip.
 pub fn check_create<B: SchemaBackend>(model: &DatabaseModel, backend: &B) -> std::io::Result<()> {
+    // A relation and an enum sharing a name cannot coexist (PostgreSQL owns a composite type per
+    // relation). The incremental planner catches this across the desired/actual pair; the create path
+    // must catch it within the single model it is about to render, or it emits un-applyable DDL.
+    reject_enum_relation_name_collision(model, model).map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+    })?;
     validate_capabilities(model, backend.capabilities())?;
     validate_backend_constraint_prefixes(model, backend)
 }
@@ -888,16 +894,32 @@ fn validate_capabilities(
                 ),
             ));
         }
+        // A bare `SqlType::Enum(name)` names an enum in the column's own schema (a cross-schema or
+        // external enum is carried as a qualified `Raw` type, not `Enum`). The renderer emits a column
+        // referencing that type by name, so preflight must confirm the type is actually declared here —
+        // otherwise the create DDL references a `CREATE TYPE` that is never emitted.
+        let declared_enums: BTreeSet<&str> = schema.enums.iter().map(|e| e.name.as_str()).collect();
         for table in &schema.tables {
             for column in &table.columns {
-                if let SqlType::Enum(name) = &column.ty
-                    && !capabilities.enums
-                {
-                    return unsupported_column(
-                        &table.name,
-                        &column.name,
-                        &format!("a column of the user-defined enum type `{name}`"),
-                    );
+                if let SqlType::Enum(name) = &column.ty {
+                    if !capabilities.enums {
+                        return unsupported_column(
+                            &table.name,
+                            &column.name,
+                            &format!("a column of the user-defined enum type `{name}`"),
+                        );
+                    }
+                    if !declared_enums.contains(name.as_str()) {
+                        return unsupported_column(
+                            &table.name,
+                            &column.name,
+                            &format!(
+                                "the enum type `{name}`, which is not declared in this schema \
+                                 (declare it as an enum, or use a qualified `Raw` type for an \
+                                 enum defined elsewhere)"
+                            ),
+                        );
+                    }
                 }
                 if column.on_update.is_some() && !capabilities.columns.on_update {
                     return unsupported_column(

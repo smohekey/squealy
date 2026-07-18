@@ -481,6 +481,29 @@ fn enum_fixture(labels: &[&str]) -> DatabaseModel {
     }
 }
 
+#[test]
+fn creating_an_enum_column_without_a_declared_type_is_rejected() {
+    // A bare `SqlType::Enum("mood")` column names an enum in its own schema; if no such enum is
+    // declared, the create preflight must reject it rather than emit a table referencing a type that
+    // was never created. (No database needed — this is a render-time preflight.)
+    let mut model = enum_fixture(&["sad", "ok", "happy"]);
+    model.schemas[0].enums.clear();
+    let error = squealy_model::render_create_sql(&model, &Postgres)
+        .expect_err("an enum column with no declared type must be rejected");
+    assert!(error.to_string().contains("mood"), "{error}");
+}
+
+#[test]
+fn creating_a_same_named_relation_and_enum_is_rejected() {
+    // PostgreSQL owns a composite type per relation, so a table and an enum cannot share a name even in
+    // a single create-from-scratch model. The create preflight must reject it.
+    let mut model = enum_fixture(&["sad", "ok", "happy"]);
+    model.schemas[0].tables[0].name = "mood".to_owned();
+    let error = squealy_model::render_create_sql(&model, &Postgres)
+        .expect_err("a relation sharing an enum name must be rejected");
+    assert!(error.to_string().contains("mood"), "{error}");
+}
+
 #[tokio::test]
 #[ignore]
 async fn publishing_an_enum_then_replanning_is_empty() {

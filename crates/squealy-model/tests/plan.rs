@@ -3,8 +3,8 @@ use squealy::{
 };
 use squealy_model::{
     AppliedRefactorError, CastColumn, ChangeRisk, CheckModel, ColumnModel, DatabaseModel,
-    DatabasePlanStep, DdlExecutor, DiffPolicy, IndexModel, PlanApplyOptions, PlanError, RefactorLog,
-    RefactorOperation, RenameColumn, RenameTable, SchemaIntrospect, SchemaModel,
+    DatabasePlanStep, DdlExecutor, DiffPolicy, IndexModel, PlanApplyOptions, PlanError,
+    RefactorLog, RefactorOperation, RenameColumn, RenameTable, SchemaIntrospect, SchemaModel,
     SchemaRefactorStore, SqlType, TableModel, TablePlanStep, apply_plan, apply_plan_with_options,
     classified_plan_steps, pending_refactors, plan_from_database,
     plan_from_database_with_refactors, plan_models, plan_models_with_refactors, render_plan_sql,
