@@ -166,6 +166,9 @@ impl SchemaBackend for Mysql {
             columns: squealy::ColumnCapabilities { on_update: true },
             constraints: squealy::ConstraintCapabilities {
                 prefix_lengths: true,
+                // MySQL 8.0.16+ supports `CHECK (...) NOT ENFORCED`. (Only checks — a foreign key has no
+                // enforcement toggle, so `foreign_key_enforcement` stays false.)
+                check_enforcement: true,
                 ..squealy::ConstraintCapabilities::default()
             },
             indexes: squealy::IndexCapabilities {

@@ -1257,6 +1257,111 @@ fn decimal_cast_check_model(scale: u32) -> DatabaseModel {
     }
 }
 
+fn enforcement_check_model(enforcement: Option<ConstraintEnforcement>) -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("catalog_enf".to_owned()),
+            views: Vec::new(),
+            tables: vec![TableModel {
+                name: "readings".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "n".to_owned(),
+                    comment: None,
+                    ty: SqlType::I32,
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                    on_update: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: vec![CheckModel {
+                    name: "ck_n_positive".to_owned(),
+                    expression: check_expr("n > 0"),
+                    validation: None,
+                    enforcement,
+                }],
+                indexes: Vec::new(),
+            }],
+        }],
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn check_not_enforced_round_trips_and_toggling_enforcement_migrates() {
+    let _db_guard = db_lock().lock().await;
+    let mut connection = Mysql
+        .connect(&database_url())
+        .await
+        .expect("connect to MySQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog_enf`")
+        .await
+        .expect("drop schema");
+
+    // Publish a `CHECK (...) NOT ENFORCED`, then re-plan: MySQL renders and reads back the enforcement
+    // state structurally, so it re-plans empty (git-bug acb1c6d Phase 3, the enforcement finish).
+    let not_enforced = enforcement_check_model(Some(ConstraintEnforcement::NotEnforced));
+    squealy_model::publish(&not_enforced, &Mysql, &mut connection)
+        .await
+        .expect("publish NOT ENFORCED check");
+    let replan = squealy_model::plan_from_database(
+        &not_enforced,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan NOT ENFORCED check");
+    assert!(
+        replan.steps.is_empty(),
+        "a NOT ENFORCED check must re-plan empty, got: {:?}",
+        replan.steps
+    );
+
+    // Toggling to the enforced default must diff — a plain check (enforcement `None`) is a real change
+    // from `NOT ENFORCED`, not folded away.
+    let enforced = enforcement_check_model(None);
+    let changed = squealy_model::plan_from_database(
+        &enforced,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("plan enforcement toggle");
+    assert!(
+        !changed.steps.is_empty(),
+        "toggling NOT ENFORCED -> enforced must diff"
+    );
+
+    // Apply the toggle, then confirm the now-enforced (default) check itself re-plans empty — the
+    // enforced default folds to `None` on introspection, so it does not churn.
+    squealy_model::apply_plan(&changed, &enforced, &Mysql, &mut connection)
+        .await
+        .expect("apply enforcement toggle");
+    let replan_enforced = squealy_model::plan_from_database(
+        &enforced,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan enforced check");
+    assert!(
+        replan_enforced.steps.is_empty(),
+        "an enforced (default) check must re-plan empty, got: {:?}",
+        replan_enforced.steps
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog_enf`")
+        .await
+        .expect("cleanup");
+}
+
 #[tokio::test]
 #[ignore]
 async fn decimal_cast_check_round_trips_and_scale_change_migrates() {

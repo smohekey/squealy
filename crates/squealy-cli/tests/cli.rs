@@ -139,7 +139,7 @@ fn mysql_capabilities_are_printed() {
     assert_capability(&stdout, "constraints.foreign_key_validation=false");
     assert_capability(&stdout, "constraints.foreign_key_enforcement=false");
     assert_capability(&stdout, "constraints.check_validation=false");
-    assert_capability(&stdout, "constraints.check_enforcement=false");
+    assert_capability(&stdout, "constraints.check_enforcement=true");
     assert_capability(&stdout, "indexes.predicates=false");
     assert_capability(&stdout, "indexes.expressions=false");
     assert_capability(&stdout, "indexes.include_columns=false");

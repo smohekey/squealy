@@ -8,8 +8,8 @@
 use std::io::{self, Write};
 
 use squealy::{
-    CheckModel, ColumnDefault, ColumnModel, Constraint, DatabaseModel, DatabasePlan,
-    DatabasePlanStep, DefaultValue, ForeignKeyModel, GeneratedStorage, IndexModel,
+    CheckModel, ColumnDefault, ColumnModel, Constraint, ConstraintEnforcement, DatabaseModel,
+    DatabasePlan, DatabasePlanStep, DefaultValue, ForeignKeyModel, GeneratedStorage, IndexModel,
     IndexPrefixLength, SqlType, Table, TableModel, TablePlanStep,
 };
 
@@ -707,22 +707,36 @@ fn validate_prefix_lengths(
 
 fn write_check(check: &CheckModel, writer: &mut impl Write) -> io::Result<()> {
     if check.validation.is_some() {
+        // MySQL has no `NOT VALID` (deferred validation) — that is a PostgreSQL concept.
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "MySQL does not support constraint validation metadata",
-        ));
-    }
-    if check.enforcement.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "MySQL check constraint enforcement metadata is not supported by squealy yet",
         ));
     }
     writer.write_all(b"CONSTRAINT ")?;
     write_quoted_ident(&check.name, writer)?;
     writer.write_all(b" CHECK (")?;
     squealy::render_scalar_expr(&check.expression, &MysqlDialect, writer)?;
-    writer.write_all(b")")
+    writer.write_all(b")")?;
+    write_constraint_enforcement(&check.enforcement, writer)
+}
+
+/// Renders a check constraint's `[NOT] ENFORCED` clause (MySQL 8.0.16+). The default, `ENFORCED`, renders
+/// bare so a plain check round-trips (introspection folds the enforced default to `None`, mirroring how
+/// PostgreSQL renders `validation`); only `NOT ENFORCED` is a meaningful, rendered difference.
+fn write_constraint_enforcement(
+    enforcement: &Option<ConstraintEnforcement>,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    match enforcement {
+        Some(ConstraintEnforcement::NotEnforced) => writer.write_all(b" NOT ENFORCED")?,
+        Some(ConstraintEnforcement::Raw(enforcement)) => {
+            writer.write_all(b" ")?;
+            writer.write_all(enforcement.as_bytes())?;
+        }
+        Some(ConstraintEnforcement::Enforced) | None => {}
+    }
+    Ok(())
 }
 
 fn write_create_index(
@@ -1416,6 +1430,43 @@ mod tests {
         let error = write_database(&model, &mut out).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("full_name"), "{error}");
+    }
+
+    #[test]
+    fn mysql_check_enforcement_renders_only_the_non_default() {
+        let check = |enforcement| CheckModel {
+            name: "c_pos".to_owned(),
+            expression: squealy::ExprNode::Compare {
+                op: squealy::CompareOp::GreaterThan,
+                left: Box::new(squealy::ExprNode::BareColumn {
+                    column: "n".to_owned(),
+                }),
+                right: Box::new(squealy::ExprNode::Literal("0".to_owned())),
+            },
+            validation: None,
+            enforcement,
+        };
+        let render = |enforcement| {
+            let mut out = Vec::new();
+            write_check(&check(enforcement), &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+
+        // NOT ENFORCED is the only meaningful, rendered difference; the enforced default (and None)
+        // render bare so a plain check round-trips against the introspected form.
+        assert_eq!(
+            render(Some(ConstraintEnforcement::NotEnforced)),
+            "CONSTRAINT `c_pos` CHECK ((`n` > 0)) NOT ENFORCED"
+        );
+        assert_eq!(
+            render(Some(ConstraintEnforcement::Enforced)),
+            "CONSTRAINT `c_pos` CHECK ((`n` > 0))"
+        );
+        assert_eq!(render(None), "CONSTRAINT `c_pos` CHECK ((`n` > 0))");
+        assert_eq!(
+            render(Some(ConstraintEnforcement::Raw("NOT ENFORCED".to_owned()))),
+            "CONSTRAINT `c_pos` CHECK ((`n` > 0)) NOT ENFORCED"
+        );
     }
 
     #[test]

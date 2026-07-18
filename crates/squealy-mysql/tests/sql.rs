@@ -50,7 +50,8 @@ fn mysql_reports_schema_capabilities() {
     assert!(!capabilities.constraints.foreign_key_validation);
     assert!(!capabilities.constraints.foreign_key_enforcement);
     assert!(!capabilities.constraints.check_validation);
-    assert!(!capabilities.constraints.check_enforcement);
+    // MySQL 8.0.16+ supports `CHECK (...) NOT ENFORCED`.
+    assert!(capabilities.constraints.check_enforcement);
     assert!(!capabilities.indexes.predicates);
     assert!(!capabilities.indexes.expressions);
     assert!(!capabilities.indexes.include_columns);
@@ -938,7 +939,7 @@ fn mysql_rejects_deferrable_foreign_keys() {
 }
 
 #[test]
-fn mysql_rejects_check_constraint_enforcement() {
+fn mysql_renders_check_constraint_not_enforced() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("shop".to_owned()),
@@ -971,9 +972,14 @@ fn mysql_rejects_check_constraint_enforcement() {
         }],
     };
 
+    // MySQL 8.0.16+ supports it, so this renders rather than rejecting (git-bug acb1c6d Phase 3).
     let mut sql = Vec::new();
-    let error = Mysql.render_create(&model, &mut sql).unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    Mysql.render_create(&model, &mut sql).expect("render NOT ENFORCED check");
+    let sql = String::from_utf8(sql).unwrap();
+    assert!(
+        sql.contains("CHECK ((`tenant_id` > 0)) NOT ENFORCED"),
+        "expected a NOT ENFORCED check in:\n{sql}"
+    );
 }
 
 #[test]
