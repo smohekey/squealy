@@ -286,14 +286,15 @@ ORDER BY a.attnum",
         .map(|row| {
             let db_type: String = row.get(1);
             let typtype: String = row.get(3);
+            let type_name: String = row.get(4);
             let type_schema: String = row.get(5);
-            // Resolve an enum view-output column by catalog identity, like table columns — same-schema
-            // only (a cross-schema enum stays `Raw`, whose verbatim qualified name renders correctly).
-            let ty = if typtype == "e" && type_schema == view_ref.schema {
-                SqlType::Enum(row.get(4))
-            } else {
-                sql_type(&db_type)
-            };
+            let ty = enum_or_sql_type(
+                &typtype,
+                &type_schema,
+                &type_name,
+                &view_ref.schema,
+                &db_type,
+            );
             ViewColumnModel {
                 name: row.get(0),
                 ty,
@@ -446,16 +447,20 @@ ORDER BY a.attnum",
             let db_type: String = row.get(1);
             let typtype: String = row.get(8);
             let type_schema: String = row.get(10);
-            // Resolve an enum-typed column by catalog identity (`typtype = 'e'`) rather than by parsing
-            // the `format_type` string, so a quoted/qualified/case-sensitive enum name binds correctly.
-            // Only bind an enum in the *same* schema as its table — `SqlType::Enum` carries just the name,
-            // and a column is rendered with its table's schema. A cross-schema enum reference (a `types`
-            // enum used by an `app` table) stays `SqlType::Raw` (the `format_type` string is already the
-            // schema-qualified `types.mood`, which renders verbatim and round-trips correctly).
-            let ty = if typtype == "e" && type_schema == table_ref.schema {
-                SqlType::Enum(row.get(9))
+            let type_name: String = row.get(9);
+            let ty = enum_or_sql_type(
+                &typtype,
+                &type_schema,
+                &type_name,
+                &table_ref.schema,
+                &db_type,
+            );
+            // Parse the default as an enum label whenever the catalog says the column IS an enum — even
+            // a cross-schema one (which is represented as `Raw`, so `default_value` alone would miss it).
+            let default_ty = if typtype == "e" {
+                SqlType::Enum(type_name.clone())
             } else {
-                sql_type(&db_type)
+                ty.clone()
             };
             let identity: String = row.get(4);
             let generated: String = row.get(5);
@@ -469,7 +474,7 @@ ORDER BY a.attnum",
                 default: (generated != "s")
                     .then(|| default.clone())
                     .flatten()
-                    .map(|value| default_value(&ty, &value)),
+                    .map(|value| default_value(&default_ty, &value)),
                 identity: identity_model(&identity),
                 generated: generated_model(&generated, default),
                 // PostgreSQL has no `ON UPDATE` column auto-update attribute.
@@ -947,6 +952,29 @@ fn default_value(ty: &SqlType, value: &str) -> DefaultValue {
             .map(DefaultValue::Float)
             .unwrap_or_else(|_| DefaultValue::Raw(value.to_owned())),
         _ => DefaultValue::Raw(value.to_owned()),
+    }
+}
+
+/// Resolves a column's [`SqlType`] from the catalog. An enum in the **same** schema as its relation
+/// becomes [`SqlType::Enum`] (rendered qualified with the relation's schema). A **cross-schema** enum
+/// becomes a schema-qualified [`SqlType::Raw`] built from the catalog (`type_schema.type_name`) — NOT the
+/// `format_type` string, which drops the qualifier when the enum's schema is on `search_path` (e.g.
+/// `public`) and would then churn against a desired qualified `Raw`. Non-enum types use `sql_type`.
+fn enum_or_sql_type(
+    typtype: &str,
+    type_schema: &str,
+    type_name: &str,
+    relation_schema: &str,
+    db_type: &str,
+) -> SqlType {
+    if typtype == "e" {
+        if type_schema == relation_schema {
+            SqlType::Enum(type_name.to_owned())
+        } else {
+            SqlType::Raw(format!("{type_schema}.{type_name}"))
+        }
+    } else {
+        sql_type(db_type)
     }
 }
 

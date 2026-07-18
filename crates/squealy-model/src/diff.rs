@@ -319,19 +319,15 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     let (enum_creates, enum_drops) = diff_enums_global(desired, actual);
 
     // PostgreSQL auto-creates a composite type for every table/view, so an enum sharing a name with a
-    // relation collides. When a relation is *replaced* by a same-named enum (or vice versa), the old
-    // object must be dropped before the new one is created. So a `CreateEnum` whose name is a dropped
-    // relation is deferred until *after* the table phase, and a `DropEnum` whose name is a created
-    // relation is hoisted to *before* it. Non-colliding enums keep their normal early-create/late-drop
-    // ordering. (These sets are usually empty — reusing a name across object kinds is rare.)
-    let dropped_relations = removed_relation_keys(&desired_schemas, actual);
-    let created_relations = removed_relation_keys(&actual_schemas, desired);
-    let (early_enum_creates, late_enum_creates): (Vec<_>, Vec<_>) = enum_creates
-        .into_iter()
-        .partition(|change| !enum_change_collides(change, &dropped_relations));
-    let (early_enum_drops, late_enum_drops): (Vec<_>, Vec<_>) = enum_drops
-        .into_iter()
-        .partition(|change| enum_change_collides(change, &created_relations));
+    // relation collides. When a relation is *replaced* by a same-named enum, the relation (with its
+    // dependents) must be dropped BEFORE the enum is created — and a new dependent using the enum must be
+    // created AFTER it. So the colliding relation's drop is hoisted to before the enum creates, letting
+    // the enum create keep its normal early slot (before the tables that reference it). Symmetrically,
+    // when an enum is replaced by a same-named relation, the colliding relation's create is deferred to
+    // after the enum drops (which follow the table phase that removes the enum's dependents). These
+    // colliding-relation sets are almost always empty — reusing a name across object kinds is rare.
+    let enum_create_keys = enum_op_keys(&enum_creates);
+    let enum_drop_keys = enum_op_keys(&enum_drops);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
         if let (Some(desired_schema), None) = (
@@ -344,10 +340,14 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
         }
     }
 
-    changes.extend(early_enum_creates);
-    // A `DropEnum` colliding with a to-be-created relation must precede the table phase that creates it.
-    changes.extend(early_enum_drops);
-    changes.extend(view_drops);
+    // Colliding relation drops (a table/view being replaced by a same-named enum) — before the enums.
+    push_relation_drops(actual, desired, &enum_create_keys, &mut changes);
+    changes.extend(enum_creates);
+    changes.extend(
+        view_drops
+            .into_iter()
+            .filter(|change| !change_collides(change, &enum_create_keys)),
+    );
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
         match (
@@ -355,36 +355,52 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
             actual_schemas.get(&schema_key),
         ) {
             (Some(desired_schema), None) => {
-                // The schema was created in the hoisted phase above; create its tables here.
+                // The schema was created in the hoisted phase above; create its tables here — except a
+                // table replacing a same-named enum, which is deferred to after the enum drops.
                 for table in &desired_schema.tables {
-                    changes.push(DatabaseDiffChange::CreateTable {
-                        schema: desired_schema.name.clone(),
-                        table: table.clone(),
-                    });
+                    if !enum_drop_keys.contains(&(desired_schema.name.clone(), table.name.clone()))
+                    {
+                        changes.push(DatabaseDiffChange::CreateTable {
+                            schema: desired_schema.name.clone(),
+                            table: table.clone(),
+                        });
+                    }
                 }
-                // This schema's views are created in the global create phase, after every table exists.
             }
             (None, Some(actual_schema)) => {
-                // This schema's views are dropped in the global drop phase, before any table; its enums
-                // and the schema itself are dropped in the trailing phases below.
+                // Drop this schema's tables here — except one replaced by a same-named enum, already
+                // dropped in the hoisted phase above.
                 for table in &actual_schema.tables {
-                    changes.push(DatabaseDiffChange::DropTable {
-                        schema: actual_schema.name.clone(),
-                        table: table.clone(),
-                    });
+                    if !enum_create_keys.contains(&(actual_schema.name.clone(), table.name.clone()))
+                    {
+                        changes.push(DatabaseDiffChange::DropTable {
+                            schema: actual_schema.name.clone(),
+                            table: table.clone(),
+                        });
+                    }
                 }
             }
             (Some(desired_schema), Some(actual_schema)) => {
-                diff_schema_tables(desired_schema, actual_schema, &mut changes);
+                diff_schema_tables(
+                    desired_schema,
+                    actual_schema,
+                    &enum_create_keys,
+                    &enum_drop_keys,
+                    &mut changes,
+                );
             }
             (None, None) => {}
         }
     }
 
-    changes.extend(view_creates);
-    // A `CreateEnum` colliding with a just-dropped relation goes here, after the table phase dropped it.
-    changes.extend(late_enum_creates);
-    changes.extend(late_enum_drops);
+    changes.extend(
+        view_creates
+            .into_iter()
+            .filter(|change| !change_collides(change, &enum_drop_keys)),
+    );
+    changes.extend(enum_drops);
+    // Colliding relation creates (a table/view replacing a same-named enum) — after the enum drops.
+    push_relation_creates(desired, actual, &enum_drop_keys, &mut changes);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
         if let (None, Some(actual_schema)) = (
@@ -447,45 +463,90 @@ fn diff_enums_global(
     (creates, drops)
 }
 
-/// The `(schema, relation-name)` keys of every table and view in `model` that is absent from `present`
-/// (keyed schemas of the *other* side) — i.e. the relations being dropped (or created, with the sides
-/// swapped). Used to detect an enum that shares a name with a relation being replaced.
-fn removed_relation_keys(
-    present: &BTreeMap<Option<String>, &SchemaModel>,
-    model: &DatabaseModel,
-) -> BTreeSet<(Option<String>, String)> {
-    let mut keys = BTreeSet::new();
-    for schema in &model.schemas {
-        let counterpart = present.get(&schema.name);
-        for name in schema
-            .tables
-            .iter()
-            .map(|table| &table.name)
-            .chain(schema.views.iter().map(|view| &view.name))
-        {
-            let still_present = counterpart.is_some_and(|other| {
-                other.tables.iter().any(|table| table.name == *name)
-                    || other.views.iter().any(|view| view.name == *name)
-            });
-            if !still_present {
-                keys.insert((schema.name.clone(), name.clone()));
+/// The `(schema, name)` keys of every `CreateEnum`/`DropEnum` in `changes`.
+fn enum_op_keys(changes: &[DatabaseDiffChange]) -> BTreeSet<(Option<String>, String)> {
+    changes
+        .iter()
+        .filter_map(|change| match change {
+            DatabaseDiffChange::CreateEnum { schema, enum_type }
+            | DatabaseDiffChange::DropEnum { schema, enum_type } => {
+                Some((schema.clone(), enum_type.name.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether a table/view create-or-drop change's `(schema, relation-name)` is in `keys`.
+fn change_collides(change: &DatabaseDiffChange, keys: &BTreeSet<(Option<String>, String)>) -> bool {
+    match change {
+        DatabaseDiffChange::CreateView { schema, view }
+        | DatabaseDiffChange::DropView { schema, view } => {
+            keys.contains(&(schema.clone(), view.name.clone()))
+        }
+        DatabaseDiffChange::CreateTable { schema, table }
+        | DatabaseDiffChange::DropTable { schema, table } => {
+            keys.contains(&(schema.clone(), table.name.clone()))
+        }
+        _ => false,
+    }
+}
+
+/// Pushes a `DropTable`/`DropView` for every relation in `actual` whose `(schema, name)` is in `keys` (a
+/// relation being replaced by a same-named enum). Such a relation is absent from `desired` (a name is not
+/// both a relation and an enum in one schema), so it is unconditionally dropped. `_desired` documents the
+/// invariant.
+fn push_relation_drops(
+    actual: &DatabaseModel,
+    _desired: &DatabaseModel,
+    keys: &BTreeSet<(Option<String>, String)>,
+    changes: &mut Vec<DatabaseDiffChange>,
+) {
+    for schema in &actual.schemas {
+        for table in &schema.tables {
+            if keys.contains(&(schema.name.clone(), table.name.clone())) {
+                changes.push(DatabaseDiffChange::DropTable {
+                    schema: schema.name.clone(),
+                    table: table.clone(),
+                });
+            }
+        }
+        for view in &schema.views {
+            if keys.contains(&(schema.name.clone(), view.name.clone())) {
+                changes.push(DatabaseDiffChange::DropView {
+                    schema: schema.name.clone(),
+                    view: view.clone(),
+                });
             }
         }
     }
-    keys
 }
 
-/// Whether a `CreateEnum`/`DropEnum` change's `(schema, name)` is in `relations`.
-fn enum_change_collides(
-    change: &DatabaseDiffChange,
-    relations: &BTreeSet<(Option<String>, String)>,
-) -> bool {
-    match change {
-        DatabaseDiffChange::CreateEnum { schema, enum_type }
-        | DatabaseDiffChange::DropEnum { schema, enum_type } => {
-            relations.contains(&(schema.clone(), enum_type.name.clone()))
+/// Pushes a `CreateTable`/`CreateView` for every relation in `desired` whose `(schema, name)` is in
+/// `keys` (a relation replacing a same-named enum being dropped).
+fn push_relation_creates(
+    desired: &DatabaseModel,
+    _actual: &DatabaseModel,
+    keys: &BTreeSet<(Option<String>, String)>,
+    changes: &mut Vec<DatabaseDiffChange>,
+) {
+    for schema in &desired.schemas {
+        for table in &schema.tables {
+            if keys.contains(&(schema.name.clone(), table.name.clone())) {
+                changes.push(DatabaseDiffChange::CreateTable {
+                    schema: schema.name.clone(),
+                    table: table.clone(),
+                });
+            }
         }
-        _ => false,
+        for view in &schema.views {
+            if keys.contains(&(schema.name.clone(), view.name.clone())) {
+                changes.push(DatabaseDiffChange::CreateView {
+                    schema: schema.name.clone(),
+                    view: view.clone(),
+                });
+            }
+        }
     }
 }
 
@@ -512,16 +573,25 @@ fn keyed_enums(model: &DatabaseModel) -> BTreeMap<(Option<String>, String), &Enu
 fn diff_schema_tables(
     desired: &SchemaModel,
     actual: &SchemaModel,
+    // A table whose name collides with an enum being created (it is being replaced by the enum) is
+    // dropped in the hoisted colliding-drop phase; one colliding with an enum being dropped (it replaces
+    // the enum) is created in the trailing colliding-create phase. Skip both here so they land in the
+    // correct order relative to the enum.
+    enum_create_keys: &BTreeSet<(Option<String>, String)>,
+    enum_drop_keys: &BTreeSet<(Option<String>, String)>,
     changes: &mut Vec<DatabaseDiffChange>,
 ) {
     let desired_tables = keyed_tables(&desired.tables);
     let actual_tables = keyed_tables(&actual.tables);
 
     for table_name in sorted_keys(&desired_tables, &actual_tables) {
+        let collision_key = (desired.name.clone(), table_name.clone());
         match (
             desired_tables.get(&table_name),
             actual_tables.get(&table_name),
         ) {
+            (Some(_), None) if enum_drop_keys.contains(&collision_key) => {}
+            (None, Some(_)) if enum_create_keys.contains(&collision_key) => {}
             (Some(desired_table), None) => changes.push(DatabaseDiffChange::CreateTable {
                 schema: desired.name.clone(),
                 table: (*desired_table).clone(),

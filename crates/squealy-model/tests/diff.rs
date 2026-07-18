@@ -394,6 +394,82 @@ fn replacing_a_table_with_a_same_named_enum_drops_the_table_first() {
     );
 }
 
+#[test]
+fn replacing_a_table_with_an_enum_used_by_a_new_table_orders_drop_enum_create() {
+    // Replace table `status` with enum `status`, and add a new table `t` with a `status`-typed column.
+    // Correct order: drop the old `status` table, create the enum, then create `t` that uses it.
+    let actual = model_with_tables("app", vec![table("status")]);
+    let mut using = table("readings");
+    using.columns = vec![column("s", SqlType::Enum("status".to_owned()))];
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![using],
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "status".to_owned(),
+                labels: vec!["open".to_owned(), "closed".to_owned()],
+            }],
+        }],
+    };
+    let changes = diff_models(&desired, &actual).changes;
+    let drop_status = changes
+        .iter()
+        .position(
+            |c| matches!(c, DatabaseDiffChange::DropTable { table, .. } if table.name == "status"),
+        )
+        .expect("drop of the old status table");
+    let create_enum = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::CreateEnum { enum_type, .. } if enum_type.name == "status"))
+        .expect("create of the status enum");
+    let create_using = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::CreateTable { table, .. } if table.name == "readings"))
+        .expect("create of the dependent table");
+    assert!(
+        drop_status < create_enum && create_enum < create_using,
+        "must drop the table, create the enum, then create the dependent table: {changes:?}"
+    );
+}
+
+#[test]
+fn replacing_an_enum_with_a_table_while_dropping_a_dependent_orders_correctly() {
+    // Replace enum `status` with a table `status`, while an existing table `u` (which uses the enum) is
+    // dropped. Correct order: drop `u`, drop the enum, then create the `status` table.
+    let mut dependent = table("u");
+    dependent.columns = vec![column("s", SqlType::Enum("status".to_owned()))];
+    let actual = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![dependent],
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "status".to_owned(),
+                labels: vec!["open".to_owned()],
+            }],
+        }],
+    };
+    let desired = model_with_tables("app", vec![table("status")]);
+    let changes = diff_models(&desired, &actual).changes;
+    let drop_u = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::DropTable { table, .. } if table.name == "u"))
+        .expect("drop of the dependent table u");
+    let drop_enum = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::DropEnum { enum_type, .. } if enum_type.name == "status"))
+        .expect("drop of the status enum");
+    let create_status = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::CreateTable { table, .. } if table.name == "status"))
+        .expect("create of the status table");
+    assert!(
+        drop_u < drop_enum && drop_enum < create_status,
+        "must drop the dependent, drop the enum, then create the table: {changes:?}"
+    );
+}
+
 fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
