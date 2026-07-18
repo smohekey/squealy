@@ -265,7 +265,7 @@ async fn view_columns(
         .query(
             "\
 SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, typ.typtype::text, typ.typname,
-       tn.nspname
+       tn.nspname, format('%I.%I', tn.nspname, typ.typname)
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_attribute a ON a.attrelid = c.oid
@@ -288,10 +288,12 @@ ORDER BY a.attnum",
             let typtype: String = row.get(3);
             let type_name: String = row.get(4);
             let type_schema: String = row.get(5);
+            let type_qualified: String = row.get(6);
             let ty = enum_or_sql_type(
                 &typtype,
                 &type_schema,
                 &type_name,
+                &type_qualified,
                 &view_ref.schema,
                 &db_type,
             );
@@ -423,7 +425,8 @@ SELECT
     col_description(c.oid, a.attnum),
     typ.typtype::text,
     typ.typname,
-    tn.nspname
+    tn.nspname,
+    format('%I.%I', tn.nspname, typ.typname)
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_attribute a ON a.attrelid = c.oid
@@ -448,10 +451,12 @@ ORDER BY a.attnum",
             let typtype: String = row.get(8);
             let type_schema: String = row.get(10);
             let type_name: String = row.get(9);
+            let type_qualified: String = row.get(11);
             let ty = enum_or_sql_type(
                 &typtype,
                 &type_schema,
                 &type_name,
+                &type_qualified,
                 &table_ref.schema,
                 &db_type,
             );
@@ -964,6 +969,7 @@ fn enum_or_sql_type(
     typtype: &str,
     type_schema: &str,
     type_name: &str,
+    type_qualified: &str,
     relation_schema: &str,
     db_type: &str,
 ) -> SqlType {
@@ -971,7 +977,10 @@ fn enum_or_sql_type(
         if type_schema == relation_schema {
             SqlType::Enum(type_name.to_owned())
         } else {
-            SqlType::Raw(format!("{type_schema}.{type_name}"))
+            // `type_qualified` is PostgreSQL's `format('%I.%I', schema, name)` — quoted only where an
+            // identifier requires it (`"Types"."Mood Type"`, but bare `types.mood`), so the round-trips
+            // as a renderable, correctly-quoted `Raw`.
+            SqlType::Raw(type_qualified.to_owned())
         }
     } else {
         sql_type(db_type)

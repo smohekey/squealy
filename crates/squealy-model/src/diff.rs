@@ -340,14 +340,33 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
         }
     }
 
-    // Colliding relation drops (a table/view being replaced by a same-named enum) — before the enums.
+    // A view depending on a colliding relation must be dropped before that relation is dropped, and a
+    // view depending on a colliding replacement relation must be created after it. Split the (already
+    // dependency-ordered) view drops/creates into the dependent closure and the rest. A colliding view
+    // itself is emitted by `push_relation_drops`/`push_relation_creates`, so exclude those keys here.
+    let drop_dependent_views = views_depending_on(actual, &enum_create_keys);
+    let create_dependent_views = views_depending_on(desired, &enum_drop_keys);
+    let is_dependent = |change: &DatabaseDiffChange,
+                        closure: &BTreeSet<(Option<String>, String)>| {
+        matches!(
+            change,
+            DatabaseDiffChange::CreateView { .. } | DatabaseDiffChange::DropView { .. }
+        ) && closure.contains(&view_change_key(change))
+    };
+    let (dependent_view_drops, other_view_drops): (Vec<_>, Vec<_>) = view_drops
+        .into_iter()
+        .filter(|change| !change_collides(change, &enum_create_keys))
+        .partition(|change| is_dependent(change, &drop_dependent_views));
+    let (dependent_view_creates, other_view_creates): (Vec<_>, Vec<_>) = view_creates
+        .into_iter()
+        .filter(|change| !change_collides(change, &enum_drop_keys))
+        .partition(|change| is_dependent(change, &create_dependent_views));
+
+    // Drop views depending on a to-be-replaced relation, then the relation, then create the enums.
+    changes.extend(dependent_view_drops);
     push_relation_drops(actual, desired, &enum_create_keys, &mut changes);
     changes.extend(enum_creates);
-    changes.extend(
-        view_drops
-            .into_iter()
-            .filter(|change| !change_collides(change, &enum_create_keys)),
-    );
+    changes.extend(other_view_drops);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
         match (
@@ -393,14 +412,12 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
         }
     }
 
-    changes.extend(
-        view_creates
-            .into_iter()
-            .filter(|change| !change_collides(change, &enum_drop_keys)),
-    );
+    changes.extend(other_view_creates);
     changes.extend(enum_drops);
-    // Colliding relation creates (a table/view replacing a same-named enum) — after the enum drops.
+    // Colliding relation creates (a table/view replacing a same-named enum) — after the enum drops —
+    // then the views that depend on the new relation.
     push_relation_creates(desired, actual, &enum_drop_keys, &mut changes);
+    changes.extend(dependent_view_creates);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
         if let (None, Some(actual_schema)) = (
@@ -461,6 +478,40 @@ fn diff_enums_global(
         }
     }
     (creates, drops)
+}
+
+/// The transitive closure of views in `model` that depend (directly or through another view) on any
+/// relation in `seeds`. Used to move a colliding relation's dependent views around it: their drops must
+/// precede the relation drop, and their creates must follow the relation create. The returned set also
+/// contains `seeds` (harmless — only view keys are matched against view changes).
+fn views_depending_on(
+    model: &DatabaseModel,
+    seeds: &BTreeSet<(Option<String>, String)>,
+) -> BTreeSet<(Option<String>, String)> {
+    let all_views: Vec<(Option<String>, &ViewModel)> = model
+        .schemas
+        .iter()
+        .flat_map(|schema| schema.views.iter().map(|view| (schema.name.clone(), view)))
+        .collect();
+    let mut affected = seeds.clone();
+    loop {
+        let mut added = false;
+        for (schema, view) in &all_views {
+            let key = (schema.clone(), view.name.clone());
+            if !affected.contains(&key)
+                && view
+                    .referenced_sources()
+                    .any(|source| affected.contains(&(source.schema.clone(), source.name.clone())))
+            {
+                affected.insert(key);
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    affected
 }
 
 /// The `(schema, name)` keys of every `CreateEnum`/`DropEnum` in `changes`.

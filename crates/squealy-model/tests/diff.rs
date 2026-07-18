@@ -470,6 +470,117 @@ fn replacing_an_enum_with_a_table_while_dropping_a_dependent_orders_correctly() 
     );
 }
 
+/// A minimal view named `name` selecting from a single source relation `source` in schema `app`.
+fn view_over(name: &str, source: &str) -> ViewModel {
+    ViewModel {
+        name: name.to_owned(),
+        comment: None,
+        columns: Vec::new(),
+        query: ViewBody::Select(Box::new(ViewQueryModel {
+            projection: vec![ProjectionItem {
+                output_name: "x".to_owned(),
+                internal_alias: None,
+                expr: ExprNode::Column {
+                    alias: "q".to_owned(),
+                    column: "x".to_owned(),
+                },
+            }],
+            from: Some(SourceItem::Named(SourceRef {
+                schema: Some("app".to_owned()),
+                name: source.to_owned(),
+                alias: "q".to_owned(),
+            })),
+            ..ViewQueryModel::default()
+        })),
+    }
+}
+
+#[test]
+fn dropping_a_relation_replaced_by_an_enum_drops_its_dependent_view_first() {
+    // Replace table `status` with enum `status`, while a live view `v` selects from the `status` table.
+    // Correct order: drop the dependent view `v`, then the `status` table, then create the enum.
+    let actual = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![table("status")],
+            views: vec![view_over("v", "status")],
+            enums: Vec::new(),
+        }],
+    };
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "status".to_owned(),
+                labels: vec!["open".to_owned()],
+            }],
+        }],
+    };
+    let changes = diff_models(&desired, &actual).changes;
+    let drop_v = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::DropView { view, .. } if view.name == "v"))
+        .expect("drop of the dependent view v");
+    let drop_status = changes
+        .iter()
+        .position(
+            |c| matches!(c, DatabaseDiffChange::DropTable { table, .. } if table.name == "status"),
+        )
+        .expect("drop of the status table");
+    let create_enum = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::CreateEnum { enum_type, .. } if enum_type.name == "status"))
+        .expect("create of the status enum");
+    assert!(
+        drop_v < drop_status && drop_status < create_enum,
+        "must drop the dependent view, then the table, then create the enum: {changes:?}"
+    );
+}
+
+#[test]
+fn creating_a_relation_replacing_an_enum_creates_its_dependent_view_last() {
+    // Replace enum `status` with table `status`, and add a desired view `v` selecting from that table.
+    // Correct order: drop the enum, create the `status` table, then create the dependent view `v`.
+    let actual = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "status".to_owned(),
+                labels: vec!["open".to_owned()],
+            }],
+        }],
+    };
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![table("status")],
+            views: vec![view_over("v", "status")],
+            enums: Vec::new(),
+        }],
+    };
+    let changes = diff_models(&desired, &actual).changes;
+    let drop_enum = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::DropEnum { enum_type, .. } if enum_type.name == "status"))
+        .expect("drop of the status enum");
+    let create_status = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::CreateTable { table, .. } if table.name == "status"))
+        .expect("create of the status table");
+    let create_v = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::CreateView { view, .. } if view.name == "v"))
+        .expect("create of the dependent view v");
+    assert!(
+        drop_enum < create_status && create_status < create_v,
+        "must drop the enum, create the table, then create the dependent view: {changes:?}"
+    );
+}
+
 fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
