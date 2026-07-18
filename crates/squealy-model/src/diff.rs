@@ -88,6 +88,62 @@ pub struct DiffPolicyError {
     pub blocked: Vec<ClassifiedDatabaseDiffChange>,
 }
 
+/// Error returned when a relation (table or view) and an enum share a name across the actual and
+/// desired models — a collision PostgreSQL cannot represent, since every relation implicitly owns a
+/// composite type of the same name.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{} is used as both a relation (table or view) and an enum across the current and desired \
+     schemas; PostgreSQL creates an implicit composite type for every relation, so a relation and \
+     an enum cannot share a name. If you are replacing one with the other, split it into separate \
+     migrations that fully drop and apply one before introducing the other.",
+    qualified_name(schema, name)
+)]
+pub struct EnumRelationCollisionError {
+    pub schema: Option<String>,
+    pub name: String,
+}
+
+fn qualified_name(schema: &Option<String>, name: &str) -> String {
+    match schema {
+        Some(schema) => format!("{schema}.{name}"),
+        None => name.to_string(),
+    }
+}
+
+/// Rejects a migration in which a single `(schema, name)` is a relation (table or view) on one side
+/// and an enum on the other — or is both within a single model. PostgreSQL auto-creates a composite
+/// type per relation, so a relation and an enum can never coexist under one name, and correctly
+/// ordering a same-name relation↔enum *swap* plus its arbitrary dependents is deferred as a separate
+/// feature. Detecting the collision here keeps `diff_models` from emitting an un-applyable plan.
+pub fn reject_enum_relation_name_collision(
+    desired: &DatabaseModel,
+    actual: &DatabaseModel,
+) -> Result<(), EnumRelationCollisionError> {
+    let mut relations: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+    let mut enums: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+    for model in [desired, actual] {
+        for schema in &model.schemas {
+            for table in &schema.tables {
+                relations.insert((schema.name.clone(), table.name.clone()));
+            }
+            for view in &schema.views {
+                relations.insert((schema.name.clone(), view.name.clone()));
+            }
+            for enum_type in &schema.enums {
+                enums.insert((schema.name.clone(), enum_type.name.clone()));
+            }
+        }
+    }
+    if let Some((schema, name)) = relations.intersection(&enums).next() {
+        return Err(EnumRelationCollisionError {
+            schema: schema.clone(),
+            name: name.clone(),
+        });
+    }
+    Ok(())
+}
+
 /// Checks whether `diff` is allowed by `policy`.
 pub fn check_diff_policy(diff: &DatabaseDiff, policy: DiffPolicy) -> Result<(), DiffPolicyError> {
     let blocked = diff
@@ -316,18 +372,12 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     // must outlive its enum — so `CREATE SCHEMA` is hoisted *before* enum creates and `DROP SCHEMA`
     // *after* enum drops. Overall order: create schemas → create/alter enums → drop views → per-schema
     // table work → create views → drop enums → drop schemas.
+    //
+    // (An enum name colliding with a same-named table/view being replaced in the same migration is
+    // rejected earlier by `reject_enum_relation_name_collision`, so no cross-object-kind ordering is
+    // needed here — PostgreSQL auto-creates a composite type per relation, and correctly ordering that
+    // swap plus its arbitrary dependents is deferred as a separate feature.)
     let (enum_creates, enum_drops) = diff_enums_global(desired, actual);
-
-    // PostgreSQL auto-creates a composite type for every table/view, so an enum sharing a name with a
-    // relation collides. When a relation is *replaced* by a same-named enum, the relation (with its
-    // dependents) must be dropped BEFORE the enum is created — and a new dependent using the enum must be
-    // created AFTER it. So the colliding relation's drop is hoisted to before the enum creates, letting
-    // the enum create keep its normal early slot (before the tables that reference it). Symmetrically,
-    // when an enum is replaced by a same-named relation, the colliding relation's create is deferred to
-    // after the enum drops (which follow the table phase that removes the enum's dependents). These
-    // colliding-relation sets are almost always empty — reusing a name across object kinds is rare.
-    let enum_create_keys = enum_op_keys(&enum_creates);
-    let enum_drop_keys = enum_op_keys(&enum_drops);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
         if let (Some(desired_schema), None) = (
@@ -340,57 +390,8 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
         }
     }
 
-    // Classify each view drop/create — all keeping the diff's dependency order (dependents-before-sources
-    // for drops, the reverse for creates):
-    //  - colliding: a view replaced by / replacing a same-named enum, emitted with the colliding relation
-    //    drops/creates (views before tables on drop, tables before views on create).
-    //  - dependent: a view depending on a colliding relation — dropped before / created after it.
-    //  - other: normal, in its usual phase.
-    let drop_dependent_views = views_depending_on(actual, &enum_create_keys);
-    let create_dependent_views = views_depending_on(desired, &enum_drop_keys);
-    let mut colliding_view_drops = Vec::new();
-    let mut dependent_view_drops = Vec::new();
-    let mut other_view_drops = Vec::new();
-    for change in view_drops {
-        if change_collides(&change, &enum_create_keys) {
-            colliding_view_drops.push(change);
-        } else if drop_dependent_views.contains(&view_change_key(&change)) {
-            dependent_view_drops.push(change);
-        } else {
-            other_view_drops.push(change);
-        }
-    }
-    let mut colliding_view_creates = Vec::new();
-    let mut dependent_view_creates = Vec::new();
-    let mut other_view_creates = Vec::new();
-    for change in view_creates {
-        if change_collides(&change, &enum_drop_keys) {
-            colliding_view_creates.push(change);
-        } else if create_dependent_views.contains(&view_change_key(&change)) {
-            dependent_view_creates.push(change);
-        } else {
-            other_view_creates.push(change);
-        }
-    }
-
-    // Before a colliding relation can be dropped, every remaining dependency on it must be severed — a
-    // kept view whose source moved off it needs an explicit `DropView` the normal diff does not emit
-    // (its recreate is the diff's `CreateView`, deferred), and a still-present foreign key referencing it
-    // must go. `sever_collision_drops` produces those severing changes and the set of table drops it
-    // hoisted (excluded from the per-schema phase below so they are not emitted twice).
-    let already_dropped_views: BTreeSet<ViewKey> =
-        dependent_view_drops.iter().map(view_change_key).collect();
-    let (severing_drops, hoisted_table_drops) =
-        sever_collision_drops(actual, desired, &enum_create_keys, &already_dropped_views);
-
-    // Drop views depending on a to-be-replaced relation, then the colliding relations themselves (their
-    // own dependent views first, then their tables), then create the enums.
-    changes.extend(dependent_view_drops);
-    changes.extend(severing_drops);
-    changes.extend(colliding_view_drops);
-    push_relation_table_drops(actual, &enum_create_keys, &mut changes);
     changes.extend(enum_creates);
-    changes.extend(other_view_drops);
+    changes.extend(view_drops);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
         match (
@@ -398,54 +399,31 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
             actual_schemas.get(&schema_key),
         ) {
             (Some(desired_schema), None) => {
-                // The schema was created in the hoisted phase above; create its tables here — except a
-                // table replacing a same-named enum, which is deferred to after the enum drops.
+                // The schema was created in the hoisted phase above; create its tables here.
                 for table in &desired_schema.tables {
-                    if !enum_drop_keys.contains(&(desired_schema.name.clone(), table.name.clone()))
-                    {
-                        changes.push(DatabaseDiffChange::CreateTable {
-                            schema: desired_schema.name.clone(),
-                            table: table.clone(),
-                        });
-                    }
+                    changes.push(DatabaseDiffChange::CreateTable {
+                        schema: desired_schema.name.clone(),
+                        table: table.clone(),
+                    });
                 }
             }
             (None, Some(actual_schema)) => {
-                // Drop this schema's tables here — except one replaced by a same-named enum (dropped in
-                // the hoisted phase above) or one whose drop was hoisted to sever a colliding relation's
-                // foreign-key dependency.
                 for table in &actual_schema.tables {
-                    let key = (actual_schema.name.clone(), table.name.clone());
-                    if !enum_create_keys.contains(&key) && !hoisted_table_drops.contains(&key) {
-                        changes.push(DatabaseDiffChange::DropTable {
-                            schema: actual_schema.name.clone(),
-                            table: table.clone(),
-                        });
-                    }
+                    changes.push(DatabaseDiffChange::DropTable {
+                        schema: actual_schema.name.clone(),
+                        table: table.clone(),
+                    });
                 }
             }
             (Some(desired_schema), Some(actual_schema)) => {
-                diff_schema_tables(
-                    desired_schema,
-                    actual_schema,
-                    &enum_create_keys,
-                    &enum_drop_keys,
-                    &hoisted_table_drops,
-                    &mut changes,
-                );
+                diff_schema_tables(desired_schema, actual_schema, &mut changes);
             }
             (None, None) => {}
         }
     }
 
-    changes.extend(other_view_creates);
+    changes.extend(view_creates);
     changes.extend(enum_drops);
-    // Colliding relation creates (a table/view replacing a same-named enum) — after the enum drops: the
-    // colliding tables first, then the colliding views (which may select from them), then the views that
-    // depend on the new relation.
-    push_relation_table_creates(desired, &enum_drop_keys, &mut changes);
-    changes.extend(colliding_view_creates);
-    changes.extend(dependent_view_creates);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
         if let (None, Some(actual_schema)) = (
@@ -508,234 +486,6 @@ fn diff_enums_global(
     (creates, drops)
 }
 
-/// Produces the changes that must precede a colliding relation's drop to sever every remaining
-/// dependency on it, and the set of table keys whose drop was hoisted here (so the caller can skip
-/// dropping them again in the normal phase).
-///
-/// `colliding` is the `(schema, name)` set of relations being replaced by a same-named enum (they are
-/// dropped just after these severing changes). Two kinds of dependency are severed:
-///  - a **view** that still selects (transitively) from a colliding relation — a kept, repointed view
-///    gets an explicit `DropView` here (its recreate is the diff's own `CreateView`, deferred to after
-///    the enum drop); a view the diff already drops is skipped (`already_dropped_views`);
-///  - a **table** that references a colliding relation with a foreign key and is itself being dropped —
-///    its `DropTable` is hoisted here (a kept referencer's key would need its FK dropped instead, which
-///    is not yet handled — such a plan is rare and PostgreSQL rejects it clearly).
-///
-/// Both are ordered by distance from the seed (furthest dependents first), so a chain (grandchild →
-/// child → colliding) drops leaves-first.
-fn sever_collision_drops(
-    actual: &DatabaseModel,
-    desired: &DatabaseModel,
-    colliding: &BTreeSet<(Option<String>, String)>,
-    already_dropped_views: &BTreeSet<ViewKey>,
-) -> (Vec<DatabaseDiffChange>, BTreeSet<(Option<String>, String)>) {
-    if colliding.is_empty() {
-        return (Vec::new(), BTreeSet::new());
-    }
-    let desired_relations: BTreeSet<(Option<String>, String)> = desired
-        .schemas
-        .iter()
-        .flat_map(|schema| {
-            schema
-                .tables
-                .iter()
-                .map(|table| &table.name)
-                .chain(schema.views.iter().map(|view| &view.name))
-                .map(|name| (schema.name.clone(), name.clone()))
-        })
-        .collect();
-
-    // BFS over actual relations depending on a colliding relation, tracking distance from the seed.
-    let mut distance: BTreeMap<(Option<String>, String), usize> =
-        colliding.iter().map(|key| (key.clone(), 0)).collect();
-    loop {
-        let mut added = false;
-        for schema in &actual.schemas {
-            for view in &schema.views {
-                let key = (schema.name.clone(), view.name.clone());
-                if distance.contains_key(&key) {
-                    continue;
-                }
-                let dep = view.referenced_sources().filter_map(|source| {
-                    let src_schema = source.schema.clone().or_else(|| schema.name.clone());
-                    distance.get(&(src_schema, source.name.clone())).copied()
-                });
-                if let Some(min) = dep.min() {
-                    distance.insert(key, min + 1);
-                    added = true;
-                }
-            }
-            for table in &schema.tables {
-                let key = (schema.name.clone(), table.name.clone());
-                if distance.contains_key(&key) {
-                    continue;
-                }
-                let dep = table.foreign_keys.iter().filter_map(|fk| {
-                    let ref_schema = fk.references_schema.clone().or_else(|| schema.name.clone());
-                    distance
-                        .get(&(ref_schema, fk.references_table.clone()))
-                        .copied()
-                });
-                if let Some(min) = dep.min() {
-                    distance.insert(key, min + 1);
-                    added = true;
-                }
-            }
-        }
-        if !added {
-            break;
-        }
-    }
-
-    let mut severing: Vec<(usize, DatabaseDiffChange)> = Vec::new();
-    let mut hoisted = BTreeSet::new();
-    for schema in &actual.schemas {
-        for view in &schema.views {
-            let key = (schema.name.clone(), view.name.clone());
-            if let Some(&dist) = distance.get(&key)
-                && dist > 0
-                && desired_relations.contains(&key)
-                && !already_dropped_views.contains(&key)
-            {
-                severing.push((
-                    dist,
-                    DatabaseDiffChange::DropView {
-                        schema: schema.name.clone(),
-                        view: view.clone(),
-                    },
-                ));
-            }
-        }
-        for table in &schema.tables {
-            let key = (schema.name.clone(), table.name.clone());
-            if let Some(&dist) = distance.get(&key)
-                && dist > 0
-                && !desired_relations.contains(&key)
-            {
-                severing.push((
-                    dist,
-                    DatabaseDiffChange::DropTable {
-                        schema: schema.name.clone(),
-                        table: table.clone(),
-                    },
-                ));
-                hoisted.insert(key);
-            }
-        }
-    }
-    // Furthest dependents first (leaves before the relations they reference).
-    severing.sort_by_key(|(distance, _)| std::cmp::Reverse(*distance));
-    (
-        severing.into_iter().map(|(_, change)| change).collect(),
-        hoisted,
-    )
-}
-
-/// The transitive closure of views in `model` that depend (directly or through another view) on any
-/// relation in `seeds`. Used to move a colliding relation's dependent views around it: their drops must
-/// precede the relation drop, and their creates must follow the relation create. The returned set also
-/// contains `seeds` (harmless — only view keys are matched against view changes).
-fn views_depending_on(
-    model: &DatabaseModel,
-    seeds: &BTreeSet<(Option<String>, String)>,
-) -> BTreeSet<(Option<String>, String)> {
-    let all_views: Vec<(Option<String>, &ViewModel)> = model
-        .schemas
-        .iter()
-        .flat_map(|schema| schema.views.iter().map(|view| (schema.name.clone(), view)))
-        .collect();
-    let mut affected = seeds.clone();
-    loop {
-        let mut added = false;
-        for (schema, view) in &all_views {
-            let key = (schema.clone(), view.name.clone());
-            if !affected.contains(&key)
-                && view.referenced_sources().any(|source| {
-                    // An unqualified source resolves against the view's own schema.
-                    let source_schema = source.schema.clone().or_else(|| schema.clone());
-                    affected.contains(&(source_schema, source.name.clone()))
-                })
-            {
-                affected.insert(key);
-                added = true;
-            }
-        }
-        if !added {
-            break;
-        }
-    }
-    affected
-}
-
-/// The `(schema, name)` keys of every `CreateEnum`/`DropEnum` in `changes`.
-fn enum_op_keys(changes: &[DatabaseDiffChange]) -> BTreeSet<(Option<String>, String)> {
-    changes
-        .iter()
-        .filter_map(|change| match change {
-            DatabaseDiffChange::CreateEnum { schema, enum_type }
-            | DatabaseDiffChange::DropEnum { schema, enum_type } => {
-                Some((schema.clone(), enum_type.name.clone()))
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-/// Whether a table/view create-or-drop change's `(schema, relation-name)` is in `keys`.
-fn change_collides(change: &DatabaseDiffChange, keys: &BTreeSet<(Option<String>, String)>) -> bool {
-    match change {
-        DatabaseDiffChange::CreateView { schema, view }
-        | DatabaseDiffChange::DropView { schema, view } => {
-            keys.contains(&(schema.clone(), view.name.clone()))
-        }
-        DatabaseDiffChange::CreateTable { schema, table }
-        | DatabaseDiffChange::DropTable { schema, table } => {
-            keys.contains(&(schema.clone(), table.name.clone()))
-        }
-        _ => false,
-    }
-}
-
-/// Pushes a `DropTable` for every table in `actual` whose `(schema, name)` is in `keys` (a table being
-/// replaced by a same-named enum). Colliding *views* are emitted separately, in dependency order, from
-/// the diff's ordered view drops.
-fn push_relation_table_drops(
-    actual: &DatabaseModel,
-    keys: &BTreeSet<(Option<String>, String)>,
-    changes: &mut Vec<DatabaseDiffChange>,
-) {
-    for schema in &actual.schemas {
-        for table in &schema.tables {
-            if keys.contains(&(schema.name.clone(), table.name.clone())) {
-                changes.push(DatabaseDiffChange::DropTable {
-                    schema: schema.name.clone(),
-                    table: table.clone(),
-                });
-            }
-        }
-    }
-}
-
-/// Pushes a `CreateTable` for every table in `desired` whose `(schema, name)` is in `keys` (a table
-/// replacing a same-named enum being dropped). Colliding views are emitted separately, in dependency
-/// order, from the diff's ordered view creates.
-fn push_relation_table_creates(
-    desired: &DatabaseModel,
-    keys: &BTreeSet<(Option<String>, String)>,
-    changes: &mut Vec<DatabaseDiffChange>,
-) {
-    for schema in &desired.schemas {
-        for table in &schema.tables {
-            if keys.contains(&(schema.name.clone(), table.name.clone())) {
-                changes.push(DatabaseDiffChange::CreateTable {
-                    schema: schema.name.clone(),
-                    table: table.clone(),
-                });
-            }
-        }
-    }
-}
-
 /// Whether `subset` appears as an ordered subsequence of `sequence` (every element of `subset` occurs
 /// in `sequence`, in the same relative order).
 fn is_ordered_subsequence(subset: &[String], sequence: &[String]) -> bool {
@@ -759,29 +509,16 @@ fn keyed_enums(model: &DatabaseModel) -> BTreeMap<(Option<String>, String), &Enu
 fn diff_schema_tables(
     desired: &SchemaModel,
     actual: &SchemaModel,
-    // A table whose name collides with an enum being created (it is being replaced by the enum) is
-    // dropped in the hoisted colliding-drop phase; one colliding with an enum being dropped (it replaces
-    // the enum) is created in the trailing colliding-create phase. Skip both here so they land in the
-    // correct order relative to the enum.
-    enum_create_keys: &BTreeSet<(Option<String>, String)>,
-    enum_drop_keys: &BTreeSet<(Option<String>, String)>,
-    // Tables whose drop was hoisted before a colliding relation drop (to sever a foreign key referencing
-    // it) — skip the drop here so it is not emitted twice.
-    hoisted_table_drops: &BTreeSet<(Option<String>, String)>,
     changes: &mut Vec<DatabaseDiffChange>,
 ) {
     let desired_tables = keyed_tables(&desired.tables);
     let actual_tables = keyed_tables(&actual.tables);
 
     for table_name in sorted_keys(&desired_tables, &actual_tables) {
-        let collision_key = (desired.name.clone(), table_name.clone());
         match (
             desired_tables.get(&table_name),
             actual_tables.get(&table_name),
         ) {
-            (Some(_), None) if enum_drop_keys.contains(&collision_key) => {}
-            (None, Some(_)) if enum_create_keys.contains(&collision_key) => {}
-            (None, Some(_)) if hoisted_table_drops.contains(&collision_key) => {}
             (Some(desired_table), None) => changes.push(DatabaseDiffChange::CreateTable {
                 schema: desired.name.clone(),
                 table: (*desired_table).clone(),

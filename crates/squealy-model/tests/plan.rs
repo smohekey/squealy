@@ -3,7 +3,7 @@ use squealy::{
 };
 use squealy_model::{
     AppliedRefactorError, CastColumn, ChangeRisk, CheckModel, ColumnModel, DatabaseModel,
-    DatabasePlanStep, DdlExecutor, DiffPolicy, IndexModel, PlanApplyOptions, RefactorLog,
+    DatabasePlanStep, DdlExecutor, DiffPolicy, IndexModel, PlanApplyOptions, PlanError, RefactorLog,
     RefactorOperation, RenameColumn, RenameTable, SchemaIntrospect, SchemaModel,
     SchemaRefactorStore, SqlType, TableModel, TablePlanStep, apply_plan, apply_plan_with_options,
     classified_plan_steps, pending_refactors, plan_from_database,
@@ -71,6 +71,9 @@ fn plan_models_applies_policy_before_returning_steps() {
     )
     .unwrap_err();
 
+    let PlanError::Policy(error) = error else {
+        panic!("expected a policy block, got {error:?}");
+    };
     assert_eq!(error.blocked.len(), 1);
     assert_eq!(error.blocked[0].risk, ChangeRisk::Ambiguous);
 }
@@ -261,6 +264,9 @@ fn plan_models_with_refactors_leaves_unmatched_refactors_blocked_by_policy() {
     )
     .unwrap_err();
 
+    let PlanError::Policy(error) = error else {
+        panic!("expected a policy block, got {error:?}");
+    };
     assert_eq!(error.blocked.len(), 1);
     assert_eq!(error.blocked[0].risk, ChangeRisk::Ambiguous);
 }

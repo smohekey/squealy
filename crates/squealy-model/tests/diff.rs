@@ -3,7 +3,7 @@ use squealy_model::{
     DefaultValue, DiffPolicy, EnumModel, ExprNode, ForeignKeyAction, ForeignKeyModel, IndexModel,
     IndexPrefixLength, ProjectionItem, SchemaModel, SourceItem, SourceRef, SqlType,
     TableDiffChange, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
-    check_diff_policy, diff_models,
+    check_diff_policy, diff_models, reject_enum_relation_name_collision,
 };
 
 #[test]
@@ -361,327 +361,49 @@ fn constraint_prefix_length_order_does_not_diff() {
     );
 }
 
-#[test]
-fn replacing_a_table_with_a_same_named_enum_drops_the_table_first() {
-    // PostgreSQL creates a composite type per table, so an enum named `status` collides with a table
-    // `status`. Replacing the table with the enum must drop the table before creating the type.
-    let actual = model_with_tables("app", vec![table("status")]);
-    let desired = DatabaseModel {
+fn enum_only(schema: &str, name: &str) -> DatabaseModel {
+    DatabaseModel {
         schemas: vec![SchemaModel {
-            name: Some("app".to_owned()),
+            name: Some(schema.to_owned()),
             tables: Vec::new(),
             views: Vec::new(),
             enums: vec![EnumModel {
-                name: "status".to_owned(),
-                labels: vec!["open".to_owned(), "closed".to_owned()],
-            }],
-        }],
-    };
-    let changes = diff_models(&desired, &actual).changes;
-    let drop_at = changes
-        .iter()
-        .position(
-            |c| matches!(c, DatabaseDiffChange::DropTable { table, .. } if table.name == "status"),
-        )
-        .expect("the table drop must be present");
-    let create_at = changes
-        .iter()
-        .position(|c| matches!(c, DatabaseDiffChange::CreateEnum { enum_type, .. } if enum_type.name == "status"))
-        .expect("the enum create must be present");
-    assert!(
-        drop_at < create_at,
-        "the same-named table must be dropped before the enum is created: {changes:?}"
-    );
-}
-
-#[test]
-fn replacing_a_table_with_an_enum_used_by_a_new_table_orders_drop_enum_create() {
-    // Replace table `status` with enum `status`, and add a new table `t` with a `status`-typed column.
-    // Correct order: drop the old `status` table, create the enum, then create `t` that uses it.
-    let actual = model_with_tables("app", vec![table("status")]);
-    let mut using = table("readings");
-    using.columns = vec![column("s", SqlType::Enum("status".to_owned()))];
-    let desired = DatabaseModel {
-        schemas: vec![SchemaModel {
-            name: Some("app".to_owned()),
-            tables: vec![using],
-            views: Vec::new(),
-            enums: vec![EnumModel {
-                name: "status".to_owned(),
-                labels: vec!["open".to_owned(), "closed".to_owned()],
-            }],
-        }],
-    };
-    let changes = diff_models(&desired, &actual).changes;
-    let drop_status = changes
-        .iter()
-        .position(
-            |c| matches!(c, DatabaseDiffChange::DropTable { table, .. } if table.name == "status"),
-        )
-        .expect("drop of the old status table");
-    let create_enum = changes
-        .iter()
-        .position(|c| matches!(c, DatabaseDiffChange::CreateEnum { enum_type, .. } if enum_type.name == "status"))
-        .expect("create of the status enum");
-    let create_using = changes
-        .iter()
-        .position(|c| matches!(c, DatabaseDiffChange::CreateTable { table, .. } if table.name == "readings"))
-        .expect("create of the dependent table");
-    assert!(
-        drop_status < create_enum && create_enum < create_using,
-        "must drop the table, create the enum, then create the dependent table: {changes:?}"
-    );
-}
-
-#[test]
-fn replacing_an_enum_with_a_table_while_dropping_a_dependent_orders_correctly() {
-    // Replace enum `status` with a table `status`, while an existing table `u` (which uses the enum) is
-    // dropped. Correct order: drop `u`, drop the enum, then create the `status` table.
-    let mut dependent = table("u");
-    dependent.columns = vec![column("s", SqlType::Enum("status".to_owned()))];
-    let actual = DatabaseModel {
-        schemas: vec![SchemaModel {
-            name: Some("app".to_owned()),
-            tables: vec![dependent],
-            views: Vec::new(),
-            enums: vec![EnumModel {
-                name: "status".to_owned(),
+                name: name.to_owned(),
                 labels: vec!["open".to_owned()],
             }],
         }],
-    };
-    let desired = model_with_tables("app", vec![table("status")]);
-    let changes = diff_models(&desired, &actual).changes;
-    let drop_u = changes
-        .iter()
-        .position(|c| matches!(c, DatabaseDiffChange::DropTable { table, .. } if table.name == "u"))
-        .expect("drop of the dependent table u");
-    let drop_enum = changes
-        .iter()
-        .position(|c| matches!(c, DatabaseDiffChange::DropEnum { enum_type, .. } if enum_type.name == "status"))
-        .expect("drop of the status enum");
-    let create_status = changes
-        .iter()
-        .position(|c| matches!(c, DatabaseDiffChange::CreateTable { table, .. } if table.name == "status"))
-        .expect("create of the status table");
-    assert!(
-        drop_u < drop_enum && drop_enum < create_status,
-        "must drop the dependent, drop the enum, then create the table: {changes:?}"
-    );
-}
-
-/// A minimal view named `name` selecting from a single source relation `source` in schema `app`.
-fn view_over(name: &str, source: &str) -> ViewModel {
-    ViewModel {
-        name: name.to_owned(),
-        comment: None,
-        columns: Vec::new(),
-        query: ViewBody::Select(Box::new(ViewQueryModel {
-            projection: vec![ProjectionItem {
-                output_name: "x".to_owned(),
-                internal_alias: None,
-                expr: ExprNode::Column {
-                    alias: "q".to_owned(),
-                    column: "x".to_owned(),
-                },
-            }],
-            from: Some(SourceItem::Named(SourceRef {
-                schema: Some("app".to_owned()),
-                name: source.to_owned(),
-                alias: "q".to_owned(),
-            })),
-            ..ViewQueryModel::default()
-        })),
     }
 }
 
 #[test]
-fn dropping_a_relation_replaced_by_an_enum_drops_its_dependent_view_first() {
-    // Replace table `status` with enum `status`, while a live view `v` selects from the `status` table.
-    // Correct order: drop the dependent view `v`, then the `status` table, then create the enum.
-    let actual = DatabaseModel {
-        schemas: vec![SchemaModel {
-            name: Some("app".to_owned()),
-            tables: vec![table("status")],
-            views: vec![view_over("v", "status")],
-            enums: Vec::new(),
-        }],
-    };
-    let desired = DatabaseModel {
-        schemas: vec![SchemaModel {
-            name: Some("app".to_owned()),
-            tables: Vec::new(),
-            views: Vec::new(),
-            enums: vec![EnumModel {
-                name: "status".to_owned(),
-                labels: vec!["open".to_owned()],
-            }],
-        }],
-    };
-    let changes = diff_models(&desired, &actual).changes;
-    let drop_v = changes
-        .iter()
-        .position(|c| matches!(c, DatabaseDiffChange::DropView { view, .. } if view.name == "v"))
-        .expect("drop of the dependent view v");
-    let drop_status = changes
-        .iter()
-        .position(
-            |c| matches!(c, DatabaseDiffChange::DropTable { table, .. } if table.name == "status"),
-        )
-        .expect("drop of the status table");
-    let create_enum = changes
-        .iter()
-        .position(|c| matches!(c, DatabaseDiffChange::CreateEnum { enum_type, .. } if enum_type.name == "status"))
-        .expect("create of the status enum");
-    assert!(
-        drop_v < drop_status && drop_status < create_enum,
-        "must drop the dependent view, then the table, then create the enum: {changes:?}"
-    );
+fn replacing_a_table_with_a_same_named_enum_is_rejected() {
+    // PostgreSQL creates a composite type per table, so an enum named `status` collides with a table
+    // `status`. Correctly ordering that swap plus its arbitrary dependents is deferred, so the plan
+    // path rejects the collision up front rather than emitting an un-applyable diff.
+    let actual = model_with_tables("app", vec![table("status")]);
+    let desired = enum_only("app", "status");
+    let error = reject_enum_relation_name_collision(&desired, &actual)
+        .expect_err("a table replaced by a same-named enum must be rejected");
+    assert_eq!(error.schema.as_deref(), Some("app"));
+    assert_eq!(error.name, "status");
 }
 
 #[test]
-fn creating_a_relation_replacing_an_enum_creates_its_dependent_view_last() {
-    // Replace enum `status` with table `status`, and add a desired view `v` selecting from that table.
-    // Correct order: drop the enum, create the `status` table, then create the dependent view `v`.
-    let actual = DatabaseModel {
-        schemas: vec![SchemaModel {
-            name: Some("app".to_owned()),
-            tables: Vec::new(),
-            views: Vec::new(),
-            enums: vec![EnumModel {
-                name: "status".to_owned(),
-                labels: vec!["open".to_owned()],
-            }],
-        }],
-    };
-    let desired = DatabaseModel {
-        schemas: vec![SchemaModel {
-            name: Some("app".to_owned()),
-            tables: vec![table("status")],
-            views: vec![view_over("v", "status")],
-            enums: Vec::new(),
-        }],
-    };
-    let changes = diff_models(&desired, &actual).changes;
-    let drop_enum = changes
-        .iter()
-        .position(|c| matches!(c, DatabaseDiffChange::DropEnum { enum_type, .. } if enum_type.name == "status"))
-        .expect("drop of the status enum");
-    let create_status = changes
-        .iter()
-        .position(|c| matches!(c, DatabaseDiffChange::CreateTable { table, .. } if table.name == "status"))
-        .expect("create of the status table");
-    let create_v = changes
-        .iter()
-        .position(|c| matches!(c, DatabaseDiffChange::CreateView { view, .. } if view.name == "v"))
-        .expect("create of the dependent view v");
-    assert!(
-        drop_enum < create_status && create_status < create_v,
-        "must drop the enum, create the table, then create the dependent view: {changes:?}"
-    );
+fn replacing_an_enum_with_a_same_named_relation_is_rejected() {
+    // The collision is symmetric: an enum on the actual side and a relation on the desired side is
+    // rejected the same way as the reverse.
+    let actual = enum_only("app", "status");
+    let desired = model_with_tables("app", vec![table("status")]);
+    let error = reject_enum_relation_name_collision(&desired, &actual)
+        .expect_err("an enum replaced by a same-named relation must be rejected");
+    assert_eq!(error.name, "status");
 }
 
 #[test]
-fn dropping_a_relation_replaced_by_an_enum_hoists_a_foreign_key_child_drop() {
-    // Replace table `status` with enum `status`, while a child table with a foreign key to `status` is
-    // also dropped. The child (whose FK still references `status`) must be dropped before `status`.
-    let mut child = table("orders");
-    child.foreign_keys = vec![ForeignKeyModel {
-        name: "fk_orders_status".to_owned(),
-        columns: vec!["status".to_owned()],
-        references_schema: Some("app".to_owned()),
-        references_table: "status".to_owned(),
-        references_columns: vec!["id".to_owned()],
-        match_type: None,
-        deferrability: None,
-        validation: None,
-        enforcement: None,
-        on_delete: None,
-        on_update: None,
-    }];
-    let actual = model_with_tables("app", vec![table("status"), child]);
-    let desired = DatabaseModel {
-        schemas: vec![SchemaModel {
-            name: Some("app".to_owned()),
-            tables: Vec::new(),
-            views: Vec::new(),
-            enums: vec![EnumModel {
-                name: "status".to_owned(),
-                labels: vec!["open".to_owned()],
-            }],
-        }],
-    };
-    let changes = diff_models(&desired, &actual).changes;
-    let drop_child = changes
-        .iter()
-        .position(
-            |c| matches!(c, DatabaseDiffChange::DropTable { table, .. } if table.name == "orders"),
-        )
-        .expect("drop of the FK-child table");
-    let drop_status = changes
-        .iter()
-        .position(
-            |c| matches!(c, DatabaseDiffChange::DropTable { table, .. } if table.name == "status"),
-        )
-        .expect("drop of the status table");
-    assert!(
-        drop_child < drop_status,
-        "the foreign-key child must be dropped before the referenced table: {changes:?}"
-    );
-    // The child must not be dropped twice (once hoisted, once in the normal phase).
-    assert_eq!(
-        changes
-            .iter()
-            .filter(|c| matches!(c, DatabaseDiffChange::DropTable { table, .. } if table.name == "orders"))
-            .count(),
-        1,
-        "the hoisted child drop must not be duplicated: {changes:?}"
-    );
-}
-
-#[test]
-fn dropping_a_relation_replaced_by_an_enum_drops_a_kept_repointed_view_first() {
-    // Replace table `status` with enum `status`; a view `v` that selected from `status` is KEPT but
-    // repointed to a `codes` table. The diff only queues a CreateView (replace) for `v`, so a DropView
-    // must be materialized before `status` is dropped (its recreate is the deferred CreateView).
-    let actual = DatabaseModel {
-        schemas: vec![SchemaModel {
-            name: Some("app".to_owned()),
-            tables: vec![table("status"), table("codes")],
-            views: vec![view_over("v", "status")],
-            enums: Vec::new(),
-        }],
-    };
-    let desired = DatabaseModel {
-        schemas: vec![SchemaModel {
-            name: Some("app".to_owned()),
-            tables: vec![table("codes")],
-            views: vec![view_over("v", "codes")],
-            enums: vec![EnumModel {
-                name: "status".to_owned(),
-                labels: vec!["open".to_owned()],
-            }],
-        }],
-    };
-    let changes = diff_models(&desired, &actual).changes;
-    let drop_v = changes
-        .iter()
-        .position(|c| matches!(c, DatabaseDiffChange::DropView { view, .. } if view.name == "v"))
-        .expect("a materialized DropView for the kept, repointed view");
-    let drop_status = changes
-        .iter()
-        .position(
-            |c| matches!(c, DatabaseDiffChange::DropTable { table, .. } if table.name == "status"),
-        )
-        .expect("drop of the status table");
-    let create_v = changes
-        .iter()
-        .position(|c| matches!(c, DatabaseDiffChange::CreateView { view, .. } if view.name == "v"))
-        .expect("recreate of the repointed view");
-    assert!(
-        drop_v < drop_status && drop_status < create_v,
-        "the kept view is dropped before the table, then recreated after: {changes:?}"
-    );
+fn a_relation_and_an_enum_with_distinct_names_are_accepted() {
+    let actual = model_with_tables("app", vec![table("status")]);
+    let desired = enum_only("app", "mood");
+    assert!(reject_enum_relation_name_collision(&desired, &actual).is_ok());
 }
 
 fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {

@@ -3,13 +3,23 @@
 //! A plan is the ordered, policy-checked form of a [`DatabaseDiff`]. It is still backend-neutral:
 //! backend crates remain responsible for deciding whether and how individual steps can be rendered.
 
-use crate::diff::diff_table;
+use crate::diff::{diff_table, reject_enum_relation_name_collision};
 use crate::{
     CastColumn, ChangeRisk, ClassifiedDatabaseDiffChange, DatabaseDiff, DatabaseDiffChange,
-    DatabaseModel, DiffPolicy, DiffPolicyError, RefactorLog, RefactorOperation, RenameColumn,
-    RenameTable, TableDiffChange, check_diff_policy, diff_models,
+    DatabaseModel, DiffPolicy, DiffPolicyError, EnumRelationCollisionError, RefactorLog,
+    RefactorOperation, RenameColumn, RenameTable, TableDiffChange, check_diff_policy, diff_models,
 };
 use squealy::{DatabasePlan, DatabasePlanStep, TablePlanStep};
+
+/// An error from planning a model diff: either a same-name relation↔enum collision the diff cannot
+/// order, or a change blocked by the deployment [`DiffPolicy`].
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+pub enum PlanError {
+    #[error(transparent)]
+    Collision(#[from] EnumRelationCollisionError),
+    #[error(transparent)]
+    Policy(#[from] DiffPolicyError),
+}
 
 /// A plan step with conservative deployment-risk classification.
 #[derive(Clone, Debug, PartialEq)]
@@ -100,8 +110,9 @@ pub fn plan_models(
     desired: &DatabaseModel,
     actual: &DatabaseModel,
     policy: DiffPolicy,
-) -> Result<DatabasePlan, DiffPolicyError> {
-    plan_diff(&diff_models(desired, actual), policy)
+) -> Result<DatabasePlan, PlanError> {
+    reject_enum_relation_name_collision(desired, actual)?;
+    Ok(plan_diff(&diff_models(desired, actual), policy)?)
 }
 
 /// Diffs `desired` against `actual`, applies explicit refactor intent, then builds a policy-checked
@@ -114,7 +125,8 @@ pub fn plan_models_with_refactors(
     actual: &DatabaseModel,
     refactors: &RefactorLog,
     policy: DiffPolicy,
-) -> Result<DatabasePlan, DiffPolicyError> {
+) -> Result<DatabasePlan, PlanError> {
+    reject_enum_relation_name_collision(desired, actual)?;
     let mut steps = flatten_diff(&diff_models(desired, actual));
     apply_refactors(&mut steps, refactors);
     check_plan_policy(&steps, policy)?;

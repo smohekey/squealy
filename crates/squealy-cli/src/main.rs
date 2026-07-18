@@ -13,7 +13,7 @@ use squealy_cli::CliError;
 use squealy_cli::extract::extract_model;
 use squealy_model::{
     ChangeRisk, ClassifiedDatabaseDiffChange, DatabaseDiffChange, DatabaseModel, DatabasePlan,
-    DatabasePlanStep, DdlExecutor, DiffPolicy, PlanApplyOptions, PlanFromDatabaseError,
+    DatabasePlanStep, DdlExecutor, DiffPolicy, PlanApplyOptions, PlanError, PlanFromDatabaseError,
     RefactorLog, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaMetadataStore,
     SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore, TableDiffChange,
     TablePlanStep, apply_plan_with_options, canonicalize_model, check_create, check_diff_policy,
@@ -456,7 +456,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             };
             let plan =
                 plan_models_with_refactors(&desired.model, &actual, &desired.refactors, policy)
-                    .map_err(|error| policy_blocked_error(&error.blocked))?;
+                    .map_err(|error| match error {
+                        PlanError::Policy(error) => policy_blocked_error(&error.blocked),
+                        PlanError::Collision(error) => CliError::Message(error.to_string()),
+                    })?;
             let sql = match backend.backend {
                 BackendKind::Postgres => render_plan_sql(&plan, &desired.model, &Postgres),
                 BackendKind::Mysql => render_plan_sql(&plan, &desired.model, &Mysql),
@@ -1919,6 +1922,7 @@ fn plan_from_database_result<E: std::fmt::Display>(
     match result {
         Ok(plan) => Ok(plan),
         Err(PlanFromDatabaseError::Policy(error)) => Err(policy_blocked_error(&error.blocked)),
+        Err(PlanFromDatabaseError::Collision(error)) => Err(CliError::Message(error.to_string())),
         Err(other) => Err(CliError::Message(format!("plan: {other}"))),
     }
 }

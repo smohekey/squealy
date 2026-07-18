@@ -17,7 +17,8 @@ pub mod diff;
 
 pub use diff::{
     ChangeRisk, ClassifiedDatabaseDiffChange, DatabaseDiff, DatabaseDiffChange, DiffPolicy,
-    DiffPolicyError, TableDiffChange, check_diff_policy, diff_models,
+    DiffPolicyError, EnumRelationCollisionError, TableDiffChange, check_diff_policy, diff_models,
+    reject_enum_relation_name_collision,
 };
 pub use package::{
     FORMAT_VERSION, PACKAGE_CONTENT_HASH_METADATA_KEY, PACKAGE_FORMAT_VERSION_METADATA_KEY,
@@ -27,7 +28,7 @@ pub use package::{
     write_package_to, write_package_with_refactors, write_package_with_refactors_to,
 };
 pub use plan::{
-    ClassifiedDatabasePlanStep, classified_plan_steps, plan_diff, plan_models,
+    ClassifiedDatabasePlanStep, PlanError, classified_plan_steps, plan_diff, plan_models,
     plan_models_with_refactors, plan_step_risk, table_plan_step_risk,
 };
 pub use refactor::{
@@ -185,6 +186,17 @@ pub enum PlanFromDatabaseError<E> {
     AppliedRefactor(#[source] AppliedRefactorError),
     #[error("schema plan blocked by policy: {0}")]
     Policy(#[source] DiffPolicyError),
+    #[error("{0}")]
+    Collision(#[source] EnumRelationCollisionError),
+}
+
+impl<E> From<PlanError> for PlanFromDatabaseError<E> {
+    fn from(error: PlanError) -> Self {
+        match error {
+            PlanError::Policy(policy) => PlanFromDatabaseError::Policy(policy),
+            PlanError::Collision(collision) => PlanFromDatabaseError::Collision(collision),
+        }
+    }
 }
 
 /// The result of repairing backend refactor metadata from a package refactor log.
@@ -245,7 +257,7 @@ where
     // way and deparsed another compare equal (and so the desired model aligns with introspection).
     let actual = canonicalize_model(connection, &actual);
     let desired = canonicalize_model(connection, desired);
-    plan_models(&desired, &actual, policy).map_err(PlanFromDatabaseError::Policy)
+    Ok(plan_models(&desired, &actual, policy)?)
 }
 
 /// Introspects `connection` and builds an incremental plan using explicit refactor intent.
@@ -273,8 +285,12 @@ where
     // Canonicalize both sides for the diff (after refactor matching, which reads the raw schema).
     let actual = canonicalize_model(connection, &actual);
     let desired = canonicalize_model(connection, desired);
-    plan_models_with_refactors(&desired, &actual, &pending_refactors, policy)
-        .map_err(PlanFromDatabaseError::Policy)
+    Ok(plan_models_with_refactors(
+        &desired,
+        &actual,
+        &pending_refactors,
+        policy,
+    )?)
 }
 
 /// Returns a copy of `model` in a canonical form for diffing, so a model does not churn against a
