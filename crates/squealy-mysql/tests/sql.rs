@@ -322,6 +322,52 @@ CREATE UNIQUE INDEX `idx_events_name` ON `shop`.`events` (`slug`);"
 }
 
 #[test]
+fn mysql_enforcement_only_check_change_uses_atomic_alter_check() {
+    // Same name and expression, only the enforcement differs: render the in-place `ALTER CHECK` toggle,
+    // NOT the non-atomic DROP + ADD (whose committed DROP would lose the check if enabling enforcement
+    // then failed validation). An expression change still uses DROP + ADD (covered by the plan test
+    // above). Cover both toggle directions and the enforced-default keyword.
+    let alter = |before_enf, after_enf| {
+        let plan = DatabasePlan {
+            steps: vec![DatabasePlanStep::AlterTable {
+                schema: Some("shop".to_owned()),
+                table: "events".to_owned(),
+                change: Box::new(TablePlanStep::AlterCheck {
+                    before: CheckModel {
+                        name: "ck_n".to_owned(),
+                        expression: check_expr("n > 0"),
+                        validation: None,
+                        enforcement: before_enf,
+                    },
+                    after: CheckModel {
+                        name: "ck_n".to_owned(),
+                        expression: check_expr("n > 0"),
+                        validation: None,
+                        enforcement: after_enf,
+                    },
+                }),
+            }],
+        };
+        let mut sql = Vec::new();
+        Mysql
+            .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+            .unwrap();
+        String::from_utf8(sql).unwrap()
+    };
+
+    // Enabling enforcement (NOT ENFORCED -> the enforced default `None`).
+    assert_eq!(
+        alter(Some(ConstraintEnforcement::NotEnforced), None),
+        "ALTER TABLE `shop`.`events` ALTER CHECK `ck_n` ENFORCED;"
+    );
+    // Disabling enforcement (enforced default -> NOT ENFORCED).
+    assert_eq!(
+        alter(None, Some(ConstraintEnforcement::NotEnforced)),
+        "ALTER TABLE `shop`.`events` ALTER CHECK `ck_n` NOT ENFORCED;"
+    );
+}
+
+#[test]
 fn mysql_renders_constraint_column_prefix_lengths() {
     let plan = DatabasePlan {
         steps: vec![

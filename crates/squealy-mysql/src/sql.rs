@@ -338,15 +338,28 @@ fn write_table_plan_step(
             write_add_foreign_key(schema, table, after, writer)?;
         }
         TablePlanStep::AlterCheck { before, after } => {
-            writer.write_all(b"ALTER TABLE ")?;
-            write_qualified_name(schema, table, writer)?;
-            writer.write_all(b" DROP CHECK ")?;
-            write_quoted_ident(&before.name, writer)?;
-            statement(writer, first)?;
-            writer.write_all(b"ALTER TABLE ")?;
-            write_qualified_name(schema, table, writer)?;
-            writer.write_all(b" ADD ")?;
-            write_check(after, writer)?;
+            if before.name == after.name && before.expression == after.expression {
+                // Only the enforcement changed (on MySQL a check carries no other alterable metadata —
+                // validation is a PostgreSQL concept). Toggle it in place with `ALTER CHECK`, which is
+                // atomic: enabling enforcement on a check whose rows violate it fails and LEAVES the
+                // check intact. The DROP + ADD below would instead commit the DROP (MySQL auto-commits
+                // DDL) and then fail the re-add's validation, silently losing the constraint.
+                writer.write_all(b"ALTER TABLE ")?;
+                write_qualified_name(schema, table, writer)?;
+                writer.write_all(b" ALTER CHECK ")?;
+                write_quoted_ident(&after.name, writer)?;
+                write_alter_check_enforcement(&after.enforcement, writer)?;
+            } else {
+                writer.write_all(b"ALTER TABLE ")?;
+                write_qualified_name(schema, table, writer)?;
+                writer.write_all(b" DROP CHECK ")?;
+                write_quoted_ident(&before.name, writer)?;
+                statement(writer, first)?;
+                writer.write_all(b"ALTER TABLE ")?;
+                write_qualified_name(schema, table, writer)?;
+                writer.write_all(b" ADD ")?;
+                write_check(after, writer)?;
+            }
         }
         TablePlanStep::AlterIndex { before, after } => {
             writer.write_all(b"DROP INDEX ")?;
@@ -721,9 +734,10 @@ fn write_check(check: &CheckModel, writer: &mut impl Write) -> io::Result<()> {
     write_constraint_enforcement(&check.enforcement, writer)
 }
 
-/// Renders a check constraint's `[NOT] ENFORCED` clause (MySQL 8.0.16+). The default, `ENFORCED`, renders
-/// bare so a plain check round-trips (introspection folds the enforced default to `None`, mirroring how
-/// PostgreSQL renders `validation`); only `NOT ENFORCED` is a meaningful, rendered difference.
+/// Renders a check constraint's `[NOT] ENFORCED` clause in a `CHECK (...)` definition (MySQL 8.0.16+).
+/// The default, `ENFORCED`, renders bare so a plain check round-trips (introspection folds the enforced
+/// default to `None`, mirroring how PostgreSQL renders `validation`); only `NOT ENFORCED` is a
+/// meaningful, rendered difference.
 fn write_constraint_enforcement(
     enforcement: &Option<ConstraintEnforcement>,
     writer: &mut impl Write,
@@ -737,6 +751,23 @@ fn write_constraint_enforcement(
         Some(ConstraintEnforcement::Enforced) | None => {}
     }
     Ok(())
+}
+
+/// Renders the enforcement keyword for an in-place `ALTER TABLE ... ALTER CHECK <name> ...` toggle. Unlike
+/// the `CHECK (...)` clause above, `ALTER CHECK` requires an explicit keyword, so the enforced default
+/// renders `ENFORCED` rather than bare.
+fn write_alter_check_enforcement(
+    enforcement: &Option<ConstraintEnforcement>,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    match enforcement {
+        Some(ConstraintEnforcement::NotEnforced) => writer.write_all(b" NOT ENFORCED"),
+        Some(ConstraintEnforcement::Raw(enforcement)) => {
+            writer.write_all(b" ")?;
+            writer.write_all(enforcement.as_bytes())
+        }
+        Some(ConstraintEnforcement::Enforced) | None => writer.write_all(b" ENFORCED"),
+    }
 }
 
 fn write_create_index(

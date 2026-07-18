@@ -1381,6 +1381,72 @@ async fn check_not_enforced_round_trips_and_toggling_enforcement_migrates() {
 
 #[tokio::test]
 #[ignore]
+async fn enabling_enforcement_on_a_violating_check_fails_but_preserves_it() {
+    let _db_guard = db_lock().lock().await;
+    let mut connection = Mysql
+        .connect(&database_url())
+        .await
+        .expect("connect to MySQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog_enf`")
+        .await
+        .expect("drop schema");
+
+    // Publish a NOT ENFORCED check, then insert a row that VIOLATES it — allowed precisely because the
+    // check is not enforced. This is the realistic reason a check is NOT ENFORCED.
+    let not_enforced = enforcement_check_model(Some(ConstraintEnforcement::NotEnforced));
+    squealy_model::publish(&not_enforced, &Mysql, &mut connection)
+        .await
+        .expect("publish NOT ENFORCED check");
+    connection
+        .execute_ddl("INSERT INTO `catalog_enf`.`readings` (`n`) VALUES (-5)")
+        .await
+        .expect("insert a violating row");
+
+    // Toggling to enforced must FAIL (the -5 row violates the check). The atomic `ALTER CHECK ...
+    // ENFORCED` leaves the check intact on failure; a DROP + ADD would have committed the DROP and lost
+    // the constraint entirely (codex round 2).
+    let enforced = enforcement_check_model(None);
+    let plan = squealy_model::plan_from_database(
+        &enforced,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("plan enforcement enable");
+    squealy_model::apply_plan(&plan, &enforced, &Mysql, &mut connection)
+        .await
+        .expect_err("enabling enforcement on a violating check must fail");
+
+    // The check survives the failed migration — still present, still NOT ENFORCED.
+    let after = squealy_model::introspect(&mut connection)
+        .await
+        .expect("introspect after the failed toggle");
+    let table = after
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.tables)
+        .find(|table| table.name == "readings")
+        .expect("readings table still exists");
+    let check = table
+        .checks
+        .iter()
+        .find(|check| check.name == "ck_n_positive")
+        .expect("the check must survive the failed enforcement toggle");
+    assert_eq!(
+        check.enforcement,
+        Some(ConstraintEnforcement::NotEnforced),
+        "the check must remain NOT ENFORCED after the failed toggle"
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS `catalog_enf`")
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore]
 async fn decimal_cast_check_round_trips_and_scale_change_migrates() {
     let _db_guard = db_lock().lock().await;
     let mut connection = Mysql
