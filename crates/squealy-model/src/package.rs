@@ -19,13 +19,13 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
     AggregateFunc, ArithmeticOp, CaseArm, CheckModel, ColumnModel, CompareOp, Constraint,
     ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, CteModel, DatabaseModel,
-    DateField, DefaultValue, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
-    FrameBound, FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage, IdentityMode,
-    IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder,
-    IndexOperatorClass, IndexPrefixLength, JoinItem, JoinKind, LogicalOp, OrderDirection,
-    OrderItem, OrderNulls, ProjectionItem, ScalarFunc, SchemaModel, SourceItem, SourceRef, SqlType,
-    TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp, WindowFunc,
-    WindowOrderTerm,
+    DateField, DefaultValue, EnumModel, ExprNode, ForeignKeyAction, ForeignKeyMatch,
+    ForeignKeyModel, FrameBound, FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage,
+    IdentityMode, IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel,
+    IndexNullsOrder, IndexOperatorClass, IndexPrefixLength, JoinItem, JoinKind, LogicalOp,
+    OrderDirection, OrderItem, OrderNulls, ProjectionItem, ScalarFunc, SchemaModel, SourceItem,
+    SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
+    ViewSetOp, WindowFunc, WindowOrderTerm,
 };
 
 use crate::{CastColumn, RefactorLog, RefactorOperation, RenameColumn, RenameTable};
@@ -416,7 +416,23 @@ fn schema_to_node(schema: &SchemaModel) -> KdlNode {
     for view in &schema.views {
         tables.nodes_mut().push(view_to_node(view));
     }
+    for enum_type in &schema.enums {
+        tables.nodes_mut().push(enum_to_node(enum_type));
+    }
     node.set_children(tables);
+    node
+}
+
+fn enum_to_node(enum_type: &EnumModel) -> KdlNode {
+    let mut node = KdlNode::new("enum");
+    node.push(KdlEntry::new(enum_type.name.clone()));
+    let mut body = KdlDocument::new();
+    for label in &enum_type.labels {
+        let mut label_node = KdlNode::new("label");
+        label_node.push(KdlEntry::new(label.clone()));
+        body.nodes_mut().push(label_node);
+    }
+    node.set_children(body);
     node
 }
 
@@ -1428,6 +1444,7 @@ fn write_sql_type(node: &mut KdlNode, ty: &SqlType) {
         SqlType::Jsonb => "jsonb",
         SqlType::Bytes => "bytes",
         SqlType::FixedBytes(_) => "fixed_bytes",
+        SqlType::Enum(_) => "enum",
         SqlType::Raw(_) => "raw",
     };
     node.push(KdlEntry::new_prop("type", name));
@@ -1463,6 +1480,9 @@ fn write_sql_type(node: &mut KdlNode, ty: &SqlType) {
         }
         SqlType::Raw(raw) => {
             node.push(KdlEntry::new_prop("raw", raw.clone()));
+        }
+        SqlType::Enum(name) => {
+            node.push(KdlEntry::new_prop("enum", name.clone()));
         }
         _ => {}
     }
@@ -1505,10 +1525,14 @@ fn schema_from_node(node: &KdlNode) -> Result<SchemaModel, PackageError> {
     let views = child_nodes(node, "view")
         .map(view_from_node)
         .collect::<Result<Vec<_>, _>>()?;
+    let enums = child_nodes(node, "enum")
+        .map(enum_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(SchemaModel {
         name: first_arg(node).map(str::to_owned),
         tables,
         views,
+        enums,
     })
 }
 
@@ -1547,6 +1571,20 @@ fn table_from_node(node: &KdlNode) -> Result<TableModel, PackageError> {
         checks,
         indexes,
     })
+}
+
+fn enum_from_node(node: &KdlNode) -> Result<EnumModel, PackageError> {
+    let name = first_arg(node)
+        .ok_or_else(|| malformed("`enum` is missing its name"))?
+        .to_owned();
+    let labels = child_nodes(node, "label")
+        .map(|label| {
+            first_arg(label)
+                .ok_or_else(|| malformed("`label` is missing its value"))
+                .map(str::to_owned)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(EnumModel { name, labels })
 }
 
 fn view_from_node(node: &KdlNode) -> Result<ViewModel, PackageError> {
@@ -2340,6 +2378,7 @@ fn sql_type_from_node(node: &KdlNode) -> Result<SqlType, PackageError> {
         "bytes" => SqlType::Bytes,
         "fixed_bytes" => SqlType::FixedBytes(required_u32(node, "length")?),
         "raw" => SqlType::Raw(required_prop(node, "raw")?),
+        "enum" => SqlType::Enum(required_prop(node, "enum")?),
         other => return Err(malformed(format!("unknown column type `{other}`"))),
     })
 }
@@ -2770,6 +2809,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: Some("public".to_owned()),
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![
                     TableModel {
                         name: "orgs".to_owned(),
@@ -2912,6 +2952,52 @@ mod tests {
     }
 
     #[test]
+    fn kdl_round_trips_enum_type_and_column() {
+        // An enum type serializes as an `enum "<name>" { label "..." }` node and a column of that type
+        // stores `type="enum" enum="<name>"`; both must survive a package round-trip so a published enum
+        // re-plans to empty.
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: Some("app".to_owned()),
+                tables: vec![TableModel {
+                    name: "readings".to_owned(),
+                    comment: None,
+                    columns: vec![ColumnModel {
+                        name: "m".to_owned(),
+                        comment: None,
+                        ty: SqlType::Enum("mood".to_owned()),
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        on_update: None,
+                    }],
+                    primary_key: None,
+                    foreign_keys: Vec::new(),
+                    uniques: Vec::new(),
+                    checks: Vec::new(),
+                    indexes: Vec::new(),
+                }],
+                views: Vec::new(),
+                enums: vec![EnumModel {
+                    name: "mood".to_owned(),
+                    labels: vec!["sad".to_owned(), "ok".to_owned(), "happy".to_owned()],
+                }],
+            }],
+        };
+        let kdl = to_kdl(&model);
+        assert!(kdl.contains("enum mood"), "missing enum node:\n{kdl}");
+        assert!(
+            kdl.contains("type=enum") && kdl.contains("enum=mood"),
+            "missing enum column type:\n{kdl}"
+        );
+        assert!(kdl.contains("label happy"), "missing enum label:\n{kdl}");
+        let parsed = from_kdl(&kdl).expect("enum model.kdl should parse");
+        assert_eq!(parsed, model, "enum KDL round-trip diverged:\n{kdl}");
+    }
+
+    #[test]
     fn kdl_round_trips_constraint_column_prefix_lengths() {
         // A MySQL `UNIQUE`/`PRIMARY KEY` over a leading column prefix stores each `col(n)` as a
         // `prefix-length <position> <length>` child on the constraint node; it must survive a package
@@ -2967,6 +3053,7 @@ mod tests {
                     indexes: Vec::new(),
                 }],
                 views: Vec::new(),
+                enums: Vec::new(),
             }],
         };
 
@@ -3110,6 +3197,7 @@ mod tests {
                         offset: Some(5),
                     })),
                 }],
+                enums: Vec::new(),
             }],
         };
 
@@ -3197,6 +3285,7 @@ mod tests {
                         ..ViewQueryModel::default()
                     })),
                 }],
+                enums: Vec::new(),
             }],
         };
 
@@ -3252,6 +3341,7 @@ mod tests {
                         ..ViewQueryModel::default()
                     })),
                 }],
+                enums: Vec::new(),
             }],
         };
 
@@ -3327,6 +3417,7 @@ mod tests {
                         offset: Some(2),
                     },
                 }],
+                enums: Vec::new(),
             }],
         };
 
@@ -3432,6 +3523,7 @@ mod tests {
                         })),
                     },
                 }],
+                enums: Vec::new(),
             }],
         };
 
@@ -3466,6 +3558,7 @@ mod tests {
                         ..ViewQueryModel::default()
                     })),
                 }],
+                enums: Vec::new(),
             }],
         };
 
@@ -3889,6 +3982,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -3984,6 +4078,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "structured".to_owned(),
                     comment: None,
@@ -4091,6 +4186,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "derived_columns".to_owned(),
                     comment: None,
@@ -4120,6 +4216,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -4182,6 +4279,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -4232,6 +4330,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -4282,6 +4381,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -4332,6 +4432,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -4387,6 +4488,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -4452,6 +4554,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -4476,6 +4579,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -4530,6 +4634,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,

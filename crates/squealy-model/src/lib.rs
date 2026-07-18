@@ -17,7 +17,8 @@ pub mod diff;
 
 pub use diff::{
     ChangeRisk, ClassifiedDatabaseDiffChange, DatabaseDiff, DatabaseDiffChange, DiffPolicy,
-    DiffPolicyError, TableDiffChange, check_diff_policy, diff_models,
+    DiffPolicyError, EnumRelationCollisionError, TableDiffChange, check_diff_policy, diff_models,
+    reject_enum_relation_collision_in_diff, reject_enum_relation_name_collision,
 };
 pub use package::{
     FORMAT_VERSION, PACKAGE_CONTENT_HASH_METADATA_KEY, PACKAGE_FORMAT_VERSION_METADATA_KEY,
@@ -27,7 +28,7 @@ pub use package::{
     write_package_to, write_package_with_refactors, write_package_with_refactors_to,
 };
 pub use plan::{
-    ClassifiedDatabasePlanStep, classified_plan_steps, plan_diff, plan_models,
+    ClassifiedDatabasePlanStep, PlanError, classified_plan_steps, plan_diff, plan_models,
     plan_models_with_refactors, plan_step_risk, table_plan_step_risk,
 };
 pub use refactor::{
@@ -37,13 +38,13 @@ pub use refactor::{
 pub use squealy::{
     CheckModel, ColumnCapabilities, ColumnModel, Constraint, ConstraintCapabilities,
     ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, CteModel, DatabaseModel,
-    DatabasePlan, DatabasePlanStep, DdlExecutor, DefaultValue, ExprNode, ForeignKeyAction,
-    ForeignKeyMatch, ForeignKeyModel, IndexCapabilities, IndexCollation, IndexDirection,
-    IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, IndexPrefixLength, LogicalOp,
-    ProjectionItem, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect,
-    SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore, SchemaPublishRecord,
-    SchemaRefactorStore, SourceItem, SourceRef, SqlType, TableModel, TablePlanStep, ViewBody,
-    ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
+    DatabasePlan, DatabasePlanStep, DdlExecutor, DefaultValue, EnumModel, ExprNode,
+    ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, IndexCapabilities, IndexCollation,
+    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
+    IndexPrefixLength, LogicalOp, ProjectionItem, SchemaBackend, SchemaCapabilities, SchemaConnect,
+    SchemaIntrospect, SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore,
+    SchemaPublishRecord, SchemaRefactorStore, SourceItem, SourceRef, SqlType, TableModel,
+    TablePlanStep, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
 };
 
 use std::collections::BTreeSet;
@@ -79,6 +80,9 @@ pub fn render_plan_sql<B: SchemaBackend>(
     // rules) so an incremental `AddUnique`/`AddPrimaryKey` cannot slip an unrenderable/non-round-tripping
     // prefix past the create preflight into `render`/`apply`.
     let capabilities = backend.capabilities();
+    // The incremental path does not run `check_create`; an enum-typed column referencing a type the
+    // desired schema never declares would otherwise render a qualified reference that fails at execution.
+    validate_enum_references(desired, capabilities)?;
     for schema in &desired.schemas {
         for table in &schema.tables {
             validate_table_constraint_prefixes(table, &capabilities)?;
@@ -138,6 +142,12 @@ fn bytes_to_sql(buffer: Vec<u8>) -> std::io::Result<String> {
 /// This validates backend capabilities against the neutral model, so callers can fail fast when a
 /// package contains metadata the target backend cannot round-trip.
 pub fn check_create<B: SchemaBackend>(model: &DatabaseModel, backend: &B) -> std::io::Result<()> {
+    // A relation and an enum sharing a name cannot coexist (PostgreSQL owns a composite type per
+    // relation). The incremental planner catches this across the desired/actual pair; the create path
+    // must catch it within the single model it is about to render, or it emits un-applyable DDL.
+    reject_enum_relation_name_collision(model, model).map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+    })?;
     validate_capabilities(model, backend.capabilities())?;
     validate_backend_constraint_prefixes(model, backend)
 }
@@ -185,6 +195,17 @@ pub enum PlanFromDatabaseError<E> {
     AppliedRefactor(#[source] AppliedRefactorError),
     #[error("schema plan blocked by policy: {0}")]
     Policy(#[source] DiffPolicyError),
+    #[error("{0}")]
+    Collision(#[source] EnumRelationCollisionError),
+}
+
+impl<E> From<PlanError> for PlanFromDatabaseError<E> {
+    fn from(error: PlanError) -> Self {
+        match error {
+            PlanError::Policy(policy) => PlanFromDatabaseError::Policy(policy),
+            PlanError::Collision(collision) => PlanFromDatabaseError::Collision(collision),
+        }
+    }
 }
 
 /// The result of repairing backend refactor metadata from a package refactor log.
@@ -245,7 +266,7 @@ where
     // way and deparsed another compare equal (and so the desired model aligns with introspection).
     let actual = canonicalize_model(connection, &actual);
     let desired = canonicalize_model(connection, desired);
-    plan_models(&desired, &actual, policy).map_err(PlanFromDatabaseError::Policy)
+    Ok(plan_models(&desired, &actual, policy)?)
 }
 
 /// Introspects `connection` and builds an incremental plan using explicit refactor intent.
@@ -273,8 +294,12 @@ where
     // Canonicalize both sides for the diff (after refactor matching, which reads the raw schema).
     let actual = canonicalize_model(connection, &actual);
     let desired = canonicalize_model(connection, desired);
-    plan_models_with_refactors(&desired, &actual, &pending_refactors, policy)
-        .map_err(PlanFromDatabaseError::Policy)
+    Ok(plan_models_with_refactors(
+        &desired,
+        &actual,
+        &pending_refactors,
+        policy,
+    )?)
 }
 
 /// Returns a copy of `model` in a canonical form for diffing, so a model does not churn against a
@@ -526,9 +551,9 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
     // schema left with no tables or views — otherwise a desired model carrying an empty namespace diffs
     // as a spurious `CreateSchema` on every run. A backend with real schemas keeps them.
     if !connection.has_namespaces() {
-        model
-            .schemas
-            .retain(|schema| !schema.tables.is_empty() || !schema.views.is_empty());
+        model.schemas.retain(|schema| {
+            !schema.tables.is_empty() || !schema.views.is_empty() || !schema.enums.is_empty()
+        });
     }
     model
 }
@@ -546,6 +571,7 @@ fn coalesce_schemas_by_name(schemas: &mut Vec<SchemaModel>) {
             Some(existing) => {
                 existing.tables.extend(schema.tables);
                 existing.views.extend(schema.views);
+                existing.enums.extend(schema.enums);
             }
             None => coalesced.push(schema),
         }
@@ -853,10 +879,75 @@ where
     connection.introspect_database().await
 }
 
+/// Validates every user-defined enum reference in `model`, on both the create preflight
+/// ([`validate_capabilities`]) and the incremental render path ([`render_plan_sql`]) — the incremental
+/// path does not run `check_create`, so an offline `squealy plan` (or a library client) must be caught
+/// here too, or it emits a qualified enum-type reference the target never creates.
+///
+/// A backend without user-defined enums (MySQL, SQLite) cannot render or introspect a
+/// `CREATE TYPE ... AS ENUM` nor a column typed as one — reject the whole class. On a backend that does
+/// support them, a bare `SqlType::Enum(name)` names an enum in the column's own schema (a cross-schema
+/// or external enum is carried as a qualified `Raw`, not `Enum`), so the type must actually be declared
+/// there. Both table columns and view output columns are checked.
+fn validate_enum_references(
+    model: &DatabaseModel,
+    capabilities: SchemaCapabilities,
+) -> std::io::Result<()> {
+    for schema in &model.schemas {
+        if !capabilities.enums
+            && let Some(enum_type) = schema.enums.first()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "backend cannot render and introspect the user-defined enum type `{}`",
+                    enum_type.name
+                ),
+            ));
+        }
+        let declared_enums: BTreeSet<&str> = schema.enums.iter().map(|e| e.name.as_str()).collect();
+        let check = |relation: &str, column: &str, ty: &SqlType| -> std::io::Result<()> {
+            if let SqlType::Enum(name) = ty {
+                if !capabilities.enums {
+                    return unsupported_column(
+                        relation,
+                        column,
+                        &format!("a column of the user-defined enum type `{name}`"),
+                    );
+                }
+                if !declared_enums.contains(name.as_str()) {
+                    return unsupported_column(
+                        relation,
+                        column,
+                        &format!(
+                            "the enum type `{name}`, which is not declared in this schema \
+                             (declare it as an enum, or use a qualified `Raw` type for an \
+                             enum defined elsewhere)"
+                        ),
+                    );
+                }
+            }
+            Ok(())
+        };
+        for table in &schema.tables {
+            for column in &table.columns {
+                check(&table.name, &column.name, &column.ty)?;
+            }
+        }
+        for view in &schema.views {
+            for column in &view.columns {
+                check(&view.name, &column.name, &column.ty)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_capabilities(
     model: &DatabaseModel,
     capabilities: SchemaCapabilities,
 ) -> std::io::Result<()> {
+    validate_enum_references(model, capabilities)?;
     for schema in &model.schemas {
         for table in &schema.tables {
             for column in &table.columns {
@@ -1057,6 +1148,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "memberships".to_owned(),
                     comment: None,
@@ -1107,6 +1199,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "memberships".to_owned(),
                     comment: None,
@@ -1173,6 +1266,7 @@ mod tests {
                     }],
                     query: ViewBody::default(),
                 }],
+                enums: Vec::new(),
             }],
         };
 
@@ -1217,6 +1311,7 @@ mod tests {
                 name: None,
                 tables: vec![],
                 views: vec![view],
+                enums: Vec::new(),
             }],
         };
 
@@ -1316,6 +1411,7 @@ mod tests {
                 name: None,
                 tables: vec![events_table()],
                 views: vec![v],
+                enums: Vec::new(),
             }],
         };
         // Desired: names the alias. Introspected: the deparser expanded it.
@@ -1425,11 +1521,13 @@ mod tests {
                 SchemaModel {
                     name: Some("empty".to_owned()),
                     views: Vec::new(),
+                    enums: Vec::new(),
                     tables: Vec::new(),
                 },
                 SchemaModel {
                     name: Some("app".to_owned()),
                     views: Vec::new(),
+                    enums: Vec::new(),
                     tables: vec![TableModel {
                         name: "widgets".to_owned(),
                         comment: None,
@@ -1454,6 +1552,31 @@ mod tests {
     }
 
     #[test]
+    fn canonicalize_model_keeps_a_schema_with_only_an_enum() {
+        // A schema-less backend prunes empty schemas, but a schema carrying only an enum type is NOT
+        // empty — dropping it would hide the enum from the diff, so a cross-dialect enum model deployed
+        // to such a backend would silently no-op instead of reaching the backend's enum rejection.
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: Some("app".to_owned()),
+                tables: Vec::new(),
+                views: Vec::new(),
+                enums: vec![EnumModel {
+                    name: "mood".to_owned(),
+                    labels: vec!["sad".to_owned(), "ok".to_owned()],
+                }],
+            }],
+        };
+        let canonical = canonicalize_model(&CanonBackend, &model);
+        assert_eq!(
+            canonical.schemas.len(),
+            1,
+            "an enum-only schema must be kept"
+        );
+        assert_eq!(canonical.schemas[0].enums[0].name, "mood");
+    }
+
+    #[test]
     fn canonicalize_model_coalesces_flattened_schemas() {
         // Two source schemas both flatten to `None`; their tables must be merged into one schema, not
         // dropped (a `BTreeMap`-keyed diff would otherwise keep only one same-named schema).
@@ -1472,11 +1595,13 @@ mod tests {
                 SchemaModel {
                     name: Some("app".to_owned()),
                     views: Vec::new(),
+                    enums: Vec::new(),
                     tables: vec![table("users")],
                 },
                 SchemaModel {
                     name: Some("archive".to_owned()),
                     views: Vec::new(),
+                    enums: Vec::new(),
                     tables: vec![table("logs")],
                 },
             ],
@@ -1572,6 +1697,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "items".to_owned(),
                     comment: None,
@@ -1929,6 +2055,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -2009,6 +2136,7 @@ mod tests {
                         prefix_lengths: false,
                     },
                     indexes: IndexCapabilities::default(),
+                    enums: false,
                 },
             },
         )
@@ -2063,6 +2191,7 @@ mod tests {
                         operator_classes: true,
                         prefix_lengths: true,
                     },
+                    enums: false,
                 },
             },
         )

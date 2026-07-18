@@ -108,6 +108,7 @@ fn schema_from_dyn(schema: &(dyn DatabaseSchema + Sync)) -> SchemaModel {
         name: schema.name().map(str::to_owned),
         tables: schema.tables().map(table_from_dyn).collect(),
         views: schema.views().map(view_from_dyn).collect(),
+        enums: Vec::new(),
     }
 }
 

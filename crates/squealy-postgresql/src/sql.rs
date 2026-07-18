@@ -58,6 +58,17 @@ impl squealy::Dialect for PostgresDialect {
     }
 
     fn write_cast_type(&self, ty: &SqlType, mut writer: &mut dyn Write) -> io::Result<()> {
+        if let SqlType::Enum(name) = ty {
+            // A cast to an enum type inside an expression (a check/generated/index/view body) has no
+            // schema context here, so it would render an unqualified `AS "mood"` that fails to resolve
+            // when the enum's schema is off `search_path`. Reject rather than emit unresolvable SQL.
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "squealy does not support casting to the enum type `{name}` in an expression"
+                ),
+            ));
+        }
         write_pg_sql_type(ty, &mut writer)
     }
 
@@ -266,8 +277,8 @@ pub(crate) mod ddl {
 
     use squealy::{
         CheckModel, ColumnModel, Constraint, ConstraintEnforcement, ConstraintValidation,
-        DatabaseModel, DatabasePlan, DatabasePlanStep, DefaultValue, ForeignKeyModel, IdentityMode,
-        IndexModel, TableModel, TablePlanStep,
+        DatabaseModel, DatabasePlan, DatabasePlanStep, DefaultValue, EnumModel, ForeignKeyModel,
+        IdentityMode, IndexModel, SqlType, TableModel, TablePlanStep,
     };
 
     use super::{write_pg_sql_type, write_qualified_name, write_quoted_ident, write_quoted_text};
@@ -285,6 +296,14 @@ pub(crate) mod ddl {
                 statement(writer, &mut first)?;
                 writer.write_all(b"CREATE SCHEMA IF NOT EXISTS ")?;
                 write_quoted_ident(name, writer)?;
+            }
+        }
+
+        // Enum types are created before any table, since a table column can be of an enum type.
+        for schema in &model.schemas {
+            for enum_type in &schema.enums {
+                statement(writer, &mut first)?;
+                write_create_enum(schema.name.as_deref(), enum_type, writer)?;
             }
         }
 
@@ -479,6 +498,30 @@ pub(crate) mod ddl {
                     writer,
                 )?;
             }
+            DatabasePlanStep::CreateEnum { schema, enum_type } => {
+                statement(writer, first)?;
+                write_create_enum(schema.as_deref(), enum_type, writer)?;
+            }
+            DatabasePlanStep::DropEnum { schema, enum_type } => {
+                statement(writer, first)?;
+                writer.write_all(b"DROP TYPE ")?;
+                write_qualified_name(schema.as_deref(), &enum_type.name, writer)?;
+            }
+            DatabasePlanStep::AlterEnum { after, .. } => {
+                // Changing an enum's labels (append, remove, or reorder) is not supported yet. A correct
+                // migration needs live-schema and whole-plan awareness — dropping/restoring live column
+                // defaults, rebuilding dependent foreign keys, dropping dependent views, and ordering
+                // around table changes and PostgreSQL's `ADD VALUE`-in-transaction rule. That is tracked
+                // as its own follow-up; for now, refuse rather than emit SQL PostgreSQL would reject.
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "squealy does not yet support changing the labels of the enum type `{}`; \
+                         recreate the type manually or add labels out of band",
+                        after.name
+                    ),
+                ));
+            }
         }
         Ok(())
     }
@@ -571,7 +614,7 @@ pub(crate) mod ddl {
                 writer.write_all(b"ALTER TABLE ")?;
                 write_qualified_name(schema, table, writer)?;
                 writer.write_all(b" ADD COLUMN ")?;
-                write_model_column(column, writer)?;
+                write_model_column(schema, column, writer)?;
                 if let Some(comment) = &column.comment {
                     statement(writer, first)?;
                     write_comment_on_column(schema, table, &column.name, Some(comment), writer)?;
@@ -753,6 +796,16 @@ pub(crate) mod ddl {
         let drop_fixed_bytes_check = before_width && before.ty != after.ty;
         let add_fixed_bytes_check = after_width && before.ty != after.ty;
 
+        // PostgreSQL validates an existing column default against the *new* type independently of the
+        // `USING` clause (which only converts the stored rows), so a default the target type cannot
+        // accept — an enum/`text` conversion in either direction, a cross-schema enum carried as `Raw`,
+        // and so on — makes `ALTER COLUMN ... TYPE` fail while the old default is still attached. Rather
+        // than enumerate which conversions PostgreSQL happens to accept in place, drop the existing
+        // default before *any* type change and let the `SET DEFAULT` below restore the desired default
+        // (forced on when the default is otherwise unchanged across the conversion). Restoring always
+        // succeeds because the desired default is by definition valid for the desired type.
+        let drop_default_before_type_change = before.default.is_some() && before.ty != after.ty;
+
         let mut wrote = false;
         if drop_fixed_bytes_check {
             write_drop_constraint(
@@ -761,6 +814,14 @@ pub(crate) mod ddl {
                 &super::fixed_bytes_check_name(&after.name),
                 writer,
             )?;
+            wrote = true;
+        }
+        if drop_default_before_type_change {
+            if wrote {
+                statement(writer, first)?;
+            }
+            write_alter_column_prefix(schema, table, &after.name, writer)?;
+            writer.write_all(b" DROP DEFAULT")?;
             wrote = true;
         }
         if before.ty != after.ty || before.collation != after.collation {
@@ -773,7 +834,7 @@ pub(crate) mod ddl {
             writer.write_all(b" ALTER COLUMN ")?;
             write_quoted_ident(&after.name, writer)?;
             writer.write_all(b" TYPE ")?;
-            write_pg_sql_type(&after.ty, writer)?;
+            write_model_column_type(schema, &after.ty, writer)?;
             if let Some(collation) = &after.collation {
                 writer.write_all(b" COLLATE ")?;
                 write_quoted_ident(collation, writer)?;
@@ -814,7 +875,7 @@ pub(crate) mod ddl {
             writer.write_all(b" DROP IDENTITY IF EXISTS")?;
             wrote = true;
         }
-        if before.default.is_some() && after.default.is_none() {
+        if before.default.is_some() && after.default.is_none() && !drop_default_before_type_change {
             if wrote {
                 statement(writer, first)?;
             }
@@ -840,7 +901,7 @@ pub(crate) mod ddl {
             wrote = true;
         }
         if let Some(default) = &after.default
-            && before.default.as_ref() != Some(default)
+            && (before.default.as_ref() != Some(default) || drop_default_before_type_change)
         {
             if wrote {
                 statement(writer, first)?;
@@ -949,6 +1010,25 @@ pub(crate) mod ddl {
         Ok(())
     }
 
+    /// Renders `CREATE TYPE <name> AS ENUM ('a', 'b', ...)`. Labels are single-quoted string literals in
+    /// their declared (sort) order.
+    fn write_create_enum(
+        schema: Option<&str>,
+        enum_type: &EnumModel,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        writer.write_all(b"CREATE TYPE ")?;
+        write_qualified_name(schema, &enum_type.name, writer)?;
+        writer.write_all(b" AS ENUM (")?;
+        for (index, label) in enum_type.labels.iter().enumerate() {
+            if index > 0 {
+                writer.write_all(b", ")?;
+            }
+            write_quoted_text(label, writer)?;
+        }
+        writer.write_all(b")")
+    }
+
     fn write_create_table(
         schema: Option<&str>,
         table: &TableModel,
@@ -961,7 +1041,7 @@ pub(crate) mod ddl {
         let mut first_entry = true;
         for column in &table.columns {
             entry(writer, &mut first_entry)?;
-            write_model_column(column, writer)?;
+            write_model_column(schema, column, writer)?;
         }
         if let Some(primary_key) = &table.primary_key {
             entry(writer, &mut first_entry)?;
@@ -1022,10 +1102,29 @@ pub(crate) mod ddl {
         }
     }
 
-    fn write_model_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()> {
+    /// Writes a model column's type, qualifying a user-enum type with the table's schema. An enum type
+    /// lives in a schema and is not on the session `search_path`, so an unqualified reference (`m mood`)
+    /// fails to resolve when the table is in a non-`public` schema; render `m "app"."mood"` instead.
+    /// All other types render unqualified.
+    fn write_model_column_type(
+        schema: Option<&str>,
+        ty: &SqlType,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        match ty {
+            SqlType::Enum(name) => write_qualified_name(schema, name, writer),
+            _ => write_pg_sql_type(ty, writer),
+        }
+    }
+
+    fn write_model_column(
+        schema: Option<&str>,
+        column: &ColumnModel,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
         write_quoted_ident(&column.name, writer)?;
         writer.write_all(b" ")?;
-        write_pg_sql_type(&column.ty, writer)?;
+        write_model_column_type(schema, &column.ty, writer)?;
         if let Some(collation) = &column.collation {
             writer.write_all(b" COLLATE ")?;
             write_quoted_ident(collation, writer)?;
@@ -1405,6 +1504,9 @@ fn write_pg_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()> {
         // PostgreSQL has no fixed-length binary type; the width is enforced by a generated
         // `CHECK (octet_length(col) = N)` constraint (see the column-check lowering).
         SqlType::FixedBytes(_) => "bytea",
+        // A user-defined enum type is referenced by its (quoted) name; the `CREATE TYPE` itself is a
+        // separate schema object rendered before the tables that use it.
+        SqlType::Enum(name) => return write_quoted_ident(name, writer),
         SqlType::Raw(raw) => raw.as_str(),
     };
     writer.write_all(name.as_bytes())
@@ -1571,6 +1673,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "people".to_owned(),
                     comment: None,

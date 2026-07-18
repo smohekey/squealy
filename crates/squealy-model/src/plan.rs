@@ -3,13 +3,25 @@
 //! A plan is the ordered, policy-checked form of a [`DatabaseDiff`]. It is still backend-neutral:
 //! backend crates remain responsible for deciding whether and how individual steps can be rendered.
 
-use crate::diff::diff_table;
+use crate::diff::{
+    diff_table, reject_enum_relation_collision_in_diff, reject_enum_relation_name_collision,
+};
 use crate::{
     CastColumn, ChangeRisk, ClassifiedDatabaseDiffChange, DatabaseDiff, DatabaseDiffChange,
-    DatabaseModel, DiffPolicy, DiffPolicyError, RefactorLog, RefactorOperation, RenameColumn,
-    RenameTable, TableDiffChange, check_diff_policy, diff_models,
+    DatabaseModel, DiffPolicy, DiffPolicyError, EnumRelationCollisionError, RefactorLog,
+    RefactorOperation, RenameColumn, RenameTable, TableDiffChange, check_diff_policy, diff_models,
 };
 use squealy::{DatabasePlan, DatabasePlanStep, TablePlanStep};
+
+/// An error from planning a model diff: either a same-name relation↔enum collision the diff cannot
+/// order, or a change blocked by the deployment [`DiffPolicy`].
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+pub enum PlanError {
+    #[error(transparent)]
+    Collision(#[from] EnumRelationCollisionError),
+    #[error(transparent)]
+    Policy(#[from] DiffPolicyError),
+}
 
 /// A plan step with conservative deployment-risk classification.
 #[derive(Clone, Debug, PartialEq)]
@@ -38,9 +50,19 @@ pub fn plan_step_risk(step: &DatabasePlanStep) -> ChangeRisk {
         DatabasePlanStep::RenameTable { .. } => ChangeRisk::Safe,
         // Create-or-replace of a view loses no data and re-runs cleanly.
         DatabasePlanStep::CreateView { .. } => ChangeRisk::Safe,
+        DatabasePlanStep::CreateEnum { .. } => ChangeRisk::Safe,
+        // Appending enum labels is safe; recreating the type (remove/reorder) rewrites its columns.
+        DatabasePlanStep::AlterEnum { additive, .. } => {
+            if *additive {
+                ChangeRisk::Safe
+            } else {
+                ChangeRisk::Destructive
+            }
+        }
         DatabasePlanStep::DropSchema { .. }
         | DatabasePlanStep::DropTable { .. }
-        | DatabasePlanStep::DropView { .. } => ChangeRisk::Destructive,
+        | DatabasePlanStep::DropView { .. }
+        | DatabasePlanStep::DropEnum { .. } => ChangeRisk::Destructive,
         DatabasePlanStep::AlterTable { change, .. } => table_plan_step_risk(change),
     }
 }
@@ -78,7 +100,12 @@ pub fn table_plan_step_risk(step: &TablePlanStep) -> ChangeRisk {
 }
 
 /// Builds a policy-checked plan from a precomputed diff.
-pub fn plan_diff(diff: &DatabaseDiff, policy: DiffPolicy) -> Result<DatabasePlan, DiffPolicyError> {
+///
+/// Besides policy checking, this rejects a diff that touches one `(schema, name)` as both a relation
+/// and an enum — the un-orderable relation↔enum swap — so a caller that assembles a diff directly
+/// cannot smuggle in a plan PostgreSQL would refuse.
+pub fn plan_diff(diff: &DatabaseDiff, policy: DiffPolicy) -> Result<DatabasePlan, PlanError> {
+    reject_enum_relation_collision_in_diff(diff)?;
     check_diff_policy(diff, policy)?;
     Ok(DatabasePlan {
         steps: flatten_diff(diff),
@@ -90,7 +117,8 @@ pub fn plan_models(
     desired: &DatabaseModel,
     actual: &DatabaseModel,
     policy: DiffPolicy,
-) -> Result<DatabasePlan, DiffPolicyError> {
+) -> Result<DatabasePlan, PlanError> {
+    reject_enum_relation_name_collision(desired, actual)?;
     plan_diff(&diff_models(desired, actual), policy)
 }
 
@@ -104,7 +132,8 @@ pub fn plan_models_with_refactors(
     actual: &DatabaseModel,
     refactors: &RefactorLog,
     policy: DiffPolicy,
-) -> Result<DatabasePlan, DiffPolicyError> {
+) -> Result<DatabasePlan, PlanError> {
+    reject_enum_relation_name_collision(desired, actual)?;
     let mut steps = flatten_diff(&diff_models(desired, actual));
     apply_refactors(&mut steps, refactors);
     check_plan_policy(&steps, policy)?;
@@ -175,6 +204,25 @@ fn plan_step_as_diff_change(step: &DatabasePlanStep) -> DatabaseDiffChange {
         DatabasePlanStep::DropView { schema, view } => DatabaseDiffChange::DropView {
             schema: schema.clone(),
             view: view.as_ref().clone(),
+        },
+        DatabasePlanStep::CreateEnum { schema, enum_type } => DatabaseDiffChange::CreateEnum {
+            schema: schema.clone(),
+            enum_type: enum_type.clone(),
+        },
+        DatabasePlanStep::DropEnum { schema, enum_type } => DatabaseDiffChange::DropEnum {
+            schema: schema.clone(),
+            enum_type: enum_type.clone(),
+        },
+        DatabasePlanStep::AlterEnum {
+            schema,
+            before,
+            after,
+            additive,
+        } => DatabaseDiffChange::AlterEnum {
+            schema: schema.clone(),
+            before: before.clone(),
+            after: after.clone(),
+            additive: *additive,
         },
     }
 }
@@ -301,6 +349,31 @@ fn flatten_diff(diff: &DatabaseDiff) -> Vec<DatabasePlanStep> {
                 steps.push(DatabasePlanStep::DropView {
                     schema: schema.clone(),
                     view: Box::new(view.clone()),
+                });
+            }
+            DatabaseDiffChange::CreateEnum { schema, enum_type } => {
+                steps.push(DatabasePlanStep::CreateEnum {
+                    schema: schema.clone(),
+                    enum_type: enum_type.clone(),
+                });
+            }
+            DatabaseDiffChange::DropEnum { schema, enum_type } => {
+                steps.push(DatabasePlanStep::DropEnum {
+                    schema: schema.clone(),
+                    enum_type: enum_type.clone(),
+                });
+            }
+            DatabaseDiffChange::AlterEnum {
+                schema,
+                before,
+                after,
+                additive,
+            } => {
+                steps.push(DatabasePlanStep::AlterEnum {
+                    schema: schema.clone(),
+                    before: before.clone(),
+                    after: after.clone(),
+                    additive: *additive,
                 });
             }
         }

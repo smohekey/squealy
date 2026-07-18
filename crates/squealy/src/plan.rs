@@ -1,6 +1,6 @@
 use crate::{
-    CheckModel, ColumnModel, Constraint, ForeignKeyModel, IndexModel, SqlType, TableModel,
-    ViewModel,
+    CheckModel, ColumnModel, Constraint, EnumModel, ForeignKeyModel, IndexModel, SqlType,
+    TableModel, ViewModel,
 };
 
 /// An ordered backend-neutral schema deployment plan.
@@ -54,6 +54,25 @@ pub enum DatabasePlanStep {
     DropView {
         schema: Option<String>,
         view: Box<ViewModel>,
+    },
+    /// Create an enum type (`CREATE TYPE ... AS ENUM`). Ordered before any table that uses it.
+    CreateEnum {
+        schema: Option<String>,
+        enum_type: EnumModel,
+    },
+    /// Drop an enum type. Ordered after any table that used it is gone.
+    DropEnum {
+        schema: Option<String>,
+        enum_type: EnumModel,
+    },
+    /// Change an enum's labels. `additive` (the actual labels are a prefix of the desired) is an in-place
+    /// `ALTER TYPE ... ADD VALUE`; otherwise the type is recreated and every column of the type rewritten
+    /// (the renderer finds those columns in the desired model it is given).
+    AlterEnum {
+        schema: Option<String>,
+        before: EnumModel,
+        after: EnumModel,
+        additive: bool,
     },
 }
 

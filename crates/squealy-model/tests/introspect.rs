@@ -24,6 +24,7 @@ async fn introspect_delegates_to_connection() {
         schemas: vec![SchemaModel {
             name: Some("app".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: Vec::new(),
         }],
     };

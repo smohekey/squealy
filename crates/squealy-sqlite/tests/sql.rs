@@ -1,7 +1,8 @@
 //! SQLite create-from-scratch DDL rendering tests.
 
 use squealy::{
-    ColumnExpr, ColumnMode, ColumnName, Database, DatabaseModel, Schema, SchemaBackend, Table,
+    ColumnExpr, ColumnMode, ColumnModel, ColumnName, Database, DatabaseModel, Schema,
+    SchemaBackend, SchemaModel, SqlType, Table, TableModel,
 };
 use squealy_sqlite::Sqlite;
 
@@ -209,11 +210,48 @@ fn rejects_non_integer_autoincrement_column() {
                 indexes: Vec::new(),
             }],
             views: Vec::new(),
+            enums: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
     let error = Sqlite.render_create(&model, &mut sql).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
+fn sqlite_rejects_a_user_enum_type() {
+    // SQLite has no user-defined enum type; a column of one is rejected at render rather than silently
+    // rendered as a bare `TEXT` affinity.
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![TableModel {
+                name: "readings".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "m".to_owned(),
+                    comment: None,
+                    ty: SqlType::Enum("mood".to_owned()),
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                    on_update: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+            views: Vec::new(),
+            enums: Vec::new(),
+        }],
+    };
+    let error = Sqlite.render_create(&model, &mut Vec::new()).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(error.to_string().contains("mood"), "{error}");
 }
 
 #[test]
@@ -245,6 +283,7 @@ fn fixed_bytes_column_enforces_width_with_a_check() {
                 indexes: Vec::new(),
             }],
             views: Vec::new(),
+            enums: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -274,6 +313,7 @@ fn rejects_table_name_collision_across_schemas() {
         name: Some(name.to_owned()),
         tables: vec![users()],
         views: Vec::new(),
+        enums: Vec::new(),
     };
     let model = DatabaseModel {
         schemas: vec![schema("public"), schema("archive")],
@@ -303,6 +343,7 @@ fn rejects_case_insensitive_table_name_collision() {
             name: None,
             tables: vec![table("Users"), table("users")],
             views: Vec::new(),
+            enums: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -355,6 +396,7 @@ fn rejects_index_name_collision_across_tables() {
             name: None,
             tables: vec![table("a"), table("b")],
             views: Vec::new(),
+            enums: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -399,6 +441,7 @@ fn renders_table_check_constraint() {
                 indexes: Vec::new(),
             }],
             views: Vec::new(),
+            enums: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -442,6 +485,7 @@ fn rejects_check_constraint_validation_or_enforcement_metadata() {
                 indexes: Vec::new(),
             }],
             views: Vec::new(),
+            enums: Vec::new(),
         }],
     };
     let base = || CheckModel {
@@ -496,6 +540,7 @@ fn renders_column_collation() {
                 indexes: Vec::new(),
             }],
             views: Vec::new(),
+            enums: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -527,6 +572,7 @@ fn rejects_reserved_object_name_prefix() {
                 indexes: Vec::new(),
             }],
             views: Vec::new(),
+            enums: Vec::new(),
         }],
     };
     for reserved in ["__squealy_refactors", "sqlite_stat1"] {
@@ -586,6 +632,7 @@ fn rejects_index_column_prefix_lengths() {
                 }],
             }],
             views: Vec::new(),
+            enums: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -626,6 +673,7 @@ fn rejects_on_update_current_timestamp() {
                 indexes: Vec::new(),
             }],
             views: Vec::new(),
+            enums: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -672,6 +720,7 @@ fn rejects_on_update_on_an_autoincrement_primary_key_column() {
                 indexes: Vec::new(),
             }],
             views: Vec::new(),
+            enums: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -770,6 +819,7 @@ fn render_create_renders_views_unqualified_in_dependency_order() {
                 id_view("active_user_ids", "active_users", None),
                 id_view("active_users", "users", Some(id_gt_zero())),
             ],
+            enums: Vec::new(),
         }],
     };
 
@@ -873,6 +923,7 @@ fn render_create_renders_view_expression_ir_in_sqlite_dialect() {
                     offset: None,
                 })),
             }],
+            enums: Vec::new(),
         }],
     };
 
@@ -946,6 +997,7 @@ fn rejects_intersect_all_view_body_which_sqlite_cannot_run() {
                     offset: None,
                 },
             }],
+            enums: Vec::new(),
         }],
     };
 
@@ -1008,6 +1060,7 @@ fn rejects_set_body_with_an_alias_qualified_order_by_term() {
                     offset: None,
                 },
             }],
+            enums: Vec::new(),
         }],
     };
 
@@ -1070,6 +1123,7 @@ fn rejects_set_body_order_by_a_name_the_left_arm_does_not_emit() {
                         offset: None,
                     },
                 }],
+                enums: Vec::new(),
             }],
         }
     };
@@ -1181,6 +1235,7 @@ fn render_create_rejects_view_name_colliding_with_table() {
             tables: vec![id_table("users")],
             // A view sharing the `users` table's name.
             views: vec![id_view("users", "users", None)],
+            enums: Vec::new(),
         }],
     };
 

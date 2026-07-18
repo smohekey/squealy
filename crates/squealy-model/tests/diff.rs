@@ -1,9 +1,9 @@
 use squealy_model::{
     ChangeRisk, CheckModel, ColumnModel, Constraint, DatabaseDiffChange, DatabaseModel,
-    DefaultValue, DiffPolicy, ExprNode, ForeignKeyAction, ForeignKeyModel, IndexModel,
+    DefaultValue, DiffPolicy, EnumModel, ExprNode, ForeignKeyAction, ForeignKeyModel, IndexModel,
     IndexPrefixLength, ProjectionItem, SchemaModel, SourceItem, SourceRef, SqlType,
     TableDiffChange, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
-    check_diff_policy, diff_models,
+    check_diff_policy, diff_models, reject_enum_relation_name_collision,
 };
 
 #[test]
@@ -361,11 +361,57 @@ fn constraint_prefix_length_order_does_not_diff() {
     );
 }
 
+fn enum_only(schema: &str, name: &str) -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some(schema.to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: name.to_owned(),
+                labels: vec!["open".to_owned()],
+            }],
+        }],
+    }
+}
+
+#[test]
+fn replacing_a_table_with_a_same_named_enum_is_rejected() {
+    // PostgreSQL creates a composite type per table, so an enum named `status` collides with a table
+    // `status`. Correctly ordering that swap plus its arbitrary dependents is deferred, so the plan
+    // path rejects the collision up front rather than emitting an un-applyable diff.
+    let actual = model_with_tables("app", vec![table("status")]);
+    let desired = enum_only("app", "status");
+    let error = reject_enum_relation_name_collision(&desired, &actual)
+        .expect_err("a table replaced by a same-named enum must be rejected");
+    assert_eq!(error.schema.as_deref(), Some("app"));
+    assert_eq!(error.name, "status");
+}
+
+#[test]
+fn replacing_an_enum_with_a_same_named_relation_is_rejected() {
+    // The collision is symmetric: an enum on the actual side and a relation on the desired side is
+    // rejected the same way as the reverse.
+    let actual = enum_only("app", "status");
+    let desired = model_with_tables("app", vec![table("status")]);
+    let error = reject_enum_relation_name_collision(&desired, &actual)
+        .expect_err("an enum replaced by a same-named relation must be rejected");
+    assert_eq!(error.name, "status");
+}
+
+#[test]
+fn a_relation_and_an_enum_with_distinct_names_are_accepted() {
+    let actual = model_with_tables("app", vec![table("status")]);
+    let desired = enum_only("app", "mood");
+    assert!(reject_enum_relation_name_collision(&desired, &actual).is_ok());
+}
+
 fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some(schema.to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables,
         }],
     }
@@ -460,6 +506,7 @@ fn schema_with(name: &str, tables: Vec<TableModel>, views: Vec<ViewModel>) -> Da
             name: Some(name.to_owned()),
             tables,
             views,
+            enums: Vec::new(),
         }],
     }
 }

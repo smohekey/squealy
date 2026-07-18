@@ -442,9 +442,9 @@ fn postgres_renders_changed_columns_in_schema_plan() {
 
     assert_eq!(
         sql,
-        "ALTER TABLE \"public\".\"events\" ALTER COLUMN \"description\" TYPE varchar(128) COLLATE \"C\";\n\
+        "ALTER TABLE \"public\".\"events\" ALTER COLUMN \"description\" DROP DEFAULT;\n\
+ALTER TABLE \"public\".\"events\" ALTER COLUMN \"description\" TYPE varchar(128) COLLATE \"C\";\n\
 ALTER TABLE \"public\".\"events\" ALTER COLUMN \"description\" SET NOT NULL;\n\
-ALTER TABLE \"public\".\"events\" ALTER COLUMN \"description\" DROP DEFAULT;\n\
 COMMENT ON COLUMN \"public\".\"events\".\"description\" IS NULL;\n\
 ALTER TABLE \"public\".\"events\" ALTER COLUMN \"status\" DROP NOT NULL;\n\
 ALTER TABLE \"public\".\"events\" ALTER COLUMN \"status\" SET DEFAULT 'new';\n\
@@ -1674,6 +1674,132 @@ ALTER TABLE \"catalog\".\"memberships\" ADD CONSTRAINT \"fk_memberships_tenant_i
     );
 }
 
+/// A one-table model with an enum type and a column of that type. Used by the enum render tests.
+fn enum_model() -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![TableModel {
+                name: "readings".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "m".to_owned(),
+                    comment: None,
+                    ty: SqlType::Enum("mood".to_owned()),
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                    on_update: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "mood".to_owned(),
+                labels: vec!["sad".to_owned(), "ok".to_owned(), "happy".to_owned()],
+            }],
+        }],
+    }
+}
+
+#[test]
+fn postgres_rejects_an_enum_label_change() {
+    // Enum-label migration is not supported yet, so an `AlterEnum` step is refused at render rather than
+    // emitting SQL PostgreSQL would reject (git-bug acb1c6d Phase 3 — enum migration is a follow-up).
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterEnum {
+            schema: Some("app".to_owned()),
+            before: EnumModel {
+                name: "mood".to_owned(),
+                labels: vec!["sad".to_owned(), "ok".to_owned()],
+            },
+            after: EnumModel {
+                name: "mood".to_owned(),
+                labels: vec!["sad".to_owned(), "ok".to_owned(), "happy".to_owned()],
+            },
+            additive: true,
+        }],
+    };
+    let error = Postgres
+        .render_plan(&plan, &DatabaseModel::default(), &mut Vec::new())
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(error.to_string().contains("mood"), "{error}");
+}
+
+#[test]
+fn postgres_renders_enum_type_before_the_table_that_uses_it() {
+    let mut sql = Vec::new();
+    Postgres.render_create(&enum_model(), &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // The CREATE TYPE precedes the CREATE TABLE, and the column references the enum by quoted name.
+    assert_eq!(
+        sql,
+        "CREATE SCHEMA IF NOT EXISTS \"app\";\n\
+CREATE TYPE \"app\".\"mood\" AS ENUM ('sad', 'ok', 'happy');\n\
+CREATE TABLE \"app\".\"readings\" (\n  \"m\" \"app\".\"mood\" NOT NULL\n);"
+    );
+}
+
+#[test]
+fn postgres_drops_and_restores_a_preserved_default_across_an_enum_type_change() {
+    // A column changing from `text DEFAULT 'sad'` to the `mood` enum keeps the same default. PostgreSQL
+    // rejects `ALTER COLUMN ... TYPE mood` while the old text default is still attached (it cannot cast
+    // the default expression), so the renderer must DROP the default before the type change and restore
+    // it afterward even though the default value itself is unchanged.
+    let before = ColumnModel {
+        name: "m".to_owned(),
+        comment: None,
+        ty: SqlType::Text,
+        collation: None,
+        nullable: false,
+        default: Some(DefaultValue::Text("sad".to_owned())),
+        identity: None,
+        generated: None,
+        on_update: None,
+    };
+    let after = ColumnModel {
+        ty: SqlType::Enum("mood".to_owned()),
+        ..before.clone()
+    };
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterTable {
+            schema: Some("app".to_owned()),
+            table: "readings".to_owned(),
+            change: Box::new(TablePlanStep::AlterColumn {
+                before,
+                after,
+                type_cast: Some("\"m\"::text::\"app\".\"mood\"".to_owned()),
+            }),
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres
+        .render_plan(&plan, &DatabaseModel::default(), &mut sql)
+        .unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    let drop_default = sql.find("DROP DEFAULT").expect("a DROP DEFAULT");
+    let type_change = sql
+        .find("TYPE \"app\".\"mood\"")
+        .expect("the enum TYPE change");
+    let set_default = sql
+        .find("SET DEFAULT 'sad'")
+        .expect("a restored SET DEFAULT");
+    assert!(
+        drop_default < type_change && type_change < set_default,
+        "default must be dropped before, and restored after, the enum type change: {sql}"
+    );
+}
+
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(Catalog)]
 #[primary_key(columns = [tenant_id, id])]
@@ -2066,6 +2192,7 @@ fn postgres_renders_table_and_column_comments() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: Some("Tenant records".to_owned()),
@@ -2108,6 +2235,7 @@ fn postgres_renders_foreign_key_match_type() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![
                 TableModel {
                     name: "memberships".to_owned(),
@@ -2187,6 +2315,7 @@ fn postgres_renders_partial_indexes() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -2247,6 +2376,7 @@ fn postgres_renders_expression_indexes() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2309,6 +2439,7 @@ fn postgres_renders_raw_expression_index_verbatim() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2363,6 +2494,7 @@ fn postgres_renders_covering_indexes() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -2430,6 +2562,7 @@ fn postgres_renders_index_null_ordering() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -2484,6 +2617,7 @@ fn postgres_renders_index_operator_classes() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2541,6 +2675,7 @@ fn postgres_renders_index_collations() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2808,6 +2943,7 @@ fn postgres_renders_views_in_dependency_order() {
                     }),
                 ),
             ],
+            enums: Vec::new(),
         }],
     };
 
@@ -3204,6 +3340,7 @@ fn postgres_renders_view_expression_ir_in_its_dialect() {
                     offset: None,
                 })),
             }],
+            enums: Vec::new(),
         }],
     };
 
@@ -3364,6 +3501,7 @@ fn postgres_view_order_by_keeps_nulls_modifier() {
                     offset: None,
                 })),
             }],
+            enums: Vec::new(),
         }],
     };
 
@@ -3395,6 +3533,7 @@ fn postgres_render_rejects_empty_view_body() {
                 }],
                 query: ViewBody::default(),
             }],
+            enums: Vec::new(),
         }],
     };
 
@@ -3921,6 +4060,7 @@ fn postgres_rejects_index_column_prefix_lengths() {
         schemas: vec![SchemaModel {
             name: Some("public".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -3973,6 +4113,7 @@ fn postgres_rejects_on_update_current_timestamp() {
         schemas: vec![SchemaModel {
             name: Some("public".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,

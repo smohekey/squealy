@@ -117,6 +117,7 @@ fn postgres_capabilities_are_printed() {
     assert_capability(&stdout, "indexes.collations=true");
     assert_capability(&stdout, "indexes.operator_classes=true");
     assert_capability(&stdout, "indexes.prefix_lengths=false");
+    assert_capability(&stdout, "enums=true");
 }
 
 #[test]
@@ -147,6 +148,7 @@ fn mysql_capabilities_are_printed() {
     assert_capability(&stdout, "indexes.collations=false");
     assert_capability(&stdout, "indexes.operator_classes=false");
     assert_capability(&stdout, "indexes.prefix_lengths=true");
+    assert_capability(&stdout, "enums=false");
 }
 
 #[test]
@@ -2213,6 +2215,7 @@ fn empty_model() -> DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("public".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,
@@ -2232,6 +2235,7 @@ fn live_introspection_model() -> DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some("cli_live_introspect".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,

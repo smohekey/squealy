@@ -19,6 +19,19 @@ use squealy::{
 pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> io::Result<()> {
     let mut first = true;
 
+    // MySQL has no standalone `CREATE TYPE`. A model declaring an enum type is rejected up front (even an
+    // unused one), so a direct `render_create` call cannot silently omit it. An enum *column* is also
+    // rejected when rendered, but this guard covers a schema that declares only the type.
+    if let Some(enum_type) = model.schemas.iter().flat_map(|schema| &schema.enums).next() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "MySQL does not support the user-defined enum type `{}`",
+                enum_type.name
+            ),
+        ));
+    }
+
     for schema in &model.schemas {
         if let Some(name) = schema.name.as_deref() {
             statement(writer, &mut first)?;
@@ -163,6 +176,27 @@ fn write_plan_step(
         DatabasePlanStep::DropView { schema, view } => {
             statement(writer, first)?;
             squealy::render_drop_view(schema.as_deref(), &view.name, &MysqlDialect, writer)?;
+        }
+        // MySQL has no standalone `CREATE TYPE` object. The create path rejects an enum model via
+        // capabilities; the incremental plan path skips that check, so reject here too.
+        DatabasePlanStep::CreateEnum { enum_type, .. }
+        | DatabasePlanStep::DropEnum { enum_type, .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "MySQL does not support the user-defined enum type `{}`",
+                    enum_type.name
+                ),
+            ));
+        }
+        DatabasePlanStep::AlterEnum { after, .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "MySQL does not support the user-defined enum type `{}`",
+                    after.name
+                ),
+            ));
         }
     }
     Ok(())
@@ -543,6 +577,14 @@ fn is_blank_raw(expr: &squealy::ExprNode) -> bool {
 /// no native `uuid` (rendered `CHAR(36)`) and only `JSON` (so `Jsonb` also renders `JSON`).
 fn write_mysql_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()> {
     let name = match ty {
+        // MySQL has native inline `ENUM(...)` on a column, but no standalone `CREATE TYPE` object, so a
+        // model built around a named enum type cannot round-trip here. Reject rather than mis-render.
+        SqlType::Enum(name) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("MySQL does not support the user-defined enum type `{name}`"),
+            ));
+        }
         SqlType::Bool => "TINYINT(1)",
         SqlType::I8 => "TINYINT",
         SqlType::I16 => "SMALLINT",
@@ -1021,6 +1063,15 @@ impl squealy::Dialect for MysqlDialect {
     }
 
     fn write_cast_type(&self, ty: &SqlType, writer: &mut dyn Write) -> io::Result<()> {
+        // A user-defined enum is a PostgreSQL-only type; MySQL has no equivalent CAST target, and the
+        // `_ => "CHAR"` fall-through below would silently rewrite the cast's semantics. Reject it (the
+        // enum column class is already refused up front — this catches an enum buried in an expression).
+        if let SqlType::Enum(name) = ty {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("MySQL cannot render a CAST to the user-defined enum type `{name}`"),
+            ));
+        }
         // `CAST(expr AS <type>)` accepts a restricted vocabulary in MySQL, distinct from column types
         // (e.g. `SIGNED`/`UNSIGNED`/`CHAR`, not `INT`/`VARCHAR`).
         let name = match ty {
@@ -1394,6 +1445,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mysql_rejects_a_cast_to_an_enum_type() {
+        // An enum column is refused up front, but an enum buried in a cast expression reaches the cast
+        // renderer, where the `_ => "CHAR"` fall-through would silently rewrite its semantics.
+        let enum_ty = SqlType::Enum("mood".to_owned());
+        let result = MysqlDialect.write_cast_type(&enum_ty, &mut Vec::new());
+        let error = result.expect_err("MySQL must reject a CAST to an enum type");
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("mood"), "{error}");
+
+        // The general (authored) cast path delegates to the same rejection.
+        let result = MysqlDialect.write_general_cast_type(&enum_ty, &mut Vec::new());
+        assert!(
+            result.is_err(),
+            "general cast to an enum must also be rejected"
+        );
+    }
+
     fn limit_offset(limit: Option<usize>, offset: Option<usize>) -> String {
         let mut out = Vec::new();
         MysqlDialect
@@ -1438,6 +1507,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "people".to_owned(),
                     comment: None,
