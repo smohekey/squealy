@@ -633,3 +633,61 @@ async fn reordering_enum_labels_recreates_the_type_then_replans_empty() {
         .await
         .expect("clean up enum fixture");
 }
+
+/// `enum_fixture` with a `DEFAULT` on the enum column, so the recreate must drop and restore it.
+fn enum_fixture_with_default(labels: &[&str], default: &str) -> DatabaseModel {
+    let mut model = enum_fixture(labels);
+    model.schemas[0].tables[0].columns[1].default = Some(DefaultValue::Text(default.to_owned()));
+    model
+}
+
+#[tokio::test]
+#[ignore]
+async fn recreating_an_enum_with_a_default_column_drops_and_restores_the_default() {
+    // A column default cannot auto-cast to the recreated type, so the recreate drops it before the type
+    // change and restores the desired default after. The migration must apply and then re-plan empty.
+    let _guard = db_lock().lock().await;
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_enums CASCADE")
+        .await
+        .expect("reset enum fixture");
+
+    let base = enum_fixture_with_default(&["sad", "ok", "happy"], "ok");
+    squealy_model::publish(&base, &Postgres, &mut connection)
+        .await
+        .expect("publish enum with a defaulted column");
+
+    let reordered = enum_fixture_with_default(&["happy", "ok", "sad"], "ok");
+    let plan = squealy_model::plan_from_database(
+        &reordered,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("plan the reorder");
+    squealy_model::apply_plan(&plan, &reordered, &Postgres, &mut connection)
+        .await
+        .expect("apply the recreate with a default (drop + restore)");
+
+    let replan = squealy_model::plan_from_database(
+        &reordered,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan after the recreate");
+    assert!(
+        replan.steps.is_empty(),
+        "a recreated enum with a restored default must re-plan empty, got: {:?}",
+        replan.steps
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_enums CASCADE")
+        .await
+        .expect("clean up enum fixture");
+}

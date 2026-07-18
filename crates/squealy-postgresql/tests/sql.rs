@@ -1709,6 +1709,39 @@ fn enum_model() -> DatabaseModel {
 }
 
 #[test]
+fn postgres_rejects_a_destructive_enum_recreate_combined_with_a_table_change() {
+    // A non-additive enum change whose column's table is also created in the same plan is refused: the
+    // recreate would rewrite a column of a table that does not exist yet (git-bug acb1c6d Phase 3 — the
+    // combinatorial recreate cases are rejected rather than mis-ordered).
+    let desired = enum_model();
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::AlterEnum {
+                schema: Some("app".to_owned()),
+                before: EnumModel {
+                    name: "mood".to_owned(),
+                    labels: vec!["sad".to_owned(), "ok".to_owned(), "happy".to_owned()],
+                },
+                after: EnumModel {
+                    name: "mood".to_owned(),
+                    labels: vec!["happy".to_owned(), "ok".to_owned(), "sad".to_owned()],
+                },
+                additive: false,
+            },
+            DatabasePlanStep::CreateTable {
+                schema: Some("app".to_owned()),
+                table: Box::new(desired.schemas[0].tables[0].clone()),
+            },
+        ],
+    };
+    let error = Postgres
+        .render_plan(&plan, &desired, &mut Vec::new())
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(error.to_string().contains("mood"), "{error}");
+}
+
+#[test]
 fn postgres_renders_enum_type_before_the_table_that_uses_it() {
     let mut sql = Vec::new();
     Postgres.render_create(&enum_model(), &mut sql).unwrap();

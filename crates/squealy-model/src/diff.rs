@@ -312,8 +312,23 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
 
     // Enum types bracket the table work the *opposite* way to views: a `CREATE TYPE` (and any label
     // change) must precede the tables whose columns reference it, and a `DROP TYPE` must follow the
-    // tables that referenced it. So enum creates/alters lead the whole diff and enum drops trail it.
+    // tables that referenced it. But a new enum still needs its schema to exist, and a dropped schema
+    // must outlive its enum — so `CREATE SCHEMA` is hoisted *before* enum creates and `DROP SCHEMA`
+    // *after* enum drops. Overall order: create schemas → create/alter enums → drop views → per-schema
+    // table work → create views → drop enums → drop schemas.
     let (enum_creates, enum_drops) = diff_enums_global(desired, actual);
+
+    for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
+        if let (Some(desired_schema), None) = (
+            desired_schemas.get(&schema_key),
+            actual_schemas.get(&schema_key),
+        ) {
+            changes.push(DatabaseDiffChange::CreateSchema {
+                schema: desired_schema.name.clone(),
+            });
+        }
+    }
+
     changes.extend(enum_creates);
     changes.extend(view_drops);
 
@@ -323,9 +338,7 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
             actual_schemas.get(&schema_key),
         ) {
             (Some(desired_schema), None) => {
-                changes.push(DatabaseDiffChange::CreateSchema {
-                    schema: desired_schema.name.clone(),
-                });
+                // The schema was created in the hoisted phase above; create its tables here.
                 for table in &desired_schema.tables {
                     changes.push(DatabaseDiffChange::CreateTable {
                         schema: desired_schema.name.clone(),
@@ -335,16 +348,14 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
                 // This schema's views are created in the global create phase, after every table exists.
             }
             (None, Some(actual_schema)) => {
-                // This schema's views are dropped in the global drop phase, before any table.
+                // This schema's views are dropped in the global drop phase, before any table; its enums
+                // and the schema itself are dropped in the trailing phases below.
                 for table in &actual_schema.tables {
                     changes.push(DatabaseDiffChange::DropTable {
                         schema: actual_schema.name.clone(),
                         table: table.clone(),
                     });
                 }
-                changes.push(DatabaseDiffChange::DropSchema {
-                    schema: actual_schema.name.clone(),
-                });
             }
             (Some(desired_schema), Some(actual_schema)) => {
                 diff_schema_tables(desired_schema, actual_schema, &mut changes);
@@ -355,6 +366,18 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
 
     changes.extend(view_creates);
     changes.extend(enum_drops);
+
+    for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
+        if let (None, Some(actual_schema)) = (
+            desired_schemas.get(&schema_key),
+            actual_schemas.get(&schema_key),
+        ) {
+            changes.push(DatabaseDiffChange::DropSchema {
+                schema: actual_schema.name.clone(),
+            });
+        }
+    }
+
     DatabaseDiff { changes }
 }
 

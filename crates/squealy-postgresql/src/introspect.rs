@@ -54,45 +54,22 @@ pub(crate) async fn database(client: &Client) -> Result<DatabaseModel, PostgresE
         schema_entry(&mut schemas, &schema).enums.push(enum_type);
     }
 
-    // A column of an enum type introspects as `SqlType::Raw("<typename>")` (the `format_type` string has
-    // no catalog awareness); rebind it to `SqlType::Enum(<bare name>)` when a same-schema enum of that
-    // name was introspected, so it compares equal to a desired enum column. `format_type` qualifies the
-    // type name (`publish_enums.mood`) whenever the enum's schema is off the session `search_path`, so
-    // match both the bare `mood` and the `<schema>.mood` spellings.
-    for schema in &mut schemas {
-        let enum_names: Vec<String> = schema.enums.iter().map(|e| e.name.clone()).collect();
-        let schema_name = schema.name.clone();
-        for table in &mut schema.tables {
-            for column in &mut table.columns {
-                if let SqlType::Raw(raw) = &column.ty {
-                    let bare = raw.rsplit_once('.').map_or(raw.as_str(), |(_, name)| name);
-                    if let Some(name) = enum_names.iter().find(|name| {
-                        raw == *name
-                            || schema_name
-                                .as_deref()
-                                .is_some_and(|s| *raw == format!("{s}.{name}"))
-                            || bare == *name
-                    }) {
-                        column.ty = SqlType::Enum(name.clone());
-                    }
-                }
-            }
-        }
-    }
-
     Ok(DatabaseModel { schemas })
 }
 
 /// Introspects every user-defined enum type (`CREATE TYPE ... AS ENUM`), paired with its schema. Labels
 /// are ordered by `enumsortorder`, the order PostgreSQL renders and compares them in.
 async fn introspect_enums(client: &Client) -> Result<Vec<(String, EnumModel)>, PostgresError> {
+    // LEFT JOIN so a label-less enum (`CREATE TYPE t AS ENUM ()`, which PostgreSQL permits) still returns
+    // one row (with a NULL label) and is not silently omitted — otherwise it would churn a `CreateEnum`
+    // every plan and fail because the type already exists.
     let rows = client
         .query(
             "\
 SELECT n.nspname, t.typname, e.enumlabel
 FROM pg_type t
 JOIN pg_namespace n ON n.oid = t.typnamespace
-JOIN pg_enum e ON e.enumtypid = t.oid
+LEFT JOIN pg_enum e ON e.enumtypid = t.oid
 WHERE t.typtype = 'e'
   AND n.nspname NOT IN ('pg_catalog', 'information_schema', '__squealy')
   AND n.nspname NOT LIKE 'pg_toast%'
@@ -101,21 +78,24 @@ ORDER BY n.nspname, t.typname, e.enumsortorder",
         )
         .await?;
 
-    // Rows arrive grouped by (schema, typname) in label order; fold consecutive rows into one enum.
+    // Rows arrive grouped by (schema, typname) in label order; fold consecutive rows into one enum. A
+    // label-less enum contributes a single row with a NULL label — start it with an empty label list.
     let mut enums: Vec<(String, EnumModel)> = Vec::new();
     for row in rows {
         let schema: String = row.get(0);
         let name: String = row.get(1);
-        let label: String = row.get(2);
+        let label: Option<String> = row.get(2);
         match enums.last_mut() {
             Some((last_schema, last_enum)) if *last_schema == schema && last_enum.name == name => {
-                last_enum.labels.push(label);
+                if let Some(label) = label {
+                    last_enum.labels.push(label);
+                }
             }
             _ => enums.push((
                 schema,
                 EnumModel {
                     name,
-                    labels: vec![label],
+                    labels: label.into_iter().collect(),
                 },
             )),
         }
@@ -284,10 +264,11 @@ async fn view_columns(
     let rows = client
         .query(
             "\
-SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull
+SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, typ.typtype::text, typ.typname
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_attribute a ON a.attrelid = c.oid
+JOIN pg_type typ ON typ.oid = a.atttypid
 WHERE n.nspname = $1
   AND c.relname = $2
   AND c.relkind = 'v'
@@ -302,9 +283,16 @@ ORDER BY a.attnum",
         .into_iter()
         .map(|row| {
             let db_type: String = row.get(1);
+            let typtype: String = row.get(3);
+            // Resolve an enum view-output column by catalog identity, like table columns.
+            let ty = if typtype == "e" {
+                SqlType::Enum(row.get(4))
+            } else {
+                sql_type(&db_type)
+            };
             ViewColumnModel {
                 name: row.get(0),
-                ty: sql_type(&db_type),
+                ty,
                 nullable: !row.get::<_, bool>(2),
             }
         })
@@ -427,7 +415,9 @@ SELECT
     a.attidentity::text,
     a.attgenerated::text,
     pg_get_expr(ad.adbin, ad.adrelid),
-    col_description(c.oid, a.attnum)
+    col_description(c.oid, a.attnum),
+    typ.typtype::text,
+    typ.typname
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_attribute a ON a.attrelid = c.oid
@@ -448,7 +438,14 @@ ORDER BY a.attnum",
         .into_iter()
         .map(|row| {
             let db_type: String = row.get(1);
-            let ty = sql_type(&db_type);
+            let typtype: String = row.get(8);
+            // Resolve an enum-typed column by catalog identity (`typtype = 'e'`) rather than by parsing
+            // the `format_type` string, so a quoted/qualified/case-sensitive enum name binds correctly.
+            let ty = if typtype == "e" {
+                SqlType::Enum(row.get(9))
+            } else {
+                sql_type(&db_type)
+            };
             let identity: String = row.get(4);
             let generated: String = row.get(5);
             let default: Option<String> = row.get(6);
@@ -903,6 +900,15 @@ fn default_value(ty: &SqlType, value: &str) -> DefaultValue {
         )
     {
         return DefaultValue::Text(text);
+    }
+
+    // An enum column's default is stored as `'label'::<type>` (e.g. `'sad'::publish_enums.mood`); recover
+    // the bare label as text so a desired `DefaultValue::Text("sad")` compares equal instead of churning.
+    if let SqlType::Enum(_) = ty {
+        let literal = trimmed.split("::").next().unwrap_or(trimmed).trim();
+        if let Some(text) = postgres_string_literal(literal) {
+            return DefaultValue::Text(text);
+        }
     }
 
     match ty {
