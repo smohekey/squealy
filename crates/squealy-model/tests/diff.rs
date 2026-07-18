@@ -366,6 +366,7 @@ fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some(schema.to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables,
         }],
     }
@@ -460,6 +461,7 @@ fn schema_with(name: &str, tables: Vec<TableModel>, views: Vec<ViewModel>) -> Da
             name: Some(name.to_owned()),
             tables,
             views,
+            enums: Vec::new(),
         }],
     }
 }

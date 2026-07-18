@@ -1,6 +1,6 @@
 use squealy::{
     CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintValidation,
-    DatabaseModel, DefaultValue, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
+    DatabaseModel, DefaultValue, EnumModel, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
     IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, SchemaModel,
     SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
@@ -50,7 +50,77 @@ pub(crate) async fn database(client: &Client) -> Result<DatabaseModel, PostgresE
         schema_entry(&mut schemas, &schema).views.push(view);
     }
 
+    for (schema, enum_type) in introspect_enums(client).await? {
+        schema_entry(&mut schemas, &schema).enums.push(enum_type);
+    }
+
+    // A column of an enum type introspects as `SqlType::Raw("<typename>")` (the `format_type` string has
+    // no catalog awareness); rebind it to `SqlType::Enum(<bare name>)` when a same-schema enum of that
+    // name was introspected, so it compares equal to a desired enum column. `format_type` qualifies the
+    // type name (`publish_enums.mood`) whenever the enum's schema is off the session `search_path`, so
+    // match both the bare `mood` and the `<schema>.mood` spellings.
+    for schema in &mut schemas {
+        let enum_names: Vec<String> = schema.enums.iter().map(|e| e.name.clone()).collect();
+        let schema_name = schema.name.clone();
+        for table in &mut schema.tables {
+            for column in &mut table.columns {
+                if let SqlType::Raw(raw) = &column.ty {
+                    let bare = raw.rsplit_once('.').map_or(raw.as_str(), |(_, name)| name);
+                    if let Some(name) = enum_names.iter().find(|name| {
+                        raw == *name
+                            || schema_name
+                                .as_deref()
+                                .is_some_and(|s| *raw == format!("{s}.{name}"))
+                            || bare == *name
+                    }) {
+                        column.ty = SqlType::Enum(name.clone());
+                    }
+                }
+            }
+        }
+    }
+
     Ok(DatabaseModel { schemas })
+}
+
+/// Introspects every user-defined enum type (`CREATE TYPE ... AS ENUM`), paired with its schema. Labels
+/// are ordered by `enumsortorder`, the order PostgreSQL renders and compares them in.
+async fn introspect_enums(client: &Client) -> Result<Vec<(String, EnumModel)>, PostgresError> {
+    let rows = client
+        .query(
+            "\
+SELECT n.nspname, t.typname, e.enumlabel
+FROM pg_type t
+JOIN pg_namespace n ON n.oid = t.typnamespace
+JOIN pg_enum e ON e.enumtypid = t.oid
+WHERE t.typtype = 'e'
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', '__squealy')
+  AND n.nspname NOT LIKE 'pg_toast%'
+ORDER BY n.nspname, t.typname, e.enumsortorder",
+            &[],
+        )
+        .await?;
+
+    // Rows arrive grouped by (schema, typname) in label order; fold consecutive rows into one enum.
+    let mut enums: Vec<(String, EnumModel)> = Vec::new();
+    for row in rows {
+        let schema: String = row.get(0);
+        let name: String = row.get(1);
+        let label: String = row.get(2);
+        match enums.last_mut() {
+            Some((last_schema, last_enum)) if *last_schema == schema && last_enum.name == name => {
+                last_enum.labels.push(label);
+            }
+            _ => enums.push((
+                schema,
+                EnumModel {
+                    name,
+                    labels: vec![label],
+                },
+            )),
+        }
+    }
+    Ok(enums)
 }
 
 /// Introspects every view, pairing each with the name of the schema it belongs to. Called with an
@@ -76,6 +146,7 @@ fn schema_entry<'a>(schemas: &'a mut Vec<SchemaModel>, name: &str) -> &'a mut Sc
         name: Some(name.to_owned()),
         tables: Vec::new(),
         views: Vec::new(),
+        enums: Vec::new(),
     });
     schemas.last_mut().expect("schema just pushed")
 }

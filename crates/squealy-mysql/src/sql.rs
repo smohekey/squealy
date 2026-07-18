@@ -164,6 +164,27 @@ fn write_plan_step(
             statement(writer, first)?;
             squealy::render_drop_view(schema.as_deref(), &view.name, &MysqlDialect, writer)?;
         }
+        // MySQL has no standalone `CREATE TYPE` object. The create path rejects an enum model via
+        // capabilities; the incremental plan path skips that check, so reject here too.
+        DatabasePlanStep::CreateEnum { enum_type, .. }
+        | DatabasePlanStep::DropEnum { enum_type, .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "MySQL does not support the user-defined enum type `{}`",
+                    enum_type.name
+                ),
+            ));
+        }
+        DatabasePlanStep::AlterEnum { after, .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "MySQL does not support the user-defined enum type `{}`",
+                    after.name
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -543,6 +564,14 @@ fn is_blank_raw(expr: &squealy::ExprNode) -> bool {
 /// no native `uuid` (rendered `CHAR(36)`) and only `JSON` (so `Jsonb` also renders `JSON`).
 fn write_mysql_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()> {
     let name = match ty {
+        // MySQL has native inline `ENUM(...)` on a column, but no standalone `CREATE TYPE` object, so a
+        // model built around a named enum type cannot round-trip here. Reject rather than mis-render.
+        SqlType::Enum(name) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("MySQL does not support the user-defined enum type `{name}`"),
+            ));
+        }
         SqlType::Bool => "TINYINT(1)",
         SqlType::I8 => "TINYINT",
         SqlType::I16 => "SMALLINT",
@@ -1438,6 +1467,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "people".to_owned(),
                     comment: None,

@@ -751,6 +751,7 @@ fn write_column_type(column: &dyn Column, writer: &mut impl Write) -> io::Result
 fn write_test_cast_type(ty: &SqlType, writer: &mut dyn Write) -> io::Result<()> {
     let name = match ty {
         SqlType::Raw(db_type) => return writer.write_all(db_type.as_bytes()),
+        SqlType::Enum(name) => return writer.write_all(name.as_bytes()),
         SqlType::Bool => "boolean",
         SqlType::I8 | SqlType::I16 => "smallint",
         SqlType::I32 => "integer",

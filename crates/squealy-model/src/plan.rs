@@ -38,9 +38,19 @@ pub fn plan_step_risk(step: &DatabasePlanStep) -> ChangeRisk {
         DatabasePlanStep::RenameTable { .. } => ChangeRisk::Safe,
         // Create-or-replace of a view loses no data and re-runs cleanly.
         DatabasePlanStep::CreateView { .. } => ChangeRisk::Safe,
+        DatabasePlanStep::CreateEnum { .. } => ChangeRisk::Safe,
+        // Appending enum labels is safe; recreating the type (remove/reorder) rewrites its columns.
+        DatabasePlanStep::AlterEnum { additive, .. } => {
+            if *additive {
+                ChangeRisk::Safe
+            } else {
+                ChangeRisk::Destructive
+            }
+        }
         DatabasePlanStep::DropSchema { .. }
         | DatabasePlanStep::DropTable { .. }
-        | DatabasePlanStep::DropView { .. } => ChangeRisk::Destructive,
+        | DatabasePlanStep::DropView { .. }
+        | DatabasePlanStep::DropEnum { .. } => ChangeRisk::Destructive,
         DatabasePlanStep::AlterTable { change, .. } => table_plan_step_risk(change),
     }
 }
@@ -176,6 +186,25 @@ fn plan_step_as_diff_change(step: &DatabasePlanStep) -> DatabaseDiffChange {
             schema: schema.clone(),
             view: view.as_ref().clone(),
         },
+        DatabasePlanStep::CreateEnum { schema, enum_type } => DatabaseDiffChange::CreateEnum {
+            schema: schema.clone(),
+            enum_type: enum_type.clone(),
+        },
+        DatabasePlanStep::DropEnum { schema, enum_type } => DatabaseDiffChange::DropEnum {
+            schema: schema.clone(),
+            enum_type: enum_type.clone(),
+        },
+        DatabasePlanStep::AlterEnum {
+            schema,
+            before,
+            after,
+            additive,
+        } => DatabaseDiffChange::AlterEnum {
+            schema: schema.clone(),
+            before: before.clone(),
+            after: after.clone(),
+            additive: *additive,
+        },
     }
 }
 
@@ -301,6 +330,31 @@ fn flatten_diff(diff: &DatabaseDiff) -> Vec<DatabasePlanStep> {
                 steps.push(DatabasePlanStep::DropView {
                     schema: schema.clone(),
                     view: Box::new(view.clone()),
+                });
+            }
+            DatabaseDiffChange::CreateEnum { schema, enum_type } => {
+                steps.push(DatabasePlanStep::CreateEnum {
+                    schema: schema.clone(),
+                    enum_type: enum_type.clone(),
+                });
+            }
+            DatabaseDiffChange::DropEnum { schema, enum_type } => {
+                steps.push(DatabasePlanStep::DropEnum {
+                    schema: schema.clone(),
+                    enum_type: enum_type.clone(),
+                });
+            }
+            DatabaseDiffChange::AlterEnum {
+                schema,
+                before,
+                after,
+                additive,
+            } => {
+                steps.push(DatabasePlanStep::AlterEnum {
+                    schema: schema.clone(),
+                    before: before.clone(),
+                    after: after.clone(),
+                    additive: *additive,
                 });
             }
         }

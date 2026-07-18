@@ -1674,6 +1674,55 @@ ALTER TABLE \"catalog\".\"memberships\" ADD CONSTRAINT \"fk_memberships_tenant_i
     );
 }
 
+/// A one-table model with an enum type and a column of that type. Used by the enum render tests.
+fn enum_model() -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![TableModel {
+                name: "readings".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "m".to_owned(),
+                    comment: None,
+                    ty: SqlType::Enum("mood".to_owned()),
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                    on_update: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "mood".to_owned(),
+                labels: vec!["sad".to_owned(), "ok".to_owned(), "happy".to_owned()],
+            }],
+        }],
+    }
+}
+
+#[test]
+fn postgres_renders_enum_type_before_the_table_that_uses_it() {
+    let mut sql = Vec::new();
+    Postgres.render_create(&enum_model(), &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // The CREATE TYPE precedes the CREATE TABLE, and the column references the enum by quoted name.
+    assert_eq!(
+        sql,
+        "CREATE SCHEMA IF NOT EXISTS \"app\";\n\
+CREATE TYPE \"app\".\"mood\" AS ENUM ('sad', 'ok', 'happy');\n\
+CREATE TABLE \"app\".\"readings\" (\n  \"m\" \"app\".\"mood\" NOT NULL\n);"
+    );
+}
+
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(Catalog)]
 #[primary_key(columns = [tenant_id, id])]
@@ -2066,6 +2115,7 @@ fn postgres_renders_table_and_column_comments() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: Some("Tenant records".to_owned()),
@@ -2108,6 +2158,7 @@ fn postgres_renders_foreign_key_match_type() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![
                 TableModel {
                     name: "memberships".to_owned(),
@@ -2187,6 +2238,7 @@ fn postgres_renders_partial_indexes() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -2247,6 +2299,7 @@ fn postgres_renders_expression_indexes() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2309,6 +2362,7 @@ fn postgres_renders_raw_expression_index_verbatim() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2363,6 +2417,7 @@ fn postgres_renders_covering_indexes() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -2430,6 +2485,7 @@ fn postgres_renders_index_null_ordering() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -2484,6 +2540,7 @@ fn postgres_renders_index_operator_classes() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2541,6 +2598,7 @@ fn postgres_renders_index_collations() {
         schemas: vec![SchemaModel {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2808,6 +2866,7 @@ fn postgres_renders_views_in_dependency_order() {
                     }),
                 ),
             ],
+            enums: Vec::new(),
         }],
     };
 
@@ -3204,6 +3263,7 @@ fn postgres_renders_view_expression_ir_in_its_dialect() {
                     offset: None,
                 })),
             }],
+            enums: Vec::new(),
         }],
     };
 
@@ -3364,6 +3424,7 @@ fn postgres_view_order_by_keeps_nulls_modifier() {
                     offset: None,
                 })),
             }],
+            enums: Vec::new(),
         }],
     };
 
@@ -3395,6 +3456,7 @@ fn postgres_render_rejects_empty_view_body() {
                 }],
                 query: ViewBody::default(),
             }],
+            enums: Vec::new(),
         }],
     };
 
@@ -3921,6 +3983,7 @@ fn postgres_rejects_index_column_prefix_lengths() {
         schemas: vec![SchemaModel {
             name: Some("public".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -3973,6 +4036,7 @@ fn postgres_rejects_on_update_current_timestamp() {
         schemas: vec![SchemaModel {
             name: Some("public".to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,

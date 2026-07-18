@@ -796,6 +796,7 @@ async fn plan_from_database_canonicalizes_view_column_types() {
             name: Some("public".to_owned()),
             tables: Vec::new(),
             views: vec![view],
+            enums: Vec::new(),
         }],
     };
     let mut connection = TestConnection {
@@ -1144,6 +1145,7 @@ fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some(schema.to_owned()),
             views: Vec::new(),
+            enums: Vec::new(),
             tables,
         }],
     }

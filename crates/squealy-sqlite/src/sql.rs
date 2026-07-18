@@ -290,6 +290,27 @@ pub(crate) fn write_plan(
             }
             // The view was already dropped in the up-front view pre-pass; nothing to emit here.
             DatabasePlanStep::DropView { .. } => {}
+            // SQLite has no user-defined enum type. The create path rejects an enum model via
+            // capabilities; the incremental plan path skips that check, so reject here too.
+            DatabasePlanStep::CreateEnum { enum_type, .. }
+            | DatabasePlanStep::DropEnum { enum_type, .. } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "SQLite does not support the user-defined enum type `{}`",
+                        enum_type.name
+                    ),
+                ));
+            }
+            DatabasePlanStep::AlterEnum { after, .. } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "SQLite does not support the user-defined enum type `{}`",
+                        after.name
+                    ),
+                ));
+            }
         }
     }
 
@@ -1070,6 +1091,18 @@ fn write_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()>
         ));
     }
     reject_on_update(column)?;
+    if let SqlType::Enum(name) = &column.ty {
+        // SQLite has no user-defined enum type. An enum column would otherwise render as a bare `TEXT`
+        // affinity, silently discarding the type, so reject it (the incremental plan path skips
+        // `validate_capabilities`, so the renderer must guard this itself).
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite does not support the user-defined enum type `{name}` (column `{}`)",
+                column.name
+            ),
+        ));
+    }
     if column.comment.is_some() {
         // Like a table comment, a column comment is not introspectable, so it would churn every plan.
         return Err(io::Error::new(
@@ -1319,6 +1352,9 @@ pub(crate) fn sqlite_affinity(ty: &SqlType) -> &str {
         | SqlType::Json
         | SqlType::Jsonb => "TEXT",
         SqlType::Bytes | SqlType::FixedBytes(_) => "BLOB",
+        // An enum column is rejected at `write_column`; its affinity (only reached via cast/canonical
+        // reuse) is text-like.
+        SqlType::Enum(_) => "TEXT",
         SqlType::Raw(raw) => raw.as_str(),
     }
 }

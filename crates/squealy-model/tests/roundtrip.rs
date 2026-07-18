@@ -171,6 +171,7 @@ fn schema_with_view(v: ViewModel) -> DatabaseModel {
             name: Some("public".to_owned()),
             tables: vec![events_table()],
             views: vec![v],
+            enums: Vec::new(),
         }],
     }
 }
@@ -182,6 +183,7 @@ fn schema_with_table(t: TableModel) -> DatabaseModel {
             name: Some("public".to_owned()),
             tables: vec![t],
             views: Vec::new(),
+            enums: Vec::new(),
         }],
     }
 }

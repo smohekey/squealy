@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use squealy::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, ForeignKeyModel, IndexModel, SchemaModel,
-    TableModel, ViewColumnModel, ViewModel,
+    CheckModel, ColumnModel, Constraint, DatabaseModel, EnumModel, ForeignKeyModel, IndexModel,
+    SchemaModel, TableModel, ViewColumnModel, ViewModel,
 };
 
 /// The structured diff from an actual database model to a desired database model.
@@ -135,6 +135,25 @@ pub enum DatabaseDiffChange {
         schema: Option<String>,
         view: ViewModel,
     },
+    /// Create a new enum type. Rendered before any table so a column can reference it.
+    CreateEnum {
+        schema: Option<String>,
+        enum_type: EnumModel,
+    },
+    /// Drop an enum type. Rendered after any table that referenced it is gone.
+    DropEnum {
+        schema: Option<String>,
+        enum_type: EnumModel,
+    },
+    /// Change an enum's labels. Appending labels is a safe in-place `ALTER TYPE ... ADD VALUE`; any other
+    /// change (removing or reordering labels) requires recreating the type and rewriting its columns —
+    /// destructive. `additive` distinguishes the two for risk classification.
+    AlterEnum {
+        schema: Option<String>,
+        before: EnumModel,
+        after: EnumModel,
+        additive: bool,
+    },
 }
 
 impl DatabaseDiffChange {
@@ -143,10 +162,20 @@ impl DatabaseDiffChange {
             DatabaseDiffChange::CreateSchema { .. }
             | DatabaseDiffChange::CreateTable { .. }
             // Create-or-replace of a view loses no data and can be re-run.
-            | DatabaseDiffChange::CreateView { .. } => ChangeRisk::Safe,
+            | DatabaseDiffChange::CreateView { .. }
+            | DatabaseDiffChange::CreateEnum { .. } => ChangeRisk::Safe,
             DatabaseDiffChange::DropSchema { .. }
             | DatabaseDiffChange::DropTable { .. }
-            | DatabaseDiffChange::DropView { .. } => ChangeRisk::Destructive,
+            | DatabaseDiffChange::DropView { .. }
+            | DatabaseDiffChange::DropEnum { .. } => ChangeRisk::Destructive,
+            // Appending enum labels is safe; recreating the type (remove/reorder) rewrites columns.
+            DatabaseDiffChange::AlterEnum { additive, .. } => {
+                if *additive {
+                    ChangeRisk::Safe
+                } else {
+                    ChangeRisk::Destructive
+                }
+            }
             DatabaseDiffChange::AlterTable { changes, .. } => classify_table_changes(changes),
         }
     }
@@ -280,6 +309,12 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     // being dropped) and creates run after all of them (a view may select from a table or schema being
     // added); the two phases bracket the per-schema table work below.
     let (view_drops, view_creates) = diff_views_global(desired, actual);
+
+    // Enum types bracket the table work the *opposite* way to views: a `CREATE TYPE` (and any label
+    // change) must precede the tables whose columns reference it, and a `DROP TYPE` must follow the
+    // tables that referenced it. So enum creates/alters lead the whole diff and enum drops trail it.
+    let (enum_creates, enum_drops) = diff_enums_global(desired, actual);
+    changes.extend(enum_creates);
     changes.extend(view_drops);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
@@ -319,7 +354,62 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     }
 
     changes.extend(view_creates);
+    changes.extend(enum_drops);
     DatabaseDiff { changes }
+}
+
+/// Diffs enum types across the whole model, returning `(creates_and_alters, drops)`. Identity is
+/// `(schema, name)`. A label change is an `AlterEnum`, flagged `additive` when the actual labels are a
+/// prefix of the desired ones (an append-only change PostgreSQL can apply in place with
+/// `ALTER TYPE ... ADD VALUE`); any other change (removal, reorder, mid-insert) is non-additive and
+/// requires recreating the type.
+fn diff_enums_global(
+    desired: &DatabaseModel,
+    actual: &DatabaseModel,
+) -> (Vec<DatabaseDiffChange>, Vec<DatabaseDiffChange>) {
+    let desired_enums = keyed_enums(desired);
+    let actual_enums = keyed_enums(actual);
+    let mut creates = Vec::new();
+    let mut drops = Vec::new();
+
+    for (key, desired_enum) in &desired_enums {
+        match actual_enums.get(key) {
+            None => creates.push(DatabaseDiffChange::CreateEnum {
+                schema: key.0.clone(),
+                enum_type: (*desired_enum).clone(),
+            }),
+            Some(actual_enum) if actual_enum.labels != desired_enum.labels => {
+                let additive = desired_enum.labels.starts_with(&actual_enum.labels);
+                creates.push(DatabaseDiffChange::AlterEnum {
+                    schema: key.0.clone(),
+                    before: (*actual_enum).clone(),
+                    after: (*desired_enum).clone(),
+                    additive,
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    for (key, actual_enum) in &actual_enums {
+        if !desired_enums.contains_key(key) {
+            drops.push(DatabaseDiffChange::DropEnum {
+                schema: key.0.clone(),
+                enum_type: (*actual_enum).clone(),
+            });
+        }
+    }
+    (creates, drops)
+}
+
+/// Keys every enum in the model by `(schema, name)`.
+fn keyed_enums(model: &DatabaseModel) -> BTreeMap<(Option<String>, String), &EnumModel> {
+    let mut enums = BTreeMap::new();
+    for schema in &model.schemas {
+        for enum_type in &schema.enums {
+            enums.insert((schema.name.clone(), enum_type.name.clone()), enum_type);
+        }
+    }
+    enums
 }
 
 fn diff_schema_tables(

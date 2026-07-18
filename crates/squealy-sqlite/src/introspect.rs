@@ -56,6 +56,8 @@ pub(crate) async fn database(connection: &SqliteConnection) -> Result<DatabaseMo
             name: None,
             tables,
             views,
+            // SQLite has no user-defined enum types.
+            enums: Vec::new(),
         }]
     };
     Ok(DatabaseModel { schemas })

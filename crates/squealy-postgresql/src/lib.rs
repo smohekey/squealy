@@ -290,6 +290,8 @@ impl squealy::SchemaBackend for Postgres {
                 operator_classes: true,
                 prefix_lengths: false,
             },
+            // PostgreSQL has `CREATE TYPE ... AS ENUM`.
+            enums: true,
         }
     }
 
@@ -304,21 +306,21 @@ impl squealy::SchemaBackend for Postgres {
     fn render_plan(
         &self,
         plan: &squealy::DatabasePlan,
-        // PostgreSQL renders each step's delta in place (`ALTER TABLE … ALTER COLUMN …`), so it does
-        // not need the full target model that table-rebuild backends (SQLite) rely on.
-        _desired: &squealy::DatabaseModel,
+        // Used only by a destructive enum recreate, to find the columns of the type it rewrites; the
+        // in-place `ALTER TABLE … ALTER COLUMN …` steps otherwise carry their own deltas.
+        desired: &squealy::DatabaseModel,
         writer: &mut impl std::io::Write,
     ) -> std::io::Result<()> {
-        sql::ddl::write_plan(plan, writer)
+        sql::ddl::write_plan(plan, desired, writer)
     }
 
     fn render_plan_concurrent(
         &self,
         plan: &squealy::DatabasePlan,
-        _desired: &squealy::DatabaseModel,
+        desired: &squealy::DatabaseModel,
         writer: &mut impl std::io::Write,
     ) -> std::io::Result<()> {
-        sql::ddl::write_plan_concurrent(plan, writer)
+        sql::ddl::write_plan_concurrent(plan, desired, writer)
     }
 
     fn supports_concurrent_index_creation(&self) -> bool {

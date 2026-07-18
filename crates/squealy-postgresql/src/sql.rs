@@ -266,8 +266,8 @@ pub(crate) mod ddl {
 
     use squealy::{
         CheckModel, ColumnModel, Constraint, ConstraintEnforcement, ConstraintValidation,
-        DatabaseModel, DatabasePlan, DatabasePlanStep, DefaultValue, ForeignKeyModel, IdentityMode,
-        IndexModel, TableModel, TablePlanStep,
+        DatabaseModel, DatabasePlan, DatabasePlanStep, DefaultValue, EnumModel, ForeignKeyModel,
+        IdentityMode, IndexModel, SqlType, TableModel, TablePlanStep,
     };
 
     use super::{write_pg_sql_type, write_qualified_name, write_quoted_ident, write_quoted_text};
@@ -285,6 +285,14 @@ pub(crate) mod ddl {
                 statement(writer, &mut first)?;
                 writer.write_all(b"CREATE SCHEMA IF NOT EXISTS ")?;
                 write_quoted_ident(name, writer)?;
+            }
+        }
+
+        // Enum types are created before any table, since a table column can be of an enum type.
+        for schema in &model.schemas {
+            for enum_type in &schema.enums {
+                statement(writer, &mut first)?;
+                write_create_enum(schema.name.as_deref(), enum_type, writer)?;
             }
         }
 
@@ -359,8 +367,13 @@ pub(crate) mod ddl {
         Ok(())
     }
 
-    /// Renders an ordered incremental DDL plan.
-    pub(crate) fn write_plan(plan: &DatabasePlan, writer: &mut impl Write) -> io::Result<()> {
+    /// Renders an ordered incremental DDL plan. `desired` is the target model, used by a destructive
+    /// enum recreate to find the columns of the type it must rewrite.
+    pub(crate) fn write_plan(
+        plan: &DatabasePlan,
+        desired: &DatabaseModel,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
         let mut first = true;
         if plan.steps.iter().any(plan_step_has_refactor_id) {
             statement(writer, &mut first)?;
@@ -369,7 +382,7 @@ pub(crate) mod ddl {
             write_create_refactor_log_table(writer)?;
         }
         for step in &plan.steps {
-            write_plan_step(step, writer, &mut first)?;
+            write_plan_step(step, desired, writer, &mut first)?;
         }
         write_deferred_foreign_keys(plan, writer, &mut first)?;
         if !first {
@@ -383,6 +396,7 @@ pub(crate) mod ddl {
     /// requires. Non-index steps fall back to normal rendering (the planner partitions them out).
     pub(crate) fn write_plan_concurrent(
         plan: &DatabasePlan,
+        desired: &DatabaseModel,
         writer: &mut impl Write,
     ) -> io::Result<()> {
         let mut first = true;
@@ -397,7 +411,7 @@ pub(crate) mod ddl {
                 statement(writer, &mut first)?;
                 write_create_index(schema.as_deref(), table, index, true, writer)?;
             } else {
-                write_plan_step(step, writer, &mut first)?;
+                write_plan_step(step, desired, writer, &mut first)?;
             }
         }
         write_deferred_foreign_keys(plan, writer, &mut first)?;
@@ -409,6 +423,7 @@ pub(crate) mod ddl {
 
     fn write_plan_step(
         step: &DatabasePlanStep,
+        desired: &DatabaseModel,
         writer: &mut impl Write,
         first: &mut bool,
     ) -> io::Result<()> {
@@ -479,8 +494,95 @@ pub(crate) mod ddl {
                     writer,
                 )?;
             }
+            DatabasePlanStep::CreateEnum { schema, enum_type } => {
+                statement(writer, first)?;
+                write_create_enum(schema.as_deref(), enum_type, writer)?;
+            }
+            DatabasePlanStep::DropEnum { schema, enum_type } => {
+                statement(writer, first)?;
+                writer.write_all(b"DROP TYPE ")?;
+                write_qualified_name(schema.as_deref(), &enum_type.name, writer)?;
+            }
+            DatabasePlanStep::AlterEnum {
+                schema,
+                before,
+                after,
+                additive,
+            } => {
+                write_alter_enum(
+                    schema.as_deref(),
+                    before,
+                    after,
+                    *additive,
+                    desired,
+                    writer,
+                    first,
+                )?;
+            }
         }
         Ok(())
+    }
+
+    /// Renders an enum-label change.
+    ///
+    /// An **additive** change (the desired labels extend the actual ones) is applied in place with one
+    /// `ALTER TYPE ... ADD VALUE` per new label — atomic and non-destructive.
+    ///
+    /// A **non-additive** change (a label removed, reordered, or inserted mid-list) cannot be done in
+    /// place: PostgreSQL only appends enum values. The type is recreated and every column of the type
+    /// rewritten through `text`:
+    ///   `ALTER TYPE x RENAME TO x__squealy_old; CREATE TYPE x AS ENUM (...);
+    ///    ALTER TABLE t ALTER COLUMN c TYPE x USING c::text::x; ...; DROP TYPE x__squealy_old`
+    /// The columns to rewrite are every enum-typed column of `x` in the desired model (their table
+    /// structure is unchanged — only the enum's labels differ). A row whose value is a dropped label
+    /// fails the `::x` cast, which correctly aborts the migration.
+    fn write_alter_enum(
+        schema: Option<&str>,
+        before: &EnumModel,
+        after: &EnumModel,
+        additive: bool,
+        desired: &DatabaseModel,
+        writer: &mut impl Write,
+        first: &mut bool,
+    ) -> io::Result<()> {
+        if additive {
+            for label in &after.labels[before.labels.len()..] {
+                statement(writer, first)?;
+                writer.write_all(b"ALTER TYPE ")?;
+                write_qualified_name(schema, &after.name, writer)?;
+                writer.write_all(b" ADD VALUE ")?;
+                write_quoted_text(label, writer)?;
+            }
+            return Ok(());
+        }
+
+        let old_name = format!("{}__squealy_old", after.name);
+        statement(writer, first)?;
+        writer.write_all(b"ALTER TYPE ")?;
+        write_qualified_name(schema, &after.name, writer)?;
+        writer.write_all(b" RENAME TO ")?;
+        write_quoted_ident(&old_name, writer)?;
+
+        statement(writer, first)?;
+        write_create_enum(schema, after, writer)?;
+
+        for (table_name, column_name) in enum_columns(desired, schema, &after.name) {
+            statement(writer, first)?;
+            writer.write_all(b"ALTER TABLE ")?;
+            write_qualified_name(schema, table_name, writer)?;
+            writer.write_all(b" ALTER COLUMN ")?;
+            write_quoted_ident(column_name, writer)?;
+            writer.write_all(b" TYPE ")?;
+            write_qualified_name(schema, &after.name, writer)?;
+            writer.write_all(b" USING ")?;
+            write_quoted_ident(column_name, writer)?;
+            writer.write_all(b"::text::")?;
+            write_qualified_name(schema, &after.name, writer)?;
+        }
+
+        statement(writer, first)?;
+        writer.write_all(b"DROP TYPE ")?;
+        write_qualified_name(schema, &old_name, writer)
     }
 
     fn write_create_table_extras(
@@ -571,7 +673,7 @@ pub(crate) mod ddl {
                 writer.write_all(b"ALTER TABLE ")?;
                 write_qualified_name(schema, table, writer)?;
                 writer.write_all(b" ADD COLUMN ")?;
-                write_model_column(column, writer)?;
+                write_model_column(schema, column, writer)?;
                 if let Some(comment) = &column.comment {
                     statement(writer, first)?;
                     write_comment_on_column(schema, table, &column.name, Some(comment), writer)?;
@@ -773,7 +875,7 @@ pub(crate) mod ddl {
             writer.write_all(b" ALTER COLUMN ")?;
             write_quoted_ident(&after.name, writer)?;
             writer.write_all(b" TYPE ")?;
-            write_pg_sql_type(&after.ty, writer)?;
+            write_model_column_type(schema, &after.ty, writer)?;
             if let Some(collation) = &after.collation {
                 writer.write_all(b" COLLATE ")?;
                 write_quoted_ident(collation, writer)?;
@@ -949,6 +1051,44 @@ pub(crate) mod ddl {
         Ok(())
     }
 
+    /// Every `(table, column)` in `schema` of the desired model whose column type is the enum `name`.
+    fn enum_columns<'a>(
+        desired: &'a DatabaseModel,
+        schema: Option<&str>,
+        name: &'a str,
+    ) -> impl Iterator<Item = (&'a str, &'a str)> {
+        desired
+            .schemas
+            .iter()
+            .filter(move |s| s.name.as_deref() == schema)
+            .flat_map(|s| &s.tables)
+            .flat_map(move |table| {
+                table.columns.iter().filter_map(move |column| {
+                    matches!(&column.ty, squealy::SqlType::Enum(enum_name) if enum_name == name)
+                        .then_some((table.name.as_str(), column.name.as_str()))
+                })
+            })
+    }
+
+    /// Renders `CREATE TYPE <name> AS ENUM ('a', 'b', ...)`. Labels are single-quoted string literals in
+    /// their declared (sort) order.
+    fn write_create_enum(
+        schema: Option<&str>,
+        enum_type: &EnumModel,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        writer.write_all(b"CREATE TYPE ")?;
+        write_qualified_name(schema, &enum_type.name, writer)?;
+        writer.write_all(b" AS ENUM (")?;
+        for (index, label) in enum_type.labels.iter().enumerate() {
+            if index > 0 {
+                writer.write_all(b", ")?;
+            }
+            write_quoted_text(label, writer)?;
+        }
+        writer.write_all(b")")
+    }
+
     fn write_create_table(
         schema: Option<&str>,
         table: &TableModel,
@@ -961,7 +1101,7 @@ pub(crate) mod ddl {
         let mut first_entry = true;
         for column in &table.columns {
             entry(writer, &mut first_entry)?;
-            write_model_column(column, writer)?;
+            write_model_column(schema, column, writer)?;
         }
         if let Some(primary_key) = &table.primary_key {
             entry(writer, &mut first_entry)?;
@@ -1022,10 +1162,29 @@ pub(crate) mod ddl {
         }
     }
 
-    fn write_model_column(column: &ColumnModel, writer: &mut impl Write) -> io::Result<()> {
+    /// Writes a model column's type, qualifying a user-enum type with the table's schema. An enum type
+    /// lives in a schema and is not on the session `search_path`, so an unqualified reference (`m mood`)
+    /// fails to resolve when the table is in a non-`public` schema; render `m "app"."mood"` instead.
+    /// All other types render unqualified.
+    fn write_model_column_type(
+        schema: Option<&str>,
+        ty: &SqlType,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        match ty {
+            SqlType::Enum(name) => write_qualified_name(schema, name, writer),
+            _ => write_pg_sql_type(ty, writer),
+        }
+    }
+
+    fn write_model_column(
+        schema: Option<&str>,
+        column: &ColumnModel,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
         write_quoted_ident(&column.name, writer)?;
         writer.write_all(b" ")?;
-        write_pg_sql_type(&column.ty, writer)?;
+        write_model_column_type(schema, &column.ty, writer)?;
         if let Some(collation) = &column.collation {
             writer.write_all(b" COLLATE ")?;
             write_quoted_ident(collation, writer)?;
@@ -1405,6 +1564,9 @@ fn write_pg_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()> {
         // PostgreSQL has no fixed-length binary type; the width is enforced by a generated
         // `CHECK (octet_length(col) = N)` constraint (see the column-check lowering).
         SqlType::FixedBytes(_) => "bytea",
+        // A user-defined enum type is referenced by its (quoted) name; the `CREATE TYPE` itself is a
+        // separate schema object rendered before the tables that use it.
+        SqlType::Enum(name) => return write_quoted_ident(name, writer),
         SqlType::Raw(raw) => raw.as_str(),
     };
     writer.write_all(name.as_bytes())
@@ -1571,6 +1733,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "people".to_owned(),
                     comment: None,

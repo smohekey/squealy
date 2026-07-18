@@ -37,13 +37,13 @@ pub use refactor::{
 pub use squealy::{
     CheckModel, ColumnCapabilities, ColumnModel, Constraint, ConstraintCapabilities,
     ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, CteModel, DatabaseModel,
-    DatabasePlan, DatabasePlanStep, DdlExecutor, DefaultValue, ExprNode, ForeignKeyAction,
-    ForeignKeyMatch, ForeignKeyModel, IndexCapabilities, IndexCollation, IndexDirection,
-    IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, IndexPrefixLength, LogicalOp,
-    ProjectionItem, SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect,
-    SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore, SchemaPublishRecord,
-    SchemaRefactorStore, SourceItem, SourceRef, SqlType, TableModel, TablePlanStep, ViewBody,
-    ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
+    DatabasePlan, DatabasePlanStep, DdlExecutor, DefaultValue, EnumModel, ExprNode,
+    ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, IndexCapabilities, IndexCollation,
+    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
+    IndexPrefixLength, LogicalOp, ProjectionItem, SchemaBackend, SchemaCapabilities, SchemaConnect,
+    SchemaIntrospect, SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore,
+    SchemaPublishRecord, SchemaRefactorStore, SourceItem, SourceRef, SqlType, TableModel,
+    TablePlanStep, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
 };
 
 use std::collections::BTreeSet;
@@ -858,8 +858,30 @@ fn validate_capabilities(
     capabilities: SchemaCapabilities,
 ) -> std::io::Result<()> {
     for schema in &model.schemas {
+        // A backend without a user-defined enum type (MySQL, SQLite) cannot render or introspect a
+        // `CREATE TYPE ... AS ENUM` or a column typed as one; reject the whole class up front.
+        if !capabilities.enums
+            && let Some(enum_type) = schema.enums.first()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "backend cannot render and introspect the user-defined enum type `{}`",
+                    enum_type.name
+                ),
+            ));
+        }
         for table in &schema.tables {
             for column in &table.columns {
+                if let SqlType::Enum(name) = &column.ty
+                    && !capabilities.enums
+                {
+                    return unsupported_column(
+                        &table.name,
+                        &column.name,
+                        &format!("a column of the user-defined enum type `{name}`"),
+                    );
+                }
                 if column.on_update.is_some() && !capabilities.columns.on_update {
                     return unsupported_column(
                         &table.name,
@@ -1057,6 +1079,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "memberships".to_owned(),
                     comment: None,
@@ -1107,6 +1130,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "memberships".to_owned(),
                     comment: None,
@@ -1173,6 +1197,7 @@ mod tests {
                     }],
                     query: ViewBody::default(),
                 }],
+                enums: Vec::new(),
             }],
         };
 
@@ -1217,6 +1242,7 @@ mod tests {
                 name: None,
                 tables: vec![],
                 views: vec![view],
+                enums: Vec::new(),
             }],
         };
 
@@ -1316,6 +1342,7 @@ mod tests {
                 name: None,
                 tables: vec![events_table()],
                 views: vec![v],
+                enums: Vec::new(),
             }],
         };
         // Desired: names the alias. Introspected: the deparser expanded it.
@@ -1425,11 +1452,13 @@ mod tests {
                 SchemaModel {
                     name: Some("empty".to_owned()),
                     views: Vec::new(),
+                    enums: Vec::new(),
                     tables: Vec::new(),
                 },
                 SchemaModel {
                     name: Some("app".to_owned()),
                     views: Vec::new(),
+                    enums: Vec::new(),
                     tables: vec![TableModel {
                         name: "widgets".to_owned(),
                         comment: None,
@@ -1472,11 +1501,13 @@ mod tests {
                 SchemaModel {
                     name: Some("app".to_owned()),
                     views: Vec::new(),
+                    enums: Vec::new(),
                     tables: vec![table("users")],
                 },
                 SchemaModel {
                     name: Some("archive".to_owned()),
                     views: Vec::new(),
+                    enums: Vec::new(),
                     tables: vec![table("logs")],
                 },
             ],
@@ -1572,6 +1603,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "items".to_owned(),
                     comment: None,
@@ -1929,6 +1961,7 @@ mod tests {
             schemas: vec![SchemaModel {
                 name: None,
                 views: Vec::new(),
+                enums: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -2009,6 +2042,7 @@ mod tests {
                         prefix_lengths: false,
                     },
                     indexes: IndexCapabilities::default(),
+                    enums: false,
                 },
             },
         )
@@ -2063,6 +2097,7 @@ mod tests {
                         operator_classes: true,
                         prefix_lengths: true,
                     },
+                    enums: false,
                 },
             },
         )

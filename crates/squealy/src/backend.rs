@@ -218,6 +218,13 @@ pub struct SchemaCapabilities {
     pub columns: ColumnCapabilities,
     pub constraints: ConstraintCapabilities,
     pub indexes: IndexCapabilities,
+    /// User-defined enum types (PostgreSQL `CREATE TYPE ... AS ENUM`), modeled as [`EnumModel`] and
+    /// referenced by a column typed [`SqlType::Enum`]. Backends without a standalone enum type (MySQL,
+    /// SQLite) leave this `false`, so a model that declares an enum is rejected rather than mis-rendered.
+    ///
+    /// [`EnumModel`]: crate::EnumModel
+    /// [`SqlType::Enum`]: crate::SqlType::Enum
+    pub enums: bool,
 }
 
 /// Per-column metadata capabilities for backend-specific column attributes.

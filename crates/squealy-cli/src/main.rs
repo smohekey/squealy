@@ -1089,6 +1089,15 @@ fn describe_plan_step(step: &DatabasePlanStep) -> String {
         DatabasePlanStep::DropView { schema, view } => {
             format!("drop view {}", qualified(schema, &view.name))
         }
+        DatabasePlanStep::CreateEnum { schema, enum_type } => {
+            format!("create enum {}", qualified(schema, &enum_type.name))
+        }
+        DatabasePlanStep::DropEnum { schema, enum_type } => {
+            format!("drop enum {}", qualified(schema, &enum_type.name))
+        }
+        DatabasePlanStep::AlterEnum { schema, after, .. } => {
+            format!("alter enum {}", qualified(schema, &after.name))
+        }
     }
 }
 
@@ -1470,7 +1479,32 @@ fn database_diff_change_json(change: &DatabaseDiffChange) -> serde_json::Value {
                 "name": qualified(schema, &view.name),
             })
         }
+        DatabaseDiffChange::CreateEnum { schema, enum_type } => {
+            enum_change_json("create", risk, schema, enum_type)
+        }
+        DatabaseDiffChange::DropEnum { schema, enum_type } => {
+            enum_change_json("drop", risk, schema, enum_type)
+        }
+        DatabaseDiffChange::AlterEnum { schema, after, .. } => {
+            enum_change_json("alter", risk, schema, after)
+        }
     }
+}
+
+fn enum_change_json(
+    action: &str,
+    risk: &str,
+    schema: &Option<String>,
+    enum_type: &squealy_model::EnumModel,
+) -> serde_json::Value {
+    json!({
+        "kind": "enum",
+        "action": action,
+        "risk": risk,
+        "schema": schema,
+        "enum": enum_type.name,
+        "name": qualified(schema, &enum_type.name),
+    })
 }
 
 fn table_diff_change_json(
@@ -1748,6 +1782,15 @@ fn print_diff(diff: &squealy_model::DatabaseDiff) {
             DatabaseDiffChange::DropView { schema, view } => {
                 println!("{risk} view - {}", qualified(schema, &view.name));
             }
+            DatabaseDiffChange::CreateEnum { schema, enum_type } => {
+                println!("{risk} enum + {}", qualified(schema, &enum_type.name));
+            }
+            DatabaseDiffChange::DropEnum { schema, enum_type } => {
+                println!("{risk} enum - {}", qualified(schema, &enum_type.name));
+            }
+            DatabaseDiffChange::AlterEnum { schema, after, .. } => {
+                println!("{risk} enum ~ {}", qualified(schema, &after.name));
+            }
         }
     }
 }
@@ -1856,6 +1899,15 @@ fn describe_diff_change(change: &DatabaseDiffChange) -> String {
         DatabaseDiffChange::DropView { schema, view } => {
             format!("drop view {}", qualified(schema, &view.name))
         }
+        DatabaseDiffChange::CreateEnum { schema, enum_type } => {
+            format!("create enum {}", qualified(schema, &enum_type.name))
+        }
+        DatabaseDiffChange::DropEnum { schema, enum_type } => {
+            format!("drop enum {}", qualified(schema, &enum_type.name))
+        }
+        DatabaseDiffChange::AlterEnum { schema, after, .. } => {
+            format!("alter enum {}", qualified(schema, &after.name))
+        }
     }
 }
 
@@ -1938,6 +1990,7 @@ fn print_schema_capabilities(capabilities: SchemaCapabilities) {
         "indexes.prefix_lengths={}",
         capabilities.indexes.prefix_lengths
     );
+    println!("enums={}", capabilities.enums);
 }
 
 impl BackendKind {
