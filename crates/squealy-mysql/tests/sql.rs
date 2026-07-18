@@ -974,7 +974,9 @@ fn mysql_renders_check_constraint_not_enforced() {
 
     // MySQL 8.0.16+ supports it, so this renders rather than rejecting (git-bug acb1c6d Phase 3).
     let mut sql = Vec::new();
-    Mysql.render_create(&model, &mut sql).expect("render NOT ENFORCED check");
+    Mysql
+        .render_create(&model, &mut sql)
+        .expect("render NOT ENFORCED check");
     let sql = String::from_utf8(sql).unwrap();
     assert!(
         sql.contains("CHECK ((`tenant_id` > 0)) NOT ENFORCED"),

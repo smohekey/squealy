@@ -1356,6 +1356,23 @@ async fn check_not_enforced_round_trips_and_toggling_enforcement_migrates() {
         replan_enforced.steps
     );
 
+    // An explicitly-spelled `Some(Enforced)` (e.g. from a KDL package) must also re-plan empty against
+    // the same live state — canonicalization folds the explicit default to `None`, matching what
+    // introspection reads back, so it does not churn an endless `AlterCheck`.
+    let explicit_enforced = enforcement_check_model(Some(ConstraintEnforcement::Enforced));
+    let replan_explicit = squealy_model::plan_from_database(
+        &explicit_enforced,
+        &mut connection,
+        squealy_model::DiffPolicy::ALLOW_ALL,
+    )
+    .await
+    .expect("re-plan explicit-enforced check");
+    assert!(
+        replan_explicit.steps.is_empty(),
+        "an explicit Some(Enforced) check must re-plan empty, got: {:?}",
+        replan_explicit.steps
+    );
+
     connection
         .execute_ddl("DROP SCHEMA IF EXISTS `catalog_enf`")
         .await

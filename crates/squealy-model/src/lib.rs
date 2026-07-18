@@ -423,6 +423,8 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 // a foreign key that spells out the default does not churn as an `AlterForeignKey`.
                 normalize_no_action(&mut foreign_key.on_delete);
                 normalize_no_action(&mut foreign_key.on_update);
+                normalize_default_validation(&mut foreign_key.validation);
+                normalize_default_enforcement(&mut foreign_key.enforcement);
             }
             for index in &mut table.indexes {
                 // Structure each `Raw` term (a legacy-package index expression, or an un-invertible
@@ -471,6 +473,10 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 // Derive the canonical name from that expression, so a backend that does not round-trip a
                 // check's name (SQLite) matches equivalent checks by expression.
                 check.name = connection.canonical_check_name(check);
+                // Fold an explicitly-spelled default validation/enforcement to `None` (introspection
+                // reads the default back as `None`), so a check that names the default does not churn.
+                normalize_default_validation(&mut check.validation);
+                normalize_default_enforcement(&mut check.enforcement);
             }
         }
         // A view's declared output columns are compared against introspected ones (which come back in
@@ -585,6 +591,25 @@ fn canonicalize_refactors<C: SchemaIntrospect>(
 fn normalize_no_action(action: &mut Option<ForeignKeyAction>) {
     if matches!(action, Some(ForeignKeyAction::NoAction)) {
         *action = None;
+    }
+}
+
+/// Normalizes an explicit `Some(ConstraintValidation::Validated)` to `None`. Validated is the default
+/// constraint state, rendered bare (no `NOT VALID`) and read back as `None` by introspection, so a model
+/// that spells out the default must fold to `None` on both sides or churn an endless `AlterCheck`/
+/// `AlterForeignKey`. Only the non-default `NotValidated` (and a backend-specific `Raw`) survives.
+fn normalize_default_validation(validation: &mut Option<ConstraintValidation>) {
+    if matches!(validation, Some(ConstraintValidation::Validated)) {
+        *validation = None;
+    }
+}
+
+/// Normalizes an explicit `Some(ConstraintEnforcement::Enforced)` to `None`. Enforced is the default,
+/// rendered bare (no `NOT ENFORCED`) and read back as `None`, so an explicit default folds to `None` on
+/// both sides rather than churning. Only the non-default `NotEnforced` (and a `Raw`) survives.
+fn normalize_default_enforcement(enforcement: &mut Option<ConstraintEnforcement>) {
+    if matches!(enforcement, Some(ConstraintEnforcement::Enforced)) {
+        *enforcement = None;
     }
 }
 
@@ -1483,6 +1508,37 @@ mod tests {
         let foreign_key = &canonical.schemas[0].tables[0].foreign_keys[0];
         assert_eq!(foreign_key.on_delete, None);
         assert_eq!(foreign_key.on_update, Some(ForeignKeyAction::Cascade));
+    }
+
+    #[test]
+    fn canonicalize_model_normalizes_explicit_default_validation_and_enforcement() {
+        // `Validated`/`Enforced` are the constraint defaults, rendered bare and read back as `None`, so an
+        // explicitly-spelled default (e.g. from a KDL package) must fold to `None` on both sides or churn
+        // an endless `AlterCheck`/`AlterForeignKey`. The non-default states are preserved.
+        let mut default_check = check();
+        default_check.validation = Some(ConstraintValidation::Validated);
+        default_check.enforcement = Some(ConstraintEnforcement::Enforced);
+        let mut default_fk = foreign_key();
+        default_fk.validation = Some(ConstraintValidation::Validated);
+        default_fk.enforcement = Some(ConstraintEnforcement::Enforced);
+        let model = table_with_constraints(default_fk, default_check);
+
+        let canonical = canonicalize_model(&DefaultBackend, &model);
+        let table = &canonical.schemas[0].tables[0];
+        assert_eq!(table.checks[0].validation, None);
+        assert_eq!(table.checks[0].enforcement, None);
+        assert_eq!(table.foreign_keys[0].validation, None);
+        assert_eq!(table.foreign_keys[0].enforcement, None);
+
+        // The non-default states survive canonicalization.
+        let mut not_default = check();
+        not_default.validation = Some(ConstraintValidation::NotValidated);
+        not_default.enforcement = Some(ConstraintEnforcement::NotEnforced);
+        let model = table_with_constraints(foreign_key(), not_default);
+        let canonical = canonicalize_model(&DefaultBackend, &model);
+        let check = &canonical.schemas[0].tables[0].checks[0];
+        assert_eq!(check.validation, Some(ConstraintValidation::NotValidated));
+        assert_eq!(check.enforcement, Some(ConstraintEnforcement::NotEnforced));
     }
 
     #[test]
