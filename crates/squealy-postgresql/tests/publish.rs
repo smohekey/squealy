@@ -504,6 +504,67 @@ fn creating_a_same_named_relation_and_enum_is_rejected() {
     assert!(error.to_string().contains("mood"), "{error}");
 }
 
+#[test]
+fn creating_a_view_column_of_an_undeclared_enum_is_rejected() {
+    // The enum-declaration check must cover view output columns, not just table columns. The view has a
+    // fully renderable body (so the only reason to reject it is the undeclared enum output column), and
+    // the table's own enum column is removed so the collision is isolated to the view.
+    let mut model = enum_fixture(&["sad", "ok", "happy"]);
+    model.schemas[0].enums.clear();
+    model.schemas[0].tables[0]
+        .columns
+        .retain(|column| column.name == "id");
+    model.schemas[0].views.push(ViewModel {
+        name: "reading_ids".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "id".to_owned(),
+            ty: SqlType::Enum("mood".to_owned()),
+            nullable: false,
+        }],
+        query: ViewBody::Select(Box::new(ViewQueryModel {
+            dependencies: Vec::new(),
+            distinct: false,
+            projection: vec![ProjectionItem {
+                output_name: "id".to_owned(),
+                internal_alias: None,
+                expr: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "id".to_owned(),
+                },
+            }],
+            from: Some(SourceItem::Named(SourceRef {
+                schema: Some("publish_enums".to_owned()),
+                name: "readings".to_owned(),
+                alias: "q0_0".to_owned(),
+            })),
+            joins: Vec::new(),
+            filter: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        })),
+    });
+    let error = squealy_model::render_create_sql(&model, &Postgres)
+        .expect_err("a view column of an undeclared enum must be rejected");
+    assert!(error.to_string().contains("mood"), "{error}");
+}
+
+#[test]
+fn incremental_rendering_rejects_an_undeclared_enum_column() {
+    // The incremental render path does not run `check_create`, so it must independently reject a column
+    // typed as an enum the desired schema never declares — otherwise offline `squealy plan` emits a
+    // qualified type reference that fails at execution.
+    let mut model = enum_fixture(&["sad", "ok", "happy"]);
+    model.schemas[0].enums.clear();
+    let plan = squealy_model::DatabasePlan { steps: Vec::new() };
+    let error = squealy_model::render_plan_sql(&plan, &model, &Postgres)
+        .expect_err("an incremental plan referencing an undeclared enum must be rejected");
+    assert!(error.to_string().contains("mood"), "{error}");
+}
+
 #[tokio::test]
 #[ignore]
 async fn publishing_an_enum_then_replanning_is_empty() {

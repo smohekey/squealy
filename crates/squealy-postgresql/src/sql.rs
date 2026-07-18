@@ -796,6 +796,15 @@ pub(crate) mod ddl {
         let drop_fixed_bytes_check = before_width && before.ty != after.ty;
         let add_fixed_bytes_check = after_width && before.ty != after.ty;
 
+        // A default attached to the old type cannot be automatically cast to a new enum type, so
+        // PostgreSQL rejects `ALTER COLUMN ... TYPE <enum>` while the column still carries one (even with
+        // a `USING` clause, which only converts the stored rows, not the default expression). Drop the
+        // existing default before the type change; the `SET DEFAULT` below restores the desired default,
+        // forced on when the default is otherwise unchanged across the conversion.
+        let drop_default_before_enum_type_change = before.default.is_some()
+            && before.ty != after.ty
+            && matches!(after.ty, squealy::SqlType::Enum(_));
+
         let mut wrote = false;
         if drop_fixed_bytes_check {
             write_drop_constraint(
@@ -804,6 +813,14 @@ pub(crate) mod ddl {
                 &super::fixed_bytes_check_name(&after.name),
                 writer,
             )?;
+            wrote = true;
+        }
+        if drop_default_before_enum_type_change {
+            if wrote {
+                statement(writer, first)?;
+            }
+            write_alter_column_prefix(schema, table, &after.name, writer)?;
+            writer.write_all(b" DROP DEFAULT")?;
             wrote = true;
         }
         if before.ty != after.ty || before.collation != after.collation {
@@ -857,7 +874,10 @@ pub(crate) mod ddl {
             writer.write_all(b" DROP IDENTITY IF EXISTS")?;
             wrote = true;
         }
-        if before.default.is_some() && after.default.is_none() {
+        if before.default.is_some()
+            && after.default.is_none()
+            && !drop_default_before_enum_type_change
+        {
             if wrote {
                 statement(writer, first)?;
             }
@@ -883,7 +903,7 @@ pub(crate) mod ddl {
             wrote = true;
         }
         if let Some(default) = &after.default
-            && before.default.as_ref() != Some(default)
+            && (before.default.as_ref() != Some(default) || drop_default_before_enum_type_change)
         {
             if wrote {
                 statement(writer, first)?;

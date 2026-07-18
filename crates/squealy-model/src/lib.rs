@@ -80,6 +80,9 @@ pub fn render_plan_sql<B: SchemaBackend>(
     // rules) so an incremental `AddUnique`/`AddPrimaryKey` cannot slip an unrenderable/non-round-tripping
     // prefix past the create preflight into `render`/`apply`.
     let capabilities = backend.capabilities();
+    // The incremental path does not run `check_create`; an enum-typed column referencing a type the
+    // desired schema never declares would otherwise render a qualified reference that fails at execution.
+    validate_enum_references(desired, capabilities)?;
     for schema in &desired.schemas {
         for table in &schema.tables {
             validate_table_constraint_prefixes(table, &capabilities)?;
@@ -876,13 +879,21 @@ where
     connection.introspect_database().await
 }
 
-fn validate_capabilities(
+/// Validates every user-defined enum reference in `model`, on both the create preflight
+/// ([`validate_capabilities`]) and the incremental render path ([`render_plan_sql`]) — the incremental
+/// path does not run `check_create`, so an offline `squealy plan` (or a library client) must be caught
+/// here too, or it emits a qualified enum-type reference the target never creates.
+///
+/// A backend without user-defined enums (MySQL, SQLite) cannot render or introspect a
+/// `CREATE TYPE ... AS ENUM` nor a column typed as one — reject the whole class. On a backend that does
+/// support them, a bare `SqlType::Enum(name)` names an enum in the column's own schema (a cross-schema
+/// or external enum is carried as a qualified `Raw`, not `Enum`), so the type must actually be declared
+/// there. Both table columns and view output columns are checked.
+fn validate_enum_references(
     model: &DatabaseModel,
     capabilities: SchemaCapabilities,
 ) -> std::io::Result<()> {
     for schema in &model.schemas {
-        // A backend without a user-defined enum type (MySQL, SQLite) cannot render or introspect a
-        // `CREATE TYPE ... AS ENUM` or a column typed as one; reject the whole class up front.
         if !capabilities.enums
             && let Some(enum_type) = schema.enums.first()
         {
@@ -894,33 +905,52 @@ fn validate_capabilities(
                 ),
             ));
         }
-        // A bare `SqlType::Enum(name)` names an enum in the column's own schema (a cross-schema or
-        // external enum is carried as a qualified `Raw` type, not `Enum`). The renderer emits a column
-        // referencing that type by name, so preflight must confirm the type is actually declared here —
-        // otherwise the create DDL references a `CREATE TYPE` that is never emitted.
         let declared_enums: BTreeSet<&str> = schema.enums.iter().map(|e| e.name.as_str()).collect();
+        let check = |relation: &str, column: &str, ty: &SqlType| -> std::io::Result<()> {
+            if let SqlType::Enum(name) = ty {
+                if !capabilities.enums {
+                    return unsupported_column(
+                        relation,
+                        column,
+                        &format!("a column of the user-defined enum type `{name}`"),
+                    );
+                }
+                if !declared_enums.contains(name.as_str()) {
+                    return unsupported_column(
+                        relation,
+                        column,
+                        &format!(
+                            "the enum type `{name}`, which is not declared in this schema \
+                             (declare it as an enum, or use a qualified `Raw` type for an \
+                             enum defined elsewhere)"
+                        ),
+                    );
+                }
+            }
+            Ok(())
+        };
         for table in &schema.tables {
             for column in &table.columns {
-                if let SqlType::Enum(name) = &column.ty {
-                    if !capabilities.enums {
-                        return unsupported_column(
-                            &table.name,
-                            &column.name,
-                            &format!("a column of the user-defined enum type `{name}`"),
-                        );
-                    }
-                    if !declared_enums.contains(name.as_str()) {
-                        return unsupported_column(
-                            &table.name,
-                            &column.name,
-                            &format!(
-                                "the enum type `{name}`, which is not declared in this schema \
-                                 (declare it as an enum, or use a qualified `Raw` type for an \
-                                 enum defined elsewhere)"
-                            ),
-                        );
-                    }
-                }
+                check(&table.name, &column.name, &column.ty)?;
+            }
+        }
+        for view in &schema.views {
+            for column in &view.columns {
+                check(&view.name, &column.name, &column.ty)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_capabilities(
+    model: &DatabaseModel,
+    capabilities: SchemaCapabilities,
+) -> std::io::Result<()> {
+    validate_enum_references(model, capabilities)?;
+    for schema in &model.schemas {
+        for table in &schema.tables {
+            for column in &table.columns {
                 if column.on_update.is_some() && !capabilities.columns.on_update {
                     return unsupported_column(
                         &table.name,

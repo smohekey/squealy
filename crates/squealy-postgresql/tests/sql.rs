@@ -1748,6 +1748,58 @@ CREATE TABLE \"app\".\"readings\" (\n  \"m\" \"app\".\"mood\" NOT NULL\n);"
     );
 }
 
+#[test]
+fn postgres_drops_and_restores_a_preserved_default_across_an_enum_type_change() {
+    // A column changing from `text DEFAULT 'sad'` to the `mood` enum keeps the same default. PostgreSQL
+    // rejects `ALTER COLUMN ... TYPE mood` while the old text default is still attached (it cannot cast
+    // the default expression), so the renderer must DROP the default before the type change and restore
+    // it afterward even though the default value itself is unchanged.
+    let before = ColumnModel {
+        name: "m".to_owned(),
+        comment: None,
+        ty: SqlType::Text,
+        collation: None,
+        nullable: false,
+        default: Some(DefaultValue::Text("sad".to_owned())),
+        identity: None,
+        generated: None,
+        on_update: None,
+    };
+    let after = ColumnModel {
+        ty: SqlType::Enum("mood".to_owned()),
+        ..before.clone()
+    };
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterTable {
+            schema: Some("app".to_owned()),
+            table: "readings".to_owned(),
+            change: Box::new(TablePlanStep::AlterColumn {
+                before,
+                after,
+                type_cast: Some("\"m\"::text::\"app\".\"mood\"".to_owned()),
+            }),
+        }],
+    };
+
+    let mut sql = Vec::new();
+    Postgres
+        .render_plan(&plan, &DatabaseModel::default(), &mut sql)
+        .unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    let drop_default = sql.find("DROP DEFAULT").expect("a DROP DEFAULT");
+    let type_change = sql
+        .find("TYPE \"app\".\"mood\"")
+        .expect("the enum TYPE change");
+    let set_default = sql
+        .find("SET DEFAULT 'sad'")
+        .expect("a restored SET DEFAULT");
+    assert!(
+        drop_default < type_change && type_change < set_default,
+        "default must be dropped before, and restored after, the enum type change: {sql}"
+    );
+}
+
 #[derive(Clone, Debug, PartialEq, Table)]
 #[schema(Catalog)]
 #[primary_key(columns = [tenant_id, id])]
