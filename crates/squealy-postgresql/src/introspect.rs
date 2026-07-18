@@ -264,11 +264,13 @@ async fn view_columns(
     let rows = client
         .query(
             "\
-SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, typ.typtype::text, typ.typname
+SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, typ.typtype::text, typ.typname,
+       tn.nspname
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_attribute a ON a.attrelid = c.oid
 JOIN pg_type typ ON typ.oid = a.atttypid
+JOIN pg_namespace tn ON tn.oid = typ.typnamespace
 WHERE n.nspname = $1
   AND c.relname = $2
   AND c.relkind = 'v'
@@ -284,8 +286,10 @@ ORDER BY a.attnum",
         .map(|row| {
             let db_type: String = row.get(1);
             let typtype: String = row.get(3);
-            // Resolve an enum view-output column by catalog identity, like table columns.
-            let ty = if typtype == "e" {
+            let type_schema: String = row.get(5);
+            // Resolve an enum view-output column by catalog identity, like table columns — same-schema
+            // only (a cross-schema enum stays `Raw`, whose verbatim qualified name renders correctly).
+            let ty = if typtype == "e" && type_schema == view_ref.schema {
                 SqlType::Enum(row.get(4))
             } else {
                 sql_type(&db_type)
@@ -417,11 +421,13 @@ SELECT
     pg_get_expr(ad.adbin, ad.adrelid),
     col_description(c.oid, a.attnum),
     typ.typtype::text,
-    typ.typname
+    typ.typname,
+    tn.nspname
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_attribute a ON a.attrelid = c.oid
 JOIN pg_type typ ON typ.oid = a.atttypid
+JOIN pg_namespace tn ON tn.oid = typ.typnamespace
 LEFT JOIN pg_collation coll ON coll.oid = a.attcollation
 LEFT JOIN pg_attrdef ad ON ad.adrelid = c.oid AND ad.adnum = a.attnum
 WHERE n.nspname = $1
@@ -439,9 +445,14 @@ ORDER BY a.attnum",
         .map(|row| {
             let db_type: String = row.get(1);
             let typtype: String = row.get(8);
+            let type_schema: String = row.get(10);
             // Resolve an enum-typed column by catalog identity (`typtype = 'e'`) rather than by parsing
             // the `format_type` string, so a quoted/qualified/case-sensitive enum name binds correctly.
-            let ty = if typtype == "e" {
+            // Only bind an enum in the *same* schema as its table — `SqlType::Enum` carries just the name,
+            // and a column is rendered with its table's schema. A cross-schema enum reference (a `types`
+            // enum used by an `app` table) stays `SqlType::Raw` (the `format_type` string is already the
+            // schema-qualified `types.mood`, which renders verbatim and round-trips correctly).
+            let ty = if typtype == "e" && type_schema == table_ref.schema {
                 SqlType::Enum(row.get(9))
             } else {
                 sql_type(&db_type)

@@ -1,6 +1,6 @@
 use squealy_model::{
     ChangeRisk, CheckModel, ColumnModel, Constraint, DatabaseDiffChange, DatabaseModel,
-    DefaultValue, DiffPolicy, ExprNode, ForeignKeyAction, ForeignKeyModel, IndexModel,
+    DefaultValue, DiffPolicy, EnumModel, ExprNode, ForeignKeyAction, ForeignKeyModel, IndexModel,
     IndexPrefixLength, ProjectionItem, SchemaModel, SourceItem, SourceRef, SqlType,
     TableDiffChange, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
     check_diff_policy, diff_models,
@@ -358,6 +358,39 @@ fn constraint_prefix_length_order_does_not_diff() {
         diff_models(&ascending, &reversed).changes.is_empty(),
         "reordered prefix lengths must not diff: {:?}",
         diff_models(&ascending, &reversed).changes
+    );
+}
+
+#[test]
+fn replacing_a_table_with_a_same_named_enum_drops_the_table_first() {
+    // PostgreSQL creates a composite type per table, so an enum named `status` collides with a table
+    // `status`. Replacing the table with the enum must drop the table before creating the type.
+    let actual = model_with_tables("app", vec![table("status")]);
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "status".to_owned(),
+                labels: vec!["open".to_owned(), "closed".to_owned()],
+            }],
+        }],
+    };
+    let changes = diff_models(&desired, &actual).changes;
+    let drop_at = changes
+        .iter()
+        .position(
+            |c| matches!(c, DatabaseDiffChange::DropTable { table, .. } if table.name == "status"),
+        )
+        .expect("the table drop must be present");
+    let create_at = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::CreateEnum { enum_type, .. } if enum_type.name == "status"))
+        .expect("the enum create must be present");
+    assert!(
+        drop_at < create_at,
+        "the same-named table must be dropped before the enum is created: {changes:?}"
     );
 }
 

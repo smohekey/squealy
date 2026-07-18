@@ -318,6 +318,21 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     // table work → create views → drop enums → drop schemas.
     let (enum_creates, enum_drops) = diff_enums_global(desired, actual);
 
+    // PostgreSQL auto-creates a composite type for every table/view, so an enum sharing a name with a
+    // relation collides. When a relation is *replaced* by a same-named enum (or vice versa), the old
+    // object must be dropped before the new one is created. So a `CreateEnum` whose name is a dropped
+    // relation is deferred until *after* the table phase, and a `DropEnum` whose name is a created
+    // relation is hoisted to *before* it. Non-colliding enums keep their normal early-create/late-drop
+    // ordering. (These sets are usually empty — reusing a name across object kinds is rare.)
+    let dropped_relations = removed_relation_keys(&desired_schemas, actual);
+    let created_relations = removed_relation_keys(&actual_schemas, desired);
+    let (early_enum_creates, late_enum_creates): (Vec<_>, Vec<_>) = enum_creates
+        .into_iter()
+        .partition(|change| !enum_change_collides(change, &dropped_relations));
+    let (early_enum_drops, late_enum_drops): (Vec<_>, Vec<_>) = enum_drops
+        .into_iter()
+        .partition(|change| enum_change_collides(change, &created_relations));
+
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
         if let (Some(desired_schema), None) = (
             desired_schemas.get(&schema_key),
@@ -329,7 +344,9 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
         }
     }
 
-    changes.extend(enum_creates);
+    changes.extend(early_enum_creates);
+    // A `DropEnum` colliding with a to-be-created relation must precede the table phase that creates it.
+    changes.extend(early_enum_drops);
     changes.extend(view_drops);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
@@ -365,7 +382,9 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     }
 
     changes.extend(view_creates);
-    changes.extend(enum_drops);
+    // A `CreateEnum` colliding with a just-dropped relation goes here, after the table phase dropped it.
+    changes.extend(late_enum_creates);
+    changes.extend(late_enum_drops);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
         if let (None, Some(actual_schema)) = (
@@ -402,7 +421,11 @@ fn diff_enums_global(
                 enum_type: (*desired_enum).clone(),
             }),
             Some(actual_enum) if actual_enum.labels != desired_enum.labels => {
-                let additive = desired_enum.labels.starts_with(&actual_enum.labels);
+                // A change is additive when every existing label is preserved in order — i.e. the actual
+                // labels are an ordered *subsequence* of the desired ones (PostgreSQL can insert a value
+                // anywhere with `ALTER TYPE ... ADD VALUE ... BEFORE/AFTER`, so a mid-list insertion is
+                // still non-destructive). A removal or reorder breaks the subsequence and is destructive.
+                let additive = is_ordered_subsequence(&actual_enum.labels, &desired_enum.labels);
                 creates.push(DatabaseDiffChange::AlterEnum {
                     schema: key.0.clone(),
                     before: (*actual_enum).clone(),
@@ -422,6 +445,57 @@ fn diff_enums_global(
         }
     }
     (creates, drops)
+}
+
+/// The `(schema, relation-name)` keys of every table and view in `model` that is absent from `present`
+/// (keyed schemas of the *other* side) — i.e. the relations being dropped (or created, with the sides
+/// swapped). Used to detect an enum that shares a name with a relation being replaced.
+fn removed_relation_keys(
+    present: &BTreeMap<Option<String>, &SchemaModel>,
+    model: &DatabaseModel,
+) -> BTreeSet<(Option<String>, String)> {
+    let mut keys = BTreeSet::new();
+    for schema in &model.schemas {
+        let counterpart = present.get(&schema.name);
+        for name in schema
+            .tables
+            .iter()
+            .map(|table| &table.name)
+            .chain(schema.views.iter().map(|view| &view.name))
+        {
+            let still_present = counterpart.is_some_and(|other| {
+                other.tables.iter().any(|table| table.name == *name)
+                    || other.views.iter().any(|view| view.name == *name)
+            });
+            if !still_present {
+                keys.insert((schema.name.clone(), name.clone()));
+            }
+        }
+    }
+    keys
+}
+
+/// Whether a `CreateEnum`/`DropEnum` change's `(schema, name)` is in `relations`.
+fn enum_change_collides(
+    change: &DatabaseDiffChange,
+    relations: &BTreeSet<(Option<String>, String)>,
+) -> bool {
+    match change {
+        DatabaseDiffChange::CreateEnum { schema, enum_type }
+        | DatabaseDiffChange::DropEnum { schema, enum_type } => {
+            relations.contains(&(schema.clone(), enum_type.name.clone()))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `subset` appears as an ordered subsequence of `sequence` (every element of `subset` occurs
+/// in `sequence`, in the same relative order).
+fn is_ordered_subsequence(subset: &[String], sequence: &[String]) -> bool {
+    let mut iter = sequence.iter();
+    subset
+        .iter()
+        .all(|item| iter.any(|candidate| candidate == item))
 }
 
 /// Keys every enum in the model by `(schema, name)`.
