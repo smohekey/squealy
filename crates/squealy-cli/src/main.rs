@@ -1101,6 +1101,18 @@ fn describe_plan_step(step: &DatabasePlanStep) -> String {
         DatabasePlanStep::AlterEnum { schema, after, .. } => {
             format!("alter enum {}", qualified(schema, &after.name))
         }
+        DatabasePlanStep::CreateSequence { schema, sequence } => {
+            format!("create sequence {}", qualified(schema, &sequence.name))
+        }
+        DatabasePlanStep::DropSequence { schema, sequence } => {
+            format!("drop sequence {}", qualified(schema, &sequence.name))
+        }
+        DatabasePlanStep::AlterSequence { schema, after, .. } => {
+            format!("alter sequence {}", qualified(schema, &after.name))
+        }
+        DatabasePlanStep::SetSequenceOwner { schema, name, .. } => {
+            format!("set owner of sequence {}", qualified(schema, name))
+        }
     }
 }
 
@@ -1491,6 +1503,18 @@ fn database_diff_change_json(change: &DatabaseDiffChange) -> serde_json::Value {
         DatabaseDiffChange::AlterEnum { schema, after, .. } => {
             enum_change_json("alter", risk, schema, after)
         }
+        DatabaseDiffChange::CreateSequence { schema, sequence } => {
+            sequence_change_json("create", risk, schema, &sequence.name)
+        }
+        DatabaseDiffChange::DropSequence { schema, sequence } => {
+            sequence_change_json("drop", risk, schema, &sequence.name)
+        }
+        DatabaseDiffChange::AlterSequence { schema, after, .. } => {
+            sequence_change_json("alter", risk, schema, &after.name)
+        }
+        DatabaseDiffChange::SetSequenceOwner { schema, name, .. } => {
+            sequence_change_json("set_owner", risk, schema, name)
+        }
     }
 }
 
@@ -1507,6 +1531,22 @@ fn enum_change_json(
         "schema": schema,
         "enum": enum_type.name,
         "name": qualified(schema, &enum_type.name),
+    })
+}
+
+fn sequence_change_json(
+    action: &str,
+    risk: &str,
+    schema: &Option<String>,
+    name: &str,
+) -> serde_json::Value {
+    json!({
+        "kind": "sequence",
+        "action": action,
+        "risk": risk,
+        "schema": schema,
+        "sequence": name,
+        "name": qualified(schema, name),
     })
 }
 
@@ -1794,6 +1834,18 @@ fn print_diff(diff: &squealy_model::DatabaseDiff) {
             DatabaseDiffChange::AlterEnum { schema, after, .. } => {
                 println!("{risk} enum ~ {}", qualified(schema, &after.name));
             }
+            DatabaseDiffChange::CreateSequence { schema, sequence } => {
+                println!("{risk} sequence + {}", qualified(schema, &sequence.name));
+            }
+            DatabaseDiffChange::DropSequence { schema, sequence } => {
+                println!("{risk} sequence - {}", qualified(schema, &sequence.name));
+            }
+            DatabaseDiffChange::AlterSequence { schema, after, .. } => {
+                println!("{risk} sequence ~ {}", qualified(schema, &after.name));
+            }
+            DatabaseDiffChange::SetSequenceOwner { schema, name, .. } => {
+                println!("{risk} sequence owner ~ {}", qualified(schema, name));
+            }
         }
     }
 }
@@ -1911,6 +1963,18 @@ fn describe_diff_change(change: &DatabaseDiffChange) -> String {
         DatabaseDiffChange::AlterEnum { schema, after, .. } => {
             format!("alter enum {}", qualified(schema, &after.name))
         }
+        DatabaseDiffChange::CreateSequence { schema, sequence } => {
+            format!("create sequence {}", qualified(schema, &sequence.name))
+        }
+        DatabaseDiffChange::DropSequence { schema, sequence } => {
+            format!("drop sequence {}", qualified(schema, &sequence.name))
+        }
+        DatabaseDiffChange::AlterSequence { schema, after, .. } => {
+            format!("alter sequence {}", qualified(schema, &after.name))
+        }
+        DatabaseDiffChange::SetSequenceOwner { schema, name, .. } => {
+            format!("set owner of sequence {}", qualified(schema, name))
+        }
     }
 }
 
@@ -1995,6 +2059,7 @@ fn print_schema_capabilities(capabilities: SchemaCapabilities) {
         capabilities.indexes.prefix_lengths
     );
     println!("enums={}", capabilities.enums);
+    println!("sequences={}", capabilities.sequences);
 }
 
 impl BackendKind {

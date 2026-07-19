@@ -34,6 +34,18 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
             ),
         ));
     }
+    // SQLite has no sequence object; reject a model that declares one up front.
+    if let Some(sequence) = model
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.sequences)
+        .next()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("SQLite does not support the sequence `{}`", sequence.name),
+        ));
+    }
     // SQLite keeps tables, indexes and views in one database-wide object namespace (there are no
     // schemas), so once schemas are flattened every table, index and view name must be unique —
     // including a table name that matches an index or a view. A model that relies on schema/table
@@ -320,6 +332,27 @@ pub(crate) fn write_plan(
                         "SQLite does not support the user-defined enum type `{}`",
                         after.name
                     ),
+                ));
+            }
+            // SQLite has no sequence object. Reject on the incremental path (the create path rejects via
+            // capabilities), mirroring the enum handling above.
+            DatabasePlanStep::CreateSequence { sequence, .. }
+            | DatabasePlanStep::DropSequence { sequence, .. } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("SQLite does not support the sequence `{}`", sequence.name),
+                ));
+            }
+            DatabasePlanStep::AlterSequence { after, .. } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("SQLite does not support the sequence `{}`", after.name),
+                ));
+            }
+            DatabasePlanStep::SetSequenceOwner { name, .. } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("SQLite does not support the sequence `{name}`"),
                 ));
             }
         }

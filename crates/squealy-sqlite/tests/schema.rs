@@ -366,6 +366,7 @@ fn expected_introspected_model() -> DatabaseModel {
                 },
             ],
             enums: Vec::new(),
+            sequences: Vec::new(),
         }],
     }
 }
@@ -390,6 +391,7 @@ async fn round_trips_a_partial_index_predicate() {
             name: None,
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "docs".to_owned(),
                 comment: None,
@@ -473,6 +475,7 @@ async fn round_trips_bool_and_unsigned_defaults() {
             name: None,
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "flags".to_owned(),
                 comment: None,
@@ -550,12 +553,14 @@ async fn coalesces_flattened_schemas_on_replan() {
                 name: Some("app".to_owned()),
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![table("users")],
             },
             SchemaModel {
                 name: Some("archive".to_owned()),
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![table("logs")],
             },
         ],
@@ -638,6 +643,7 @@ async fn honors_schema_qualified_table_rename_refactor() {
             name: Some("app".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![table(table_name)],
         }],
     };
@@ -695,6 +701,7 @@ async fn round_trips_fixed_bytes_width() {
             name: None,
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "blobs".to_owned(),
                 comment: None,
@@ -809,6 +816,7 @@ async fn round_trips_an_explicit_ascending_index_direction() {
             name: None,
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "docs".to_owned(),
                 comment: None,
@@ -868,6 +876,7 @@ async fn round_trips_a_partial_descending_index_direction() {
             name: None,
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "docs".to_owned(),
                 comment: None,
@@ -919,6 +928,7 @@ async fn replans_empty_for_a_desired_model_with_only_empty_schemas() {
             name: Some("app".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: Vec::new(),
         }],
     };
@@ -1053,6 +1063,7 @@ async fn round_trips_a_table_check_constraint() {
             name: None,
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "accounts".to_owned(),
                 comment: None,
@@ -1123,6 +1134,7 @@ async fn round_trips_a_column_collation() {
             name: None,
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "people".to_owned(),
                 comment: None,

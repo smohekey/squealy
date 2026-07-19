@@ -25,6 +25,7 @@ async fn introspect_delegates_to_connection() {
             name: Some("app".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: Vec::new(),
         }],
     };

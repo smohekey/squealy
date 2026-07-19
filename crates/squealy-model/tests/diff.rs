@@ -1,9 +1,11 @@
+use squealy_model::DatabaseDiff;
 use squealy_model::{
     ChangeRisk, CheckModel, ColumnModel, Constraint, DatabaseDiffChange, DatabaseModel,
     DefaultValue, DiffPolicy, EnumModel, ExprNode, ForeignKeyAction, ForeignKeyModel, IndexModel,
-    IndexPrefixLength, ProjectionItem, SchemaModel, SourceItem, SourceRef, SqlType,
-    TableDiffChange, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
-    check_diff_policy, diff_models, reject_enum_relation_name_collision,
+    IndexPrefixLength, ProjectionItem, SchemaModel, SequenceDataType, SequenceModel,
+    SequenceOwnedBy, SourceItem, SourceRef, SqlType, TableDiffChange, TableModel, ViewBody,
+    ViewColumnModel, ViewModel, ViewQueryModel, check_diff_policy, diff_models,
+    reject_enum_relation_collision_in_diff, reject_enum_relation_name_collision,
 };
 
 #[test]
@@ -371,6 +373,7 @@ fn enum_only(schema: &str, name: &str) -> DatabaseModel {
                 name: name.to_owned(),
                 labels: vec!["open".to_owned()],
             }],
+            sequences: Vec::new(),
         }],
     }
 }
@@ -406,12 +409,308 @@ fn a_relation_and_an_enum_with_distinct_names_are_accepted() {
     assert!(reject_enum_relation_name_collision(&desired, &actual).is_ok());
 }
 
+fn bigint_sequence(name: &str, owned_by: Option<SequenceOwnedBy>) -> SequenceModel {
+    SequenceModel {
+        name: name.to_owned(),
+        data_type: SequenceDataType::BigInt,
+        start: 1,
+        increment: 1,
+        min: 1,
+        max: i64::MAX,
+        cache: 1,
+        cycle: false,
+        owned_by,
+    }
+}
+
+#[test]
+fn creating_an_owned_sequence_orders_create_before_table_and_owner_after() {
+    // A new sequence owned by a new table: the bare `CreateSequence` must precede the `CreateTable` (a
+    // column could `nextval` it), and the `SetSequenceOwner` must follow it (the owning column must
+    // exist).
+    let actual = DatabaseModel::default();
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![table("events")],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: vec![bigint_sequence(
+                "events_id_seq",
+                Some(SequenceOwnedBy {
+                    table: "events".to_owned(),
+                    column: "id".to_owned(),
+                }),
+            )],
+        }],
+    };
+    let changes = diff_models(&desired, &actual).changes;
+    let create_seq = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::CreateSequence { .. }))
+        .expect("a CreateSequence");
+    let create_table = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::CreateTable { .. }))
+        .expect("a CreateTable");
+    let set_owner = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::SetSequenceOwner { .. }))
+        .expect("a SetSequenceOwner");
+    assert!(
+        create_seq < create_table && create_table < set_owner,
+        "sequence created before table, owner set after: {changes:?}"
+    );
+}
+
+#[test]
+fn a_sequence_sharing_a_table_name_is_rejected() {
+    // A sequence and a table both live in PostgreSQL's per-schema pg_class namespace, so they cannot
+    // share a name; the collision guard must reject it (here, within a single desired model).
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![table("counter")],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: vec![bigint_sequence("counter", None)],
+        }],
+    };
+    let error = reject_enum_relation_name_collision(&desired, &DatabaseModel::default())
+        .expect_err("a sequence sharing a table name must be rejected");
+    assert_eq!(error.name, "counter");
+}
+
+fn named_index(name: &str) -> IndexModel {
+    IndexModel {
+        name: name.to_owned(),
+        columns: vec!["id".to_owned()],
+        expressions: Vec::new(),
+        include_columns: Vec::new(),
+        unique: false,
+        method: None,
+        directions: Vec::new(),
+        nulls: Vec::new(),
+        collations: Vec::new(),
+        operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
+        predicate: None,
+    }
+}
+
+#[test]
+fn precomputed_diff_rejects_a_sequence_colliding_with_an_altered_index() {
+    // The precomputed-diff guard must claim index names from `AlterIndex` (not only add/drop), so a
+    // caller cannot hand `plan_diff` a diff that alters index `counter` while creating a sequence
+    // `counter` — a plan PostgreSQL rejects over the shared pg_class namespace.
+    let diff = DatabaseDiff {
+        changes: vec![
+            DatabaseDiffChange::AlterTable {
+                schema: Some("app".to_owned()),
+                table: "events".to_owned(),
+                changes: vec![TableDiffChange::AlterIndex {
+                    before: named_index("counter"),
+                    after: named_index("counter"),
+                }],
+            },
+            DatabaseDiffChange::CreateSequence {
+                schema: Some("app".to_owned()),
+                sequence: bigint_sequence("counter", None),
+            },
+        ],
+    };
+    let error = reject_enum_relation_collision_in_diff(&diff)
+        .expect_err("a sequence colliding with an altered index must be rejected");
+    assert_eq!(error.name, "counter");
+}
+
+#[test]
+fn a_sequence_sharing_an_index_name_is_rejected() {
+    // A sequence and an index both occupy PostgreSQL's per-schema pg_class namespace (verified on PG 17),
+    // so they cannot share a name.
+    let mut indexed = table("events");
+    indexed.indexes = vec![IndexModel {
+        name: "counter".to_owned(),
+        columns: vec!["id".to_owned()],
+        expressions: Vec::new(),
+        include_columns: Vec::new(),
+        unique: false,
+        method: None,
+        directions: Vec::new(),
+        nulls: Vec::new(),
+        collations: Vec::new(),
+        operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
+        predicate: None,
+    }];
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![indexed],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: vec![bigint_sequence("counter", None)],
+        }],
+    };
+    let error = reject_enum_relation_name_collision(&desired, &DatabaseModel::default())
+        .expect_err("a sequence sharing an index name must be rejected");
+    assert_eq!(error.name, "counter");
+}
+
+#[test]
+fn a_sequence_sharing_an_enum_name_is_rejected() {
+    // A sequence owns an associated pg_type, which collides with an enum of the same name (verified: PG 17
+    // reports "a relation has an associated type of the same name").
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "mood".to_owned(),
+                labels: vec!["ok".to_owned()],
+            }],
+            sequences: vec![bigint_sequence("mood", None)],
+        }],
+    };
+    let error = reject_enum_relation_name_collision(&desired, &DatabaseModel::default())
+        .expect_err("a sequence sharing an enum name must be rejected");
+    assert_eq!(error.name, "mood");
+}
+
+#[test]
+fn an_enum_and_a_same_named_index_are_accepted() {
+    // An index has no associated pg_type, so it does *not* collide with an enum of the same name (verified
+    // on PG 17). The guard must not over-reject this valid pairing.
+    let mut indexed = table("events");
+    indexed.indexes = vec![IndexModel {
+        name: "mood".to_owned(),
+        columns: vec!["id".to_owned()],
+        expressions: Vec::new(),
+        include_columns: Vec::new(),
+        unique: false,
+        method: None,
+        directions: Vec::new(),
+        nulls: Vec::new(),
+        collations: Vec::new(),
+        operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
+        predicate: None,
+    }];
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![indexed],
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "mood".to_owned(),
+                labels: vec!["ok".to_owned()],
+            }],
+            sequences: Vec::new(),
+        }],
+    };
+    assert!(
+        reject_enum_relation_name_collision(&desired, &DatabaseModel::default()).is_ok(),
+        "an enum and a same-named index must be accepted"
+    );
+}
+
+#[test]
+fn dropping_an_owned_sequence_detaches_it_before_the_table_drop() {
+    // A sequence OWNED BY a table being dropped would be cascade-dropped by PostgreSQL, making the
+    // explicit DropSequence fail. The diff must detach it (SetSequenceOwner -> NONE) before the table
+    // work and drop it after.
+    let owned = |()| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![table("events")],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: vec![bigint_sequence(
+                "events_id_seq",
+                Some(SequenceOwnedBy {
+                    table: "events".to_owned(),
+                    column: "id".to_owned(),
+                }),
+            )],
+        }],
+    };
+    let actual = owned(());
+    let desired = DatabaseModel::default();
+    let changes = diff_models(&desired, &actual).changes;
+    let detach = changes
+        .iter()
+        .position(|c| {
+            matches!(c, DatabaseDiffChange::SetSequenceOwner { owned_by, .. } if owned_by.is_none())
+        })
+        .expect("a detach SetSequenceOwner -> NONE");
+    let drop_table = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::DropTable { .. }))
+        .expect("a DropTable");
+    let drop_seq = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::DropSequence { .. }))
+        .expect("a DropSequence");
+    assert!(
+        detach < drop_table && drop_table < drop_seq,
+        "detach before the table drop, drop the sequence after: {changes:?}"
+    );
+}
+
+#[test]
+fn an_unchanged_sequence_produces_no_diff() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: vec![bigint_sequence("s", None)],
+        }],
+    };
+    assert!(
+        diff_models(&model, &model).changes.is_empty(),
+        "an identical sequence must not diff"
+    );
+}
+
+#[test]
+fn changing_a_sequence_attribute_is_an_alter_not_a_recreate() {
+    let base = |increment: i64| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: vec![SequenceModel {
+                increment,
+                ..bigint_sequence("s", None)
+            }],
+        }],
+    };
+    let changes = diff_models(&base(2), &base(1)).changes;
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c, DatabaseDiffChange::AlterSequence { .. })),
+        "an attribute change is an AlterSequence: {changes:?}"
+    );
+    assert!(
+        !changes
+            .iter()
+            .any(|c| matches!(c, DatabaseDiffChange::DropSequence { .. })),
+        "an attribute change must not drop the sequence: {changes:?}"
+    );
+}
+
 fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some(schema.to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables,
         }],
     }
@@ -507,6 +806,7 @@ fn schema_with(name: &str, tables: Vec<TableModel>, views: Vec<ViewModel>) -> Da
             tables,
             views,
             enums: Vec::new(),
+            sequences: Vec::new(),
         }],
     }
 }

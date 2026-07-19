@@ -177,6 +177,8 @@ impl SchemaBackend for Mysql {
             },
             // MySQL has inline column `ENUM(...)` but no standalone `CREATE TYPE` object.
             enums: false,
+            // MySQL has no standalone sequence object (`AUTO_INCREMENT` only).
+            sequences: false,
         }
     }
 

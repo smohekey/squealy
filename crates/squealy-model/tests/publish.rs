@@ -376,6 +376,7 @@ fn fixed_bytes_width_model(width: u32) -> DatabaseModel {
             name: Some("publish_demo_fixedbytes".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "keys".to_owned(),
                 comment: None,
@@ -406,6 +407,7 @@ fn alter_column_baseline_model() -> DatabaseModel {
             name: Some("publish_demo_alter".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,
@@ -449,6 +451,7 @@ fn alter_column_desired_model() -> DatabaseModel {
             name: Some("publish_demo_alter".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,
@@ -492,6 +495,7 @@ fn rich_model() -> DatabaseModel {
             name: Some("publish_demo_rich".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![
                 TableModel {
                     name: "memberships".to_owned(),

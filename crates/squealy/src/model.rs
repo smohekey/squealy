@@ -109,6 +109,9 @@ fn schema_from_dyn(schema: &(dyn DatabaseSchema + Sync)) -> SchemaModel {
         tables: schema.tables().map(table_from_dyn).collect(),
         views: schema.views().map(view_from_dyn).collect(),
         enums: Vec::new(),
+        // Sequences are not authored through the derive macros (they are introspected / KDL-authored),
+        // so a compile-time schema declares none.
+        sequences: Vec::new(),
     }
 }
 

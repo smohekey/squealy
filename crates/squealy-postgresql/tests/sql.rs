@@ -1704,6 +1704,7 @@ fn enum_model() -> DatabaseModel {
                 name: "mood".to_owned(),
                 labels: vec!["sad".to_owned(), "ok".to_owned(), "happy".to_owned()],
             }],
+            sequences: Vec::new(),
         }],
     }
 }
@@ -1746,6 +1747,152 @@ fn postgres_renders_enum_type_before_the_table_that_uses_it() {
 CREATE TYPE \"app\".\"mood\" AS ENUM ('sad', 'ok', 'happy');\n\
 CREATE TABLE \"app\".\"readings\" (\n  \"m\" \"app\".\"mood\" NOT NULL\n);"
     );
+}
+
+fn sequence(name: &str, owned_by: Option<SequenceOwnedBy>) -> SequenceModel {
+    SequenceModel {
+        name: name.to_owned(),
+        data_type: SequenceDataType::BigInt,
+        start: 1,
+        increment: 1,
+        min: 1,
+        max: i64::MAX,
+        cache: 1,
+        cycle: false,
+        owned_by,
+    }
+}
+
+fn sequence_model(sequences: Vec<SequenceModel>, tables: Vec<TableModel>) -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables,
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences,
+        }],
+    }
+}
+
+#[test]
+fn postgres_renders_a_standalone_sequence_with_all_attributes() {
+    let mut sql = Vec::new();
+    Postgres
+        .render_create(
+            &sequence_model(vec![sequence("counter", None)], Vec::new()),
+            &mut sql,
+        )
+        .unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // Every attribute renders explicitly so a published sequence re-plans to empty against pg_sequence.
+    assert_eq!(
+        sql,
+        "CREATE SCHEMA IF NOT EXISTS \"app\";\n\
+CREATE SEQUENCE \"app\".\"counter\" AS bigint INCREMENT BY 1 MINVALUE 1 \
+MAXVALUE 9223372036854775807 START WITH 1 CACHE 1 NO CYCLE;"
+    );
+}
+
+#[test]
+fn postgres_renders_an_owned_sequence_after_its_table() {
+    let counter = TableModel {
+        name: "events".to_owned(),
+        comment: None,
+        columns: vec![ColumnModel {
+            name: "id".to_owned(),
+            comment: None,
+            ty: SqlType::I64,
+            collation: None,
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+            on_update: None,
+        }],
+        primary_key: None,
+        foreign_keys: Vec::new(),
+        uniques: Vec::new(),
+        checks: Vec::new(),
+        indexes: Vec::new(),
+    };
+    let owned = sequence(
+        "events_id_seq",
+        Some(SequenceOwnedBy {
+            table: "events".to_owned(),
+            column: "id".to_owned(),
+        }),
+    );
+    let mut sql = Vec::new();
+    Postgres
+        .render_create(&sequence_model(vec![owned], vec![counter]), &mut sql)
+        .unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // The bare CREATE SEQUENCE precedes the table (a column default could nextval it); the OWNED BY is a
+    // separate ALTER SEQUENCE after the table exists.
+    let create_seq = sql.find("CREATE SEQUENCE").expect("a CREATE SEQUENCE");
+    let create_table = sql.find("CREATE TABLE").expect("a CREATE TABLE");
+    let owned_by = sql
+        .find("ALTER SEQUENCE \"app\".\"events_id_seq\" OWNED BY \"app\".\"events\".\"id\"")
+        .expect("an OWNED BY alter");
+    assert!(
+        create_seq < create_table && create_table < owned_by,
+        "sequence created before table, owned after: {sql}"
+    );
+    assert!(
+        !sql[..create_table].contains("OWNED BY"),
+        "the CREATE SEQUENCE must not carry OWNED BY: {sql}"
+    );
+}
+
+#[test]
+fn postgres_renders_sequence_plan_steps() {
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::CreateSequence {
+                schema: Some("app".to_owned()),
+                sequence: sequence("s", None),
+            },
+            DatabasePlanStep::AlterSequence {
+                schema: Some("app".to_owned()),
+                before: sequence("s", None),
+                after: SequenceModel {
+                    increment: 2,
+                    ..sequence("s", None)
+                },
+            },
+            DatabasePlanStep::SetSequenceOwner {
+                schema: Some("app".to_owned()),
+                name: "s".to_owned(),
+                owned_by: None,
+            },
+            DatabasePlanStep::DropSequence {
+                schema: Some("app".to_owned()),
+                sequence: sequence("old", None),
+            },
+        ],
+    };
+    let mut sql = Vec::new();
+    Postgres
+        .render_plan(&plan, &DatabaseModel::default(), &mut sql)
+        .unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains("CREATE SEQUENCE \"app\".\"s\" AS bigint INCREMENT BY 1"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("ALTER SEQUENCE \"app\".\"s\" AS bigint INCREMENT BY 2"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("ALTER SEQUENCE \"app\".\"s\" OWNED BY NONE"),
+        "{sql}"
+    );
+    assert!(sql.contains("DROP SEQUENCE \"app\".\"old\""), "{sql}");
 }
 
 #[test]
@@ -2193,6 +2340,7 @@ fn postgres_renders_table_and_column_comments() {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: Some("Tenant records".to_owned()),
@@ -2290,6 +2438,7 @@ fn postgres_renders_foreign_key_match_type() {
                     indexes: Vec::new(),
                 },
             ],
+            sequences: Vec::new(),
         }],
     };
 
@@ -2316,6 +2465,7 @@ fn postgres_renders_partial_indexes() {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -2377,6 +2527,7 @@ fn postgres_renders_expression_indexes() {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2440,6 +2591,7 @@ fn postgres_renders_raw_expression_index_verbatim() {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2495,6 +2647,7 @@ fn postgres_renders_covering_indexes() {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -2563,6 +2716,7 @@ fn postgres_renders_index_null_ordering() {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -2618,6 +2772,7 @@ fn postgres_renders_index_operator_classes() {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2676,6 +2831,7 @@ fn postgres_renders_index_collations() {
             name: Some("catalog".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2944,6 +3100,7 @@ fn postgres_renders_views_in_dependency_order() {
                 ),
             ],
             enums: Vec::new(),
+            sequences: Vec::new(),
         }],
     };
 
@@ -3341,6 +3498,7 @@ fn postgres_renders_view_expression_ir_in_its_dialect() {
                 })),
             }],
             enums: Vec::new(),
+            sequences: Vec::new(),
         }],
     };
 
@@ -3502,6 +3660,7 @@ fn postgres_view_order_by_keeps_nulls_modifier() {
                 })),
             }],
             enums: Vec::new(),
+            sequences: Vec::new(),
         }],
     };
 
@@ -3534,6 +3693,7 @@ fn postgres_render_rejects_empty_view_body() {
                 query: ViewBody::default(),
             }],
             enums: Vec::new(),
+            sequences: Vec::new(),
         }],
     };
 
@@ -4061,6 +4221,7 @@ fn postgres_rejects_index_column_prefix_lengths() {
             name: Some("public".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -4114,6 +4275,7 @@ fn postgres_rejects_on_update_current_timestamp() {
             name: Some("public".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,

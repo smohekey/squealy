@@ -803,6 +803,7 @@ async fn plan_from_database_canonicalizes_view_column_types() {
             tables: Vec::new(),
             views: vec![view],
             enums: Vec::new(),
+            sequences: Vec::new(),
         }],
     };
     let mut connection = TestConnection {
@@ -1161,6 +1162,7 @@ fn plan_diff_rejects_a_relation_enum_swap_from_a_precomputed_diff() {
                 name: "status".to_owned(),
                 labels: vec!["open".to_owned()],
             }],
+            sequences: Vec::new(),
         }],
     };
     let diff = diff_models(&desired, &actual);
@@ -1178,6 +1180,7 @@ fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {
             name: Some(schema.to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables,
         }],
     }
