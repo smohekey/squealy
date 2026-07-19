@@ -277,6 +277,7 @@ pub fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
         uniques,
         checks,
         indexes,
+        exclusions: Vec::new(),
     }
 }
 

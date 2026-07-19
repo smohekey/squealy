@@ -58,6 +58,22 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
             format!("SQLite does not support the domain `{}`", domain.name),
         ));
     }
+    // SQLite has no exclusion constraint; reject a model that declares one up front.
+    if let Some(exclusion) = model
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.tables)
+        .flat_map(|table| &table.exclusions)
+        .next()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite does not support the exclusion constraint `{}`",
+                exclusion.name
+            ),
+        ));
+    }
     // SQLite keeps tables, indexes and views in one database-wide object namespace (there are no
     // schemas), so once schemas are flattened every table, index and view name must be unique —
     // including a table name that matches an index or a view. A model that relies on schema/table
@@ -637,7 +653,12 @@ fn change_needs_rebuild(change: &TablePlanStep) -> bool {
         | TablePlanStep::AlterForeignKey { .. }
         | TablePlanStep::AddCheck { .. }
         | TablePlanStep::DropCheck { .. }
-        | TablePlanStep::AlterCheck { .. } => true,
+        | TablePlanStep::AlterCheck { .. }
+        // SQLite has no exclusion constraint; a model carrying one is rejected up front, so these never
+        // reach a valid plan. Classify as a rebuild for match exhaustiveness.
+        | TablePlanStep::AddExclusion { .. }
+        | TablePlanStep::DropExclusion { .. }
+        | TablePlanStep::AlterExclusion { .. } => true,
     }
 }
 

@@ -2,12 +2,106 @@ use squealy_model::DatabaseDiff;
 use squealy_model::DomainModel;
 use squealy_model::{
     ChangeRisk, CheckModel, ColumnModel, Constraint, DatabaseDiffChange, DatabaseModel,
-    DefaultValue, DiffPolicy, EnumModel, ExprNode, ForeignKeyAction, ForeignKeyModel, IndexModel,
-    IndexPrefixLength, ProjectionItem, SchemaModel, SequenceDataType, SequenceModel,
-    SequenceOwnedBy, SourceItem, SourceRef, SqlType, TableDiffChange, TableModel, ViewBody,
-    ViewColumnModel, ViewModel, ViewQueryModel, check_diff_policy, diff_models,
-    reject_enum_relation_collision_in_diff, reject_enum_relation_name_collision,
+    DefaultValue, DiffPolicy, EnumModel, ExclusionElement, ExclusionModel, ExclusionTerm, ExprNode,
+    ForeignKeyAction, ForeignKeyModel, IndexMethod, IndexModel, IndexPrefixLength, ProjectionItem,
+    SchemaModel, SequenceDataType, SequenceModel, SequenceOwnedBy, SourceItem, SourceRef, SqlType,
+    TableDiffChange, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
+    check_diff_policy, diff_models, reject_enum_relation_collision_in_diff,
+    reject_enum_relation_name_collision,
 };
+
+fn range_exclusion(name: &str) -> ExclusionModel {
+    ExclusionModel {
+        name: name.to_owned(),
+        method: Some(IndexMethod::Gist),
+        elements: vec![ExclusionElement {
+            term: ExclusionTerm::Column("during".to_owned()),
+            operator: "&&".to_owned(),
+            operator_class: None,
+            collation: None,
+            direction: None,
+            nulls: None,
+        }],
+        predicate: None,
+        deferrability: None,
+    }
+}
+
+fn plain_index(name: &str) -> IndexModel {
+    IndexModel {
+        name: name.to_owned(),
+        columns: vec!["id".to_owned()],
+        expressions: Vec::new(),
+        include_columns: Vec::new(),
+        unique: false,
+        method: None,
+        directions: Vec::new(),
+        nulls: Vec::new(),
+        collations: Vec::new(),
+        operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
+        predicate: None,
+    }
+}
+
+#[test]
+fn an_exclusion_and_a_same_named_index_swap_is_rejected() {
+    // An exclusion owns a `pg_class` index, so replacing it with a plain index of the same name in one
+    // migration cannot be ordered (the new index is created before the old exclusion's index is dropped).
+    // The guard must reject it up front rather than emit a plan PostgreSQL aborts with "already exists".
+    let mut actual_table = table("events");
+    actual_table.exclusions = vec![range_exclusion("evt_key")];
+    let actual = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![actual_table],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: Vec::new(),
+        }],
+    };
+    let mut desired_table = table("events");
+    desired_table.indexes = vec![plain_index("evt_key")];
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![desired_table],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: Vec::new(),
+        }],
+    };
+    let error = reject_enum_relation_name_collision(&desired, &actual)
+        .expect_err("an exclusion↔same-name-index swap must be rejected");
+    assert_eq!(error.name, "evt_key");
+}
+
+#[test]
+fn an_exclusion_and_a_same_named_enum_are_accepted() {
+    // An exclusion is backed only by an index (no `pg_type`), so — like a plain index — it does not
+    // collide with an enum of the same name. The guard must not over-reject this valid pairing.
+    let mut excluded = table("events");
+    excluded.exclusions = vec![range_exclusion("mood")];
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![excluded],
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "mood".to_owned(),
+                labels: vec!["ok".to_owned()],
+            }],
+            sequences: Vec::new(),
+            domains: Vec::new(),
+        }],
+    };
+    assert!(
+        reject_enum_relation_name_collision(&desired, &DatabaseModel::default()).is_ok(),
+        "an exclusion and a same-named enum must be accepted"
+    );
+}
 
 #[test]
 fn reordered_domain_checks_do_not_diff() {
@@ -813,6 +907,7 @@ fn table(name: &str) -> TableModel {
         uniques: vec![],
         checks: vec![],
         indexes: vec![],
+        exclusions: Vec::new(),
     }
 }
 

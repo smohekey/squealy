@@ -317,6 +317,7 @@ fn expected_introspected_model() -> DatabaseModel {
                     uniques: Vec::new(),
                     checks: Vec::new(),
                     indexes: Vec::new(),
+                    exclusions: Vec::new(),
                 },
                 TableModel {
                     name: "repositorys".to_owned(),
@@ -348,6 +349,7 @@ fn expected_introspected_model() -> DatabaseModel {
                         prefix_lengths: Vec::new(),
                         predicate: None,
                     }],
+                    exclusions: Vec::new(),
                 },
                 TableModel {
                     name: "users".to_owned(),
@@ -363,6 +365,7 @@ fn expected_introspected_model() -> DatabaseModel {
                     uniques: Vec::new(),
                     checks: Vec::new(),
                     indexes: Vec::new(),
+                    exclusions: Vec::new(),
                 },
             ],
             enums: Vec::new(),
@@ -424,6 +427,7 @@ async fn round_trips_a_partial_index_predicate() {
                         }),
                     })),
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -507,6 +511,7 @@ async fn round_trips_bool_and_unsigned_defaults() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -549,6 +554,7 @@ async fn coalesces_flattened_schemas_on_replan() {
         uniques: Vec::new(),
         checks: Vec::new(),
         indexes: Vec::new(),
+        exclusions: Vec::new(),
     };
     let model = DatabaseModel {
         schemas: vec![
@@ -642,6 +648,7 @@ async fn honors_schema_qualified_table_rename_refactor() {
         uniques: Vec::new(),
         checks: Vec::new(),
         indexes: Vec::new(),
+        exclusions: Vec::new(),
     };
     let model = |table_name: &str| DatabaseModel {
         schemas: vec![SchemaModel {
@@ -728,6 +735,7 @@ async fn round_trips_fixed_bytes_width() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -844,6 +852,7 @@ async fn round_trips_an_explicit_ascending_index_direction() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: vec![index],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -908,6 +917,7 @@ async fn round_trips_a_partial_descending_index_direction() {
                     prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -1099,6 +1109,7 @@ async fn round_trips_a_table_check_constraint() {
                     enforcement: None,
                 }],
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -1166,6 +1177,7 @@ async fn round_trips_a_column_collation() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     };

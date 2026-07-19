@@ -57,6 +57,7 @@ fn table(name: &str, columns: Vec<ColumnModel>) -> TableModel {
         uniques: Vec::new(),
         checks: Vec::new(),
         indexes: Vec::new(),
+        exclusions: Vec::new(),
     }
 }
 

@@ -355,6 +355,7 @@ fn clause_alias_mysql_model() -> DatabaseModel {
                 uniques: vec![],
                 checks: vec![],
                 indexes: vec![],
+                exclusions: Vec::new(),
             }],
             views: vec![ViewModel {
                 name: "ca_v".to_owned(),
@@ -470,6 +471,7 @@ fn alter_column_baseline_model() -> DatabaseModel {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     }
@@ -515,6 +517,7 @@ fn alter_column_desired_model() -> DatabaseModel {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     }
@@ -694,6 +697,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                     prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             },
             TableModel {
                 name: "widgets".to_owned(),
@@ -748,6 +752,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                 }],
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             },
         ],
         enums: Vec::new(),
@@ -886,6 +891,7 @@ fn rich_mysql_model() -> DatabaseModel {
                         prefix_lengths: Vec::new(),
                         predicate: None,
                     }],
+                    exclusions: Vec::new(),
                 },
                 TableModel {
                     name: "tenants".to_owned(),
@@ -954,6 +960,7 @@ fn rich_mysql_model() -> DatabaseModel {
                     }],
                     checks: Vec::new(),
                     indexes: Vec::new(),
+                    exclusions: Vec::new(),
                 },
             ],
         }],
@@ -1089,6 +1096,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                     prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             },
             TableModel {
                 name: "tenants".to_owned(),
@@ -1157,6 +1165,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
                 }],
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             },
         ],
     }
@@ -1213,6 +1222,7 @@ fn timestamp_precision_model(precision: Option<u8>) -> DatabaseModel {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     }
@@ -1276,6 +1286,7 @@ fn decimal_cast_check_model(scale: u32) -> DatabaseModel {
                     enforcement: None,
                 }],
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     }
@@ -1313,6 +1324,7 @@ fn enforcement_check_model(enforcement: Option<ConstraintEnforcement>) -> Databa
                     enforcement,
                 }],
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     }

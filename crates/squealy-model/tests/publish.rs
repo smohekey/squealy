@@ -397,6 +397,7 @@ fn fixed_bytes_width_model(width: u32) -> DatabaseModel {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     }
@@ -442,6 +443,7 @@ fn alter_column_baseline_model() -> DatabaseModel {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     }
@@ -487,6 +489,7 @@ fn alter_column_desired_model() -> DatabaseModel {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     }
@@ -604,6 +607,7 @@ fn rich_model() -> DatabaseModel {
                             right: Box::new(squealy::ExprNode::Literal("0".to_owned())),
                         })),
                     }],
+                    exclusions: Vec::new(),
                 },
                 TableModel {
                     name: "tenants".to_owned(),
@@ -734,6 +738,7 @@ fn rich_model() -> DatabaseModel {
                             predicate: None,
                         },
                     ],
+                    exclusions: Vec::new(),
                 },
             ],
         }],

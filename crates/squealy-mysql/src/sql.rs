@@ -58,6 +58,23 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
         ));
     }
 
+    // MySQL has no exclusion constraint; reject a model that declares one up front.
+    if let Some(exclusion) = model
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.tables)
+        .flat_map(|table| &table.exclusions)
+        .next()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "MySQL does not support the exclusion constraint `{}`",
+                exclusion.name
+            ),
+        ));
+    }
+
     for schema in &model.schemas {
         if let Some(name) = schema.name.as_deref() {
             statement(writer, &mut first)?;
@@ -470,6 +487,26 @@ fn write_table_plan_step(
             write_qualified_name(schema, table, writer)?;
             statement(writer, first)?;
             write_create_index(schema, table, after, writer)?;
+        }
+        // MySQL has no exclusion constraint. Reject on the incremental path (the create path rejects via
+        // capabilities), mirroring the enum/sequence/domain handling.
+        TablePlanStep::AddExclusion { exclusion } | TablePlanStep::DropExclusion { exclusion } => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "MySQL does not support the exclusion constraint `{}`",
+                    exclusion.name
+                ),
+            ));
+        }
+        TablePlanStep::AlterExclusion { after, .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "MySQL does not support the exclusion constraint `{}`",
+                    after.name
+                ),
+            ));
         }
         // MySQL has no `USING` cast clause; `MODIFY COLUMN` performs the conversion implicitly, so
         // any `type_cast` hint is ignored here.
@@ -1593,6 +1630,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![],
                     indexes: vec![],
+                    exclusions: Vec::new(),
                 }],
             }],
         };
