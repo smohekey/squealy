@@ -1503,6 +1503,7 @@ fn database_diff_change_json(change: &DatabaseDiffChange) -> serde_json::Value {
                 "risk": risk,
                 "schema": schema,
                 "view": view.name,
+                "materialized": view.materialized,
                 "name": qualified(schema, &view.name),
             })
         }
@@ -1513,6 +1514,7 @@ fn database_diff_change_json(change: &DatabaseDiffChange) -> serde_json::Value {
                 "risk": risk,
                 "schema": schema,
                 "view": view.name,
+                "materialized": view.materialized,
                 "name": qualified(schema, &view.name),
             })
         }
@@ -1876,10 +1878,20 @@ fn print_diff(diff: &squealy_model::DatabaseDiff) {
                 }
             }
             DatabaseDiffChange::CreateView { schema, view } => {
-                println!("{risk} view + {}", qualified(schema, &view.name));
+                let kind = if view.materialized {
+                    "materialized view"
+                } else {
+                    "view"
+                };
+                println!("{risk} {kind} + {}", qualified(schema, &view.name));
             }
             DatabaseDiffChange::DropView { schema, view } => {
-                println!("{risk} view - {}", qualified(schema, &view.name));
+                let kind = if view.materialized {
+                    "materialized view"
+                } else {
+                    "view"
+                };
+                println!("{risk} {kind} - {}", qualified(schema, &view.name));
             }
             DatabaseDiffChange::CreateEnum { schema, enum_type } => {
                 println!("{risk} enum + {}", qualified(schema, &enum_type.name));
@@ -2023,10 +2035,20 @@ fn describe_diff_change(change: &DatabaseDiffChange) -> String {
             format!("alter table {}", qualified(schema, table))
         }
         DatabaseDiffChange::CreateView { schema, view } => {
-            format!("create view {}", qualified(schema, &view.name))
+            let kind = if view.materialized {
+                "materialized view"
+            } else {
+                "view"
+            };
+            format!("create {kind} {}", qualified(schema, &view.name))
         }
         DatabaseDiffChange::DropView { schema, view } => {
-            format!("drop view {}", qualified(schema, &view.name))
+            let kind = if view.materialized {
+                "materialized view"
+            } else {
+                "view"
+            };
+            format!("drop {kind} {}", qualified(schema, &view.name))
         }
         DatabaseDiffChange::CreateEnum { schema, enum_type } => {
             format!("create enum {}", qualified(schema, &enum_type.name))
