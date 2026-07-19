@@ -1256,6 +1256,50 @@ fn mysql_rejects_a_materialized_view() {
 }
 
 #[test]
+fn mysql_rejects_dropping_a_materialized_view() {
+    // A `DropView` for a materialized view can only reach the plan from an actual model that declared one
+    // (an offline package diff). MySQL must reject it, not emit an unsupported `DROP MATERIALIZED VIEW`.
+    let view = ViewModel {
+        name: "totals".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "n".to_owned(),
+            ty: SqlType::I64,
+            nullable: false,
+        }],
+        query: ViewBody::Select(Box::new(ViewQueryModel {
+            dependencies: Vec::new(),
+            distinct: false,
+            projection: vec![ProjectionItem {
+                output_name: "n".to_owned(),
+                internal_alias: None,
+                expr: ExprNode::Literal("1".to_owned()),
+            }],
+            from: None,
+            joins: Vec::new(),
+            filter: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        })),
+        materialized: true,
+    };
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::DropView {
+            schema: Some("shop".to_owned()),
+            view: Box::new(view),
+        }],
+    };
+    let error = Mysql
+        .render_plan(&plan, &DatabaseModel::default(), &mut Vec::new())
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("totals"), "{error}");
+}
+
+#[test]
 fn mysql_renders_check_constraint_not_enforced() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {

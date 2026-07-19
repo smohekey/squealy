@@ -253,6 +253,26 @@ pub(crate) fn write_plan(
     check_reserved_object_names(object_names())?;
     check_object_name_uniqueness(object_names())?;
 
+    // SQLite has no materialized views. One can only reach the plan through a package (an offline diff's
+    // desired or actual model), so reject any materialized view in a create OR drop step up front, before
+    // the view drop pre-pass would emit a plain `DROP VIEW` for it.
+    if let Some(view) = plan.steps.iter().find_map(|step| match step {
+        DatabasePlanStep::CreateView { view, .. } | DatabasePlanStep::DropView { view, .. }
+            if view.materialized =>
+        {
+            Some(view)
+        }
+        _ => None,
+    }) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite does not support the materialized view `{}`",
+                view.name
+            ),
+        ));
+    }
+
     let mut first = true;
 
     // Create the refactor bookkeeping table once, up front, if any rename in the plan carries a

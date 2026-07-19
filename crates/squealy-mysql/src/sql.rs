@@ -245,7 +245,18 @@ fn write_plan_step(
         }
         DatabasePlanStep::DropView { schema, view } => {
             statement(writer, first)?;
-            // MySQL has no materialized views (rejected up front), so this is always a plain `DROP VIEW`.
+            // MySQL has no materialized views. A `DropView` for one can only come from an actual model
+            // that declared it (e.g. an offline package diff), so reject it rather than emit an
+            // unsupported `DROP MATERIALIZED VIEW`.
+            if view.materialized {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "MySQL does not support the materialized view `{}`",
+                        view.name
+                    ),
+                ));
+            }
             squealy::render_drop_view(
                 schema.as_deref(),
                 &view.name,

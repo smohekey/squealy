@@ -2148,6 +2148,7 @@ fn print_schema_capabilities(capabilities: SchemaCapabilities) {
     println!("enums={}", capabilities.enums);
     println!("sequences={}", capabilities.sequences);
     println!("domains={}", capabilities.domains);
+    println!("materialized_views={}", capabilities.materialized_views);
 }
 
 impl BackendKind {

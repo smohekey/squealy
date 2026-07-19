@@ -118,6 +118,7 @@ fn postgres_capabilities_are_printed() {
     assert_capability(&stdout, "indexes.operator_classes=true");
     assert_capability(&stdout, "indexes.prefix_lengths=false");
     assert_capability(&stdout, "enums=true");
+    assert_capability(&stdout, "materialized_views=true");
 }
 
 #[test]
@@ -149,6 +150,7 @@ fn mysql_capabilities_are_printed() {
     assert_capability(&stdout, "indexes.operator_classes=false");
     assert_capability(&stdout, "indexes.prefix_lengths=true");
     assert_capability(&stdout, "enums=false");
+    assert_capability(&stdout, "materialized_views=false");
 }
 
 #[test]

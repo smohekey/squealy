@@ -416,6 +416,54 @@ fn sqlite_rejects_a_materialized_view() {
 }
 
 #[test]
+fn sqlite_rejects_dropping_a_materialized_view() {
+    use squealy::{
+        DatabaseModel, DatabasePlan, DatabasePlanStep, ExprNode, ProjectionItem, SqlType, ViewBody,
+        ViewColumnModel, ViewModel, ViewQueryModel,
+    };
+    // A `DropView` for a materialized view can only reach the plan from an actual model that declared one
+    // (an offline package diff). SQLite must reject it, not emit a plain `DROP VIEW` in the drop pre-pass.
+    let view = ViewModel {
+        name: "totals".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "n".to_owned(),
+            ty: SqlType::I64,
+            nullable: false,
+        }],
+        query: ViewBody::Select(Box::new(ViewQueryModel {
+            dependencies: Vec::new(),
+            distinct: false,
+            projection: vec![ProjectionItem {
+                output_name: "n".to_owned(),
+                internal_alias: None,
+                expr: ExprNode::Literal("1".to_owned()),
+            }],
+            from: None,
+            joins: Vec::new(),
+            filter: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        })),
+        materialized: true,
+    };
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::DropView {
+            schema: None,
+            view: Box::new(view),
+        }],
+    };
+    let error = Sqlite
+        .render_plan(&plan, &DatabaseModel::default(), &mut Vec::new())
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(error.to_string().contains("totals"), "{error}");
+}
+
+#[test]
 fn fixed_bytes_column_enforces_width_with_a_check() {
     // `BLOB` has no fixed width, so a `FixedBytes(N)` column carries a `CHECK (length("col") = N)` to
     // preserve the fixed-width invariant the core type and other backends enforce.
