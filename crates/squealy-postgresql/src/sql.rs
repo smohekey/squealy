@@ -278,7 +278,7 @@ pub(crate) mod ddl {
     use squealy::{
         CheckModel, ColumnModel, Constraint, ConstraintEnforcement, ConstraintValidation,
         DatabaseModel, DatabasePlan, DatabasePlanStep, DefaultValue, EnumModel, ForeignKeyModel,
-        IdentityMode, IndexModel, SqlType, TableModel, TablePlanStep,
+        IdentityMode, IndexModel, SequenceModel, SqlType, TableModel, TablePlanStep,
     };
 
     use super::{write_pg_sql_type, write_qualified_name, write_quoted_ident, write_quoted_text};
@@ -307,10 +307,35 @@ pub(crate) mod ddl {
             }
         }
 
+        // Sequences are created (without their `OWNED BY`) before any table, since a column default can
+        // `nextval` a sequence. The `OWNED BY` clause is applied after the tables exist, below.
+        for schema in &model.schemas {
+            for sequence in &schema.sequences {
+                statement(writer, &mut first)?;
+                write_create_sequence(schema.name.as_deref(), sequence, writer)?;
+            }
+        }
+
         for schema in &model.schemas {
             for table in &schema.tables {
                 statement(writer, &mut first)?;
                 write_create_table(schema.name.as_deref(), table, writer)?;
+            }
+        }
+
+        // Now that every table exists, tie each owned sequence to its column.
+        for schema in &model.schemas {
+            for sequence in &schema.sequences {
+                if sequence.owned_by.is_some() {
+                    statement(writer, &mut first)?;
+                    writer.write_all(b"ALTER SEQUENCE ")?;
+                    write_qualified_name(schema.name.as_deref(), &sequence.name, writer)?;
+                    write_sequence_owned_by(
+                        schema.name.as_deref(),
+                        sequence.owned_by.as_ref(),
+                        writer,
+                    )?;
+                }
             }
         }
 
@@ -521,6 +546,31 @@ pub(crate) mod ddl {
                         after.name
                     ),
                 ));
+            }
+            DatabasePlanStep::CreateSequence { schema, sequence } => {
+                statement(writer, first)?;
+                write_create_sequence(schema.as_deref(), sequence, writer)?;
+            }
+            DatabasePlanStep::AlterSequence { schema, after, .. } => {
+                statement(writer, first)?;
+                writer.write_all(b"ALTER SEQUENCE ")?;
+                write_qualified_name(schema.as_deref(), &after.name, writer)?;
+                write_sequence_attributes(after, writer)?;
+            }
+            DatabasePlanStep::SetSequenceOwner {
+                schema,
+                name,
+                owned_by,
+            } => {
+                statement(writer, first)?;
+                writer.write_all(b"ALTER SEQUENCE ")?;
+                write_qualified_name(schema.as_deref(), name, writer)?;
+                write_sequence_owned_by(schema.as_deref(), owned_by.as_ref(), writer)?;
+            }
+            DatabasePlanStep::DropSequence { schema, sequence } => {
+                statement(writer, first)?;
+                writer.write_all(b"DROP SEQUENCE ")?;
+                write_qualified_name(schema.as_deref(), &sequence.name, writer)?;
             }
         }
         Ok(())
@@ -1027,6 +1077,67 @@ pub(crate) mod ddl {
             write_quoted_text(label, writer)?;
         }
         writer.write_all(b")")
+    }
+
+    /// Renders `CREATE SEQUENCE <name> <attributes>` — without the `OWNED BY` clause, which is applied
+    /// separately once the owning column exists.
+    fn write_create_sequence(
+        schema: Option<&str>,
+        sequence: &SequenceModel,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        writer.write_all(b"CREATE SEQUENCE ")?;
+        write_qualified_name(schema, &sequence.name, writer)?;
+        write_sequence_attributes(sequence, writer)
+    }
+
+    /// Renders every sequence attribute explicitly (` AS <type> INCREMENT BY … MINVALUE … MAXVALUE …
+    /// START WITH … CACHE … [NO ]CYCLE`), so a published sequence re-plans to empty against the concrete
+    /// values `pg_sequence` reports. Shared by `CREATE SEQUENCE` and `ALTER SEQUENCE`.
+    fn write_sequence_attributes(
+        sequence: &SequenceModel,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        write!(
+            writer,
+            " AS {} INCREMENT BY {} MINVALUE {} MAXVALUE {} START WITH {} CACHE {}",
+            sequence_data_type_sql(sequence.data_type),
+            sequence.increment,
+            sequence.min,
+            sequence.max,
+            sequence.start,
+            sequence.cache,
+        )?;
+        writer.write_all(if sequence.cycle {
+            b" CYCLE"
+        } else {
+            b" NO CYCLE"
+        })
+    }
+
+    /// Renders ` OWNED BY <table>.<column>` (schema-qualified) or ` OWNED BY NONE`.
+    fn write_sequence_owned_by(
+        schema: Option<&str>,
+        owned_by: Option<&squealy::SequenceOwnedBy>,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        writer.write_all(b" OWNED BY ")?;
+        match owned_by {
+            Some(owner) => {
+                write_qualified_name(schema, &owner.table, writer)?;
+                writer.write_all(b".")?;
+                write_quoted_ident(&owner.column, writer)
+            }
+            None => writer.write_all(b"NONE"),
+        }
+    }
+
+    fn sequence_data_type_sql(data_type: squealy::SequenceDataType) -> &'static str {
+        match data_type {
+            squealy::SequenceDataType::SmallInt => "smallint",
+            squealy::SequenceDataType::Integer => "integer",
+            squealy::SequenceDataType::BigInt => "bigint",
+        }
     }
 
     fn write_create_table(
@@ -1674,6 +1785,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "people".to_owned(),
                     comment: None,

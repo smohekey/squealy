@@ -81,6 +81,7 @@ fn model(views: Vec<ViewModel>) -> DatabaseModel {
             tables: vec![users_table()],
             views,
             enums: Vec::new(),
+            sequences: Vec::new(),
         }],
     }
 }
@@ -281,6 +282,7 @@ fn cross_schema_dependent_is_dropped_and_recreated() {
             tables: Vec::new(),
             views,
             enums: Vec::new(),
+            sequences: Vec::new(),
         }
     }
 

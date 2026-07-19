@@ -1,9 +1,10 @@
 use squealy_model::{
     ChangeRisk, CheckModel, ColumnModel, Constraint, DatabaseDiffChange, DatabaseModel,
     DefaultValue, DiffPolicy, EnumModel, ExprNode, ForeignKeyAction, ForeignKeyModel, IndexModel,
-    IndexPrefixLength, ProjectionItem, SchemaModel, SourceItem, SourceRef, SqlType,
-    TableDiffChange, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
-    check_diff_policy, diff_models, reject_enum_relation_name_collision,
+    IndexPrefixLength, ProjectionItem, SchemaModel, SequenceDataType, SequenceModel,
+    SequenceOwnedBy, SourceItem, SourceRef, SqlType, TableDiffChange, TableModel, ViewBody,
+    ViewColumnModel, ViewModel, ViewQueryModel, check_diff_policy, diff_models,
+    reject_enum_relation_name_collision,
 };
 
 #[test]
@@ -371,6 +372,7 @@ fn enum_only(schema: &str, name: &str) -> DatabaseModel {
                 name: name.to_owned(),
                 labels: vec!["open".to_owned()],
             }],
+            sequences: Vec::new(),
         }],
     }
 }
@@ -406,12 +408,113 @@ fn a_relation_and_an_enum_with_distinct_names_are_accepted() {
     assert!(reject_enum_relation_name_collision(&desired, &actual).is_ok());
 }
 
+fn bigint_sequence(name: &str, owned_by: Option<SequenceOwnedBy>) -> SequenceModel {
+    SequenceModel {
+        name: name.to_owned(),
+        data_type: SequenceDataType::BigInt,
+        start: 1,
+        increment: 1,
+        min: 1,
+        max: i64::MAX,
+        cache: 1,
+        cycle: false,
+        owned_by,
+    }
+}
+
+#[test]
+fn creating_an_owned_sequence_orders_create_before_table_and_owner_after() {
+    // A new sequence owned by a new table: the bare `CreateSequence` must precede the `CreateTable` (a
+    // column could `nextval` it), and the `SetSequenceOwner` must follow it (the owning column must
+    // exist).
+    let actual = DatabaseModel::default();
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![table("events")],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: vec![bigint_sequence(
+                "events_id_seq",
+                Some(SequenceOwnedBy {
+                    table: "events".to_owned(),
+                    column: "id".to_owned(),
+                }),
+            )],
+        }],
+    };
+    let changes = diff_models(&desired, &actual).changes;
+    let create_seq = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::CreateSequence { .. }))
+        .expect("a CreateSequence");
+    let create_table = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::CreateTable { .. }))
+        .expect("a CreateTable");
+    let set_owner = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::SetSequenceOwner { .. }))
+        .expect("a SetSequenceOwner");
+    assert!(
+        create_seq < create_table && create_table < set_owner,
+        "sequence created before table, owner set after: {changes:?}"
+    );
+}
+
+#[test]
+fn an_unchanged_sequence_produces_no_diff() {
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: vec![bigint_sequence("s", None)],
+        }],
+    };
+    assert!(
+        diff_models(&model, &model).changes.is_empty(),
+        "an identical sequence must not diff"
+    );
+}
+
+#[test]
+fn changing_a_sequence_attribute_is_an_alter_not_a_recreate() {
+    let base = |increment: i64| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: vec![SequenceModel {
+                increment,
+                ..bigint_sequence("s", None)
+            }],
+        }],
+    };
+    let changes = diff_models(&base(2), &base(1)).changes;
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c, DatabaseDiffChange::AlterSequence { .. })),
+        "an attribute change is an AlterSequence: {changes:?}"
+    );
+    assert!(
+        !changes
+            .iter()
+            .any(|c| matches!(c, DatabaseDiffChange::DropSequence { .. })),
+        "an attribute change must not drop the sequence: {changes:?}"
+    );
+}
+
 fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {
     DatabaseModel {
         schemas: vec![SchemaModel {
             name: Some(schema.to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables,
         }],
     }
@@ -507,6 +610,7 @@ fn schema_with(name: &str, tables: Vec<TableModel>, views: Vec<ViewModel>) -> Da
             tables,
             views,
             enums: Vec::new(),
+            sequences: Vec::new(),
         }],
     }
 }

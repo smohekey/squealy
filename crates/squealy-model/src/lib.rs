@@ -43,8 +43,9 @@ pub use squealy::{
     IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
     IndexPrefixLength, LogicalOp, ProjectionItem, SchemaBackend, SchemaCapabilities, SchemaConnect,
     SchemaIntrospect, SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore,
-    SchemaPublishRecord, SchemaRefactorStore, SourceItem, SourceRef, SqlType, TableModel,
-    TablePlanStep, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
+    SchemaPublishRecord, SchemaRefactorStore, SequenceDataType, SequenceModel, SequenceOwnedBy,
+    SourceItem, SourceRef, SqlType, TableModel, TablePlanStep, ViewBody, ViewColumnModel,
+    ViewModel, ViewQueryModel, ViewSetOp,
 };
 
 use std::collections::BTreeSet;
@@ -552,7 +553,10 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
     // as a spurious `CreateSchema` on every run. A backend with real schemas keeps them.
     if !connection.has_namespaces() {
         model.schemas.retain(|schema| {
-            !schema.tables.is_empty() || !schema.views.is_empty() || !schema.enums.is_empty()
+            !schema.tables.is_empty()
+                || !schema.views.is_empty()
+                || !schema.enums.is_empty()
+                || !schema.sequences.is_empty()
         });
     }
     model
@@ -572,6 +576,7 @@ fn coalesce_schemas_by_name(schemas: &mut Vec<SchemaModel>) {
                 existing.tables.extend(schema.tables);
                 existing.views.extend(schema.views);
                 existing.enums.extend(schema.enums);
+                existing.sequences.extend(schema.sequences);
             }
             None => coalesced.push(schema),
         }
@@ -948,6 +953,23 @@ fn validate_capabilities(
     capabilities: SchemaCapabilities,
 ) -> std::io::Result<()> {
     validate_enum_references(model, capabilities)?;
+    // A backend without a standalone sequence object (MySQL, SQLite) cannot render or introspect a
+    // `CREATE SEQUENCE`; reject the whole class up front so a declared sequence is not silently dropped.
+    if !capabilities.sequences
+        && let Some(sequence) = model
+            .schemas
+            .iter()
+            .flat_map(|schema| &schema.sequences)
+            .next()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "backend cannot render and introspect the sequence `{}`",
+                sequence.name
+            ),
+        ));
+    }
     for schema in &model.schemas {
         for table in &schema.tables {
             for column in &table.columns {
@@ -1149,6 +1171,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "memberships".to_owned(),
                     comment: None,
@@ -1200,6 +1223,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "memberships".to_owned(),
                     comment: None,
@@ -1267,6 +1291,7 @@ mod tests {
                     query: ViewBody::default(),
                 }],
                 enums: Vec::new(),
+                sequences: Vec::new(),
             }],
         };
 
@@ -1312,6 +1337,7 @@ mod tests {
                 tables: vec![],
                 views: vec![view],
                 enums: Vec::new(),
+                sequences: Vec::new(),
             }],
         };
 
@@ -1412,6 +1438,7 @@ mod tests {
                 tables: vec![events_table()],
                 views: vec![v],
                 enums: Vec::new(),
+                sequences: Vec::new(),
             }],
         };
         // Desired: names the alias. Introspected: the deparser expanded it.
@@ -1522,12 +1549,14 @@ mod tests {
                     name: Some("empty".to_owned()),
                     views: Vec::new(),
                     enums: Vec::new(),
+                    sequences: Vec::new(),
                     tables: Vec::new(),
                 },
                 SchemaModel {
                     name: Some("app".to_owned()),
                     views: Vec::new(),
                     enums: Vec::new(),
+                    sequences: Vec::new(),
                     tables: vec![TableModel {
                         name: "widgets".to_owned(),
                         comment: None,
@@ -1565,6 +1594,7 @@ mod tests {
                     name: "mood".to_owned(),
                     labels: vec!["sad".to_owned(), "ok".to_owned()],
                 }],
+                sequences: Vec::new(),
             }],
         };
         let canonical = canonicalize_model(&CanonBackend, &model);
@@ -1596,12 +1626,14 @@ mod tests {
                     name: Some("app".to_owned()),
                     views: Vec::new(),
                     enums: Vec::new(),
+                    sequences: Vec::new(),
                     tables: vec![table("users")],
                 },
                 SchemaModel {
                     name: Some("archive".to_owned()),
                     views: Vec::new(),
                     enums: Vec::new(),
+                    sequences: Vec::new(),
                     tables: vec![table("logs")],
                 },
             ],
@@ -1698,6 +1730,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "items".to_owned(),
                     comment: None,
@@ -2056,6 +2089,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -2137,6 +2171,7 @@ mod tests {
                     },
                     indexes: IndexCapabilities::default(),
                     enums: false,
+                    sequences: false,
                 },
             },
         )
@@ -2192,6 +2227,7 @@ mod tests {
                         prefix_lengths: true,
                     },
                     enums: false,
+                    sequences: false,
                 },
             },
         )

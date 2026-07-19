@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, EnumModel, ForeignKeyModel, IndexModel,
-    SchemaModel, TableModel, ViewColumnModel, ViewModel,
+    SchemaModel, SequenceModel, TableModel, ViewColumnModel, ViewModel,
 };
 
 /// The structured diff from an actual database model to a desired database model.
@@ -174,7 +174,13 @@ pub fn reject_enum_relation_collision_in_diff(
             DatabaseDiffChange::AlterEnum { schema, after, .. } => {
                 enums.insert((schema.clone(), after.name.clone()));
             }
-            DatabaseDiffChange::CreateSchema { .. } | DatabaseDiffChange::DropSchema { .. } => {}
+            // Sequences share no namespace with relations or enums, so they cannot collide.
+            DatabaseDiffChange::CreateSequence { .. }
+            | DatabaseDiffChange::DropSequence { .. }
+            | DatabaseDiffChange::AlterSequence { .. }
+            | DatabaseDiffChange::SetSequenceOwner { .. }
+            | DatabaseDiffChange::CreateSchema { .. }
+            | DatabaseDiffChange::DropSchema { .. } => {}
         }
     }
     if let Some((schema, name)) = relations.intersection(&enums).next() {
@@ -252,6 +258,33 @@ pub enum DatabaseDiffChange {
         after: EnumModel,
         additive: bool,
     },
+    /// Create a new sequence. Rendered before any table (a column default may `nextval` it) but without
+    /// its `OWNED BY` clause — that column may not exist yet, so ownership is a separate post-table
+    /// [`SetSequenceOwner`](DatabaseDiffChange::SetSequenceOwner).
+    CreateSequence {
+        schema: Option<String>,
+        sequence: SequenceModel,
+    },
+    /// Drop a sequence. Rendered after any table whose column default referenced it is gone.
+    DropSequence {
+        schema: Option<String>,
+        sequence: SequenceModel,
+    },
+    /// Change a sequence's attributes (type/start/increment/bounds/cache/cycle) in place with
+    /// `ALTER SEQUENCE`. Ownership is not part of this — see
+    /// [`SetSequenceOwner`](DatabaseDiffChange::SetSequenceOwner).
+    AlterSequence {
+        schema: Option<String>,
+        before: SequenceModel,
+        after: SequenceModel,
+    },
+    /// Set (or clear) a sequence's owning column via `ALTER SEQUENCE ... OWNED BY`. Rendered after tables
+    /// so the owning column exists, distinct from the sequence's create/attribute changes.
+    SetSequenceOwner {
+        schema: Option<String>,
+        name: String,
+        owned_by: Option<squealy::SequenceOwnedBy>,
+    },
 }
 
 impl DatabaseDiffChange {
@@ -261,11 +294,16 @@ impl DatabaseDiffChange {
             | DatabaseDiffChange::CreateTable { .. }
             // Create-or-replace of a view loses no data and can be re-run.
             | DatabaseDiffChange::CreateView { .. }
-            | DatabaseDiffChange::CreateEnum { .. } => ChangeRisk::Safe,
+            | DatabaseDiffChange::CreateEnum { .. }
+            // Creating a sequence, altering its attributes, or (re)assigning its owner loses no data.
+            | DatabaseDiffChange::CreateSequence { .. }
+            | DatabaseDiffChange::AlterSequence { .. }
+            | DatabaseDiffChange::SetSequenceOwner { .. } => ChangeRisk::Safe,
             DatabaseDiffChange::DropSchema { .. }
             | DatabaseDiffChange::DropTable { .. }
             | DatabaseDiffChange::DropView { .. }
-            | DatabaseDiffChange::DropEnum { .. } => ChangeRisk::Destructive,
+            | DatabaseDiffChange::DropEnum { .. }
+            | DatabaseDiffChange::DropSequence { .. } => ChangeRisk::Destructive,
             // Appending enum labels is safe; recreating the type (remove/reorder) rewrites columns.
             DatabaseDiffChange::AlterEnum { additive, .. } => {
                 if *additive {
@@ -421,6 +459,12 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     // swap plus its arbitrary dependents is deferred as a separate feature.)
     let (enum_creates, enum_drops) = diff_enums_global(desired, actual);
 
+    // Sequences bracket the table work like enums: a `CREATE SEQUENCE` (and any attribute change) must
+    // precede a table whose column default `nextval`s it, and a `DROP SEQUENCE` must follow the table
+    // whose default referenced it. A sequence's `OWNED BY <table>.<column>`, however, needs the owning
+    // column to exist, so it is deferred to the post-table phase alongside drops.
+    let (sequence_pre_table, sequence_post_table) = diff_sequences_global(desired, actual);
+
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
         if let (Some(desired_schema), None) = (
             desired_schemas.get(&schema_key),
@@ -433,6 +477,7 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     }
 
     changes.extend(enum_creates);
+    changes.extend(sequence_pre_table);
     changes.extend(view_drops);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
@@ -466,6 +511,7 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
 
     changes.extend(view_creates);
     changes.extend(enum_drops);
+    changes.extend(sequence_post_table);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
         if let (None, Some(actual_schema)) = (
@@ -546,6 +592,90 @@ fn keyed_enums(model: &DatabaseModel) -> BTreeMap<(Option<String>, String), &Enu
         }
     }
     enums
+}
+
+/// Diffs sequences across the whole model, returning `(pre_table, post_table)` change lists. Identity is
+/// `(schema, name)`. The **pre-table** list (`CreateSequence` without owner, `AlterSequence` for an
+/// attribute change) runs before the table work so a column default can `nextval` a new sequence; the
+/// **post-table** list (`SetSequenceOwner` when the owning column changed — including a create with an
+/// owner — and `DropSequence`) runs after it so the owning column exists and no live default still
+/// references a sequence being dropped.
+fn diff_sequences_global(
+    desired: &DatabaseModel,
+    actual: &DatabaseModel,
+) -> (Vec<DatabaseDiffChange>, Vec<DatabaseDiffChange>) {
+    let desired_sequences = keyed_sequences(desired);
+    let actual_sequences = keyed_sequences(actual);
+    let mut pre_table = Vec::new();
+    let mut post_table = Vec::new();
+
+    for (key, desired_sequence) in &desired_sequences {
+        match actual_sequences.get(key) {
+            None => {
+                pre_table.push(DatabaseDiffChange::CreateSequence {
+                    schema: key.0.clone(),
+                    sequence: sequence_without_owner(desired_sequence),
+                });
+                if desired_sequence.owned_by.is_some() {
+                    post_table.push(DatabaseDiffChange::SetSequenceOwner {
+                        schema: key.0.clone(),
+                        name: desired_sequence.name.clone(),
+                        owned_by: desired_sequence.owned_by.clone(),
+                    });
+                }
+            }
+            Some(actual_sequence) => {
+                if attributes_differ(actual_sequence, desired_sequence) {
+                    pre_table.push(DatabaseDiffChange::AlterSequence {
+                        schema: key.0.clone(),
+                        before: sequence_without_owner(actual_sequence),
+                        after: sequence_without_owner(desired_sequence),
+                    });
+                }
+                if actual_sequence.owned_by != desired_sequence.owned_by {
+                    post_table.push(DatabaseDiffChange::SetSequenceOwner {
+                        schema: key.0.clone(),
+                        name: desired_sequence.name.clone(),
+                        owned_by: desired_sequence.owned_by.clone(),
+                    });
+                }
+            }
+        }
+    }
+    for (key, actual_sequence) in &actual_sequences {
+        if !desired_sequences.contains_key(key) {
+            post_table.push(DatabaseDiffChange::DropSequence {
+                schema: key.0.clone(),
+                sequence: (*actual_sequence).clone(),
+            });
+        }
+    }
+    (pre_table, post_table)
+}
+
+/// Whether two sequences differ in any attribute other than their owning column (which is diffed
+/// separately, in the post-table phase).
+fn attributes_differ(a: &SequenceModel, b: &SequenceModel) -> bool {
+    sequence_without_owner(a) != sequence_without_owner(b)
+}
+
+/// A copy of `sequence` with its owner cleared, so attribute comparison/rendering ignores ownership.
+fn sequence_without_owner(sequence: &SequenceModel) -> SequenceModel {
+    SequenceModel {
+        owned_by: None,
+        ..sequence.clone()
+    }
+}
+
+/// Keys every sequence in the model by `(schema, name)`.
+fn keyed_sequences(model: &DatabaseModel) -> BTreeMap<(Option<String>, String), &SequenceModel> {
+    let mut sequences = BTreeMap::new();
+    for schema in &model.schemas {
+        for sequence in &schema.sequences {
+            sequences.insert((schema.name.clone(), sequence.name.clone()), sequence);
+        }
+    }
+    sequences
 }
 
 fn diff_schema_tables(

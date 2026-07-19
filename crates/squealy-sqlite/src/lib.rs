@@ -107,6 +107,8 @@ impl SchemaBackend for Sqlite {
             },
             // SQLite has no user-defined enum type.
             enums: false,
+            // SQLite has no sequence object (`AUTOINCREMENT` only).
+            sequences: false,
         }
     }
 

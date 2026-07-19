@@ -23,9 +23,9 @@ use squealy::{
     ForeignKeyModel, FrameBound, FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage,
     IdentityMode, IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel,
     IndexNullsOrder, IndexOperatorClass, IndexPrefixLength, JoinItem, JoinKind, LogicalOp,
-    OrderDirection, OrderItem, OrderNulls, ProjectionItem, ScalarFunc, SchemaModel, SourceItem,
-    SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
-    ViewSetOp, WindowFunc, WindowOrderTerm,
+    OrderDirection, OrderItem, OrderNulls, ProjectionItem, ScalarFunc, SchemaModel,
+    SequenceDataType, SequenceModel, SequenceOwnedBy, SourceItem, SourceRef, SqlType, TableModel,
+    ViewBody, ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp, WindowFunc, WindowOrderTerm,
 };
 
 use crate::{CastColumn, RefactorLog, RefactorOperation, RenameColumn, RenameTable};
@@ -419,8 +419,54 @@ fn schema_to_node(schema: &SchemaModel) -> KdlNode {
     for enum_type in &schema.enums {
         tables.nodes_mut().push(enum_to_node(enum_type));
     }
+    for sequence in &schema.sequences {
+        tables.nodes_mut().push(sequence_to_node(sequence));
+    }
     node.set_children(tables);
     node
+}
+
+fn sequence_to_node(sequence: &SequenceModel) -> KdlNode {
+    let mut node = KdlNode::new("sequence");
+    node.push(KdlEntry::new(sequence.name.clone()));
+    node.push(KdlEntry::new_prop(
+        "data-type",
+        sequence_data_type_name(sequence.data_type),
+    ));
+    node.push(KdlEntry::new_prop(
+        "start",
+        KdlValue::Integer(sequence.start as i128),
+    ));
+    node.push(KdlEntry::new_prop(
+        "increment",
+        KdlValue::Integer(sequence.increment as i128),
+    ));
+    node.push(KdlEntry::new_prop(
+        "min",
+        KdlValue::Integer(sequence.min as i128),
+    ));
+    node.push(KdlEntry::new_prop(
+        "max",
+        KdlValue::Integer(sequence.max as i128),
+    ));
+    node.push(KdlEntry::new_prop(
+        "cache",
+        KdlValue::Integer(sequence.cache as i128),
+    ));
+    node.push(KdlEntry::new_prop("cycle", KdlValue::Bool(sequence.cycle)));
+    if let Some(owner) = &sequence.owned_by {
+        node.push(KdlEntry::new_prop("owned-by-table", owner.table.clone()));
+        node.push(KdlEntry::new_prop("owned-by-column", owner.column.clone()));
+    }
+    node
+}
+
+fn sequence_data_type_name(data_type: SequenceDataType) -> &'static str {
+    match data_type {
+        SequenceDataType::SmallInt => "smallint",
+        SequenceDataType::Integer => "integer",
+        SequenceDataType::BigInt => "bigint",
+    }
 }
 
 fn enum_to_node(enum_type: &EnumModel) -> KdlNode {
@@ -1528,11 +1574,15 @@ fn schema_from_node(node: &KdlNode) -> Result<SchemaModel, PackageError> {
     let enums = child_nodes(node, "enum")
         .map(enum_from_node)
         .collect::<Result<Vec<_>, _>>()?;
+    let sequences = child_nodes(node, "sequence")
+        .map(sequence_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(SchemaModel {
         name: first_arg(node).map(str::to_owned),
         tables,
         views,
         enums,
+        sequences,
     })
 }
 
@@ -1585,6 +1635,56 @@ fn enum_from_node(node: &KdlNode) -> Result<EnumModel, PackageError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(EnumModel { name, labels })
+}
+
+fn sequence_from_node(node: &KdlNode) -> Result<SequenceModel, PackageError> {
+    let name = first_arg(node)
+        .ok_or_else(|| malformed("`sequence` is missing its name"))?
+        .to_owned();
+    let data_type = match prop(node, "data-type") {
+        None | Some("bigint") => SequenceDataType::BigInt,
+        Some("integer") => SequenceDataType::Integer,
+        Some("smallint") => SequenceDataType::SmallInt,
+        Some(other) => {
+            return Err(malformed(format!(
+                "`sequence` has an unknown data-type `{other}` (expected smallint/integer/bigint)"
+            )));
+        }
+    };
+    // A hand-authored sequence may omit any attribute; fill it from PostgreSQL's own default for the
+    // data type and increment direction, so a bare `sequence "s"` matches what introspection reads back.
+    let increment = prop_i64(node, "increment")?.unwrap_or(1);
+    let min =
+        prop_i64(node, "min")?.unwrap_or_else(|| SequenceModel::default_min(data_type, increment));
+    let max =
+        prop_i64(node, "max")?.unwrap_or_else(|| SequenceModel::default_max(data_type, increment));
+    let start = prop_i64(node, "start")?
+        .unwrap_or_else(|| SequenceModel::default_start(min, max, increment));
+    let cache = prop_i64(node, "cache")?.unwrap_or(1);
+    let cycle = prop_bool(node, "cycle");
+    let owned_by = match (prop(node, "owned-by-table"), prop(node, "owned-by-column")) {
+        (Some(table), Some(column)) => Some(SequenceOwnedBy {
+            table: table.to_owned(),
+            column: column.to_owned(),
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(malformed(
+                "`sequence` owner needs both `owned-by-table` and `owned-by-column`",
+            ));
+        }
+    };
+    Ok(SequenceModel {
+        name,
+        data_type,
+        start,
+        increment,
+        min,
+        max,
+        cache,
+        cycle,
+        owned_by,
+    })
 }
 
 fn view_from_node(node: &KdlNode) -> Result<ViewModel, PackageError> {
@@ -2449,6 +2549,20 @@ fn prop_usize(node: &KdlNode, key: &str) -> Result<Option<usize>, PackageError> 
         .map_err(|_| malformed(format!("`{key}` is out of range for usize")))
 }
 
+fn prop_i64(node: &KdlNode, key: &str) -> Result<Option<i64>, PackageError> {
+    let Some(value) = node
+        .entries()
+        .iter()
+        .find(|entry| entry.name().map(|name| name.value()) == Some(key))
+        .and_then(|entry| entry.value().as_integer())
+    else {
+        return Ok(None);
+    };
+    i64::try_from(value)
+        .map(Some)
+        .map_err(|_| malformed(format!("`{key}` is out of range for i64")))
+}
+
 fn default_from_node(node: &KdlNode) -> Result<Option<DefaultValue>, PackageError> {
     let Some(kind) = prop(node, "default") else {
         return Ok(None);
@@ -2810,6 +2924,7 @@ mod tests {
                 name: Some("public".to_owned()),
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![
                     TableModel {
                         name: "orgs".to_owned(),
@@ -2984,6 +3099,7 @@ mod tests {
                     name: "mood".to_owned(),
                     labels: vec!["sad".to_owned(), "ok".to_owned(), "happy".to_owned()],
                 }],
+                sequences: Vec::new(),
             }],
         };
         let kdl = to_kdl(&model);
@@ -2995,6 +3111,76 @@ mod tests {
         assert!(kdl.contains("label happy"), "missing enum label:\n{kdl}");
         let parsed = from_kdl(&kdl).expect("enum model.kdl should parse");
         assert_eq!(parsed, model, "enum KDL round-trip diverged:\n{kdl}");
+    }
+
+    #[test]
+    fn kdl_round_trips_a_sequence() {
+        // A sequence serializes as a `sequence "<name>" data-type=… start=… …` node carrying every
+        // attribute (plus its owning column when set); all of it must survive a package round-trip so a
+        // published sequence re-plans to empty.
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: Some("app".to_owned()),
+                tables: Vec::new(),
+                views: Vec::new(),
+                enums: Vec::new(),
+                sequences: vec![
+                    SequenceModel {
+                        name: "counter".to_owned(),
+                        data_type: SequenceDataType::Integer,
+                        start: 5,
+                        increment: 2,
+                        min: 5,
+                        max: 2_147_483_647,
+                        cache: 10,
+                        cycle: true,
+                        owned_by: None,
+                    },
+                    SequenceModel {
+                        name: "events_id_seq".to_owned(),
+                        data_type: SequenceDataType::BigInt,
+                        start: 1,
+                        increment: 1,
+                        min: 1,
+                        max: i64::MAX,
+                        cache: 1,
+                        cycle: false,
+                        owned_by: Some(SequenceOwnedBy {
+                            table: "events".to_owned(),
+                            column: "id".to_owned(),
+                        }),
+                    },
+                ],
+            }],
+        };
+        let kdl = to_kdl(&model);
+        assert!(
+            kdl.contains("sequence counter"),
+            "missing sequence node:\n{kdl}"
+        );
+        assert!(
+            kdl.contains("owned-by-table=events"),
+            "missing owner:\n{kdl}"
+        );
+        let parsed = from_kdl(&kdl).expect("sequence model.kdl should parse");
+        assert_eq!(parsed, model, "sequence KDL round-trip diverged:\n{kdl}");
+    }
+
+    #[test]
+    fn kdl_fills_a_bare_sequence_with_postgres_defaults() {
+        // A hand-authored `sequence "s"` with no attributes must read back as PostgreSQL's own defaults
+        // for a bigint sequence, so it matches what introspection reports (else it would churn).
+        let kdl = "database {\n    schema \"app\" {\n        sequence \"s\"\n    }\n}\n";
+        let model = from_kdl(kdl).expect("bare sequence should parse");
+        let sequence = &model.schemas[0].sequences[0];
+        assert_eq!(sequence.data_type, SequenceDataType::BigInt);
+        assert_eq!(sequence.start, 1);
+        assert_eq!(sequence.increment, 1);
+        assert_eq!(sequence.min, 1);
+        assert_eq!(sequence.max, i64::MAX);
+        assert_eq!(sequence.cache, 1);
+        assert!(!sequence.cycle);
+        assert_eq!(sequence.owned_by, None);
     }
 
     #[test]
@@ -3054,6 +3240,7 @@ mod tests {
                 }],
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
             }],
         };
 
@@ -3198,6 +3385,7 @@ mod tests {
                     })),
                 }],
                 enums: Vec::new(),
+                sequences: Vec::new(),
             }],
         };
 
@@ -3286,6 +3474,7 @@ mod tests {
                     })),
                 }],
                 enums: Vec::new(),
+                sequences: Vec::new(),
             }],
         };
 
@@ -3342,6 +3531,7 @@ mod tests {
                     })),
                 }],
                 enums: Vec::new(),
+                sequences: Vec::new(),
             }],
         };
 
@@ -3418,6 +3608,7 @@ mod tests {
                     },
                 }],
                 enums: Vec::new(),
+                sequences: Vec::new(),
             }],
         };
 
@@ -3524,6 +3715,7 @@ mod tests {
                     },
                 }],
                 enums: Vec::new(),
+                sequences: Vec::new(),
             }],
         };
 
@@ -3559,6 +3751,7 @@ mod tests {
                     })),
                 }],
                 enums: Vec::new(),
+                sequences: Vec::new(),
             }],
         };
 
@@ -3983,6 +4176,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -4079,6 +4273,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "structured".to_owned(),
                     comment: None,
@@ -4187,6 +4382,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "derived_columns".to_owned(),
                     comment: None,
@@ -4217,6 +4413,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -4280,6 +4477,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -4331,6 +4529,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -4382,6 +4581,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -4433,6 +4633,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -4489,6 +4690,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -4555,6 +4757,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -4580,6 +4783,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -4635,6 +4839,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,

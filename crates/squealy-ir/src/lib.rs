@@ -206,6 +206,11 @@ pub struct SchemaModel {
     /// A column of an enum type carries [`SqlType::Enum`] naming it. Backends without a user-enum type
     /// (MySQL, SQLite) reject a model that declares one.
     pub enums: Vec<EnumModel>,
+    /// Standalone sequences declared in this namespace (PostgreSQL `CREATE SEQUENCE`); see
+    /// [`SequenceModel`]. A sequence implicitly owned by an identity/serial column is *not* listed here
+    /// (it is created with its column); only free-standing sequences appear. Backends without a sequence
+    /// object (MySQL, SQLite) reject a model that declares one.
+    pub sequences: Vec<SequenceModel>,
 }
 
 /// A named enumerated type (PostgreSQL `CREATE TYPE <name> AS ENUM (<labels>)`). Its labels are ordered;
@@ -215,6 +220,88 @@ pub struct SchemaModel {
 pub struct EnumModel {
     pub name: String,
     pub labels: Vec<String>,
+}
+
+/// The integer data type backing a sequence (`CREATE SEQUENCE ... AS <type>`). PostgreSQL supports the
+/// three signed integer widths; the width sets the default `MINVALUE`/`MAXVALUE` bounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SequenceDataType {
+    SmallInt,
+    Integer,
+    BigInt,
+}
+
+impl SequenceDataType {
+    /// The type's maximum value — the default ascending `MAXVALUE`.
+    pub fn max_value(self) -> i64 {
+        match self {
+            SequenceDataType::SmallInt => i16::MAX as i64,
+            SequenceDataType::Integer => i32::MAX as i64,
+            SequenceDataType::BigInt => i64::MAX,
+        }
+    }
+
+    /// The type's minimum value — the default descending `MINVALUE`.
+    pub fn min_value(self) -> i64 {
+        match self {
+            SequenceDataType::SmallInt => i16::MIN as i64,
+            SequenceDataType::Integer => i32::MIN as i64,
+            SequenceDataType::BigInt => i64::MIN,
+        }
+    }
+}
+
+/// The column a standalone sequence is tied to via `ALTER SEQUENCE ... OWNED BY <table>.<column>` — the
+/// sequence is dropped when that column (or its table) is dropped. `None` on [`SequenceModel`] means
+/// `OWNED BY NONE`. The column lives in the sequence's own schema.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SequenceOwnedBy {
+    pub table: String,
+    pub column: String,
+}
+
+/// A standalone sequence (PostgreSQL `CREATE SEQUENCE`). Every attribute is stored as the concrete value
+/// PostgreSQL's `pg_sequence` catalog reports, so a published sequence re-plans to empty against
+/// introspection; a hand-authored sequence that omits an attribute is filled to the type's default when
+/// the package is read. A sequence implicitly created for an identity/serial column is not modeled here.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SequenceModel {
+    pub name: String,
+    pub data_type: SequenceDataType,
+    pub start: i64,
+    pub increment: i64,
+    pub min: i64,
+    pub max: i64,
+    pub cache: i64,
+    pub cycle: bool,
+    pub owned_by: Option<SequenceOwnedBy>,
+}
+
+impl SequenceModel {
+    /// The default `MINVALUE` for a sequence of `data_type` incrementing in the given direction
+    /// (ascending sequences default to `1`, descending to the type minimum) — PostgreSQL's own rule.
+    pub fn default_min(data_type: SequenceDataType, increment: i64) -> i64 {
+        if increment < 0 {
+            data_type.min_value()
+        } else {
+            1
+        }
+    }
+
+    /// The default `MAXVALUE` for a sequence of `data_type` incrementing in the given direction
+    /// (ascending sequences default to the type maximum, descending to `-1`) — PostgreSQL's own rule.
+    pub fn default_max(data_type: SequenceDataType, increment: i64) -> i64 {
+        if increment < 0 {
+            -1
+        } else {
+            data_type.max_value()
+        }
+    }
+
+    /// The default `START` for a sequence — its `MINVALUE` ascending, its `MAXVALUE` descending.
+    pub fn default_start(min: i64, max: i64, increment: i64) -> i64 {
+        if increment < 0 { max } else { min }
+    }
 }
 
 /// A table and its table-level, named constraints.
