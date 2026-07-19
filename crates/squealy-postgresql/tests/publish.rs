@@ -1001,6 +1001,110 @@ async fn publishing_an_exclusion_then_replanning_is_empty() {
 
 #[tokio::test]
 #[ignore]
+async fn introspecting_an_exclusion_with_an_include_column_ignores_the_covering_column() {
+    // An exclusion can carry a covering `INCLUDE` column. `pg_index.indkey` lists it alongside the key
+    // columns, but `conexclop`/`indclass`/`indoption` cover only the key positions — so reading every
+    // `indkey` entry would fabricate a keyless element with no operator. The introspector must read only
+    // the `indnkeyatts` key columns. Raw-create an `EXCLUDE (during WITH &&) INCLUDE (room)`, then a model
+    // that declares only the key element must re-plan empty (with the fix disabled, the fabricated `room`
+    // element makes the actual model differ and the plan is non-empty).
+    let _guard = db_lock().lock().await;
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl(
+            "DROP SCHEMA IF EXISTS publish_excl_include CASCADE;\n\
+             CREATE SCHEMA publish_excl_include;\n\
+             CREATE TABLE publish_excl_include.res (\n\
+                 room integer NOT NULL,\n\
+                 during tstzrange NOT NULL\n\
+             );\n\
+             ALTER TABLE publish_excl_include.res\n\
+                 ADD CONSTRAINT res_no_overlap EXCLUDE USING gist (during WITH &&) INCLUDE (room)",
+        )
+        .await
+        .expect("raw-create an exclusion with an INCLUDE column");
+
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("publish_excl_include".to_owned()),
+            tables: vec![TableModel {
+                name: "res".to_owned(),
+                comment: None,
+                columns: vec![
+                    ColumnModel {
+                        name: "room".to_owned(),
+                        comment: None,
+                        ty: SqlType::I32,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        on_update: None,
+                    },
+                    ColumnModel {
+                        name: "during".to_owned(),
+                        comment: None,
+                        ty: SqlType::Raw("tstzrange".to_owned()),
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        on_update: None,
+                    },
+                ],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+                exclusions: vec![ExclusionModel {
+                    name: "res_no_overlap".to_owned(),
+                    method: Some(IndexMethod::Gist),
+                    elements: vec![ExclusionElement {
+                        term: ExclusionTerm::Column("during".to_owned()),
+                        operator: "&&".to_owned(),
+                        operator_class: None,
+                        collation: None,
+                        direction: None,
+                        nulls: None,
+                    }],
+                    predicate: None,
+                    deferrability: None,
+                }],
+            }],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: Vec::new(),
+        }],
+    };
+
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect("re-plan against the INCLUDE exclusion");
+    assert!(
+        plan.steps.is_empty(),
+        "an exclusion's INCLUDE column must not fabricate an element, got: {:?}",
+        plan.steps
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_excl_include CASCADE")
+        .await
+        .expect("clean up INCLUDE exclusion fixture");
+}
+
+#[tokio::test]
+#[ignore]
 async fn publishing_an_enum_then_replanning_is_empty() {
     // A published enum type + a column of that type must re-plan to empty: the CREATE TYPE round-trips
     // (introspected from pg_enum), and the column rebinds from Raw("mood") to Enum("mood").

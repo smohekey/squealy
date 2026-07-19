@@ -973,7 +973,9 @@ ORDER BY idx.relname",
 /// key terms (columns and expressions), operator classes, collations, sort direction/null order — come
 /// from that index's catalog rows exactly as a plain index's do; the per-element operators come from the
 /// constraint's own `conexclop` array (operator OIDs joined to `pg_operator`). Element order is the index
-/// key order. The plain-index introspector deliberately skips constraint-backed indexes (its
+/// key order. Only the *key* columns (`indkey[..indnkeyatts]`) are read: `conexclop`/`indclass`/`indoption`
+/// describe key positions only, so a covering `INCLUDE` column would otherwise become a bogus element with
+/// no operator. The plain-index introspector deliberately skips constraint-backed indexes (its
 /// `con.oid IS NULL` filter), so an exclusion's backing index is not also surfaced as a standalone index.
 async fn exclusions(
     client: &Client,
@@ -992,6 +994,7 @@ SELECT
     ARRAY(
         SELECT k.attnum::int
         FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, position)
+        WHERE k.position <= i.indnkeyatts
         ORDER BY position
     ) AS attnums,
     ARRAY(
@@ -999,6 +1002,7 @@ SELECT
         FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, position)
         LEFT JOIN pg_attribute a
             ON a.attrelid = i.indrelid AND a.attnum = k.attnum AND k.attnum <> 0
+        WHERE k.position <= i.indnkeyatts
         ORDER BY position
     ) AS column_names,
     ARRAY(
