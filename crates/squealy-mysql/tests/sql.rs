@@ -1068,6 +1068,36 @@ fn mysql_rejects_a_user_enum_type() {
 }
 
 #[test]
+fn mysql_incremental_render_rejects_a_sequence_bearing_model() {
+    // The incremental render path does not run `check_create`; even with an empty plan (a re-plan between
+    // two identical sequence-bearing packages), a sequence on a backend that does not support one must be
+    // rejected rather than silently accepted.
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: vec![SequenceModel {
+                name: "counter".to_owned(),
+                data_type: SequenceDataType::BigInt,
+                start: 1,
+                increment: 1,
+                min: 1,
+                max: i64::MAX,
+                cache: 1,
+                cycle: false,
+                owned_by: None,
+            }],
+        }],
+    };
+    let plan = squealy_model::DatabasePlan { steps: Vec::new() };
+    let error = squealy_model::render_plan_sql(&plan, &model, &Mysql)
+        .expect_err("a sequence-bearing model must be rejected on the incremental path");
+    assert!(error.to_string().contains("counter"), "{error}");
+}
+
+#[test]
 fn mysql_rejects_a_sequence() {
     // MySQL has no standalone sequence object, so a model declaring one is rejected at render.
     let model = DatabaseModel {

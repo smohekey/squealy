@@ -85,11 +85,7 @@ pub fn render_plan_sql<B: SchemaBackend>(
     // desired schema never declares would otherwise render a qualified reference that fails at execution,
     // and a malformed sequence would render `CREATE SEQUENCE` DDL PostgreSQL rejects.
     validate_enum_references(desired, capabilities)?;
-    for schema in &desired.schemas {
-        for sequence in &schema.sequences {
-            validate_sequence(sequence)?;
-        }
-    }
+    validate_sequences(desired, capabilities)?;
     for schema in &desired.schemas {
         for table in &schema.tables {
             validate_table_constraint_prefixes(table, &capabilities)?;
@@ -994,13 +990,16 @@ fn validate_sequence(sequence: &SequenceModel) -> std::io::Result<()> {
     Ok(())
 }
 
-fn validate_capabilities(
+/// Validates every declared sequence, on both the create preflight ([`validate_capabilities`]) and the
+/// incremental render path ([`render_plan_sql`]) — the incremental path does not run `check_create`, so a
+/// backend without sequences (MySQL, SQLite) must be caught here too even when the plan carries no
+/// sequence step (a `squealy plan` between two identical sequence-bearing packages). A backend without a
+/// standalone sequence object rejects the whole class; a supporting backend still has each sequence's
+/// attributes checked against PostgreSQL's `CREATE SEQUENCE` invariants.
+fn validate_sequences(
     model: &DatabaseModel,
     capabilities: SchemaCapabilities,
 ) -> std::io::Result<()> {
-    validate_enum_references(model, capabilities)?;
-    // A backend without a standalone sequence object (MySQL, SQLite) cannot render or introspect a
-    // `CREATE SEQUENCE`; reject the whole class up front so a declared sequence is not silently dropped.
     if !capabilities.sequences
         && let Some(sequence) = model
             .schemas
@@ -1021,6 +1020,15 @@ fn validate_capabilities(
             validate_sequence(sequence)?;
         }
     }
+    Ok(())
+}
+
+fn validate_capabilities(
+    model: &DatabaseModel,
+    capabilities: SchemaCapabilities,
+) -> std::io::Result<()> {
+    validate_enum_references(model, capabilities)?;
+    validate_sequences(model, capabilities)?;
     for schema in &model.schemas {
         for table in &schema.tables {
             for column in &table.columns {
