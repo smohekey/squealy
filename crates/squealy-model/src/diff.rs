@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use squealy::{
     CheckModel, ColumnModel, Constraint, DatabaseModel, EnumModel, ForeignKeyModel, IndexModel,
-    SchemaModel, TableModel, ViewColumnModel, ViewModel,
+    SchemaModel, SequenceModel, TableModel, ViewColumnModel, ViewModel,
 };
 
 /// The structured diff from an actual database model to a desired database model.
@@ -88,20 +88,84 @@ pub struct DiffPolicyError {
     pub blocked: Vec<ClassifiedDatabaseDiffChange>,
 }
 
-/// Error returned when a relation (table or view) and an enum share a name across the actual and
-/// desired models — a collision PostgreSQL cannot represent, since every relation implicitly owns a
-/// composite type of the same name.
+/// Error returned when two schema objects that PostgreSQL cannot give the same name — a sequence versus
+/// a table/view/index, or an enum versus a table/view/sequence — share a `(schema, name)` across the
+/// actual and desired models. Relations (tables, views, sequences, indexes) share one per-schema
+/// `pg_class` namespace, and a table/view/sequence additionally owns a composite `pg_type` alongside
+/// enums. Correctly ordering such a *swap* plus its arbitrary dependents is deferred, so it is rejected.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "{} is used as both a relation (table or view) and an enum across the current and desired \
-     schemas; PostgreSQL creates an implicit composite type for every relation, so a relation and \
-     an enum cannot share a name. If you are replacing one with the other, split it into separate \
-     migrations that fully drop and apply one before introducing the other.",
+    "{} is used as two schema objects that PostgreSQL cannot give the same name — a sequence and a \
+     table/view/index, or an enum and a table/view/sequence — across the current and desired schemas. \
+     Relations share one `pg_class` namespace and a table/view/sequence owns a composite type alongside \
+     enums in `pg_type`. If you are replacing one with another, split it into separate migrations that \
+     fully drop and apply one before introducing the other.",
     qualified_name(schema, name)
 )]
 pub struct EnumRelationCollisionError {
     pub schema: Option<String>,
     pub name: String,
+}
+
+/// A schema object kind that occupies PostgreSQL's per-schema relation/type namespaces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ObjectKind {
+    Table,
+    View,
+    Sequence,
+    Enum,
+    Index,
+}
+
+/// Whether two *different* object kinds sharing a `(schema, name)` is a swap this diff cannot order and
+/// so rejects. The matrix is exactly what PostgreSQL 17 enforces for the sequence/enum pairs this guard
+/// owns (verified empirically):
+/// - a **sequence** is a `pg_class` relation *and* owns an associated type, so it clashes with every
+///   table, view, index, and with an enum;
+/// - an **enum** lives in `pg_type`, so it clashes with a table's/view's/sequence's associated type —
+///   but *not* with an index, which has none.
+///
+/// A plain table↔view (or table↔index) name clash is left to the existing name-based diff, which keys
+/// those separately; this guard only covers the un-orderable sequence/enum swaps.
+fn kinds_collide(a: ObjectKind, b: ObjectKind) -> bool {
+    use ObjectKind::*;
+    matches!(
+        (a, b),
+        (Enum, Table)
+            | (Table, Enum)
+            | (Enum, View)
+            | (View, Enum)
+            | (Enum, Sequence)
+            | (Sequence, Enum)
+            | (Sequence, Table)
+            | (Table, Sequence)
+            | (Sequence, View)
+            | (View, Sequence)
+            | (Sequence, Index)
+            | (Index, Sequence)
+    )
+}
+
+/// Records that `(schema, name)` is claimed by object `kind`, returning an error if any *different* kind
+/// that [collides](kinds_collide) with it already claimed the same name. The same kind claiming it twice
+/// — e.g. a table present in both the desired and actual model — is fine, as is a non-colliding different
+/// kind (a table and a same-named view, an enum and a same-named index). All kinds seen for a name are
+/// retained, so a later colliding claim is caught regardless of the order they arrive in.
+fn claim_object_name(
+    claims: &mut BTreeMap<(Option<String>, String), BTreeSet<ObjectKind>>,
+    schema: &Option<String>,
+    name: &str,
+    kind: ObjectKind,
+) -> Result<(), EnumRelationCollisionError> {
+    let kinds = claims.entry((schema.clone(), name.to_owned())).or_default();
+    if kinds.iter().any(|existing| kinds_collide(*existing, kind)) {
+        return Err(EnumRelationCollisionError {
+            schema: schema.clone(),
+            name: name.to_owned(),
+        });
+    }
+    kinds.insert(kind);
+    Ok(())
 }
 
 fn qualified_name(schema: &Option<String>, name: &str) -> String {
@@ -111,77 +175,149 @@ fn qualified_name(schema: &Option<String>, name: &str) -> String {
     }
 }
 
-/// Rejects a migration in which a single `(schema, name)` is a relation (table or view) on one side
-/// and an enum on the other — or is both within a single model. PostgreSQL auto-creates a composite
-/// type per relation, so a relation and an enum can never coexist under one name, and correctly
-/// ordering a same-name relation↔enum *swap* plus its arbitrary dependents is deferred as a separate
-/// feature. Detecting the collision here keeps `diff_models` from emitting an un-applyable plan.
+/// Rejects a migration in which a single `(schema, name)` is claimed by two schema objects PostgreSQL
+/// keeps in overlapping namespaces (see [`kinds_collide`] for the exact matrix) — across the desired and
+/// actual models, or within one. Correctly ordering such a swap plus its arbitrary dependents is
+/// deferred, so detecting the collision here keeps `diff_models` from emitting an un-applyable plan.
 pub fn reject_enum_relation_name_collision(
     desired: &DatabaseModel,
     actual: &DatabaseModel,
 ) -> Result<(), EnumRelationCollisionError> {
-    let mut relations: BTreeSet<(Option<String>, String)> = BTreeSet::new();
-    let mut enums: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+    let mut claims: BTreeMap<(Option<String>, String), BTreeSet<ObjectKind>> = BTreeMap::new();
     for model in [desired, actual] {
         for schema in &model.schemas {
             for table in &schema.tables {
-                relations.insert((schema.name.clone(), table.name.clone()));
+                claim_object_name(&mut claims, &schema.name, &table.name, ObjectKind::Table)?;
+                // A PRIMARY KEY / UNIQUE constraint and an explicit index each own a `pg_class` index of
+                // that name, which a same-named sequence would collide with.
+                for index in &table.indexes {
+                    claim_object_name(&mut claims, &schema.name, &index.name, ObjectKind::Index)?;
+                }
+                if let Some(primary_key) = &table.primary_key {
+                    claim_object_name(
+                        &mut claims,
+                        &schema.name,
+                        &primary_key.name,
+                        ObjectKind::Index,
+                    )?;
+                }
+                for unique in &table.uniques {
+                    claim_object_name(&mut claims, &schema.name, &unique.name, ObjectKind::Index)?;
+                }
             }
             for view in &schema.views {
-                relations.insert((schema.name.clone(), view.name.clone()));
+                claim_object_name(&mut claims, &schema.name, &view.name, ObjectKind::View)?;
+            }
+            for sequence in &schema.sequences {
+                claim_object_name(
+                    &mut claims,
+                    &schema.name,
+                    &sequence.name,
+                    ObjectKind::Sequence,
+                )?;
             }
             for enum_type in &schema.enums {
-                enums.insert((schema.name.clone(), enum_type.name.clone()));
+                claim_object_name(&mut claims, &schema.name, &enum_type.name, ObjectKind::Enum)?;
             }
         }
-    }
-    if let Some((schema, name)) = relations.intersection(&enums).next() {
-        return Err(EnumRelationCollisionError {
-            schema: schema.clone(),
-            name: name.clone(),
-        });
     }
     Ok(())
 }
 
-/// Rejects a precomputed diff that touches a single `(schema, name)` as both an enum and a relation
-/// (table or view). [`reject_enum_relation_name_collision`] catches the collision from a model pair;
-/// this catches it from a diff a caller assembled and handed to [`plan_diff`](crate::plan_diff)
-/// directly (e.g. a same-name relation↔enum swap, whose `CreateEnum`/`DropTable` the flattener would
-/// otherwise emit in an order PostgreSQL rejects over the relation's implicit composite type).
+/// Rejects a precomputed diff that touches one `(schema, name)` as more than one kind of schema object
+/// (table, view, sequence, or enum). [`reject_enum_relation_name_collision`] catches the collision from
+/// a model pair; this catches it from a diff a caller assembled and handed to
+/// [`plan_diff`](crate::plan_diff) directly (e.g. a same-name relation↔enum or relation↔sequence swap,
+/// whose create/drop the flattener would otherwise emit in an order PostgreSQL rejects over the shared
+/// `pg_class`/`pg_type` namespace).
 pub fn reject_enum_relation_collision_in_diff(
     diff: &DatabaseDiff,
 ) -> Result<(), EnumRelationCollisionError> {
-    let mut relations: BTreeSet<(Option<String>, String)> = BTreeSet::new();
-    let mut enums: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+    let mut claims: BTreeMap<(Option<String>, String), BTreeSet<ObjectKind>> = BTreeMap::new();
     for change in &diff.changes {
         match change {
             DatabaseDiffChange::CreateTable { schema, table }
             | DatabaseDiffChange::DropTable { schema, table } => {
-                relations.insert((schema.clone(), table.name.clone()));
+                claim_object_name(&mut claims, schema, &table.name, ObjectKind::Table)?;
+                for index in &table.indexes {
+                    claim_object_name(&mut claims, schema, &index.name, ObjectKind::Index)?;
+                }
+                if let Some(primary_key) = &table.primary_key {
+                    claim_object_name(&mut claims, schema, &primary_key.name, ObjectKind::Index)?;
+                }
+                for unique in &table.uniques {
+                    claim_object_name(&mut claims, schema, &unique.name, ObjectKind::Index)?;
+                }
             }
-            DatabaseDiffChange::AlterTable { schema, table, .. } => {
-                relations.insert((schema.clone(), table.clone()));
+            DatabaseDiffChange::AlterTable {
+                schema,
+                table,
+                changes,
+            } => {
+                claim_object_name(&mut claims, schema, table, ObjectKind::Table)?;
+                for change in changes {
+                    match change {
+                        TableDiffChange::AddIndex { index }
+                        | TableDiffChange::DropIndex { index } => {
+                            claim_object_name(&mut claims, schema, &index.name, ObjectKind::Index)?;
+                        }
+                        TableDiffChange::AlterIndex { before, after } => {
+                            claim_object_name(
+                                &mut claims,
+                                schema,
+                                &before.name,
+                                ObjectKind::Index,
+                            )?;
+                            claim_object_name(&mut claims, schema, &after.name, ObjectKind::Index)?;
+                        }
+                        TableDiffChange::AddPrimaryKey { constraint }
+                        | TableDiffChange::DropPrimaryKey { constraint }
+                        | TableDiffChange::AddUnique { constraint }
+                        | TableDiffChange::DropUnique { constraint } => {
+                            claim_object_name(
+                                &mut claims,
+                                schema,
+                                &constraint.name,
+                                ObjectKind::Index,
+                            )?;
+                        }
+                        TableDiffChange::AlterPrimaryKey { before, after }
+                        | TableDiffChange::AlterUnique { before, after } => {
+                            claim_object_name(
+                                &mut claims,
+                                schema,
+                                &before.name,
+                                ObjectKind::Index,
+                            )?;
+                            claim_object_name(&mut claims, schema, &after.name, ObjectKind::Index)?;
+                        }
+                        _ => {}
+                    }
+                }
             }
             DatabaseDiffChange::CreateView { schema, view }
             | DatabaseDiffChange::DropView { schema, view } => {
-                relations.insert((schema.clone(), view.name.clone()));
+                claim_object_name(&mut claims, schema, &view.name, ObjectKind::View)?;
             }
             DatabaseDiffChange::CreateEnum { schema, enum_type }
             | DatabaseDiffChange::DropEnum { schema, enum_type } => {
-                enums.insert((schema.clone(), enum_type.name.clone()));
+                claim_object_name(&mut claims, schema, &enum_type.name, ObjectKind::Enum)?;
             }
             DatabaseDiffChange::AlterEnum { schema, after, .. } => {
-                enums.insert((schema.clone(), after.name.clone()));
+                claim_object_name(&mut claims, schema, &after.name, ObjectKind::Enum)?;
+            }
+            DatabaseDiffChange::CreateSequence { schema, sequence }
+            | DatabaseDiffChange::DropSequence { schema, sequence } => {
+                claim_object_name(&mut claims, schema, &sequence.name, ObjectKind::Sequence)?;
+            }
+            DatabaseDiffChange::AlterSequence { schema, after, .. } => {
+                claim_object_name(&mut claims, schema, &after.name, ObjectKind::Sequence)?;
+            }
+            DatabaseDiffChange::SetSequenceOwner { schema, name, .. } => {
+                claim_object_name(&mut claims, schema, name, ObjectKind::Sequence)?;
             }
             DatabaseDiffChange::CreateSchema { .. } | DatabaseDiffChange::DropSchema { .. } => {}
         }
-    }
-    if let Some((schema, name)) = relations.intersection(&enums).next() {
-        return Err(EnumRelationCollisionError {
-            schema: schema.clone(),
-            name: name.clone(),
-        });
     }
     Ok(())
 }
@@ -252,6 +388,33 @@ pub enum DatabaseDiffChange {
         after: EnumModel,
         additive: bool,
     },
+    /// Create a new sequence. Rendered before any table (a column default may `nextval` it) but without
+    /// its `OWNED BY` clause — that column may not exist yet, so ownership is a separate post-table
+    /// [`SetSequenceOwner`](DatabaseDiffChange::SetSequenceOwner).
+    CreateSequence {
+        schema: Option<String>,
+        sequence: SequenceModel,
+    },
+    /// Drop a sequence. Rendered after any table whose column default referenced it is gone.
+    DropSequence {
+        schema: Option<String>,
+        sequence: SequenceModel,
+    },
+    /// Change a sequence's attributes (type/start/increment/bounds/cache/cycle) in place with
+    /// `ALTER SEQUENCE`. Ownership is not part of this — see
+    /// [`SetSequenceOwner`](DatabaseDiffChange::SetSequenceOwner).
+    AlterSequence {
+        schema: Option<String>,
+        before: SequenceModel,
+        after: SequenceModel,
+    },
+    /// Set (or clear) a sequence's owning column via `ALTER SEQUENCE ... OWNED BY`. Rendered after tables
+    /// so the owning column exists, distinct from the sequence's create/attribute changes.
+    SetSequenceOwner {
+        schema: Option<String>,
+        name: String,
+        owned_by: Option<squealy::SequenceOwnedBy>,
+    },
 }
 
 impl DatabaseDiffChange {
@@ -261,11 +424,16 @@ impl DatabaseDiffChange {
             | DatabaseDiffChange::CreateTable { .. }
             // Create-or-replace of a view loses no data and can be re-run.
             | DatabaseDiffChange::CreateView { .. }
-            | DatabaseDiffChange::CreateEnum { .. } => ChangeRisk::Safe,
+            | DatabaseDiffChange::CreateEnum { .. }
+            // Creating a sequence, altering its attributes, or (re)assigning its owner loses no data.
+            | DatabaseDiffChange::CreateSequence { .. }
+            | DatabaseDiffChange::AlterSequence { .. }
+            | DatabaseDiffChange::SetSequenceOwner { .. } => ChangeRisk::Safe,
             DatabaseDiffChange::DropSchema { .. }
             | DatabaseDiffChange::DropTable { .. }
             | DatabaseDiffChange::DropView { .. }
-            | DatabaseDiffChange::DropEnum { .. } => ChangeRisk::Destructive,
+            | DatabaseDiffChange::DropEnum { .. }
+            | DatabaseDiffChange::DropSequence { .. } => ChangeRisk::Destructive,
             // Appending enum labels is safe; recreating the type (remove/reorder) rewrites columns.
             DatabaseDiffChange::AlterEnum { additive, .. } => {
                 if *additive {
@@ -421,6 +589,12 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     // swap plus its arbitrary dependents is deferred as a separate feature.)
     let (enum_creates, enum_drops) = diff_enums_global(desired, actual);
 
+    // Sequences bracket the table work like enums: a `CREATE SEQUENCE` (and any attribute change) must
+    // precede a table whose column default `nextval`s it, and a `DROP SEQUENCE` must follow the table
+    // whose default referenced it. A sequence's `OWNED BY <table>.<column>`, however, needs the owning
+    // column to exist, so it is deferred to the post-table phase alongside drops.
+    let (sequence_pre_table, sequence_post_table) = diff_sequences_global(desired, actual);
+
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
         if let (Some(desired_schema), None) = (
             desired_schemas.get(&schema_key),
@@ -433,6 +607,7 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     }
 
     changes.extend(enum_creates);
+    changes.extend(sequence_pre_table);
     changes.extend(view_drops);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
@@ -466,6 +641,7 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
 
     changes.extend(view_creates);
     changes.extend(enum_drops);
+    changes.extend(sequence_post_table);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
         if let (None, Some(actual_schema)) = (
@@ -546,6 +722,117 @@ fn keyed_enums(model: &DatabaseModel) -> BTreeMap<(Option<String>, String), &Enu
         }
     }
     enums
+}
+
+/// Diffs sequences across the whole model, returning `(pre_table, post_table)` change lists. Identity is
+/// `(schema, name)`.
+///
+/// The **pre-table** list runs before all table work — `CreateSequence` (without owner, so a column
+/// default can `nextval` a new sequence), `AlterSequence` (attribute change), and a *detach*
+/// (`SetSequenceOwner` → `NONE`) for any sequence whose *current* owner is going away (the sequence is
+/// being dropped, or its owner is being changed/removed). Detaching before the table phase is what keeps
+/// PostgreSQL from cascade-dropping an owned sequence when its owning table/column is dropped.
+///
+/// The **post-table** list runs after all table work — an *attach* (`SetSequenceOwner` → the desired
+/// owner) once the new owning column exists, and `DropSequence` for a removed sequence (now safely
+/// detached, so its owner's drop did not already cascade it away).
+fn diff_sequences_global(
+    desired: &DatabaseModel,
+    actual: &DatabaseModel,
+) -> (Vec<DatabaseDiffChange>, Vec<DatabaseDiffChange>) {
+    let desired_sequences = keyed_sequences(desired);
+    let actual_sequences = keyed_sequences(actual);
+    let mut pre_table = Vec::new();
+    let mut post_table = Vec::new();
+
+    // Detach any existing sequence whose current owner is about to disappear, before the table phase.
+    let detach = |pre_table: &mut Vec<DatabaseDiffChange>, key: &(Option<String>, String)| {
+        pre_table.push(DatabaseDiffChange::SetSequenceOwner {
+            schema: key.0.clone(),
+            name: key.1.clone(),
+            owned_by: None,
+        });
+    };
+
+    for (key, desired_sequence) in &desired_sequences {
+        match actual_sequences.get(key) {
+            None => {
+                pre_table.push(DatabaseDiffChange::CreateSequence {
+                    schema: key.0.clone(),
+                    sequence: sequence_without_owner(desired_sequence),
+                });
+                if desired_sequence.owned_by.is_some() {
+                    post_table.push(DatabaseDiffChange::SetSequenceOwner {
+                        schema: key.0.clone(),
+                        name: desired_sequence.name.clone(),
+                        owned_by: desired_sequence.owned_by.clone(),
+                    });
+                }
+            }
+            Some(actual_sequence) => {
+                if attributes_differ(actual_sequence, desired_sequence) {
+                    pre_table.push(DatabaseDiffChange::AlterSequence {
+                        schema: key.0.clone(),
+                        before: sequence_without_owner(actual_sequence),
+                        after: sequence_without_owner(desired_sequence),
+                    });
+                }
+                if actual_sequence.owned_by != desired_sequence.owned_by {
+                    // The old owner is going away: release it before the table phase (so a drop of that
+                    // owner cannot cascade the sequence), then re-attach to the desired owner afterward.
+                    if actual_sequence.owned_by.is_some() {
+                        detach(&mut pre_table, key);
+                    }
+                    if desired_sequence.owned_by.is_some() {
+                        post_table.push(DatabaseDiffChange::SetSequenceOwner {
+                            schema: key.0.clone(),
+                            name: desired_sequence.name.clone(),
+                            owned_by: desired_sequence.owned_by.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for (key, actual_sequence) in &actual_sequences {
+        if !desired_sequences.contains_key(key) {
+            // Detach first so dropping the owner does not cascade the sequence out from under the
+            // explicit `DropSequence` below.
+            if actual_sequence.owned_by.is_some() {
+                detach(&mut pre_table, key);
+            }
+            post_table.push(DatabaseDiffChange::DropSequence {
+                schema: key.0.clone(),
+                sequence: sequence_without_owner(actual_sequence),
+            });
+        }
+    }
+    (pre_table, post_table)
+}
+
+/// Whether two sequences differ in any attribute other than their owning column (which is diffed
+/// separately, in the post-table phase).
+fn attributes_differ(a: &SequenceModel, b: &SequenceModel) -> bool {
+    sequence_without_owner(a) != sequence_without_owner(b)
+}
+
+/// A copy of `sequence` with its owner cleared, so attribute comparison/rendering ignores ownership.
+fn sequence_without_owner(sequence: &SequenceModel) -> SequenceModel {
+    SequenceModel {
+        owned_by: None,
+        ..sequence.clone()
+    }
+}
+
+/// Keys every sequence in the model by `(schema, name)`.
+fn keyed_sequences(model: &DatabaseModel) -> BTreeMap<(Option<String>, String), &SequenceModel> {
+    let mut sequences = BTreeMap::new();
+    for schema in &model.schemas {
+        for sequence in &schema.sequences {
+            sequences.insert((schema.name.clone(), sequence.name.clone()), sequence);
+        }
+    }
+    sequences
 }
 
 fn diff_schema_tables(

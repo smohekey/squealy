@@ -32,6 +32,19 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
         ));
     }
 
+    // MySQL has no standalone sequence object; reject a model that declares one up front.
+    if let Some(sequence) = model
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.sequences)
+        .next()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("MySQL does not support the sequence `{}`", sequence.name),
+        ));
+    }
+
     for schema in &model.schemas {
         if let Some(name) = schema.name.as_deref() {
             statement(writer, &mut first)?;
@@ -196,6 +209,27 @@ fn write_plan_step(
                     "MySQL does not support the user-defined enum type `{}`",
                     after.name
                 ),
+            ));
+        }
+        // MySQL has no standalone sequence object. Reject on the incremental path (the create path
+        // rejects via capabilities), mirroring the enum handling above.
+        DatabasePlanStep::CreateSequence { sequence, .. }
+        | DatabasePlanStep::DropSequence { sequence, .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("MySQL does not support the sequence `{}`", sequence.name),
+            ));
+        }
+        DatabasePlanStep::AlterSequence { after, .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("MySQL does not support the sequence `{}`", after.name),
+            ));
+        }
+        DatabasePlanStep::SetSequenceOwner { name, .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("MySQL does not support the sequence `{name}`"),
             ));
         }
     }
@@ -1508,6 +1542,7 @@ mod tests {
                 name: None,
                 views: Vec::new(),
                 enums: Vec::new(),
+                sequences: Vec::new(),
                 tables: vec![TableModel {
                     name: "people".to_owned(),
                     comment: None,

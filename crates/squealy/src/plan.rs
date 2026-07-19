@@ -1,6 +1,6 @@
 use crate::{
-    CheckModel, ColumnModel, Constraint, EnumModel, ForeignKeyModel, IndexModel, SqlType,
-    TableModel, ViewModel,
+    CheckModel, ColumnModel, Constraint, EnumModel, ForeignKeyModel, IndexModel, SequenceModel,
+    SequenceOwnedBy, SqlType, TableModel, ViewModel,
 };
 
 /// An ordered backend-neutral schema deployment plan.
@@ -73,6 +73,30 @@ pub enum DatabasePlanStep {
         before: EnumModel,
         after: EnumModel,
         additive: bool,
+    },
+    /// Create a sequence (`CREATE SEQUENCE`), without its `OWNED BY` clause. Ordered before any table
+    /// whose column default `nextval`s it.
+    CreateSequence {
+        schema: Option<String>,
+        sequence: SequenceModel,
+    },
+    /// Drop a sequence. Ordered after any table whose column default referenced it is gone.
+    DropSequence {
+        schema: Option<String>,
+        sequence: SequenceModel,
+    },
+    /// Change a sequence's attributes in place (`ALTER SEQUENCE`). Ownership is a separate step.
+    AlterSequence {
+        schema: Option<String>,
+        before: SequenceModel,
+        after: SequenceModel,
+    },
+    /// Set or clear a sequence's owning column (`ALTER SEQUENCE ... OWNED BY`). Ordered after tables so
+    /// the owning column exists.
+    SetSequenceOwner {
+        schema: Option<String>,
+        name: String,
+        owned_by: Option<SequenceOwnedBy>,
     },
 }
 

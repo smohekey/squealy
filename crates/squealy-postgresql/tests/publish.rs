@@ -307,6 +307,7 @@ fn clause_alias_model() -> DatabaseModel {
                 })),
             }],
             enums: Vec::new(),
+            sequences: Vec::new(),
         }],
     }
 }
@@ -477,6 +478,7 @@ fn enum_fixture(labels: &[&str]) -> DatabaseModel {
                 name: "mood".to_owned(),
                 labels: labels.iter().map(|s| s.to_string()).collect(),
             }],
+            sequences: Vec::new(),
         }],
     }
 }
@@ -502,6 +504,65 @@ fn creating_a_same_named_relation_and_enum_is_rejected() {
     let error = squealy_model::render_create_sql(&model, &Postgres)
         .expect_err("a relation sharing an enum name must be rejected");
     assert!(error.to_string().contains("mood"), "{error}");
+}
+
+#[test]
+fn creating_an_invalid_sequence_is_rejected() {
+    // Sequence invariants PostgreSQL enforces at CREATE time are checked at preflight, not left to fail
+    // only when the DDL executes.
+    let base = SequenceModel {
+        name: "counter".to_owned(),
+        data_type: SequenceDataType::Integer,
+        start: 1,
+        increment: 1,
+        min: 1,
+        max: 100,
+        cache: 1,
+        cycle: false,
+        owned_by: None,
+    };
+    let with = |sequence: SequenceModel| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: vec![sequence],
+        }],
+    };
+    for bad in [
+        SequenceModel {
+            increment: 0,
+            ..base.clone()
+        },
+        SequenceModel {
+            min: 100,
+            max: 1,
+            ..base.clone()
+        },
+        SequenceModel {
+            // PostgreSQL requires MINVALUE strictly less than MAXVALUE.
+            min: 5,
+            max: 5,
+            start: 5,
+            ..base.clone()
+        },
+        SequenceModel {
+            start: 500,
+            ..base.clone()
+        },
+        SequenceModel {
+            max: i64::MAX, // outside the integer type's range
+            ..base.clone()
+        },
+    ] {
+        let error = squealy_model::render_create_sql(&with(bad.clone()), &Postgres)
+            .expect_err("an invalid sequence must be rejected");
+        assert!(
+            error.to_string().contains("counter"),
+            "error should name the sequence: {error} (for {bad:?})"
+        );
+    }
 }
 
 #[test]
@@ -601,6 +662,189 @@ async fn publishing_an_enum_then_replanning_is_empty() {
         .execute_ddl("DROP SCHEMA IF EXISTS publish_enums CASCADE")
         .await
         .expect("clean up enum fixture");
+}
+
+fn sequence_fixture() -> DatabaseModel {
+    let events = TableModel {
+        name: "events".to_owned(),
+        comment: None,
+        columns: vec![ColumnModel {
+            name: "id".to_owned(),
+            comment: None,
+            ty: SqlType::I64,
+            collation: None,
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+            on_update: None,
+        }],
+        primary_key: Some(Constraint {
+            prefix_lengths: Vec::new(),
+            name: "pk_events".to_owned(),
+            columns: vec!["id".to_owned()],
+        }),
+        foreign_keys: Vec::new(),
+        uniques: Vec::new(),
+        checks: Vec::new(),
+        indexes: Vec::new(),
+    };
+    let standalone = SequenceModel {
+        name: "counter".to_owned(),
+        data_type: SequenceDataType::Integer,
+        start: 100,
+        increment: 5,
+        min: 100,
+        max: 2_147_483_647,
+        cache: 1,
+        cycle: false,
+        owned_by: None,
+    };
+    let owned = SequenceModel {
+        name: "events_id_seq".to_owned(),
+        data_type: SequenceDataType::BigInt,
+        start: 1,
+        increment: 1,
+        min: 1,
+        max: i64::MAX,
+        cache: 1,
+        cycle: false,
+        owned_by: Some(SequenceOwnedBy {
+            table: "events".to_owned(),
+            column: "id".to_owned(),
+        }),
+    };
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("publish_seqs".to_owned()),
+            tables: vec![events],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: vec![standalone, owned],
+        }],
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn publishing_sequences_then_replanning_is_empty() {
+    // A published standalone sequence (with non-default attributes) and a column-owned sequence must both
+    // re-plan to empty: pg_sequence round-trips the concrete attributes, the identity/serial exclusion
+    // does not hide a genuinely standalone sequence, and the `OWNED BY` link is recovered.
+    let _guard = db_lock().lock().await;
+    let model = sequence_fixture();
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_seqs CASCADE")
+        .await
+        .expect("reset sequence fixture");
+
+    squealy_model::publish(&model, &Postgres, &mut connection)
+        .await
+        .expect("publish sequences");
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect("re-plan against the published sequences");
+    assert!(
+        plan.steps.is_empty(),
+        "published sequences must re-plan empty, got: {:?}",
+        plan.steps
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_seqs CASCADE")
+        .await
+        .expect("clean up sequence fixture");
+}
+
+#[tokio::test]
+#[ignore]
+async fn dropping_a_table_and_its_owned_sequence_applies_cleanly() {
+    // A sequence OWNED BY a dropped table is cascade-dropped by PostgreSQL. Without the pre-table detach,
+    // the plan's explicit DROP SEQUENCE would then fail on a missing object. Publish the fixture, then
+    // apply a migration that removes the table and both sequences, and assert PostgreSQL accepts it.
+    let _guard = db_lock().lock().await;
+    let published = sequence_fixture();
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_seqs CASCADE")
+        .await
+        .expect("reset sequence fixture");
+    squealy_model::publish(&published, &Postgres, &mut connection)
+        .await
+        .expect("publish sequences");
+
+    // Target: the same schema, emptied of its table and sequences. Diff directly against the known
+    // published model (not a whole-database introspection) so only this schema's objects are dropped.
+    let target = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("publish_seqs".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+        }],
+    };
+    let plan =
+        squealy_model::plan_models(&target, &published, squealy_model::DiffPolicy::ALLOW_ALL)
+            .expect("plan the drop migration");
+    squealy_model::apply_plan(&plan, &target, &Postgres, &mut connection)
+        .await
+        .expect("apply the drop of a table and its owned sequence");
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_seqs CASCADE")
+        .await
+        .expect("clean up sequence fixture");
+}
+
+#[tokio::test]
+#[ignore]
+async fn identity_column_sequence_is_not_surfaced_as_standalone() {
+    // A `GENERATED ... AS IDENTITY` column owns an internal sequence (pg_depend deptype 'i'). Introspection
+    // must exclude it, or an identity table would re-plan a spurious `DropSequence` every run.
+    let _guard = db_lock().lock().await;
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl(
+            "DROP SCHEMA IF EXISTS publish_seqs CASCADE;\n\
+             CREATE SCHEMA publish_seqs;\n\
+             CREATE TABLE publish_seqs.widgets (id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY)",
+        )
+        .await
+        .expect("create identity table");
+
+    let introspected = squealy_model::introspect(&mut connection)
+        .await
+        .expect("introspect identity table");
+    let schema = introspected
+        .schemas
+        .iter()
+        .find(|schema| schema.name.as_deref() == Some("publish_seqs"))
+        .expect("the publish_seqs schema");
+    assert!(
+        schema.sequences.is_empty(),
+        "an identity column's internal sequence must not be introspected as standalone: {:?}",
+        schema.sequences
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_seqs CASCADE")
+        .await
+        .expect("clean up sequence fixture");
 }
 
 #[tokio::test]

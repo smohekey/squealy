@@ -51,6 +51,10 @@ pub fn plan_step_risk(step: &DatabasePlanStep) -> ChangeRisk {
         // Create-or-replace of a view loses no data and re-runs cleanly.
         DatabasePlanStep::CreateView { .. } => ChangeRisk::Safe,
         DatabasePlanStep::CreateEnum { .. } => ChangeRisk::Safe,
+        // Creating a sequence, altering its attributes, or (re)assigning its owner loses no data.
+        DatabasePlanStep::CreateSequence { .. }
+        | DatabasePlanStep::AlterSequence { .. }
+        | DatabasePlanStep::SetSequenceOwner { .. } => ChangeRisk::Safe,
         // Appending enum labels is safe; recreating the type (remove/reorder) rewrites its columns.
         DatabasePlanStep::AlterEnum { additive, .. } => {
             if *additive {
@@ -62,7 +66,8 @@ pub fn plan_step_risk(step: &DatabasePlanStep) -> ChangeRisk {
         DatabasePlanStep::DropSchema { .. }
         | DatabasePlanStep::DropTable { .. }
         | DatabasePlanStep::DropView { .. }
-        | DatabasePlanStep::DropEnum { .. } => ChangeRisk::Destructive,
+        | DatabasePlanStep::DropEnum { .. }
+        | DatabasePlanStep::DropSequence { .. } => ChangeRisk::Destructive,
         DatabasePlanStep::AlterTable { change, .. } => table_plan_step_risk(change),
     }
 }
@@ -224,6 +229,34 @@ fn plan_step_as_diff_change(step: &DatabasePlanStep) -> DatabaseDiffChange {
             after: after.clone(),
             additive: *additive,
         },
+        DatabasePlanStep::CreateSequence { schema, sequence } => {
+            DatabaseDiffChange::CreateSequence {
+                schema: schema.clone(),
+                sequence: sequence.clone(),
+            }
+        }
+        DatabasePlanStep::DropSequence { schema, sequence } => DatabaseDiffChange::DropSequence {
+            schema: schema.clone(),
+            sequence: sequence.clone(),
+        },
+        DatabasePlanStep::AlterSequence {
+            schema,
+            before,
+            after,
+        } => DatabaseDiffChange::AlterSequence {
+            schema: schema.clone(),
+            before: before.clone(),
+            after: after.clone(),
+        },
+        DatabasePlanStep::SetSequenceOwner {
+            schema,
+            name,
+            owned_by,
+        } => DatabaseDiffChange::SetSequenceOwner {
+            schema: schema.clone(),
+            name: name.clone(),
+            owned_by: owned_by.clone(),
+        },
     }
 }
 
@@ -374,6 +407,40 @@ fn flatten_diff(diff: &DatabaseDiff) -> Vec<DatabasePlanStep> {
                     before: before.clone(),
                     after: after.clone(),
                     additive: *additive,
+                });
+            }
+            DatabaseDiffChange::CreateSequence { schema, sequence } => {
+                steps.push(DatabasePlanStep::CreateSequence {
+                    schema: schema.clone(),
+                    sequence: sequence.clone(),
+                });
+            }
+            DatabaseDiffChange::DropSequence { schema, sequence } => {
+                steps.push(DatabasePlanStep::DropSequence {
+                    schema: schema.clone(),
+                    sequence: sequence.clone(),
+                });
+            }
+            DatabaseDiffChange::AlterSequence {
+                schema,
+                before,
+                after,
+            } => {
+                steps.push(DatabasePlanStep::AlterSequence {
+                    schema: schema.clone(),
+                    before: before.clone(),
+                    after: after.clone(),
+                });
+            }
+            DatabaseDiffChange::SetSequenceOwner {
+                schema,
+                name,
+                owned_by,
+            } => {
+                steps.push(DatabasePlanStep::SetSequenceOwner {
+                    schema: schema.clone(),
+                    name: name.clone(),
+                    owned_by: owned_by.clone(),
                 });
             }
         }

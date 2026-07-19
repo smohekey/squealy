@@ -52,6 +52,7 @@ fn schema_entry<'a>(schemas: &'a mut Vec<SchemaModel>, name: &str) -> &'a mut Sc
         tables: Vec::new(),
         views: Vec::new(),
         enums: Vec::new(),
+        sequences: Vec::new(),
     });
     schemas.last_mut().expect("schema just pushed")
 }

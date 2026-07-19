@@ -225,6 +225,12 @@ pub struct SchemaCapabilities {
     /// [`EnumModel`]: crate::EnumModel
     /// [`SqlType::Enum`]: crate::SqlType::Enum
     pub enums: bool,
+    /// Standalone sequences (PostgreSQL `CREATE SEQUENCE`), modeled as [`SequenceModel`]. Backends
+    /// without a sequence object (MySQL, SQLite) leave this `false`, so a model that declares one is
+    /// rejected rather than silently dropped.
+    ///
+    /// [`SequenceModel`]: crate::SequenceModel
+    pub sequences: bool,
 }
 
 /// Per-column metadata capabilities for backend-specific column attributes.

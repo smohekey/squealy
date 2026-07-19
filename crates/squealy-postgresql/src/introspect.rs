@@ -3,7 +3,8 @@ use squealy::{
     DatabaseModel, DefaultValue, EnumModel, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
     GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
     IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, SchemaModel,
-    SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
+    SequenceDataType, SequenceModel, SequenceOwnedBy, SourceRef, SqlType, TableModel, ViewBody,
+    ViewColumnModel, ViewModel, ViewQueryModel,
 };
 use tokio_postgres::Client;
 
@@ -54,7 +55,97 @@ pub(crate) async fn database(client: &Client) -> Result<DatabaseModel, PostgresE
         schema_entry(&mut schemas, &schema).enums.push(enum_type);
     }
 
+    for (schema, sequence) in introspect_sequences(client).await? {
+        schema_entry(&mut schemas, &schema).sequences.push(sequence);
+    }
+
     Ok(DatabaseModel { schemas })
+}
+
+/// Introspects every free-standing sequence (`CREATE SEQUENCE`), paired with its schema. A sequence
+/// implicitly owned by an identity or serial column (an `auto`/`internal` `pg_depend` link to a column)
+/// is excluded — it is created with its column, not as a standalone object. A sequence explicitly tied
+/// to a column with `ALTER SEQUENCE ... OWNED BY` (a `deptype = 'a'` link) is kept, and its owning
+/// column recovered.
+async fn introspect_sequences(
+    client: &Client,
+) -> Result<Vec<(String, SequenceModel)>, PostgresError> {
+    let rows = client
+        .query(
+            "\
+SELECT n.nspname,
+       c.relname,
+       format_type(s.seqtypid, NULL) AS data_type,
+       s.seqstart,
+       s.seqincrement,
+       s.seqmin,
+       s.seqmax,
+       s.seqcache,
+       s.seqcycle,
+       owner.tablename,
+       owner.colname
+FROM pg_sequence s
+JOIN pg_class c ON c.oid = s.seqrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN LATERAL (
+    SELECT rel.relname AS tablename, att.attname AS colname
+    FROM pg_depend d
+    JOIN pg_class rel ON rel.oid = d.refobjid
+    JOIN pg_attribute att ON att.attrelid = d.refobjid AND att.attnum = d.refobjsubid
+    WHERE d.classid = 'pg_class'::regclass
+      AND d.objid = c.oid
+      AND d.deptype = 'a'
+      AND d.refobjsubid <> 0
+    LIMIT 1
+) owner ON TRUE
+WHERE c.relkind = 'S'
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', '__squealy')
+  AND n.nspname NOT LIKE 'pg_toast%'
+  AND NOT EXISTS (
+      SELECT 1 FROM pg_depend d
+      WHERE d.classid = 'pg_class'::regclass
+        AND d.objid = c.oid
+        AND d.deptype = 'i'
+        AND d.refobjsubid <> 0
+  )
+ORDER BY n.nspname, c.relname",
+            &[],
+        )
+        .await?;
+
+    let mut sequences = Vec::new();
+    for row in rows {
+        let schema: String = row.get(0);
+        let name: String = row.get(1);
+        let data_type_name: String = row.get(2);
+        let data_type = match data_type_name.as_str() {
+            "smallint" => SequenceDataType::SmallInt,
+            "integer" => SequenceDataType::Integer,
+            _ => SequenceDataType::BigInt,
+        };
+        let owned_by = match (
+            row.get::<_, Option<String>>(9),
+            row.get::<_, Option<String>>(10),
+        ) {
+            (Some(table), Some(column)) => Some(SequenceOwnedBy { table, column }),
+            _ => None,
+        };
+        sequences.push((
+            schema,
+            SequenceModel {
+                name,
+                data_type,
+                start: row.get(3),
+                increment: row.get(4),
+                min: row.get(5),
+                max: row.get(6),
+                cache: row.get(7),
+                cycle: row.get(8),
+                owned_by,
+            },
+        ));
+    }
+    Ok(sequences)
 }
 
 /// Introspects every user-defined enum type (`CREATE TYPE ... AS ENUM`), paired with its schema. Labels
@@ -127,6 +218,7 @@ fn schema_entry<'a>(schemas: &'a mut Vec<SchemaModel>, name: &str) -> &'a mut Sc
         tables: Vec::new(),
         views: Vec::new(),
         enums: Vec::new(),
+        sequences: Vec::new(),
     });
     schemas.last_mut().expect("schema just pushed")
 }

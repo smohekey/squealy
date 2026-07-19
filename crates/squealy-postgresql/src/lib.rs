@@ -292,6 +292,8 @@ impl squealy::SchemaBackend for Postgres {
             },
             // PostgreSQL has `CREATE TYPE ... AS ENUM`.
             enums: true,
+            // PostgreSQL has standalone `CREATE SEQUENCE`.
+            sequences: true,
         }
     }
 

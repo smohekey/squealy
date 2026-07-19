@@ -386,6 +386,7 @@ fn clause_alias_mysql_model() -> DatabaseModel {
                 })),
             }],
             enums: Vec::new(),
+            sequences: Vec::new(),
         }],
     }
 }
@@ -434,6 +435,7 @@ fn alter_column_baseline_model() -> DatabaseModel {
             name: Some("catalog_alter".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,
@@ -477,6 +479,7 @@ fn alter_column_desired_model() -> DatabaseModel {
             name: Some("catalog_alter".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,
@@ -745,6 +748,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
             },
         ],
         enums: Vec::new(),
+        sequences: Vec::new(),
     }
 }
 
@@ -754,6 +758,7 @@ fn rich_mysql_model() -> DatabaseModel {
             name: Some("catalog_rich".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![
                 TableModel {
                     name: "memberships".to_owned(),
@@ -955,6 +960,7 @@ fn mysql_normalized_rich_schema() -> SchemaModel {
         name: Some("catalog_rich".to_owned()),
         views: Vec::new(),
         enums: Vec::new(),
+        sequences: Vec::new(),
         tables: vec![
             TableModel {
                 name: "memberships".to_owned(),
@@ -1158,6 +1164,7 @@ fn timestamp_precision_model(precision: Option<u8>) -> DatabaseModel {
             name: Some("catalog_ts".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,
@@ -1214,6 +1221,7 @@ fn decimal_cast_check_model(scale: u32) -> DatabaseModel {
             name: Some("catalog_dc".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "quotas".to_owned(),
                 comment: None,
@@ -1271,6 +1279,7 @@ fn enforcement_check_model(enforcement: Option<ConstraintEnforcement>) -> Databa
             name: Some("catalog_enf".to_owned()),
             views: Vec::new(),
             enums: Vec::new(),
+            sequences: Vec::new(),
             tables: vec![TableModel {
                 name: "readings".to_owned(),
                 comment: None,
