@@ -645,8 +645,10 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     }
 
     changes.extend(enum_creates);
-    changes.extend(domain_creates);
+    // Sequences precede domains: a domain's `DEFAULT` may `nextval` a sequence created in the same
+    // migration, but a sequence never references a domain.
     changes.extend(sequence_pre_table);
+    changes.extend(domain_creates);
     changes.extend(view_drops);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {

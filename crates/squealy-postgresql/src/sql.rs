@@ -308,20 +308,21 @@ pub(crate) mod ddl {
             }
         }
 
+        // Sequences are created (without their `OWNED BY`) before any table, since a column default can
+        // `nextval` a sequence. The `OWNED BY` clause is applied after the tables exist, below. Sequences
+        // precede domains so a domain's `DEFAULT` may `nextval` one.
+        for schema in &model.schemas {
+            for sequence in &schema.sequences {
+                statement(writer, &mut first)?;
+                write_create_sequence(schema.name.as_deref(), sequence, writer)?;
+            }
+        }
+
         // Domains are created before any table, since a table column can be of a domain type.
         for schema in &model.schemas {
             for domain in &schema.domains {
                 statement(writer, &mut first)?;
                 write_create_domain(schema.name.as_deref(), domain, writer)?;
-            }
-        }
-
-        // Sequences are created (without their `OWNED BY`) before any table, since a column default can
-        // `nextval` a sequence. The `OWNED BY` clause is applied after the tables exist, below.
-        for schema in &model.schemas {
-            for sequence in &schema.sequences {
-                statement(writer, &mut first)?;
-                write_create_sequence(schema.name.as_deref(), sequence, writer)?;
             }
         }
 

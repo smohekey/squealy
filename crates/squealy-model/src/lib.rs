@@ -545,6 +545,28 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 !view.columns.is_empty(),
             );
         }
+        // A domain's base type, default, and CHECK expressions come back from introspection in the
+        // backend's physical form (a `Text` base reads as `String`, a bare-precision timestamp as
+        // `Some(6)`, a `Raw` check restructured), so canonicalize them the same way a table column and
+        // check are — otherwise an unchanged domain authored with a logical alias would churn a (rejected)
+        // base-type `AlterDomain` every run. Its CHECK constraints are also compared order-independently
+        // (introspection returns them name-sorted).
+        for domain in &mut schema.domains {
+            domain.base_type = connection.canonical_sql_type(&domain.base_type);
+            if let Some(default) = &mut domain.default {
+                *default = connection.canonical_default(&domain.base_type, default);
+            }
+            for check in &mut domain.checks {
+                check.expression = connection.canonical_check_expression(check.expression.clone());
+                check.expression = squealy::normalize_expr(&check.expression);
+                squealy::map_cast_types(&mut check.expression, &|ty| {
+                    connection.canonical_cast_type(ty)
+                });
+                normalize_default_validation(&mut check.validation);
+                normalize_default_enforcement(&mut check.enforcement);
+            }
+            domain.checks.sort_by(|a, b| a.name.cmp(&b.name));
+        }
     }
     // A schema-less backend flattens every namespace to the same (default) name, so two source schemas
     // can now share a name. `diff_models` keys schemas by name in a `BTreeMap`, which would drop the
@@ -1051,6 +1073,25 @@ fn validate_domains(
     }
     for schema in &model.schemas {
         for domain in &schema.domains {
+            // A domain's base type must be a plain scalar squealy can render and introspect faithfully.
+            // A `FixedBytes(N)` loses its width (rendered `bytea`, with no place for the length CHECK a
+            // table column gets), and a `SqlType::Enum` would render an unqualified type name that fails
+            // to resolve off `search_path` (a domain over an enum should name it as a qualified `Raw`).
+            match &domain.base_type {
+                SqlType::FixedBytes(_) => {
+                    return unsupported_domain(
+                        &domain.name,
+                        "a fixed-width byte base type (its length cannot be enforced on a domain)",
+                    );
+                }
+                SqlType::Enum(_) => {
+                    return unsupported_domain(
+                        &domain.name,
+                        "an enum base type (name the enum as a qualified `Raw` type instead)",
+                    );
+                }
+                _ => {}
+            }
             for check in &domain.checks {
                 if squealy::expr_references_bare_column(&check.expression) {
                     return Err(std::io::Error::new(
@@ -1062,10 +1103,26 @@ fn validate_domains(
                         ),
                     ));
                 }
+                // `CREATE DOMAIN` has no grammar for a per-constraint `NOT VALID`/enforcement clause, and
+                // introspection reads a domain check back as validated/enforced, so reject a non-default
+                // validation/enforcement rather than render DDL PostgreSQL refuses.
+                if check.validation.is_some() || check.enforcement.is_some() {
+                    return unsupported_domain(
+                        &domain.name,
+                        "a CHECK with an explicit validation/enforcement clause (unsupported on a domain)",
+                    );
+                }
             }
         }
     }
     Ok(())
+}
+
+fn unsupported_domain(domain: &str, feature: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("domain `{domain}` uses {feature}"),
+    ))
 }
 
 fn validate_capabilities(

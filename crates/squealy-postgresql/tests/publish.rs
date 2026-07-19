@@ -606,6 +606,33 @@ fn creating_a_domain_check_referencing_a_column_is_rejected() {
 }
 
 #[test]
+fn creating_a_domain_with_an_unsupported_base_type_is_rejected() {
+    // A domain base type must be a plain scalar: a fixed-width byte type would lose its length, and an
+    // enum would render an unqualified type name that fails to resolve.
+    let domain = |base: SqlType| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: vec![DomainModel {
+                name: "d".to_owned(),
+                base_type: base,
+                not_null: false,
+                default: None,
+                checks: Vec::new(),
+            }],
+        }],
+    };
+    for base in [SqlType::FixedBytes(16), SqlType::Enum("mood".to_owned())] {
+        let error = squealy_model::render_create_sql(&domain(base.clone()), &Postgres)
+            .expect_err("an unsupported domain base type must be rejected");
+        assert!(error.to_string().contains('d'), "{error} (for {base:?})");
+    }
+}
+
+#[test]
 fn creating_a_view_column_of_an_undeclared_enum_is_rejected() {
     // The enum-declaration check must cover view output columns, not just table columns. The view has a
     // fully renderable body (so the only reason to reject it is the undeclared enum output column), and
@@ -666,20 +693,31 @@ fn incremental_rendering_rejects_an_undeclared_enum_column() {
     assert!(error.to_string().contains("mood"), "{error}");
 }
 
+fn domain_check(name: &str, sql: &str) -> CheckModel {
+    CheckModel {
+        name: name.to_owned(),
+        expression: squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+            .read_domain_check_expression(sql)
+            .unwrap(),
+        validation: None,
+        enforcement: None,
+    }
+}
+
 fn domain_fixture() -> DatabaseModel {
-    let positive = DomainModel {
-        name: "positive".to_owned(),
-        base_type: SqlType::I32,
+    // A `Text`-based domain: introspection reads the base back as PostgreSQL's physical `String`, so this
+    // exercises the domain canonicalization (an un-canonicalized `Text` would churn a base-type
+    // `AlterDomain` every run). Two CHECKs authored in non-name-sorted order exercise the order-independent
+    // comparison (introspection returns them name-sorted).
+    let email = DomainModel {
+        name: "email".to_owned(),
+        base_type: SqlType::Text,
         not_null: true,
-        default: Some(DefaultValue::Int(1)),
-        checks: vec![CheckModel {
-            name: "positive_check".to_owned(),
-            expression: squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
-                .read_domain_check_expression("VALUE > 0")
-                .unwrap(),
-            validation: None,
-            enforcement: None,
-        }],
+        default: None,
+        checks: vec![
+            domain_check("z_length", "length(VALUE) < 320"),
+            domain_check("a_nonempty", "VALUE <> ''"),
+        ],
     };
     // A table with a column of the domain type. Off the search_path, `format_type` reports the domain
     // qualified, so the column round-trips as a qualified `Raw`.
@@ -687,9 +725,9 @@ fn domain_fixture() -> DatabaseModel {
         name: "readings".to_owned(),
         comment: None,
         columns: vec![ColumnModel {
-            name: "score".to_owned(),
+            name: "contact".to_owned(),
             comment: None,
-            ty: SqlType::Raw("publish_domains.positive".to_owned()),
+            ty: SqlType::Raw("publish_domains.email".to_owned()),
             collation: None,
             nullable: false,
             default: None,
@@ -710,7 +748,7 @@ fn domain_fixture() -> DatabaseModel {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
-            domains: vec![positive],
+            domains: vec![email],
         }],
     }
 }
