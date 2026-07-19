@@ -254,6 +254,7 @@ fn expected_introspected_model() -> DatabaseModel {
                         }),
                         ..ViewQueryModel::default()
                     })),
+                    materialized: false,
                 },
                 ViewModel {
                     name: "user_count_by_actives".to_owned(),
@@ -292,6 +293,7 @@ fn expected_introspected_model() -> DatabaseModel {
                         group_by: vec![user_col("active")],
                         ..ViewQueryModel::default()
                     })),
+                    materialized: false,
                 },
             ],
             // Tables come back in `sqlite_master` name order: posts, repositorys, users.

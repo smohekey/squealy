@@ -1104,11 +1104,17 @@ fn diff_views_global(
                 //
                 // An introspected view whose body could not be reconstructed has an empty `SELECT` body
                 // (only its name, columns, and dependencies are recovered) — the "body unknown" marker.
+                // A materialized view has no `CREATE OR REPLACE`, so any change to one (or a transition
+                // between a regular and a materialized view) must drop the old and create the new, not
+                // re-run a replace.
+                let materialized = desired_view.materialized || actual_view.materialized;
                 if actual_view.query.is_empty() {
-                    if view_columns_differ_ignoring_nullability(
-                        &desired_view.columns,
-                        &actual_view.columns,
-                    ) {
+                    if materialized
+                        || view_columns_differ_ignoring_nullability(
+                            &desired_view.columns,
+                            &actual_view.columns,
+                        )
+                    {
                         drops.push(DatabaseDiffChange::DropView {
                             schema: schema.clone(),
                             view: (*actual_view).clone(),
@@ -1119,7 +1125,7 @@ fn diff_views_global(
                         view: (*desired_view).clone(),
                     });
                 } else if desired_view != actual_view {
-                    if desired_view.columns != actual_view.columns {
+                    if materialized || desired_view.columns != actual_view.columns {
                         drops.push(DatabaseDiffChange::DropView {
                             schema: schema.clone(),
                             view: (*actual_view).clone(),

@@ -75,6 +75,22 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
         ));
     }
 
+    // MySQL has no materialized views; reject a model that declares one up front.
+    if let Some(view) = model
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.views)
+        .find(|view| view.materialized)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "MySQL does not support the materialized view `{}`",
+                view.name
+            ),
+        ));
+    }
+
     for schema in &model.schemas {
         if let Some(name) = schema.name.as_deref() {
             statement(writer, &mut first)?;
@@ -212,13 +228,31 @@ fn write_plan_step(
         } => write_table_plan_step(schema.as_deref(), table, change, writer, first)?,
         DatabasePlanStep::CreateView { schema, view } => {
             statement(writer, first)?;
+            // MySQL has no materialized views. Reject on the incremental path (the create path rejects up
+            // front / via capabilities), mirroring the enum/sequence/domain handling.
+            if view.materialized {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "MySQL does not support the materialized view `{}`",
+                        view.name
+                    ),
+                ));
+            }
             // `CREATE OR REPLACE VIEW` so a body change re-runs cleanly; a column-set change is
             // preceded by a `DropView` from the diff.
             squealy::render_create_view(schema.as_deref(), view, true, &MysqlDialect, writer)?;
         }
         DatabasePlanStep::DropView { schema, view } => {
             statement(writer, first)?;
-            squealy::render_drop_view(schema.as_deref(), &view.name, &MysqlDialect, writer)?;
+            // MySQL has no materialized views (rejected up front), so this is always a plain `DROP VIEW`.
+            squealy::render_drop_view(
+                schema.as_deref(),
+                &view.name,
+                view.materialized,
+                &MysqlDialect,
+                writer,
+            )?;
         }
         // MySQL has no standalone `CREATE TYPE` object. The create path rejects an enum model via
         // capabilities; the incremental plan path skips that check, so reject here too.

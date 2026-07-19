@@ -282,8 +282,8 @@ ORDER BY n.nspname, t.typname, e.enumsortorder",
 /// emptied `search_path` (see [`database`]) so `pg_get_viewdef` fully qualifies the sources it deparses.
 async fn introspect_views(client: &Client) -> Result<Vec<(String, ViewModel)>, PostgresError> {
     let mut views = Vec::new();
-    for view_ref in view_refs(client).await? {
-        let view = view(client, &view_ref).await?;
+    for (view_ref, materialized) in view_refs(client).await? {
+        let view = view(client, &view_ref, materialized).await?;
         views.push((view_ref.schema, view));
     }
     Ok(views)
@@ -308,14 +308,16 @@ fn schema_entry<'a>(schemas: &'a mut Vec<SchemaModel>, name: &str) -> &'a mut Sc
     schemas.last_mut().expect("schema just pushed")
 }
 
-async fn view_refs(client: &Client) -> Result<Vec<TableRef>, PostgresError> {
+/// Lists regular views (`relkind = 'v'`) and materialized views (`relkind = 'm'`), pairing each with
+/// whether it is materialized. Both reconstruct their body from `pg_get_viewdef` identically.
+async fn view_refs(client: &Client) -> Result<Vec<(TableRef, bool)>, PostgresError> {
     let rows = client
         .query(
             "\
-SELECT n.nspname, c.relname
+SELECT n.nspname, c.relname, (c.relkind = 'm') AS materialized
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relkind = 'v'
+WHERE c.relkind IN ('v', 'm')
   AND n.nspname NOT IN ('pg_catalog', 'information_schema', '__squealy')
   AND n.nspname NOT LIKE 'pg_toast%'
 ORDER BY n.nspname, c.relname",
@@ -325,14 +327,23 @@ ORDER BY n.nspname, c.relname",
 
     Ok(rows
         .into_iter()
-        .map(|row| TableRef {
-            schema: row.get(0),
-            name: row.get(1),
+        .map(|row| {
+            (
+                TableRef {
+                    schema: row.get(0),
+                    name: row.get(1),
+                },
+                row.get(2),
+            )
         })
         .collect())
 }
 
-async fn view(client: &Client, view_ref: &TableRef) -> Result<ViewModel, PostgresError> {
+async fn view(
+    client: &Client,
+    view_ref: &TableRef,
+    materialized: bool,
+) -> Result<ViewModel, PostgresError> {
     // Reconstruct the view's structural body from its `pg_get_viewdef` deparse so a squealy-published
     // view re-plans to empty (the diff's structural bar), rather than re-applying it every run. The
     // reverse parser inverts the deparse idioms it knows; a body it cannot yet lower falls back to the
@@ -356,6 +367,7 @@ async fn view(client: &Client, view_ref: &TableRef) -> Result<ViewModel, Postgre
         comment: None,
         columns: view_columns(client, view_ref).await?,
         query,
+        materialized,
     })
 }
 
@@ -384,7 +396,7 @@ FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = $1
   AND c.relname = $2
-  AND c.relkind = 'v'",
+  AND c.relkind IN ('v', 'm')",
             &[&view_ref.schema, &view_ref.name],
         )
         .await?;
@@ -393,8 +405,8 @@ WHERE n.nspname = $1
 }
 
 /// The other views this view depends on, read from its `ON SELECT` rewrite rule's dependencies.
-/// Restricted to relations of kind `v` (other views); table dependencies are irrelevant to view
-/// ordering because every table is created before any view.
+/// Restricted to relations of kind `v`/`m` (other regular or materialized views); table dependencies
+/// are irrelevant to view ordering because every table is created before any view.
 async fn view_dependencies(
     client: &Client,
     view_ref: &TableRef,
@@ -412,7 +424,7 @@ JOIN pg_namespace dn ON dn.oid = dc.relnamespace
 WHERE sn.nspname = $1
   AND sc.relname = $2
   AND d.refclassid = 'pg_class'::regclass
-  AND dc.relkind = 'v'
+  AND dc.relkind IN ('v', 'm')
   AND dc.oid <> sc.oid
 ORDER BY dn.nspname, dc.relname",
             &[&view_ref.schema, &view_ref.name],
@@ -450,7 +462,7 @@ JOIN pg_type typ ON typ.oid = a.atttypid
 JOIN pg_namespace tn ON tn.oid = typ.typnamespace
 WHERE n.nspname = $1
   AND c.relname = $2
-  AND c.relkind = 'v'
+  AND c.relkind IN ('v', 'm')
   AND a.attnum > 0
   AND NOT a.attisdropped
 ORDER BY a.attnum",

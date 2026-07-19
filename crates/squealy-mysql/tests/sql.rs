@@ -1212,6 +1212,50 @@ fn mysql_rejects_an_exclusion_constraint() {
 }
 
 #[test]
+fn mysql_rejects_a_materialized_view() {
+    // MySQL has no materialized views, so a model declaring one is rejected at render.
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: Vec::new(),
+            views: vec![ViewModel {
+                name: "totals".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "n".to_owned(),
+                    ty: SqlType::I64,
+                    nullable: false,
+                }],
+                query: ViewBody::Select(Box::new(ViewQueryModel {
+                    dependencies: Vec::new(),
+                    distinct: false,
+                    projection: vec![ProjectionItem {
+                        output_name: "n".to_owned(),
+                        internal_alias: None,
+                        expr: ExprNode::Literal("1".to_owned()),
+                    }],
+                    from: None,
+                    joins: Vec::new(),
+                    filter: None,
+                    group_by: Vec::new(),
+                    having: None,
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                })),
+                materialized: true,
+            }],
+        }],
+    };
+    let error = Mysql.render_create(&model, &mut Vec::new()).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("totals"), "{error}");
+}
+
+#[test]
 fn mysql_renders_check_constraint_not_enforced() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
@@ -1911,6 +1955,7 @@ fn mysql_renders_view_after_tables() {
                     limit: None,
                     offset: None,
                 })),
+                materialized: false,
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
@@ -1983,6 +2028,7 @@ fn mysql_view_fragment_requoting_preserves_string_literals() {
                     limit: None,
                     offset: None,
                 })),
+                materialized: false,
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
@@ -2043,6 +2089,7 @@ fn mysql_renders_view_plan_steps() {
             limit: None,
             offset: None,
         })),
+        materialized: false,
     };
 
     let plan = DatabasePlan {
@@ -2216,6 +2263,7 @@ fn mysql_renders_view_expression_ir_in_its_dialect() {
                     limit: None,
                     offset: None,
                 })),
+                materialized: false,
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
@@ -2279,6 +2327,7 @@ fn mysql_view_now_renders_with_microsecond_precision() {
                     limit: None,
                     offset: None,
                 })),
+                materialized: false,
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
@@ -2339,6 +2388,7 @@ fn mysql_view_order_by_drops_nulls_modifier() {
                     limit: None,
                     offset: None,
                 })),
+                materialized: false,
             }],
             enums: Vec::new(),
             sequences: Vec::new(),

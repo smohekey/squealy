@@ -88,6 +88,7 @@ pub fn render_plan_sql<B: SchemaBackend>(
     validate_sequences(desired, capabilities)?;
     validate_domains(desired, capabilities)?;
     validate_exclusions(desired, capabilities)?;
+    validate_materialized_views(desired, capabilities)?;
     for schema in &desired.schemas {
         for table in &schema.tables {
             validate_table_constraint_prefixes(table, &capabilities)?;
@@ -1231,6 +1232,33 @@ fn validate_exclusions(
     Ok(())
 }
 
+/// Rejects a materialized view on a backend that has no materialized views (`materialized_views = false`,
+/// MySQL/SQLite), so a model that declares one is refused rather than mis-rendered as a plain view. A
+/// regular view needs no capability. Shared by the create preflight ([`validate_capabilities`]) and the
+/// incremental render path ([`render_plan_sql`]) so both agree.
+fn validate_materialized_views(
+    model: &DatabaseModel,
+    capabilities: SchemaCapabilities,
+) -> std::io::Result<()> {
+    if capabilities.materialized_views {
+        return Ok(());
+    }
+    for schema in &model.schemas {
+        for view in &schema.views {
+            if view.materialized {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "backend cannot render and introspect the materialized view `{}`",
+                        view.name
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_capabilities(
     model: &DatabaseModel,
     capabilities: SchemaCapabilities,
@@ -1239,6 +1267,7 @@ fn validate_capabilities(
     validate_sequences(model, capabilities)?;
     validate_domains(model, capabilities)?;
     validate_exclusions(model, capabilities)?;
+    validate_materialized_views(model, capabilities)?;
     for schema in &model.schemas {
         for table in &schema.tables {
             for column in &table.columns {
@@ -1563,6 +1592,7 @@ mod tests {
                         nullable: false,
                     }],
                     query: ViewBody::default(),
+                    materialized: false,
                 }],
                 enums: Vec::new(),
                 sequences: Vec::new(),
@@ -1605,6 +1635,7 @@ mod tests {
                 }],
                 ..Default::default()
             })),
+            materialized: false,
         };
         let model = DatabaseModel {
             schemas: vec![SchemaModel {
@@ -1707,6 +1738,7 @@ mod tests {
                     }],
                     ..Default::default()
                 })),
+                materialized: false,
             }
         }
         let model = |v: ViewModel| DatabaseModel {
@@ -2463,6 +2495,7 @@ mod tests {
                     enums: false,
                     sequences: false,
                     domains: false,
+                    materialized_views: false,
                 },
             },
         )
@@ -2520,6 +2553,7 @@ mod tests {
                     enums: false,
                     sequences: false,
                     domains: false,
+                    materialized_views: false,
                 },
             },
         )

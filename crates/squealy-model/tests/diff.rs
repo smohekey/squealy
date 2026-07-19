@@ -1028,6 +1028,7 @@ fn dep_view(name: &str, from: &str) -> ViewModel {
             limit: None,
             offset: None,
         })),
+        materialized: false,
     }
 }
 

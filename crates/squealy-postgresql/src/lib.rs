@@ -298,6 +298,8 @@ impl squealy::SchemaBackend for Postgres {
             sequences: true,
             // PostgreSQL has `CREATE DOMAIN`.
             domains: true,
+            // PostgreSQL has `CREATE MATERIALIZED VIEW`.
+            materialized_views: true,
         }
     }
 
@@ -1320,6 +1322,7 @@ CREATE INDEX CONCURRENTLY j ON t (d);";
                 })),
                 ..Default::default()
             })),
+            materialized: false,
         };
 
         let mut sql = Vec::new();

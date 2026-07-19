@@ -181,6 +181,8 @@ impl SchemaBackend for Mysql {
             sequences: false,
             // MySQL has no domain object.
             domains: false,
+            // MySQL has no materialized views.
+            materialized_views: false,
         }
     }
 

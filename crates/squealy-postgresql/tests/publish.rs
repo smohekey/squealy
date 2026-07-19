@@ -306,6 +306,7 @@ fn clause_alias_model() -> DatabaseModel {
                     }],
                     ..Default::default()
                 })),
+                materialized: false,
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
@@ -344,6 +345,105 @@ async fn publishing_a_clause_alias_view_then_replanning_is_empty() {
     );
 
     reset_fixtures(&mut connection).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn publishing_a_materialized_view_then_replanning_is_empty() {
+    // A published materialized view over a table must re-plan to empty: it renders as
+    // `CREATE MATERIALIZED VIEW … AS … WITH DATA`, introspects back from `relkind = 'm'` with its body
+    // reconstructed via `pg_get_viewdef` exactly like a regular view, and rebinds `materialized = true`.
+    let _guard = db_lock().lock().await;
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_matviews CASCADE")
+        .await
+        .expect("reset matview fixture");
+
+    let column = |name: &str| ColumnModel {
+        name: name.to_owned(),
+        comment: None,
+        ty: SqlType::I64,
+        collation: None,
+        nullable: true,
+        default: None,
+        identity: None,
+        generated: None,
+        on_update: None,
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("publish_matviews".to_owned()),
+            tables: vec![TableModel {
+                name: "mv_events".to_owned(),
+                comment: None,
+                columns: vec![column("amount"), column("total")],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+                exclusions: Vec::new(),
+            }],
+            views: vec![ViewModel {
+                name: "mv_totals".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "total".to_owned(),
+                    ty: SqlType::I64,
+                    nullable: true,
+                }],
+                query: ViewBody::Select(Box::new(ViewQueryModel {
+                    projection: vec![ProjectionItem {
+                        output_name: "total".to_owned(),
+                        internal_alias: Some("total".to_owned()),
+                        expr: ExprNode::Binary {
+                            op: ArithmeticOp::Multiply,
+                            left: Box::new(ExprNode::Column {
+                                alias: "q".to_owned(),
+                                column: "amount".to_owned(),
+                            }),
+                            right: Box::new(ExprNode::Literal("2".to_owned())),
+                        },
+                    }],
+                    from: Some(SourceItem::Named(SourceRef {
+                        schema: Some("publish_matviews".to_owned()),
+                        name: "mv_events".to_owned(),
+                        alias: "q".to_owned(),
+                    })),
+                    ..Default::default()
+                })),
+                materialized: true,
+            }],
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: Vec::new(),
+        }],
+    };
+
+    squealy_model::publish(&model, &Postgres, &mut connection)
+        .await
+        .expect("publish materialized view");
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect("re-plan against the published materialized view");
+    assert!(
+        plan.steps.is_empty(),
+        "a published materialized view must re-plan empty, got: {:?}",
+        plan.steps
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_matviews CASCADE")
+        .await
+        .expect("clean up matview fixture");
 }
 
 // A table exercising every neutral integer width PostgreSQL has no dedicated type for, so each renders to
@@ -676,6 +776,7 @@ fn creating_a_view_column_of_an_undeclared_enum_is_rejected() {
             limit: None,
             offset: None,
         })),
+        materialized: false,
     });
     let error = squealy_model::render_create_sql(&model, &Postgres)
         .expect_err("a view column of an undeclared enum must be rejected");

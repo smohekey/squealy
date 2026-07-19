@@ -74,6 +74,21 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
             ),
         ));
     }
+    // SQLite has no materialized views; reject a model that declares one up front.
+    if let Some(view) = model
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.views)
+        .find(|view| view.materialized)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite does not support the materialized view `{}`",
+                view.name
+            ),
+        ));
+    }
     // SQLite keeps tables, indexes and views in one database-wide object namespace (there are no
     // schemas), so once schemas are flattened every table, index and view name must be unique —
     // including a table name that matches an index or a view. A model that relies on schema/table
@@ -327,6 +342,17 @@ pub(crate) fn write_plan(
                 }
             }
             DatabasePlanStep::CreateView { schema, view } => {
+                // SQLite has no materialized views. Reject on the incremental path (the create path
+                // rejects up front / via capabilities).
+                if view.materialized {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        format!(
+                            "SQLite does not support the materialized view `{}`",
+                            view.name
+                        ),
+                    ));
+                }
                 // The view was already dropped in the up-front view pre-pass (SQLite has no
                 // `CREATE OR REPLACE VIEW`); recreate it here, after all table work, so it binds to the
                 // final table shapes. Views are ordered so a view-on-view is created after its source.

@@ -368,6 +368,54 @@ fn sqlite_rejects_an_exclusion_constraint() {
 }
 
 #[test]
+fn sqlite_rejects_a_materialized_view() {
+    use squealy::{
+        DatabaseModel, ExprNode, ProjectionItem, SchemaModel, SqlType, ViewBody, ViewColumnModel,
+        ViewModel, ViewQueryModel,
+    };
+    // SQLite has no materialized views; a model declaring one is rejected at render.
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: Vec::new(),
+            views: vec![ViewModel {
+                name: "totals".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "n".to_owned(),
+                    ty: SqlType::I64,
+                    nullable: false,
+                }],
+                query: ViewBody::Select(Box::new(ViewQueryModel {
+                    dependencies: Vec::new(),
+                    distinct: false,
+                    projection: vec![ProjectionItem {
+                        output_name: "n".to_owned(),
+                        internal_alias: None,
+                        expr: ExprNode::Literal("1".to_owned()),
+                    }],
+                    from: None,
+                    joins: Vec::new(),
+                    filter: None,
+                    group_by: Vec::new(),
+                    having: None,
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                })),
+                materialized: true,
+            }],
+        }],
+    };
+    let error = Sqlite.render_create(&model, &mut Vec::new()).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(error.to_string().contains("totals"), "{error}");
+}
+
+#[test]
 fn fixed_bytes_column_enforces_width_with_a_check() {
     // `BLOB` has no fixed width, so a `FixedBytes(N)` column carries a `CHECK (length("col") = N)` to
     // preserve the fixed-width invariant the core type and other backends enforce.
@@ -913,6 +961,7 @@ fn id_view(name: &str, from: &str, filter: Option<squealy::ExprNode>) -> squealy
             limit: None,
             offset: None,
         })),
+        materialized: false,
     }
 }
 
@@ -1071,6 +1120,7 @@ fn render_create_renders_view_expression_ir_in_sqlite_dialect() {
                     limit: None,
                     offset: None,
                 })),
+                materialized: false,
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
@@ -1147,6 +1197,7 @@ fn rejects_intersect_all_view_body_which_sqlite_cannot_run() {
                     limit: None,
                     offset: None,
                 },
+                materialized: false,
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
@@ -1212,6 +1263,7 @@ fn rejects_set_body_with_an_alias_qualified_order_by_term() {
                     limit: None,
                     offset: None,
                 },
+                materialized: false,
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
@@ -1277,6 +1329,7 @@ fn rejects_set_body_order_by_a_name_the_left_arm_does_not_emit() {
                         limit: None,
                         offset: None,
                     },
+                    materialized: false,
                 }],
                 enums: Vec::new(),
                 sequences: Vec::new(),

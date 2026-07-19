@@ -911,6 +911,11 @@ pub struct ViewModel {
     pub columns: Vec<ViewColumnModel>,
     /// The structural body of the view — a single `SELECT` or a set operation.
     pub query: ViewBody,
+    /// Whether this is a *materialized* view (`CREATE MATERIALIZED VIEW`, PostgreSQL `relkind = 'm'`),
+    /// which physically stores its rows. A materialized view renders and drops with the `MATERIALIZED`
+    /// keyword and cannot be `CREATE OR REPLACE`d (a change re-creates it); everything else — the
+    /// structural body, dependency ordering, and packaging — is shared with a regular view.
+    pub materialized: bool,
 }
 
 /// One output column of a [`ViewModel`].
@@ -4778,6 +4783,7 @@ mod tests {
                 ],
                 body: Box::new(select_from("a")),
             },
+            materialized: false,
         };
         let names: Vec<&str> = view.referenced_sources().map(|s| s.name.as_str()).collect();
         assert!(

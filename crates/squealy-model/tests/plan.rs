@@ -796,6 +796,7 @@ async fn plan_from_database_canonicalizes_view_column_types() {
                 ..ViewQueryModel::default()
             }
         })),
+        materialized: false,
     };
     let schema = |view: ViewModel| DatabaseModel {
         schemas: vec![SchemaModel {

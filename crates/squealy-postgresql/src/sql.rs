@@ -529,6 +529,7 @@ pub(crate) mod ddl {
                 squealy::render_drop_view(
                     schema.as_deref(),
                     &view.name,
+                    view.materialized,
                     &super::PostgresDialect,
                     writer,
                 )?;

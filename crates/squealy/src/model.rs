@@ -136,6 +136,9 @@ fn view_from_dyn(view: &(dyn crate::ViewDef + Sync)) -> ViewModel {
         // The typed view builder only produces a single `SELECT`; set-op/CTE view bodies are
         // reconstructed on introspection, not authored through the builder (Track F, a follow-up).
         query: crate::ViewBody::Select(Box::new(query)),
+        // The typed view builder produces only regular views; a materialized view is modeled through
+        // introspection / a package, not the derive builder.
+        materialized: false,
     }
 }
 

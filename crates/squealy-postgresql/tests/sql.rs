@@ -3347,6 +3347,7 @@ fn postgres_renders_views_in_dependency_order() {
                 limit: None,
                 offset: None,
             })),
+            materialized: false,
         }
     }
 
@@ -3473,6 +3474,7 @@ fn postgres_renders_view_plan_steps() {
             limit: None,
             offset: None,
         })),
+        materialized: false,
     };
 
     let plan = DatabasePlan {
@@ -3504,6 +3506,81 @@ SELECT q0_0.\"id\" FROM \"public\".\"users\" AS q0_0 WHERE (q0_0.\"id\" > 0)"
     assert!(
         sql.contains("DROP VIEW \"public\".\"active_users\""),
         "missing drop view: {sql}"
+    );
+}
+
+// A materialized view renders `CREATE MATERIALIZED VIEW … WITH DATA` (never `OR REPLACE`, which matviews
+// lack) and drops with `DROP MATERIALIZED VIEW`.
+#[test]
+fn postgres_renders_materialized_view_plan_steps() {
+    let view = ViewModel {
+        name: "active_users".to_owned(),
+        comment: None,
+        columns: vec![ViewColumnModel {
+            name: "id".to_owned(),
+            ty: SqlType::I32,
+            nullable: false,
+        }],
+        query: ViewBody::Select(Box::new(ViewQueryModel {
+            dependencies: Vec::new(),
+            distinct: false,
+            projection: vec![ProjectionItem {
+                output_name: "id".to_owned(),
+                internal_alias: None,
+                expr: ExprNode::Column {
+                    alias: "q0_0".to_owned(),
+                    column: "id".to_owned(),
+                },
+            }],
+            from: Some(SourceItem::Named(SourceRef {
+                schema: Some("public".to_owned()),
+                name: "users".to_owned(),
+                alias: "q0_0".to_owned(),
+            })),
+            joins: Vec::new(),
+            filter: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        })),
+        materialized: true,
+    };
+
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::CreateView {
+                schema: Some("public".to_owned()),
+                view: Box::new(view.clone()),
+            },
+            DatabasePlanStep::DropView {
+                schema: Some("public".to_owned()),
+                view: Box::new(view),
+            },
+        ],
+    };
+
+    let mut sql = Vec::new();
+    Postgres
+        .render_plan(&plan, &squealy::DatabaseModel::default(), &mut sql)
+        .unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CREATE MATERIALIZED VIEW \"public\".\"active_users\" (\"id\") AS \
+SELECT q0_0.\"id\" FROM \"public\".\"users\" AS q0_0 WITH DATA"
+        ),
+        "missing create materialized view (no OR REPLACE, WITH DATA): {sql}"
+    );
+    assert!(
+        !sql.contains("OR REPLACE"),
+        "a materialized view has no OR REPLACE: {sql}"
+    );
+    assert!(
+        sql.contains("DROP MATERIALIZED VIEW \"public\".\"active_users\""),
+        "missing drop materialized view: {sql}"
     );
 }
 
@@ -3541,6 +3618,7 @@ fn postgres_renders_distinct_view_body() {
             limit: None,
             offset: None,
         })),
+        materialized: false,
     };
 
     let plan = DatabasePlan {
@@ -3609,6 +3687,7 @@ fn postgres_renders_case_view_body() {
             offset: None,
             dependencies: Vec::new(),
         })),
+        materialized: false,
     };
 
     let plan = DatabasePlan {
@@ -3790,6 +3869,7 @@ fn postgres_renders_view_expression_ir_in_its_dialect() {
                     limit: None,
                     offset: None,
                 })),
+                materialized: false,
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
@@ -3953,6 +4033,7 @@ fn postgres_view_order_by_keeps_nulls_modifier() {
                     limit: None,
                     offset: None,
                 })),
+                materialized: false,
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
@@ -3987,6 +4068,7 @@ fn postgres_render_rejects_empty_view_body() {
                     nullable: false,
                 }],
                 query: ViewBody::default(),
+                materialized: false,
             }],
             enums: Vec::new(),
             sequences: Vec::new(),

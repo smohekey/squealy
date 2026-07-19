@@ -1087,10 +1087,20 @@ fn describe_plan_step(step: &DatabasePlanStep) -> String {
             qualified(schema, table)
         ),
         DatabasePlanStep::CreateView { schema, view } => {
-            format!("create view {}", qualified(schema, &view.name))
+            let kind = if view.materialized {
+                "materialized view"
+            } else {
+                "view"
+            };
+            format!("create {kind} {}", qualified(schema, &view.name))
         }
         DatabasePlanStep::DropView { schema, view } => {
-            format!("drop view {}", qualified(schema, &view.name))
+            let kind = if view.materialized {
+                "materialized view"
+            } else {
+                "view"
+            };
+            format!("drop {kind} {}", qualified(schema, &view.name))
         }
         DatabasePlanStep::CreateEnum { schema, enum_type } => {
             format!("create enum {}", qualified(schema, &enum_type.name))

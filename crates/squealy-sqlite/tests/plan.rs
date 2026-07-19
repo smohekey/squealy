@@ -134,6 +134,7 @@ fn active_widgets_view() -> ViewModel {
             limit: None,
             offset: None,
         })),
+        materialized: false,
     }
 }
 
@@ -164,6 +165,7 @@ fn active_widget_ids_view() -> ViewModel {
             })),
             ..ViewQueryModel::default()
         })),
+        materialized: false,
     }
 }
 
@@ -1560,6 +1562,7 @@ async fn replanning_an_unchanged_view_is_not_destructive() {
             limit: None,
             offset: None,
         })),
+        materialized: false,
     });
 
     publish(&model, &Sqlite, &mut connection)
@@ -1641,6 +1644,7 @@ async fn replanning_a_clause_alias_colliding_with_a_source_column_is_empty() {
             }],
             ..ViewQueryModel::default()
         })),
+        materialized: false,
     });
 
     publish(&model, &Sqlite, &mut connection)
@@ -1892,6 +1896,7 @@ async fn a_trigger_on_a_non_ascii_case_variant_view_does_not_block() {
             })),
             ..ViewQueryModel::default()
         })),
+        materialized: false,
     };
     model.schemas[0].views.push(view("Ä"));
     model.schemas[0].views.push(view("ä"));
@@ -2544,6 +2549,7 @@ async fn a_recursive_cte_view_is_valid_sqlite() {
                 ..ViewQueryModel::default()
             }))),
         },
+        materialized: false,
     };
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
@@ -2640,6 +2646,7 @@ fn a_scoped_recursive_cte_arm_is_rejected_on_sqlite() {
                 ..ViewQueryModel::default()
             }))),
         },
+        materialized: false,
     };
     let desired = DatabaseModel {
         schemas: vec![SchemaModel {
@@ -2765,6 +2772,7 @@ async fn a_recursive_cte_with_a_nested_with_prelude_is_valid_sqlite() {
                 ..ViewQueryModel::default()
             }))),
         },
+        materialized: false,
     };
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
@@ -2835,6 +2843,7 @@ async fn replanning_a_view_with_an_ilike_filter_is_empty() {
             }),
             ..ViewQueryModel::default()
         })),
+        materialized: false,
     };
     let model = DatabaseModel {
         schemas: vec![SchemaModel {

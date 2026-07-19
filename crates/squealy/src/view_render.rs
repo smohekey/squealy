@@ -13,7 +13,9 @@ use crate::{
     UnaryStringFunc, ViewBody, ViewModel, ViewQueryModel, ViewSetOp, WindowFunc,
 };
 
-/// Renders `CREATE [OR REPLACE] VIEW <qualified> [(<cols>)] AS <select>` for the given dialect.
+/// Renders `CREATE [OR REPLACE] VIEW <qualified> [(<cols>)] AS <select>` — or, for a materialized view,
+/// `CREATE MATERIALIZED VIEW <qualified> [(<cols>)] AS <select> WITH DATA` — for the given dialect. A
+/// materialized view has no `OR REPLACE` form, so `or_replace` is ignored when `view.materialized`.
 pub fn render_create_view(
     schema: Option<&str>,
     view: &ViewModel,
@@ -36,7 +38,10 @@ pub fn render_create_view(
         ));
     }
 
-    writer.write_all(if or_replace {
+    writer.write_all(if view.materialized {
+        // A materialized view has no `OR REPLACE`; a change re-creates it (drop + create).
+        b"CREATE MATERIALIZED VIEW ".as_slice()
+    } else if or_replace {
         b"CREATE OR REPLACE VIEW ".as_slice()
     } else {
         b"CREATE VIEW ".as_slice()
@@ -57,17 +62,28 @@ pub fn render_create_view(
     }
 
     writer.write_all(b" AS ")?;
-    render_body(&view.query, view.columns.is_empty(), dialect, writer)
+    render_body(&view.query, view.columns.is_empty(), dialect, writer)?;
+    if view.materialized {
+        // Populate on create (the default), rendered explicitly. `WITH NO DATA` (an unpopulated matview)
+        // is a data-state concern squealy does not model.
+        writer.write_all(b" WITH DATA")?;
+    }
+    Ok(())
 }
 
-/// Renders `DROP VIEW <qualified>`.
+/// Renders `DROP [MATERIALIZED] VIEW <qualified>`.
 pub fn render_drop_view(
     schema: Option<&str>,
     name: &str,
+    materialized: bool,
     dialect: &dyn Dialect,
     writer: &mut dyn Write,
 ) -> io::Result<()> {
-    writer.write_all(b"DROP VIEW ")?;
+    writer.write_all(if materialized {
+        b"DROP MATERIALIZED VIEW ".as_slice()
+    } else {
+        b"DROP VIEW ".as_slice()
+    })?;
     render_qualified(schema, name, dialect, writer)
 }
 
