@@ -416,6 +416,58 @@ fn sqlite_rejects_a_materialized_view() {
 }
 
 #[test]
+fn sqlite_rejects_a_collateral_materialized_view_in_the_desired_model() {
+    use squealy::{
+        DatabaseModel, DatabasePlan, ExprNode, ProjectionItem, SchemaModel, SourceItem, SourceRef,
+        SqlType, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
+    };
+    // An unchanged materialized view over a rebuilt table carries no plan step, so it is only visible in
+    // `desired`. SQLite must reject it there too, before the collateral view pre-pass renders an
+    // unsupported `CREATE MATERIALIZED VIEW`.
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: Vec::new(),
+            views: vec![ViewModel {
+                name: "totals".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "n".to_owned(),
+                    ty: SqlType::I64,
+                    nullable: false,
+                }],
+                query: ViewBody::Select(Box::new(ViewQueryModel {
+                    projection: vec![ProjectionItem {
+                        output_name: "n".to_owned(),
+                        internal_alias: None,
+                        expr: ExprNode::Column {
+                            alias: "q".to_owned(),
+                            column: "n".to_owned(),
+                        },
+                    }],
+                    from: Some(SourceItem::Named(SourceRef {
+                        schema: None,
+                        name: "t".to_owned(),
+                        alias: "q".to_owned(),
+                    })),
+                    ..Default::default()
+                })),
+                materialized: true,
+            }],
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: Vec::new(),
+        }],
+    };
+    // An empty plan still carries `desired`; the matview is not in any step but must still be rejected.
+    let error = Sqlite
+        .render_plan(&DatabasePlan::default(), &desired, &mut Vec::new())
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(error.to_string().contains("totals"), "{error}");
+}
+
+#[test]
 fn sqlite_rejects_dropping_a_materialized_view() {
     use squealy::{
         DatabaseModel, DatabasePlan, DatabasePlanStep, ExprNode, ProjectionItem, SqlType, ViewBody,

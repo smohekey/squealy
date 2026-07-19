@@ -362,17 +362,28 @@ async fn view(
         }
         None => empty_body(client, view_ref).await?,
     };
-    // squealy does not yet model indexes on a materialized view (a follow-up). A matview change re-creates
-    // it (there is no `CREATE OR REPLACE MATERIALIZED VIEW`), which would silently drop any out-of-band
-    // index — including a UNIQUE index needed for `REFRESH ... CONCURRENTLY` or correctness. Refuse to
-    // manage an indexed matview rather than lose its indexes on a recreate; a squealy-authored matview has
-    // no indexes, so this only rejects one indexed out of band.
-    if materialized && !indexes(client, view_ref).await?.is_empty() {
-        return Err(PostgresError::Unsupported(format!(
-            "materialized view `{}` has one or more indexes, which squealy does not yet manage \
-             (a materialized-view change re-creates it and would drop them)",
-            view_ref.name
-        )));
+    // squealy models only a materialized view's body — not its indexes, tablespace, access method, or
+    // storage parameters. A matview change re-creates it (there is no `CREATE OR REPLACE MATERIALIZED
+    // VIEW`), which would silently drop any such out-of-band fact — including a UNIQUE index needed for
+    // `REFRESH ... CONCURRENTLY` or correctness, or a non-default tablespace. Refuse to manage a matview
+    // that carries one rather than lose it on a recreate; a squealy-authored matview carries none, so only
+    // one configured out of band is rejected.
+    if materialized {
+        if !indexes(client, view_ref).await?.is_empty() {
+            return Err(PostgresError::Unsupported(format!(
+                "materialized view `{}` has one or more indexes, which squealy does not yet manage \
+                 (a materialized-view change re-creates it and would drop them)",
+                view_ref.name
+            )));
+        }
+        if materialized_view_has_nondefault_storage(client, view_ref).await? {
+            return Err(PostgresError::Unsupported(format!(
+                "materialized view `{}` uses a non-default tablespace, access method, or storage \
+                 parameters, which squealy does not yet manage (a materialized-view change re-creates \
+                 it and would reset them)",
+                view_ref.name
+            )));
+        }
     }
 
     Ok(ViewModel {
@@ -382,6 +393,31 @@ async fn view(
         query,
         materialized,
     })
+}
+
+/// Whether a materialized view carries a storage fact squealy does not model — a non-default tablespace,
+/// a non-default (non-`heap`) table access method, or any storage parameter (`reloptions`). Such a matview
+/// is refused rather than silently reset to defaults on a recreate.
+async fn materialized_view_has_nondefault_storage(
+    client: &Client,
+    view_ref: &TableRef,
+) -> Result<bool, PostgresError> {
+    let rows = client
+        .query(
+            "\
+SELECT c.reltablespace <> 0
+       OR c.reloptions IS NOT NULL
+       OR COALESCE(am.amname, 'heap') <> 'heap'
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_am am ON am.oid = c.relam
+WHERE n.nspname = $1
+  AND c.relname = $2
+  AND c.relkind = 'm'",
+            &[&view_ref.schema, &view_ref.name],
+        )
+        .await?;
+    Ok(rows.first().map(|row| row.get(0)).unwrap_or(false))
 }
 
 /// The body-unknown sentinel: an empty `SELECT` carrying only the view-on-view dependencies, so the diff

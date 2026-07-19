@@ -488,6 +488,45 @@ async fn introspecting_a_materialized_view_with_an_index_is_rejected() {
         .expect("clean up indexed matview fixture");
 }
 
+#[tokio::test]
+#[ignore]
+async fn introspecting_a_materialized_view_with_storage_options_is_rejected() {
+    // squealy models only a matview's body, not its storage parameters. A recreate would reset them, so an
+    // out-of-band `WITH (...)` matview is refused rather than silently reset to defaults.
+    let _guard = db_lock().lock().await;
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl(
+            "DROP SCHEMA IF EXISTS publish_mv_storage CASCADE;\n\
+             CREATE SCHEMA publish_mv_storage;\n\
+             CREATE TABLE publish_mv_storage.src (id integer NOT NULL);\n\
+             CREATE MATERIALIZED VIEW publish_mv_storage.mv WITH (autovacuum_enabled = false) AS \
+             SELECT id FROM publish_mv_storage.src WITH DATA",
+        )
+        .await
+        .expect("raw-create a materialized view with storage options");
+
+    let error = squealy_model::plan_from_database(
+        &DatabaseModel::default(),
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect_err("a materialized view with storage options must be rejected");
+    assert!(
+        error.to_string().contains("mv") && error.to_string().contains("storage"),
+        "error should name the matview's storage: {error}"
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_mv_storage CASCADE")
+        .await
+        .expect("clean up storage matview fixture");
+}
+
 // A table exercising every neutral integer width PostgreSQL has no dedicated type for, so each renders to
 // `smallint`/`integer`/`bigint`/`numeric` and must introspect back to the signed representative it
 // canonicalizes to (`canonical_pg_sql_type`). Two unsigned columns carry defaults to exercise the matching

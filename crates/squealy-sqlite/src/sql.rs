@@ -254,16 +254,24 @@ pub(crate) fn write_plan(
     check_object_name_uniqueness(object_names())?;
 
     // SQLite has no materialized views. One can only reach the plan through a package (an offline diff's
-    // desired or actual model), so reject any materialized view in a create OR drop step up front, before
-    // the view drop pre-pass would emit a plain `DROP VIEW` for it.
-    if let Some(view) = plan.steps.iter().find_map(|step| match step {
+    // desired or actual model). Reject any materialized view before the view drop pre-pass would emit a
+    // plain `DROP VIEW` for it — both in a create/drop step AND in the desired model directly, since an
+    // *unchanged* materialized view over a rebuilt table carries no step but is dropped/recreated as
+    // collateral (which `render_create_view` would emit as an unsupported `CREATE MATERIALIZED VIEW`).
+    let step_matview = plan.steps.iter().find_map(|step| match step {
         DatabasePlanStep::CreateView { view, .. } | DatabasePlanStep::DropView { view, .. }
             if view.materialized =>
         {
-            Some(view)
+            Some(view.as_ref())
         }
         _ => None,
-    }) {
+    });
+    let desired_matview = desired
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.views)
+        .find(|view| view.materialized);
+    if let Some(view) = step_matview.or(desired_matview) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!(
