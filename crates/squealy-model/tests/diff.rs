@@ -463,6 +463,67 @@ fn creating_an_owned_sequence_orders_create_before_table_and_owner_after() {
 }
 
 #[test]
+fn a_sequence_sharing_a_table_name_is_rejected() {
+    // A sequence and a table both live in PostgreSQL's per-schema pg_class namespace, so they cannot
+    // share a name; the collision guard must reject it (here, within a single desired model).
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![table("counter")],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: vec![bigint_sequence("counter", None)],
+        }],
+    };
+    let error = reject_enum_relation_name_collision(&desired, &DatabaseModel::default())
+        .expect_err("a sequence sharing a table name must be rejected");
+    assert_eq!(error.name, "counter");
+}
+
+#[test]
+fn dropping_an_owned_sequence_detaches_it_before_the_table_drop() {
+    // A sequence OWNED BY a table being dropped would be cascade-dropped by PostgreSQL, making the
+    // explicit DropSequence fail. The diff must detach it (SetSequenceOwner -> NONE) before the table
+    // work and drop it after.
+    let owned = |()| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![table("events")],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: vec![bigint_sequence(
+                "events_id_seq",
+                Some(SequenceOwnedBy {
+                    table: "events".to_owned(),
+                    column: "id".to_owned(),
+                }),
+            )],
+        }],
+    };
+    let actual = owned(());
+    let desired = DatabaseModel::default();
+    let changes = diff_models(&desired, &actual).changes;
+    let detach = changes
+        .iter()
+        .position(|c| {
+            matches!(c, DatabaseDiffChange::SetSequenceOwner { owned_by, .. } if owned_by.is_none())
+        })
+        .expect("a detach SetSequenceOwner -> NONE");
+    let drop_table = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::DropTable { .. }))
+        .expect("a DropTable");
+    let drop_seq = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::DropSequence { .. }))
+        .expect("a DropSequence");
+    assert!(
+        detach < drop_table && drop_table < drop_seq,
+        "detach before the table drop, drop the sequence after: {changes:?}"
+    );
+}
+
+#[test]
 fn an_unchanged_sequence_produces_no_diff() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {

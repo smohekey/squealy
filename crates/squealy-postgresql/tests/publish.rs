@@ -707,6 +707,50 @@ async fn publishing_sequences_then_replanning_is_empty() {
 
 #[tokio::test]
 #[ignore]
+async fn dropping_a_table_and_its_owned_sequence_applies_cleanly() {
+    // A sequence OWNED BY a dropped table is cascade-dropped by PostgreSQL. Without the pre-table detach,
+    // the plan's explicit DROP SEQUENCE would then fail on a missing object. Publish the fixture, then
+    // apply a migration that removes the table and both sequences, and assert PostgreSQL accepts it.
+    let _guard = db_lock().lock().await;
+    let published = sequence_fixture();
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_seqs CASCADE")
+        .await
+        .expect("reset sequence fixture");
+    squealy_model::publish(&published, &Postgres, &mut connection)
+        .await
+        .expect("publish sequences");
+
+    // Target: the same schema, emptied of its table and sequences. Diff directly against the known
+    // published model (not a whole-database introspection) so only this schema's objects are dropped.
+    let target = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("publish_seqs".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+        }],
+    };
+    let plan =
+        squealy_model::plan_models(&target, &published, squealy_model::DiffPolicy::ALLOW_ALL)
+            .expect("plan the drop migration");
+    squealy_model::apply_plan(&plan, &target, &Postgres, &mut connection)
+        .await
+        .expect("apply the drop of a table and its owned sequence");
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_seqs CASCADE")
+        .await
+        .expect("clean up sequence fixture");
+}
+
+#[tokio::test]
+#[ignore]
 async fn identity_column_sequence_is_not_surfaced_as_standalone() {
     // A `GENERATED ... AS IDENTITY` column owns an internal sequence (pg_depend deptype 'i'). Introspection
     // must exclude it, or an identity table would re-plan a spurious `DropSequence` every run.
