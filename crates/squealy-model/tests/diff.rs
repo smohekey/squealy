@@ -1,4 +1,5 @@
 use squealy_model::DatabaseDiff;
+use squealy_model::DomainModel;
 use squealy_model::{
     ChangeRisk, CheckModel, ColumnModel, Constraint, DatabaseDiffChange, DatabaseModel,
     DefaultValue, DiffPolicy, EnumModel, ExprNode, ForeignKeyAction, ForeignKeyModel, IndexModel,
@@ -7,6 +8,44 @@ use squealy_model::{
     ViewColumnModel, ViewModel, ViewQueryModel, check_diff_policy, diff_models,
     reject_enum_relation_collision_in_diff, reject_enum_relation_name_collision,
 };
+
+#[test]
+fn dropping_a_domain_orders_it_before_dropping_its_enum_base() {
+    // A domain based on an enum (carried as a `Raw` base) depends on the enum, so `DROP DOMAIN` must
+    // precede `DROP TYPE` when both are removed.
+    let actual = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "mood".to_owned(),
+                labels: vec!["ok".to_owned()],
+            }],
+            sequences: Vec::new(),
+            domains: vec![DomainModel {
+                name: "feeling".to_owned(),
+                base_type: SqlType::Raw("app.mood".to_owned()),
+                not_null: false,
+                default: None,
+                checks: Vec::new(),
+            }],
+        }],
+    };
+    let changes = diff_models(&DatabaseModel::default(), &actual).changes;
+    let drop_domain = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::DropDomain { .. }))
+        .expect("a DropDomain");
+    let drop_enum = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::DropEnum { .. }))
+        .expect("a DropEnum");
+    assert!(
+        drop_domain < drop_enum,
+        "the domain must drop before its enum base: {changes:?}"
+    );
+}
 
 #[test]
 fn identical_models_have_empty_diff() {

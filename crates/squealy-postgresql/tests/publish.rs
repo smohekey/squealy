@@ -794,6 +794,86 @@ async fn publishing_a_domain_then_replanning_is_empty() {
 
 #[tokio::test]
 #[ignore]
+async fn publishing_a_public_domain_with_a_raw_check_replans_empty() {
+    // A domain in `public` (on the search_path, so `format_type` drops the qualifier) with a column of
+    // the domain type, and a CHECK authored through the `Raw("VALUE …")` escape hatch. Without the
+    // catalog-qualified column resolution the column would churn; without domain-aware check
+    // canonicalization the `VALUE` keyword would render as a quoted `"value"` column and fail to publish.
+    let _guard = db_lock().lock().await;
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl("DROP TABLE IF EXISTS public.metrics;\nDROP DOMAIN IF EXISTS public.pct")
+        .await
+        .expect("reset public domain fixture");
+
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("public".to_owned()),
+            tables: vec![TableModel {
+                name: "metrics".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "ratio".to_owned(),
+                    comment: None,
+                    ty: SqlType::Raw("public.pct".to_owned()),
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                    on_update: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: vec![DomainModel {
+                name: "pct".to_owned(),
+                base_type: SqlType::I32,
+                not_null: false,
+                default: None,
+                checks: vec![CheckModel {
+                    name: "pct_range".to_owned(),
+                    // Authored through the Raw escape hatch, not the domain reader.
+                    expression: ExprNode::Raw("VALUE >= 0 AND VALUE <= 100".to_owned()),
+                    validation: None,
+                    enforcement: None,
+                }],
+            }],
+        }],
+    };
+    squealy_model::publish(&model, &Postgres, &mut connection)
+        .await
+        .expect("publish public domain + column");
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect("re-plan against the published public domain");
+    assert!(
+        plan.steps.is_empty(),
+        "a published public domain must re-plan empty, got: {:?}",
+        plan.steps
+    );
+
+    connection
+        .execute_ddl("DROP TABLE IF EXISTS public.metrics;\nDROP DOMAIN IF EXISTS public.pct")
+        .await
+        .expect("clean up public domain fixture");
+}
+
+#[tokio::test]
+#[ignore]
 async fn publishing_an_enum_then_replanning_is_empty() {
     // A published enum type + a column of that type must re-plan to empty: the CREATE TYPE round-trips
     // (introspected from pg_enum), and the column rebinds from Raw("mood") to Enum("mood").

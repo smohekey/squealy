@@ -1137,10 +1137,11 @@ fn default_value(ty: &SqlType, value: &str) -> DefaultValue {
 }
 
 /// Resolves a column's [`SqlType`] from the catalog. An enum in the **same** schema as its relation
-/// becomes [`SqlType::Enum`] (rendered qualified with the relation's schema). A **cross-schema** enum
-/// becomes a schema-qualified [`SqlType::Raw`] built from the catalog (`type_schema.type_name`) — NOT the
-/// `format_type` string, which drops the qualifier when the enum's schema is on `search_path` (e.g.
-/// `public`) and would then churn against a desired qualified `Raw`. Non-enum types use `sql_type`.
+/// becomes [`SqlType::Enum`] (rendered qualified with the relation's schema). A **cross-schema** enum, or
+/// a **domain** (typtype `'d'`), becomes a schema-qualified [`SqlType::Raw`] built from the catalog
+/// (`type_schema.type_name`) — NOT the `format_type` string, which drops the qualifier when the type's
+/// schema is on `search_path` (e.g. `public`) and would then churn against a desired qualified `Raw`.
+/// Other types use `sql_type`.
 fn enum_or_sql_type(
     typtype: &str,
     type_schema: &str,
@@ -1149,17 +1150,13 @@ fn enum_or_sql_type(
     relation_schema: &str,
     db_type: &str,
 ) -> SqlType {
-    if typtype == "e" {
-        if type_schema == relation_schema {
-            SqlType::Enum(type_name.to_owned())
-        } else {
-            // `type_qualified` is PostgreSQL's `format('%I.%I', schema, name)` — quoted only where an
-            // identifier requires it (`"Types"."Mood Type"`, but bare `types.mood`), so the round-trips
-            // as a renderable, correctly-quoted `Raw`.
-            SqlType::Raw(type_qualified.to_owned())
-        }
-    } else {
-        sql_type(db_type)
+    match typtype {
+        "e" if type_schema == relation_schema => SqlType::Enum(type_name.to_owned()),
+        // A cross-schema enum or any domain: keep the catalog-qualified name so it round-trips against a
+        // desired qualified `Raw` regardless of `search_path`. `type_qualified` is PostgreSQL's
+        // `format('%I.%I', schema, name)` — quoted only where an identifier requires it.
+        "e" | "d" => SqlType::Raw(type_qualified.to_owned()),
+        _ => sql_type(db_type),
     }
 }
 

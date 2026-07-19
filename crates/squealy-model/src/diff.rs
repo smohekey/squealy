@@ -681,8 +681,10 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     }
 
     changes.extend(view_creates);
-    changes.extend(enum_drops);
+    // Domains drop before enums: a domain based on an enum (carried as a `Raw` base) depends on it, so
+    // the enum's `DROP TYPE` must follow the domain's `DROP DOMAIN`.
     changes.extend(domain_drops);
+    changes.extend(enum_drops);
     changes.extend(sequence_post_table);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {

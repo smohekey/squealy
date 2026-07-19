@@ -558,6 +558,16 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
             }
             for check in &mut domain.checks {
                 check.expression = connection.canonical_check_expression(check.expression.clone());
+                // `canonical_check_expression` reparses a `Raw("VALUE > 0")` (a package-authored domain
+                // check) with the generic check reader, which lowers `VALUE` to a `"value"` bare column;
+                // rewrite it back to `DomainValue` so the domain constraint renders the keyword, not a
+                // quoted column. A check that is already structural (from introspection) is untouched.
+                squealy::map_expr_nodes(&mut check.expression, &|node| {
+                    if matches!(node, squealy::ExprNode::BareColumn { column } if column == "value")
+                    {
+                        *node = squealy::ExprNode::DomainValue;
+                    }
+                });
                 check.expression = squealy::normalize_expr(&check.expression);
                 squealy::map_cast_types(&mut check.expression, &|ty| {
                     connection.canonical_cast_type(ty)
