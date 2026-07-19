@@ -7,8 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use squealy::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, DomainModel, EnumModel, ForeignKeyModel,
-    IndexModel, SchemaModel, SequenceModel, TableModel, ViewColumnModel, ViewModel,
+    CheckModel, ColumnModel, Constraint, DatabaseModel, DomainModel, EnumModel, ExclusionModel,
+    ForeignKeyModel, IndexModel, SchemaModel, SequenceModel, TableModel, ViewColumnModel,
+    ViewModel,
 };
 
 /// The structured diff from an actual database model to a desired database model.
@@ -206,6 +207,15 @@ pub fn reject_enum_relation_name_collision(
                 for unique in &table.uniques {
                     claim_object_name(&mut claims, &schema.name, &unique.name, ObjectKind::Index)?;
                 }
+                // An exclusion constraint is backed by a `pg_class` index of its own name too.
+                for exclusion in &table.exclusions {
+                    claim_object_name(
+                        &mut claims,
+                        &schema.name,
+                        &exclusion.name,
+                        ObjectKind::Index,
+                    )?;
+                }
             }
             for view in &schema.views {
                 claim_object_name(&mut claims, &schema.name, &view.name, ObjectKind::View)?;
@@ -253,6 +263,9 @@ pub fn reject_enum_relation_collision_in_diff(
                 for unique in &table.uniques {
                     claim_object_name(&mut claims, schema, &unique.name, ObjectKind::Index)?;
                 }
+                for exclusion in &table.exclusions {
+                    claim_object_name(&mut claims, schema, &exclusion.name, ObjectKind::Index)?;
+                }
             }
             DatabaseDiffChange::AlterTable {
                 schema,
@@ -288,6 +301,24 @@ pub fn reject_enum_relation_collision_in_diff(
                         }
                         TableDiffChange::AlterPrimaryKey { before, after }
                         | TableDiffChange::AlterUnique { before, after } => {
+                            claim_object_name(
+                                &mut claims,
+                                schema,
+                                &before.name,
+                                ObjectKind::Index,
+                            )?;
+                            claim_object_name(&mut claims, schema, &after.name, ObjectKind::Index)?;
+                        }
+                        TableDiffChange::AddExclusion { exclusion }
+                        | TableDiffChange::DropExclusion { exclusion } => {
+                            claim_object_name(
+                                &mut claims,
+                                schema,
+                                &exclusion.name,
+                                ObjectKind::Index,
+                            )?;
+                        }
+                        TableDiffChange::AlterExclusion { before, after } => {
                             claim_object_name(
                                 &mut claims,
                                 schema,
@@ -547,6 +578,16 @@ pub enum TableDiffChange {
         before: IndexModel,
         after: IndexModel,
     },
+    AddExclusion {
+        exclusion: ExclusionModel,
+    },
+    DropExclusion {
+        exclusion: ExclusionModel,
+    },
+    AlterExclusion {
+        before: ExclusionModel,
+        after: ExclusionModel,
+    },
 }
 
 impl TableDiffChange {
@@ -557,13 +598,15 @@ impl TableDiffChange {
             | TableDiffChange::AddUnique { .. }
             | TableDiffChange::AddForeignKey { .. }
             | TableDiffChange::AddCheck { .. }
-            | TableDiffChange::AddIndex { .. } => ChangeRisk::Safe,
+            | TableDiffChange::AddIndex { .. }
+            | TableDiffChange::AddExclusion { .. } => ChangeRisk::Safe,
             TableDiffChange::DropColumn { .. }
             | TableDiffChange::DropPrimaryKey { .. }
             | TableDiffChange::DropUnique { .. }
             | TableDiffChange::DropForeignKey { .. }
             | TableDiffChange::DropCheck { .. }
-            | TableDiffChange::DropIndex { .. } => ChangeRisk::Destructive,
+            | TableDiffChange::DropIndex { .. }
+            | TableDiffChange::DropExclusion { .. } => ChangeRisk::Destructive,
             TableDiffChange::AddColumn { column } => {
                 if column.nullable || column.default.is_some() || column.identity.is_some() {
                     ChangeRisk::Safe
@@ -576,7 +619,8 @@ impl TableDiffChange {
             | TableDiffChange::AlterUnique { .. }
             | TableDiffChange::AlterForeignKey { .. }
             | TableDiffChange::AlterCheck { .. }
-            | TableDiffChange::AlterIndex { .. } => ChangeRisk::Ambiguous,
+            | TableDiffChange::AlterIndex { .. }
+            | TableDiffChange::AlterExclusion { .. } => ChangeRisk::Ambiguous,
         }
     }
 }
@@ -1303,6 +1347,23 @@ pub(crate) fn diff_table(desired: &TableModel, actual: &TableModel) -> Vec<Table
             index: index.clone(),
         },
         |before, after| TableDiffChange::AlterIndex {
+            before: before.clone(),
+            after: after.clone(),
+        },
+        &mut changes,
+    );
+
+    diff_named_vec(
+        &desired.exclusions,
+        &actual.exclusions,
+        |exclusion| exclusion.name.clone(),
+        |exclusion| TableDiffChange::AddExclusion {
+            exclusion: exclusion.clone(),
+        },
+        |exclusion| TableDiffChange::DropExclusion {
+            exclusion: exclusion.clone(),
+        },
+        |before, after| TableDiffChange::AlterExclusion {
             before: before.clone(),
             after: after.clone(),
         },

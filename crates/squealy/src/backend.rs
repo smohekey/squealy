@@ -263,6 +263,8 @@ pub struct ConstraintCapabilities {
     ///
     /// [`Constraint::prefix_lengths`]: crate::Constraint::prefix_lengths
     pub prefix_lengths: bool,
+    /// Exclusion constraints (`EXCLUDE USING gist (col WITH &&, ...)`, PostgreSQL-only).
+    pub exclusions: bool,
 }
 
 /// Index metadata capabilities for features that are not uniformly available across SQL backends.

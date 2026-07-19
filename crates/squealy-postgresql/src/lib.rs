@@ -280,6 +280,8 @@ impl squealy::SchemaBackend for Postgres {
                 check_validation: true,
                 check_enforcement: false,
                 prefix_lengths: false,
+                // PostgreSQL has `EXCLUDE USING <method> (col WITH <operator>)`.
+                exclusions: true,
             },
             indexes: squealy::IndexCapabilities {
                 predicates: true,

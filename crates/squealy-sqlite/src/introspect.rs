@@ -248,6 +248,8 @@ async fn table(connection: &SqliteConnection, name: &str) -> Result<TableModel, 
         // are recovered by parsing the stored statement (see [`table_checks`]).
         checks: create_sql.as_deref().map(table_checks).unwrap_or_default(),
         indexes,
+        // SQLite has no exclusion constraint.
+        exclusions: Vec::new(),
     })
 }
 

@@ -1,6 +1,6 @@
 use crate::{
-    CheckModel, ColumnModel, Constraint, DomainModel, EnumModel, ForeignKeyModel, IndexModel,
-    SequenceModel, SequenceOwnedBy, SqlType, TableModel, ViewModel,
+    CheckModel, ColumnModel, Constraint, DomainModel, EnumModel, ExclusionModel, ForeignKeyModel,
+    IndexModel, SequenceModel, SequenceOwnedBy, SqlType, TableModel, ViewModel,
 };
 
 /// An ordered backend-neutral schema deployment plan.
@@ -194,5 +194,15 @@ pub enum TablePlanStep {
     AlterIndex {
         before: IndexModel,
         after: IndexModel,
+    },
+    AddExclusion {
+        exclusion: ExclusionModel,
+    },
+    DropExclusion {
+        exclusion: ExclusionModel,
+    },
+    AlterExclusion {
+        before: ExclusionModel,
+        after: ExclusionModel,
     },
 }

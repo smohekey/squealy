@@ -340,6 +340,7 @@ pub struct TableModel {
     pub uniques: Vec<Constraint>,
     pub checks: Vec<CheckModel>,
     pub indexes: Vec<IndexModel>,
+    pub exclusions: Vec<ExclusionModel>,
 }
 
 /// Per-column facts (the table-level constraints live on [`TableModel`]).
@@ -854,6 +855,45 @@ impl IndexMethod {
             IndexMethod::Raw(method) => method,
         }
     }
+}
+
+/// A named exclusion constraint (`EXCLUDE USING gist (col WITH &&, ...)`). PostgreSQL-only: it guarantees
+/// no two rows have all listed key terms comparing *true* under their paired operator. It is backed by an
+/// index (which is why it carries an access method and index-style per-term facts), but unlike a plain
+/// index each key term is paired with an operator, so the terms are modelled as a `Vec<ExclusionElement>`
+/// rather than the flat positional vectors an [`IndexModel`] uses.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExclusionModel {
+    pub name: String,
+    /// The backing index access method (`USING gist`). `None` renders without a `USING` clause, letting
+    /// the backend pick its default (`btree`).
+    pub method: Option<IndexMethod>,
+    /// The key terms, in order; order is significant and never sorted.
+    pub elements: Vec<ExclusionElement>,
+    /// Structural predicate for a partial exclusion (a `WHERE`). Boxed so an [`ExprNode`] does not bloat
+    /// every `ExclusionModel` when absent.
+    pub predicate: Option<Box<ExprNode>>,
+    pub deferrability: Option<ConstraintDeferrability>,
+}
+
+/// One key term of an [`ExclusionModel`]: a column or expression, paired with the operator it is excluded
+/// under, plus optional index-style per-term facts (operator class, collation, sort direction, null order).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExclusionElement {
+    pub term: ExclusionTerm,
+    /// The operator this term is excluded under (`&&`, `=`), rendered inside `WITH`.
+    pub operator: String,
+    pub operator_class: Option<String>,
+    pub collation: Option<String>,
+    pub direction: Option<IndexDirection>,
+    pub nulls: Option<IndexNullsOrder>,
+}
+
+/// The keyed thing in an [`ExclusionElement`]: either a bare column or a structural expression.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExclusionTerm {
+    Column(String),
+    Expression(ExprNode),
 }
 
 /// A view: a named `SELECT` with a typed output schema and a backend-neutral structural body.

@@ -146,6 +146,7 @@ fn postgres_renders_incremental_schema_plan() {
                         prefix_lengths: Vec::new(),
                         predicate: None,
                     }],
+                    exclusions: Vec::new(),
                 }),
             },
             DatabasePlanStep::AlterTable {
@@ -196,6 +197,7 @@ fn postgres_renders_incremental_schema_plan() {
                     uniques: Vec::new(),
                     checks: Vec::new(),
                     indexes: Vec::new(),
+                    exclusions: Vec::new(),
                 }),
             },
             DatabasePlanStep::DropSchema {
@@ -1698,6 +1700,7 @@ fn enum_model() -> DatabaseModel {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
             views: Vec::new(),
             enums: vec![EnumModel {
@@ -1818,6 +1821,7 @@ fn postgres_renders_an_owned_sequence_after_its_table() {
         uniques: Vec::new(),
         checks: Vec::new(),
         indexes: Vec::new(),
+        exclusions: Vec::new(),
     };
     let owned = sequence(
         "events_id_seq",
@@ -1919,6 +1923,148 @@ fn domain_model(domain: DomainModel) -> DatabaseModel {
             domains: vec![domain],
         }],
     }
+}
+
+fn exclusion_column(name: &str, ty: SqlType) -> ColumnModel {
+    ColumnModel {
+        name: name.to_owned(),
+        comment: None,
+        ty,
+        collation: None,
+        nullable: false,
+        default: None,
+        identity: None,
+        generated: None,
+        on_update: None,
+    }
+}
+
+fn exclusion_table(columns: Vec<ColumnModel>, exclusion: ExclusionModel) -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![TableModel {
+                name: "reservations".to_owned(),
+                comment: None,
+                columns,
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+                exclusions: vec![exclusion],
+            }],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: Vec::new(),
+        }],
+    }
+}
+
+#[test]
+fn postgres_renders_an_exclusion_constraint() {
+    // `EXCLUDE USING gist (room WITH =, during WITH &&) WHERE (canceled = false) DEFERRABLE INITIALLY
+    // DEFERRED` — the "no double-booking" idiom, with a partial predicate, an operator class, and
+    // deferrability all rendered inline in `CREATE TABLE`.
+    let exclusion = ExclusionModel {
+        name: "reservations_no_overlap".to_owned(),
+        method: Some(IndexMethod::Gist),
+        elements: vec![
+            ExclusionElement {
+                term: ExclusionTerm::Column("room".to_owned()),
+                operator: "=".to_owned(),
+                operator_class: Some("gist_int4_ops".to_owned()),
+                collation: None,
+                direction: None,
+                nulls: None,
+            },
+            ExclusionElement {
+                term: ExclusionTerm::Column("during".to_owned()),
+                operator: "&&".to_owned(),
+                operator_class: None,
+                collation: None,
+                direction: None,
+                nulls: None,
+            },
+        ],
+        predicate: Some(Box::new(check_expr("canceled = false"))),
+        deferrability: Some(ConstraintDeferrability::InitiallyDeferred),
+    };
+    let model = exclusion_table(
+        vec![
+            exclusion_column("room", SqlType::I32),
+            exclusion_column("during", SqlType::Raw("tstzrange".to_owned())),
+            exclusion_column("canceled", SqlType::Bool),
+        ],
+        exclusion,
+    );
+
+    let mut sql = Vec::new();
+    Postgres.render_create(&model, &mut sql).unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "CONSTRAINT \"reservations_no_overlap\" EXCLUDE USING gist (\"room\" gist_int4_ops WITH =, \
+             \"during\" WITH &&) WHERE ((\"canceled\" = FALSE)) DEFERRABLE INITIALLY DEFERRED"
+        ),
+        "{sql}"
+    );
+}
+
+#[test]
+fn postgres_renders_exclusion_add_and_drop_plan_steps() {
+    let exclusion = ExclusionModel {
+        name: "reservations_no_overlap".to_owned(),
+        method: Some(IndexMethod::Gist),
+        elements: vec![ExclusionElement {
+            term: ExclusionTerm::Column("during".to_owned()),
+            operator: "&&".to_owned(),
+            operator_class: None,
+            collation: None,
+            direction: None,
+            nulls: None,
+        }],
+        predicate: None,
+        deferrability: None,
+    };
+    let plan = DatabasePlan {
+        steps: vec![
+            DatabasePlanStep::AlterTable {
+                schema: Some("app".to_owned()),
+                table: "reservations".to_owned(),
+                change: Box::new(TablePlanStep::AddExclusion {
+                    exclusion: exclusion.clone(),
+                }),
+            },
+            DatabasePlanStep::AlterTable {
+                schema: Some("app".to_owned()),
+                table: "reservations".to_owned(),
+                change: Box::new(TablePlanStep::DropExclusion { exclusion }),
+            },
+        ],
+    };
+    let mut sql = Vec::new();
+    Postgres
+        .render_plan(&plan, &DatabaseModel::default(), &mut sql)
+        .unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains(
+            "ALTER TABLE \"app\".\"reservations\" ADD CONSTRAINT \"reservations_no_overlap\" \
+             EXCLUDE USING gist (\"during\" WITH &&)"
+        ),
+        "{sql}"
+    );
+    // An exclusion is dropped as a constraint (which drops its backing index), not via `DROP INDEX`.
+    assert!(
+        sql.contains(
+            "ALTER TABLE \"app\".\"reservations\" DROP CONSTRAINT \"reservations_no_overlap\""
+        ),
+        "{sql}"
+    );
 }
 
 #[test]
@@ -2487,6 +2633,7 @@ fn postgres_renders_table_and_column_comments() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -2543,6 +2690,7 @@ fn postgres_renders_foreign_key_match_type() {
                     uniques: Vec::new(),
                     checks: Vec::new(),
                     indexes: Vec::new(),
+                    exclusions: Vec::new(),
                 },
                 TableModel {
                     name: "tenants".to_owned(),
@@ -2563,6 +2711,7 @@ fn postgres_renders_foreign_key_match_type() {
                     uniques: Vec::new(),
                     checks: Vec::new(),
                     indexes: Vec::new(),
+                    exclusions: Vec::new(),
                 },
             ],
             sequences: Vec::new(),
@@ -2633,6 +2782,7 @@ fn postgres_renders_partial_indexes() {
                         right: Box::new(squealy::ExprNode::Literal("0".to_owned())),
                     })),
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -2695,6 +2845,7 @@ fn postgres_renders_expression_indexes() {
                     prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -2755,6 +2906,7 @@ fn postgres_renders_raw_expression_index_verbatim() {
                     prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -2825,6 +2977,7 @@ fn postgres_renders_covering_indexes() {
                     prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -2882,6 +3035,7 @@ fn postgres_renders_index_null_ordering() {
                     prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -2942,6 +3096,7 @@ fn postgres_renders_index_operator_classes() {
                     prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -3005,6 +3160,7 @@ fn postgres_renders_index_collations() {
                     prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -3059,6 +3215,7 @@ fn fk_test_table(name: &str, references_table: Option<&str>) -> Box<TableModel> 
         uniques: Vec::new(),
         checks: Vec::new(),
         indexes: Vec::new(),
+        exclusions: Vec::new(),
     })
 }
 
@@ -3215,6 +3372,7 @@ fn postgres_renders_views_in_dependency_order() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
             // `active_user_ids` selects from the `active_users` view, so it must be created after it
             // even though it is declared first.
@@ -4397,6 +4555,7 @@ fn postgres_rejects_index_column_prefix_lengths() {
                     }],
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -4439,6 +4598,7 @@ fn postgres_rejects_on_update_current_timestamp() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     };

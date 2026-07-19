@@ -813,6 +813,7 @@ fn table(name: &str) -> TableModel {
         uniques: vec![],
         checks: vec![],
         indexes: vec![],
+        exclusions: Vec::new(),
     }
 }
 

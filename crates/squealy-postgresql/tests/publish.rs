@@ -276,6 +276,7 @@ fn clause_alias_model() -> DatabaseModel {
                 uniques: vec![],
                 checks: vec![],
                 indexes: vec![],
+                exclusions: Vec::new(),
             }],
             views: vec![ViewModel {
                 name: "ca_v".to_owned(),
@@ -473,6 +474,7 @@ fn enum_fixture(labels: &[&str]) -> DatabaseModel {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
             views: Vec::new(),
             enums: vec![EnumModel {
@@ -740,6 +742,7 @@ fn domain_fixture() -> DatabaseModel {
         uniques: Vec::new(),
         checks: Vec::new(),
         indexes: Vec::new(),
+        exclusions: Vec::new(),
     };
     DatabaseModel {
         schemas: vec![SchemaModel {
@@ -831,6 +834,7 @@ async fn publishing_a_public_domain_with_a_raw_check_replans_empty() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
             views: Vec::new(),
             enums: Vec::new(),
@@ -870,6 +874,129 @@ async fn publishing_a_public_domain_with_a_raw_check_replans_empty() {
         .execute_ddl("DROP TABLE IF EXISTS public.metrics;\nDROP DOMAIN IF EXISTS public.pct")
         .await
         .expect("clean up public domain fixture");
+}
+
+#[tokio::test]
+#[ignore]
+async fn publishing_an_exclusion_then_replanning_is_empty() {
+    // A published exclusion constraint — a multi-element `EXCLUDE USING gist (room WITH =, during WITH &&)`
+    // with a partial predicate and `DEFERRABLE INITIALLY DEFERRED` — must re-plan to empty. This exercises
+    // the whole introspection path: the backing index's access method and key terms, the `conexclop`
+    // operators, `condeferrable`/`condeferred`, and the partial predicate all round-trip, and the
+    // constraint's backing index is not surfaced as a standalone index. (`room int WITH =` under gist needs
+    // the `btree_gist` extension.)
+    let _guard = db_lock().lock().await;
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_exclusions CASCADE")
+        .await
+        .expect("reset exclusion fixture");
+    connection
+        .execute_ddl("CREATE EXTENSION IF NOT EXISTS btree_gist")
+        .await
+        .expect("btree_gist extension available");
+
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("publish_exclusions".to_owned()),
+            tables: vec![TableModel {
+                name: "reservations".to_owned(),
+                comment: None,
+                columns: vec![
+                    ColumnModel {
+                        name: "room".to_owned(),
+                        comment: None,
+                        ty: SqlType::I32,
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        on_update: None,
+                    },
+                    ColumnModel {
+                        name: "during".to_owned(),
+                        comment: None,
+                        ty: SqlType::Raw("tstzrange".to_owned()),
+                        collation: None,
+                        nullable: false,
+                        default: None,
+                        identity: None,
+                        generated: None,
+                        on_update: None,
+                    },
+                    ColumnModel {
+                        name: "canceled".to_owned(),
+                        comment: None,
+                        ty: SqlType::Bool,
+                        collation: None,
+                        nullable: false,
+                        default: Some(DefaultValue::Bool(false)),
+                        identity: None,
+                        generated: None,
+                        on_update: None,
+                    },
+                ],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+                exclusions: vec![ExclusionModel {
+                    name: "reservations_no_overlap".to_owned(),
+                    method: Some(IndexMethod::Gist),
+                    elements: vec![
+                        ExclusionElement {
+                            term: ExclusionTerm::Column("room".to_owned()),
+                            operator: "=".to_owned(),
+                            operator_class: None,
+                            collation: None,
+                            direction: None,
+                            nulls: None,
+                        },
+                        ExclusionElement {
+                            term: ExclusionTerm::Column("during".to_owned()),
+                            operator: "&&".to_owned(),
+                            operator_class: None,
+                            collation: None,
+                            direction: None,
+                            nulls: None,
+                        },
+                    ],
+                    predicate: Some(Box::new(ExprNode::Raw("NOT canceled".to_owned()))),
+                    deferrability: Some(ConstraintDeferrability::InitiallyDeferred),
+                }],
+            }],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: Vec::new(),
+        }],
+    };
+
+    squealy_model::publish(&model, &Postgres, &mut connection)
+        .await
+        .expect("publish exclusion constraint");
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect("re-plan against the published exclusion");
+    assert!(
+        plan.steps.is_empty(),
+        "a published exclusion must re-plan empty, got: {:?}",
+        plan.steps
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_exclusions CASCADE")
+        .await
+        .expect("clean up exclusion fixture");
 }
 
 #[tokio::test]
@@ -934,6 +1061,7 @@ fn sequence_fixture() -> DatabaseModel {
         uniques: Vec::new(),
         checks: Vec::new(),
         indexes: Vec::new(),
+        exclusions: Vec::new(),
     };
     let standalone = SequenceModel {
         name: "counter".to_owned(),

@@ -208,6 +208,7 @@ fn rejects_non_integer_autoincrement_column() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
             views: Vec::new(),
             enums: Vec::new(),
@@ -246,6 +247,7 @@ fn sqlite_rejects_a_user_enum_type() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
             views: Vec::new(),
             enums: Vec::new(),
@@ -311,6 +313,61 @@ fn sqlite_rejects_a_domain() {
 }
 
 #[test]
+fn sqlite_rejects_an_exclusion_constraint() {
+    use squealy::{
+        ColumnModel, DatabaseModel, ExclusionElement, ExclusionModel, ExclusionTerm, IndexMethod,
+        SchemaModel, SqlType, TableModel,
+    };
+    // SQLite has no exclusion constraint; a model declaring one is rejected at render.
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: vec![TableModel {
+                name: "reservations".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "during".to_owned(),
+                    comment: None,
+                    ty: SqlType::Raw("tstzrange".to_owned()),
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                    on_update: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+                exclusions: vec![ExclusionModel {
+                    name: "no_overlap".to_owned(),
+                    method: Some(IndexMethod::Gist),
+                    elements: vec![ExclusionElement {
+                        term: ExclusionTerm::Column("during".to_owned()),
+                        operator: "&&".to_owned(),
+                        operator_class: None,
+                        collation: None,
+                        direction: None,
+                        nulls: None,
+                    }],
+                    predicate: None,
+                    deferrability: None,
+                }],
+            }],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: Vec::new(),
+        }],
+    };
+    let error = Sqlite.render_create(&model, &mut Vec::new()).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(error.to_string().contains("no_overlap"), "{error}");
+}
+
+#[test]
 fn fixed_bytes_column_enforces_width_with_a_check() {
     // `BLOB` has no fixed width, so a `FixedBytes(N)` column carries a `CHECK (length("col") = N)` to
     // preserve the fixed-width invariant the core type and other backends enforce.
@@ -337,6 +394,7 @@ fn fixed_bytes_column_enforces_width_with_a_check() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
             views: Vec::new(),
             enums: Vec::new(),
@@ -366,6 +424,7 @@ fn rejects_table_name_collision_across_schemas() {
         uniques: Vec::new(),
         checks: Vec::new(),
         indexes: Vec::new(),
+        exclusions: Vec::new(),
     };
     let schema = |name: &str| SchemaModel {
         name: Some(name.to_owned()),
@@ -397,6 +456,7 @@ fn rejects_case_insensitive_table_name_collision() {
         uniques: Vec::new(),
         checks: Vec::new(),
         indexes: Vec::new(),
+        exclusions: Vec::new(),
     };
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
@@ -452,6 +512,7 @@ fn rejects_index_name_collision_across_tables() {
         uniques: Vec::new(),
         checks: Vec::new(),
         indexes: vec![index()],
+        exclusions: Vec::new(),
     };
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
@@ -503,6 +564,7 @@ fn renders_table_check_constraint() {
                     enforcement: None,
                 }],
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
             views: Vec::new(),
             enums: Vec::new(),
@@ -549,6 +611,7 @@ fn rejects_check_constraint_validation_or_enforcement_metadata() {
                 uniques: Vec::new(),
                 checks: vec![check],
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
             views: Vec::new(),
             enums: Vec::new(),
@@ -606,6 +669,7 @@ fn renders_column_collation() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
             views: Vec::new(),
             enums: Vec::new(),
@@ -640,6 +704,7 @@ fn rejects_reserved_object_name_prefix() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
             views: Vec::new(),
             enums: Vec::new(),
@@ -702,6 +767,7 @@ fn rejects_index_column_prefix_lengths() {
                     }],
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             }],
             views: Vec::new(),
             enums: Vec::new(),
@@ -745,6 +811,7 @@ fn rejects_on_update_current_timestamp() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
             views: Vec::new(),
             enums: Vec::new(),
@@ -794,6 +861,7 @@ fn rejects_on_update_on_an_autoincrement_primary_key_column() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
             views: Vec::new(),
             enums: Vec::new(),
@@ -869,6 +937,7 @@ fn id_table(name: &str) -> squealy::TableModel {
         uniques: Vec::new(),
         checks: Vec::new(),
         indexes: Vec::new(),
+        exclusions: Vec::new(),
     }
 }
 

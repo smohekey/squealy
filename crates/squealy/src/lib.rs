@@ -566,16 +566,17 @@ pub use schema::{DatabaseSchema, DefaultSchema, Schema};
 pub use squealy_ir::{
     AggregateFunc, ArithmeticOp, CaseArm, CheckModel, ColumnModel, CompareOp, Constraint,
     ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, CteModel, DateField,
-    DefaultValue, DomainModel, EnumModel, ExprNode, ForeignKeyAction, ForeignKeyMatch,
-    ForeignKeyModel, FrameBound, FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage,
-    IdentifierCase, IdentityMode, IdentityModel, IndexCollation, IndexDirection, IndexMethod,
-    IndexModel, IndexNullsOrder, IndexOperatorClass, IndexPrefixLength, JoinItem, JoinKind,
-    LogicalOp, OrderDirection, OrderItem, OrderNulls, ProjectionItem, ScalarFunc, SchemaModel,
-    SequenceDataType, SequenceModel, SequenceOwnedBy, SourceItem, SourceRef, SqlType, TableModel,
-    ViewBody, ViewClauseDialect, ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
-    ViewSourceColumns, WindowFunc, WindowOrderTerm, canonicalize_view_clause_aliases,
-    expr_references_bare_column, fold_like_case_insensitivity, map_cast_types, map_expr_nodes,
-    normalize_expr, prefix_length_shape_error, view_body_output_names, visit_scope_exprs,
+    DefaultValue, DomainModel, EnumModel, ExclusionElement, ExclusionModel, ExclusionTerm,
+    ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, FrameBound, FrameMode, FrameSpec,
+    GeneratedColumnModel, GeneratedStorage, IdentifierCase, IdentityMode, IdentityModel,
+    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
+    IndexPrefixLength, JoinItem, JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls,
+    ProjectionItem, ScalarFunc, SchemaModel, SequenceDataType, SequenceModel, SequenceOwnedBy,
+    SourceItem, SourceRef, SqlType, TableModel, ViewBody, ViewClauseDialect, ViewColumnModel,
+    ViewModel, ViewQueryModel, ViewSetOp, ViewSourceColumns, WindowFunc, WindowOrderTerm,
+    canonicalize_view_clause_aliases, expr_references_bare_column, fold_like_case_insensitivity,
+    map_cast_types, map_expr_nodes, normalize_expr, prefix_length_shape_error,
+    view_body_output_names, visit_scope_exprs,
 };
 pub use squealy_macros::{CTE, ColumnType, Database, RecursiveCTE, Schema, Table, View};
 pub use table::{

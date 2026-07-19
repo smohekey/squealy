@@ -101,6 +101,7 @@ fn mysql_renders_incremental_schema_plan() {
                         prefix_lengths: Vec::new(),
                         predicate: None,
                     }],
+                    exclusions: Vec::new(),
                 }),
             },
             DatabasePlanStep::AlterTable {
@@ -151,6 +152,7 @@ fn mysql_renders_incremental_schema_plan() {
                     uniques: Vec::new(),
                     checks: Vec::new(),
                     indexes: Vec::new(),
+                    exclusions: Vec::new(),
                 }),
             },
             DatabasePlanStep::DropSchema {
@@ -917,6 +919,7 @@ fn mysql_renders_table_and_column_comments() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -972,6 +975,7 @@ fn mysql_rejects_foreign_key_match_types() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -1021,6 +1025,7 @@ fn mysql_rejects_deferrable_foreign_keys() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -1056,6 +1061,7 @@ fn mysql_rejects_a_user_enum_type() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
             views: Vec::new(),
             enums: vec![EnumModel {
@@ -1155,6 +1161,57 @@ fn mysql_rejects_a_domain() {
 }
 
 #[test]
+fn mysql_rejects_an_exclusion_constraint() {
+    // MySQL has no exclusion constraint, so a model declaring one is rejected at render.
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: Vec::new(),
+            tables: vec![TableModel {
+                name: "reservations".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "during".to_owned(),
+                    comment: None,
+                    ty: SqlType::Raw("tstzrange".to_owned()),
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                    on_update: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+                exclusions: vec![ExclusionModel {
+                    name: "no_overlap".to_owned(),
+                    method: Some(IndexMethod::Gist),
+                    elements: vec![ExclusionElement {
+                        term: ExclusionTerm::Column("during".to_owned()),
+                        operator: "&&".to_owned(),
+                        operator_class: None,
+                        collation: None,
+                        direction: None,
+                        nulls: None,
+                    }],
+                    predicate: None,
+                    deferrability: None,
+                }],
+            }],
+        }],
+    };
+    let error = Mysql.render_create(&model, &mut Vec::new()).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("no_overlap"), "{error}");
+}
+
+#[test]
 fn mysql_renders_check_constraint_not_enforced() {
     let model = DatabaseModel {
         schemas: vec![SchemaModel {
@@ -1187,6 +1244,7 @@ fn mysql_renders_check_constraint_not_enforced() {
                     enforcement: Some(ConstraintEnforcement::NotEnforced),
                 }],
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -1250,6 +1308,7 @@ fn mysql_rejects_partial_index_predicates() {
                         right: Box::new(squealy::ExprNode::Literal("0".to_owned())),
                     })),
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -1305,6 +1364,7 @@ fn mysql_rejects_expression_indexes() {
                     prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -1368,6 +1428,7 @@ fn mysql_rejects_covering_index_include_columns() {
                     prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -1418,6 +1479,7 @@ fn mysql_rejects_index_null_ordering() {
                     prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -1471,6 +1533,7 @@ fn mysql_rejects_index_operator_classes() {
                     prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -1524,6 +1587,7 @@ fn mysql_rejects_index_collations() {
                     prefix_lengths: Vec::new(),
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -1577,6 +1641,7 @@ fn mysql_renders_index_column_prefix_lengths() {
                     }],
                     predicate: None,
                 }],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -1635,6 +1700,7 @@ fn render_prefix_index_model(mutate: impl FnOnce(&mut IndexModel)) -> std::io::R
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: vec![index],
+                exclusions: Vec::new(),
             }],
         }],
     };
@@ -1741,6 +1807,7 @@ fn fk_test_table(name: &str, references_table: Option<&str>) -> Box<TableModel> 
         uniques: Vec::new(),
         checks: Vec::new(),
         indexes: Vec::new(),
+        exclusions: Vec::new(),
     })
 }
 
@@ -1803,6 +1870,7 @@ fn mysql_renders_view_after_tables() {
                 uniques: Vec::new(),
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
             views: vec![ViewModel {
                 name: "active_users".to_owned(),
@@ -2527,6 +2595,7 @@ fn model_with_prefix_unique(column_ty: SqlType, length: u32) -> DatabaseModel {
                 }],
                 checks: Vec::new(),
                 indexes: Vec::new(),
+                exclusions: Vec::new(),
             }],
         }],
     }
