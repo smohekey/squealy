@@ -38,7 +38,7 @@ pub use refactor::{
 pub use squealy::{
     CheckModel, ColumnCapabilities, ColumnModel, Constraint, ConstraintCapabilities,
     ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, CteModel, DatabaseModel,
-    DatabasePlan, DatabasePlanStep, DdlExecutor, DefaultValue, EnumModel, ExprNode,
+    DatabasePlan, DatabasePlanStep, DdlExecutor, DefaultValue, DomainModel, EnumModel, ExprNode,
     ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, IndexCapabilities, IndexCollation,
     IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
     IndexPrefixLength, LogicalOp, ProjectionItem, SchemaBackend, SchemaCapabilities, SchemaConnect,
@@ -86,6 +86,7 @@ pub fn render_plan_sql<B: SchemaBackend>(
     // and a malformed sequence would render `CREATE SEQUENCE` DDL PostgreSQL rejects.
     validate_enum_references(desired, capabilities)?;
     validate_sequences(desired, capabilities)?;
+    validate_domains(desired, capabilities)?;
     for schema in &desired.schemas {
         for table in &schema.tables {
             validate_table_constraint_prefixes(table, &capabilities)?;
@@ -544,6 +545,38 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 !view.columns.is_empty(),
             );
         }
+        // A domain's base type, default, and CHECK expressions come back from introspection in the
+        // backend's physical form (a `Text` base reads as `String`, a bare-precision timestamp as
+        // `Some(6)`, a `Raw` check restructured), so canonicalize them the same way a table column and
+        // check are — otherwise an unchanged domain authored with a logical alias would churn a (rejected)
+        // base-type `AlterDomain` every run. Its CHECK constraints are also compared order-independently
+        // (introspection returns them name-sorted).
+        for domain in &mut schema.domains {
+            domain.base_type = connection.canonical_sql_type(&domain.base_type);
+            if let Some(default) = &mut domain.default {
+                *default = connection.canonical_default(&domain.base_type, default);
+            }
+            for check in &mut domain.checks {
+                check.expression = connection.canonical_check_expression(check.expression.clone());
+                // `canonical_check_expression` reparses a `Raw("VALUE > 0")` (a package-authored domain
+                // check) with the generic check reader, which lowers `VALUE` to a `"value"` bare column;
+                // rewrite it back to `DomainValue` so the domain constraint renders the keyword, not a
+                // quoted column. A check that is already structural (from introspection) is untouched.
+                squealy::map_expr_nodes(&mut check.expression, &|node| {
+                    if matches!(node, squealy::ExprNode::BareColumn { column } if column == "value")
+                    {
+                        *node = squealy::ExprNode::DomainValue;
+                    }
+                });
+                check.expression = squealy::normalize_expr(&check.expression);
+                squealy::map_cast_types(&mut check.expression, &|ty| {
+                    connection.canonical_cast_type(ty)
+                });
+                normalize_default_validation(&mut check.validation);
+                normalize_default_enforcement(&mut check.enforcement);
+            }
+            domain.checks.sort_by(|a, b| a.name.cmp(&b.name));
+        }
     }
     // A schema-less backend flattens every namespace to the same (default) name, so two source schemas
     // can now share a name. `diff_models` keys schemas by name in a `BTreeMap`, which would drop the
@@ -559,6 +592,7 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 || !schema.views.is_empty()
                 || !schema.enums.is_empty()
                 || !schema.sequences.is_empty()
+                || !schema.domains.is_empty()
         });
     }
     model
@@ -579,6 +613,7 @@ fn coalesce_schemas_by_name(schemas: &mut Vec<SchemaModel>) {
                 existing.views.extend(schema.views);
                 existing.enums.extend(schema.enums);
                 existing.sequences.extend(schema.sequences);
+                existing.domains.extend(schema.domains);
             }
             None => coalesced.push(schema),
         }
@@ -1023,12 +1058,90 @@ fn validate_sequences(
     Ok(())
 }
 
+/// Validates every declared domain, on both the create preflight ([`validate_capabilities`]) and the
+/// incremental render path ([`render_plan_sql`]). A backend without a domain object (MySQL, SQLite)
+/// rejects the whole class; on a supporting backend, each domain `CHECK` may only reference the value
+/// under test (the `VALUE` keyword) — a bare column reference is not valid inside a domain constraint.
+fn validate_domains(
+    model: &DatabaseModel,
+    capabilities: SchemaCapabilities,
+) -> std::io::Result<()> {
+    if !capabilities.domains
+        && let Some(domain) = model
+            .schemas
+            .iter()
+            .flat_map(|schema| &schema.domains)
+            .next()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "backend cannot render and introspect the domain `{}`",
+                domain.name
+            ),
+        ));
+    }
+    for schema in &model.schemas {
+        for domain in &schema.domains {
+            // A domain's base type must be a plain scalar squealy can render and introspect faithfully.
+            // A `FixedBytes(N)` loses its width (rendered `bytea`, with no place for the length CHECK a
+            // table column gets), and a `SqlType::Enum` would render an unqualified type name that fails
+            // to resolve off `search_path` (a domain over an enum should name it as a qualified `Raw`).
+            match &domain.base_type {
+                SqlType::FixedBytes(_) => {
+                    return unsupported_domain(
+                        &domain.name,
+                        "a fixed-width byte base type (its length cannot be enforced on a domain)",
+                    );
+                }
+                SqlType::Enum(_) => {
+                    return unsupported_domain(
+                        &domain.name,
+                        "an enum base type (name the enum as a qualified `Raw` type instead)",
+                    );
+                }
+                _ => {}
+            }
+            for check in &domain.checks {
+                if squealy::expr_references_bare_column(&check.expression) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "domain `{}` CHECK `{}` references a column; a domain constraint may only \
+                             use the value under test (the `VALUE` keyword)",
+                            domain.name, check.name
+                        ),
+                    ));
+                }
+                // `CREATE DOMAIN` has no grammar for a per-constraint `NOT VALID`/enforcement clause, and
+                // introspection reads a domain check back as validated/enforced, so reject a non-default
+                // validation/enforcement rather than render DDL PostgreSQL refuses.
+                if check.validation.is_some() || check.enforcement.is_some() {
+                    return unsupported_domain(
+                        &domain.name,
+                        "a CHECK with an explicit validation/enforcement clause (unsupported on a domain)",
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn unsupported_domain(domain: &str, feature: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("domain `{domain}` uses {feature}"),
+    ))
+}
+
 fn validate_capabilities(
     model: &DatabaseModel,
     capabilities: SchemaCapabilities,
 ) -> std::io::Result<()> {
     validate_enum_references(model, capabilities)?;
     validate_sequences(model, capabilities)?;
+    validate_domains(model, capabilities)?;
     for schema in &model.schemas {
         for table in &schema.tables {
             for column in &table.columns {
@@ -1231,6 +1344,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "memberships".to_owned(),
                     comment: None,
@@ -1283,6 +1397,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "memberships".to_owned(),
                     comment: None,
@@ -1351,6 +1466,7 @@ mod tests {
                 }],
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
             }],
         };
 
@@ -1397,6 +1513,7 @@ mod tests {
                 views: vec![view],
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
             }],
         };
 
@@ -1498,6 +1615,7 @@ mod tests {
                 views: vec![v],
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
             }],
         };
         // Desired: names the alias. Introspected: the deparser expanded it.
@@ -1609,6 +1727,7 @@ mod tests {
                     views: Vec::new(),
                     enums: Vec::new(),
                     sequences: Vec::new(),
+                    domains: Vec::new(),
                     tables: Vec::new(),
                 },
                 SchemaModel {
@@ -1616,6 +1735,7 @@ mod tests {
                     views: Vec::new(),
                     enums: Vec::new(),
                     sequences: Vec::new(),
+                    domains: Vec::new(),
                     tables: vec![TableModel {
                         name: "widgets".to_owned(),
                         comment: None,
@@ -1654,6 +1774,7 @@ mod tests {
                     labels: vec!["sad".to_owned(), "ok".to_owned()],
                 }],
                 sequences: Vec::new(),
+                domains: Vec::new(),
             }],
         };
         let canonical = canonicalize_model(&CanonBackend, &model);
@@ -1686,6 +1807,7 @@ mod tests {
                     views: Vec::new(),
                     enums: Vec::new(),
                     sequences: Vec::new(),
+                    domains: Vec::new(),
                     tables: vec![table("users")],
                 },
                 SchemaModel {
@@ -1693,6 +1815,7 @@ mod tests {
                     views: Vec::new(),
                     enums: Vec::new(),
                     sequences: Vec::new(),
+                    domains: Vec::new(),
                     tables: vec![table("logs")],
                 },
             ],
@@ -1790,6 +1913,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "items".to_owned(),
                     comment: None,
@@ -2149,6 +2273,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -2231,6 +2356,7 @@ mod tests {
                     indexes: IndexCapabilities::default(),
                     enums: false,
                     sequences: false,
+                    domains: false,
                 },
             },
         )
@@ -2287,6 +2413,7 @@ mod tests {
                     },
                     enums: false,
                     sequences: false,
+                    domains: false,
                 },
             },
         )

@@ -60,6 +60,8 @@ pub(crate) async fn database(connection: &SqliteConnection) -> Result<DatabaseMo
             enums: Vec::new(),
             // SQLite has no sequence object.
             sequences: Vec::new(),
+            // SQLite has no domain object.
+            domains: Vec::new(),
         }]
     };
     Ok(DatabaseModel { schemas })

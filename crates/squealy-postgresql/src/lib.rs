@@ -294,6 +294,8 @@ impl squealy::SchemaBackend for Postgres {
             enums: true,
             // PostgreSQL has standalone `CREATE SEQUENCE`.
             sequences: true,
+            // PostgreSQL has `CREATE DOMAIN`.
+            domains: true,
         }
     }
 

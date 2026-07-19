@@ -1,6 +1,6 @@
 use crate::{
-    CheckModel, ColumnModel, Constraint, EnumModel, ForeignKeyModel, IndexModel, SequenceModel,
-    SequenceOwnedBy, SqlType, TableModel, ViewModel,
+    CheckModel, ColumnModel, Constraint, DomainModel, EnumModel, ForeignKeyModel, IndexModel,
+    SequenceModel, SequenceOwnedBy, SqlType, TableModel, ViewModel,
 };
 
 /// An ordered backend-neutral schema deployment plan.
@@ -97,6 +97,22 @@ pub enum DatabasePlanStep {
         schema: Option<String>,
         name: String,
         owned_by: Option<SequenceOwnedBy>,
+    },
+    /// Create a domain type (`CREATE DOMAIN`). Ordered before any table whose column is of the domain.
+    CreateDomain {
+        schema: Option<String>,
+        domain: DomainModel,
+    },
+    /// Drop a domain type. Ordered after any table that used it is gone.
+    DropDomain {
+        schema: Option<String>,
+        domain: DomainModel,
+    },
+    /// Change a domain in place (`ALTER DOMAIN`): its `NOT NULL`, `DEFAULT`, and `CHECK` constraints.
+    AlterDomain {
+        schema: Option<String>,
+        before: DomainModel,
+        after: DomainModel,
     },
 }
 

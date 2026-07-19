@@ -179,6 +179,8 @@ impl SchemaBackend for Mysql {
             enums: false,
             // MySQL has no standalone sequence object (`AUTO_INCREMENT` only).
             sequences: false,
+            // MySQL has no domain object.
+            domains: false,
         }
     }
 

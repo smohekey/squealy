@@ -46,6 +46,18 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
             format!("SQLite does not support the sequence `{}`", sequence.name),
         ));
     }
+    // SQLite has no domain object; reject a model that declares one up front.
+    if let Some(domain) = model
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.domains)
+        .next()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("SQLite does not support the domain `{}`", domain.name),
+        ));
+    }
     // SQLite keeps tables, indexes and views in one database-wide object namespace (there are no
     // schemas), so once schemas are flattened every table, index and view name must be unique —
     // including a table name that matches an index or a view. A model that relies on schema/table
@@ -353,6 +365,21 @@ pub(crate) fn write_plan(
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     format!("SQLite does not support the sequence `{name}`"),
+                ));
+            }
+            // SQLite has no domain object. Reject on the incremental path, mirroring the enum/sequence
+            // handling above.
+            DatabasePlanStep::CreateDomain { domain, .. }
+            | DatabasePlanStep::DropDomain { domain, .. } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("SQLite does not support the domain `{}`", domain.name),
+                ));
+            }
+            DatabasePlanStep::AlterDomain { after, .. } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("SQLite does not support the domain `{}`", after.name),
                 ));
             }
         }

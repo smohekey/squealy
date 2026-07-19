@@ -2677,7 +2677,11 @@ fn resolve_expr_columns_protected(
             }
         }
         // Leaves — no nested expression, no column to resolve.
-        ExprNode::Column { .. } | ExprNode::Literal(_) | ExprNode::Raw(_) | ExprNode::Now => {}
+        ExprNode::Column { .. }
+        | ExprNode::DomainValue
+        | ExprNode::Literal(_)
+        | ExprNode::Raw(_)
+        | ExprNode::Now => {}
     }
 }
 

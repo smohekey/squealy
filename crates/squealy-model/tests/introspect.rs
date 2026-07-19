@@ -26,6 +26,7 @@ async fn introspect_delegates_to_connection() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: Vec::new(),
         }],
     };

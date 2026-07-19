@@ -231,6 +231,12 @@ pub struct SchemaCapabilities {
     ///
     /// [`SequenceModel`]: crate::SequenceModel
     pub sequences: bool,
+    /// Domain types (PostgreSQL `CREATE DOMAIN`), modeled as [`DomainModel`]. Backends without a domain
+    /// object (MySQL, SQLite) leave this `false`, so a model that declares one is rejected rather than
+    /// silently dropped.
+    ///
+    /// [`DomainModel`]: crate::DomainModel
+    pub domains: bool,
 }
 
 /// Per-column metadata capabilities for backend-specific column attributes.

@@ -676,6 +676,8 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
             dialect.write_quoted_ident(column, writer)
         }
         ExprNode::BareColumn { column } => dialect.write_quoted_ident(column, writer),
+        // The `VALUE` keyword in a domain CHECK — the bare keyword, never quoted.
+        ExprNode::DomainValue => writer.write_all(b"VALUE"),
         ExprNode::Literal(text) => writer.write_all(text.as_bytes()),
         // The un-modelable escape hatch: emit the already-rendered dialect SQL verbatim.
         ExprNode::Raw(text) => writer.write_all(text.as_bytes()),

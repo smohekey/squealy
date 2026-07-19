@@ -308,6 +308,7 @@ fn clause_alias_model() -> DatabaseModel {
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     }
 }
@@ -479,6 +480,7 @@ fn enum_fixture(labels: &[&str]) -> DatabaseModel {
                 labels: labels.iter().map(|s| s.to_string()).collect(),
             }],
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     }
 }
@@ -528,6 +530,7 @@ fn creating_an_invalid_sequence_is_rejected() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: vec![sequence],
+            domains: Vec::new(),
         }],
     };
     for bad in [
@@ -562,6 +565,70 @@ fn creating_an_invalid_sequence_is_rejected() {
             error.to_string().contains("counter"),
             "error should name the sequence: {error} (for {bad:?})"
         );
+    }
+}
+
+#[test]
+fn creating_a_domain_check_referencing_a_column_is_rejected() {
+    // A domain CHECK may only reference the value under test (the `VALUE` keyword); a bare column
+    // reference is invalid SQL, so preflight rejects it rather than rendering DDL PostgreSQL refuses.
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: vec![DomainModel {
+                name: "positive".to_owned(),
+                base_type: SqlType::I32,
+                not_null: false,
+                default: None,
+                checks: vec![CheckModel {
+                    name: "bad_check".to_owned(),
+                    // `id > 0` — references a column, not VALUE.
+                    expression: ExprNode::Compare {
+                        op: CompareOp::GreaterThan,
+                        left: Box::new(ExprNode::BareColumn {
+                            column: "id".to_owned(),
+                        }),
+                        right: Box::new(ExprNode::Literal("0".to_owned())),
+                    },
+                    validation: None,
+                    enforcement: None,
+                }],
+            }],
+        }],
+    };
+    let error = squealy_model::render_create_sql(&model, &Postgres)
+        .expect_err("a domain check referencing a column must be rejected");
+    assert!(error.to_string().contains("positive"), "{error}");
+}
+
+#[test]
+fn creating_a_domain_with_an_unsupported_base_type_is_rejected() {
+    // A domain base type must be a plain scalar: a fixed-width byte type would lose its length, and an
+    // enum would render an unqualified type name that fails to resolve.
+    let domain = |base: SqlType| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: vec![DomainModel {
+                name: "d".to_owned(),
+                base_type: base,
+                not_null: false,
+                default: None,
+                checks: Vec::new(),
+            }],
+        }],
+    };
+    for base in [SqlType::FixedBytes(16), SqlType::Enum("mood".to_owned())] {
+        let error = squealy_model::render_create_sql(&domain(base.clone()), &Postgres)
+            .expect_err("an unsupported domain base type must be rejected");
+        assert!(error.to_string().contains('d'), "{error} (for {base:?})");
     }
 }
 
@@ -624,6 +691,185 @@ fn incremental_rendering_rejects_an_undeclared_enum_column() {
     let error = squealy_model::render_plan_sql(&plan, &model, &Postgres)
         .expect_err("an incremental plan referencing an undeclared enum must be rejected");
     assert!(error.to_string().contains("mood"), "{error}");
+}
+
+fn domain_check(name: &str, sql: &str) -> CheckModel {
+    CheckModel {
+        name: name.to_owned(),
+        expression: squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+            .read_domain_check_expression(sql)
+            .unwrap(),
+        validation: None,
+        enforcement: None,
+    }
+}
+
+fn domain_fixture() -> DatabaseModel {
+    // A `Text`-based domain: introspection reads the base back as PostgreSQL's physical `String`, so this
+    // exercises the domain canonicalization (an un-canonicalized `Text` would churn a base-type
+    // `AlterDomain` every run). Two CHECKs authored in non-name-sorted order exercise the order-independent
+    // comparison (introspection returns them name-sorted).
+    let email = DomainModel {
+        name: "email".to_owned(),
+        base_type: SqlType::Text,
+        not_null: true,
+        default: None,
+        checks: vec![
+            domain_check("z_length", "length(VALUE) < 320"),
+            domain_check("a_nonempty", "VALUE <> ''"),
+        ],
+    };
+    // A table with a column of the domain type. Off the search_path, `format_type` reports the domain
+    // qualified, so the column round-trips as a qualified `Raw`.
+    let readings = TableModel {
+        name: "readings".to_owned(),
+        comment: None,
+        columns: vec![ColumnModel {
+            name: "contact".to_owned(),
+            comment: None,
+            ty: SqlType::Raw("publish_domains.email".to_owned()),
+            collation: None,
+            nullable: false,
+            default: None,
+            identity: None,
+            generated: None,
+            on_update: None,
+        }],
+        primary_key: None,
+        foreign_keys: Vec::new(),
+        uniques: Vec::new(),
+        checks: Vec::new(),
+        indexes: Vec::new(),
+    };
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("publish_domains".to_owned()),
+            tables: vec![readings],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: vec![email],
+        }],
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn publishing_a_domain_then_replanning_is_empty() {
+    // A published domain (base type + NOT NULL + DEFAULT + a named CHECK using VALUE) and a column of the
+    // domain type must re-plan to empty: pg_type/pg_constraint round-trip the domain, the CHECK's VALUE
+    // keyword survives, and the domain-typed column reads back as the same qualified `Raw`.
+    let _guard = db_lock().lock().await;
+    let model = domain_fixture();
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_domains CASCADE")
+        .await
+        .expect("reset domain fixture");
+
+    squealy_model::publish(&model, &Postgres, &mut connection)
+        .await
+        .expect("publish domain + column");
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect("re-plan against the published domain");
+    assert!(
+        plan.steps.is_empty(),
+        "a published domain must re-plan empty, got: {:?}",
+        plan.steps
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_domains CASCADE")
+        .await
+        .expect("clean up domain fixture");
+}
+
+#[tokio::test]
+#[ignore]
+async fn publishing_a_public_domain_with_a_raw_check_replans_empty() {
+    // A domain in `public` (on the search_path, so `format_type` drops the qualifier) with a column of
+    // the domain type, and a CHECK authored through the `Raw("VALUE …")` escape hatch. Without the
+    // catalog-qualified column resolution the column would churn; without domain-aware check
+    // canonicalization the `VALUE` keyword would render as a quoted `"value"` column and fail to publish.
+    let _guard = db_lock().lock().await;
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl("DROP TABLE IF EXISTS public.metrics;\nDROP DOMAIN IF EXISTS public.pct")
+        .await
+        .expect("reset public domain fixture");
+
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("public".to_owned()),
+            tables: vec![TableModel {
+                name: "metrics".to_owned(),
+                comment: None,
+                columns: vec![ColumnModel {
+                    name: "ratio".to_owned(),
+                    comment: None,
+                    ty: SqlType::Raw("public.pct".to_owned()),
+                    collation: None,
+                    nullable: false,
+                    default: None,
+                    identity: None,
+                    generated: None,
+                    on_update: None,
+                }],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+            }],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: vec![DomainModel {
+                name: "pct".to_owned(),
+                base_type: SqlType::I32,
+                not_null: false,
+                default: None,
+                checks: vec![CheckModel {
+                    name: "pct_range".to_owned(),
+                    // Authored through the Raw escape hatch, not the domain reader.
+                    expression: ExprNode::Raw("VALUE >= 0 AND VALUE <= 100".to_owned()),
+                    validation: None,
+                    enforcement: None,
+                }],
+            }],
+        }],
+    };
+    squealy_model::publish(&model, &Postgres, &mut connection)
+        .await
+        .expect("publish public domain + column");
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect("re-plan against the published public domain");
+    assert!(
+        plan.steps.is_empty(),
+        "a published public domain must re-plan empty, got: {:?}",
+        plan.steps
+    );
+
+    connection
+        .execute_ddl("DROP TABLE IF EXISTS public.metrics;\nDROP DOMAIN IF EXISTS public.pct")
+        .await
+        .expect("clean up public domain fixture");
 }
 
 #[tokio::test]
@@ -721,6 +967,7 @@ fn sequence_fixture() -> DatabaseModel {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: vec![standalone, owned],
+            domains: Vec::new(),
         }],
     }
 }
@@ -793,6 +1040,7 @@ async fn dropping_a_table_and_its_owned_sequence_applies_cleanly() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     let plan =

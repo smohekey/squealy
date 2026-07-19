@@ -1705,6 +1705,7 @@ fn enum_model() -> DatabaseModel {
                 labels: vec!["sad".to_owned(), "ok".to_owned(), "happy".to_owned()],
             }],
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     }
 }
@@ -1771,6 +1772,7 @@ fn sequence_model(sequences: Vec<SequenceModel>, tables: Vec<TableModel>) -> Dat
             views: Vec::new(),
             enums: Vec::new(),
             sequences,
+            domains: Vec::new(),
         }],
     }
 }
@@ -1893,6 +1895,130 @@ fn postgres_renders_sequence_plan_steps() {
         "{sql}"
     );
     assert!(sql.contains("DROP SEQUENCE \"app\".\"old\""), "{sql}");
+}
+
+fn domain_check(name: &str, sql: &str) -> CheckModel {
+    CheckModel {
+        name: name.to_owned(),
+        expression: squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+            .read_domain_check_expression(sql)
+            .expect("domain check expression parses"),
+        validation: None,
+        enforcement: None,
+    }
+}
+
+fn domain_model(domain: DomainModel) -> DatabaseModel {
+    DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: vec![domain],
+        }],
+    }
+}
+
+#[test]
+fn postgres_renders_a_domain_with_all_attributes() {
+    let domain = DomainModel {
+        name: "positive".to_owned(),
+        base_type: SqlType::I32,
+        not_null: true,
+        default: Some(DefaultValue::Int(1)),
+        checks: vec![domain_check("positive_check", "VALUE > 0")],
+    };
+    let mut sql = Vec::new();
+    Postgres
+        .render_create(&domain_model(domain), &mut sql)
+        .unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    // The domain's base type, default, NOT NULL, and CHECK all render; the CHECK uses the bare `VALUE`
+    // keyword (not a quoted `"value"` column), and the CREATE DOMAIN precedes any table.
+    assert_eq!(
+        sql,
+        "CREATE SCHEMA IF NOT EXISTS \"app\";\n\
+CREATE DOMAIN \"app\".\"positive\" AS integer DEFAULT 1 NOT NULL \
+CONSTRAINT \"positive_check\" CHECK ((VALUE > 0));"
+    );
+}
+
+#[test]
+fn postgres_renders_domain_alter_plan_steps() {
+    let base = DomainModel {
+        name: "d".to_owned(),
+        base_type: SqlType::I32,
+        not_null: false,
+        default: None,
+        checks: vec![domain_check("old_check", "VALUE > 0")],
+    };
+    let after = DomainModel {
+        not_null: true,
+        default: Some(DefaultValue::Int(5)),
+        checks: vec![domain_check("new_check", "VALUE < 100")],
+        ..base.clone()
+    };
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterDomain {
+            schema: Some("app".to_owned()),
+            before: base,
+            after,
+        }],
+    };
+    let mut sql = Vec::new();
+    Postgres
+        .render_plan(&plan, &DatabaseModel::default(), &mut sql)
+        .unwrap();
+    let sql = String::from_utf8(sql).unwrap();
+
+    assert!(
+        sql.contains("ALTER DOMAIN \"app\".\"d\" DROP CONSTRAINT \"old_check\""),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("ALTER DOMAIN \"app\".\"d\" SET NOT NULL"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("ALTER DOMAIN \"app\".\"d\" SET DEFAULT 5"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains(
+            "ALTER DOMAIN \"app\".\"d\" ADD CONSTRAINT \"new_check\" CHECK ((VALUE < 100))"
+        ),
+        "{sql}"
+    );
+}
+
+#[test]
+fn postgres_rejects_a_domain_base_type_change() {
+    let before = DomainModel {
+        name: "d".to_owned(),
+        base_type: SqlType::I32,
+        not_null: false,
+        default: None,
+        checks: Vec::new(),
+    };
+    let after = DomainModel {
+        base_type: SqlType::I64,
+        ..before.clone()
+    };
+    let plan = DatabasePlan {
+        steps: vec![DatabasePlanStep::AlterDomain {
+            schema: Some("app".to_owned()),
+            before,
+            after,
+        }],
+    };
+    let error = Postgres
+        .render_plan(&plan, &DatabaseModel::default(), &mut Vec::new())
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(error.to_string().contains("base type"), "{error}");
 }
 
 #[test]
@@ -2341,6 +2467,7 @@ fn postgres_renders_table_and_column_comments() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: Some("Tenant records".to_owned()),
@@ -2439,6 +2566,7 @@ fn postgres_renders_foreign_key_match_type() {
                 },
             ],
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -2466,6 +2594,7 @@ fn postgres_renders_partial_indexes() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -2528,6 +2657,7 @@ fn postgres_renders_expression_indexes() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2592,6 +2722,7 @@ fn postgres_renders_raw_expression_index_verbatim() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2648,6 +2779,7 @@ fn postgres_renders_covering_indexes() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -2717,6 +2849,7 @@ fn postgres_renders_index_null_ordering() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -2773,6 +2906,7 @@ fn postgres_renders_index_operator_classes() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -2832,6 +2966,7 @@ fn postgres_renders_index_collations() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -3101,6 +3236,7 @@ fn postgres_renders_views_in_dependency_order() {
             ],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -3499,6 +3635,7 @@ fn postgres_renders_view_expression_ir_in_its_dialect() {
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -3661,6 +3798,7 @@ fn postgres_view_order_by_keeps_nulls_modifier() {
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -3694,6 +3832,7 @@ fn postgres_render_rejects_empty_view_body() {
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -4222,6 +4361,7 @@ fn postgres_rejects_index_column_prefix_lengths() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -4276,6 +4416,7 @@ fn postgres_rejects_on_update_current_timestamp() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,

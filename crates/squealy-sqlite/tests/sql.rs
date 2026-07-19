@@ -1,7 +1,7 @@
 //! SQLite create-from-scratch DDL rendering tests.
 
 use squealy::{
-    ColumnExpr, ColumnMode, ColumnModel, ColumnName, Database, DatabaseModel, Schema,
+    ColumnExpr, ColumnMode, ColumnModel, ColumnName, Database, DatabaseModel, DomainModel, Schema,
     SchemaBackend, SchemaModel, SequenceDataType, SequenceModel, SqlType, Table, TableModel,
 };
 use squealy_sqlite::Sqlite;
@@ -212,6 +212,7 @@ fn rejects_non_integer_autoincrement_column() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -249,6 +250,7 @@ fn sqlite_rejects_a_user_enum_type() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     let error = Sqlite.render_create(&model, &mut Vec::new()).unwrap_err();
@@ -276,11 +278,36 @@ fn sqlite_rejects_a_sequence() {
                 cycle: false,
                 owned_by: None,
             }],
+            domains: Vec::new(),
         }],
     };
     let error = Sqlite.render_create(&model, &mut Vec::new()).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
     assert!(error.to_string().contains("counter"), "{error}");
+}
+
+#[test]
+fn sqlite_rejects_a_domain() {
+    // SQLite has no domain object; a model declaring one is rejected at render.
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: None,
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: vec![DomainModel {
+                name: "positive".to_owned(),
+                base_type: SqlType::I32,
+                not_null: false,
+                default: None,
+                checks: Vec::new(),
+            }],
+        }],
+    };
+    let error = Sqlite.render_create(&model, &mut Vec::new()).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(error.to_string().contains("positive"), "{error}");
 }
 
 #[test]
@@ -314,6 +341,7 @@ fn fixed_bytes_column_enforces_width_with_a_check() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -345,6 +373,7 @@ fn rejects_table_name_collision_across_schemas() {
         views: Vec::new(),
         enums: Vec::new(),
         sequences: Vec::new(),
+        domains: Vec::new(),
     };
     let model = DatabaseModel {
         schemas: vec![schema("public"), schema("archive")],
@@ -376,6 +405,7 @@ fn rejects_case_insensitive_table_name_collision() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -430,6 +460,7 @@ fn rejects_index_name_collision_across_tables() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -476,6 +507,7 @@ fn renders_table_check_constraint() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -521,6 +553,7 @@ fn rejects_check_constraint_validation_or_enforcement_metadata() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     let base = || CheckModel {
@@ -577,6 +610,7 @@ fn renders_column_collation() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -610,6 +644,7 @@ fn rejects_reserved_object_name_prefix() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     for reserved in ["__squealy_refactors", "sqlite_stat1"] {
@@ -671,6 +706,7 @@ fn rejects_index_column_prefix_lengths() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -713,6 +749,7 @@ fn rejects_on_update_current_timestamp() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -761,6 +798,7 @@ fn rejects_on_update_on_an_autoincrement_primary_key_column() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     let mut sql = Vec::new();
@@ -861,6 +899,7 @@ fn render_create_renders_views_unqualified_in_dependency_order() {
             ],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -966,6 +1005,7 @@ fn render_create_renders_view_expression_ir_in_sqlite_dialect() {
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -1041,6 +1081,7 @@ fn rejects_intersect_all_view_body_which_sqlite_cannot_run() {
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -1105,6 +1146,7 @@ fn rejects_set_body_with_an_alias_qualified_order_by_term() {
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -1169,6 +1211,7 @@ fn rejects_set_body_order_by_a_name_the_left_arm_does_not_emit() {
                 }],
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
             }],
         }
     };
@@ -1282,6 +1325,7 @@ fn render_create_rejects_view_name_colliding_with_table() {
             views: vec![id_view("users", "users", None)],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
