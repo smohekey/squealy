@@ -86,13 +86,15 @@ pub fn table_plan_step_risk(step: &TablePlanStep) -> ChangeRisk {
         | TablePlanStep::AddUnique { .. }
         | TablePlanStep::AddForeignKey { .. }
         | TablePlanStep::AddCheck { .. }
-        | TablePlanStep::AddIndex { .. } => ChangeRisk::Safe,
+        | TablePlanStep::AddIndex { .. }
+        | TablePlanStep::AddExclusion { .. } => ChangeRisk::Safe,
         TablePlanStep::DropColumn { .. }
         | TablePlanStep::DropPrimaryKey { .. }
         | TablePlanStep::DropUnique { .. }
         | TablePlanStep::DropForeignKey { .. }
         | TablePlanStep::DropCheck { .. }
-        | TablePlanStep::DropIndex { .. } => ChangeRisk::Destructive,
+        | TablePlanStep::DropIndex { .. }
+        | TablePlanStep::DropExclusion { .. } => ChangeRisk::Destructive,
         TablePlanStep::AddColumn { column } => {
             if column.nullable || column.default.is_some() || column.identity.is_some() {
                 ChangeRisk::Safe
@@ -105,7 +107,8 @@ pub fn table_plan_step_risk(step: &TablePlanStep) -> ChangeRisk {
         | TablePlanStep::AlterUnique { .. }
         | TablePlanStep::AlterForeignKey { .. }
         | TablePlanStep::AlterCheck { .. }
-        | TablePlanStep::AlterIndex { .. } => ChangeRisk::Ambiguous,
+        | TablePlanStep::AlterIndex { .. }
+        | TablePlanStep::AlterExclusion { .. } => ChangeRisk::Ambiguous,
     }
 }
 
@@ -349,6 +352,16 @@ fn table_plan_step_as_diff_change(step: &TablePlanStep) -> TableDiffChange {
             index: index.clone(),
         },
         TablePlanStep::AlterIndex { before, after } => TableDiffChange::AlterIndex {
+            before: before.clone(),
+            after: after.clone(),
+        },
+        TablePlanStep::AddExclusion { exclusion } => TableDiffChange::AddExclusion {
+            exclusion: exclusion.clone(),
+        },
+        TablePlanStep::DropExclusion { exclusion } => TableDiffChange::DropExclusion {
+            exclusion: exclusion.clone(),
+        },
+        TablePlanStep::AlterExclusion { before, after } => TableDiffChange::AlterExclusion {
             before: before.clone(),
             after: after.clone(),
         },
@@ -740,6 +753,16 @@ fn table_plan_step(change: &TableDiffChange) -> TablePlanStep {
             index: index.clone(),
         },
         TableDiffChange::AlterIndex { before, after } => TablePlanStep::AlterIndex {
+            before: before.clone(),
+            after: after.clone(),
+        },
+        TableDiffChange::AddExclusion { exclusion } => TablePlanStep::AddExclusion {
+            exclusion: exclusion.clone(),
+        },
+        TableDiffChange::DropExclusion { exclusion } => TablePlanStep::DropExclusion {
+            exclusion: exclusion.clone(),
+        },
+        TableDiffChange::AlterExclusion { before, after } => TablePlanStep::AlterExclusion {
             before: before.clone(),
             after: after.clone(),
         },

@@ -1151,6 +1151,9 @@ fn describe_table_plan_step(step: &TablePlanStep) -> String {
         TablePlanStep::AddIndex { index } => format!("add index {}", index.name),
         TablePlanStep::DropIndex { index } => format!("drop index {}", index.name),
         TablePlanStep::AlterIndex { after, .. } => format!("alter index {}", after.name),
+        TablePlanStep::AddExclusion { exclusion } => format!("add exclusion {}", exclusion.name),
+        TablePlanStep::DropExclusion { exclusion } => format!("drop exclusion {}", exclusion.name),
+        TablePlanStep::AlterExclusion { after, .. } => format!("alter exclusion {}", after.name),
     }
 }
 
@@ -1685,6 +1688,15 @@ fn table_diff_change_json(
         TableDiffChange::AlterIndex { after, .. } => {
             constraint_change_json("index", "alter", risk, schema, table, &after.name)
         }
+        TableDiffChange::AddExclusion { exclusion } => {
+            constraint_change_json("exclusion", "add", risk, schema, table, &exclusion.name)
+        }
+        TableDiffChange::DropExclusion { exclusion } => {
+            constraint_change_json("exclusion", "drop", risk, schema, table, &exclusion.name)
+        }
+        TableDiffChange::AlterExclusion { after, .. } => {
+            constraint_change_json("exclusion", "alter", risk, schema, table, &after.name)
+        }
     }
 }
 
@@ -1944,6 +1956,15 @@ fn print_table_change(schema: &Option<String>, table: &str, change: &TableDiffCh
         TableDiffChange::AlterIndex { after, .. } => {
             println!("{risk} index ~ {table}.{}", after.name);
         }
+        TableDiffChange::AddExclusion { exclusion } => {
+            println!("{risk} exclusion + {table}.{}", exclusion.name);
+        }
+        TableDiffChange::DropExclusion { exclusion } => {
+            println!("{risk} exclusion - {table}.{}", exclusion.name);
+        }
+        TableDiffChange::AlterExclusion { after, .. } => {
+            println!("{risk} exclusion ~ {table}.{}", after.name);
+        }
     }
 }
 
@@ -2090,6 +2111,10 @@ fn print_schema_capabilities(capabilities: SchemaCapabilities) {
     println!(
         "constraints.prefix_lengths={}",
         capabilities.constraints.prefix_lengths
+    );
+    println!(
+        "constraints.exclusions={}",
+        capabilities.constraints.exclusions
     );
     println!("indexes.predicates={}", capabilities.indexes.predicates);
     println!("indexes.expressions={}", capabilities.indexes.expressions);

@@ -38,14 +38,14 @@ pub use refactor::{
 pub use squealy::{
     CheckModel, ColumnCapabilities, ColumnModel, Constraint, ConstraintCapabilities,
     ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, CteModel, DatabaseModel,
-    DatabasePlan, DatabasePlanStep, DdlExecutor, DefaultValue, DomainModel, EnumModel, ExprNode,
-    ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, IndexCapabilities, IndexCollation,
-    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
-    IndexPrefixLength, LogicalOp, ProjectionItem, SchemaBackend, SchemaCapabilities, SchemaConnect,
-    SchemaIntrospect, SchemaMetadataStore, SchemaModel, SchemaPublishHistoryStore,
-    SchemaPublishRecord, SchemaRefactorStore, SequenceDataType, SequenceModel, SequenceOwnedBy,
-    SourceItem, SourceRef, SqlType, TableModel, TablePlanStep, ViewBody, ViewColumnModel,
-    ViewModel, ViewQueryModel, ViewSetOp,
+    DatabasePlan, DatabasePlanStep, DdlExecutor, DefaultValue, DomainModel, EnumModel,
+    ExclusionElement, ExclusionModel, ExclusionTerm, ExprNode, ForeignKeyAction, ForeignKeyMatch,
+    ForeignKeyModel, IndexCapabilities, IndexCollation, IndexDirection, IndexMethod, IndexModel,
+    IndexNullsOrder, IndexOperatorClass, IndexPrefixLength, LogicalOp, ProjectionItem,
+    SchemaBackend, SchemaCapabilities, SchemaConnect, SchemaIntrospect, SchemaMetadataStore,
+    SchemaModel, SchemaPublishHistoryStore, SchemaPublishRecord, SchemaRefactorStore,
+    SequenceDataType, SequenceModel, SequenceOwnedBy, SourceItem, SourceRef, SqlType, TableModel,
+    TablePlanStep, ViewBody, ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp,
 };
 
 use std::collections::BTreeSet;
@@ -87,6 +87,7 @@ pub fn render_plan_sql<B: SchemaBackend>(
     validate_enum_references(desired, capabilities)?;
     validate_sequences(desired, capabilities)?;
     validate_domains(desired, capabilities)?;
+    validate_exclusions(desired, capabilities)?;
     for schema in &desired.schemas {
         for table in &schema.tables {
             validate_table_constraint_prefixes(table, &capabilities)?;
@@ -506,6 +507,56 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
                 // reads the default back as `None`), so a check that names the default does not churn.
                 normalize_default_validation(&mut check.validation);
                 normalize_default_enforcement(&mut check.enforcement);
+            }
+            for exclusion in &mut table.exclusions {
+                // Element order is significant (it is the constraint's key order) and is never sorted.
+                for element in &mut exclusion.elements {
+                    // `ASC` is the default sort direction; introspection reports it as `None`, so fold an
+                    // explicit `Some(Asc)` to `None` (both sides) so a spelled-out default does not churn.
+                    if element.direction == Some(IndexDirection::Asc) {
+                        element.direction = None;
+                    }
+                    // The default null order follows the direction (`ASC` → `LAST`, `DESC` → `FIRST`);
+                    // fold a spelled-out default to `None` so it matches the introspected form.
+                    let default_first = element.direction == Some(IndexDirection::Desc);
+                    if (element.nulls == Some(IndexNullsOrder::First) && default_first)
+                        || (element.nulls == Some(IndexNullsOrder::Last) && !default_first)
+                    {
+                        element.nulls = None;
+                    }
+                    if let ExclusionTerm::Expression(expression) = &mut element.term {
+                        // Structure a `Raw` term (a legacy-package or un-invertible introspected one) in
+                        // the backend's dialect and normalize it, exactly as an index-key expression, so an
+                        // exclusion term written one way and deparsed another compares equal. An exclusion
+                        // element is a single term, so keep the first structured expression.
+                        if let Some(structured) = connection
+                            .canonical_index_expression(expression.clone())
+                            .into_iter()
+                            .next()
+                        {
+                            let mut structured = squealy::normalize_expr(&structured);
+                            squealy::map_cast_types(&mut structured, &|ty| {
+                                connection.canonical_cast_type(ty)
+                            });
+                            *expression = structured;
+                        }
+                    }
+                }
+                if let Some(predicate) = exclusion.predicate.take() {
+                    let predicate = connection.canonical_index_predicate(*predicate);
+                    let mut predicate = squealy::normalize_expr(&predicate);
+                    squealy::map_cast_types(&mut predicate, &|ty| {
+                        connection.canonical_cast_type(ty)
+                    });
+                    exclusion.predicate = Some(Box::new(predicate));
+                }
+                // Fold an unspecified access method to the backend default, so an exclusion written without
+                // `USING` matches the concrete method introspection reads back.
+                if let Some(default_method) = &default_method
+                    && exclusion.method.is_none()
+                {
+                    exclusion.method = Some(default_method.clone());
+                }
             }
         }
         // A view's declared output columns are compared against introspected ones (which come back in
@@ -1135,6 +1186,51 @@ fn unsupported_domain(domain: &str, feature: &str) -> std::io::Result<()> {
     ))
 }
 
+/// Validates every table's exclusion constraints against the backend's capabilities and the
+/// backend-neutral shape rules. The capability gate (`constraints.exclusions`) rejects the whole feature
+/// on a backend that lacks it (MySQL/SQLite); the shape rules reject an exclusion with no elements or an
+/// element with no operator, which no backend can render. Shared by the create preflight
+/// ([`validate_capabilities`]) and the incremental render path ([`render_plan_sql`]) so both agree.
+fn validate_exclusions(
+    model: &DatabaseModel,
+    capabilities: SchemaCapabilities,
+) -> std::io::Result<()> {
+    for schema in &model.schemas {
+        for table in &schema.tables {
+            for exclusion in &table.exclusions {
+                if !capabilities.constraints.exclusions {
+                    return unsupported_constraint(
+                        &table.name,
+                        &exclusion.name,
+                        "exclusion constraints",
+                    );
+                }
+                if exclusion.elements.is_empty() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "exclusion constraint `{}` on `{}` has no elements",
+                            exclusion.name, table.name
+                        ),
+                    ));
+                }
+                for element in &exclusion.elements {
+                    if element.operator.trim().is_empty() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!(
+                                "exclusion constraint `{}` on `{}` has an element with no operator",
+                                exclusion.name, table.name
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_capabilities(
     model: &DatabaseModel,
     capabilities: SchemaCapabilities,
@@ -1142,6 +1238,7 @@ fn validate_capabilities(
     validate_enum_references(model, capabilities)?;
     validate_sequences(model, capabilities)?;
     validate_domains(model, capabilities)?;
+    validate_exclusions(model, capabilities)?;
     for schema in &model.schemas {
         for table in &schema.tables {
             for column in &table.columns {
@@ -1354,6 +1451,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![check],
                     indexes: vec![],
+                    exclusions: Vec::new(),
                 }],
             }],
         }
@@ -1407,6 +1505,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![],
                     indexes: vec![index],
+                    exclusions: Vec::new(),
                 }],
             }],
         }
@@ -1453,6 +1552,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![],
                     indexes: vec![],
+                    exclusions: Vec::new(),
                 }],
                 views: vec![ViewModel {
                     name: "key_view".to_owned(),
@@ -1567,6 +1667,7 @@ mod tests {
                 uniques: vec![],
                 checks: vec![],
                 indexes: vec![],
+                exclusions: Vec::new(),
             }
         }
         fn amount_times_two() -> ExprNode {
@@ -1745,6 +1846,7 @@ mod tests {
                         uniques: vec![],
                         checks: vec![],
                         indexes: vec![],
+                        exclusions: Vec::new(),
                     }],
                 },
             ],
@@ -1799,6 +1901,7 @@ mod tests {
             uniques: vec![],
             checks: vec![],
             indexes: vec![],
+            exclusions: Vec::new(),
         };
         let model = DatabaseModel {
             schemas: vec![
@@ -1940,6 +2043,7 @@ mod tests {
                     }],
                     checks: Vec::new(),
                     indexes: Vec::new(),
+                    exclusions: Vec::new(),
                 }],
             }],
         }
@@ -2296,6 +2400,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![],
                     indexes: vec![],
+                    exclusions: Vec::new(),
                 }],
             }],
         };
@@ -2352,6 +2457,7 @@ mod tests {
                         check_validation: false,
                         check_enforcement: true,
                         prefix_lengths: false,
+                        exclusions: false,
                     },
                     indexes: IndexCapabilities::default(),
                     enums: false,

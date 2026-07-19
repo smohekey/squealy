@@ -278,8 +278,8 @@ pub(crate) mod ddl {
     use squealy::{
         CheckModel, ColumnModel, Constraint, ConstraintEnforcement, ConstraintValidation,
         DatabaseModel, DatabasePlan, DatabasePlanStep, DefaultValue, DomainModel, EnumModel,
-        ForeignKeyModel, IdentityMode, IndexModel, SequenceModel, SqlType, TableModel,
-        TablePlanStep,
+        ExclusionElement, ExclusionModel, ExclusionTerm, ForeignKeyModel, IdentityMode, IndexModel,
+        SequenceModel, SqlType, TableModel, TablePlanStep,
     };
 
     use super::{write_pg_sql_type, write_qualified_name, write_quoted_ident, write_quoted_text};
@@ -804,6 +804,19 @@ pub(crate) mod ddl {
                 statement(writer, first)?;
                 write_create_index(schema, table, after, false, writer)?;
             }
+            TablePlanStep::AddExclusion { exclusion } => {
+                write_add_exclusion(schema, table, exclusion, writer)?;
+            }
+            TablePlanStep::DropExclusion { exclusion } => {
+                // An exclusion constraint is dropped as a constraint (which drops its backing index), not
+                // via `DROP INDEX`.
+                write_drop_constraint(schema, table, &exclusion.name, writer)?;
+            }
+            TablePlanStep::AlterExclusion { before, after } => {
+                write_drop_constraint(schema, table, &before.name, writer)?;
+                statement(writer, first)?;
+                write_add_exclusion(schema, table, after, writer)?;
+            }
             TablePlanStep::AlterColumn {
                 before,
                 after,
@@ -1281,6 +1294,10 @@ pub(crate) mod ddl {
             entry(writer, &mut first_entry)?;
             write_check(check, writer)?;
         }
+        for exclusion in &table.exclusions {
+            entry(writer, &mut first_entry)?;
+            write_exclusion(exclusion, writer)?;
+        }
 
         writer.write_all(b"\n)")
     }
@@ -1530,6 +1547,86 @@ pub(crate) mod ddl {
         }
         write_constraint_validation(&foreign_key.validation, writer)?;
         Ok(())
+    }
+
+    fn write_exclusion(exclusion: &ExclusionModel, writer: &mut impl Write) -> io::Result<()> {
+        writer.write_all(b"CONSTRAINT ")?;
+        write_quoted_ident(&exclusion.name, writer)?;
+        writer.write_all(b" EXCLUDE")?;
+        if let Some(method) = &exclusion.method {
+            writer.write_all(b" USING ")?;
+            writer.write_all(method.postgres_sql().as_bytes())?;
+        }
+        writer.write_all(b" (")?;
+        for (position, element) in exclusion.elements.iter().enumerate() {
+            if position > 0 {
+                writer.write_all(b", ")?;
+            }
+            write_exclusion_element(element, writer)?;
+        }
+        writer.write_all(b")")?;
+        if let Some(predicate) = &exclusion.predicate {
+            writer.write_all(b" WHERE (")?;
+            squealy::render_scalar_expr(predicate, &super::PostgresDialect, writer)?;
+            writer.write_all(b")")?;
+        }
+        if let Some(deferrability) = &exclusion.deferrability {
+            writer.write_all(b" ")?;
+            writer.write_all(deferrability.as_sql().as_bytes())?;
+        }
+        Ok(())
+    }
+
+    fn write_exclusion_element(
+        element: &ExclusionElement,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        // The key term: a bare column, a verbatim `Raw` expression, or a parenthesized structural one
+        // (mirroring how `write_index_terms` renders index-key expressions).
+        match &element.term {
+            ExclusionTerm::Column(column) => write_quoted_ident(column, writer)?,
+            ExclusionTerm::Expression(squealy::ExprNode::Raw(raw)) => {
+                writer.write_all(raw.as_bytes())?
+            }
+            ExclusionTerm::Expression(structural) => {
+                writer.write_all(b"(")?;
+                squealy::render_scalar_expr(structural, &super::PostgresDialect, writer)?;
+                writer.write_all(b")")?;
+            }
+        }
+        if let Some(collation) = &element.collation {
+            writer.write_all(b" COLLATE ")?;
+            write_quoted_ident(collation, writer)?;
+        }
+        if let Some(operator_class) = &element.operator_class {
+            writer.write_all(b" ")?;
+            writer.write_all(operator_class.as_bytes())?;
+        }
+        match &element.direction {
+            Some(squealy::IndexDirection::Asc) => writer.write_all(b" ASC")?,
+            Some(squealy::IndexDirection::Desc) => writer.write_all(b" DESC")?,
+            None => {}
+        }
+        match &element.nulls {
+            Some(squealy::IndexNullsOrder::First) => writer.write_all(b" NULLS FIRST")?,
+            Some(squealy::IndexNullsOrder::Last) => writer.write_all(b" NULLS LAST")?,
+            None => {}
+        }
+        writer.write_all(b" WITH ")?;
+        writer.write_all(element.operator.as_bytes())?;
+        Ok(())
+    }
+
+    fn write_add_exclusion(
+        schema: Option<&str>,
+        table: &str,
+        exclusion: &ExclusionModel,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        writer.write_all(b"ALTER TABLE ")?;
+        write_qualified_name(schema, table, writer)?;
+        writer.write_all(b" ADD ")?;
+        write_exclusion(exclusion, writer)
     }
 
     fn write_constraint_validation(
@@ -1924,6 +2021,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![],
                     indexes: vec![],
+                    exclusions: Vec::new(),
                 }],
             }],
         };

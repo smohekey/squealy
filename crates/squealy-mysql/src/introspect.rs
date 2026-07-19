@@ -302,6 +302,8 @@ async fn table(
         uniques,
         checks: checks(conn, table_ref).await?,
         indexes: indexes(conn, table_ref).await?,
+        // MySQL has no exclusion constraint.
+        exclusions: Vec::new(),
     })
 }
 

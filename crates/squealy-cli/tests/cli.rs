@@ -473,6 +473,7 @@ fn diff_reports_package_model_changes() {
         uniques: vec![],
         checks: vec![],
         indexes: vec![],
+        exclusions: Vec::new(),
     });
     write_package(&desired_model, &desired).expect("write desired package");
     write_package(&empty_model(), &actual).expect("write actual package");
@@ -2227,6 +2228,7 @@ fn empty_model() -> DatabaseModel {
                 uniques: vec![],
                 checks: vec![],
                 indexes: vec![],
+                exclusions: Vec::new(),
             }],
         }],
     }
@@ -2259,6 +2261,7 @@ fn live_introspection_model() -> DatabaseModel {
                 uniques: vec![],
                 checks: vec![],
                 indexes: vec![],
+                exclusions: Vec::new(),
             }],
         }],
     }

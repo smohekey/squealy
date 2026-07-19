@@ -1,10 +1,11 @@
 use squealy::{
     CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintValidation,
-    DatabaseModel, DefaultValue, DomainModel, EnumModel, ForeignKeyAction, ForeignKeyMatch,
-    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
-    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
-    SchemaModel, SequenceDataType, SequenceModel, SequenceOwnedBy, SourceRef, SqlType, TableModel,
-    ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
+    DatabaseModel, DefaultValue, DomainModel, EnumModel, ExclusionElement, ExclusionModel,
+    ExclusionTerm, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
+    GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
+    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, SchemaModel,
+    SequenceDataType, SequenceModel, SequenceOwnedBy, SourceRef, SqlType, TableModel, ViewBody,
+    ViewColumnModel, ViewModel, ViewQueryModel,
 };
 use tokio_postgres::Client;
 
@@ -525,6 +526,7 @@ async fn table(client: &Client, table_ref: &TableRef) -> Result<TableModel, Post
         uniques,
         checks,
         indexes: indexes(client, table_ref).await?,
+        exclusions: exclusions(client, table_ref).await?,
     })
 }
 
@@ -961,6 +963,178 @@ ORDER BY idx.relname",
                             .read_index_predicate_or_raw(&predicate),
                     )
                 }),
+            }
+        })
+        .collect())
+}
+
+/// Introspects every exclusion constraint (`EXCLUDE USING gist (col WITH &&, ...)`, `contype = 'x'`) on
+/// the table. Each is backed by an index (`con.conindid`), so the per-element facts — access method,
+/// key terms (columns and expressions), operator classes, collations, sort direction/null order — come
+/// from that index's catalog rows exactly as a plain index's do; the per-element operators come from the
+/// constraint's own `conexclop` array (operator OIDs joined to `pg_operator`). Element order is the index
+/// key order. Only the *key* columns (`indkey[..indnkeyatts]`) are read: `conexclop`/`indclass`/`indoption`
+/// describe key positions only, so a covering `INCLUDE` column would otherwise become a bogus element with
+/// no operator. The plain-index introspector deliberately skips constraint-backed indexes (its
+/// `con.oid IS NULL` filter), so an exclusion's backing index is not also surfaced as a standalone index.
+async fn exclusions(
+    client: &Client,
+    table_ref: &TableRef,
+) -> Result<Vec<ExclusionModel>, PostgresError> {
+    let rows = client
+        .query(
+            "\
+SELECT
+    con.conname,
+    am.amname,
+    con.condeferrable,
+    con.condeferred,
+    pg_get_expr(i.indpred, i.indrelid) AS predicate,
+    pg_get_expr(i.indexprs, i.indrelid) AS expressions,
+    ARRAY(
+        SELECT k.attnum::int
+        FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, position)
+        WHERE k.position <= i.indnkeyatts
+        ORDER BY position
+    ) AS attnums,
+    ARRAY(
+        SELECT COALESCE(a.attname::text, '')
+        FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, position)
+        LEFT JOIN pg_attribute a
+            ON a.attrelid = i.indrelid AND a.attnum = k.attnum AND k.attnum <> 0
+        WHERE k.position <= i.indnkeyatts
+        ORDER BY position
+    ) AS column_names,
+    ARRAY(
+        SELECT op.oprname::text
+        FROM unnest(con.conexclop) WITH ORDINALITY AS ex(opoid, position)
+        JOIN pg_operator op ON op.oid = ex.opoid
+        ORDER BY position
+    ) AS operators,
+    ARRAY(
+        SELECT CASE WHEN opc.opcdefault THEN '' ELSE opc.opcname::text END
+        FROM unnest(i.indclass) WITH ORDINALITY AS cls(opcoid, position)
+        JOIN pg_opclass opc ON opc.oid = cls.opcoid
+        ORDER BY position
+    ) AS opclasses,
+    ARRAY(
+        SELECT CASE
+            WHEN coll.collname IS NULL OR coll.collname = 'default' THEN ''
+            ELSE coll.collname::text
+        END
+        FROM unnest(i.indcollation) WITH ORDINALITY AS indcoll(collation_oid, position)
+        LEFT JOIN pg_collation coll ON coll.oid = indcoll.collation_oid
+        ORDER BY position
+    ) AS collations,
+    ARRAY(
+        SELECT CASE WHEN (option & 1) = 1 THEN 'DESC' ELSE 'ASC' END
+        FROM unnest(i.indoption) WITH ORDINALITY AS opt(option, position)
+        ORDER BY position
+    ) AS directions,
+    ARRAY(
+        SELECT CASE WHEN (option & 2) = 2 THEN 'FIRST' ELSE 'LAST' END
+        FROM unnest(i.indoption) WITH ORDINALITY AS opt(option, position)
+        ORDER BY position
+    ) AS nulls
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_index i ON i.indexrelid = con.conindid
+JOIN pg_class idx ON idx.oid = con.conindid
+JOIN pg_am am ON am.oid = idx.relam
+WHERE n.nspname = $1
+  AND c.relname = $2
+  AND con.contype = 'x'
+ORDER BY con.conname",
+            &[&table_ref.schema, &table_ref.name],
+        )
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let deferrable: bool = row.get(2);
+            let deferred: bool = row.get(3);
+            let attnums: Vec<i32> = row.get(6);
+            let column_names: Vec<String> = row.get(7);
+            let operators: Vec<String> = row.get(8);
+            let opclasses: Vec<String> = row.get(9);
+            let collations: Vec<String> = row.get(10);
+            let directions: Vec<String> = row.get(11);
+            let nulls: Vec<String> = row.get(12);
+            // `pg_get_expr(indexprs, …)` returns every expression key term as one comma-separated string,
+            // in the order of the expression (attnum = 0) positions.
+            let mut expressions = row
+                .get::<_, Option<String>>(5)
+                .map(|expressions| {
+                    squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                        .read_index_expressions_or_raw(&expressions)
+                })
+                .unwrap_or_default()
+                .into_iter();
+
+            let elements = attnums
+                .iter()
+                .enumerate()
+                .map(|(position, attnum)| {
+                    let term = if *attnum == 0 {
+                        // An expression key term: consume the next `pg_get_expr` term in order.
+                        expressions
+                            .next()
+                            .map(ExclusionTerm::Expression)
+                            .unwrap_or_else(|| {
+                                ExclusionTerm::Expression(ExprNode::Raw(String::new()))
+                            })
+                    } else {
+                        ExclusionTerm::Column(
+                            column_names.get(position).cloned().unwrap_or_default(),
+                        )
+                    };
+                    let is_desc = directions.get(position).map(String::as_str) == Some("DESC");
+                    let nulls_first = nulls.get(position).map(String::as_str) == Some("FIRST");
+                    ExclusionElement {
+                        term,
+                        operator: operators.get(position).cloned().unwrap_or_default(),
+                        operator_class: opclasses
+                            .get(position)
+                            .filter(|name| !name.is_empty())
+                            .cloned(),
+                        collation: collations
+                            .get(position)
+                            .filter(|name| !name.is_empty())
+                            .cloned(),
+                        // `ASC` is the default; report only an explicit `DESC`.
+                        direction: is_desc.then_some(IndexDirection::Desc),
+                        // The default null order follows the direction (`ASC` → `LAST`, `DESC` → `FIRST`);
+                        // report only a non-default order.
+                        nulls: if nulls_first == is_desc {
+                            None
+                        } else if nulls_first {
+                            Some(IndexNullsOrder::First)
+                        } else {
+                            Some(IndexNullsOrder::Last)
+                        },
+                    }
+                })
+                .collect();
+
+            ExclusionModel {
+                name: row.get(0),
+                method: Some(IndexMethod::from_sql(&row.get::<_, String>(1))),
+                elements,
+                predicate: row.get::<_, Option<String>>(4).map(|predicate| {
+                    Box::new(
+                        squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                            .read_index_predicate_or_raw(&predicate),
+                    )
+                }),
+                // `condeferrable = false` is the (non-deferrable) default, reported as `None` so an
+                // exclusion that does not spell out deferrability does not churn.
+                deferrability: match (deferrable, deferred) {
+                    (false, _) => None,
+                    (true, false) => Some(ConstraintDeferrability::InitiallyImmediate),
+                    (true, true) => Some(ConstraintDeferrability::InitiallyDeferred),
+                },
             }
         })
         .collect())

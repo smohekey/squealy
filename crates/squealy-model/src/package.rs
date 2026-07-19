@@ -19,13 +19,14 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
     AggregateFunc, ArithmeticOp, CaseArm, CheckModel, ColumnModel, CompareOp, Constraint,
     ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, CteModel, DatabaseModel,
-    DateField, DefaultValue, DomainModel, EnumModel, ExprNode, ForeignKeyAction, ForeignKeyMatch,
-    ForeignKeyModel, FrameBound, FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage,
-    IdentityMode, IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel,
-    IndexNullsOrder, IndexOperatorClass, IndexPrefixLength, JoinItem, JoinKind, LogicalOp,
-    OrderDirection, OrderItem, OrderNulls, ProjectionItem, ScalarFunc, SchemaModel,
-    SequenceDataType, SequenceModel, SequenceOwnedBy, SourceItem, SourceRef, SqlType, TableModel,
-    ViewBody, ViewColumnModel, ViewModel, ViewQueryModel, ViewSetOp, WindowFunc, WindowOrderTerm,
+    DateField, DefaultValue, DomainModel, EnumModel, ExclusionElement, ExclusionModel,
+    ExclusionTerm, ExprNode, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel, FrameBound,
+    FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
+    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
+    IndexPrefixLength, JoinItem, JoinKind, LogicalOp, OrderDirection, OrderItem, OrderNulls,
+    ProjectionItem, ScalarFunc, SchemaModel, SequenceDataType, SequenceModel, SequenceOwnedBy,
+    SourceItem, SourceRef, SqlType, TableModel, ViewBody, ViewColumnModel, ViewModel,
+    ViewQueryModel, ViewSetOp, WindowFunc, WindowOrderTerm,
 };
 
 use crate::{CastColumn, RefactorLog, RefactorOperation, RenameColumn, RenameTable};
@@ -533,6 +534,9 @@ fn table_to_node(table: &TableModel) -> KdlNode {
     }
     for check in &table.checks {
         body.nodes_mut().push(check_to_node(check));
+    }
+    for exclusion in &table.exclusions {
+        body.nodes_mut().push(exclusion_to_node(exclusion));
     }
     node.set_children(body);
     node
@@ -1466,6 +1470,57 @@ fn index_prefix_length_to_node(prefix_length: &IndexPrefixLength) -> KdlNode {
     node
 }
 
+fn exclusion_to_node(exclusion: &ExclusionModel) -> KdlNode {
+    let mut node = KdlNode::new("exclusion");
+    node.push(KdlEntry::new_prop("name", exclusion.name.clone()));
+    if let Some(method) = &exclusion.method {
+        node.push(KdlEntry::new_prop("method", index_method(method)));
+    }
+    if let Some(deferrability) = &exclusion.deferrability {
+        node.push(KdlEntry::new_prop(
+            "deferrable",
+            constraint_deferrability(deferrability),
+        ));
+    }
+    let mut children = KdlDocument::new();
+    for element in &exclusion.elements {
+        children
+            .nodes_mut()
+            .push(exclusion_element_to_node(element));
+    }
+    if let Some(predicate) = &exclusion.predicate {
+        children.nodes_mut().push(wrap_expr("predicate", predicate));
+    }
+    node.set_children(children);
+    node
+}
+
+fn exclusion_element_to_node(element: &ExclusionElement) -> KdlNode {
+    let mut node = KdlNode::new("element");
+    if let ExclusionTerm::Column(column) = &element.term {
+        node.push(KdlEntry::new(column.clone()));
+    }
+    node.push(KdlEntry::new_prop("operator", element.operator.clone()));
+    if let Some(operator_class) = &element.operator_class {
+        node.push(KdlEntry::new_prop("operator-class", operator_class.clone()));
+    }
+    if let Some(collation) = &element.collation {
+        node.push(KdlEntry::new_prop("collation", collation.clone()));
+    }
+    if let Some(direction) = &element.direction {
+        node.push(KdlEntry::new_prop("direction", index_direction(direction)));
+    }
+    if let Some(nulls) = &element.nulls {
+        node.push(KdlEntry::new_prop("nulls", index_nulls_order(nulls)));
+    }
+    // An expression term is stored structurally as an `expression { <expr> }` child (a column term is the
+    // bare arg above).
+    if let ExclusionTerm::Expression(expression) = &element.term {
+        push_child(&mut node, wrap_expr("expression", expression));
+    }
+    node
+}
+
 fn check_to_node(check: &CheckModel) -> KdlNode {
     let mut node = KdlNode::new("check");
     node.push(KdlEntry::new_prop("name", check.name.clone()));
@@ -1641,6 +1696,9 @@ fn table_from_node(node: &KdlNode) -> Result<TableModel, PackageError> {
     let checks = child_nodes(node, "check")
         .map(check_from_node)
         .collect::<Result<Vec<_>, _>>()?;
+    let exclusions = child_nodes(node, "exclusion")
+        .map(exclusion_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(TableModel {
         name,
@@ -1651,6 +1709,7 @@ fn table_from_node(node: &KdlNode) -> Result<TableModel, PackageError> {
         uniques,
         checks,
         indexes,
+        exclusions,
     })
 }
 
@@ -2469,6 +2528,67 @@ fn index_predicate_from_node(node: &KdlNode) -> Result<Option<Box<ExprNode>>, Pa
     }
 }
 
+fn exclusion_from_node(node: &KdlNode) -> Result<ExclusionModel, PackageError> {
+    let elements = child_nodes(node, "element")
+        .map(exclusion_element_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
+    let predicate = child_nodes(node, "predicate")
+        .next()
+        .map(|predicate| first_child_expr(predicate).map(Box::new))
+        .transpose()?;
+    Ok(ExclusionModel {
+        name: required_prop(node, "name")?,
+        method: prop(node, "method").map(IndexMethod::from_sql),
+        elements,
+        predicate,
+        deferrability: prop(node, "deferrable").map(ConstraintDeferrability::from_sql),
+    })
+}
+
+fn exclusion_element_from_node(node: &KdlNode) -> Result<ExclusionElement, PackageError> {
+    let term = match child_nodes(node, "expression").next() {
+        Some(expression) => ExclusionTerm::Expression(first_child_expr(expression)?),
+        None => {
+            let column = first_arg(node).ok_or_else(|| {
+                malformed("`element` needs a column arg or an `expression` child")
+            })?;
+            ExclusionTerm::Column(column.to_owned())
+        }
+    };
+    Ok(ExclusionElement {
+        term,
+        operator: required_prop(node, "operator")?,
+        operator_class: prop(node, "operator-class").map(str::to_owned),
+        collation: prop(node, "collation").map(str::to_owned),
+        direction: prop(node, "direction")
+            .map(exclusion_direction_from_str)
+            .transpose()?,
+        nulls: prop(node, "nulls")
+            .map(exclusion_nulls_from_str)
+            .transpose()?,
+    })
+}
+
+fn exclusion_direction_from_str(direction: &str) -> Result<IndexDirection, PackageError> {
+    match direction {
+        "asc" => Ok(IndexDirection::Asc),
+        "desc" => Ok(IndexDirection::Desc),
+        other => Err(malformed(format!(
+            "`element` has unsupported direction `{other}`"
+        ))),
+    }
+}
+
+fn exclusion_nulls_from_str(order: &str) -> Result<IndexNullsOrder, PackageError> {
+    match order {
+        "first" => Ok(IndexNullsOrder::First),
+        "last" => Ok(IndexNullsOrder::Last),
+        other => Err(malformed(format!(
+            "`element` has unsupported null ordering `{other}`"
+        ))),
+    }
+}
+
 fn check_from_node(node: &KdlNode) -> Result<CheckModel, PackageError> {
     // The current format stores the expression structurally as an `expr { … }` child. Packages written
     // before the check expression became structural carry it as an `expr="..."` string *prop*, which was
@@ -3091,6 +3211,7 @@ mod tests {
                             prefix_lengths: Vec::new(),
                             predicate: None,
                         }],
+                        exclusions: Vec::new(),
                     },
                     TableModel {
                         name: "members".to_owned(),
@@ -3137,6 +3258,7 @@ mod tests {
                         uniques: vec![],
                         checks: vec![],
                         indexes: vec![],
+                        exclusions: Vec::new(),
                     },
                 ],
             }],
@@ -3187,6 +3309,7 @@ mod tests {
                     uniques: Vec::new(),
                     checks: Vec::new(),
                     indexes: Vec::new(),
+                    exclusions: Vec::new(),
                 }],
                 views: Vec::new(),
                 enums: vec![EnumModel {
@@ -3321,6 +3444,73 @@ mod tests {
     }
 
     #[test]
+    fn kdl_round_trips_an_exclusion() {
+        // An exclusion serializes as an `exclusion name=… method=… deferrable=…` node with `element`
+        // children (a column arg or an `expression { … }` child, plus operator/operator-class/collation/
+        // direction/nulls props) and an optional `predicate { … }`. A full-featured one — a column term,
+        // an expression term, an operator class, a collation, a non-default sort order, a partial
+        // predicate, and deferrability — must survive a package round-trip.
+        let expression = squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+            .read_index_expressions_or_raw("lower(code)")
+            .into_iter()
+            .next()
+            .expect("expression term parses");
+        let predicate = squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+            .read_check_expression("canceled = false")
+            .expect("predicate parses");
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: Some("app".to_owned()),
+                tables: vec![TableModel {
+                    name: "reservations".to_owned(),
+                    comment: None,
+                    columns: Vec::new(),
+                    primary_key: None,
+                    foreign_keys: Vec::new(),
+                    uniques: Vec::new(),
+                    checks: Vec::new(),
+                    indexes: Vec::new(),
+                    exclusions: vec![ExclusionModel {
+                        name: "no_overlap".to_owned(),
+                        method: Some(IndexMethod::Gist),
+                        elements: vec![
+                            ExclusionElement {
+                                term: ExclusionTerm::Column("during".to_owned()),
+                                operator: "&&".to_owned(),
+                                operator_class: Some("range_ops".to_owned()),
+                                collation: None,
+                                direction: None,
+                                nulls: None,
+                            },
+                            ExclusionElement {
+                                term: ExclusionTerm::Expression(expression),
+                                operator: "=".to_owned(),
+                                operator_class: None,
+                                collation: Some("C".to_owned()),
+                                direction: Some(IndexDirection::Desc),
+                                nulls: Some(IndexNullsOrder::Last),
+                            },
+                        ],
+                        predicate: Some(Box::new(predicate)),
+                        deferrability: Some(ConstraintDeferrability::InitiallyDeferred),
+                    }],
+                }],
+                views: Vec::new(),
+                enums: Vec::new(),
+                sequences: Vec::new(),
+                domains: Vec::new(),
+            }],
+        };
+        let kdl = to_kdl(&model);
+        assert!(
+            kdl.contains("exclusion") && kdl.contains("element"),
+            "missing exclusion/element nodes:\n{kdl}"
+        );
+        let parsed = from_kdl(&kdl).expect("exclusion model.kdl should parse");
+        assert_eq!(parsed, model, "exclusion KDL round-trip diverged:\n{kdl}");
+    }
+
+    #[test]
     fn kdl_rejects_a_mistyped_sequence_integer_attribute() {
         // A present-but-non-integer attribute (`increment="2"`) is a malformed package, not an absent
         // one — it must be rejected rather than silently publishing the default increment.
@@ -3402,6 +3592,7 @@ mod tests {
                     }],
                     checks: Vec::new(),
                     indexes: Vec::new(),
+                    exclusions: Vec::new(),
                 }],
                 views: Vec::new(),
                 enums: Vec::new(),
@@ -4381,6 +4572,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![],
                     indexes: vec![],
+                    exclusions: Vec::new(),
                 }],
             }],
         };
@@ -4457,6 +4649,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![],
                     indexes: vec![],
+                    exclusions: Vec::new(),
                 }],
             }],
         };
@@ -4567,6 +4760,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![],
                     indexes: vec![],
+                    exclusions: Vec::new(),
                 }],
             }],
         };
@@ -4612,6 +4806,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![],
                     indexes: vec![],
+                    exclusions: Vec::new(),
                 }],
             }],
         };
@@ -4664,6 +4859,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![],
                     indexes: vec![],
+                    exclusions: Vec::new(),
                 }],
             }],
         };
@@ -4717,6 +4913,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![],
                     indexes: vec![],
+                    exclusions: Vec::new(),
                 }],
             }],
         };
@@ -4770,6 +4967,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![],
                     indexes: vec![],
+                    exclusions: Vec::new(),
                 }],
             }],
         };
@@ -4828,6 +5026,7 @@ mod tests {
                         enforcement: None,
                     }],
                     indexes: vec![],
+                    exclusions: Vec::new(),
                 }],
             }],
         };
@@ -4886,6 +5085,7 @@ mod tests {
                         enforcement: Some(ConstraintEnforcement::NotEnforced),
                     }],
                     indexes: vec![],
+                    exclusions: Vec::new(),
                 }],
             }],
         };
@@ -4949,6 +5149,7 @@ mod tests {
                     uniques: vec![],
                     checks: vec![],
                     indexes,
+                    exclusions: Vec::new(),
                 }],
             }],
         };
@@ -5003,6 +5204,7 @@ mod tests {
                         }],
                         predicate: None,
                     }],
+                    exclusions: Vec::new(),
                 }],
             }],
         };
@@ -5046,6 +5248,7 @@ mod tests {
                         prefix_lengths: Vec::new(),
                         predicate: None,
                     }],
+                    exclusions: Vec::new(),
                 }],
             }],
         };
