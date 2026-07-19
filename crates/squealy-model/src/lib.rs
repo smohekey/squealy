@@ -565,6 +565,12 @@ pub fn canonicalize_model<C: SchemaIntrospect>(
         // otherwise an unchanged view whose column type has a physical/logical alias (MySQL
         // `String`/`Varchar(255)`, PostgreSQL `Text`/`String`) would churn a drop+recreate every run.
         for view in &mut schema.views {
+            // No backend renders a view comment (`COMMENT ON [MATERIALIZED] VIEW`), and introspection
+            // reads a view's comment back as `None`, so a comment is not a distinguishing feature of a
+            // view. Normalize it away on both sides — otherwise a package-authored view carrying a comment
+            // churns every plan (harmlessly re-running `CREATE OR REPLACE` for a regular view, but
+            // *destructively* dropping and re-populating a materialized view, which has no replace form).
+            view.comment = None;
             for column in &mut view.columns {
                 column.ty = connection.canonical_view_column_type(&column.ty);
                 // A view's DDL carries no per-column NOT NULL, and introspection cannot reliably recover
@@ -1608,6 +1614,56 @@ mod tests {
         );
         // ...but a view column canonicalizes to `Bytes` (a view column has no check to fold).
         assert_eq!(canonical.schemas[0].views[0].columns[0].ty, SqlType::Bytes);
+    }
+
+    #[test]
+    fn canonicalize_model_folds_view_comments_away() {
+        // No backend renders or introspects a view comment, so it must canonicalize to `None` on both
+        // sides — otherwise a package-authored materialized view carrying a comment would churn
+        // destructively (drop + repopulate) every plan. A regular view is folded the same way.
+        let commented = |name: &str, materialized: bool| ViewModel {
+            name: name.to_owned(),
+            comment: Some("some docs".to_owned()),
+            columns: vec![ViewColumnModel {
+                name: "id".to_owned(),
+                ty: SqlType::I32,
+                nullable: false,
+            }],
+            query: ViewBody::Select(Box::new(ViewQueryModel {
+                projection: vec![ProjectionItem {
+                    output_name: "id".to_owned(),
+                    internal_alias: None,
+                    expr: ExprNode::Column {
+                        alias: "q".to_owned(),
+                        column: "id".to_owned(),
+                    },
+                }],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: None,
+                    name: "t".to_owned(),
+                    alias: "q".to_owned(),
+                })),
+                ..Default::default()
+            })),
+            materialized,
+        };
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: None,
+                tables: Vec::new(),
+                views: vec![commented("mv", true), commented("v", false)],
+                enums: Vec::new(),
+                sequences: Vec::new(),
+                domains: Vec::new(),
+            }],
+        };
+
+        let canonical = canonicalize_model(&CanonBackend, &model);
+        assert_eq!(canonical.schemas[0].views[0].comment, None);
+        assert_eq!(canonical.schemas[0].views[1].comment, None);
+        // The materialized flag itself is preserved (only the comment is folded).
+        assert!(canonical.schemas[0].views[0].materialized);
+        assert!(!canonical.schemas[0].views[1].materialized);
     }
 
     #[test]
