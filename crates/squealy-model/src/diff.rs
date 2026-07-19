@@ -117,18 +117,25 @@ enum ObjectKind {
     Enum,
     Domain,
     Index,
+    /// An exclusion constraint. Like an [`Index`](ObjectKind::Index) it owns a `pg_class` index, but it is
+    /// a *distinct* kind so an exclusion↔same-name-index/UNIQUE/PK swap (both index-backed) is caught — the
+    /// diff cannot order it, since the new index-backed object is created before the old one is dropped.
+    Exclusion,
 }
 
 /// Whether two *different* object kinds sharing a `(schema, name)` is a swap this diff cannot order and
-/// so rejects. The matrix is exactly what PostgreSQL 17 enforces for the sequence/enum pairs this guard
-/// owns (verified empirically):
+/// so rejects. The matrix is exactly what PostgreSQL 17 enforces for the pairs this guard owns (verified
+/// empirically):
 /// - a **sequence** is a `pg_class` relation *and* owns an associated type, so it clashes with every
 ///   table, view, index, and with an enum or domain;
 /// - an **enum** and a **domain** live in `pg_type`, so each clashes with a table's/view's/sequence's
-///   associated type and with the other — but *not* with an index, which has none.
+///   associated type and with the other — but *not* with an index, which has none;
+/// - an **exclusion** owns a `pg_class` index, so it clashes with a plain index/UNIQUE/PK of the same
+///   name (all index-backed) — that swap cannot be ordered — but, like a plain index, not with an enum or
+///   domain (no type) nor with a table/view (left to the name-based diff).
 ///
 /// A plain table↔view (or table↔index) name clash is left to the existing name-based diff, which keys
-/// those separately; this guard only covers the un-orderable sequence/enum/domain swaps.
+/// those separately; this guard only covers the un-orderable sequence/enum/domain/exclusion swaps.
 fn kinds_collide(a: ObjectKind, b: ObjectKind) -> bool {
     use ObjectKind::*;
     if a == b {
@@ -145,8 +152,11 @@ fn kinds_collide(a: ObjectKind, b: ObjectKind) -> bool {
     if type_like(a) || type_like(b) {
         return composite_bearer(a) && composite_bearer(b);
     }
-    // Both are plain `pg_class` relations (table/view/index); that clash is left to the name-based diff.
-    false
+    // An exclusion and a plain index/UNIQUE/PK of the same name both own a `pg_class` index; that swap
+    // cannot be ordered (the new index-backed object would be created before the old one is dropped), so
+    // reject it. Other plain-relation clashes (table↔view, table↔index) are left to the name-based diff.
+    let index_backed = |k| matches!(k, Index | Exclusion);
+    (a == Exclusion || b == Exclusion) && index_backed(a) && index_backed(b)
 }
 
 /// Records that `(schema, name)` is claimed by object `kind`, returning an error if any *different* kind
@@ -207,13 +217,14 @@ pub fn reject_enum_relation_name_collision(
                 for unique in &table.uniques {
                     claim_object_name(&mut claims, &schema.name, &unique.name, ObjectKind::Index)?;
                 }
-                // An exclusion constraint is backed by a `pg_class` index of its own name too.
+                // An exclusion constraint is backed by a `pg_class` index of its own name too, but as a
+                // distinct kind so an exclusion↔same-name-index/UNIQUE/PK swap is rejected.
                 for exclusion in &table.exclusions {
                     claim_object_name(
                         &mut claims,
                         &schema.name,
                         &exclusion.name,
-                        ObjectKind::Index,
+                        ObjectKind::Exclusion,
                     )?;
                 }
             }
@@ -264,7 +275,7 @@ pub fn reject_enum_relation_collision_in_diff(
                     claim_object_name(&mut claims, schema, &unique.name, ObjectKind::Index)?;
                 }
                 for exclusion in &table.exclusions {
-                    claim_object_name(&mut claims, schema, &exclusion.name, ObjectKind::Index)?;
+                    claim_object_name(&mut claims, schema, &exclusion.name, ObjectKind::Exclusion)?;
                 }
             }
             DatabaseDiffChange::AlterTable {
@@ -315,7 +326,7 @@ pub fn reject_enum_relation_collision_in_diff(
                                 &mut claims,
                                 schema,
                                 &exclusion.name,
-                                ObjectKind::Index,
+                                ObjectKind::Exclusion,
                             )?;
                         }
                         TableDiffChange::AlterExclusion { before, after } => {
@@ -323,9 +334,14 @@ pub fn reject_enum_relation_collision_in_diff(
                                 &mut claims,
                                 schema,
                                 &before.name,
-                                ObjectKind::Index,
+                                ObjectKind::Exclusion,
                             )?;
-                            claim_object_name(&mut claims, schema, &after.name, ObjectKind::Index)?;
+                            claim_object_name(
+                                &mut claims,
+                                schema,
+                                &after.name,
+                                ObjectKind::Exclusion,
+                            )?;
                         }
                         _ => {}
                     }
