@@ -10,6 +10,44 @@ use squealy_model::{
 };
 
 #[test]
+fn reordered_domain_checks_do_not_diff() {
+    let domain = |checks: Vec<CheckModel>| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: vec![DomainModel {
+                name: "d".to_owned(),
+                base_type: SqlType::I32,
+                not_null: false,
+                default: None,
+                checks,
+            }],
+        }],
+    };
+    let a = CheckModel {
+        name: "a_check".to_owned(),
+        expression: ExprNode::DomainValue,
+        validation: None,
+        enforcement: None,
+    };
+    let z = CheckModel {
+        name: "z_check".to_owned(),
+        expression: ExprNode::Literal("TRUE".to_owned()),
+        validation: None,
+        enforcement: None,
+    };
+    // The same named checks in opposite declaration order must not diff.
+    let changes = diff_models(&domain(vec![a.clone(), z.clone()]), &domain(vec![z, a])).changes;
+    assert!(
+        changes.is_empty(),
+        "reordered domain checks must not diff: {changes:?}"
+    );
+}
+
+#[test]
 fn dropping_a_domain_orders_it_before_dropping_its_enum_base() {
     // A domain based on an enum (carried as a `Raw` base) depends on the enum, so `DROP DOMAIN` must
     // precede `DROP TYPE` when both are removed.

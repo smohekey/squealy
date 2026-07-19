@@ -788,7 +788,7 @@ fn diff_domains_global(
                 schema: key.0.clone(),
                 domain: (*desired_domain).clone(),
             }),
-            Some(actual_domain) if actual_domain != desired_domain => {
+            Some(actual_domain) if domains_differ(actual_domain, desired_domain) => {
                 creates.push(DatabaseDiffChange::AlterDomain {
                     schema: key.0.clone(),
                     before: (*actual_domain).clone(),
@@ -807,6 +807,23 @@ fn diff_domains_global(
         }
     }
     (creates, drops)
+}
+
+/// Whether two domains differ, comparing their `CHECK` constraints as an unordered set (constraint
+/// declaration order carries no meaning, and introspection returns them name-sorted). Canonicalization
+/// already sorts them on the plan path; this keeps a direct `diff_models` over two packages from
+/// reporting a spurious `AlterDomain` when only the check order differs.
+fn domains_differ(a: &DomainModel, b: &DomainModel) -> bool {
+    let sorted_checks = |domain: &DomainModel| {
+        let mut checks = domain.checks.clone();
+        checks.sort_by(|x, y| x.name.cmp(&y.name));
+        checks
+    };
+    a.name != b.name
+        || a.base_type != b.base_type
+        || a.not_null != b.not_null
+        || a.default != b.default
+        || sorted_checks(a) != sorted_checks(b)
 }
 
 /// Keys every domain in the model by `(schema, name)`.
