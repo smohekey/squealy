@@ -897,6 +897,7 @@ fn mysql_renders_table_and_column_comments() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: Some("Tenant records".to_owned()),
@@ -939,6 +940,7 @@ fn mysql_rejects_foreign_key_match_types() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -987,6 +989,7 @@ fn mysql_rejects_deferrable_foreign_keys() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -1060,6 +1063,7 @@ fn mysql_rejects_a_user_enum_type() {
                 labels: vec!["sad".to_owned(), "happy".to_owned()],
             }],
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     let error = Mysql.render_create(&model, &mut Vec::new()).unwrap_err();
@@ -1089,6 +1093,7 @@ fn mysql_incremental_render_rejects_a_sequence_bearing_model() {
                 cycle: false,
                 owned_by: None,
             }],
+            domains: Vec::new(),
         }],
     };
     let plan = squealy_model::DatabasePlan { steps: Vec::new() };
@@ -1117,11 +1122,36 @@ fn mysql_rejects_a_sequence() {
                 cycle: false,
                 owned_by: None,
             }],
+            domains: Vec::new(),
         }],
     };
     let error = Mysql.render_create(&model, &mut Vec::new()).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     assert!(error.to_string().contains("counter"), "{error}");
+}
+
+#[test]
+fn mysql_rejects_a_domain() {
+    // MySQL has no domain object, so a model declaring one is rejected at render.
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("shop".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: vec![DomainModel {
+                name: "positive".to_owned(),
+                base_type: SqlType::I32,
+                not_null: false,
+                default: None,
+                checks: Vec::new(),
+            }],
+        }],
+    };
+    let error = Mysql.render_create(&model, &mut Vec::new()).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("positive"), "{error}");
 }
 
 #[test]
@@ -1132,6 +1162,7 @@ fn mysql_renders_check_constraint_not_enforced() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -1180,6 +1211,7 @@ fn mysql_rejects_partial_index_predicates() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -1235,6 +1267,7 @@ fn mysql_rejects_expression_indexes() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -1289,6 +1322,7 @@ fn mysql_rejects_covering_index_include_columns() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -1351,6 +1385,7 @@ fn mysql_rejects_index_null_ordering() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "memberships".to_owned(),
                 comment: None,
@@ -1400,6 +1435,7 @@ fn mysql_rejects_index_operator_classes() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -1452,6 +1488,7 @@ fn mysql_rejects_index_collations() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -1504,6 +1541,7 @@ fn mysql_renders_index_column_prefix_lengths() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -1577,6 +1615,7 @@ fn render_prefix_index_model(mutate: impl FnOnce(&mut IndexModel)) -> std::io::R
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "tenants".to_owned(),
                 comment: None,
@@ -1807,6 +1846,7 @@ fn mysql_renders_view_after_tables() {
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -1878,6 +1918,7 @@ fn mysql_view_fragment_requoting_preserves_string_literals() {
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -2110,6 +2151,7 @@ fn mysql_renders_view_expression_ir_in_its_dialect() {
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -2172,6 +2214,7 @@ fn mysql_view_now_renders_with_microsecond_precision() {
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -2231,6 +2274,7 @@ fn mysql_view_order_by_drops_nulls_modifier() {
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -2456,6 +2500,7 @@ fn model_with_prefix_unique(column_ty: SqlType, length: u32) -> DatabaseModel {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "items".to_owned(),
                 comment: None,

@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use squealy::{
-    CheckModel, ColumnModel, Constraint, DatabaseModel, EnumModel, ForeignKeyModel, IndexModel,
-    SchemaModel, SequenceModel, TableModel, ViewColumnModel, ViewModel,
+    CheckModel, ColumnModel, Constraint, DatabaseModel, DomainModel, EnumModel, ForeignKeyModel,
+    IndexModel, SchemaModel, SequenceModel, TableModel, ViewColumnModel, ViewModel,
 };
 
 /// The structured diff from an actual database model to a desired database model.
@@ -114,6 +114,7 @@ enum ObjectKind {
     View,
     Sequence,
     Enum,
+    Domain,
     Index,
 }
 
@@ -121,29 +122,30 @@ enum ObjectKind {
 /// so rejects. The matrix is exactly what PostgreSQL 17 enforces for the sequence/enum pairs this guard
 /// owns (verified empirically):
 /// - a **sequence** is a `pg_class` relation *and* owns an associated type, so it clashes with every
-///   table, view, index, and with an enum;
-/// - an **enum** lives in `pg_type`, so it clashes with a table's/view's/sequence's associated type —
-///   but *not* with an index, which has none.
+///   table, view, index, and with an enum or domain;
+/// - an **enum** and a **domain** live in `pg_type`, so each clashes with a table's/view's/sequence's
+///   associated type and with the other — but *not* with an index, which has none.
 ///
 /// A plain table↔view (or table↔index) name clash is left to the existing name-based diff, which keys
-/// those separately; this guard only covers the un-orderable sequence/enum swaps.
+/// those separately; this guard only covers the un-orderable sequence/enum/domain swaps.
 fn kinds_collide(a: ObjectKind, b: ObjectKind) -> bool {
     use ObjectKind::*;
-    matches!(
-        (a, b),
-        (Enum, Table)
-            | (Table, Enum)
-            | (Enum, View)
-            | (View, Enum)
-            | (Enum, Sequence)
-            | (Sequence, Enum)
-            | (Sequence, Table)
-            | (Table, Sequence)
-            | (Sequence, View)
-            | (View, Sequence)
-            | (Sequence, Index)
-            | (Index, Sequence)
-    )
+    if a == b {
+        return false;
+    }
+    // A sequence is a `pg_class` relation that also owns a type, so it clashes with every other kind.
+    if a == Sequence || b == Sequence {
+        return true;
+    }
+    // An enum or domain lives only in `pg_type`, so it clashes with any object that owns a composite
+    // type of the same name (a table, view, or the other enum/domain) — but not an index, which has none.
+    let type_like = |k| matches!(k, Enum | Domain);
+    let composite_bearer = |k| matches!(k, Table | View | Enum | Domain);
+    if type_like(a) || type_like(b) {
+        return composite_bearer(a) && composite_bearer(b);
+    }
+    // Both are plain `pg_class` relations (table/view/index); that clash is left to the name-based diff.
+    false
 }
 
 /// Records that `(schema, name)` is claimed by object `kind`, returning an error if any *different* kind
@@ -218,6 +220,9 @@ pub fn reject_enum_relation_name_collision(
             }
             for enum_type in &schema.enums {
                 claim_object_name(&mut claims, &schema.name, &enum_type.name, ObjectKind::Enum)?;
+            }
+            for domain in &schema.domains {
+                claim_object_name(&mut claims, &schema.name, &domain.name, ObjectKind::Domain)?;
             }
         }
     }
@@ -315,6 +320,13 @@ pub fn reject_enum_relation_collision_in_diff(
             }
             DatabaseDiffChange::SetSequenceOwner { schema, name, .. } => {
                 claim_object_name(&mut claims, schema, name, ObjectKind::Sequence)?;
+            }
+            DatabaseDiffChange::CreateDomain { schema, domain }
+            | DatabaseDiffChange::DropDomain { schema, domain } => {
+                claim_object_name(&mut claims, schema, &domain.name, ObjectKind::Domain)?;
+            }
+            DatabaseDiffChange::AlterDomain { schema, after, .. } => {
+                claim_object_name(&mut claims, schema, &after.name, ObjectKind::Domain)?;
             }
             DatabaseDiffChange::CreateSchema { .. } | DatabaseDiffChange::DropSchema { .. } => {}
         }
@@ -415,6 +427,22 @@ pub enum DatabaseDiffChange {
         name: String,
         owned_by: Option<squealy::SequenceOwnedBy>,
     },
+    /// Create a new domain type. Rendered before any table so a column can be of it.
+    CreateDomain {
+        schema: Option<String>,
+        domain: DomainModel,
+    },
+    /// Drop a domain type. Rendered after any table that referenced it is gone.
+    DropDomain {
+        schema: Option<String>,
+        domain: DomainModel,
+    },
+    /// Change a domain's `NOT NULL`, `DEFAULT`, or `CHECK` constraints in place with `ALTER DOMAIN`.
+    AlterDomain {
+        schema: Option<String>,
+        before: DomainModel,
+        after: DomainModel,
+    },
 }
 
 impl DatabaseDiffChange {
@@ -428,12 +456,17 @@ impl DatabaseDiffChange {
             // Creating a sequence, altering its attributes, or (re)assigning its owner loses no data.
             | DatabaseDiffChange::CreateSequence { .. }
             | DatabaseDiffChange::AlterSequence { .. }
-            | DatabaseDiffChange::SetSequenceOwner { .. } => ChangeRisk::Safe,
+            | DatabaseDiffChange::SetSequenceOwner { .. }
+            // Creating a domain, or altering its constraints, loses no data (a tightened CHECK can fail
+            // to apply, but is not itself destructive).
+            | DatabaseDiffChange::CreateDomain { .. }
+            | DatabaseDiffChange::AlterDomain { .. } => ChangeRisk::Safe,
             DatabaseDiffChange::DropSchema { .. }
             | DatabaseDiffChange::DropTable { .. }
             | DatabaseDiffChange::DropView { .. }
             | DatabaseDiffChange::DropEnum { .. }
-            | DatabaseDiffChange::DropSequence { .. } => ChangeRisk::Destructive,
+            | DatabaseDiffChange::DropSequence { .. }
+            | DatabaseDiffChange::DropDomain { .. } => ChangeRisk::Destructive,
             // Appending enum labels is safe; recreating the type (remove/reorder) rewrites columns.
             DatabaseDiffChange::AlterEnum { additive, .. } => {
                 if *additive {
@@ -595,6 +628,11 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     // column to exist, so it is deferred to the post-table phase alongside drops.
     let (sequence_pre_table, sequence_post_table) = diff_sequences_global(desired, actual);
 
+    // Domains bracket the table work exactly like enums (both are `pg_type`): a `CREATE DOMAIN` (and any
+    // constraint change) precedes the tables whose columns are of the domain, and a `DROP DOMAIN` follows
+    // them.
+    let (domain_creates, domain_drops) = diff_domains_global(desired, actual);
+
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
         if let (Some(desired_schema), None) = (
             desired_schemas.get(&schema_key),
@@ -607,7 +645,10 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     }
 
     changes.extend(enum_creates);
+    // Sequences precede domains: a domain's `DEFAULT` may `nextval` a sequence created in the same
+    // migration, but a sequence never references a domain.
     changes.extend(sequence_pre_table);
+    changes.extend(domain_creates);
     changes.extend(view_drops);
 
     for schema_key in sorted_keys(&desired_schemas, &actual_schemas) {
@@ -640,6 +681,9 @@ pub fn diff_models(desired: &DatabaseModel, actual: &DatabaseModel) -> DatabaseD
     }
 
     changes.extend(view_creates);
+    // Domains drop before enums: a domain based on an enum (carried as a `Raw` base) depends on it, so
+    // the enum's `DROP TYPE` must follow the domain's `DROP DOMAIN`.
+    changes.extend(domain_drops);
     changes.extend(enum_drops);
     changes.extend(sequence_post_table);
 
@@ -722,6 +766,75 @@ fn keyed_enums(model: &DatabaseModel) -> BTreeMap<(Option<String>, String), &Enu
         }
     }
     enums
+}
+
+/// Diffs domain types across the whole model, returning `(creates_and_alters, drops)`. Identity is
+/// `(schema, name)`. A domain that differs is an `AlterDomain` (the renderer applies granular
+/// `ALTER DOMAIN` statements for its `NOT NULL` / `DEFAULT` / `CHECK` changes, or refuses a base-type
+/// change it cannot perform in place). Creates/alters are rendered before tables (a column may be of the
+/// domain), drops after.
+fn diff_domains_global(
+    desired: &DatabaseModel,
+    actual: &DatabaseModel,
+) -> (Vec<DatabaseDiffChange>, Vec<DatabaseDiffChange>) {
+    let desired_domains = keyed_domains(desired);
+    let actual_domains = keyed_domains(actual);
+    let mut creates = Vec::new();
+    let mut drops = Vec::new();
+
+    for (key, desired_domain) in &desired_domains {
+        match actual_domains.get(key) {
+            None => creates.push(DatabaseDiffChange::CreateDomain {
+                schema: key.0.clone(),
+                domain: (*desired_domain).clone(),
+            }),
+            Some(actual_domain) if domains_differ(actual_domain, desired_domain) => {
+                creates.push(DatabaseDiffChange::AlterDomain {
+                    schema: key.0.clone(),
+                    before: (*actual_domain).clone(),
+                    after: (*desired_domain).clone(),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    for (key, actual_domain) in &actual_domains {
+        if !desired_domains.contains_key(key) {
+            drops.push(DatabaseDiffChange::DropDomain {
+                schema: key.0.clone(),
+                domain: (*actual_domain).clone(),
+            });
+        }
+    }
+    (creates, drops)
+}
+
+/// Whether two domains differ, comparing their `CHECK` constraints as an unordered set (constraint
+/// declaration order carries no meaning, and introspection returns them name-sorted). Canonicalization
+/// already sorts them on the plan path; this keeps a direct `diff_models` over two packages from
+/// reporting a spurious `AlterDomain` when only the check order differs.
+fn domains_differ(a: &DomainModel, b: &DomainModel) -> bool {
+    let sorted_checks = |domain: &DomainModel| {
+        let mut checks = domain.checks.clone();
+        checks.sort_by(|x, y| x.name.cmp(&y.name));
+        checks
+    };
+    a.name != b.name
+        || a.base_type != b.base_type
+        || a.not_null != b.not_null
+        || a.default != b.default
+        || sorted_checks(a) != sorted_checks(b)
+}
+
+/// Keys every domain in the model by `(schema, name)`.
+fn keyed_domains(model: &DatabaseModel) -> BTreeMap<(Option<String>, String), &DomainModel> {
+    let mut domains = BTreeMap::new();
+    for schema in &model.schemas {
+        for domain in &schema.domains {
+            domains.insert((schema.name.clone(), domain.name.clone()), domain);
+        }
+    }
+    domains
 }
 
 /// Diffs sequences across the whole model, returning `(pre_table, post_table)` change lists. Identity is

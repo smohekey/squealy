@@ -1,4 +1,5 @@
 use squealy_model::DatabaseDiff;
+use squealy_model::DomainModel;
 use squealy_model::{
     ChangeRisk, CheckModel, ColumnModel, Constraint, DatabaseDiffChange, DatabaseModel,
     DefaultValue, DiffPolicy, EnumModel, ExprNode, ForeignKeyAction, ForeignKeyModel, IndexModel,
@@ -7,6 +8,82 @@ use squealy_model::{
     ViewColumnModel, ViewModel, ViewQueryModel, check_diff_policy, diff_models,
     reject_enum_relation_collision_in_diff, reject_enum_relation_name_collision,
 };
+
+#[test]
+fn reordered_domain_checks_do_not_diff() {
+    let domain = |checks: Vec<CheckModel>| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: vec![DomainModel {
+                name: "d".to_owned(),
+                base_type: SqlType::I32,
+                not_null: false,
+                default: None,
+                checks,
+            }],
+        }],
+    };
+    let a = CheckModel {
+        name: "a_check".to_owned(),
+        expression: ExprNode::DomainValue,
+        validation: None,
+        enforcement: None,
+    };
+    let z = CheckModel {
+        name: "z_check".to_owned(),
+        expression: ExprNode::Literal("TRUE".to_owned()),
+        validation: None,
+        enforcement: None,
+    };
+    // The same named checks in opposite declaration order must not diff.
+    let changes = diff_models(&domain(vec![a.clone(), z.clone()]), &domain(vec![z, a])).changes;
+    assert!(
+        changes.is_empty(),
+        "reordered domain checks must not diff: {changes:?}"
+    );
+}
+
+#[test]
+fn dropping_a_domain_orders_it_before_dropping_its_enum_base() {
+    // A domain based on an enum (carried as a `Raw` base) depends on the enum, so `DROP DOMAIN` must
+    // precede `DROP TYPE` when both are removed.
+    let actual = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "mood".to_owned(),
+                labels: vec!["ok".to_owned()],
+            }],
+            sequences: Vec::new(),
+            domains: vec![DomainModel {
+                name: "feeling".to_owned(),
+                base_type: SqlType::Raw("app.mood".to_owned()),
+                not_null: false,
+                default: None,
+                checks: Vec::new(),
+            }],
+        }],
+    };
+    let changes = diff_models(&DatabaseModel::default(), &actual).changes;
+    let drop_domain = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::DropDomain { .. }))
+        .expect("a DropDomain");
+    let drop_enum = changes
+        .iter()
+        .position(|c| matches!(c, DatabaseDiffChange::DropEnum { .. }))
+        .expect("a DropEnum");
+    assert!(
+        drop_domain < drop_enum,
+        "the domain must drop before its enum base: {changes:?}"
+    );
+}
 
 #[test]
 fn identical_models_have_empty_diff() {
@@ -374,6 +451,7 @@ fn enum_only(schema: &str, name: &str) -> DatabaseModel {
                 labels: vec!["open".to_owned()],
             }],
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     }
 }
@@ -442,6 +520,7 @@ fn creating_an_owned_sequence_orders_create_before_table_and_owner_after() {
                     column: "id".to_owned(),
                 }),
             )],
+            domains: Vec::new(),
         }],
     };
     let changes = diff_models(&desired, &actual).changes;
@@ -474,6 +553,7 @@ fn a_sequence_sharing_a_table_name_is_rejected() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: vec![bigint_sequence("counter", None)],
+            domains: Vec::new(),
         }],
     };
     let error = reject_enum_relation_name_collision(&desired, &DatabaseModel::default())
@@ -550,6 +630,7 @@ fn a_sequence_sharing_an_index_name_is_rejected() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: vec![bigint_sequence("counter", None)],
+            domains: Vec::new(),
         }],
     };
     let error = reject_enum_relation_name_collision(&desired, &DatabaseModel::default())
@@ -571,6 +652,7 @@ fn a_sequence_sharing_an_enum_name_is_rejected() {
                 labels: vec!["ok".to_owned()],
             }],
             sequences: vec![bigint_sequence("mood", None)],
+            domains: Vec::new(),
         }],
     };
     let error = reject_enum_relation_name_collision(&desired, &DatabaseModel::default())
@@ -607,6 +689,7 @@ fn an_enum_and_a_same_named_index_are_accepted() {
                 labels: vec!["ok".to_owned()],
             }],
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     assert!(
@@ -633,6 +716,7 @@ fn dropping_an_owned_sequence_detaches_it_before_the_table_drop() {
                     column: "id".to_owned(),
                 }),
             )],
+            domains: Vec::new(),
         }],
     };
     let actual = owned(());
@@ -667,6 +751,7 @@ fn an_unchanged_sequence_produces_no_diff() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: vec![bigint_sequence("s", None)],
+            domains: Vec::new(),
         }],
     };
     assert!(
@@ -687,6 +772,7 @@ fn changing_a_sequence_attribute_is_an_alter_not_a_recreate() {
                 increment,
                 ..bigint_sequence("s", None)
             }],
+            domains: Vec::new(),
         }],
     };
     let changes = diff_models(&base(2), &base(1)).changes;
@@ -711,6 +797,7 @@ fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables,
         }],
     }
@@ -807,6 +894,7 @@ fn schema_with(name: &str, tables: Vec<TableModel>, views: Vec<ViewModel>) -> Da
             views,
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     }
 }

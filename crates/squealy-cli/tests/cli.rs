@@ -2217,6 +2217,7 @@ fn empty_model() -> DatabaseModel {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,
@@ -2238,6 +2239,7 @@ fn live_introspection_model() -> DatabaseModel {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![TableModel {
                 name: "events".to_owned(),
                 comment: None,

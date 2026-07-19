@@ -55,6 +55,10 @@ pub fn plan_step_risk(step: &DatabasePlanStep) -> ChangeRisk {
         DatabasePlanStep::CreateSequence { .. }
         | DatabasePlanStep::AlterSequence { .. }
         | DatabasePlanStep::SetSequenceOwner { .. } => ChangeRisk::Safe,
+        // Creating a domain or altering its constraints loses no data.
+        DatabasePlanStep::CreateDomain { .. } | DatabasePlanStep::AlterDomain { .. } => {
+            ChangeRisk::Safe
+        }
         // Appending enum labels is safe; recreating the type (remove/reorder) rewrites its columns.
         DatabasePlanStep::AlterEnum { additive, .. } => {
             if *additive {
@@ -67,7 +71,8 @@ pub fn plan_step_risk(step: &DatabasePlanStep) -> ChangeRisk {
         | DatabasePlanStep::DropTable { .. }
         | DatabasePlanStep::DropView { .. }
         | DatabasePlanStep::DropEnum { .. }
-        | DatabasePlanStep::DropSequence { .. } => ChangeRisk::Destructive,
+        | DatabasePlanStep::DropSequence { .. }
+        | DatabasePlanStep::DropDomain { .. } => ChangeRisk::Destructive,
         DatabasePlanStep::AlterTable { change, .. } => table_plan_step_risk(change),
     }
 }
@@ -257,6 +262,23 @@ fn plan_step_as_diff_change(step: &DatabasePlanStep) -> DatabaseDiffChange {
             name: name.clone(),
             owned_by: owned_by.clone(),
         },
+        DatabasePlanStep::CreateDomain { schema, domain } => DatabaseDiffChange::CreateDomain {
+            schema: schema.clone(),
+            domain: domain.clone(),
+        },
+        DatabasePlanStep::DropDomain { schema, domain } => DatabaseDiffChange::DropDomain {
+            schema: schema.clone(),
+            domain: domain.clone(),
+        },
+        DatabasePlanStep::AlterDomain {
+            schema,
+            before,
+            after,
+        } => DatabaseDiffChange::AlterDomain {
+            schema: schema.clone(),
+            before: before.clone(),
+            after: after.clone(),
+        },
     }
 }
 
@@ -441,6 +463,29 @@ fn flatten_diff(diff: &DatabaseDiff) -> Vec<DatabasePlanStep> {
                     schema: schema.clone(),
                     name: name.clone(),
                     owned_by: owned_by.clone(),
+                });
+            }
+            DatabaseDiffChange::CreateDomain { schema, domain } => {
+                steps.push(DatabasePlanStep::CreateDomain {
+                    schema: schema.clone(),
+                    domain: domain.clone(),
+                });
+            }
+            DatabaseDiffChange::DropDomain { schema, domain } => {
+                steps.push(DatabasePlanStep::DropDomain {
+                    schema: schema.clone(),
+                    domain: domain.clone(),
+                });
+            }
+            DatabaseDiffChange::AlterDomain {
+                schema,
+                before,
+                after,
+            } => {
+                steps.push(DatabasePlanStep::AlterDomain {
+                    schema: schema.clone(),
+                    before: before.clone(),
+                    after: after.clone(),
                 });
             }
         }
