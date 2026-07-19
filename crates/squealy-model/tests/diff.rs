@@ -481,6 +481,97 @@ fn a_sequence_sharing_a_table_name_is_rejected() {
 }
 
 #[test]
+fn a_sequence_sharing_an_index_name_is_rejected() {
+    // A sequence and an index both occupy PostgreSQL's per-schema pg_class namespace (verified on PG 17),
+    // so they cannot share a name.
+    let mut indexed = table("events");
+    indexed.indexes = vec![IndexModel {
+        name: "counter".to_owned(),
+        columns: vec!["id".to_owned()],
+        expressions: Vec::new(),
+        include_columns: Vec::new(),
+        unique: false,
+        method: None,
+        directions: Vec::new(),
+        nulls: Vec::new(),
+        collations: Vec::new(),
+        operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
+        predicate: None,
+    }];
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![indexed],
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: vec![bigint_sequence("counter", None)],
+        }],
+    };
+    let error = reject_enum_relation_name_collision(&desired, &DatabaseModel::default())
+        .expect_err("a sequence sharing an index name must be rejected");
+    assert_eq!(error.name, "counter");
+}
+
+#[test]
+fn a_sequence_sharing_an_enum_name_is_rejected() {
+    // A sequence owns an associated pg_type, which collides with an enum of the same name (verified: PG 17
+    // reports "a relation has an associated type of the same name").
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "mood".to_owned(),
+                labels: vec!["ok".to_owned()],
+            }],
+            sequences: vec![bigint_sequence("mood", None)],
+        }],
+    };
+    let error = reject_enum_relation_name_collision(&desired, &DatabaseModel::default())
+        .expect_err("a sequence sharing an enum name must be rejected");
+    assert_eq!(error.name, "mood");
+}
+
+#[test]
+fn an_enum_and_a_same_named_index_are_accepted() {
+    // An index has no associated pg_type, so it does *not* collide with an enum of the same name (verified
+    // on PG 17). The guard must not over-reject this valid pairing.
+    let mut indexed = table("events");
+    indexed.indexes = vec![IndexModel {
+        name: "mood".to_owned(),
+        columns: vec!["id".to_owned()],
+        expressions: Vec::new(),
+        include_columns: Vec::new(),
+        unique: false,
+        method: None,
+        directions: Vec::new(),
+        nulls: Vec::new(),
+        collations: Vec::new(),
+        operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
+        predicate: None,
+    }];
+    let desired = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: vec![indexed],
+            views: Vec::new(),
+            enums: vec![EnumModel {
+                name: "mood".to_owned(),
+                labels: vec!["ok".to_owned()],
+            }],
+            sequences: Vec::new(),
+        }],
+    };
+    assert!(
+        reject_enum_relation_name_collision(&desired, &DatabaseModel::default()).is_ok(),
+        "an enum and a same-named index must be accepted"
+    );
+}
+
+#[test]
 fn dropping_an_owned_sequence_detaches_it_before_the_table_drop() {
     // A sequence OWNED BY a table being dropped would be cascade-dropped by PostgreSQL, making the
     // explicit DropSequence fail. The diff must detach it (SetSequenceOwner -> NONE) before the table

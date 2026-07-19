@@ -2550,14 +2550,19 @@ fn prop_usize(node: &KdlNode, key: &str) -> Result<Option<usize>, PackageError> 
 }
 
 fn prop_i64(node: &KdlNode, key: &str) -> Result<Option<i64>, PackageError> {
-    let Some(value) = node
+    let Some(entry) = node
         .entries()
         .iter()
         .find(|entry| entry.name().map(|name| name.value()) == Some(key))
-        .and_then(|entry| entry.value().as_integer())
     else {
         return Ok(None);
     };
+    // The property is present: a non-integer value (e.g. `increment="2"`) is a malformed package, not an
+    // absent property — reject it rather than silently fall back to the default.
+    let value = entry
+        .value()
+        .as_integer()
+        .ok_or_else(|| malformed(format!("`{key}` must be an integer")))?;
     i64::try_from(value)
         .map(Some)
         .map_err(|_| malformed(format!("`{key}` is out of range for i64")))
@@ -3181,6 +3186,19 @@ mod tests {
         assert_eq!(sequence.cache, 1);
         assert!(!sequence.cycle);
         assert_eq!(sequence.owned_by, None);
+    }
+
+    #[test]
+    fn kdl_rejects_a_mistyped_sequence_integer_attribute() {
+        // A present-but-non-integer attribute (`increment="2"`) is a malformed package, not an absent
+        // one — it must be rejected rather than silently publishing the default increment.
+        let kdl =
+            "database {\n    schema \"app\" {\n        sequence \"s\" increment=\"2\"\n    }\n}\n";
+        let error = from_kdl(kdl).expect_err("a string-typed integer attribute must be rejected");
+        assert!(
+            error.to_string().contains("increment"),
+            "error should name the bad attribute: {error}"
+        );
     }
 
     #[test]
