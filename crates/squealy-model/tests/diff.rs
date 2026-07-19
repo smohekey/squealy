@@ -45,6 +45,54 @@ fn plain_index(name: &str) -> IndexModel {
 }
 
 #[test]
+fn a_materialized_view_comment_only_change_does_not_diff() {
+    // A package-to-package diff does not canonicalize, so a comment-only difference on a materialized view
+    // must be ignored here too — otherwise it would force a destructive drop/recreate every plan (a matview
+    // has no `CREATE OR REPLACE`), even though comments are neither rendered nor introspected.
+    let matview = |comment: Option<&str>| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: vec![ViewModel {
+                name: "totals".to_owned(),
+                comment: comment.map(str::to_owned),
+                columns: vec![ViewColumnModel {
+                    name: "n".to_owned(),
+                    ty: SqlType::I64,
+                    nullable: false,
+                }],
+                query: ViewBody::Select(Box::new(ViewQueryModel {
+                    projection: vec![ProjectionItem {
+                        output_name: "n".to_owned(),
+                        internal_alias: None,
+                        expr: ExprNode::Column {
+                            alias: "q".to_owned(),
+                            column: "n".to_owned(),
+                        },
+                    }],
+                    from: Some(SourceItem::Named(SourceRef {
+                        schema: Some("app".to_owned()),
+                        name: "t".to_owned(),
+                        alias: "q".to_owned(),
+                    })),
+                    ..Default::default()
+                })),
+                materialized: true,
+            }],
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: Vec::new(),
+        }],
+    };
+    let diff = diff_models(&matview(Some("docs")), &matview(None));
+    assert!(
+        diff.is_empty(),
+        "a comment-only matview change must not diff, got: {:?}",
+        diff.changes
+    );
+}
+
+#[test]
 fn an_exclusion_and_a_same_named_index_swap_is_rejected() {
     // An exclusion owns a `pg_class` index, so replacing it with a plain index of the same name in one
     // migration cannot be ordered (the new index is created before the old exclusion's index is dropped).

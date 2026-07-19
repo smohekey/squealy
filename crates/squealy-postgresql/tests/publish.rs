@@ -446,6 +446,48 @@ async fn publishing_a_materialized_view_then_replanning_is_empty() {
         .expect("clean up matview fixture");
 }
 
+#[tokio::test]
+#[ignore]
+async fn introspecting_a_materialized_view_with_an_index_is_rejected() {
+    // squealy does not yet model indexes on a materialized view. Rather than silently drop an out-of-band
+    // index when a matview change re-creates the view, introspection refuses to manage an indexed matview.
+    let _guard = db_lock().lock().await;
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl(
+            "DROP SCHEMA IF EXISTS publish_mv_index CASCADE;\n\
+             CREATE SCHEMA publish_mv_index;\n\
+             CREATE TABLE publish_mv_index.src (id integer NOT NULL);\n\
+             CREATE MATERIALIZED VIEW publish_mv_index.mv AS SELECT id FROM publish_mv_index.src \
+             WITH DATA;\n\
+             CREATE UNIQUE INDEX mv_id ON publish_mv_index.mv (id)",
+        )
+        .await
+        .expect("raw-create an indexed materialized view");
+
+    // Any operation that introspects the whole database (here, planning) must fail loudly rather than
+    // model the matview without its index.
+    let error = squealy_model::plan_from_database(
+        &DatabaseModel::default(),
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect_err("an indexed materialized view must be rejected");
+    assert!(
+        error.to_string().contains("mv") && error.to_string().contains("index"),
+        "error should name the indexed matview: {error}"
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_mv_index CASCADE")
+        .await
+        .expect("clean up indexed matview fixture");
+}
+
 // A table exercising every neutral integer width PostgreSQL has no dedicated type for, so each renders to
 // `smallint`/`integer`/`bigint`/`numeric` and must introspect back to the signed representative it
 // canonicalizes to (`canonical_pg_sql_type`). Two unsigned columns carry defaults to exercise the matching

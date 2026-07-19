@@ -362,6 +362,19 @@ async fn view(
         }
         None => empty_body(client, view_ref).await?,
     };
+    // squealy does not yet model indexes on a materialized view (a follow-up). A matview change re-creates
+    // it (there is no `CREATE OR REPLACE MATERIALIZED VIEW`), which would silently drop any out-of-band
+    // index — including a UNIQUE index needed for `REFRESH ... CONCURRENTLY` or correctness. Refuse to
+    // manage an indexed matview rather than lose its indexes on a recreate; a squealy-authored matview has
+    // no indexes, so this only rejects one indexed out of band.
+    if materialized && !indexes(client, view_ref).await?.is_empty() {
+        return Err(PostgresError::Unsupported(format!(
+            "materialized view `{}` has one or more indexes, which squealy does not yet manage \
+             (a materialized-view change re-creates it and would drop them)",
+            view_ref.name
+        )));
+    }
+
     Ok(ViewModel {
         name: view_ref.name.clone(),
         comment: None,

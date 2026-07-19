@@ -1124,7 +1124,7 @@ fn diff_views_global(
                         schema,
                         view: (*desired_view).clone(),
                     });
-                } else if desired_view != actual_view {
+                } else if views_differ_ignoring_comment(desired_view, actual_view) {
                     if materialized || desired_view.columns != actual_view.columns {
                         drops.push(DatabaseDiffChange::DropView {
                             schema: schema.clone(),
@@ -1202,6 +1202,20 @@ fn diff_views_global(
         std::cmp::Reverse(dependency_rank(&actual_order, &view_change_key(change)))
     });
     (drops, creates)
+}
+
+/// Whether two views differ in any way that matters, ignoring the comment. No backend renders or
+/// introspects a view comment, so a comment-only difference is not a real change — comparing it would
+/// otherwise force a `CREATE OR REPLACE` re-run for a regular view and a *destructive* drop/recreate for a
+/// materialized view (which has no replace form). Live-model diffs already have their comments folded by
+/// [`canonicalize_model`](crate::canonicalize_model); this also covers an offline package-to-package diff,
+/// which does not canonicalize.
+fn views_differ_ignoring_comment(a: &ViewModel, b: &ViewModel) -> bool {
+    let without_comment = |view: &ViewModel| ViewModel {
+        comment: None,
+        ..view.clone()
+    };
+    without_comment(a) != without_comment(b)
 }
 
 fn view_columns_differ_ignoring_nullability(
