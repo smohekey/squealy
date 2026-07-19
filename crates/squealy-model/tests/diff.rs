@@ -374,6 +374,7 @@ fn enum_only(schema: &str, name: &str) -> DatabaseModel {
                 labels: vec!["open".to_owned()],
             }],
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     }
 }
@@ -442,6 +443,7 @@ fn creating_an_owned_sequence_orders_create_before_table_and_owner_after() {
                     column: "id".to_owned(),
                 }),
             )],
+            domains: Vec::new(),
         }],
     };
     let changes = diff_models(&desired, &actual).changes;
@@ -474,6 +476,7 @@ fn a_sequence_sharing_a_table_name_is_rejected() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: vec![bigint_sequence("counter", None)],
+            domains: Vec::new(),
         }],
     };
     let error = reject_enum_relation_name_collision(&desired, &DatabaseModel::default())
@@ -550,6 +553,7 @@ fn a_sequence_sharing_an_index_name_is_rejected() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: vec![bigint_sequence("counter", None)],
+            domains: Vec::new(),
         }],
     };
     let error = reject_enum_relation_name_collision(&desired, &DatabaseModel::default())
@@ -571,6 +575,7 @@ fn a_sequence_sharing_an_enum_name_is_rejected() {
                 labels: vec!["ok".to_owned()],
             }],
             sequences: vec![bigint_sequence("mood", None)],
+            domains: Vec::new(),
         }],
     };
     let error = reject_enum_relation_name_collision(&desired, &DatabaseModel::default())
@@ -607,6 +612,7 @@ fn an_enum_and_a_same_named_index_are_accepted() {
                 labels: vec!["ok".to_owned()],
             }],
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     assert!(
@@ -633,6 +639,7 @@ fn dropping_an_owned_sequence_detaches_it_before_the_table_drop() {
                     column: "id".to_owned(),
                 }),
             )],
+            domains: Vec::new(),
         }],
     };
     let actual = owned(());
@@ -667,6 +674,7 @@ fn an_unchanged_sequence_produces_no_diff() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: vec![bigint_sequence("s", None)],
+            domains: Vec::new(),
         }],
     };
     assert!(
@@ -687,6 +695,7 @@ fn changing_a_sequence_attribute_is_an_alter_not_a_recreate() {
                 increment,
                 ..bigint_sequence("s", None)
             }],
+            domains: Vec::new(),
         }],
     };
     let changes = diff_models(&base(2), &base(1)).changes;
@@ -711,6 +720,7 @@ fn model_with_tables(schema: &str, tables: Vec<TableModel>) -> DatabaseModel {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables,
         }],
     }
@@ -807,6 +817,7 @@ fn schema_with(name: &str, tables: Vec<TableModel>, views: Vec<ViewModel>) -> Da
             views,
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     }
 }

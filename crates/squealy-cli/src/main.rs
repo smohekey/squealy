@@ -1113,6 +1113,15 @@ fn describe_plan_step(step: &DatabasePlanStep) -> String {
         DatabasePlanStep::SetSequenceOwner { schema, name, .. } => {
             format!("set owner of sequence {}", qualified(schema, name))
         }
+        DatabasePlanStep::CreateDomain { schema, domain } => {
+            format!("create domain {}", qualified(schema, &domain.name))
+        }
+        DatabasePlanStep::DropDomain { schema, domain } => {
+            format!("drop domain {}", qualified(schema, &domain.name))
+        }
+        DatabasePlanStep::AlterDomain { schema, after, .. } => {
+            format!("alter domain {}", qualified(schema, &after.name))
+        }
     }
 }
 
@@ -1515,7 +1524,32 @@ fn database_diff_change_json(change: &DatabaseDiffChange) -> serde_json::Value {
         DatabaseDiffChange::SetSequenceOwner { schema, name, .. } => {
             sequence_change_json("set_owner", risk, schema, name)
         }
+        DatabaseDiffChange::CreateDomain { schema, domain } => {
+            domain_change_json("create", risk, schema, &domain.name)
+        }
+        DatabaseDiffChange::DropDomain { schema, domain } => {
+            domain_change_json("drop", risk, schema, &domain.name)
+        }
+        DatabaseDiffChange::AlterDomain { schema, after, .. } => {
+            domain_change_json("alter", risk, schema, &after.name)
+        }
     }
+}
+
+fn domain_change_json(
+    action: &str,
+    risk: &str,
+    schema: &Option<String>,
+    name: &str,
+) -> serde_json::Value {
+    json!({
+        "kind": "domain",
+        "action": action,
+        "risk": risk,
+        "schema": schema,
+        "domain": name,
+        "name": qualified(schema, name),
+    })
 }
 
 fn enum_change_json(
@@ -1846,6 +1880,15 @@ fn print_diff(diff: &squealy_model::DatabaseDiff) {
             DatabaseDiffChange::SetSequenceOwner { schema, name, .. } => {
                 println!("{risk} sequence owner ~ {}", qualified(schema, name));
             }
+            DatabaseDiffChange::CreateDomain { schema, domain } => {
+                println!("{risk} domain + {}", qualified(schema, &domain.name));
+            }
+            DatabaseDiffChange::DropDomain { schema, domain } => {
+                println!("{risk} domain - {}", qualified(schema, &domain.name));
+            }
+            DatabaseDiffChange::AlterDomain { schema, after, .. } => {
+                println!("{risk} domain ~ {}", qualified(schema, &after.name));
+            }
         }
     }
 }
@@ -1975,6 +2018,15 @@ fn describe_diff_change(change: &DatabaseDiffChange) -> String {
         DatabaseDiffChange::SetSequenceOwner { schema, name, .. } => {
             format!("set owner of sequence {}", qualified(schema, name))
         }
+        DatabaseDiffChange::CreateDomain { schema, domain } => {
+            format!("create domain {}", qualified(schema, &domain.name))
+        }
+        DatabaseDiffChange::DropDomain { schema, domain } => {
+            format!("drop domain {}", qualified(schema, &domain.name))
+        }
+        DatabaseDiffChange::AlterDomain { schema, after, .. } => {
+            format!("alter domain {}", qualified(schema, &after.name))
+        }
     }
 }
 
@@ -2060,6 +2112,7 @@ fn print_schema_capabilities(capabilities: SchemaCapabilities) {
     );
     println!("enums={}", capabilities.enums);
     println!("sequences={}", capabilities.sequences);
+    println!("domains={}", capabilities.domains);
 }
 
 impl BackendKind {

@@ -1,10 +1,10 @@
 use squealy::{
     CheckModel, ColumnModel, Constraint, ConstraintDeferrability, ConstraintValidation,
-    DatabaseModel, DefaultValue, EnumModel, ForeignKeyAction, ForeignKeyMatch, ForeignKeyModel,
-    GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel, IndexCollation,
-    IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass, SchemaModel,
-    SequenceDataType, SequenceModel, SequenceOwnedBy, SourceRef, SqlType, TableModel, ViewBody,
-    ViewColumnModel, ViewModel, ViewQueryModel,
+    DatabaseModel, DefaultValue, DomainModel, EnumModel, ForeignKeyAction, ForeignKeyMatch,
+    ForeignKeyModel, GeneratedColumnModel, GeneratedStorage, IdentityMode, IdentityModel,
+    IndexCollation, IndexDirection, IndexMethod, IndexModel, IndexNullsOrder, IndexOperatorClass,
+    SchemaModel, SequenceDataType, SequenceModel, SequenceOwnedBy, SourceRef, SqlType, TableModel,
+    ViewBody, ViewColumnModel, ViewModel, ViewQueryModel,
 };
 use tokio_postgres::Client;
 
@@ -59,7 +59,90 @@ pub(crate) async fn database(client: &Client) -> Result<DatabaseModel, PostgresE
         schema_entry(&mut schemas, &schema).sequences.push(sequence);
     }
 
+    for (schema, domain) in introspect_domains(client).await? {
+        schema_entry(&mut schemas, &schema).domains.push(domain);
+    }
+
     Ok(DatabaseModel { schemas })
+}
+
+/// Introspects every domain type (`CREATE DOMAIN`), paired with its schema. The base type, `NOT NULL`,
+/// and `DEFAULT` come from `pg_type`; each named `CHECK` constraint from `pg_constraint` (a domain may
+/// have several).
+async fn introspect_domains(client: &Client) -> Result<Vec<(String, DomainModel)>, PostgresError> {
+    let rows = client
+        .query(
+            "\
+SELECT n.nspname,
+       t.typname,
+       format_type(t.typbasetype, t.typtypmod) AS base_type,
+       t.typnotnull,
+       pg_get_expr(t.typdefaultbin, 0) AS default_expr
+FROM pg_type t
+JOIN pg_namespace n ON n.oid = t.typnamespace
+WHERE t.typtype = 'd'
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', '__squealy')
+  AND n.nspname NOT LIKE 'pg_toast%'
+ORDER BY n.nspname, t.typname",
+            &[],
+        )
+        .await?;
+
+    let mut domains: Vec<(String, DomainModel)> = Vec::new();
+    for row in rows {
+        let schema: String = row.get(0);
+        let name: String = row.get(1);
+        let base_type_name: String = row.get(2);
+        let not_null: bool = row.get(3);
+        let default_expr: Option<String> = row.get(4);
+        let base_type = sql_type(&base_type_name);
+        let default = default_expr.map(|value| default_value(&base_type, &value));
+        domains.push((
+            schema,
+            DomainModel {
+                name,
+                base_type,
+                not_null,
+                default,
+                checks: Vec::new(),
+            },
+        ));
+    }
+
+    // Attach each domain's named CHECK constraints (contypid points at the domain's type oid).
+    let check_rows = client
+        .query(
+            "\
+SELECT n.nspname, t.typname, c.conname, pg_get_constraintdef(c.oid) AS def
+FROM pg_constraint c
+JOIN pg_type t ON t.oid = c.contypid
+JOIN pg_namespace n ON n.oid = t.typnamespace
+WHERE c.contype = 'c'
+  AND t.typtype = 'd'
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', '__squealy')
+  AND n.nspname NOT LIKE 'pg_toast%'
+ORDER BY n.nspname, t.typname, c.conname",
+            &[],
+        )
+        .await?;
+    for row in check_rows {
+        let schema: String = row.get(0);
+        let name: String = row.get(1);
+        let check_name: String = row.get(2);
+        let definition: String = row.get(3);
+        if let Some((_, domain)) = domains
+            .iter_mut()
+            .find(|(s, d)| *s == schema && d.name == name)
+        {
+            domain.checks.push(CheckModel {
+                name: check_name,
+                expression: domain_check_expression(&definition),
+                validation: None,
+                enforcement: None,
+            });
+        }
+    }
+    Ok(domains)
 }
 
 /// Introspects every free-standing sequence (`CREATE SEQUENCE`), paired with its schema. A sequence
@@ -219,6 +302,7 @@ fn schema_entry<'a>(schemas: &'a mut Vec<SchemaModel>, name: &str) -> &'a mut Sc
         views: Vec::new(),
         enums: Vec::new(),
         sequences: Vec::new(),
+        domains: Vec::new(),
     });
     schemas.last_mut().expect("schema just pushed")
 }
@@ -1167,6 +1251,17 @@ fn check_expression(definition: &str) -> squealy::ExprNode {
         .unwrap_or(definition);
     squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
         .read_check_expression_or_raw(inner)
+}
+
+/// Like [`check_expression`], but for a domain constraint: the `VALUE` keyword is preserved as
+/// [`ExprNode::DomainValue`](squealy::ExprNode::DomainValue) rather than folded to a `"value"` column.
+fn domain_check_expression(definition: &str) -> squealy::ExprNode {
+    let inner = definition
+        .strip_prefix("CHECK (")
+        .and_then(|body| body.strip_suffix(')'))
+        .unwrap_or(definition);
+    squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+        .read_domain_check_expression_or_raw(inner)
 }
 
 #[cfg(test)]

@@ -67,6 +67,7 @@ fn one_table(table: TableModel) -> DatabaseModel {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![table],
         }],
     }
@@ -174,6 +175,7 @@ fn table_and_view() -> DatabaseModel {
             views: vec![active_widgets_view()],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     }
 }
@@ -732,6 +734,7 @@ async fn rebuild_preserves_child_rows_despite_on_delete_cascade() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![parents, children],
         }],
     };
@@ -818,6 +821,7 @@ async fn foreign_key_check_rejects_a_violating_change() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![parents, children],
         }],
     };
@@ -1208,6 +1212,7 @@ async fn applies_an_index_name_swap_between_tables() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![left, right],
         }],
     };
@@ -1379,6 +1384,7 @@ async fn drops_a_table_before_reusing_its_name_for_an_index() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
             tables: vec![
                 table("keep", vec![column("x", SqlType::Text, false)]),
                 table("zzz", vec![column("y", SqlType::Text, false)]),
@@ -2049,6 +2055,7 @@ async fn rebuilding_a_table_under_an_existing_view_succeeds() {
             views: vec![active_widgets_view()],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -2088,6 +2095,7 @@ async fn rebuilding_a_table_under_a_chained_view_succeeds() {
                 views: vec![active_widgets_view(), active_widget_ids_view()],
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
             }],
         }
     };
@@ -2135,6 +2143,7 @@ async fn replacing_a_table_with_a_same_named_view_succeeds() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     publish(&v1, &Sqlite, &mut connection)
@@ -2156,6 +2165,7 @@ async fn replacing_a_table_with_a_same_named_view_succeeds() {
             views: vec![summary_view],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -2192,6 +2202,7 @@ async fn replacing_a_view_with_a_same_named_table_succeeds() {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -2252,6 +2263,7 @@ async fn renaming_a_table_and_reusing_its_name_for_a_view_succeeds() {
             views: vec![view_x],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     let refactors = RefactorLog {
@@ -2304,6 +2316,7 @@ async fn a_view_column_set_change_is_a_blocked_destructive_change() {
             views: vec![renamed],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -2368,6 +2381,7 @@ async fn renaming_a_table_and_reusing_its_name_for_a_view_case_insensitively_suc
             views: vec![view_thing],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     let refactors = RefactorLog {
@@ -2537,6 +2551,7 @@ async fn a_recursive_cte_view_is_valid_sqlite() {
             views: vec![view],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -2632,6 +2647,7 @@ fn a_scoped_recursive_cte_arm_is_rejected_on_sqlite() {
             views: vec![view],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     let plan =
@@ -2756,6 +2772,7 @@ async fn a_recursive_cte_with_a_nested_with_prelude_is_valid_sqlite() {
             views: vec![view],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
 
@@ -2825,6 +2842,7 @@ async fn replanning_a_view_with_an_ilike_filter_is_empty() {
             views: vec![view],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     };
     publish(&model, &Sqlite, &mut connection)

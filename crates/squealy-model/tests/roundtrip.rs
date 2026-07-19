@@ -173,6 +173,7 @@ fn schema_with_view(v: ViewModel) -> DatabaseModel {
             views: vec![v],
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     }
 }
@@ -186,6 +187,7 @@ fn schema_with_table(t: TableModel) -> DatabaseModel {
             views: Vec::new(),
             enums: Vec::new(),
             sequences: Vec::new(),
+            domains: Vec::new(),
         }],
     }
 }

@@ -277,8 +277,9 @@ pub(crate) mod ddl {
 
     use squealy::{
         CheckModel, ColumnModel, Constraint, ConstraintEnforcement, ConstraintValidation,
-        DatabaseModel, DatabasePlan, DatabasePlanStep, DefaultValue, EnumModel, ForeignKeyModel,
-        IdentityMode, IndexModel, SequenceModel, SqlType, TableModel, TablePlanStep,
+        DatabaseModel, DatabasePlan, DatabasePlanStep, DefaultValue, DomainModel, EnumModel,
+        ForeignKeyModel, IdentityMode, IndexModel, SequenceModel, SqlType, TableModel,
+        TablePlanStep,
     };
 
     use super::{write_pg_sql_type, write_qualified_name, write_quoted_ident, write_quoted_text};
@@ -304,6 +305,14 @@ pub(crate) mod ddl {
             for enum_type in &schema.enums {
                 statement(writer, &mut first)?;
                 write_create_enum(schema.name.as_deref(), enum_type, writer)?;
+            }
+        }
+
+        // Domains are created before any table, since a table column can be of a domain type.
+        for schema in &model.schemas {
+            for domain in &schema.domains {
+                statement(writer, &mut first)?;
+                write_create_domain(schema.name.as_deref(), domain, writer)?;
             }
         }
 
@@ -571,6 +580,22 @@ pub(crate) mod ddl {
                 statement(writer, first)?;
                 writer.write_all(b"DROP SEQUENCE ")?;
                 write_qualified_name(schema.as_deref(), &sequence.name, writer)?;
+            }
+            DatabasePlanStep::CreateDomain { schema, domain } => {
+                statement(writer, first)?;
+                write_create_domain(schema.as_deref(), domain, writer)?;
+            }
+            DatabasePlanStep::AlterDomain {
+                schema,
+                before,
+                after,
+            } => {
+                write_alter_domain(schema.as_deref(), before, after, writer, first)?;
+            }
+            DatabasePlanStep::DropDomain { schema, domain } => {
+                statement(writer, first)?;
+                writer.write_all(b"DROP DOMAIN ")?;
+                write_qualified_name(schema.as_deref(), &domain.name, writer)?;
             }
         }
         Ok(())
@@ -1138,6 +1163,95 @@ pub(crate) mod ddl {
             squealy::SequenceDataType::Integer => "integer",
             squealy::SequenceDataType::BigInt => "bigint",
         }
+    }
+
+    /// Renders `CREATE DOMAIN <name> AS <base_type> [DEFAULT …] [NOT NULL] [CONSTRAINT … CHECK (…)]…`.
+    fn write_create_domain(
+        schema: Option<&str>,
+        domain: &DomainModel,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        writer.write_all(b"CREATE DOMAIN ")?;
+        write_qualified_name(schema, &domain.name, writer)?;
+        writer.write_all(b" AS ")?;
+        write_pg_sql_type(&domain.base_type, writer)?;
+        if let Some(default) = &domain.default {
+            writer.write_all(b" DEFAULT ")?;
+            write_default_value(default, writer)?;
+        }
+        if domain.not_null {
+            writer.write_all(b" NOT NULL")?;
+        }
+        for check in &domain.checks {
+            writer.write_all(b" ")?;
+            write_check(check, writer)?;
+        }
+        Ok(())
+    }
+
+    /// Renders the granular `ALTER DOMAIN` statements for a domain's `NOT NULL` / `DEFAULT` / `CHECK`
+    /// changes. A base-type change cannot be done in place — PostgreSQL has no `ALTER DOMAIN … TYPE` — so
+    /// it is refused (recreate the domain manually), mirroring the deferred enum-label migration.
+    fn write_alter_domain(
+        schema: Option<&str>,
+        before: &DomainModel,
+        after: &DomainModel,
+        writer: &mut impl Write,
+        first: &mut bool,
+    ) -> io::Result<()> {
+        if before.base_type != after.base_type {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "squealy does not support changing the base type of the domain `{}`; recreate it \
+                     manually",
+                    after.name
+                ),
+            ));
+        }
+        // Drop each check that is gone or changed before adding the new/changed ones, so a same-named
+        // check whose expression changed is dropped and re-added rather than colliding.
+        for before_check in &before.checks {
+            if !after.checks.iter().any(|c| c == before_check) {
+                statement(writer, first)?;
+                writer.write_all(b"ALTER DOMAIN ")?;
+                write_qualified_name(schema, &after.name, writer)?;
+                writer.write_all(b" DROP CONSTRAINT ")?;
+                write_quoted_ident(&before_check.name, writer)?;
+            }
+        }
+        if before.not_null != after.not_null {
+            statement(writer, first)?;
+            writer.write_all(b"ALTER DOMAIN ")?;
+            write_qualified_name(schema, &after.name, writer)?;
+            writer.write_all(if after.not_null {
+                b" SET NOT NULL"
+            } else {
+                b" DROP NOT NULL"
+            })?;
+        }
+        if before.default != after.default {
+            statement(writer, first)?;
+            writer.write_all(b"ALTER DOMAIN ")?;
+            write_qualified_name(schema, &after.name, writer)?;
+            match &after.default {
+                Some(default) => {
+                    writer.write_all(b" SET DEFAULT ")?;
+                    write_default_value(default, writer)?;
+                }
+                None => writer.write_all(b" DROP DEFAULT")?,
+            }
+        }
+        for after_check in &after.checks {
+            if !before.checks.iter().any(|c| c == after_check) {
+                statement(writer, first)?;
+                writer.write_all(b"ALTER DOMAIN ")?;
+                write_qualified_name(schema, &after.name, writer)?;
+                writer.write_all(b" ADD ")?;
+                write_check(after_check, writer)?;
+            }
+        }
+        Ok(())
     }
 
     fn write_create_table(
@@ -1786,6 +1900,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "people".to_owned(),
                     comment: None,

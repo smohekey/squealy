@@ -19,7 +19,7 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use squealy::{
     AggregateFunc, ArithmeticOp, CaseArm, CheckModel, ColumnModel, CompareOp, Constraint,
     ConstraintDeferrability, ConstraintEnforcement, ConstraintValidation, CteModel, DatabaseModel,
-    DateField, DefaultValue, EnumModel, ExprNode, ForeignKeyAction, ForeignKeyMatch,
+    DateField, DefaultValue, DomainModel, EnumModel, ExprNode, ForeignKeyAction, ForeignKeyMatch,
     ForeignKeyModel, FrameBound, FrameMode, FrameSpec, GeneratedColumnModel, GeneratedStorage,
     IdentityMode, IdentityModel, IndexCollation, IndexDirection, IndexMethod, IndexModel,
     IndexNullsOrder, IndexOperatorClass, IndexPrefixLength, JoinItem, JoinKind, LogicalOp,
@@ -422,6 +422,9 @@ fn schema_to_node(schema: &SchemaModel) -> KdlNode {
     for sequence in &schema.sequences {
         tables.nodes_mut().push(sequence_to_node(sequence));
     }
+    for domain in &schema.domains {
+        tables.nodes_mut().push(domain_to_node(domain));
+    }
     node.set_children(tables);
     node
 }
@@ -467,6 +470,28 @@ fn sequence_data_type_name(data_type: SequenceDataType) -> &'static str {
         SequenceDataType::Integer => "integer",
         SequenceDataType::BigInt => "bigint",
     }
+}
+
+fn domain_to_node(domain: &DomainModel) -> KdlNode {
+    let mut node = KdlNode::new("domain");
+    node.push(KdlEntry::new(domain.name.clone()));
+    write_sql_type(&mut node, &domain.base_type);
+    if domain.not_null {
+        node.push(KdlEntry::new_prop("not-null", KdlValue::Bool(true)));
+    }
+    if let Some(default) = &domain.default {
+        let (kind, value) = default_parts(default);
+        node.push(KdlEntry::new_prop("default", kind));
+        if let Some(value) = value {
+            node.push(KdlEntry::new_prop("default-value", value));
+        }
+    }
+    let mut body = KdlDocument::new();
+    for check in &domain.checks {
+        body.nodes_mut().push(check_to_node(check));
+    }
+    node.set_children(body);
+    node
 }
 
 fn enum_to_node(enum_type: &EnumModel) -> KdlNode {
@@ -758,6 +783,8 @@ fn expr_to_node(expr: &ExprNode) -> KdlNode {
             node.push(KdlEntry::new(column.clone()));
             node
         }
+        // The `VALUE` keyword in a domain CHECK — a bare node with no arguments.
+        ExprNode::DomainValue => KdlNode::new("domain-value"),
         ExprNode::Literal(text) => {
             let mut node = KdlNode::new("lit");
             node.push(KdlEntry::new(text.clone()));
@@ -1577,12 +1604,16 @@ fn schema_from_node(node: &KdlNode) -> Result<SchemaModel, PackageError> {
     let sequences = child_nodes(node, "sequence")
         .map(sequence_from_node)
         .collect::<Result<Vec<_>, _>>()?;
+    let domains = child_nodes(node, "domain")
+        .map(domain_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(SchemaModel {
         name: first_arg(node).map(str::to_owned),
         tables,
         views,
         enums,
         sequences,
+        domains,
     })
 }
 
@@ -1687,6 +1718,25 @@ fn sequence_from_node(node: &KdlNode) -> Result<SequenceModel, PackageError> {
         cache,
         cycle,
         owned_by,
+    })
+}
+
+fn domain_from_node(node: &KdlNode) -> Result<DomainModel, PackageError> {
+    let name = first_arg(node)
+        .ok_or_else(|| malformed("`domain` is missing its name"))?
+        .to_owned();
+    let base_type = sql_type_from_node(node)?;
+    let not_null = prop_bool(node, "not-null");
+    let default = default_from_node(node)?;
+    let checks = child_nodes(node, "check")
+        .map(check_from_node)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DomainModel {
+        name,
+        base_type,
+        not_null,
+        default,
+        checks,
     })
 }
 
@@ -1985,6 +2035,7 @@ fn expr_from_node(node: &KdlNode) -> Result<ExprNode, PackageError> {
                 .to_owned();
             ExprNode::BareColumn { column }
         }
+        "domain-value" => ExprNode::DomainValue,
         "lit" => ExprNode::Literal(
             first_arg(node)
                 .ok_or_else(|| malformed("`lit` is missing its text"))?
@@ -2967,6 +3018,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![
                     TableModel {
                         name: "orgs".to_owned(),
@@ -3142,6 +3194,7 @@ mod tests {
                     labels: vec!["sad".to_owned(), "ok".to_owned(), "happy".to_owned()],
                 }],
                 sequences: Vec::new(),
+                domains: Vec::new(),
             }],
         };
         let kdl = to_kdl(&model);
@@ -3193,6 +3246,7 @@ mod tests {
                         }),
                     },
                 ],
+                domains: Vec::new(),
             }],
         };
         let kdl = to_kdl(&model);
@@ -3223,6 +3277,47 @@ mod tests {
         assert_eq!(sequence.cache, 1);
         assert!(!sequence.cycle);
         assert_eq!(sequence.owned_by, None);
+    }
+
+    #[test]
+    fn kdl_round_trips_a_domain() {
+        // A domain serializes as a `domain "<name>" type=… not-null=… default=…` node with `check`
+        // children; its CHECK expression (using the `VALUE` keyword) must survive a package round-trip.
+        let check = CheckModel {
+            name: "positive_check".to_owned(),
+            expression: squealy_parse::Reader::new(squealy_parse::SqlDialect::Postgres)
+                .read_domain_check_expression("VALUE > 0")
+                .unwrap(),
+            validation: None,
+            enforcement: None,
+        };
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: Some("app".to_owned()),
+                tables: Vec::new(),
+                views: Vec::new(),
+                enums: Vec::new(),
+                sequences: Vec::new(),
+                domains: vec![DomainModel {
+                    name: "positive".to_owned(),
+                    base_type: SqlType::I32,
+                    not_null: true,
+                    default: Some(DefaultValue::Int(1)),
+                    checks: vec![check],
+                }],
+            }],
+        };
+        let kdl = to_kdl(&model);
+        assert!(
+            kdl.contains("domain positive"),
+            "missing domain node:\n{kdl}"
+        );
+        assert!(
+            kdl.contains("domain-value"),
+            "the VALUE keyword must serialize as a `domain-value` node:\n{kdl}"
+        );
+        let parsed = from_kdl(&kdl).expect("domain model.kdl should parse");
+        assert_eq!(parsed, model, "domain KDL round-trip diverged:\n{kdl}");
     }
 
     #[test]
@@ -3311,6 +3406,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
             }],
         };
 
@@ -3456,6 +3552,7 @@ mod tests {
                 }],
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
             }],
         };
 
@@ -3545,6 +3642,7 @@ mod tests {
                 }],
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
             }],
         };
 
@@ -3602,6 +3700,7 @@ mod tests {
                 }],
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
             }],
         };
 
@@ -3679,6 +3778,7 @@ mod tests {
                 }],
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
             }],
         };
 
@@ -3786,6 +3886,7 @@ mod tests {
                 }],
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
             }],
         };
 
@@ -3822,6 +3923,7 @@ mod tests {
                 }],
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
             }],
         };
 
@@ -4247,6 +4349,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -4344,6 +4447,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "structured".to_owned(),
                     comment: None,
@@ -4453,6 +4557,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "derived_columns".to_owned(),
                     comment: None,
@@ -4484,6 +4589,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -4548,6 +4654,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -4600,6 +4707,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -4652,6 +4760,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -4704,6 +4813,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -4761,6 +4871,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "children".to_owned(),
                     comment: None,
@@ -4828,6 +4939,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -4854,6 +4966,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,
@@ -4910,6 +5023,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "events".to_owned(),
                     comment: None,

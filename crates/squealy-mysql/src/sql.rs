@@ -45,6 +45,19 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
         ));
     }
 
+    // MySQL has no domain object; reject a model that declares one up front.
+    if let Some(domain) = model
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.domains)
+        .next()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("MySQL does not support the domain `{}`", domain.name),
+        ));
+    }
+
     for schema in &model.schemas {
         if let Some(name) = schema.name.as_deref() {
             statement(writer, &mut first)?;
@@ -230,6 +243,20 @@ fn write_plan_step(
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("MySQL does not support the sequence `{name}`"),
+            ));
+        }
+        // MySQL has no domain object. Reject on the incremental path, mirroring the enum/sequence handling.
+        DatabasePlanStep::CreateDomain { domain, .. }
+        | DatabasePlanStep::DropDomain { domain, .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("MySQL does not support the domain `{}`", domain.name),
+            ));
+        }
+        DatabasePlanStep::AlterDomain { after, .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("MySQL does not support the domain `{}`", after.name),
             ));
         }
     }
@@ -1543,6 +1570,7 @@ mod tests {
                 views: Vec::new(),
                 enums: Vec::new(),
                 sequences: Vec::new(),
+                domains: Vec::new(),
                 tables: vec![TableModel {
                     name: "people".to_owned(),
                     comment: None,

@@ -211,6 +211,10 @@ pub struct SchemaModel {
     /// (it is created with its column); only free-standing sequences appear. Backends without a sequence
     /// object (MySQL, SQLite) reject a model that declares one.
     pub sequences: Vec<SequenceModel>,
+    /// Domain types declared in this namespace (PostgreSQL `CREATE DOMAIN`); see [`DomainModel`]. A
+    /// column of a domain type carries the domain's (optionally schema-qualified) name as a
+    /// [`SqlType::Raw`]. Backends without a domain object (MySQL, SQLite) reject a model that declares one.
+    pub domains: Vec<DomainModel>,
 }
 
 /// A named enumerated type (PostgreSQL `CREATE TYPE <name> AS ENUM (<labels>)`). Its labels are ordered;
@@ -220,6 +224,23 @@ pub struct SchemaModel {
 pub struct EnumModel {
     pub name: String,
     pub labels: Vec<String>,
+}
+
+/// A named domain type (PostgreSQL `CREATE DOMAIN <name> AS <base_type> [NOT NULL] [DEFAULT <default>]
+/// [CONSTRAINT <name> CHECK (<expr>)] ...`). A domain constrains an underlying base type; its `CHECK`
+/// expressions reference the value under test with the `VALUE` keyword ([`ExprNode::DomainValue`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DomainModel {
+    pub name: String,
+    /// The underlying base type the domain constrains (e.g. `integer`, `varchar(64)`, `numeric(10,2)`).
+    pub base_type: SqlType,
+    /// A domain-level `NOT NULL` constraint on the value.
+    pub not_null: bool,
+    /// A domain-level `DEFAULT`, applied to a column of the domain type when none is given.
+    pub default: Option<DefaultValue>,
+    /// Named `CHECK` constraints; each expression references the value with the `VALUE` keyword. A domain
+    /// may carry more than one.
+    pub checks: Vec<CheckModel>,
 }
 
 /// The integer data type backing a sequence (`CREATE SEQUENCE ... AS <type>`). PostgreSQL supports the
@@ -1076,11 +1097,14 @@ fn map_source_exprs(source: &mut SourceItem, f: &impl Fn(&mut ExprNode)) {
 /// Applies `f` to `expr` itself and then to every nested [`ExprNode`], recursing into scalar/`IN`/`EXISTS`
 /// subqueries. Exhaustive over [`ExprNode`] so a new node is a compile error here rather than an
 /// unvisited one.
-fn map_expr_nodes(expr: &mut ExprNode, f: &impl Fn(&mut ExprNode)) {
+/// Applies `f` to `expr` and then, pre-order, to every nested [`ExprNode`] in the tree. `f` may mutate a
+/// node in place (including replacing it with a different variant); children are visited afterward.
+pub fn map_expr_nodes(expr: &mut ExprNode, f: &impl Fn(&mut ExprNode)) {
     f(expr);
     match expr {
         ExprNode::Column { .. }
         | ExprNode::BareColumn { .. }
+        | ExprNode::DomainValue
         | ExprNode::Literal(_)
         | ExprNode::Raw(_)
         | ExprNode::Now => {}
@@ -1184,11 +1208,25 @@ fn map_expr_nodes(expr: &mut ExprNode, f: &impl Fn(&mut ExprNode)) {
 /// traversal of the reverse parser's column resolver, so a caller inspecting a clause term's own-scope
 /// column references (e.g. which projection aliases a `GROUP BY`/`HAVING`/`ORDER BY` names) sees exactly
 /// those. Exhaustive over [`ExprNode`] so a new node is a compile error here rather than an unvisited one.
+/// Whether `expr` references a column (qualified or unqualified) anywhere in its own scope. Used to
+/// reject a PostgreSQL domain `CHECK` that names a column — a domain constraint may only reference the
+/// value under test via the `VALUE` keyword ([`ExprNode::DomainValue`]).
+pub fn expr_references_bare_column(expr: &ExprNode) -> bool {
+    let mut found = false;
+    visit_scope_exprs(expr, &mut |node| {
+        if matches!(node, ExprNode::Column { .. } | ExprNode::BareColumn { .. }) {
+            found = true;
+        }
+    });
+    found
+}
+
 pub fn visit_scope_exprs(expr: &ExprNode, f: &mut impl FnMut(&ExprNode)) {
     f(expr);
     match expr {
         ExprNode::Column { .. }
         | ExprNode::BareColumn { .. }
+        | ExprNode::DomainValue
         | ExprNode::Literal(_)
         | ExprNode::Raw(_)
         | ExprNode::Now => {}
@@ -1286,6 +1324,7 @@ fn map_scope_exprs_mut(expr: &mut ExprNode, f: &mut impl FnMut(&mut ExprNode)) {
     match expr {
         ExprNode::Column { .. }
         | ExprNode::BareColumn { .. }
+        | ExprNode::DomainValue
         | ExprNode::Literal(_)
         | ExprNode::Raw(_)
         | ExprNode::Now => {}
@@ -1809,6 +1848,7 @@ fn resolve_clause_scope(
     match node {
         ExprNode::Column { .. }
         | ExprNode::BareColumn { .. }
+        | ExprNode::DomainValue
         | ExprNode::Literal(_)
         | ExprNode::Raw(_)
         | ExprNode::Now => {}
@@ -2195,6 +2235,7 @@ fn map_expr_result_pins(expr: &mut ExprNode, f: &impl Fn(&SqlType) -> SqlType) {
         // Leaves — no nested expression, no result pin.
         ExprNode::Column { .. }
         | ExprNode::BareColumn { .. }
+        | ExprNode::DomainValue
         | ExprNode::Literal(_)
         | ExprNode::Raw(_)
         | ExprNode::Now => {}
@@ -2273,6 +2314,7 @@ fn map_expr_sources(expr: &mut ExprNode, f: &impl Fn(&mut SourceRef)) {
     match expr {
         ExprNode::Column { .. }
         | ExprNode::BareColumn { .. }
+        | ExprNode::DomainValue
         | ExprNode::Literal(_)
         | ExprNode::Raw(_)
         | ExprNode::Now => {}
@@ -2516,6 +2558,9 @@ pub enum ExprNode {
     /// An unqualified column reference, rendered as a bare `<column>`. Constraint, generated-column, and
     /// index expressions name columns of their own table with no alias.
     BareColumn { column: String },
+    /// The `VALUE` keyword in a PostgreSQL domain `CHECK` — the value under test. Rendered as the bare
+    /// keyword `VALUE` (never quoted), distinct from a `BareColumn` named `value`.
+    DomainValue,
     /// An inlined SQL literal, already formatted (e.g. `'Ada'`, `42`, `TRUE`, `NULL`).
     Literal(String),
     /// An un-modelable expression, carried as its already-rendered dialect SQL and re-emitted verbatim.
@@ -3047,6 +3092,7 @@ fn collect_expr_sources<'a>(expr: &'a ExprNode, sources: &mut Vec<&'a SourceRef>
     match expr {
         ExprNode::Column { .. }
         | ExprNode::BareColumn { .. }
+        | ExprNode::DomainValue
         | ExprNode::Literal(_)
         | ExprNode::Raw(_) => {}
         ExprNode::Binary { left, right, .. }

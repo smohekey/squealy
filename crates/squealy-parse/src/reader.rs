@@ -17,7 +17,7 @@
 //! the lowering grammar return [`ReadError::NotYetLowered`].
 
 use sqlparser::ast::Statement;
-use squealy_ir::{ExprNode, ViewBody};
+use squealy_ir::{ExprNode, ViewBody, map_expr_nodes};
 
 use crate::{ReadError, SqlDialect, lower, parse_expr, parse_expr_list, parse_sql};
 
@@ -103,6 +103,24 @@ impl Reader {
             .unwrap_or_else(|_| ExprNode::Raw(sql.to_owned()))
     }
 
+    /// Reads a PostgreSQL domain `CHECK` expression into an [`ExprNode`]. A domain check references the
+    /// value under test with the `VALUE` keyword, which the generic scalar lowering turns into a
+    /// lowercased `BareColumn { column: "value" }`; since a domain check has no real columns, every such
+    /// bare `value` reference is rewritten to [`ExprNode::DomainValue`] so it round-trips as the keyword.
+    pub fn read_domain_check_expression(&self, sql: &str) -> Result<ExprNode, ReadError> {
+        let mut expr = self.read_scalar_expression(sql)?;
+        rewrite_value_keyword(&mut expr);
+        Ok(expr)
+    }
+
+    /// Reads a domain `CHECK` expression into a structural [`ExprNode`], falling back to [`ExprNode::Raw`]
+    /// carrying the input text when it cannot be parsed or lowered (the live-introspection entry point;
+    /// see [`read_check_expression_or_raw`](Self::read_check_expression_or_raw)).
+    pub fn read_domain_check_expression_or_raw(&self, sql: &str) -> ExprNode {
+        self.read_domain_check_expression(sql)
+            .unwrap_or_else(|_| ExprNode::Raw(sql.to_owned()))
+    }
+
     /// Reads a generated/computed column's defining expression into an [`ExprNode`].
     pub fn read_generated_expression(&self, sql: &str) -> Result<ExprNode, ReadError> {
         self.read_scalar_expression(sql)
@@ -164,4 +182,15 @@ impl Reader {
         let expr = parse_expr(sql, self.dialect)?;
         lower::lower_expr(&expr, self.dialect)
     }
+}
+
+/// Rewrites every bare `value` column reference in `expr` to [`ExprNode::DomainValue`]. In a domain
+/// `CHECK` the only unqualified reference is the `VALUE` keyword (a domain has no columns), which the
+/// generic lowering folds to a lowercased `BareColumn { column: "value" }`.
+fn rewrite_value_keyword(expr: &mut ExprNode) {
+    map_expr_nodes(expr, &|node| {
+        if matches!(node, ExprNode::BareColumn { column } if column == "value") {
+            *node = ExprNode::DomainValue;
+        }
+    });
 }

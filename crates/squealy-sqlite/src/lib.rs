@@ -109,6 +109,8 @@ impl SchemaBackend for Sqlite {
             enums: false,
             // SQLite has no sequence object (`AUTOINCREMENT` only).
             sequences: false,
+            // SQLite has no domain object.
+            domains: false,
         }
     }
 
