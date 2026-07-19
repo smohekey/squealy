@@ -973,9 +973,9 @@ fn validate_sequence(sequence: &SequenceModel) -> std::io::Result<()> {
     if sequence.cache < 1 {
         return reject(format!("CACHE must be at least 1, got {}", sequence.cache));
     }
-    if sequence.min > sequence.max {
+    if sequence.min >= sequence.max {
         return reject(format!(
-            "MINVALUE ({}) must not exceed MAXVALUE ({})",
+            "MINVALUE ({}) must be less than MAXVALUE ({})",
             sequence.min, sequence.max
         ));
     }

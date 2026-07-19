@@ -541,6 +541,13 @@ fn creating_an_invalid_sequence_is_rejected() {
             ..base.clone()
         },
         SequenceModel {
+            // PostgreSQL requires MINVALUE strictly less than MAXVALUE.
+            min: 5,
+            max: 5,
+            start: 5,
+            ..base.clone()
+        },
+        SequenceModel {
             start: 500,
             ..base.clone()
         },
