@@ -261,6 +261,15 @@ pub fn reject_enum_relation_collision_in_diff(
                         | TableDiffChange::DropIndex { index } => {
                             claim_object_name(&mut claims, schema, &index.name, ObjectKind::Index)?;
                         }
+                        TableDiffChange::AlterIndex { before, after } => {
+                            claim_object_name(
+                                &mut claims,
+                                schema,
+                                &before.name,
+                                ObjectKind::Index,
+                            )?;
+                            claim_object_name(&mut claims, schema, &after.name, ObjectKind::Index)?;
+                        }
                         TableDiffChange::AddPrimaryKey { constraint }
                         | TableDiffChange::DropPrimaryKey { constraint }
                         | TableDiffChange::AddUnique { constraint }
@@ -271,6 +280,16 @@ pub fn reject_enum_relation_collision_in_diff(
                                 &constraint.name,
                                 ObjectKind::Index,
                             )?;
+                        }
+                        TableDiffChange::AlterPrimaryKey { before, after }
+                        | TableDiffChange::AlterUnique { before, after } => {
+                            claim_object_name(
+                                &mut claims,
+                                schema,
+                                &before.name,
+                                ObjectKind::Index,
+                            )?;
+                            claim_object_name(&mut claims, schema, &after.name, ObjectKind::Index)?;
                         }
                         _ => {}
                     }

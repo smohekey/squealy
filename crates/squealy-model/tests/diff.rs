@@ -1,10 +1,11 @@
+use squealy_model::DatabaseDiff;
 use squealy_model::{
     ChangeRisk, CheckModel, ColumnModel, Constraint, DatabaseDiffChange, DatabaseModel,
     DefaultValue, DiffPolicy, EnumModel, ExprNode, ForeignKeyAction, ForeignKeyModel, IndexModel,
     IndexPrefixLength, ProjectionItem, SchemaModel, SequenceDataType, SequenceModel,
     SequenceOwnedBy, SourceItem, SourceRef, SqlType, TableDiffChange, TableModel, ViewBody,
     ViewColumnModel, ViewModel, ViewQueryModel, check_diff_policy, diff_models,
-    reject_enum_relation_name_collision,
+    reject_enum_relation_collision_in_diff, reject_enum_relation_name_collision,
 };
 
 #[test]
@@ -477,6 +478,49 @@ fn a_sequence_sharing_a_table_name_is_rejected() {
     };
     let error = reject_enum_relation_name_collision(&desired, &DatabaseModel::default())
         .expect_err("a sequence sharing a table name must be rejected");
+    assert_eq!(error.name, "counter");
+}
+
+fn named_index(name: &str) -> IndexModel {
+    IndexModel {
+        name: name.to_owned(),
+        columns: vec!["id".to_owned()],
+        expressions: Vec::new(),
+        include_columns: Vec::new(),
+        unique: false,
+        method: None,
+        directions: Vec::new(),
+        nulls: Vec::new(),
+        collations: Vec::new(),
+        operator_classes: Vec::new(),
+        prefix_lengths: Vec::new(),
+        predicate: None,
+    }
+}
+
+#[test]
+fn precomputed_diff_rejects_a_sequence_colliding_with_an_altered_index() {
+    // The precomputed-diff guard must claim index names from `AlterIndex` (not only add/drop), so a
+    // caller cannot hand `plan_diff` a diff that alters index `counter` while creating a sequence
+    // `counter` — a plan PostgreSQL rejects over the shared pg_class namespace.
+    let diff = DatabaseDiff {
+        changes: vec![
+            DatabaseDiffChange::AlterTable {
+                schema: Some("app".to_owned()),
+                table: "events".to_owned(),
+                changes: vec![TableDiffChange::AlterIndex {
+                    before: named_index("counter"),
+                    after: named_index("counter"),
+                }],
+            },
+            DatabaseDiffChange::CreateSequence {
+                schema: Some("app".to_owned()),
+                sequence: bigint_sequence("counter", None),
+            },
+        ],
+    };
+    let error = reject_enum_relation_collision_in_diff(&diff)
+        .expect_err("a sequence colliding with an altered index must be rejected");
     assert_eq!(error.name, "counter");
 }
 

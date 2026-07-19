@@ -507,6 +507,58 @@ fn creating_a_same_named_relation_and_enum_is_rejected() {
 }
 
 #[test]
+fn creating_an_invalid_sequence_is_rejected() {
+    // Sequence invariants PostgreSQL enforces at CREATE time are checked at preflight, not left to fail
+    // only when the DDL executes.
+    let base = SequenceModel {
+        name: "counter".to_owned(),
+        data_type: SequenceDataType::Integer,
+        start: 1,
+        increment: 1,
+        min: 1,
+        max: 100,
+        cache: 1,
+        cycle: false,
+        owned_by: None,
+    };
+    let with = |sequence: SequenceModel| DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("app".to_owned()),
+            tables: Vec::new(),
+            views: Vec::new(),
+            enums: Vec::new(),
+            sequences: vec![sequence],
+        }],
+    };
+    for bad in [
+        SequenceModel {
+            increment: 0,
+            ..base.clone()
+        },
+        SequenceModel {
+            min: 100,
+            max: 1,
+            ..base.clone()
+        },
+        SequenceModel {
+            start: 500,
+            ..base.clone()
+        },
+        SequenceModel {
+            max: i64::MAX, // outside the integer type's range
+            ..base.clone()
+        },
+    ] {
+        let error = squealy_model::render_create_sql(&with(bad.clone()), &Postgres)
+            .expect_err("an invalid sequence must be rejected");
+        assert!(
+            error.to_string().contains("counter"),
+            "error should name the sequence: {error} (for {bad:?})"
+        );
+    }
+}
+
+#[test]
 fn creating_a_view_column_of_an_undeclared_enum_is_rejected() {
     // The enum-declaration check must cover view output columns, not just table columns. The view has a
     // fully renderable body (so the only reason to reject it is the undeclared enum output column), and

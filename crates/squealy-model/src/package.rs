@@ -1641,7 +1641,7 @@ fn sequence_from_node(node: &KdlNode) -> Result<SequenceModel, PackageError> {
     let name = first_arg(node)
         .ok_or_else(|| malformed("`sequence` is missing its name"))?
         .to_owned();
-    let data_type = match prop(node, "data-type") {
+    let data_type = match prop_str_checked(node, "data-type")? {
         None | Some("bigint") => SequenceDataType::BigInt,
         Some("integer") => SequenceDataType::Integer,
         Some("smallint") => SequenceDataType::SmallInt,
@@ -1661,8 +1661,11 @@ fn sequence_from_node(node: &KdlNode) -> Result<SequenceModel, PackageError> {
     let start = prop_i64(node, "start")?
         .unwrap_or_else(|| SequenceModel::default_start(min, max, increment));
     let cache = prop_i64(node, "cache")?.unwrap_or(1);
-    let cycle = prop_bool(node, "cycle");
-    let owned_by = match (prop(node, "owned-by-table"), prop(node, "owned-by-column")) {
+    let cycle = prop_bool_checked(node, "cycle")?.unwrap_or(false);
+    let owned_by = match (
+        prop_str_checked(node, "owned-by-table")?,
+        prop_str_checked(node, "owned-by-column")?,
+    ) {
         (Some(table), Some(column)) => Some(SequenceOwnedBy {
             table: table.to_owned(),
             column: column.to_owned(),
@@ -2549,6 +2552,40 @@ fn prop_usize(node: &KdlNode, key: &str) -> Result<Option<usize>, PackageError> 
         .map_err(|_| malformed(format!("`{key}` is out of range for usize")))
 }
 
+/// Returns a string-valued property, distinguishing an absent property (`Ok(None)`) from one present
+/// with a non-string value (`Err`) — so a mistyped attribute is a malformed package, not a silent
+/// fallback to the default.
+fn prop_str_checked<'a>(node: &'a KdlNode, key: &str) -> Result<Option<&'a str>, PackageError> {
+    let Some(entry) = node
+        .entries()
+        .iter()
+        .find(|entry| entry.name().map(|name| name.value()) == Some(key))
+    else {
+        return Ok(None);
+    };
+    entry
+        .value()
+        .as_string()
+        .map(Some)
+        .ok_or_else(|| malformed(format!("`{key}` must be a string")))
+}
+
+/// Returns a boolean-valued property, distinguishing absence from a present non-boolean value (`Err`).
+fn prop_bool_checked(node: &KdlNode, key: &str) -> Result<Option<bool>, PackageError> {
+    let Some(entry) = node
+        .entries()
+        .iter()
+        .find(|entry| entry.name().map(|name| name.value()) == Some(key))
+    else {
+        return Ok(None);
+    };
+    entry
+        .value()
+        .as_bool()
+        .map(Some)
+        .ok_or_else(|| malformed(format!("`{key}` must be a boolean")))
+}
+
 fn prop_i64(node: &KdlNode, key: &str) -> Result<Option<i64>, PackageError> {
     let Some(entry) = node
         .entries()
@@ -3199,6 +3236,21 @@ mod tests {
             error.to_string().contains("increment"),
             "error should name the bad attribute: {error}"
         );
+    }
+
+    #[test]
+    fn kdl_rejects_mistyped_sequence_string_and_bool_attributes() {
+        // A present-but-wrong-KDL-type attribute is a malformed package, not an absent one: it must be
+        // rejected rather than silently defaulting (bigint / not-cycling / unowned).
+        let cases = [
+            "sequence \"s\" data-type=42",
+            "sequence \"s\" cycle=\"true\"",
+            "sequence \"s\" owned-by-table=1 owned-by-column=\"c\"",
+        ];
+        for body in cases {
+            let kdl = format!("database {{\n    schema \"app\" {{\n        {body}\n    }}\n}}\n");
+            from_kdl(&kdl).expect_err(&format!("a mistyped attribute must be rejected: {body}"));
+        }
     }
 
     #[test]

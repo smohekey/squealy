@@ -82,8 +82,14 @@ pub fn render_plan_sql<B: SchemaBackend>(
     // prefix past the create preflight into `render`/`apply`.
     let capabilities = backend.capabilities();
     // The incremental path does not run `check_create`; an enum-typed column referencing a type the
-    // desired schema never declares would otherwise render a qualified reference that fails at execution.
+    // desired schema never declares would otherwise render a qualified reference that fails at execution,
+    // and a malformed sequence would render `CREATE SEQUENCE` DDL PostgreSQL rejects.
     validate_enum_references(desired, capabilities)?;
+    for schema in &desired.schemas {
+        for sequence in &schema.sequences {
+            validate_sequence(sequence)?;
+        }
+    }
     for schema in &desired.schemas {
         for table in &schema.tables {
             validate_table_constraint_prefixes(table, &capabilities)?;
@@ -948,6 +954,46 @@ fn validate_enum_references(
     Ok(())
 }
 
+/// Validates a sequence's attributes against the invariants PostgreSQL enforces at `CREATE SEQUENCE`
+/// time, so a malformed sequence is rejected at preflight rather than only when the DDL executes.
+fn validate_sequence(sequence: &SequenceModel) -> std::io::Result<()> {
+    let reject = |reason: String| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("sequence `{}` is invalid: {reason}", sequence.name),
+        ))
+    };
+    let (type_min, type_max) = (
+        sequence.data_type.min_value(),
+        sequence.data_type.max_value(),
+    );
+    if sequence.increment == 0 {
+        return reject("INCREMENT must not be zero".to_owned());
+    }
+    if sequence.cache < 1 {
+        return reject(format!("CACHE must be at least 1, got {}", sequence.cache));
+    }
+    if sequence.min > sequence.max {
+        return reject(format!(
+            "MINVALUE ({}) must not exceed MAXVALUE ({})",
+            sequence.min, sequence.max
+        ));
+    }
+    if sequence.min < type_min || sequence.max > type_max {
+        return reject(format!(
+            "MINVALUE/MAXVALUE ({}..{}) are outside the range of the sequence's type ({type_min}..{type_max})",
+            sequence.min, sequence.max
+        ));
+    }
+    if sequence.start < sequence.min || sequence.start > sequence.max {
+        return reject(format!(
+            "START ({}) must be within MINVALUE..MAXVALUE ({}..{})",
+            sequence.start, sequence.min, sequence.max
+        ));
+    }
+    Ok(())
+}
+
 fn validate_capabilities(
     model: &DatabaseModel,
     capabilities: SchemaCapabilities,
@@ -969,6 +1015,11 @@ fn validate_capabilities(
                 sequence.name
             ),
         ));
+    }
+    for schema in &model.schemas {
+        for sequence in &schema.sequences {
+            validate_sequence(sequence)?;
+        }
     }
     for schema in &model.schemas {
         for table in &schema.tables {
