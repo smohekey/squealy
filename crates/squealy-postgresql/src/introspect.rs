@@ -395,9 +395,15 @@ async fn view(
     })
 }
 
-/// Whether a materialized view carries a storage fact squealy does not model — a non-default tablespace,
-/// a non-default (non-`heap`) table access method, or any storage parameter (`reloptions`). Such a matview
-/// is refused rather than silently reset to defaults on a recreate.
+/// Whether a materialized view carries a storage fact squealy does not model and a recreate would reset:
+/// an explicit storage parameter (`reloptions`), a tablespace or table access method that differs from
+/// what a fresh `CREATE MATERIALIZED VIEW` would pick in *this* session, or a per-column `SET STORAGE` /
+/// `SET COMPRESSION` (in `pg_attribute`, not `reloptions`).
+///
+/// Tablespace and access method are compared against the *effective* session defaults, not `heap`/`0`
+/// absolutely — a squealy-created matview under a non-default `default_tablespace` /
+/// `default_table_access_method` GUC inherits that setting, and rejecting it would break publish-then-
+/// replan. A matview whose tablespace/AM genuinely differs from a fresh create's is refused.
 async fn materialized_view_has_nondefault_storage(
     client: &Client,
     view_ref: &TableRef,
@@ -405,12 +411,31 @@ async fn materialized_view_has_nondefault_storage(
     let rows = client
         .query(
             "\
-SELECT c.reltablespace <> 0
-       OR c.reloptions IS NOT NULL
-       OR COALESCE(am.amname, 'heap') <> 'heap'
+SELECT
+    -- An explicit `WITH (...)` storage parameter is never inherited from a GUC.
+    c.reloptions IS NOT NULL
+    -- Effective tablespace vs. what a fresh `CREATE` picks this session (the `default_tablespace` GUC, or
+    -- the database default). `reltablespace = 0` means the database default.
+    OR COALESCE(NULLIF(c.reltablespace, 0), db.dattablespace) <> COALESCE(
+        (SELECT ts.oid FROM pg_tablespace ts
+         WHERE ts.spcname = NULLIF(current_setting('default_tablespace'), '')),
+        db.dattablespace
+    )
+    -- Table access method vs. the `default_table_access_method` GUC (defaults to `heap`).
+    OR c.relam <> (SELECT am.oid FROM pg_am am
+                   WHERE am.amname = current_setting('default_table_access_method'))
+    -- Any column with a non-default `STORAGE` or `COMPRESSION` (stored in `pg_attribute`).
+    OR EXISTS (
+        SELECT 1 FROM pg_attribute a
+        JOIN pg_type t ON t.oid = a.atttypid
+        WHERE a.attrelid = c.oid
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+          AND (a.attstorage <> t.typstorage OR a.attcompression <> '')
+    )
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
-LEFT JOIN pg_am am ON am.oid = c.relam
+JOIN pg_database db ON db.datname = current_database()
 WHERE n.nspname = $1
   AND c.relname = $2
   AND c.relkind = 'm'",
