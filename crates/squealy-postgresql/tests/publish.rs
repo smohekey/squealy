@@ -567,6 +567,46 @@ async fn introspecting_a_materialized_view_with_column_storage_is_rejected() {
         .expect("clean up column-storage matview fixture");
 }
 
+#[tokio::test]
+#[ignore]
+async fn introspecting_a_materialized_view_with_column_statistics_is_rejected() {
+    // Per-column planner statistics (`SET STATISTICS`) live in `pg_attribute.attstattarget`; squealy does
+    // not model them and a recreate would reset them, so an out-of-band one is refused.
+    let _guard = db_lock().lock().await;
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl(
+            "DROP SCHEMA IF EXISTS publish_mv_stats CASCADE;\n\
+             CREATE SCHEMA publish_mv_stats;\n\
+             CREATE TABLE publish_mv_stats.src (id integer NOT NULL);\n\
+             CREATE MATERIALIZED VIEW publish_mv_stats.mv AS SELECT id FROM publish_mv_stats.src \
+             WITH DATA;\n\
+             ALTER MATERIALIZED VIEW publish_mv_stats.mv ALTER COLUMN id SET STATISTICS 500",
+        )
+        .await
+        .expect("raw-create a materialized view with column statistics");
+
+    let error = squealy_model::plan_from_database(
+        &DatabaseModel::default(),
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect_err("a materialized view with column statistics must be rejected");
+    assert!(
+        error.to_string().contains("mv") && error.to_string().contains("storage"),
+        "error should name the matview's storage: {error}"
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_mv_stats CASCADE")
+        .await
+        .expect("clean up column-statistics matview fixture");
+}
+
 // A table exercising every neutral integer width PostgreSQL has no dedicated type for, so each renders to
 // `smallint`/`integer`/`bigint`/`numeric` and must introspect back to the signed representative it
 // canonicalizes to (`canonical_pg_sql_type`). Two unsigned columns carry defaults to exercise the matching

@@ -395,10 +395,12 @@ async fn view(
     })
 }
 
-/// Whether a materialized view carries a storage fact squealy does not model and a recreate would reset:
-/// an explicit storage parameter (`reloptions`), a tablespace or table access method that differs from
-/// what a fresh `CREATE MATERIALIZED VIEW` would pick in *this* session, or a per-column `SET STORAGE` /
-/// `SET COMPRESSION` (in `pg_attribute`, not `reloptions`).
+/// Whether a materialized view carries a storage fact squealy does not model and a recreate would reset.
+/// Covers the whole `ALTER MATERIALIZED VIEW` storage/statistics surface (ownership/grants excluded, a
+/// separate concern for every object): relation storage parameters (`reloptions`) and TOAST storage
+/// parameters (on `reltoastrelid`), a tablespace or table access method that differs from what a fresh
+/// `CREATE MATERIALIZED VIEW` would pick in *this* session, and per-column `SET STORAGE` / `SET COMPRESSION`
+/// / `SET STATISTICS` / `SET (n_distinct = ...)` (all in `pg_attribute`).
 ///
 /// Tablespace and access method are compared against the *effective* session defaults, not `heap`/`0`
 /// absolutely — a squealy-created matview under a non-default `default_tablespace` /
@@ -424,14 +426,24 @@ SELECT
     -- Table access method vs. the `default_table_access_method` GUC (defaults to `heap`).
     OR c.relam <> (SELECT am.oid FROM pg_am am
                    WHERE am.amname = current_setting('default_table_access_method'))
-    -- Any column with a non-default `STORAGE` or `COMPRESSION` (stored in `pg_attribute`).
+    -- A `toast.*` storage option lives on the TOAST relation's `reloptions`, not the parent's.
+    OR EXISTS (
+        SELECT 1 FROM pg_class tc
+        WHERE tc.oid = c.reltoastrelid AND tc.reloptions IS NOT NULL
+    )
+    -- Any column with a non-default `SET STORAGE` / `SET COMPRESSION` / `SET STATISTICS` /
+    -- `SET (n_distinct = ...)` — the full `ALTER MATERIALIZED VIEW ... ALTER COLUMN` storage/stats surface,
+    -- all in `pg_attribute` (`attstattarget` is `NULL` in PG 17+ / `-1` earlier when unset).
     OR EXISTS (
         SELECT 1 FROM pg_attribute a
         JOIN pg_type t ON t.oid = a.atttypid
         WHERE a.attrelid = c.oid
           AND a.attnum > 0
           AND NOT a.attisdropped
-          AND (a.attstorage <> t.typstorage OR a.attcompression <> '')
+          AND (a.attstorage <> t.typstorage
+               OR a.attcompression <> ''
+               OR COALESCE(a.attstattarget, -1) <> -1
+               OR a.attoptions IS NOT NULL)
     )
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
