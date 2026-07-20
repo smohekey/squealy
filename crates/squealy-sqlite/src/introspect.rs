@@ -157,6 +157,8 @@ async fn view(connection: &SqliteConnection, name: &str) -> Result<ViewModel, Sq
         comment: None,
         columns,
         query,
+        // SQLite has no materialized views.
+        materialized: false,
     })
 }
 

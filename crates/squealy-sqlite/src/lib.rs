@@ -111,6 +111,8 @@ impl SchemaBackend for Sqlite {
             sequences: false,
             // SQLite has no domain object.
             domains: false,
+            // SQLite has no materialized views.
+            materialized_views: false,
         }
     }
 

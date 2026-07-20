@@ -385,6 +385,7 @@ fn clause_alias_mysql_model() -> DatabaseModel {
                     }],
                     ..ViewQueryModel::default()
                 })),
+                materialized: false,
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
@@ -578,6 +579,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                     }),
                     ..ViewQueryModel::default()
                 })),
+                materialized: false,
             },
             // A grouped/aggregated view: `count(id)` deparses without a result-pin cast (an unpinned
             // `count`), and its select-list alias is re-derived from the declared column name.
@@ -631,6 +633,7 @@ fn mysql_normalized_catalog_schema() -> SchemaModel {
                     }],
                     ..ViewQueryModel::default()
                 })),
+                materialized: false,
             },
         ],
         tables: vec![

@@ -74,6 +74,21 @@ pub(crate) fn write_database(model: &DatabaseModel, writer: &mut impl Write) -> 
             ),
         ));
     }
+    // SQLite has no materialized views; reject a model that declares one up front.
+    if let Some(view) = model
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.views)
+        .find(|view| view.materialized)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite does not support the materialized view `{}`",
+                view.name
+            ),
+        ));
+    }
     // SQLite keeps tables, indexes and views in one database-wide object namespace (there are no
     // schemas), so once schemas are flattened every table, index and view name must be unique —
     // including a table name that matches an index or a view. A model that relies on schema/table
@@ -238,6 +253,34 @@ pub(crate) fn write_plan(
     check_reserved_object_names(object_names())?;
     check_object_name_uniqueness(object_names())?;
 
+    // SQLite has no materialized views. One can only reach the plan through a package (an offline diff's
+    // desired or actual model). Reject any materialized view before the view drop pre-pass would emit a
+    // plain `DROP VIEW` for it — both in a create/drop step AND in the desired model directly, since an
+    // *unchanged* materialized view over a rebuilt table carries no step but is dropped/recreated as
+    // collateral (which `render_create_view` would emit as an unsupported `CREATE MATERIALIZED VIEW`).
+    let step_matview = plan.steps.iter().find_map(|step| match step {
+        DatabasePlanStep::CreateView { view, .. } | DatabasePlanStep::DropView { view, .. }
+            if view.materialized =>
+        {
+            Some(view.as_ref())
+        }
+        _ => None,
+    });
+    let desired_matview = desired
+        .schemas
+        .iter()
+        .flat_map(|schema| &schema.views)
+        .find(|view| view.materialized);
+    if let Some(view) = step_matview.or(desired_matview) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "SQLite does not support the materialized view `{}`",
+                view.name
+            ),
+        ));
+    }
+
     let mut first = true;
 
     // Create the refactor bookkeeping table once, up front, if any rename in the plan carries a
@@ -327,6 +370,17 @@ pub(crate) fn write_plan(
                 }
             }
             DatabasePlanStep::CreateView { schema, view } => {
+                // SQLite has no materialized views. Reject on the incremental path (the create path
+                // rejects up front / via capabilities).
+                if view.materialized {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        format!(
+                            "SQLite does not support the materialized view `{}`",
+                            view.name
+                        ),
+                    ));
+                }
                 // The view was already dropped in the up-front view pre-pass (SQLite has no
                 // `CREATE OR REPLACE VIEW`); recreate it here, after all table work, so it binds to the
                 // final table shapes. Views are ordered so a view-on-view is created after its source.

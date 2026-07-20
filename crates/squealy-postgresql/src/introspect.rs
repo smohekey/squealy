@@ -282,8 +282,8 @@ ORDER BY n.nspname, t.typname, e.enumsortorder",
 /// emptied `search_path` (see [`database`]) so `pg_get_viewdef` fully qualifies the sources it deparses.
 async fn introspect_views(client: &Client) -> Result<Vec<(String, ViewModel)>, PostgresError> {
     let mut views = Vec::new();
-    for view_ref in view_refs(client).await? {
-        let view = view(client, &view_ref).await?;
+    for (view_ref, materialized) in view_refs(client).await? {
+        let view = view(client, &view_ref, materialized).await?;
         views.push((view_ref.schema, view));
     }
     Ok(views)
@@ -308,14 +308,16 @@ fn schema_entry<'a>(schemas: &'a mut Vec<SchemaModel>, name: &str) -> &'a mut Sc
     schemas.last_mut().expect("schema just pushed")
 }
 
-async fn view_refs(client: &Client) -> Result<Vec<TableRef>, PostgresError> {
+/// Lists regular views (`relkind = 'v'`) and materialized views (`relkind = 'm'`), pairing each with
+/// whether it is materialized. Both reconstruct their body from `pg_get_viewdef` identically.
+async fn view_refs(client: &Client) -> Result<Vec<(TableRef, bool)>, PostgresError> {
     let rows = client
         .query(
             "\
-SELECT n.nspname, c.relname
+SELECT n.nspname, c.relname, (c.relkind = 'm') AS materialized
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relkind = 'v'
+WHERE c.relkind IN ('v', 'm')
   AND n.nspname NOT IN ('pg_catalog', 'information_schema', '__squealy')
   AND n.nspname NOT LIKE 'pg_toast%'
 ORDER BY n.nspname, c.relname",
@@ -325,14 +327,23 @@ ORDER BY n.nspname, c.relname",
 
     Ok(rows
         .into_iter()
-        .map(|row| TableRef {
-            schema: row.get(0),
-            name: row.get(1),
+        .map(|row| {
+            (
+                TableRef {
+                    schema: row.get(0),
+                    name: row.get(1),
+                },
+                row.get(2),
+            )
         })
         .collect())
 }
 
-async fn view(client: &Client, view_ref: &TableRef) -> Result<ViewModel, PostgresError> {
+async fn view(
+    client: &Client,
+    view_ref: &TableRef,
+    materialized: bool,
+) -> Result<ViewModel, PostgresError> {
     // Reconstruct the view's structural body from its `pg_get_viewdef` deparse so a squealy-published
     // view re-plans to empty (the diff's structural bar), rather than re-applying it every run. The
     // reverse parser inverts the deparse idioms it knows; a body it cannot yet lower falls back to the
@@ -351,12 +362,99 @@ async fn view(client: &Client, view_ref: &TableRef) -> Result<ViewModel, Postgre
         }
         None => empty_body(client, view_ref).await?,
     };
+    // squealy models only a materialized view's body — not its indexes, tablespace, access method, or
+    // storage parameters. A matview change re-creates it (there is no `CREATE OR REPLACE MATERIALIZED
+    // VIEW`), which would silently drop any such out-of-band fact — including a UNIQUE index needed for
+    // `REFRESH ... CONCURRENTLY` or correctness, or a non-default tablespace. Refuse to manage a matview
+    // that carries one rather than lose it on a recreate; a squealy-authored matview carries none, so only
+    // one configured out of band is rejected.
+    if materialized {
+        if !indexes(client, view_ref).await?.is_empty() {
+            return Err(PostgresError::Unsupported(format!(
+                "materialized view `{}` has one or more indexes, which squealy does not yet manage \
+                 (a materialized-view change re-creates it and would drop them)",
+                view_ref.name
+            )));
+        }
+        if materialized_view_has_nondefault_storage(client, view_ref).await? {
+            return Err(PostgresError::Unsupported(format!(
+                "materialized view `{}` uses a non-default tablespace, access method, or storage \
+                 parameters, which squealy does not yet manage (a materialized-view change re-creates \
+                 it and would reset them)",
+                view_ref.name
+            )));
+        }
+    }
+
     Ok(ViewModel {
         name: view_ref.name.clone(),
         comment: None,
         columns: view_columns(client, view_ref).await?,
         query,
+        materialized,
     })
+}
+
+/// Whether a materialized view carries a storage fact squealy does not model and a recreate would reset.
+/// Covers the whole `ALTER MATERIALIZED VIEW` storage/statistics surface (ownership/grants excluded, a
+/// separate concern for every object): relation storage parameters (`reloptions`) and TOAST storage
+/// parameters (on `reltoastrelid`), a tablespace or table access method that differs from what a fresh
+/// `CREATE MATERIALIZED VIEW` would pick in *this* session, and per-column `SET STORAGE` / `SET COMPRESSION`
+/// / `SET STATISTICS` / `SET (n_distinct = ...)` (all in `pg_attribute`).
+///
+/// Tablespace and access method are compared against the *effective* session defaults, not `heap`/`0`
+/// absolutely — a squealy-created matview under a non-default `default_tablespace` /
+/// `default_table_access_method` GUC inherits that setting, and rejecting it would break publish-then-
+/// replan. A matview whose tablespace/AM genuinely differs from a fresh create's is refused.
+async fn materialized_view_has_nondefault_storage(
+    client: &Client,
+    view_ref: &TableRef,
+) -> Result<bool, PostgresError> {
+    let rows = client
+        .query(
+            "\
+SELECT
+    -- An explicit `WITH (...)` storage parameter is never inherited from a GUC.
+    c.reloptions IS NOT NULL
+    -- Effective tablespace vs. what a fresh `CREATE` picks this session (the `default_tablespace` GUC, or
+    -- the database default). `reltablespace = 0` means the database default.
+    OR COALESCE(NULLIF(c.reltablespace, 0), db.dattablespace) <> COALESCE(
+        (SELECT ts.oid FROM pg_tablespace ts
+         WHERE ts.spcname = NULLIF(current_setting('default_tablespace'), '')),
+        db.dattablespace
+    )
+    -- Table access method vs. the `default_table_access_method` GUC (defaults to `heap`).
+    OR c.relam <> (SELECT am.oid FROM pg_am am
+                   WHERE am.amname = current_setting('default_table_access_method'))
+    -- A `toast.*` storage option lives on the TOAST relation's `reloptions`, not the parent's.
+    OR EXISTS (
+        SELECT 1 FROM pg_class tc
+        WHERE tc.oid = c.reltoastrelid AND tc.reloptions IS NOT NULL
+    )
+    -- Any column with a non-default `SET STORAGE` / `SET COMPRESSION` / `SET STATISTICS` /
+    -- `SET (n_distinct = ...)` — the full `ALTER MATERIALIZED VIEW ... ALTER COLUMN` storage/stats surface,
+    -- all in `pg_attribute` (`attstattarget` is `NULL` in PG 17+ / `-1` earlier when unset).
+    OR EXISTS (
+        SELECT 1 FROM pg_attribute a
+        JOIN pg_type t ON t.oid = a.atttypid
+        WHERE a.attrelid = c.oid
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+          AND (a.attstorage <> t.typstorage
+               OR a.attcompression <> ''
+               OR COALESCE(a.attstattarget, -1) <> -1
+               OR a.attoptions IS NOT NULL)
+    )
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_database db ON db.datname = current_database()
+WHERE n.nspname = $1
+  AND c.relname = $2
+  AND c.relkind = 'm'",
+            &[&view_ref.schema, &view_ref.name],
+        )
+        .await?;
+    Ok(rows.first().map(|row| row.get(0)).unwrap_or(false))
 }
 
 /// The body-unknown sentinel: an empty `SELECT` carrying only the view-on-view dependencies, so the diff
@@ -384,7 +482,7 @@ FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = $1
   AND c.relname = $2
-  AND c.relkind = 'v'",
+  AND c.relkind IN ('v', 'm')",
             &[&view_ref.schema, &view_ref.name],
         )
         .await?;
@@ -393,8 +491,8 @@ WHERE n.nspname = $1
 }
 
 /// The other views this view depends on, read from its `ON SELECT` rewrite rule's dependencies.
-/// Restricted to relations of kind `v` (other views); table dependencies are irrelevant to view
-/// ordering because every table is created before any view.
+/// Restricted to relations of kind `v`/`m` (other regular or materialized views); table dependencies
+/// are irrelevant to view ordering because every table is created before any view.
 async fn view_dependencies(
     client: &Client,
     view_ref: &TableRef,
@@ -412,7 +510,7 @@ JOIN pg_namespace dn ON dn.oid = dc.relnamespace
 WHERE sn.nspname = $1
   AND sc.relname = $2
   AND d.refclassid = 'pg_class'::regclass
-  AND dc.relkind = 'v'
+  AND dc.relkind IN ('v', 'm')
   AND dc.oid <> sc.oid
 ORDER BY dn.nspname, dc.relname",
             &[&view_ref.schema, &view_ref.name],
@@ -450,7 +548,7 @@ JOIN pg_type typ ON typ.oid = a.atttypid
 JOIN pg_namespace tn ON tn.oid = typ.typnamespace
 WHERE n.nspname = $1
   AND c.relname = $2
-  AND c.relkind = 'v'
+  AND c.relkind IN ('v', 'm')
   AND a.attnum > 0
   AND NOT a.attisdropped
 ORDER BY a.attnum",

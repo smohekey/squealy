@@ -306,6 +306,7 @@ fn clause_alias_model() -> DatabaseModel {
                     }],
                     ..Default::default()
                 })),
+                materialized: false,
             }],
             enums: Vec::new(),
             sequences: Vec::new(),
@@ -344,6 +345,266 @@ async fn publishing_a_clause_alias_view_then_replanning_is_empty() {
     );
 
     reset_fixtures(&mut connection).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn publishing_a_materialized_view_then_replanning_is_empty() {
+    // A published materialized view over a table must re-plan to empty: it renders as
+    // `CREATE MATERIALIZED VIEW … AS … WITH DATA`, introspects back from `relkind = 'm'` with its body
+    // reconstructed via `pg_get_viewdef` exactly like a regular view, and rebinds `materialized = true`.
+    let _guard = db_lock().lock().await;
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_matviews CASCADE")
+        .await
+        .expect("reset matview fixture");
+
+    let column = |name: &str| ColumnModel {
+        name: name.to_owned(),
+        comment: None,
+        ty: SqlType::I64,
+        collation: None,
+        nullable: true,
+        default: None,
+        identity: None,
+        generated: None,
+        on_update: None,
+    };
+    let model = DatabaseModel {
+        schemas: vec![SchemaModel {
+            name: Some("publish_matviews".to_owned()),
+            tables: vec![TableModel {
+                name: "mv_events".to_owned(),
+                comment: None,
+                columns: vec![column("amount"), column("total")],
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                uniques: Vec::new(),
+                checks: Vec::new(),
+                indexes: Vec::new(),
+                exclusions: Vec::new(),
+            }],
+            views: vec![ViewModel {
+                name: "mv_totals".to_owned(),
+                comment: None,
+                columns: vec![ViewColumnModel {
+                    name: "total".to_owned(),
+                    ty: SqlType::I64,
+                    nullable: true,
+                }],
+                query: ViewBody::Select(Box::new(ViewQueryModel {
+                    projection: vec![ProjectionItem {
+                        output_name: "total".to_owned(),
+                        internal_alias: Some("total".to_owned()),
+                        expr: ExprNode::Binary {
+                            op: ArithmeticOp::Multiply,
+                            left: Box::new(ExprNode::Column {
+                                alias: "q".to_owned(),
+                                column: "amount".to_owned(),
+                            }),
+                            right: Box::new(ExprNode::Literal("2".to_owned())),
+                        },
+                    }],
+                    from: Some(SourceItem::Named(SourceRef {
+                        schema: Some("publish_matviews".to_owned()),
+                        name: "mv_events".to_owned(),
+                        alias: "q".to_owned(),
+                    })),
+                    ..Default::default()
+                })),
+                materialized: true,
+            }],
+            enums: Vec::new(),
+            sequences: Vec::new(),
+            domains: Vec::new(),
+        }],
+    };
+
+    squealy_model::publish(&model, &Postgres, &mut connection)
+        .await
+        .expect("publish materialized view");
+    let plan = squealy_model::plan_from_database(
+        &model,
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect("re-plan against the published materialized view");
+    assert!(
+        plan.steps.is_empty(),
+        "a published materialized view must re-plan empty, got: {:?}",
+        plan.steps
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_matviews CASCADE")
+        .await
+        .expect("clean up matview fixture");
+}
+
+#[tokio::test]
+#[ignore]
+async fn introspecting_a_materialized_view_with_an_index_is_rejected() {
+    // squealy does not yet model indexes on a materialized view. Rather than silently drop an out-of-band
+    // index when a matview change re-creates the view, introspection refuses to manage an indexed matview.
+    let _guard = db_lock().lock().await;
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl(
+            "DROP SCHEMA IF EXISTS publish_mv_index CASCADE;\n\
+             CREATE SCHEMA publish_mv_index;\n\
+             CREATE TABLE publish_mv_index.src (id integer NOT NULL);\n\
+             CREATE MATERIALIZED VIEW publish_mv_index.mv AS SELECT id FROM publish_mv_index.src \
+             WITH DATA;\n\
+             CREATE UNIQUE INDEX mv_id ON publish_mv_index.mv (id)",
+        )
+        .await
+        .expect("raw-create an indexed materialized view");
+
+    // Any operation that introspects the whole database (here, planning) must fail loudly rather than
+    // model the matview without its index.
+    let error = squealy_model::plan_from_database(
+        &DatabaseModel::default(),
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect_err("an indexed materialized view must be rejected");
+    assert!(
+        error.to_string().contains("mv") && error.to_string().contains("index"),
+        "error should name the indexed matview: {error}"
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_mv_index CASCADE")
+        .await
+        .expect("clean up indexed matview fixture");
+}
+
+#[tokio::test]
+#[ignore]
+async fn introspecting_a_materialized_view_with_storage_options_is_rejected() {
+    // squealy models only a matview's body, not its storage parameters. A recreate would reset them, so an
+    // out-of-band `WITH (...)` matview is refused rather than silently reset to defaults.
+    let _guard = db_lock().lock().await;
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl(
+            "DROP SCHEMA IF EXISTS publish_mv_storage CASCADE;\n\
+             CREATE SCHEMA publish_mv_storage;\n\
+             CREATE TABLE publish_mv_storage.src (id integer NOT NULL);\n\
+             CREATE MATERIALIZED VIEW publish_mv_storage.mv WITH (autovacuum_enabled = false) AS \
+             SELECT id FROM publish_mv_storage.src WITH DATA",
+        )
+        .await
+        .expect("raw-create a materialized view with storage options");
+
+    let error = squealy_model::plan_from_database(
+        &DatabaseModel::default(),
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect_err("a materialized view with storage options must be rejected");
+    assert!(
+        error.to_string().contains("mv") && error.to_string().contains("storage"),
+        "error should name the matview's storage: {error}"
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_mv_storage CASCADE")
+        .await
+        .expect("clean up storage matview fixture");
+}
+
+#[tokio::test]
+#[ignore]
+async fn introspecting_a_materialized_view_with_column_storage_is_rejected() {
+    // A per-column `SET STORAGE` lives in `pg_attribute` (not `reloptions`); squealy does not model it and
+    // a recreate would reset it, so an out-of-band one is refused.
+    let _guard = db_lock().lock().await;
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl(
+            "DROP SCHEMA IF EXISTS publish_mv_colstore CASCADE;\n\
+             CREATE SCHEMA publish_mv_colstore;\n\
+             CREATE TABLE publish_mv_colstore.src (label text NOT NULL);\n\
+             CREATE MATERIALIZED VIEW publish_mv_colstore.mv AS SELECT label FROM \
+             publish_mv_colstore.src WITH DATA;\n\
+             ALTER MATERIALIZED VIEW publish_mv_colstore.mv ALTER COLUMN label SET STORAGE EXTERNAL",
+        )
+        .await
+        .expect("raw-create a materialized view with column storage");
+
+    let error = squealy_model::plan_from_database(
+        &DatabaseModel::default(),
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect_err("a materialized view with column storage must be rejected");
+    assert!(
+        error.to_string().contains("mv") && error.to_string().contains("storage"),
+        "error should name the matview's storage: {error}"
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_mv_colstore CASCADE")
+        .await
+        .expect("clean up column-storage matview fixture");
+}
+
+#[tokio::test]
+#[ignore]
+async fn introspecting_a_materialized_view_with_column_statistics_is_rejected() {
+    // Per-column planner statistics (`SET STATISTICS`) live in `pg_attribute.attstattarget`; squealy does
+    // not model them and a recreate would reset them, so an out-of-band one is refused.
+    let _guard = db_lock().lock().await;
+    let mut connection = Postgres
+        .connect(&database_url())
+        .await
+        .expect("connect to PostgreSQL");
+    connection
+        .execute_ddl(
+            "DROP SCHEMA IF EXISTS publish_mv_stats CASCADE;\n\
+             CREATE SCHEMA publish_mv_stats;\n\
+             CREATE TABLE publish_mv_stats.src (id integer NOT NULL);\n\
+             CREATE MATERIALIZED VIEW publish_mv_stats.mv AS SELECT id FROM publish_mv_stats.src \
+             WITH DATA;\n\
+             ALTER MATERIALIZED VIEW publish_mv_stats.mv ALTER COLUMN id SET STATISTICS 500",
+        )
+        .await
+        .expect("raw-create a materialized view with column statistics");
+
+    let error = squealy_model::plan_from_database(
+        &DatabaseModel::default(),
+        &mut connection,
+        squealy_model::DiffPolicy::default(),
+    )
+    .await
+    .expect_err("a materialized view with column statistics must be rejected");
+    assert!(
+        error.to_string().contains("mv") && error.to_string().contains("storage"),
+        "error should name the matview's storage: {error}"
+    );
+
+    connection
+        .execute_ddl("DROP SCHEMA IF EXISTS publish_mv_stats CASCADE")
+        .await
+        .expect("clean up column-statistics matview fixture");
 }
 
 // A table exercising every neutral integer width PostgreSQL has no dedicated type for, so each renders to
@@ -676,6 +937,7 @@ fn creating_a_view_column_of_an_undeclared_enum_is_rejected() {
             limit: None,
             offset: None,
         })),
+        materialized: false,
     });
     let error = squealy_model::render_create_sql(&model, &Postgres)
         .expect_err("a view column of an undeclared enum must be rejected");

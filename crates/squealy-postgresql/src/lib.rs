@@ -227,6 +227,8 @@ pub enum PostgresError {
     Conversion(&'static str),
     #[error("postgres render error: {0}")]
     Render(#[source] std::io::Error),
+    #[error("unsupported schema object: {0}")]
+    Unsupported(String),
 }
 
 impl Backend for Postgres {
@@ -298,6 +300,8 @@ impl squealy::SchemaBackend for Postgres {
             sequences: true,
             // PostgreSQL has `CREATE DOMAIN`.
             domains: true,
+            // PostgreSQL has `CREATE MATERIALIZED VIEW`.
+            materialized_views: true,
         }
     }
 
@@ -1320,6 +1324,7 @@ CREATE INDEX CONCURRENTLY j ON t (d);";
                 })),
                 ..Default::default()
             })),
+            materialized: false,
         };
 
         let mut sql = Vec::new();

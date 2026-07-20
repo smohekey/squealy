@@ -548,6 +548,9 @@ fn view_to_node(view: &ViewModel) -> KdlNode {
     if let Some(comment) = &view.comment {
         node.push(KdlEntry::new_prop("comment", comment.clone()));
     }
+    if view.materialized {
+        node.push(KdlEntry::new_prop("materialized", KdlValue::Bool(true)));
+    }
     let mut body = KdlDocument::new();
     for column in &view.columns {
         body.nodes_mut().push(view_column_to_node(column));
@@ -1815,6 +1818,9 @@ fn view_from_node(node: &KdlNode) -> Result<ViewModel, PackageError> {
         comment: prop(node, "comment").map(str::to_owned),
         columns,
         query,
+        // A present-but-non-boolean `materialized` is a malformed package, not an absent flag: reject it
+        // rather than silently downgrade a materialized view to a regular one.
+        materialized: prop_bool_checked(node, "materialized")?.unwrap_or(false),
     })
 }
 
@@ -3740,6 +3746,7 @@ mod tests {
                         limit: Some(10),
                         offset: Some(5),
                     })),
+                    materialized: false,
                 }],
                 enums: Vec::new(),
                 sequences: Vec::new(),
@@ -3754,6 +3761,79 @@ mod tests {
         );
         let parsed = from_kdl(&kdl).expect("view model.kdl should parse");
         assert_eq!(parsed, model, "view KDL round-trip diverged:\n{kdl}");
+    }
+
+    #[test]
+    fn kdl_round_trips_a_materialized_view() {
+        // A materialized view serializes the `materialized=#true` prop on the `view` node and round-trips
+        // as materialized; an ordinary view carries no such prop.
+        let materialized = |name: &str, materialized: bool| ViewModel {
+            name: name.to_owned(),
+            comment: None,
+            columns: vec![ViewColumnModel {
+                name: "id".to_owned(),
+                ty: SqlType::I32,
+                nullable: false,
+            }],
+            query: ViewBody::Select(Box::new(ViewQueryModel {
+                dependencies: Vec::new(),
+                distinct: false,
+                projection: vec![ProjectionItem {
+                    output_name: "id".to_owned(),
+                    internal_alias: None,
+                    expr: ExprNode::Column {
+                        alias: "q0_0".to_owned(),
+                        column: "id".to_owned(),
+                    },
+                }],
+                from: Some(SourceItem::Named(SourceRef {
+                    schema: Some("public".to_owned()),
+                    name: "users".to_owned(),
+                    alias: "q0_0".to_owned(),
+                })),
+                joins: Vec::new(),
+                filter: None,
+                group_by: Vec::new(),
+                having: None,
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+            })),
+            materialized,
+        };
+        let model = DatabaseModel {
+            schemas: vec![SchemaModel {
+                name: Some("public".to_owned()),
+                tables: Vec::new(),
+                views: vec![
+                    materialized("active_ids", true),
+                    materialized("plain_ids", false),
+                ],
+                enums: Vec::new(),
+                sequences: Vec::new(),
+                domains: Vec::new(),
+            }],
+        };
+        let kdl = to_kdl(&model);
+        assert!(
+            kdl.contains("materialized=#true"),
+            "materialized flag not serialized:\n{kdl}"
+        );
+        let parsed = from_kdl(&kdl).expect("materialized view model.kdl should parse");
+        assert_eq!(
+            parsed, model,
+            "materialized view KDL round-trip diverged:\n{kdl}"
+        );
+
+        // A present-but-non-boolean `materialized` is malformed and must be rejected, not silently
+        // downgraded to a regular view (which would bypass the backend materialized-view capability).
+        let corrupted = kdl.replace("materialized=#true", "materialized=\"true\"");
+        let error =
+            from_kdl(&corrupted).expect_err("a string-typed materialized flag must be rejected");
+        assert!(
+            error.to_string().contains("materialized"),
+            "error should name the bad flag: {error}"
+        );
     }
 
     #[test]
@@ -3830,6 +3910,7 @@ mod tests {
                         }],
                         ..ViewQueryModel::default()
                     })),
+                    materialized: false,
                 }],
                 enums: Vec::new(),
                 sequences: Vec::new(),
@@ -3888,6 +3969,7 @@ mod tests {
                         }],
                         ..ViewQueryModel::default()
                     })),
+                    materialized: false,
                 }],
                 enums: Vec::new(),
                 sequences: Vec::new(),
@@ -3966,6 +4048,7 @@ mod tests {
                         limit: Some(10),
                         offset: Some(2),
                     },
+                    materialized: false,
                 }],
                 enums: Vec::new(),
                 sequences: Vec::new(),
@@ -4074,6 +4157,7 @@ mod tests {
                             ..ViewQueryModel::default()
                         })),
                     },
+                    materialized: false,
                 }],
                 enums: Vec::new(),
                 sequences: Vec::new(),
@@ -4111,6 +4195,7 @@ mod tests {
                         }],
                         ..ViewQueryModel::default()
                     })),
+                    materialized: false,
                 }],
                 enums: Vec::new(),
                 sequences: Vec::new(),

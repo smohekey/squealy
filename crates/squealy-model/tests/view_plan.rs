@@ -72,6 +72,7 @@ fn view(filter: &str, columns: &[&str]) -> ViewModel {
             limit: None,
             offset: None,
         })),
+        materialized: false,
     }
 }
 

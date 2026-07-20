@@ -237,6 +237,13 @@ pub struct SchemaCapabilities {
     ///
     /// [`DomainModel`]: crate::DomainModel
     pub domains: bool,
+    /// Materialized views (PostgreSQL `CREATE MATERIALIZED VIEW`), modeled as a [`ViewModel`] with
+    /// `materialized = true`. Backends without materialized views (MySQL, SQLite) leave this `false`, so a
+    /// model that declares one is rejected rather than mis-rendered as a plain view. (Regular views need no
+    /// capability — they are assumed everywhere.)
+    ///
+    /// [`ViewModel`]: crate::ViewModel
+    pub materialized_views: bool,
 }
 
 /// Per-column metadata capabilities for backend-specific column attributes.

@@ -154,6 +154,7 @@ fn view_of(name: &str, outputs: Vec<(&str, SqlType)>, query: ViewBody) -> ViewMo
             })
             .collect(),
         query,
+        materialized: false,
     }
 }
 
@@ -1696,6 +1697,7 @@ fn view_bodies_round_trip_through_each_dialect() {
                 comment: view.comment.clone(),
                 columns: view.columns.clone(),
                 query: lowered.clone(),
+                materialized: false,
             };
             let re_rendered = render_view(&round_tripped, dialect);
             if re_rendered != rendered {

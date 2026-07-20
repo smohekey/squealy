@@ -101,6 +101,8 @@ async fn view(conn: &mut mysql_async::Conn, view_ref: &TableRef) -> Result<ViewM
         comment: None,
         columns,
         query,
+        // MySQL has no materialized views.
+        materialized: false,
     })
 }
 
