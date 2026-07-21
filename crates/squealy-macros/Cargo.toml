@@ -1,0 +1,25 @@
+[package]
+name = "squealy-macros"
+description = "Derive macros for squealy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+squealy-core.workspace = true
+
+[dev-dependencies]
+squealy.workspace = true
+trybuild.workspace = true
+
+[lints]
+workspace = true

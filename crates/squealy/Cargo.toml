@@ -1,11 +1,30 @@
 [package]
 name = "squealy"
+description = "Typed SQL schema metadata and query builder for Rust"
+readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+uuid = ["squealy-core/uuid"]
+bytes = ["squealy-core/bytes"]
+systemtime = ["squealy-core/systemtime"]
+time = ["squealy-core/time"]
+chrono = ["squealy-core/chrono"]
 
 [dependencies]
 squealy-core.workspace = true
+squealy-macros.workspace = true
+
+[dev-dependencies]
+squealy-test.workspace = true
+trybuild.workspace = true
 
 [lints]
 workspace = true

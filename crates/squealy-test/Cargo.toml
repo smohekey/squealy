@@ -1,0 +1,20 @@
+[package]
+name = "squealy-test"
+description = "In-memory test backend for squealy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+systemtime = ["squealy/systemtime"]
+
+[dependencies]
+futures-core.workspace = true
+squealy.workspace = true
+
+[lints]
+workspace = true

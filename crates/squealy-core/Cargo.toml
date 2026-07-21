@@ -1,8 +1,28 @@
 [package]
 name = "squealy-core"
+description = "Backend-neutral schema metadata and typed query engine for squealy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+uuid = ["dep:uuid"]
+bytes = ["dep:bytes"]
+systemtime = []
+time = ["dep:time"]
+chrono = ["dep:chrono"]
+
+[dependencies]
+futures-core.workspace = true
+uuid = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
+time = { version = "0.3", optional = true, default-features = false }
+chrono = { version = "0.4", optional = true, default-features = false }
 
 [lints]
 workspace = true
