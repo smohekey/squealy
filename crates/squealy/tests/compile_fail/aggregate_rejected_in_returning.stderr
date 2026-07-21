@@ -4,9 +4,9 @@ error[E0271]: type mismatch resolving `<Expr<'_, CountExpr<ItemId>, AggregateExp
 17 |         .insert_returning(|item| item.id.count());
    |          ^^^^^^^^^^^^^^^^ expected `ScalarProjection`, found `AggregateProjection`
    |
-note: required by a bound in `__SquealyItemWriteBuilder::<'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, __SquealyItemNameWriteInsertState, __SquealyItemNameWriteUpdateState>::insert_returning`
+note: required by a bound in `__SquealyItemWriteBuilder::<'conn, Conn, Assignments, Filters, FilterState>::insert_returning`
   --> tests/compile_fail/aggregate_rejected_in_returning.rs:4:35
    |
  4 | #[derive(Clone, Debug, PartialEq, Table)]
-   |                                   ^^^^^ required by this bound in `__SquealyItemWriteBuilder::<'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, __SquealyItemNameWriteInsertState, __SquealyItemNameWriteUpdateState>::insert_returning`
+   |                                   ^^^^^ required by this bound in `__SquealyItemWriteBuilder::<'conn, Conn, Assignments, Filters, FilterState>::insert_returning`
    = note: this error originates in the derive macro `Table` (in Nightly builds, run with -Z macro-backtrace for more info)

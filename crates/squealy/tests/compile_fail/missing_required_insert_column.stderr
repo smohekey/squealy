@@ -1,0 +1,23 @@
+error[E0277]: `INSERT` must supply every required (non-null, no-default) column of the target table
+  --> tests/compile_fail/missing_required_insert_column.rs:13:43
+   |
+13 |     let _query = TestConnection.to::<User>().insert();
+   |                                              ^^^^^^ the trait `squealy::CoversColumn<UserName, _>` is not implemented for `HNil`
+   |
+   = note: set the missing column on the write builder, or add it to the `INSERT … SELECT` target list
+help: the following other types implement trait `squealy::CoversColumn<T, Index>`
+  --> $WORKSPACE/crates/squealy-core/src/list.rs
+   |
+   |   impl<T, Tail> CoversColumn<T, Here> for HCons<T, Tail> {}
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `HCons<T, Tail>` implements `squealy::CoversColumn<T, squealy::Here>`
+   |
+   | / impl<T, Head, Tail, Index> CoversColumn<T, There<Index>> for HCons<Head, Tail> where
+   | |     Tail: CoversColumn<T, Index>
+   | |________________________________^ `HCons<Head, Tail>` implements `squealy::CoversColumn<T, squealy::There<Index>>`
+   = note: required for `HCons<squealy::RequiredCol<UserName, squealy::NonNullableColumn>, HCons<squealy::RequiredCol<UserNickname, squealy::NullableColumn>, HNil>>` to implement `squealy::RequiredCovered<HNil, HCons<_, HCons<squealy::Omittable, HNil>>>`
+note: required by a bound in `__SquealyUserWriteBuilder::<'conn, Conn, Assignments, Filters, FilterState>::insert`
+  --> tests/compile_fail/missing_required_insert_column.rs:4:35
+   |
+ 4 | #[derive(Clone, Debug, PartialEq, Table)]
+   |                                   ^^^^^ required by this bound in `__SquealyUserWriteBuilder::<'conn, Conn, Assignments, Filters, FilterState>::insert`
+   = note: this error originates in the derive macro `Table` (in Nightly builds, run with -Z macro-backtrace for more info)

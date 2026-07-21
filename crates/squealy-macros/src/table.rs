@@ -1081,263 +1081,99 @@ impl TableStruct {
 	) -> BuilderExpansion {
 		let visibility = &self.visibility;
 		let builder_ident = generated_ident(table_ident, "write", "Builder");
-		let update_ready_ident = generated_ident(table_ident, "write", "UpdateReady");
 		let fields = self
 			.fields
 			.iter()
 			.enumerate()
 			.filter(|(_, field)| field.insertable() || field.updateable())
 			.collect::<Vec<_>>();
-		let insert_state_idents = fields
-			.iter()
-			.map(|(_, field)| generated_ident(table_ident, &field.ident.to_string(), "WriteInsertState"))
-			.collect::<Vec<_>>();
-		let insert_missing_idents = fields
-			.iter()
-			.map(|(_, field)| {
-				generated_ident(table_ident, &field.ident.to_string(), "WriteInsertMissing")
-			})
-			.collect::<Vec<_>>();
-		let insert_set_idents = fields
-			.iter()
-			.map(|(_, field)| generated_ident(table_ident, &field.ident.to_string(), "WriteInsertSet"))
-			.collect::<Vec<_>>();
-		let update_state_idents = fields
-			.iter()
-			.map(|(_, field)| generated_ident(table_ident, &field.ident.to_string(), "WriteUpdateState"))
-			.collect::<Vec<_>>();
-		let update_missing_idents = fields
-			.iter()
-			.map(|(_, field)| {
-				generated_ident(table_ident, &field.ident.to_string(), "WriteUpdateMissing")
-			})
-			.collect::<Vec<_>>();
-		let update_set_idents = fields
-			.iter()
-			.map(|(_, field)| generated_ident(table_ident, &field.ident.to_string(), "WriteUpdateSet"))
-			.collect::<Vec<_>>();
-		let insert_state_defaults = insert_state_idents
-			.iter()
-			.zip(insert_missing_idents.iter())
-			.map(|(state, missing)| quote::quote! { #state = #missing })
-			.collect::<Vec<_>>();
-		let update_state_defaults = update_state_idents
-			.iter()
-			.zip(update_missing_idents.iter())
-			.map(|(state, missing)| quote::quote! { #state = #missing })
-			.collect::<Vec<_>>();
-		let insert_initial_states = insert_missing_idents.iter().collect::<Vec<_>>();
-		let update_initial_states = update_missing_idents.iter().collect::<Vec<_>>();
-		// `.insert()` is generic over every column's insert-state slot; required-ness is enforced
-		// type-level by an `InsertReady<Nullability>` bound per insertable, non-default column. A
-		// column with a `default` is always omittable (no bound). `InsertReady` is satisfied by a
-		// `Set` slot (any nullability) or a `Missing` slot only when the column is nullable.
-		let insert_ready_bounds = fields
-			.iter()
-			.zip(insert_state_idents.iter())
-			.filter(|((_, field), _)| field.insertable() && field.attrs.default.is_none())
-			.map(|((_, field), state)| {
-				let d = field.value_ty.clone();
-				quote::quote! {
-						#state: ::squealy::InsertReady<<#d as ::squealy::ColumnNullability>::Nullability>,
-				}
-			})
-			.collect::<Vec<_>>();
-		let insert_ready_impls = fields
-			.iter()
-			.zip(insert_set_idents.iter())
-			.zip(insert_missing_idents.iter())
-			.filter(|(((_, field), _), _)| field.insertable())
-			.map(|(((_, _), set), missing)| {
-				quote::quote! {
-						impl<N> ::squealy::InsertReady<N> for #set {}
-						impl ::squealy::InsertReady<::squealy::NullableColumn> for #missing {}
-				}
-			})
-			.collect::<Vec<_>>();
-		let insert_state_tuple = if insert_state_idents.is_empty() {
-			quote::quote! { () }
-		} else {
-			quote::quote! { (#(#insert_state_idents,)*) }
-		};
-		let update_state_tuple = if update_state_idents.is_empty() {
-			quote::quote! { () }
-		} else {
-			quote::quote! { (#(#update_state_idents,)*) }
-		};
-		let update_ready_impls = (1usize..(1usize << fields.len()))
-			.filter_map(|mask| {
-				let mut has_update_set = false;
-				let states = fields
-					.iter()
-					.zip(update_missing_idents.iter())
-					.zip(update_set_idents.iter())
-					.enumerate()
-					.map(|(index, (((_, field), missing), set))| {
-						if field.updateable() && (mask & (1usize << index)) != 0 {
-							has_update_set = true;
-							quote::quote! { #set }
-						} else {
-							quote::quote! { #missing }
-						}
-					})
-					.collect::<Vec<_>>();
-
-				has_update_set.then(|| {
-					quote::quote! {
-							impl #update_ready_ident for (#(#states,)*) {}
-					}
-				})
-			})
-			.collect::<Vec<_>>();
-		let state_params = insert_state_idents
-			.iter()
-			.chain(update_state_idents.iter())
-			.collect::<Vec<_>>();
 		let setters = fields
-            .iter()
-            .enumerate()
-            .map(|(setter_index, (field_index, field))| {
-                let field_ident =
-                    proc_macro2::Ident::new(&field.ident.to_string(), Span::call_site());
-                let field_expr_kind = &expr_kind_idents[*field_index];
-                let value_bound = if field.nullable() {
-                    quote::quote! { ::squealy::IntoNullableAssignmentValue<#field_expr_kind> }
-                } else {
-                    quote::quote! { ::squealy::IntoAssignmentValue<#field_expr_kind> }
-                };
-                let assignment_value_ty = if field.nullable() {
-                    quote::quote! { <Value as ::squealy::IntoNullableAssignmentValue<#field_expr_kind>>::Value }
-                } else {
-                    quote::quote! { <Value as ::squealy::IntoAssignmentValue<#field_expr_kind>>::Value }
-                };
-                let assignment_value = if field.nullable() {
-                    quote::quote! { ::squealy::IntoNullableAssignmentValue::into_nullable_assignment_value(value) }
-                } else {
-                    quote::quote! { ::squealy::IntoAssignmentValue::into_assignment_value(value) }
-                };
-                let insert_assignment_ty = quote::quote! {
-                    ::squealy::InsertAssignment<#field_expr_kind, #assignment_value_ty>
-                };
-                let update_assignment_ty = quote::quote! {
-                    ::squealy::UpdateAssignment<#field_expr_kind, #assignment_value_ty>
-                };
-                let insert_return_states = insert_state_idents
-                    .iter()
-                    .enumerate()
-                    .map(|(index, state)| {
-                        if index == setter_index && field.insertable() {
-                            let set = &insert_set_idents[index];
-                            quote::quote! { #set }
-                        } else {
-                            quote::quote! { #state }
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let update_return_states = update_state_idents
-                    .iter()
-                    .enumerate()
-                    .map(|(index, state)| {
-                        if index == setter_index && field.updateable() {
-                            let set = &update_set_idents[index];
-                            quote::quote! { #set }
-                        } else {
-                            quote::quote! { #state }
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let insert_columns_out = if field.insertable() {
-                    quote::quote! { <InsertColumns as ::squealy::PushBack<#insert_assignment_ty>>::Output }
-                } else {
-                    quote::quote! { InsertColumns }
-                };
-                let update_columns_out = if field.updateable() {
-                    quote::quote! { <UpdateColumns as ::squealy::PushBack<#update_assignment_ty>>::Output }
-                } else {
-                    quote::quote! { UpdateColumns }
-                };
-                let insert_bound = field
-                    .insertable()
-                    .then(|| quote::quote! { InsertColumns: ::squealy::PushBack<#insert_assignment_ty>, });
-                let update_bound = field
-                    .updateable()
-                    .then(|| quote::quote! { UpdateColumns: ::squealy::PushBack<#update_assignment_ty>, });
-                let insert_append = if field.insertable() {
-                    let value = if field.updateable() {
-                        quote::quote! { assignment_value.clone() }
-                    } else {
-                        quote::quote! { assignment_value }
-                    };
-                    quote::quote! {
-                        let insert_columns = self.insert_columns.push_back(
-                            ::squealy::InsertAssignment::<#field_expr_kind, #assignment_value_ty>::new(#value)
-                        );
-                    }
-                } else {
-                    quote::quote! {
-                        let insert_columns = self.insert_columns;
-                    }
-                };
-                let update_append = if field.updateable() {
-                    quote::quote! {
-                        let update_columns = self.update_columns.push_back(
-                            ::squealy::UpdateAssignment::<#field_expr_kind, #assignment_value_ty>::new(assignment_value)
-                        );
-                    }
-                } else {
-                    quote::quote! {
-                        let update_columns = self.update_columns;
-                    }
-                };
+			.iter()
+			.map(|(field_index, field)| {
+				let field_ident = proc_macro2::Ident::new(&field.ident.to_string(), Span::call_site());
+				let field_expr_kind = &expr_kind_idents[*field_index];
+				let value_bound = if field.nullable() {
+					quote::quote! { ::squealy::IntoNullableAssignmentValue<#field_expr_kind> }
+				} else {
+					quote::quote! { ::squealy::IntoAssignmentValue<#field_expr_kind> }
+				};
+				let assignment_value_ty = if field.nullable() {
+					quote::quote! { <Value as ::squealy::IntoNullableAssignmentValue<#field_expr_kind>>::Value }
+				} else {
+					quote::quote! { <Value as ::squealy::IntoAssignmentValue<#field_expr_kind>>::Value }
+				};
+				let assignment_value = if field.nullable() {
+					quote::quote! { ::squealy::IntoNullableAssignmentValue::into_nullable_assignment_value(value) }
+				} else {
+					quote::quote! { ::squealy::IntoAssignmentValue::into_assignment_value(value) }
+				};
+				let insert_marker = if field.insertable() {
+					quote::quote! { ::squealy::WriteEnabled }
+				} else {
+					quote::quote! { ::squealy::WriteDisabled }
+				};
+				let update_marker = if field.updateable() {
+					quote::quote! { ::squealy::WriteEnabled }
+				} else {
+					quote::quote! { ::squealy::WriteDisabled }
+				};
+				let assignment_ty = quote::quote! {
+						::squealy::WriteAssignment<
+								#field_expr_kind,
+								#assignment_value_ty,
+								#insert_marker,
+								#update_marker,
+						>
+				};
 
-                quote::quote! {
-                    impl<'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, #(#state_params),*>
-                        #builder_ident <'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, #(#state_params),*>
-                    where
-                        Conn: ::squealy::QueryBuilder + 'conn,
-                    {
-                        pub fn #field_ident<Value>(
-                            self,
-                            value: Value,
-                        ) -> #builder_ident <
-                            'conn,
-                            Conn,
-                            #insert_columns_out,
-                            #update_columns_out,
-                            Filters,
-                            FilterState,
-                            #(#insert_return_states,)*
-                            #(#update_return_states),*
-                        >
-                        where
-                            Value: #value_bound,
-                            #insert_bound
-                            #update_bound
-                        {
-                            let assignment_value = #assignment_value;
-                            #insert_append
-                            #update_append
-                            #builder_ident {
-                                connection: self.connection,
-                                insert_columns,
-                                update_columns,
-                                filters: self.filters,
-                                _state: ::std::marker::PhantomData,
-                            }
-                        }
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
+				quote::quote! {
+						impl<'conn, Conn, Assignments, Filters, FilterState>
+								#builder_ident <'conn, Conn, Assignments, Filters, FilterState>
+						where
+								Conn: ::squealy::QueryBuilder + 'conn,
+						{
+								pub fn #field_ident<Value>(
+										self,
+										value: Value,
+								) -> #builder_ident <
+										'conn,
+										Conn,
+										<Assignments as ::squealy::PushBack<#assignment_ty>>::Output,
+										Filters,
+										FilterState,
+								>
+								where
+										Value: #value_bound,
+										Assignments: ::squealy::PushBack<#assignment_ty>,
+								{
+										let assignment_value = #assignment_value;
+										#builder_ident {
+												connection: self.connection,
+												assignments: self.assignments.push_back(
+														::squealy::WriteAssignment::<
+																#field_expr_kind,
+																#assignment_value_ty,
+																#insert_marker,
+																#update_marker,
+														>::new(assignment_value)
+												),
+												filters: self.filters,
+												_state: ::std::marker::PhantomData,
+										}
+								}
+						}
+				}
+			})
+			.collect::<Vec<_>>();
 		let update_finalizers = if fields.iter().any(|(_, field)| field.updateable()) {
 			quote::quote! {
-					impl<'conn, Conn, InsertColumns, UpdateColumns, Filters, #(#insert_state_idents,)* #(#update_state_idents),*>
-							#builder_ident <'conn, Conn, InsertColumns, UpdateColumns, Filters, ::squealy::MutationFiltered, #(#insert_state_idents,)* #(#update_state_idents),*>
+					impl<'conn, Conn, Assignments, Filters>
+							#builder_ident <'conn, Conn, Assignments, Filters, ::squealy::MutationFiltered>
 					where
 							Conn: ::squealy::QueryBuilder + 'conn,
-							UpdateColumns: ::squealy::UpdateAssignments + 'conn,
+							Assignments: ::squealy::WriteAssignments,
+							<Assignments as ::squealy::WriteAssignments>::Update: ::squealy::NonEmptyUpdateAssignments + 'conn,
 							Filters: ::squealy::PredicateNodes + 'conn,
-							#update_state_tuple: #update_ready_ident,
 					{
 							pub fn update(
 									self,
@@ -1346,32 +1182,32 @@ impl TableStruct {
 							> + ::std::marker::Send + 'conn
 							where
 									Conn: ::squealy::Connection,
-									UpdateColumns: ::squealy::UpdateAssignments,
-									<UpdateColumns as ::squealy::UpdateAssignments>::Params: ::squealy::NoRuntimeParams,
+									<<Assignments as ::squealy::WriteAssignments>::Update as ::squealy::UpdateAssignments>::Params: ::squealy::NoRuntimeParams,
 									Filters: ::squealy::PredicateNodes,
 									<Filters as ::squealy::PredicateNodes>::Params: ::squealy::NoRuntimeParams,
 									<Conn as ::squealy::QueryBuilder>::Update<
 											'conn,
 											#table_ident <'static, ::squealy::ColumnExpr>,
 											(),
-											UpdateColumns,
+											<Assignments as ::squealy::WriteAssignments>::Update,
 											Filters,
 											(),
-									>: ::squealy::ExecutableUpdateQuery<'conn, UpdateColumns, Filters, ()>
+									>: ::squealy::ExecutableUpdateQuery<'conn, <Assignments as ::squealy::WriteAssignments>::Update, Filters, ()>
 											// The future captures this query object, so require it `Send` (see `insert`).
 											+ ::std::marker::Send,
 							{
+									let update_columns = ::squealy::WriteAssignments::into_update(self.assignments);
 									let query = <<Conn as ::squealy::QueryBuilder>::Update<
 											'conn,
 											#table_ident <'static, ::squealy::ColumnExpr>,
 											(),
-											UpdateColumns,
+											<Assignments as ::squealy::WriteAssignments>::Update,
 											Filters,
 											(),
-									> as ::squealy::UpdateQuery<'conn, UpdateColumns, Filters, ()>>::build(
+									> as ::squealy::UpdateQuery<'conn, <Assignments as ::squealy::WriteAssignments>::Update, Filters, ()>>::build(
 											self.connection,
 											Self::ALIAS,
-											self.update_columns,
+											update_columns,
 											self.filters,
 											(),
 									);
@@ -1385,24 +1221,25 @@ impl TableStruct {
 									projection: impl ::std::ops::FnOnce(
 											<#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
 									) -> P,
-							) -> <Conn as ::squealy::QueryBuilder>::Update<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape, UpdateColumns, Filters, P>
+							) -> <Conn as ::squealy::QueryBuilder>::Update<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape, <Assignments as ::squealy::WriteAssignments>::Update, Filters, P>
 							where
 									P: ::squealy::ReturningProjection<'static> + ::squealy::Projectable + ::squealy::ProjectionClass<Class = ::squealy::ScalarProjection> + ::squealy::ReturnableProjection + ::squealy::ProjectionParams<Params = ::squealy::HNil>,
 									<P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<<Conn as ::squealy::QueryBuilder>::Backend>,
 							{
+									let update_columns = ::squealy::WriteAssignments::into_update(self.assignments);
 									let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
 									let projection = projection(table);
 									<<Conn as ::squealy::QueryBuilder>::Update<
 											'conn,
 											#table_ident <'static, ::squealy::ColumnExpr>,
 											<P as ::squealy::ReturningProjection<'static>>::Shape,
-											UpdateColumns,
+											<Assignments as ::squealy::WriteAssignments>::Update,
 											Filters,
 											P,
-									> as ::squealy::UpdateQuery<'conn, UpdateColumns, Filters, P>>::build(
+									> as ::squealy::UpdateQuery<'conn, <Assignments as ::squealy::WriteAssignments>::Update, Filters, P>>::build(
 											self.connection,
 											Self::ALIAS,
-											self.update_columns,
+											update_columns,
 											self.filters,
 											projection,
 									)
@@ -1414,82 +1251,45 @@ impl TableStruct {
 		};
 
 		let definitions = quote::quote! {
-				#(
-						#[doc(hidden)]
-						#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-						#visibility struct #insert_missing_idents;
-				)*
-
-				#(
-						#[doc(hidden)]
-						#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-						#visibility struct #insert_set_idents;
-				)*
-
-				// Type-level insert-required-ness: a `Set` slot is ready for any nullability; a `Missing`
-				// slot is ready only for a nullable column.
-				#(#insert_ready_impls)*
-
-				#(
-						#[doc(hidden)]
-						#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-						#visibility struct #update_missing_idents;
-				)*
-
-				#(
-						#[doc(hidden)]
-						#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-						#visibility struct #update_set_idents;
-				)*
-
-				#[doc(hidden)]
-				#visibility trait #update_ready_ident {}
-				#(#update_ready_impls)*
-
 				#[doc(hidden)]
 				#[derive(Clone, Debug, PartialEq)]
 				#visibility struct #builder_ident <
 						'conn,
 						Conn: ::squealy::QueryBuilder + 'conn,
-						InsertColumns = ::squealy::HNil,
-						UpdateColumns = ::squealy::HNil,
+						Assignments = ::squealy::HNil,
 						Filters = ::squealy::HNil,
 						FilterState = ::squealy::MutationUnfiltered,
-						#(#insert_state_defaults,)*
-						#(#update_state_defaults),*
 				> {
 						connection: &'conn Conn,
-						insert_columns: InsertColumns,
-						update_columns: UpdateColumns,
+						assignments: Assignments,
 						filters: Filters,
-						_state: ::std::marker::PhantomData<(FilterState, #insert_state_tuple, #update_state_tuple)>,
+						_state: ::std::marker::PhantomData<FilterState>,
 				}
 
-				impl<'conn, Conn> #builder_ident <'conn, Conn, ::squealy::HNil, ::squealy::HNil, ::squealy::HNil, ::squealy::MutationUnfiltered, #(#insert_initial_states,)* #(#update_initial_states),*>
+				impl<'conn, Conn> #builder_ident <'conn, Conn>
 				where
 						Conn: ::squealy::QueryBuilder + 'conn,
 				{
 						fn new(connection: &'conn Conn) -> Self {
 								Self {
 										connection,
-										insert_columns: ::squealy::HNil,
-										update_columns: ::squealy::HNil,
+										assignments: ::squealy::HNil,
 										filters: ::squealy::HNil,
 										_state: ::std::marker::PhantomData,
 								}
 						}
 				}
 
-				impl<'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, #(#state_params),*>
-						#builder_ident <'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, #(#state_params),*>
+				impl<'conn, Conn, Assignments, Filters, FilterState>
+						#builder_ident <'conn, Conn, Assignments, Filters, FilterState>
 				where
 						Conn: ::squealy::QueryBuilder + 'conn,
 				{
 						const ALIAS: ::squealy::SourceAlias = ::squealy::SourceAlias::new(0, 0);
 				}
 
-				impl<'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, #(#state_params),*>
-						#builder_ident <'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, #(#state_params),*>
+				impl<'conn, Conn, Assignments, Filters, FilterState>
+						#builder_ident <'conn, Conn, Assignments, Filters, FilterState>
 				where
 						Conn: ::squealy::QueryBuilder + 'conn,
 				{
@@ -1498,7 +1298,7 @@ impl TableStruct {
 								predicate: impl ::std::ops::FnOnce(
 										&<#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
 								) -> ::squealy::Predicate<'static, P, PredicateAst>,
-						) -> #builder_ident <'conn, Conn, InsertColumns, UpdateColumns, <Filters as ::squealy::PushBack<::squealy::Predicate<'static, P, PredicateAst>>>::Output, ::squealy::MutationFiltered, #(#state_params),*>
+						) -> #builder_ident <'conn, Conn, Assignments, <Filters as ::squealy::PushBack<::squealy::Predicate<'static, P, PredicateAst>>>::Output, ::squealy::MutationFiltered>
 						where
 								Filters: ::squealy::PushBack<::squealy::Predicate<'static, P, PredicateAst>>,
 								<Filters as ::squealy::PushBack<::squealy::Predicate<'static, P, PredicateAst>>>::Output: ::squealy::PredicateNodes,
@@ -1511,24 +1311,22 @@ impl TableStruct {
 								let predicate = predicate(&table);
 								#builder_ident {
 										connection: self.connection,
-										insert_columns: self.insert_columns,
-										update_columns: self.update_columns,
+										assignments: self.assignments,
 										filters: self.filters.push_back(predicate),
 										_state: ::std::marker::PhantomData,
 								}
 						}
 				}
 
-				impl<'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, #(#state_params),*>
-						#builder_ident <'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, #(#state_params),*>
+				impl<'conn, Conn, Assignments, Filters, FilterState>
+						#builder_ident <'conn, Conn, Assignments, Filters, FilterState>
 				where
 						Conn: ::squealy::QueryBuilder + 'conn,
 				{
-						pub fn all(self) -> #builder_ident <'conn, Conn, InsertColumns, UpdateColumns, Filters, ::squealy::MutationFiltered, #(#state_params),*> {
+						pub fn all(self) -> #builder_ident <'conn, Conn, Assignments, Filters, ::squealy::MutationFiltered> {
 								#builder_ident {
 										connection: self.connection,
-										insert_columns: self.insert_columns,
-										update_columns: self.update_columns,
+										assignments: self.assignments,
 										filters: self.filters,
 										_state: ::std::marker::PhantomData,
 								}
@@ -1537,44 +1335,46 @@ impl TableStruct {
 
 				#(#setters)*
 
-				impl<'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, #(#insert_state_idents,)* #(#update_state_idents),*> #builder_ident <'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, #(#insert_state_idents,)* #(#update_state_idents),*>
+				impl<'conn, Conn, Assignments, Filters, FilterState> #builder_ident <'conn, Conn, Assignments, Filters, FilterState>
 				where
 						Conn: ::squealy::QueryBuilder + 'conn,
-						InsertColumns: ::squealy::InsertAssignments + 'conn,
-						<InsertColumns as ::squealy::InsertAssignments>::Params: ::squealy::HAppend<::squealy::HNil>,
-						#(#insert_ready_bounds)*
+						Assignments: ::squealy::WriteAssignments + 'conn,
+						<Assignments as ::squealy::WriteAssignments>::Insert: ::squealy::InsertAssignments + 'conn,
+						<<Assignments as ::squealy::WriteAssignments>::Insert as ::squealy::InsertAssignments>::Params: ::squealy::HAppend<::squealy::HNil>,
 				{
-						pub fn insert(
+						pub fn insert<__SquealyCoverage>(
 								self,
 						) -> impl ::std::future::Future<
 								Output = ::std::result::Result<u64, <<Conn as ::squealy::QueryBuilder>::Backend as ::squealy::Backend>::Error>,
 						> + ::std::marker::Send + 'conn
 						where
 								Conn: ::squealy::Connection,
-								::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>: ::squealy::InsertRows,
-								<::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil> as ::squealy::InsertRows>::Params: ::squealy::NoRuntimeParams,
+								<#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::InsertableTable>::RequiredInsertColumns: ::squealy::RequiredCovered<<Assignments as ::squealy::WriteAssignments>::InsertKeys, __SquealyCoverage>,
+								::squealy::HCons<::squealy::InsertRow<<Assignments as ::squealy::WriteAssignments>::Insert>, ::squealy::HNil>: ::squealy::InsertRows,
+								<::squealy::HCons<::squealy::InsertRow<<Assignments as ::squealy::WriteAssignments>::Insert>, ::squealy::HNil> as ::squealy::InsertRows>::Params: ::squealy::NoRuntimeParams,
 								<Conn as ::squealy::QueryBuilder>::Insert<
 										'conn,
 										#table_ident <'static, ::squealy::ColumnExpr>,
 										(),
-										::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>,
+										::squealy::HCons<::squealy::InsertRow<<Assignments as ::squealy::WriteAssignments>::Insert>, ::squealy::HNil>,
 										(),
-								>: ::squealy::ExecutableInsertQuery<'conn, ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>, ()>
+								>: ::squealy::ExecutableInsertQuery<'conn, ::squealy::HCons<::squealy::InsertRow<<Assignments as ::squealy::WriteAssignments>::Insert>, ::squealy::HNil>, ()>
 										// The returned future captures this query object, so it must be `Send` for the
 										// future to be `Send` behind a generic `async fn -> impl Future + Send` trait.
 										+ ::std::marker::Send,
 						{
+								let insert_columns = ::squealy::WriteAssignments::into_insert(self.assignments);
 								let insert_rows = ::squealy::HCons {
-										head: ::squealy::InsertRow::new(self.insert_columns),
+										head: ::squealy::InsertRow::new(insert_columns),
 										tail: ::squealy::HNil,
 								};
 								let query = <<Conn as ::squealy::QueryBuilder>::Insert<
 										'conn,
 										#table_ident <'static, ::squealy::ColumnExpr>,
 										(),
-										::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>,
+										::squealy::HCons<::squealy::InsertRow<<Assignments as ::squealy::WriteAssignments>::Insert>, ::squealy::HNil>,
 										(),
-								> as ::squealy::InsertQuery<'conn, ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>, ()>>::build(
+								> as ::squealy::InsertQuery<'conn, ::squealy::HCons<::squealy::InsertRow<<Assignments as ::squealy::WriteAssignments>::Insert>, ::squealy::HNil>, ()>>::build(
 										self.connection,
 										insert_rows,
 										(),
@@ -1584,18 +1384,20 @@ impl TableStruct {
 								}
 						}
 
-						pub fn insert_returning<P>(
+						pub fn insert_returning<P, __SquealyCoverage>(
 								self,
 								projection: impl ::std::ops::FnOnce(
 										<#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
 								) -> P,
-						) -> <Conn as ::squealy::QueryBuilder>::Insert<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape, ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>, P>
+						) -> <Conn as ::squealy::QueryBuilder>::Insert<'conn, #table_ident <'static, ::squealy::ColumnExpr>, <P as ::squealy::ReturningProjection<'static>>::Shape, ::squealy::HCons<::squealy::InsertRow<<Assignments as ::squealy::WriteAssignments>::Insert>, ::squealy::HNil>, P>
 						where
+								<#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::InsertableTable>::RequiredInsertColumns: ::squealy::RequiredCovered<<Assignments as ::squealy::WriteAssignments>::InsertKeys, __SquealyCoverage>,
 								P: ::squealy::ReturningProjection<'static> + ::squealy::Projectable + ::squealy::ProjectionClass<Class = ::squealy::ScalarProjection> + ::squealy::ReturnableProjection + ::squealy::ProjectionParams<Params = ::squealy::HNil>,
 								<P::Shape as ::squealy::ProjectionShape>::Row: ::squealy::Decode<<Conn as ::squealy::QueryBuilder>::Backend>,
 						{
+								let insert_columns = ::squealy::WriteAssignments::into_insert(self.assignments);
 								let insert_rows = ::squealy::HCons {
-										head: ::squealy::InsertRow::new(self.insert_columns),
+										head: ::squealy::InsertRow::new(insert_columns),
 										tail: ::squealy::HNil,
 								};
 								let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
@@ -1604,9 +1406,9 @@ impl TableStruct {
 										'conn,
 										#table_ident <'static, ::squealy::ColumnExpr>,
 										<P as ::squealy::ReturningProjection<'static>>::Shape,
-										::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>,
+										::squealy::HCons<::squealy::InsertRow<<Assignments as ::squealy::WriteAssignments>::Insert>, ::squealy::HNil>,
 										P,
-								> as ::squealy::InsertQuery<'conn, ::squealy::HCons<::squealy::InsertRow<InsertColumns>, ::squealy::HNil>, P>>::build(
+								> as ::squealy::InsertQuery<'conn, ::squealy::HCons<::squealy::InsertRow<<Assignments as ::squealy::WriteAssignments>::Insert>, ::squealy::HNil>, P>>::build(
 										self.connection,
 										insert_rows,
 										projection,
@@ -1616,30 +1418,31 @@ impl TableStruct {
 						/// `INSERT … ON CONFLICT (<target>) …` — PostgreSQL upsert. `target` selects the
 						/// conflict column(s); follow with `do_nothing()` / `do_update()`. Gated to backends
 						/// that support `ON CONFLICT` (PostgreSQL).
-						pub fn on_conflict<__SquealyTarget>(
+						pub fn on_conflict<__SquealyTarget, __SquealyCoverage>(
 								self,
 								target: impl ::std::ops::FnOnce(
 										<#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>,
 								) -> __SquealyTarget,
-						) -> ::squealy::OnConflict<'conn, Conn, #table_ident <'static, ::squealy::ColumnExpr>, InsertColumns>
+						) -> ::squealy::OnConflict<'conn, Conn, #table_ident <'static, ::squealy::ColumnExpr>, <Assignments as ::squealy::WriteAssignments>::Insert>
 						where
 								Conn: ::squealy::OnConflictQueryBuilder,
 								__SquealyTarget: ::squealy::ConflictTarget,
+								<#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::InsertableTable>::RequiredInsertColumns: ::squealy::RequiredCovered<<Assignments as ::squealy::WriteAssignments>::InsertKeys, __SquealyCoverage>,
 						{
+								let insert_columns = ::squealy::WriteAssignments::into_insert(self.assignments);
 								let table = <#table_ident <'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::exprs(Self::ALIAS);
 								let target = ::squealy::ConflictTarget::column_names(target(table));
-								::squealy::OnConflict::new(self.connection, self.insert_columns, target)
+								::squealy::OnConflict::new(self.connection, insert_columns, target)
 						}
 				}
 
 				// `insert_select` is only available on a *fresh* builder: its rows come entirely from the
 				// source query, so any prior write-builder state would be silently dropped. The whole state
-				// is pinned to its initial form — no insert setters (`InsertColumns = HNil`), no update
-				// setters (`UpdateColumns = HNil`), and no filter (`Filters = HNil`, `MutationUnfiltered`) —
+				// is pinned to its initial form — no assignments and no filter —
 				// so e.g. `.name(..).insert_select(..)` or `.where_(..).insert_select(..)` is a compile
 				// error. No insert-readiness bounds either (values come from the source, not setters).
-				impl<'conn, Conn, #(#insert_state_idents,)* #(#update_state_idents),*>
-						#builder_ident <'conn, Conn, ::squealy::HNil, ::squealy::HNil, ::squealy::HNil, ::squealy::MutationUnfiltered, #(#insert_state_idents,)* #(#update_state_idents),*>
+				impl<'conn, Conn>
+						#builder_ident <'conn, Conn, ::squealy::HNil, ::squealy::HNil, ::squealy::MutationUnfiltered>
 				where
 						Conn: ::squealy::QueryBuilder + 'conn,
 				{
@@ -1781,7 +1584,7 @@ impl Field {
 
 	/// Macro-time nullability, by a literal `Option<…>` token check. Used only for the setter
 	/// value-dispatch and the `is_null` gate; storage/decode/DDL nullability and insert-required-ness
-	/// are resolved at the type level via `ColumnNullability` / `InsertReady` (alias-transparent).
+	/// are resolved at the type level through `RequiredInsertColumns` coverage (alias-transparent).
 	fn nullable(&self) -> bool {
 		strip_option(&self.value_ty).is_some()
 	}

@@ -1,10 +1,10 @@
-error[E0599]: no method named `insert_select` found for struct `__SquealyUserWriteBuilder<'_, TestConnection, HNil, HNil, HNil, squealy::MutationFiltered>` in the current scope
+error[E0599]: no method named `insert_select` found for struct `__SquealyUserWriteBuilder<'_, TestConnection, HNil, HNil, squealy::MutationFiltered>` in the current scope
   --> tests/compile_fail/insert_select_after_filter_rejected.rs:16:42
    |
  4 | #[derive(Clone, Debug, PartialEq, Table)]
    |                                   ----- method `insert_select` not found for this struct
 ...
 16 |     let _query = conn.to::<User>().all().insert_select(
-   |                  ------------------------^^^^^^^^^^^^^ method not found in `__SquealyUserWriteBuilder<'_, TestConnection, HNil, HNil, HNil, squealy::MutationFiltered>`
+   |                  ------------------------^^^^^^^^^^^^^ method not found in `__SquealyUserWriteBuilder<'_, TestConnection, HNil, HNil, squealy::MutationFiltered>`
    |
-   = note: the method was found for `__SquealyUserWriteBuilder<'conn, Conn, HNil, HNil, HNil, squealy::MutationUnfiltered, __SquealyUserNameWriteInsertState, __SquealyUserNameWriteUpdateState>`
+   = note: the method was found for `__SquealyUserWriteBuilder<'conn, Conn>`

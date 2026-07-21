@@ -172,14 +172,6 @@ help: the trait `ColumnNullability` is not implemented for `JsonPayload`
           and $N others
   = note: this error originates in the derive macro `Table` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0277]: this column must be set before `.insert()` (it is not nullable and has no default)
- --> tests/compile_fail/feature_gated/unmapped_column_type_requires_db_type.rs:6:35
-  |
-6 | #[derive(Clone, Debug, PartialEq, Table)]
-  |                                   ^^^^^ the trait `squealy::InsertReady<squealy::NonNullableColumn>` is not implemented for `__SquealyEventIdWriteInsertState`
-  |
-  = note: this error originates in the derive macro `Table` (in Nightly builds, run with -Z macro-backtrace for more info)
-
 error[E0277]: the trait bound `Option<i32>: Decode<Backend>` is not satisfied
  --> tests/compile_fail/feature_gated/unmapped_column_type_requires_db_type.rs:6:35
   |
@@ -219,6 +211,30 @@ note: required by a bound in `squealy::ReturningProjection::Shape`
   |
   |     type Shape: ProjectionShape;
   |                 ^^^^^^^^^^^^^^^ required by this bound in `ReturningProjection::Shape`
+  = note: this error originates in the derive macro `Table` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `HCons<squealy::RequiredCol<EventId, squealy::NonNullableColumn>, HCons<squealy::RequiredCol<EventPayload, _>, HNil>>: squealy::RequiredCovered<<Assignments as squealy::WriteAssignments>::InsertKeys, __SquealyCoverage>` is not satisfied
+ --> tests/compile_fail/feature_gated/unmapped_column_type_requires_db_type.rs:6:35
+  |
+6 | #[derive(Clone, Debug, PartialEq, Table)]
+  |                                   ^^^^^ unsatisfied trait bound
+  |
+  = help: the trait `squealy::RequiredCovered<<Assignments as squealy::WriteAssignments>::InsertKeys, __SquealyCoverage>` is not implemented for `HCons<squealy::RequiredCol<EventId, squealy::NonNullableColumn>, HCons<squealy::RequiredCol<EventPayload, _>, HNil>>`
+help: the following other types implement trait `squealy::RequiredCovered<Set, Indices>`
+ --> $WORKSPACE/crates/squealy-core/src/list.rs
+  |
+  | / impl<Set, K, Tail, Index, RestIndices> RequiredCovered<Set, HCons<Index, RestIndices>>
+  | |     for HCons<RequiredCol<K, crate::NonNullableColumn>, Tail>
+  | | where
+  | |     Set: CoversColumn<K, Index>,
+  | |     Tail: RequiredCovered<Set, RestIndices>,
+  | |____________________________________________^ `HCons<squealy::RequiredCol<K, squealy::NonNullableColumn>, Tail>` implements `squealy::RequiredCovered<Set, HCons<Index, RestIndices>>`
+...
+  | / impl<Set, K, Tail, RestIndices> RequiredCovered<Set, HCons<Omittable, RestIndices>>
+  | |     for HCons<RequiredCol<K, crate::NullableColumn>, Tail>
+  | | where
+  | |     Tail: RequiredCovered<Set, RestIndices>,
+  | |____________________________________________^ `HCons<squealy::RequiredCol<K, squealy::NullableColumn>, Tail>` implements `squealy::RequiredCovered<Set, HCons<squealy::Omittable, RestIndices>>`
   = note: this error originates in the derive macro `Table` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: expected a `FnOnce(__SquealyEventExprsProjection<'static>)` closure, found `impl ::std::ops::FnOnce(<Event<'static, ::squealy::ColumnExpr> as ::squealy::ProjectionShape>::Exprs<'static>) -> P`
@@ -275,17 +291,33 @@ error[E0277]: expected a `FnOnce(__SquealyEventExprsProjection<'static>)` closur
              found a closure with signature `fn(<Event<'static> as ProjectionShape>::Exprs<'static>)`
   = note: this error originates in the derive macro `Table` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0277]: this column must be set before `.insert()` (it is not nullable and has no default)
+error[E0277]: the trait bound `HCons<squealy::RequiredCol<EventId, squealy::NonNullableColumn>, HCons<squealy::RequiredCol<EventPayload, _>, HNil>>: squealy::RequiredCovered<<Assignments as squealy::WriteAssignments>::InsertKeys, __SquealyCoverage>` is not satisfied
  --> tests/compile_fail/feature_gated/unmapped_column_type_requires_db_type.rs:6:35
   |
 6 | #[derive(Clone, Debug, PartialEq, Table)]
-  |                                   ^^^^^ the trait `squealy::InsertReady<squealy::NonNullableColumn>` is not implemented for `__SquealyEventIdWriteInsertState`
+  |                                   ^^^^^ unsatisfied trait bound
   |
-note: required by a bound in `__SquealyEventWriteBuilder<'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, __SquealyEventIdWriteInsertState, __SquealyEventPayloadWriteInsertState, __SquealyEventIdWriteUpdateState, __SquealyEventPayloadWriteUpdateState>`
+  = help: the trait `squealy::RequiredCovered<<Assignments as squealy::WriteAssignments>::InsertKeys, __SquealyCoverage>` is not implemented for `HCons<squealy::RequiredCol<EventId, squealy::NonNullableColumn>, HCons<squealy::RequiredCol<EventPayload, _>, HNil>>`
+help: the following other types implement trait `squealy::RequiredCovered<Set, Indices>`
+ --> $WORKSPACE/crates/squealy-core/src/list.rs
+  |
+  | / impl<Set, K, Tail, Index, RestIndices> RequiredCovered<Set, HCons<Index, RestIndices>>
+  | |     for HCons<RequiredCol<K, crate::NonNullableColumn>, Tail>
+  | | where
+  | |     Set: CoversColumn<K, Index>,
+  | |     Tail: RequiredCovered<Set, RestIndices>,
+  | |____________________________________________^ `HCons<squealy::RequiredCol<K, squealy::NonNullableColumn>, Tail>` implements `squealy::RequiredCovered<Set, HCons<Index, RestIndices>>`
+...
+  | / impl<Set, K, Tail, RestIndices> RequiredCovered<Set, HCons<Omittable, RestIndices>>
+  | |     for HCons<RequiredCol<K, crate::NullableColumn>, Tail>
+  | | where
+  | |     Tail: RequiredCovered<Set, RestIndices>,
+  | |____________________________________________^ `HCons<squealy::RequiredCol<K, squealy::NullableColumn>, Tail>` implements `squealy::RequiredCovered<Set, HCons<squealy::Omittable, RestIndices>>`
+note: required by a bound in `__SquealyEventWriteBuilder::<'conn, Conn, Assignments, Filters, FilterState>::insert`
  --> tests/compile_fail/feature_gated/unmapped_column_type_requires_db_type.rs:6:35
   |
 6 | #[derive(Clone, Debug, PartialEq, Table)]
-  |                                   ^^^^^ required by this bound in `__SquealyEventWriteBuilder<'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, __SquealyEventIdWriteInsertState, __SquealyEventPayloadWriteInsertState, __SquealyEventIdWriteUpdateState, __SquealyEventPayloadWriteUpdateState>`
+  |                                   ^^^^^ required by this bound in `__SquealyEventWriteBuilder::<'conn, Conn, Assignments, Filters, FilterState>::insert`
   = note: this error originates in the derive macro `Table` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: the trait bound `JsonPayload: ColumnNullability` is not satisfied

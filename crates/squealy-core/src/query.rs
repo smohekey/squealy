@@ -64,18 +64,6 @@ pub trait IsNullable {}
 
 impl IsNullable for NullableColumn {}
 
-/// Type-level gate for whether a column's insert-typestate slot may be left unset at `.insert()`.
-/// The `Table` derive generates, per insertable column, `impl<N> InsertReady<N>` for its "set" marker
-/// (always ready) and `impl InsertReady<NullableColumn>` for its "missing" marker (a nullable column
-/// may be omitted). There is deliberately no `InsertReady<NonNullableColumn>` for a missing marker,
-/// so omitting a required (non-null, no-default) column makes `.insert()` unavailable. `N` is the
-/// column's `ColumnNullability::Nullability`.
-#[doc(hidden)]
-#[diagnostic::on_unimplemented(
-	message = "this column must be set before `.insert()` (it is not nullable and has no default)"
-)]
-pub trait InsertReady<N> {}
-
 #[doc(hidden)]
 pub trait IntoInsertColumnValue<K, Value>
 where
@@ -191,6 +179,45 @@ where
 }
 
 impl<K, Value> UpdateAssignment<K, Value>
+where
+	K: ColumnKey,
+	Value: AssignmentValueNode,
+{
+	pub fn new(value: impl Into<Value>) -> Self {
+		Self {
+			value: value.into(),
+			_column: PhantomData,
+		}
+	}
+}
+
+/// Marker used by the generated write builder to include an assignment in an operation.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteEnabled {}
+
+/// Marker used by the generated write builder to omit an assignment from an operation.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteDisabled {}
+
+/// An assignment accumulated by a generated write builder.
+///
+/// `Insert` and `Update` determine which operation-specific list receives the value when a finalizer
+/// consumes the builder. This keeps one assignment-list type parameter while preserving explicitly
+/// insert-only or update-only columns.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct WriteAssignment<K, Value, Insert, Update>
+where
+	K: ColumnKey,
+	Value: AssignmentValueNode,
+{
+	value: Value,
+	_column: PhantomData<(K, Insert, Update)>,
+}
+
+impl<K, Value, Insert, Update> WriteAssignment<K, Value, Insert, Update>
 where
 	K: ColumnKey,
 	Value: AssignmentValueNode,
@@ -1366,6 +1393,143 @@ where
 	{
 		visitor.visit_assignment(self.head.column(), &self.head)?;
 		self.tail.try_visit(visitor)
+	}
+}
+
+/// Marker implemented only for a non-empty update-assignment HList.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+	message = "an update must set at least one updateable column",
+	note = "call a generated column setter before `.update()` or `.update_returning()`"
+)]
+pub trait NonEmptyUpdateAssignments: UpdateAssignments {}
+
+impl<Head, Tail> NonEmptyUpdateAssignments for HCons<Head, Tail>
+where
+	Head: UpdateAssignmentNode,
+	Tail: UpdateAssignments,
+	Head::Params: crate::HAppend<Tail::Params>,
+{
+}
+
+/// Projects a generated builder's operation-aware assignments into insert and update HLists.
+#[doc(hidden)]
+pub trait WriteAssignments: HList + Sized {
+	type Insert: InsertAssignments;
+	type Update: UpdateAssignments;
+	type InsertKeys: HList;
+
+	fn into_insert(self) -> Self::Insert;
+	fn into_update(self) -> Self::Update;
+}
+
+impl WriteAssignments for HNil {
+	type Insert = HNil;
+	type Update = HNil;
+	type InsertKeys = HNil;
+
+	fn into_insert(self) -> Self::Insert {
+		self
+	}
+
+	fn into_update(self) -> Self::Update {
+		self
+	}
+}
+
+impl<K, Value, Tail> WriteAssignments
+	for HCons<WriteAssignment<K, Value, WriteEnabled, WriteEnabled>, Tail>
+where
+	K: ColumnKey,
+	Value: AssignmentValueNode,
+	Tail: WriteAssignments,
+	Value::Params: crate::HAppend<<Tail::Insert as InsertAssignments>::Params>
+		+ crate::HAppend<<Tail::Update as UpdateAssignments>::Params>,
+{
+	type Insert = HCons<InsertAssignment<K, Value>, Tail::Insert>;
+	type Update = HCons<UpdateAssignment<K, Value>, Tail::Update>;
+	type InsertKeys = HCons<K, Tail::InsertKeys>;
+
+	fn into_insert(self) -> Self::Insert {
+		HCons {
+			head: InsertAssignment::new(self.head.value),
+			tail: self.tail.into_insert(),
+		}
+	}
+
+	fn into_update(self) -> Self::Update {
+		HCons {
+			head: UpdateAssignment::new(self.head.value),
+			tail: self.tail.into_update(),
+		}
+	}
+}
+
+impl<K, Value, Tail> WriteAssignments
+	for HCons<WriteAssignment<K, Value, WriteEnabled, WriteDisabled>, Tail>
+where
+	K: ColumnKey,
+	Value: AssignmentValueNode,
+	Tail: WriteAssignments,
+	Value::Params: crate::HAppend<<Tail::Insert as InsertAssignments>::Params>,
+{
+	type Insert = HCons<InsertAssignment<K, Value>, Tail::Insert>;
+	type Update = Tail::Update;
+	type InsertKeys = HCons<K, Tail::InsertKeys>;
+
+	fn into_insert(self) -> Self::Insert {
+		HCons {
+			head: InsertAssignment::new(self.head.value),
+			tail: self.tail.into_insert(),
+		}
+	}
+
+	fn into_update(self) -> Self::Update {
+		self.tail.into_update()
+	}
+}
+
+impl<K, Value, Tail> WriteAssignments
+	for HCons<WriteAssignment<K, Value, WriteDisabled, WriteEnabled>, Tail>
+where
+	K: ColumnKey,
+	Value: AssignmentValueNode,
+	Tail: WriteAssignments,
+	Value::Params: crate::HAppend<<Tail::Update as UpdateAssignments>::Params>,
+{
+	type Insert = Tail::Insert;
+	type Update = HCons<UpdateAssignment<K, Value>, Tail::Update>;
+	type InsertKeys = Tail::InsertKeys;
+
+	fn into_insert(self) -> Self::Insert {
+		self.tail.into_insert()
+	}
+
+	fn into_update(self) -> Self::Update {
+		HCons {
+			head: UpdateAssignment::new(self.head.value),
+			tail: self.tail.into_update(),
+		}
+	}
+}
+
+impl<K, Value, Tail> WriteAssignments
+	for HCons<WriteAssignment<K, Value, WriteDisabled, WriteDisabled>, Tail>
+where
+	K: ColumnKey,
+	Value: AssignmentValueNode,
+	Tail: WriteAssignments,
+{
+	type Insert = Tail::Insert;
+	type Update = Tail::Update;
+	type InsertKeys = Tail::InsertKeys;
+
+	fn into_insert(self) -> Self::Insert {
+		self.tail.into_insert()
+	}
+
+	fn into_update(self) -> Self::Update {
+		self.tail.into_update()
 	}
 }
 

@@ -13,9 +13,9 @@ help: the trait `NonAggregatePredicate` is implemented for `squealy::ComparePred
    | |     Right: NonAggregateAst,
    | |___________________________^
    = note: required for `squealy::ComparePredicateAst<squealy::AggregateExprAst<squealy::ColumnExprAst<CounterId>>, squealy::LiteralExprAst<i64>>` to implement `NonAggregatePredicate`
-note: required by a bound in `__SquealyCounterWriteBuilder::<'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, __SquealyCounterTotalWriteInsertState, __SquealyCounterTotalWriteUpdateState>::where_`
+note: required by a bound in `__SquealyCounterWriteBuilder::<'conn, Conn, Assignments, Filters, FilterState>::where_`
   --> tests/compile_fail/aggregate_rejected_in_generated_where.rs:4:35
    |
  4 | #[derive(Clone, Debug, PartialEq, Table)]
-   |                                   ^^^^^ required by this bound in `__SquealyCounterWriteBuilder::<'conn, Conn, InsertColumns, UpdateColumns, Filters, FilterState, __SquealyCounterTotalWriteInsertState, __SquealyCounterTotalWriteUpdateState>::where_`
+   |                                   ^^^^^ required by this bound in `__SquealyCounterWriteBuilder::<'conn, Conn, Assignments, Filters, FilterState>::where_`
    = note: this error originates in the derive macro `Table` (in Nightly builds, run with -Z macro-backtrace for more info)

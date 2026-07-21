@@ -116,15 +116,11 @@ impl<T, Head, Tail, Index> Contains<T, There<Index>> for HCons<Head, Tail> where
 {
 }
 
-/// The target column list `Set` (an `HList` of column kinds) contains the required column `T` (position
-/// witnessed by `Index`). A parallel of [`Contains`] dedicated to `INSERT … SELECT` required-column
-/// coverage so its unsatisfied-bound message is phrased for that case — rustc surfaces the deepest
-/// failing trait, so the message must live here on the leaf rather than on the [`RequiredCovered`]
-/// wrapper.
+/// The supplied insert-column set `Set` contains required column `T` (at `Index`).
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-	message = "`INSERT … SELECT` must list every required (non-null, no-default) column of the target table",
-	note = "add the missing required column(s) to the `INSERT … SELECT` target column list"
+	message = "`INSERT` must supply every required (non-null, no-default) column of the target table",
+	note = "set the missing column on the write builder, or add it to the `INSERT … SELECT` target list"
 )]
 pub trait CoversColumn<T, Index> {}
 
@@ -140,7 +136,7 @@ impl<T, Head, Tail, Index> CoversColumn<T, There<Index>> for HCons<Head, Tail> w
 /// `Table` derive lists one per insertable, no-default column, resolving `N` via `ColumnNullability`
 /// (the same type-level path as the setter-based insert's readiness bounds — so a nullable column
 /// declared through a type alias is still recognized as omittable). [`RequiredCovered`] then requires
-/// only the non-null ones appear in an `INSERT … SELECT` target.
+/// only the non-null ones appear in the supplied insert-column set.
 #[doc(hidden)]
 pub struct RequiredCol<K, N>(core::marker::PhantomData<(K, N)>);
 
@@ -150,8 +146,8 @@ pub struct RequiredCol<K, N>(core::marker::PhantomData<(K, N)>);
 pub struct Omittable;
 
 /// Every **non-null** required column in `Self` (an `HList` of [`RequiredCol`]) appears in the target
-/// column list `Set`; nullable required columns are omittable and skipped. Mirrors the setter-based
-/// insert's type-level nullability. `Indices` are the per-element witnesses (a membership index for a
+/// column set `Set`; nullable required columns are omittable and skipped. `Indices` are the
+/// per-element witnesses (a membership index for a
 /// covered non-null column, [`Omittable`] for a skipped nullable one), inferred by the compiler.
 #[doc(hidden)]
 pub trait RequiredCovered<Set, Indices> {}
