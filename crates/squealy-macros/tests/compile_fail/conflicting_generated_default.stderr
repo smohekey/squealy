@@ -1,0 +1,5 @@
+error: column `label` cannot combine `generated` with a default
+ --> tests/compile_fail/conflicting_generated_default.rs:8:5
+  |
+8 |     label: C::Type<'scope, String>,
+  |     ^^^^^

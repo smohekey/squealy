@@ -19,6 +19,7 @@ chrono = ["dep:chrono"]
 
 [dependencies]
 futures-core.workspace = true
+squealy-macros.workspace = true
 uuid = { version = "1", optional = true }
 bytes = { version = "1", optional = true }
 time = { version = "0.3", optional = true, default-features = false }

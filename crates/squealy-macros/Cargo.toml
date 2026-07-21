@@ -15,7 +15,7 @@ proc-macro = true
 [dependencies]
 proc-macro2 = "1.0"
 quote = "1.0"
-squealy-core.workspace = true
+sqlparser = "=0.62.0"
 
 [dev-dependencies]
 squealy.workspace = true

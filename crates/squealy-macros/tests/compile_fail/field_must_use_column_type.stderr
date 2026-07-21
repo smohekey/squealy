@@ -1,0 +1,7 @@
+error: Table fields must use `C::Type<'scope, Value>`
+ --> tests/compile_fail/field_must_use_column_type.rs:3:10
+  |
+3 | #[derive(Table)]
+  |          ^^^^^
+  |
+  = note: this error originates in the derive macro `Table` (in Nightly builds, run with -Z macro-backtrace for more info)

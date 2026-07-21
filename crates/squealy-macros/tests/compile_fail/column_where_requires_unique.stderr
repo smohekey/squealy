@@ -1,0 +1,5 @@
+error: column `slug` has a `where = ...` predicate but is not `unique`; a partial predicate is only meaningful on a unique column
+ --> tests/compile_fail/column_where_requires_unique.rs:8:5
+  |
+8 |     slug: C::Type<'scope, String>,
+  |     ^^^^

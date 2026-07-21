@@ -1,0 +1,7 @@
+error: unsupported ColumnType attribute `foo`
+ --> tests/compile_fail/column_type_rejects_unsupported_attribute.rs:3:10
+  |
+3 | #[derive(ColumnType)]
+  |          ^^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `ColumnType` (in Nightly builds, run with -Z macro-backtrace for more info)
