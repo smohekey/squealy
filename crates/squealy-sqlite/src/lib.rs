@@ -60,6 +60,45 @@ impl SqliteConnection {
 	pub fn new(conn: tokio_rusqlite::Connection) -> Self {
 		Self { conn }
 	}
+
+	/// Executes one or more semicolon-separated SQL statements.
+	///
+	/// This delegates directly to [`rusqlite::Connection::execute_batch`][execute-batch]. It does not
+	/// add an implicit transaction; callers that need atomicity must include transaction control in
+	/// `sql` or use [`ConnectionWithTransaction`].
+	///
+	/// [execute-batch]: tokio_rusqlite::rusqlite::Connection::execute_batch
+	pub async fn execute_batch(&self, sql: &str) -> Result<(), SqliteError> {
+		let sql = sql.to_owned();
+		self
+			.conn
+			.call(move |conn| conn.execute_batch(&sql))
+			.await
+			.map_err(SqliteError::Query)
+	}
+
+	/// Lists application table names in SQLite's database-wide namespace.
+	///
+	/// SQLite's internal `sqlite_*` tables and legacy Squealy bookkeeping tables named
+	/// `__squealy_*` are excluded. The returned names are sorted by their UTF-8 bytes so the result is
+	/// stable regardless of insertion order or database collation settings.
+	pub async fn list_user_tables(&self) -> Result<Vec<String>, SqliteError> {
+		let mut tables = self
+			.conn
+			.call(|conn| {
+				let mut statement = conn.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'")?;
+				let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+				rows.collect::<Result<Vec<_>, _>>()
+			})
+			.await
+			.map_err(SqliteError::Query)?;
+
+		tables.retain(|name| {
+			!name.as_bytes().starts_with(b"sqlite_") && !name.as_bytes().starts_with(b"__squealy_")
+		});
+		tables.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+		Ok(tables)
+	}
 }
 
 impl std::fmt::Debug for SqliteConnection {
@@ -171,7 +210,7 @@ async fn finish_transaction<T>(
 mod tests {
 	use squealy::Connect;
 
-	use super::Sqlite;
+	use super::{Sqlite, SqliteError};
 
 	#[tokio::test]
 	async fn connect_enables_foreign_keys() {
@@ -182,5 +221,73 @@ mod tests {
 			.await
 			.expect("read pragma");
 		assert_eq!(enabled, 1);
+	}
+
+	#[tokio::test]
+	async fn execute_batch_runs_all_statements() {
+		let connection = Sqlite.connect(":memory:").await.expect("connect");
+		connection
+			.execute_batch(
+				"CREATE TABLE widgets (id INTEGER PRIMARY KEY);\n\
+				 INSERT INTO widgets (id) VALUES (1);\n\
+				 INSERT INTO widgets (id) VALUES (2);",
+			)
+			.await
+			.expect("execute batch");
+
+		let count = connection
+			.conn
+			.call(|conn| {
+				conn.query_row("SELECT count(*) FROM widgets", [], |row| {
+					row.get::<_, i64>(0)
+				})
+			})
+			.await
+			.expect("count rows");
+		assert_eq!(count, 2);
+	}
+
+	#[tokio::test]
+	async fn execute_batch_propagates_driver_errors() {
+		let connection = Sqlite.connect(":memory:").await.expect("connect");
+		let error = connection
+			.execute_batch("CREATE TABL broken")
+			.await
+			.expect_err("invalid SQL must fail");
+		assert!(matches!(error, SqliteError::Query(_)));
+	}
+
+	#[tokio::test]
+	async fn list_user_tables_is_empty_for_a_fresh_database() {
+		let connection = Sqlite.connect(":memory:").await.expect("connect");
+		assert_eq!(
+			connection.list_user_tables().await.expect("list tables"),
+			Vec::<String>::new()
+		);
+	}
+
+	#[tokio::test]
+	async fn list_user_tables_filters_internal_tables_and_sorts_by_bytes() {
+		let connection = Sqlite.connect(":memory:").await.expect("connect");
+		connection
+			.execute_batch(
+				"CREATE TABLE zed (id INTEGER);\n\
+				 CREATE TABLE Alpha (id INTEGER);\n\
+				 CREATE TABLE beta (id INTEGER);\n\
+				 CREATE TABLE __squealy_metadata (name TEXT);\n\
+				 CREATE TABLE identities (id INTEGER PRIMARY KEY AUTOINCREMENT);",
+			)
+			.await
+			.expect("create tables");
+
+		assert_eq!(
+			connection.list_user_tables().await.expect("list tables"),
+			vec![
+				"Alpha".to_owned(),
+				"beta".to_owned(),
+				"identities".to_owned(),
+				"zed".to_owned(),
+			]
+		);
 	}
 }
