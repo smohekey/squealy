@@ -98,6 +98,24 @@ The facade and backend crates default to no optional value-type features.
 | `uuid` | `uuid::Uuid` | facade, PostgreSQL, MySQL |
 | `bytes` | `bytes::Bytes` | facade, PostgreSQL, MySQL |
 | `systemtime` | `std::time::SystemTime` | facade, PostgreSQL, MySQL, test backend |
+
+## SQLite create DDL (opt in)
+
+The optional `squealy-ddl-sqlite` crate renders deterministic, create-from-scratch SQLite DDL from
+`DatabaseModel`:
+
+```rust,no_run
+let model = squealy::DatabaseModel::from_database::<ApplicationDatabase>();
+let sql = squealy_ddl_sqlite::render_create_sql(&model)?;
+connection.execute_batch(&sql).await?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The renderer is deliberately separate from the query-only `squealy` facade and does not provide
+migrations, schema diffing, introspection, or history tables. `SqliteConnection::execute_batch` keeps
+the driver's batch semantics without adding a transaction, while `list_user_tables` returns stable
+binary-sorted application table names. Rendering is byte-identical for a given renderer version;
+persisted fingerprints should include that version because formatting may change in a future release.
 | `time` | `time::OffsetDateTime` | facade, PostgreSQL, MySQL |
 | `chrono` | `chrono::DateTime<Utc>` | facade, PostgreSQL, MySQL |
 | `serde` | backend JSON wrapper for serde values | PostgreSQL, MySQL |

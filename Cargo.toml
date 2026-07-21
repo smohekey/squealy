@@ -2,6 +2,7 @@
 members = [
     "crates/squealy",
     "crates/squealy-core",
+	"crates/squealy-ddl-sqlite",
     "crates/squealy-macros",
     "crates/squealy-mysql",
     "crates/squealy-postgresql",
@@ -23,6 +24,7 @@ categories = ["database"]
 [workspace.dependencies]
 squealy = { version = "0.1.0", path = "crates/squealy" }
 squealy-core = { version = "0.1.0", path = "crates/squealy-core" }
+squealy-ddl-sqlite = { version = "0.1.0", path = "crates/squealy-ddl-sqlite" }
 squealy-macros = { version = "0.1.0", path = "crates/squealy-macros" }
 squealy-mysql = { version = "0.1.0", path = "crates/squealy-mysql" }
 squealy-postgresql = { version = "0.1.0", path = "crates/squealy-postgresql" }

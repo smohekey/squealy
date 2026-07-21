@@ -1511,6 +1511,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "squealy-ddl-sqlite"
+version = "0.1.0"
+dependencies = [
+ "squealy",
+ "squealy-core",
+ "squealy-sqlite",
+ "tokio",
+ "tokio-rusqlite",
+]
+
+[[package]]
 name = "squealy-macros"
 version = "0.1.0"
 dependencies = [

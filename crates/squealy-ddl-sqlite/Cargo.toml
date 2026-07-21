@@ -1,0 +1,22 @@
+[package]
+name = "squealy-ddl-sqlite"
+description = "Deterministic create-from-scratch SQLite DDL renderer for Squealy models"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+squealy-core.workspace = true
+
+[dev-dependencies]
+squealy.workspace = true
+squealy-sqlite.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio-rusqlite = { version = "0.7", features = ["bundled"] }
+
+[lints]
+workspace = true
