@@ -35,6 +35,6 @@ impl<'scope, C: ColumnMode> CteDefinition for ActiveUser<'scope, C> {
 }
 
 fn main() {
-    // A CTE has no view body, so it cannot be published as a view.
+	// A CTE has no persistent view body, so it cannot be used as a view definition.
     let _ = view_definition_model::<ActiveUser>();
 }

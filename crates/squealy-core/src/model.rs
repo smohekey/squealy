@@ -1,14 +1,9 @@
 //! Owned, backend-neutral schema model.
 //!
 //! The compile-time `#[derive(Table/Schema/Database)]` types are the source of truth.
-//! [`DatabaseModel::from_database`] materializes them into an owned model that DDL-management
-//! operations (render create-from-scratch, package export/import, future diff) all consume. The same
-//! model can later be produced from a package or from live-database introspection, so operations stay
-//! source-agnostic.
-//!
-//! These types live in the core crate (rather than the `squealy-model` engine) so that backends can
-//! implement [`SchemaBackend`](crate::SchemaBackend) against them without depending on the engine.
-//! See `docs/ddl-management.md` for the design.
+//! [`DatabaseModel::from_database`] materializes their tables, constraints, indexes, and views into
+//! an owned model. The complete public model also represents metadata kinds that derives do not
+//! currently author, including enums, sequences, domains, exclusions, and materialized views.
 
 use crate::{
 	CheckModel, ColumnModel, Constraint, DefaultValue, ForeignKeyAction, ForeignKeyModel,
@@ -109,8 +104,7 @@ fn schema_from_dyn(schema: &(dyn DatabaseSchema + Sync)) -> SchemaModel {
 		tables: schema.tables().map(table_from_dyn).collect(),
 		views: schema.views().map(view_from_dyn).collect(),
 		enums: Vec::new(),
-		// Sequences and domains are not authored through the derive macros (they are introspected /
-		// KDL-authored), so a compile-time schema declares none.
+		// Sequences and domains are represented by the owned model but are not authored by derives.
 		sequences: Vec::new(),
 		domains: Vec::new(),
 	}
@@ -119,13 +113,9 @@ fn schema_from_dyn(schema: &(dyn DatabaseSchema + Sync)) -> SchemaModel {
 fn view_from_dyn(view: &(dyn crate::ViewDef + Sync)) -> ViewModel {
 	let columns = view.columns();
 	let mut query = view.definition_model();
-	// The view's declared column list authoritatively names the outputs: the renderer emits it (`CREATE
-	// VIEW v (id, name) AS …`) and suppresses each projection's own `AS` alias, so the builder-internal
-	// projection names (`t0_id`) never reach the SQL. Set the top-level projection output names to the
-	// declared column names positionally, so the authored body matches the form introspection
-	// reconstructs — a deparse (`pg_get_viewdef`) carries no column list, so its projection is named by
-	// the view's output columns — and a published view re-plans to empty instead of churning. Lengths
-	// match by construction (the `Row` check ties each projected column to one declared output).
+	// The declared column list authoritatively names the outputs. Replace builder-internal projection
+	// names (`t0_id`) positionally so rendering the typed view body uses its public column names.
+	// Lengths match by construction: the `Row` check ties each projection to one declared output.
 	for (item, column) in query.projection.iter_mut().zip(&columns) {
 		item.output_name = column.name.clone();
 	}
@@ -133,19 +123,16 @@ fn view_from_dyn(view: &(dyn crate::ViewDef + Sync)) -> ViewModel {
 		name: view.name().to_owned(),
 		comment: None,
 		columns,
-		// The typed view builder only produces a single `SELECT`; set-op/CTE view bodies are
-		// reconstructed on introspection, not authored through the builder (Track F, a follow-up).
+		// The typed view builder currently authors a single `SELECT` body.
 		query: crate::ViewBody::Select(Box::new(query)),
-		// The typed view builder produces only regular views; a materialized view is modeled through
-		// introspection / a package, not the derive builder.
+		// The derive authors regular views; the owned type still represents materialized views.
 		materialized: false,
 	}
 }
 
-/// Builds the neutral [`TableModel`] for a query-builder [`Table`]. This is the canonical
-/// `&dyn Table` → model conversion used when lowering a whole database; a backend can reuse it so its
-/// single-table create path (`Backend::write_table`) renders identically to its model-based
-/// create-from-scratch path.
+/// Builds the neutral [`TableModel`] for a query-builder [`Table`].
+///
+/// This is the canonical `&dyn Table` to owned-metadata conversion used when lowering a database.
 pub fn table_from_dyn(table: &(dyn Table + Sync)) -> TableModel {
 	let name = table.name().to_owned();
 	let columns = table.columns();
@@ -301,8 +288,7 @@ fn column_from_dyn(column: &dyn Column) -> ColumnModel {
 			expression: None,
 			storage: GeneratedStorage::Unknown,
 		}),
-		// The derive macro has no `ON UPDATE` attribute; the value arrives only from introspection or a
-		// KDL package.
+		// The derive macro has no `ON UPDATE` attribute.
 		on_update: None,
 	}
 }
@@ -368,8 +354,7 @@ fn partial_unique_index(
 	}
 }
 
-// Deterministic constraint/index names. These double as the identity the future diff uses to match
-// constraints across versions, so the conventions are stable and documented.
+// Deterministic constraint/index names keep exported metadata stable across builds.
 
 fn join_columns(columns: &[&str]) -> String {
 	columns.join("_")

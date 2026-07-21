@@ -7,21 +7,21 @@
 //! concrete [`Backend`]. So this module defines a render-only [`ModelBackend`]/[`ModelConn`] whose
 //! `Encode` impls format SQL literals, and a [`ModelSink`] + [`IrBuilder`] that walk the typed AST's
 //! structural visitors into an [`ExprNode`] tree. None of this ever executes — it exists purely to
-//! turn a typed definition into the neutral model that backends render `CREATE VIEW` from.
+//! turn a typed definition into the neutral model used for views and CTEs.
 
 use std::borrow::Cow;
 use std::io;
 use std::marker::PhantomData;
 
 use crate::{
-	AggregateFunc, ArithmeticOp, Backend, CaseArm, ColumnRef, CompareOp, DateField, DdlPredicateAst,
-	Decode, Encode, Expr, ExprKind, ExprNode, ExprVisitor, FrameSpec, InsertableTable, JoinItem,
-	JoinKind, LogicalOp, Order, OrderDirection, OrderItem, ParamWriter, Predicate,
-	PredicateAstVisitor, PredicateKind, Projectable, ProjectionItem, ProjectionShape,
-	ProjectionVisitor, QueryBuilder, RenderAst, RenderCaseArms, RenderCoalesceArgs,
-	RenderPredicateAst, RenderProjectable, RenderSelectAst, RenderSimpleCaseArms, RenderSubquery,
-	RowReader, ScalarFunc, SelectAst, SelectSink, Selected, SourceAlias, SourceItem, SourceRef,
-	SqlType, TableProjection, UnaryStringFunc, ViewQueryModel, WindowFunc, WindowOrderTerm,
+	AggregateFunc, ArithmeticOp, Backend, CaseArm, ColumnRef, CompareOp, DateField, Decode, Encode,
+	Expr, ExprKind, ExprNode, ExprVisitor, FrameSpec, InsertableTable, JoinItem, JoinKind, LogicalOp,
+	Order, OrderDirection, OrderItem, ParamWriter, Predicate, PredicateAstVisitor, PredicateKind,
+	Projectable, ProjectionItem, ProjectionShape, ProjectionVisitor, QueryBuilder, RenderAst,
+	RenderCaseArms, RenderCoalesceArgs, RenderPredicateAst, RenderProjectable, RenderSelectAst,
+	RenderSimpleCaseArms, RenderSubquery, RowReader, ScalarFunc, SchemaPredicateAst, SelectAst,
+	SelectSink, Selected, SourceAlias, SourceItem, SourceRef, SqlType, TableProjection,
+	UnaryStringFunc, ViewQueryModel, WindowFunc, WindowOrderTerm,
 };
 
 // ---------------------------------------------------------------------------
@@ -830,19 +830,16 @@ where
 	Ok(builder.finish())
 }
 
-/// Lowers a `where = |row| ...` partial-index predicate closure's result into a neutral [`ExprNode`],
-/// the structural counterpart to [`render_ddl_predicate`](crate::render_ddl_predicate). Used by the
-/// `Table` derive to populate [`IndexModel::predicate`](squealy_ir::IndexModel::predicate) so each
-/// backend renders the partial-index `WHERE` in its own dialect.
+/// Lowers a `where = |row| ...` partial-index predicate closure's result into a neutral [`ExprNode`].
+/// Used by the `Table` derive to populate [`IndexModel::predicate`](crate::IndexModel::predicate).
 ///
-/// The [`DdlPredicateAst`](crate::DdlPredicateAst) bound restricts a DDL predicate to the same
-/// single-table, subquery-free subset [`render_ddl_predicate`] accepts, so every column names the
-/// index's own table: columns are emitted as unqualified [`ExprNode::BareColumn`] (as a `CHECK` /
-/// index-expression term is), not the alias-qualified form a view body uses.
-pub fn build_ddl_predicate<K, Ast>(predicate: &Predicate<'_, K, Ast>) -> ExprNode
+/// The [`SchemaPredicateAst`] bound restricts metadata predicates to a single-table, parameter-free
+/// subset. Columns become unqualified [`ExprNode::BareColumn`] nodes rather than the alias-qualified
+/// form a view body uses.
+pub fn build_schema_predicate<K, Ast>(predicate: &Predicate<'_, K, Ast>) -> ExprNode
 where
 	K: PredicateKind,
-	Ast: DdlPredicateAst + RenderPredicateAst<ModelBackend>,
+	Ast: SchemaPredicateAst + RenderPredicateAst<ModelBackend>,
 {
 	let mut builder = IrBuilder {
 		bare_columns: true,
@@ -889,8 +886,7 @@ fn and_into(slot: &mut Option<ExprNode>, node: ExprNode) {
 }
 
 /// Builds a named source item for a table/view relation. The typed view builder can only reference
-/// named relations, so it always produces [`SourceItem::Named`]; derived-table view bodies are
-/// reconstructed on introspection, not authored through this builder (Track F, a separate feature).
+/// named relations, so it always produces [`SourceItem::Named`].
 fn source_ref<S>(alias: SourceAlias) -> SourceItem
 where
 	S: TableProjection,
@@ -1159,7 +1155,8 @@ pub trait ViewSelect {
 	fn cte_dependencies(&self) -> Vec<&'static dyn crate::CteDef>;
 
 	/// Pair this (anchor) body with a recursive term of the same row type to form a recursive CTE body
-	/// (`<anchor> UNION [ALL] <recursive>`). Used in [`RecursiveCteDefinition::definition`].
+	/// (`<anchor> UNION [ALL] <recursive>`). Used in
+	/// [`RecursiveCteDefinition::definition`](crate::RecursiveCteDefinition::definition).
 	fn union_with<Recursive>(self, recursive: Recursive) -> crate::RecursiveUnion<Self, Recursive>
 	where
 		Self: Sized,

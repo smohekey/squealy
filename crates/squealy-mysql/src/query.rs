@@ -1,8 +1,6 @@
 //! MySQL query runtime.
 //!
-//! This module is the query-execution counterpart to the schema management in [`crate`]: the value
-//! codec (decoding result columns into Rust values and encoding bound parameters into the driver's
-//! value type) and the [`Backend`] impl. The executable query objects build on top of it.
+//! This module contains the value codec, backend implementation, and executable query objects.
 
 use std::future::Future;
 use std::marker::PhantomData;
@@ -36,8 +34,6 @@ pub struct MysqlRowReader<'row> {
 }
 
 impl<'row> MysqlRowReader<'row> {
-	// Wired up by the executable query impls (the next step), which decode each result row.
-	#[allow(dead_code)]
 	pub(crate) fn new(row: &'row mut mysql_async::Row) -> Self {
 		Self { row, index: 0 }
 	}
@@ -350,10 +346,8 @@ impl Decode<Mysql> for uuid::Uuid {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Json<T>(pub T);
 
-// Maps to `ColumnType::Json` (not `Jsonb`): MySQL has a single `JSON` type, which the introspector
-// reads back as `SqlType::Json`, so the desired model settles against a published schema instead of
-// churning a `Jsonb` vs `Json` type change. (The PostgreSQL backend uses `Jsonb` for its own wrapper,
-// where `jsonb` is the distinct, preferred physical type.)
+// Maps to `ColumnType::Json` (not `Jsonb`) because MySQL has a single `JSON` type. The PostgreSQL
+// backend uses `Jsonb` for its wrapper, where `jsonb` is a distinct physical type.
 #[cfg(feature = "serde")]
 impl<T> squealy::HasColumnType for Json<T> {
 	const COLUMN_TYPE: squealy::ColumnType = squealy::ColumnType::Json;

@@ -43,8 +43,8 @@ pub fn derive_table(input: TokenStream) -> TokenStream {
 ///
 /// The wrapper uses its inner field's column type, bind conversion, row decoding,
 /// and literal expression behavior. Add `#[column_type(db_type = "...")]` when the
-/// wrapper should keep the transparent Rust conversions but render a raw
-/// backend-specific DDL type.
+/// wrapper should keep the transparent Rust conversions but record a raw
+/// backend-specific SQL type.
 #[proc_macro_derive(ColumnType, attributes(column_type))]
 pub fn derive_column_type(input: TokenStream) -> TokenStream {
 	column_type::derive(input)
@@ -57,15 +57,14 @@ pub fn derive_schema(input: TokenStream) -> TokenStream {
 	schema::derive(input)
 }
 
-/// Derives [`SchemaView`](squealy::SchemaView) for a view-mode struct: its declared output columns,
+/// Derives `SchemaView` for a view-mode struct: its declared output columns,
 /// name, and namespace. The view body is supplied separately via `ViewDefinition::definition`.
 #[proc_macro_derive(View, attributes(column, column_name, schema))]
 pub fn derive_view(input: TokenStream) -> TokenStream {
 	view::derive(input)
 }
 
-/// Derives squealy database metadata from fields containing schema types.
-/// Derives [`SchemaCte`](squealy::SchemaCte) for a CTE struct: its declared output columns, name, and
+/// Derives `SchemaCte` for a CTE struct: its declared output columns, name, and
 /// the read-only queryable projection. The CTE body is supplied separately via
 /// `CteDefinition::definition`, and the CTE is inlined as a `WITH` clause when referenced.
 #[proc_macro_derive(CTE, attributes(column, column_name, schema))]
@@ -80,6 +79,7 @@ pub fn derive_recursive_cte(input: TokenStream) -> TokenStream {
 	cte::derive_recursive(input)
 }
 
+/// Derives squealy database metadata from fields containing schema types.
 #[proc_macro_derive(Database)]
 pub fn derive_database(input: TokenStream) -> TokenStream {
 	database::derive(input)

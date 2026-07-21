@@ -5726,182 +5726,65 @@ where
 	}
 }
 
-/// Renders an expression operand to a self-contained ANSI SQL fragment for use inside a DDL
-/// partial-index predicate (`CREATE UNIQUE INDEX ... WHERE <predicate>`).
-///
-/// Unlike [`RenderAst`], this path is **backend-independent** and carries no bind parameters:
-/// columns render as bare, double-quoted identifiers with no source alias, and a value literal
-/// renders *inline* (no `$n` placeholder) via [`DdlSqlLiteral`]. It is implemented for columns and
-/// for literals of the scalar value types; operands whose SQL form is backend-specific (a runtime
-/// bind param, an arithmetic sub-expression, or a literal of a temporal/uuid type) do not satisfy
-/// the bound and fail to compile.
+/// Marker for expression operands supported in Rust-authored schema predicates.
 #[doc(hidden)]
-pub trait DdlExprAst {
-	fn render_ddl(&self, out: &mut String);
-}
+pub trait SchemaPredicateExprAst {}
 
-/// Renders a predicate node to a self-contained ANSI SQL string for a DDL partial-index
-/// predicate. See [`DdlExprAst`] for the backend-independent contract.
+/// Marker for the single-table, parameter-free predicate subset supported by schema metadata.
 #[doc(hidden)]
-pub trait DdlPredicateAst {
-	fn render_ddl(&self, out: &mut String);
-}
+pub trait SchemaPredicateAst {}
 
-/// A Rust value that renders as an inline ANSI SQL literal inside a DDL partial-index predicate
-/// (e.g. `... WHERE "status" = 0`). Implemented for the scalar value types; types whose SQL
-/// literal form is backend-specific or ambiguous (timestamps, `uuid`) are intentionally omitted, so
-/// comparing such a column to a literal in a partial-index predicate is a compile error rather than
-/// producing dialect-dependent or malformed SQL.
+/// Marker for Rust values with an unambiguous structural literal in schema predicates.
 #[doc(hidden)]
-pub trait DdlSqlLiteral {
-	fn render_sql_literal(&self, out: &mut String);
-}
+pub trait SchemaPredicateLiteral {}
 
-macro_rules! impl_ddl_sql_literal_display {
+macro_rules! impl_schema_predicate_literal {
     ($($ty:ty),* $(,)?) => {
-        $(impl DdlSqlLiteral for $ty {
-            fn render_sql_literal(&self, out: &mut String) {
-                use ::std::fmt::Write as _;
-                // Integer/float `Display` is already a valid SQL numeric literal.
-                let _ = write!(out, "{self}");
-            }
-        })*
+        $(impl SchemaPredicateLiteral for $ty {})*
     };
 }
 
-impl_ddl_sql_literal_display!(i8, i16, i32, i64, i128, isize);
-impl_ddl_sql_literal_display!(u8, u16, u32, u64, u128, usize);
-impl_ddl_sql_literal_display!(f32, f64);
+impl_schema_predicate_literal!(i8, i16, i32, i64, i128, isize);
+impl_schema_predicate_literal!(u8, u16, u32, u64, u128, usize);
+impl_schema_predicate_literal!(f32, f64, bool, String);
 
-impl DdlSqlLiteral for bool {
-	fn render_sql_literal(&self, out: &mut String) {
-		out.push_str(if *self { "TRUE" } else { "FALSE" });
-	}
-}
+impl<K> SchemaPredicateExprAst for ColumnExprAst<K> {}
 
-impl DdlSqlLiteral for String {
-	fn render_sql_literal(&self, out: &mut String) {
-		// Standard SQL single-quoted string with embedded quotes doubled, matching the backend
-		// text-literal quoting. Values originate from compile-time predicates, so this is
-		// correctness (a slug like `o'brien`), not injection defense.
-		out.push('\'');
-		for ch in self.chars() {
-			if ch == '\'' {
-				out.push('\'');
-			}
-			out.push(ch);
-		}
-		out.push('\'');
-	}
-}
-
-impl<K> DdlExprAst for ColumnExprAst<K> {
-	fn render_ddl(&self, out: &mut String) {
-		out.push('"');
-		for ch in self.column.chars() {
-			if ch == '"' {
-				out.push('"');
-			}
-			out.push(ch);
-		}
-		out.push('"');
-	}
-}
-
-impl<K> DdlExprAst for LiteralExprAst<K>
+impl<K> SchemaPredicateExprAst for LiteralExprAst<K>
 where
 	K: ExprKind,
-	K::Value: DdlSqlLiteral,
+	K::Value: SchemaPredicateLiteral,
 {
-	fn render_ddl(&self, out: &mut String) {
-		self.value.render_sql_literal(out);
-	}
 }
 
-impl<Operand> DdlPredicateAst for NullCheckPredicateAst<Operand>
-where
-	Operand: DdlExprAst,
+impl<Operand> SchemaPredicateAst for NullCheckPredicateAst<Operand> where
+	Operand: SchemaPredicateExprAst
 {
-	fn render_ddl(&self, out: &mut String) {
-		out.push('(');
-		self.operand.render_ddl(out);
-		out.push_str(if self.negated {
-			" IS NOT NULL)"
-		} else {
-			" IS NULL)"
-		});
-	}
 }
 
-impl<Left, Right> DdlPredicateAst for ComparePredicateAst<Left, Right>
+impl<Left, Right> SchemaPredicateAst for ComparePredicateAst<Left, Right>
 where
-	Left: DdlExprAst,
-	Right: DdlExprAst,
+	Left: SchemaPredicateExprAst,
+	Right: SchemaPredicateExprAst,
 {
-	fn render_ddl(&self, out: &mut String) {
-		out.push('(');
-		self.left.render_ddl(out);
-		out.push(' ');
-		out.push_str(crate::render::render_compare_op(self.op));
-		out.push(' ');
-		self.right.render_ddl(out);
-		out.push(')');
-	}
 }
 
-impl<Left, Right> DdlPredicateAst for AndPredicateAst<Left, Right>
+impl<Left, Right> SchemaPredicateAst for AndPredicateAst<Left, Right>
 where
-	Left: DdlPredicateAst,
-	Right: DdlPredicateAst,
+	Left: SchemaPredicateAst,
+	Right: SchemaPredicateAst,
 {
-	fn render_ddl(&self, out: &mut String) {
-		out.push('(');
-		self.left.render_ddl(out);
-		out.push_str(" AND ");
-		self.right.render_ddl(out);
-		out.push(')');
-	}
 }
 
-impl<Left, Right> DdlPredicateAst for OrPredicateAst<Left, Right>
+impl<Left, Right> SchemaPredicateAst for OrPredicateAst<Left, Right>
 where
-	Left: DdlPredicateAst,
-	Right: DdlPredicateAst,
+	Left: SchemaPredicateAst,
+	Right: SchemaPredicateAst,
 {
-	fn render_ddl(&self, out: &mut String) {
-		out.push('(');
-		self.left.render_ddl(out);
-		out.push_str(" OR ");
-		self.right.render_ddl(out);
-		out.push(')');
-	}
 }
 
-impl<Predicate> DdlPredicateAst for NotPredicateAst<Predicate>
-where
-	Predicate: DdlPredicateAst,
-{
-	fn render_ddl(&self, out: &mut String) {
-		out.push_str("(NOT ");
-		self.predicate.render_ddl(out);
-		out.push(')');
-	}
-}
-
-/// Render a typed, literal-free [`Predicate`] to a self-contained ANSI SQL string suitable for a
-/// DDL partial-index `WHERE` clause. Used by the `Table` derive to lower a `where = |row| ...`
-/// attribute on a unique column/constraint or index into [`IndexModel::predicate`].
-///
-/// [`IndexModel::predicate`]: squealy_ir::IndexModel::predicate
-pub fn render_ddl_predicate<K, Ast>(predicate: &Predicate<'_, K, Ast>) -> String
-where
-	K: PredicateKind,
-	Ast: PredicateAst + DdlPredicateAst,
-{
-	let mut out = String::new();
-	predicate.ast.render_ddl(&mut out);
-	out
-}
+impl<Predicate> SchemaPredicateAst for NotPredicateAst<Predicate> where Predicate: SchemaPredicateAst
+{}
 
 /// A typed SQL scalar expression scoped to a query builder invocation.
 #[derive(Debug, PartialEq)]

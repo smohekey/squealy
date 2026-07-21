@@ -8047,7 +8047,7 @@ where
 
 	/// Finish this chain as an embeddable subquery rather than an executable query. The projection
 	/// must select exactly one column; the resulting [`SubquerySelect`] carries that column's type as
-	/// its [`Subquery::Output`] so an `IN (subquery)` or scalar use can be type-checked.
+	/// its [`ScalarSubquery::OutputKind`] so an `IN (subquery)` or scalar use can be type-checked.
 	fn select_subquery<P, Indices>(
 		self,
 		projection: impl FnOnce(<Self::Exprs as ToTuple>::Tuple) -> P,
@@ -8179,7 +8179,7 @@ where
 	}
 
 	/// `FULL [OUTER] JOIN`: both the joined table and the accumulated base become nullable.
-	/// Gated to backends whose dialect supports it ([`SupportsFullJoin`] — PostgreSQL, and the view
+	/// Gated to backends whose dialect supports it ([`crate::SupportsFullJoin`] — PostgreSQL, and the view
 	/// model backend); MySQL has no `FULL JOIN`, so this does not compile against it.
 	fn full_join<S>(self) -> FullJoinTarget<Self, S>
 	where
@@ -8295,7 +8295,7 @@ where
 	/// Like [`select`](Self::select), but the projection closure also receives a [`Subqueries`]
 	/// handle for projecting scalar subqueries (`SELECT (SELECT …)`), which may be correlated.
 	///
-	/// A projected scalar subquery renders before the outer `FROM`, so a runtime [`param`] inside it
+	/// A projected scalar subquery renders before the outer `FROM`, so a runtime [`crate::param`] inside it
 	/// would emit a placeholder the top-level query can't bind (its executable/prepared param shape
 	/// is the source chain's). To stop that from silently producing an unbound placeholder, the
 	/// projection must be free of runtime params (`P: ProjectionParams<Params = HNil>`). A correlated

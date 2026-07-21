@@ -1,11 +1,11 @@
 error[E0277]: the trait bound `ActiveUser<'_>: ViewDefinition` is not satisfied
-  --> tests/compile_fail/cte_is_not_publishable_as_view.rs:39:37
+  --> tests/compile_fail/cte_is_not_a_view.rs:39:37
    |
 39 |     let _ = view_definition_model::<ActiveUser>();
    |                                     ^^^^^^^^^^ unsatisfied trait bound
    |
 help: the trait `ViewDefinition` is not implemented for `ActiveUser<'_>`
-  --> tests/compile_fail/cte_is_not_publishable_as_view.rs:24:1
+  --> tests/compile_fail/cte_is_not_a_view.rs:24:1
    |
 24 | struct ActiveUser<'scope, C: ColumnMode = ColumnExpr> {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

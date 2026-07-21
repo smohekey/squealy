@@ -57,7 +57,7 @@ pub use table::{
 	WriteableTable,
 };
 #[doc(hidden)]
-pub use view::{build_ddl_predicate, lower_view, view_definition_model};
+pub use view::{build_schema_predicate, lower_view, view_definition_model};
 pub use view::{ModelBackend, ModelConn, SchemaView, ViewDefinition, ViewSelect};
 pub use view_render::{render_scalar_expr, render_with_prefix};
 

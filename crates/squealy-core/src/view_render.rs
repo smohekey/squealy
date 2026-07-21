@@ -318,9 +318,9 @@ fn render_recursive_arm(
 }
 
 /// Renders a `WITH [RECURSIVE] <name> [(<cols>)] AS (<body>)[, …] ` prelude (note the trailing space) for a
-/// [`ViewBody::With`]. Each CTE body renders via [`render_body`], except a **recursive** CTE — one whose
+/// [`ViewBody::With`]. Each CTE body uses the shared body renderer, except a **recursive** CTE — one whose
 /// set body references its own name — whose `<anchor> UNION [ALL] <recursive>` arms render per-arm (bare, or
-/// parenthesized where the dialect permits a scoped arm; see [`render_recursive_arm`]).
+/// parenthesized where the dialect permits a scoped arm).
 ///
 /// This is the single shared `WITH`-prefix renderer: both a view body's `WITH` prelude and the runtime
 /// query path (`render.rs::write_cte_prefix`, which builds a `&[CteModel]` from the collected `CteDef`s)
@@ -541,8 +541,7 @@ fn render_source(
 /// index key / partial-predicate terms. These carry **unqualified** column references
 /// ([`ExprNode::Column`] with `alias: None`), rendered as bare quoted identifiers.
 ///
-/// This is the render half that the reverse parser ([`squealy_parse`](https://docs.rs/squealy-parse)'s
-/// `lower_expr`) inverts; the two must stay symmetric so a published constraint re-plans to empty.
+/// The same structural renderer is used for every backend dialect.
 pub fn render_scalar_expr(
 	node: &ExprNode,
 	dialect: &dyn Dialect,

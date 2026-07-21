@@ -1,7 +1,7 @@
 //! Emits Rust construction tokens for a lowered schema-attribute expression.
 //!
 //! The derive macros parse a `check = "..."` / index expression string into a structural `ExprNode` at
-//! expansion time (via `squealy-parse`, in the neutral `Generic` authoring dialect). This module turns
+//! expansion time with the private parser's neutral `Generic` dialect. This module turns
 //! that `ExprNode` back into tokens that build the equivalent `::squealy::ExprNode` value in the
 //! generated code, so the neutral model carries the structural form (not a raw string) and each backend
 //! renders it in its own dialect.
@@ -24,8 +24,7 @@ use quote::quote;
 /// - `Some(ExprNode::Raw("..."))` when it parses as valid SQL but is outside the structural subset the
 ///   reverse parser handles (`%` modulo, a backend-specific function) — OR when it is backend-specific
 ///   syntax the neutral `Generic` dialect cannot parse but a concrete backend can (e.g. PostgreSQL JSONB
-///   `metadata ? 'key'`). It is preserved verbatim so the check renders exactly as authored (and stays
-///   comparable via the backend's `Raw` canonicalization), matching the pre-migration behavior;
+///   `metadata ? 'key'`). It is preserved verbatim so the check renders exactly as authored;
 /// - a `compile_error!` (with a `None` fallback so exactly one clear error surfaces) only when NO SQL
 ///   dialect can parse the string — a genuine authoring mistake worth catching at compile time.
 pub(crate) fn check_option_tokens(expr: Option<&str>) -> TokenStream {

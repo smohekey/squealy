@@ -10,14 +10,13 @@ pub trait Index: Sync {
 		false
 	}
 
-	/// An optional partial-index predicate, rendered into `CREATE INDEX ... WHERE <predicate>`.
+	/// An optional structural partial-index predicate.
 	///
 	/// Returns a function that lowers the index's typed `where = |row| ...` attribute to a neutral
-	/// [`ExprNode`](crate::ExprNode) (see [`build_ddl_predicate`](crate::build_ddl_predicate)), which
-	/// each backend renders in its own dialect. It is a function rather than a value because the
+	/// [`ExprNode`](crate::ExprNode) (see [`build_schema_predicate`](crate::build_schema_predicate)).
+	/// It is a function rather than a value because the
 	/// predicate is built from the table's column expressions; the model builder calls it once when
-	/// constructing the schema model. Partial-index predicates are Postgres-only; other backends reject
-	/// them.
+	/// constructing the owned metadata.
 	fn predicate(&self) -> Option<fn() -> crate::ExprNode> {
 		None
 	}

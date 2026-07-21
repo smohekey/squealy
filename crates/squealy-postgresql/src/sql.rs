@@ -82,8 +82,8 @@ fn write_pg_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()> {
 		}
 		SqlType::Date => "date",
 		// `time(n)` / `timestamp(n) [with time zone]` — the fractional-seconds precision goes between the
-		// base name and the `with time zone` suffix. `None` renders the bare form (PostgreSQL then uses
-		// its microsecond default, which introspection reads back as `Some(6)`).
+		// base name and the `with time zone` suffix. `None` renders the bare form and lets PostgreSQL use
+		// its microsecond default.
 		SqlType::Time { tz, precision } => {
 			return write_pg_temporal(writer, "time", *tz, *precision);
 		}

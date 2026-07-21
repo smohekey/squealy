@@ -6,8 +6,8 @@
 //! [`ViewQueryModel`](crate::ViewQueryModel)) — `#[derive(CTE)]` generates the same queryable
 //! projection as `#[derive(View)]`, plus the [`SchemaCte`] metadata below.
 //!
-//! It is **one-directional**: a CTE is never published (it has no `ViewDef`), and a view is never
-//! inlined (it is not a [`CteDefinition`]).
+//! It is **one-directional**: a CTE has no persistent `ViewDef`, and a view is not a
+//! [`CteDefinition`] that can be inlined.
 
 use crate::{ModelConn, ViewBody, ViewColumnModel, ViewQueryModel, ViewSelect, ViewSetOp};
 
@@ -37,8 +37,6 @@ pub trait CteDefinition: SchemaCte {
 
 /// Object-safe view of a CTE used while collecting a query's `WITH` clause: its name and lowered body.
 ///
-/// (A CTE body that references *another* CTE — transitive dependencies + topological ordering — is a
-/// later increment; this carries just the name and body for the flat case.)
 pub trait CteDef: Sync {
 	fn name(&self) -> &'static str;
 

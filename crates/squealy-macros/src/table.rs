@@ -2215,8 +2215,8 @@ fn token_trees_to_stream(tokens: &[TokenTree]) -> proc_macro2::TokenStream {
 /// [`ExprNode`], and returns the `Option<fn() -> ExprNode>` expression that references it (for a
 /// `TableUnique`, `Column::unique_predicate`, or `Index::predicate`). The function definition is pushed
 /// onto `defs`; the predicate closure is applied to the table's column expressions and lowered by
-/// [`squealy::build_ddl_predicate`], whose `DdlPredicateAst` bound only accepts the single-table,
-/// subquery-free subset (`IS NULL` / comparisons of columns and literals), so an unsupported predicate
+/// `squealy::build_schema_predicate`, whose marker bound only accepts the single-table, parameter-free
+/// subset (`IS NULL` / comparisons of columns and literals), so an unsupported predicate
 /// fails to compile here.
 fn predicate_fn_reference(
 	table_ident: &proc_macro2::Ident,
@@ -2243,7 +2243,7 @@ fn predicate_fn_reference(
 									),
 							)
 					}
-					::squealy::build_ddl_predicate(&build(#closure))
+					::squealy::build_schema_predicate(&build(#closure))
 			}
 	});
 	quote::quote! { ::std::option::Option::Some(#fn_ident as fn() -> ::squealy::ExprNode) }

@@ -107,7 +107,7 @@ pub enum ColumnType {
 	F64,
 	String,
 	Bool,
-	// Structured types produced by parsing `#[column(db_type = "...")]` and (later) by introspection.
+	// Structured types produced by parsing `#[column(db_type = "...")]`.
 	Varchar(u32),
 	Char(u32),
 	Text,

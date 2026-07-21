@@ -1,10 +1,7 @@
-//! Backend-neutral schema and expression data types shared across the squealy crates.
+//! Backend-neutral schema metadata and structural query-expression data types.
 //!
-//! These are the pure, dependency-free data types of the owned schema model and the structural view
-//! expression tree. They live in this leaf crate (with no workspace dependencies) so that both the
-//! core `squealy` crate and tooling like `squealy-parse` can share them without a dependency cycle.
-//! The compile-time query-builder types, the `#[derive]` machinery, and the `&dyn` walkers that
-//! materialize these types all live in the core `squealy` crate.
+//! These owned types sit beside the compile-time query builder, derive support, and metadata walkers
+//! in `squealy-core`.
 
 // ===== expression operator / function data types =====
 
@@ -14,8 +11,7 @@ pub enum ArithmeticOp {
 	Subtract,
 	Multiply,
 	Divide,
-	/// SQL `%` modulo. Renders as `%` on every dialect, so a `%` expression round-trips structurally
-	/// (introspect → re-render is byte-identical on the same backend). **Cross-dialect caveat:** the
+	/// SQL `%` modulo. Renders as `%` on every dialect. **Cross-dialect caveat:** the
 	/// operand semantics are not identical — SQLite coerces both operands to integers before the
 	/// operation (`9.5 % 2` → `1`), while PostgreSQL and MySQL keep the fractional remainder
 	/// (`9.5 % 2` → `1.5`). Integer-operand modulo (the usual `col % n = 0` check) is portable; a
@@ -281,10 +277,8 @@ pub struct SequenceOwnedBy {
 	pub column: String,
 }
 
-/// A standalone sequence (PostgreSQL `CREATE SEQUENCE`). Every attribute is stored as the concrete value
-/// PostgreSQL's `pg_sequence` catalog reports, so a published sequence re-plans to empty against
-/// introspection; a hand-authored sequence that omits an attribute is filled to the type's default when
-/// the package is read. A sequence implicitly created for an identity/serial column is not modeled here.
+/// A standalone sequence with concrete PostgreSQL-compatible attributes. A sequence implicitly
+/// created for an identity/serial column is not modeled here.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SequenceModel {
 	pub name: String,
@@ -332,8 +326,7 @@ impl SequenceModel {
 /// A table and its table-level, named constraints.
 ///
 /// Unlike the query-side `Column` trait (which hangs primary-key/unique/foreign-key/check facts off
-/// each column), the model hoists those into named table-level lists. This matches `ALTER TABLE … ADD
-/// CONSTRAINT`, how catalogs report constraints during introspection, and admits composite keys.
+/// each column), the model hoists those into named table-level lists and admits composite keys.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableModel {
 	pub name: String,
@@ -359,16 +352,16 @@ pub struct ColumnModel {
 	pub identity: Option<IdentityModel>,
 	pub generated: Option<GeneratedColumnModel>,
 	/// A MySQL `ON UPDATE CURRENT_TIMESTAMP` auto-update expression, structured like [`generated`]
-	/// so the backend renders it in its own dialect and the diff compares it structurally.
+	/// so the backend can render it in its own dialect.
 	///
 	/// MySQL is the only dialect with this attribute, and the only expression it accepts is
-	/// `CURRENT_TIMESTAMP` (so an introspected column carries [`ExprNode::Now`]); its fractional-seconds
+	/// `CURRENT_TIMESTAMP` ([`ExprNode::Now`]); its fractional-seconds
 	/// precision is forced to equal the column's own `TIMESTAMP`/`DATETIME` precision, so the renderer
 	/// derives the fsp from the column type rather than from the node. PostgreSQL and SQLite reject a
 	/// column carrying this — they cannot represent it.
 	///
-	/// Boxed so the rare, MySQL-only attribute does not enlarge every `ColumnModel` (which is embedded
-	/// inline in the plan/diff step enums), mirroring [`IndexModel::predicate`].
+	/// Boxed so the rare, MySQL-only attribute does not enlarge every `ColumnModel`, mirroring
+	/// [`IndexModel::predicate`].
 	///
 	/// [`generated`]: ColumnModel::generated
 	pub on_update: Option<Box<ExprNode>>,
@@ -423,10 +416,8 @@ pub enum IdentityMode {
 ///
 /// The `expression` is [`Option`] because a column can be *marked* generated without an authored
 /// expression: the `#[column(generated)]` derive attribute is a bare flag with no expression syntax,
-/// so a macro-built model carries `None` (and the renderer rejects it — a generated column has to have
-/// an expression). A real defining expression arrives only from a KDL package or live introspection,
-/// as `Some`. It is a structural [`ExprNode`] so the backend renders it in its own dialect and the diff
-/// compares it structurally (mirroring [`CheckModel`]).
+/// so a macro-built model carries `None`. A defining expression is represented as `Some` and stored as
+/// a structural [`ExprNode`] so each backend can render its own dialect (mirroring [`CheckModel`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct GeneratedColumnModel {
 	pub expression: Option<ExprNode>,
@@ -443,10 +434,9 @@ pub enum GeneratedStorage {
 
 /// The owned, backend-neutral logical column type.
 ///
-/// This mirrors the compile-time `ColumnType` but owns its strings, so a model can be rebuilt from
-/// a package or live-database introspection (the `const`-friendly `ColumnType` borrows `'static`
-/// strings and cannot represent runtime-sourced values). It is the place the neutral type vocabulary
-/// grows structurally (e.g. `Varchar { len }`) as introspection lands.
+/// This mirrors the compile-time `ColumnType` but owns its strings, while the `const`-friendly
+/// `ColumnType` borrows `'static` strings. It is the complete neutral type vocabulary used by owned
+/// metadata.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SqlType {
 	I8,
@@ -707,7 +697,7 @@ impl ForeignKeyAction {
 }
 
 /// A named check constraint carrying its boolean expression as a structural [`ExprNode`], so each
-/// backend renders it in its own dialect and the diff compares it structurally.
+/// backend can render it in its own dialect.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CheckModel {
 	pub name: String,
@@ -902,23 +892,18 @@ pub enum ExclusionTerm {
 
 /// A view: a named `SELECT` with a typed output schema and a backend-neutral structural body.
 ///
-/// The compile-time `#[derive(View)]` type is the source of truth; the walker materializes it here so
-/// the same DDL-management operations (render, package export/import, future diff) that consume
-/// [`TableModel`] also consume views. The body is structural ([`ViewQueryModel`]) so each backend
-/// renders its own dialect and the model round-trips through a package.
+/// The compile-time `#[derive(View)]` type is the source of truth; the walker materializes it here.
+/// The body is structural ([`ViewQueryModel`]) so each backend renders its own dialect.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewModel {
 	pub name: String,
 	pub comment: Option<String>,
-	/// The view's output columns, in projection order. Powers DDL (the optional column list),
-	/// packaging, introspection, and the queryable typed face.
+	/// The view's output columns, in projection order.
 	pub columns: Vec<ViewColumnModel>,
 	/// The structural body of the view — a single `SELECT` or a set operation.
 	pub query: ViewBody,
 	/// Whether this is a *materialized* view (`CREATE MATERIALIZED VIEW`, PostgreSQL `relkind = 'm'`),
-	/// which physically stores its rows. A materialized view renders and drops with the `MATERIALIZED`
-	/// keyword and cannot be `CREATE OR REPLACE`d (a change re-creates it); everything else — the
-	/// structural body, dependency ordering, and packaging — is shared with a regular view.
+	/// which physically stores its rows. The structural body is shared with a regular view.
 	pub materialized: bool,
 }
 
@@ -933,10 +918,6 @@ pub struct ViewColumnModel {
 /// The backend-neutral structural body of a view definition: a single `SELECT` ([`ViewQueryModel`]), a
 /// set operation (`UNION`/`INTERSECT`/`EXCEPT`, optionally `ALL`) over two nested bodies, or a `WITH`
 /// (common-table-expression) prelude wrapping any of these.
-///
-/// A view whose body live introspection cannot reconstruct is stored as an **empty** [`ViewBody::Select`]
-/// (empty projection) carrying only its recorded `dependencies` — the diff's body-unknown sentinel (see
-/// [`ViewBody::is_empty`]). A reconstructed body is compared structurally.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ViewBody {
 	/// A single `SELECT`.
@@ -977,22 +958,20 @@ pub struct CteModel {
 }
 
 impl Default for ViewBody {
-	/// An empty single `SELECT` — the body-unknown form an introspected, un-reconstructed view carries.
+	/// An empty single `SELECT`.
 	fn default() -> Self {
 		ViewBody::Select(Box::default())
 	}
 }
 
 impl ViewBody {
-	/// Whether this is the body-unknown sentinel: an empty `SELECT` (no projection), as stored for a
-	/// live-introspected view whose body could not be reconstructed. A `Set` body is never empty.
+	/// Whether this is an empty `SELECT` body. A `Set` body is never empty.
 	pub fn is_empty(&self) -> bool {
 		matches!(self, ViewBody::Select(select) if select.projection.is_empty())
 	}
 
-	/// The view-on-view dependencies recorded on an introspected (un-reconstructed) body, or `&[]` for a
-	/// reconstructed body (whose dependencies are found by walking it). Only an empty `Select` carries
-	/// these — see [`ViewModel::referenced_sources`].
+	/// Explicit view-on-view dependencies attached to a single `Select` body. Other body shapes return
+	/// `&[]`; their dependencies are found by walking the body.
 	pub fn dependencies(&self) -> &[SourceRef] {
 		match self {
 			ViewBody::Select(select) => &select.dependencies,
@@ -1005,12 +984,9 @@ impl ViewBody {
 	///
 	/// A result pin is the optional `CAST(<call> AS ty)` wrapper the renderer emits around an aggregate,
 	/// window, `EXTRACT`, `CASE`, `NULLIF`, or `COALESCE` so the output column's wire type matches the
-	/// view's declared column type (the `result: Option<SqlType>` fields). Because a dialect's cast
-	/// vocabulary is many-to-one (several [`SqlType`]s render to the same keyword, so a narrower authored
-	/// pin round-trips through introspection as the keyword's canonical representative), a backend's
-	/// `canonical_view_body` calls this — on **both** the desired and the introspected model — to fold each
-	/// pin to that same representative, so a published view does not churn. A general `CAST` node's target
-	/// type is left untouched: it is a user-authored conversion, not a renderer-synthesized pin.
+	/// view's declared column type (the `result: Option<SqlType>` fields). A dialect can use this to fold
+	/// several [`SqlType`] variants to the same supported result-pin spelling. A general `CAST` node's
+	/// target type is left untouched because it is user-authored, not a renderer-synthesized pin.
 	pub fn map_result_pins(&mut self, f: &impl Fn(&SqlType) -> SqlType) {
 		match self {
 			ViewBody::Select(query) => map_query_result_pins(query, f),
@@ -1039,15 +1015,9 @@ impl ViewBody {
 	/// set-operation arms, `WITH` CTEs, derived-table subqueries, and scalar/`IN`/`EXISTS` subqueries —
 	/// the mutable analog of [`referenced_sources`](ViewModel::referenced_sources)'s traversal.
 	///
-	/// A backend's `canonical_view_body` uses this — on **both** the desired and the introspected model —
-	/// to reconcile a source-qualifier the backend does not round-trip. SQLite has no namespaces, so it
-	/// suppresses the schema qualifier when rendering a view body: an introspected body's every
-	/// `SourceRef.schema` reads back `None`, while a `from_database` desired body carries the mapped
-	/// `Some("app")`. Flattening both sides to `None` lets a published view re-plan to empty (mirrors how
-	/// [`canonical_schema_name`](crate::SchemaIntrospect::canonical_schema_name) flattens the top-level
-	/// schema). Unlike [`referenced_sources`], this visits **every** `SourceRef` — including one bound to a
-	/// `WITH` CTE (flattening its already-unqualified schema is a no-op) and the introspected
-	/// `dependencies` — so a new source-bearing shape is handled uniformly.
+	/// This is useful for dialects such as SQLite that suppress schema qualifiers. Unlike
+	/// [`referenced_sources`](ViewModel::referenced_sources), this visits **every** `SourceRef`, including
+	/// CTE bindings and explicit `dependencies`, so a new source-bearing shape is handled uniformly.
 	pub fn map_sources(&mut self, f: &impl Fn(&mut SourceRef)) {
 		match self {
 			ViewBody::Select(query) => map_query_sources(query, f),
@@ -1078,11 +1048,8 @@ impl ViewBody {
 	/// sub-expression (each node, then its children). Exhaustive over [`ExprNode`], so a new variant is a
 	/// compile error rather than a silently-unvisited node.
 	///
-	/// A backend's `canonical_view_body` uses this — on **both** the desired and the introspected model —
-	/// to fold a spelling its renderer does not distinguish. SQLite (like MySQL) emits plain `LIKE` for
-	/// both `case_insensitive` states and introspects them back as `false`, so an authored `ILIKE`
-	/// (`case_insensitive: true`) in a view body must be folded to `false` here or the reconstructed body
-	/// churns a perpetual `CreateView` (mirrors `fold_like_case_insensitivity` on checks/index predicates).
+	/// A dialect can use this to fold structural distinctions its renderer cannot express, such as
+	/// case-insensitive `LIKE` on MySQL or SQLite.
 	pub fn map_exprs(&mut self, f: &impl Fn(&mut ExprNode)) {
 		match self {
 			ViewBody::Select(query) => map_query_exprs(query, f),
@@ -1465,19 +1432,18 @@ fn map_scope_exprs_mut(expr: &mut ExprNode, f: &mut impl FnMut(&mut ExprNode)) {
 
 /// Looks up the column names a named view-body source (a table or another view) exposes, so the clause-name
 /// canonicalizer can tell a genuine source-column reference from a projection-alias reference. `None` when
-/// the source is unknown to the catalog (e.g. a CTE-bound name or a source not in the introspected model) —
-/// treated as "no colliding source column", so the reference resolves as the reverse parser classified it.
+/// the source is unknown to the catalog (for example a CTE-bound name); this is treated as no colliding
+/// source column.
 pub trait ViewSourceColumns {
 	/// The column names `source` exposes, or `None` if the source is not in the catalog.
 	fn source_columns(&self, source: &SourceRef) -> Option<Vec<String>>;
 }
 
-/// Converges a view body's clause terms (`GROUP BY`/`HAVING`/`ORDER BY`) to the structural form each backend
-/// deparser produces, so a published view whose clause references a projection output **alias** re-plans to
-/// empty instead of churning a `CREATE OR REPLACE VIEW` (git-bug 823ae69).
+/// Canonicalizes a view body's clause terms (`GROUP BY`/`HAVING`/`ORDER BY`) when they reference a
+/// projection output **alias**.
 ///
-/// A backend that stores a view rewrites a clause's alias reference on introspection: a **standalone** alias
-/// deparses to the projection's underlying **expression** (PostgreSQL `pg_get_viewdef`; MySQL `ORDER BY`),
+/// Stored SQL may rewrite a clause's alias reference: a **standalone** alias can become the
+/// projection's underlying **expression** (PostgreSQL `pg_get_viewdef`; MySQL `ORDER BY`),
 /// while a **nested** reference (`ORDER BY total + 1`) deparses to the underlying **source column** (every
 /// dialect resolves a nested reference to the source, not the output alias — verified live). The reverse
 /// parser already applies each dialect's *position* rules when it decides whether a clause term is a kept
@@ -1495,16 +1461,11 @@ pub trait ViewSourceColumns {
 /// or `HAVING` name, and any *nested* reference, resolve to the **source column** (PostgreSQL, MySQL, and
 /// SQLite agree). A name with no source collision is always the alias.
 ///
-/// Then unreferenced [`ProjectionItem::internal_alias`]es are pruned. Applied to BOTH the desired and the
-/// introspected model in `canonicalize_model`, so the two converge. The canonical model is the plan payload
-/// (a `CreateView` for a changed view renders the canonicalized body), so every rewrite here must be
-/// **semantically equivalent** to the original — an expanded alias (`ORDER BY total` → `ORDER BY (amount*2)`)
-/// and a rebound source column are the same value the deparser would emit, matching the existing
-/// `canonical_check_expression`/`normalize_expr` precedent (the canonical form is also rendered there). The
-/// resolver is conservative — an ambiguous or unresolved source leaves a clause name unchanged rather than
-/// risk a non-equivalent rewrite. Dialect-agnostic beyond a single `identifiers_case_insensitive` flag: the
-/// parser encoded the dialect *position* rules already, so this needs only the catalog + the (structural)
-/// standalone-vs-nested position and clause kind.
+/// Then unreferenced [`ProjectionItem::internal_alias`]es are pruned. Every rewrite is semantically
+/// equivalent to the original: an expanded alias (`ORDER BY total` to `ORDER BY (amount*2)`) and a
+/// rebound source column denote the same value. The resolver is conservative; an ambiguous or
+/// unresolved source leaves a clause name unchanged. Dialect behavior is supplied through
+/// [`ViewClauseDialect`].
 pub fn canonicalize_view_clause_aliases(
 	body: &mut ViewBody,
 	catalog: &dyn ViewSourceColumns,
@@ -1512,7 +1473,7 @@ pub fn canonicalize_view_clause_aliases(
 	top_level_column_listed: bool,
 ) {
 	// `top_level_column_listed` is `true` when the view declares an output column list (`view.columns` is
-	// non-empty, which `render_create_view` emits as `CREATE VIEW (<columns>)`), suppressing each
+	// non-empty, so the renderer suppresses each
 	// projection's own `AS` — so only a kept `internal_alias` is an in-scope clause alias. When the view has
 	// NO declared columns the renderer emits each projection `AS output_name`, so `output_name` IS visible.
 	let ctx = ClauseCtx { catalog, dialect };
@@ -1559,7 +1520,7 @@ pub fn view_body_output_names(body: &ViewBody) -> Vec<String> {
 /// enclosing `WITH` but is NOT visible here (a forward reference the dialect disallows, or a non-recursive
 /// self-reference) — such a name resolves to nothing rather than falling back to a same-named catalog table,
 /// so a dialect-specific visibility difference can never bind a clause to the wrong relation and emit
-/// different DDL. It only leaves the clause name un-canonicalized (a harmless re-plan).
+/// invalid SQL. It only leaves the clause name un-canonicalized.
 type CteScope = std::collections::BTreeMap<String, Option<Vec<String>>>;
 
 /// Inserts a CTE binding into `scope`, first removing any existing key that is the SAME identifier under this
@@ -1767,8 +1728,8 @@ impl ClauseScope<'_> {
 	/// The `(alias, column)` of the single resolved source that exposes `name`, or `None` if none or more than
 	/// one does (an ambiguous join reference is left as the deparser qualified it). SQL binds a name a single
 	/// source exposes to that source, and every dialect deparses it as a qualified column. The returned
-	/// `column` is the source's OWN spelling (which may differ in case from the clause reference on a
-	/// case-insensitive backend) — the form the deparser emits, so the rebound node matches introspection.
+	/// `column` is the source's own spelling, which may differ in case from the clause reference on a
+	/// case-insensitive backend.
 	fn unique_binding(&self, name: &str) -> Option<(&str, &str)> {
 		let mut found = None;
 		for (alias, columns) in self.sources {
@@ -2305,8 +2266,8 @@ fn map_case_arms(
 	}
 }
 
-/// Applies `f` to every [`SourceRef`] reachable from a single `SELECT` body, recursing through subqueries
-/// (see [`ViewBody::map_sources`]). Mirrors [`collect_query_sources`], including the introspected
+/// Applies `f` to every [`SourceRef`] reachable from a single `SELECT` body, recursing through
+/// subqueries (see [`ViewBody::map_sources`]). Mirrors [`collect_query_sources`], including explicit
 /// `dependencies`.
 fn map_query_sources(query: &mut ViewQueryModel, f: &impl Fn(&mut SourceRef)) {
 	for dependency in &mut query.dependencies {
@@ -2481,10 +2442,8 @@ pub struct ViewQueryModel {
 	pub order_by: Vec<OrderItem>,
 	pub limit: Option<usize>,
 	pub offset: Option<usize>,
-	/// View-on-view dependencies recorded by live introspection, which cannot reconstruct the body
-	/// into the structural form above. Empty for declared/package views, whose dependencies are found
-	/// by walking the body; [`ViewModel::referenced_sources`] folds these in so live drop ordering
-	/// still sees view-on-view edges. Not serialized (introspected models are never packaged).
+	/// Optional view-on-view dependency edges not already expressed by the structural body.
+	/// [`ViewModel::referenced_sources`] folds these into the sources found by walking the body.
 	pub dependencies: Vec<SourceRef>,
 }
 
@@ -2496,27 +2455,13 @@ pub struct ProjectionItem {
 	/// reference — kept when a `CREATE VIEW (<cols>)`/`WITH cte (<cols>)` list names the outputs (so it
 	/// suppresses the `AS`) **and** a body clause actually references it. `None` otherwise: no column list, a
 	/// column-listed projection with no explicit `AS` (a bare column's own name is not a suppressible `AS`),
-	/// or an alias no clause references (the reverse parser prunes it, since the renderer would emit a
-	/// needless `AS` that a backend drops on storage). Kept even when the alias *coincides* with
+	/// or an alias no clause references. Kept even when the alias *coincides* with
 	/// [`output_name`](Self::output_name) — a column list does not introduce its names into the `SELECT`
 	/// scope, so a bare clause reference still needs the explicit `AS`. When `Some`, the renderer re-emits
 	/// `AS <internal_alias>` even under a column list so the body-local clause reference resolves (without it
 	/// the reference dangles — invalid SQL). Re-rendering a column-listed body is byte-identical to its
-	/// source. The typed view builder never produces this (its clauses reference only source columns); it
-	/// arises from external/hand-authored SQL and KDL packages.
-	///
-	/// **Residual (a harmless re-plan, never wrong SQL):** the reverse parser has no source-column catalog,
-	/// so it cannot always tell a clause's alias reference from a same-named source column, and a backend
-	/// that stores a view rewrites clause references on introspection. Two shapes therefore re-plan a
-	/// `CREATE OR REPLACE VIEW` each run — the same idempotent, non-destructive convergence gap the
-	/// body-unknown view path already accepts. First, a backend rewrites a clause's alias reference to the
-	/// underlying expression (PostgreSQL `pg_get_viewdef` deparses `… AS total … ORDER BY total` as
-	/// `… AS n … ORDER BY (<expr>)`; MySQL expands an expression-alias clause), so the introspected body no
-	/// longer carries the alias. Second, a source column whose name collides with a computed projection
-	/// alias — a bare clause reference is kept as an alias here, but a dialect resolves it to the source
-	/// column. SQLite (verbatim DDL) round-trips to empty except under such a collision. The re-render is
-	/// always valid SQL and preserves the view's meaning; only the diff sees a difference. Removing the
-	/// residual needs catalog-based name resolution (tracked separately).
+	/// source. The typed view builder does not produce this because its clauses reference source columns;
+	/// it remains part of the complete structural model for manually constructed view bodies.
 	pub internal_alias: Option<String>,
 	pub expr: ExprNode,
 }
@@ -2604,12 +2549,9 @@ pub enum ExprNode {
 	DomainValue,
 	/// An inlined SQL literal, already formatted (e.g. `'Ada'`, `42`, `TRUE`, `NULL`).
 	Literal(String),
-	/// An un-modelable expression, carried as its already-rendered dialect SQL and re-emitted verbatim.
-	/// The last-resort escape hatch: live introspection uses it when the reverse parser cannot yet lower
-	/// a backend's deparse output into a structural node. It is dialect-specific (does not re-render
-	/// across dialects) and never produced by the forward path (the derive macro / typed builders), so a
-	/// squealy-published object round-trips structurally; a `Raw` on one side of a diff means the
-	/// introspected form could not be structured and will not compare equal to a structural desired node.
+	/// An expression carried as already-rendered dialect SQL and re-emitted verbatim. This is the escape
+	/// hatch for syntactically valid expressions outside the structural subset and is therefore
+	/// dialect-specific.
 	Raw(String),
 	/// Binary arithmetic; `Divide` uses the backend's fractional-division handling.
 	Binary {
@@ -2726,17 +2668,13 @@ pub enum ExprNode {
 	/// A general, dialect-neutral function call `<name>(<args>)` for functions outside the closed
 	/// [`ScalarFn`](ExprNode::ScalarFn) set — user-defined and other built-in functions in CHECK /
 	/// generated-column / index expressions (`jsonb_typeof(data) = 'object'`). The `name` is stored
-	/// lowercased (matching the forward path's authored spelling and PostgreSQL's unquoted deparse) and
+	/// lowercased (matching PostgreSQL's unquoted function spelling) and
 	/// re-emitted verbatim: unlike [`ScalarFn`](ExprNode::ScalarFn) there is no cross-dialect name
 	/// mapping, so a general function does not re-render across dialects with a different spelling.
 	///
 	/// **Invariant:** the arguments are fully structural — no direct [`Literal`](ExprNode::Literal) and no
-	/// [`Raw`](ExprNode::Raw). The reverse parser only produces this node from an *unquoted* call whose
-	/// every argument lowered structurally: PostgreSQL synthesizes a `::type` cast on a literal argument
-	/// (`f('x')` deparses as `f('x'::text)`) and stripping that cast to make the introspected form match
-	/// could rewrite the DDL the canonical model feeds, so a literal-argument call stays `Raw`; and any
-	/// unlowerable argument makes the *whole* call `Raw`. The KDL reader rejects a `function` node with a
-	/// literal or `Raw` argument for the same reason, so a structural `Function` holds neither.
+	/// [`Raw`](ExprNode::Raw). Calls with literal or otherwise unsupported arguments stay `Raw`, so a
+	/// structural `Function` holds neither.
 	Function { name: String, args: Vec<ExprNode> },
 	/// `CURRENT_TIMESTAMP`.
 	Now,
@@ -2853,8 +2791,7 @@ fn collect_body_sources<'a>(body: &'a ViewBody, sources: &mut Vec<&'a SourceRef>
 
 /// Collects every [`SourceRef`] reachable from a single `SELECT` body, recursing through subqueries.
 fn collect_query_sources<'a>(query: &'a ViewQueryModel, sources: &mut Vec<&'a SourceRef>) {
-	// Introspected views carry no body but record their dependencies here; declared/package views
-	// leave this empty and contribute their sources by walking the body below.
+	// Explicit dependency-only edges are included before walking the structural body.
 	sources.extend(query.dependencies.iter());
 	if let Some(from) = &query.from {
 		collect_source_item(from, sources);
@@ -2892,9 +2829,7 @@ fn collect_source_item<'a>(source: &'a SourceItem, sources: &mut Vec<&'a SourceR
 	}
 }
 
-/// Normalizes a constraint [`ExprNode`] to a canonical structural form, so expressions that
-/// PostgreSQL's `pg_get_constraintdef` rewrites compare equal to the authored form once both the desired
-/// and introspected model are normalized (applied in `canonicalize_model` before diffing). Two rewrites:
+/// Normalizes a constraint [`ExprNode`] to a canonical structural form with two rewrites:
 ///
 /// - **`BETWEEN` expansion**: `x BETWEEN a AND b` → `(x >= a) AND (x <= b)`, and
 ///   `x NOT BETWEEN a AND b` → `(x < a) OR (x > b)`.
@@ -2904,15 +2839,10 @@ fn collect_source_item<'a>(source: &'a SourceItem, sources: &mut Vec<&'a SourceR
 /// Recurses through the constraint-expression node set; leaves and view-body-only nodes (which never
 /// occur in a check) are returned unchanged.
 /// Applies `f` to the target type of every general [`ExprNode::Cast`] reachable from `expr` (recursing
-/// through all sub-expressions). A backend's constraint canonicalization uses this — on **both** the
-/// desired and introspected model — to fold each general cast's target to that dialect's canonical
-/// representative (a cast vocabulary is many-to-one, so several [`SqlType`]s render to the same keyword).
-///
-/// A cast structured from a `Raw` string on both sides already agrees (both re-parse through the same
-/// inverter); this covers the STRUCTURAL-desired-cast path that never re-parses — a narrower cast in a
-/// KDL package deployed to a lossier dialect, or a hand-built model — which would otherwise churn against
-/// the introspected representative. This is the general-cast analogue of result-pin folding
-/// ([`ViewBody::map_result_pins`]), which deliberately leaves a general cast's target alone.
+/// through all sub-expressions). Dialects can use this to fold each general cast's target to a supported
+/// representative when several [`SqlType`] variants render to the same keyword. This is the
+/// general-cast analogue of result-pin folding ([`ViewBody::map_result_pins`]), which deliberately
+/// leaves a general cast's target alone.
 pub fn map_cast_types(expr: &mut ExprNode, f: &impl Fn(&SqlType) -> SqlType) {
 	map_expr_nodes(expr, &|node| {
 		if let ExprNode::Cast { ty, .. } = node {
@@ -3015,18 +2945,13 @@ pub fn normalize_expr(expr: &ExprNode) -> ExprNode {
 			func: *func,
 			args: args.iter().map(normalize_expr).collect(),
 		},
-		// A general function's name is folded to lowercase: the reverse parser only ever produces one
-		// from an *unquoted* call (which PostgreSQL deparses lowercased), so lowercasing here — applied to
-		// both the desired and introspected model in `canonicalize_model` — makes a model- or KDL-authored
-		// `MD5(...)` compare equal to the introspected `md5(...)` instead of churning.
+		// General unquoted function names are case-insensitive, so normalize their spelling.
 		ExprNode::Function { name, args } => ExprNode::Function {
 			name: name.to_ascii_lowercase(),
 			args: args.iter().map(normalize_expr).collect(),
 		},
 		// Recurse through a general cast's operand — a `CAST(<expr> AS ty)` check carries a full
-		// expression that itself needs normalizing (e.g. a `BETWEEN` inside the cast must expand to its
-		// `AND` pair to match PostgreSQL's deparse), else `CAST((x BETWEEN 1 AND 2) AS boolean)` would
-		// churn against the introspected `CAST((x >= 1 AND x <= 2) AS boolean)`.
+		// expression that itself needs normalizing, including `BETWEEN` inside the cast.
 		ExprNode::Cast { operand, ty } => ExprNode::Cast {
 			operand: Box::new(normalize_expr(operand)),
 			ty: ty.clone(),
@@ -3037,10 +2962,8 @@ pub fn normalize_expr(expr: &ExprNode) -> ExprNode {
 
 /// Drops the case-insensitivity distinction on every [`ExprNode::Like`] node (forces
 /// `case_insensitive = false`), for backends whose renderer emits the same `LIKE` for both flag states
-/// and whose introspection therefore always reads `false` (MySQL/SQLite — only PostgreSQL spells the
-/// case-insensitive form distinctly, as `ILIKE`). Applied to both the desired and introspected model in
-/// `canonicalize_model` so an authored `ILIKE` (`case_insensitive: true`) check does not churn against
-/// the introspected `false`. Recurses the constraint node set; other nodes pass through.
+/// (MySQL/SQLite; only PostgreSQL spells the case-insensitive form distinctly as `ILIKE`). Recurses the
+/// constraint node set; other nodes pass through.
 pub fn fold_like_case_insensitivity(expr: &ExprNode) -> ExprNode {
 	match expr {
 		ExprNode::Like {
@@ -3506,8 +3429,7 @@ mod tests {
 
 	#[test]
 	fn a_standalone_source_column_order_by_is_left_as_a_bound_column() {
-		// `ORDER BY amount` names a source column, not an alias — it binds to `q.amount` (idempotent: the
-		// desired side already carries `Column`, the introspected bare form converges to it).
+		// `ORDER BY amount` names a source column, not an alias, so it binds to `q.amount`.
 		let out = canon(
 			total_view(None, vec![bare("amount")]),
 			&QCatalog(vec!["amount".to_owned()]),
@@ -3516,9 +3438,8 @@ mod tests {
 	}
 
 	#[test]
-	fn an_already_expanded_introspected_clause_is_unchanged() {
-		// The introspected side already carries the expression (the deparser expanded it): the pass is a
-		// no-op, so it converges with the expanded desired side.
+	fn an_already_expanded_clause_is_unchanged() {
+		// An already expanded expression is unchanged.
 		let out = canon(
 			total_view(None, vec![amount_times_two()]),
 			&QCatalog(vec!["amount".to_owned(), "total".to_owned()]),
@@ -4444,8 +4365,8 @@ mod tests {
 		body.map_sources(&|source| source.schema = None);
 
 		// Every reachable source — both set arms, the EXISTS subquery, and the derived table — now
-		// carries `schema: None` (the schema-qualifier flatten a SQLite view diff needs). `collect_body_
-		// sources` drops CTE-bound names, so it does not see the CTE's own body; that is asserted below.
+		// carries `schema: None`. `collect_body_sources` drops CTE-bound names, so it does not see the
+		// CTE's own body; that is asserted below.
 		let mut sources = Vec::new();
 		collect_body_sources(&body, &mut sources);
 		assert!(!sources.is_empty());
@@ -4557,7 +4478,7 @@ mod tests {
 			cmp(CompareOp::LessThanOrEquals, bare("x"), lit("10")),
 		);
 		assert_eq!(normalize_expr(&between), expected);
-		// The introspected deparse form normalizes to the same tree (a no-op on it).
+		// The expanded form is already normalized.
 		assert_eq!(normalize_expr(&expected), expected);
 	}
 
@@ -4676,9 +4597,8 @@ mod tests {
 
 	#[test]
 	fn normalize_lowercases_general_function_names() {
-		// A model- or KDL-authored `MD5(col)` must compare equal to the introspected `md5(col)` (the
-		// reverse parser only produces a `Function` node from an unquoted, hence lowercase, name), so
-		// normalization folds the name and recurses into arguments.
+		// Unquoted SQL function names are case-insensitive, so normalization folds the name and recurses
+		// into arguments.
 		let upper = ExprNode::Function {
 			name: "MD5".to_owned(),
 			args: vec![bare("col")],
