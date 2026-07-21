@@ -1,0 +1,11 @@
+[package]
+name = "squealy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+squealy-core.workspace = true
+
+[lints]
+workspace = true

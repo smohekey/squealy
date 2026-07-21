@@ -1,0 +1,22 @@
+[workspace]
+members = ["crates/*"]
+default-members = ["crates/squealy"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+squealy-core = { path = "crates/squealy-core", version = "0.1.0" }
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace.metadata]
+name = "squealy"

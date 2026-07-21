@@ -1,0 +1,13 @@
+# Pin the formatting style to the 2021 edition independently of the language edition
+# (which is 2024). rustfmt's style edition otherwise tracks the crate edition, and the
+# 2024 style rewraps method chains tree-wide; pinning keeps the language bump free of
+# unrelated reformatting churn. Drop this line and run `cargo fmt --all` to adopt the
+# 2024 style as a deliberate, standalone change.
+style_edition = "2021"
+tab_spaces = 2
+hard_tabs = true
+reorder_imports = true
+newline_style = "Unix"
+#fn_params_layout = "Vertical"
+use_field_init_shorthand = true
+#max_width = 180
