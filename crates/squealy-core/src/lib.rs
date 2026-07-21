@@ -59,9 +59,7 @@ pub use table::{
 #[doc(hidden)]
 pub use view::{build_ddl_predicate, lower_view, view_definition_model};
 pub use view::{ModelBackend, ModelConn, SchemaView, ViewDefinition, ViewSelect};
-pub use view_render::{
-	ordered_views, render_create_view, render_drop_view, render_scalar_expr, render_with_prefix,
-};
+pub use view_render::{render_scalar_expr, render_with_prefix};
 
 /// Returns the product name used by the retained executable.
 #[must_use]

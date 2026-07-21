@@ -1,0 +1,83 @@
+error[E0599]: no method named `build` found for struct `DeleteUsingBuilder<'_, '_, TestConnection, Counter<'_>, Post<'_>>` in the current scope
+  --> tests/compile_fail/delete_using_requires_correlation.rs:23:57
+   |
+23 |     let _query = conn.from::<Counter>().using::<Post>().build();
+   |                                                         ^^^^^ this is an associated function, not a method
+   |
+   = note: found the following associated functions; to be used as methods, functions must have a `self` parameter
+note: candidate #1 is defined in the trait `squealy::DeleteQuery`
+  --> $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   | /     fn build(
+   | |         builder: &'builder Self::Builder,
+   | |         alias: SourceAlias,
+   | |         filters: Filters,
+...  |
+   | |     where
+   | |         Self: Sized;
+   | |____________________^
+note: candidate #2 is defined in the trait `squealy::DeleteUsingQuery`
+  --> $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   | /     fn build(
+   | |         builder: &'builder Self::Builder,
+   | |         target_alias: SourceAlias,
+   | |         source_alias: SourceAlias,
+...  |
+   | |     where
+   | |         Self: Sized;
+   | |____________________^
+note: candidate #3 is defined in the trait `squealy::InsertQuery`
+  --> $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   | /     fn build(builder: &'builder Self::Builder, rows: Rows, returning: Returning) -> Self
+   | |     where
+   | |         Self: Sized;
+   | |____________________^
+note: candidate #4 is defined in the trait `squealy::UpdateFromQuery`
+  --> $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   | /     fn build(
+   | |         builder: &'builder Self::Builder,
+   | |         target_alias: SourceAlias,
+   | |         source_alias: SourceAlias,
+...  |
+   | |     where
+   | |         Self: Sized;
+   | |____________________^
+note: candidate #5 is defined in the trait `squealy::UpdateQuery`
+  --> $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   | /     fn build(
+   | |         builder: &'builder Self::Builder,
+   | |         alias: SourceAlias,
+   | |         columns: Columns,
+...  |
+   | |     where
+   | |         Self: Sized;
+   | |____________________^
+help: disambiguate the associated function for candidate #1
+   |
+23 -     let _query = conn.from::<Counter>().using::<Post>().build();
+23 +     let _query = <DeleteUsingBuilder<'_, '_, TestConnection, Counter<'_>, Post<'_>> as squealy::DeleteQuery>::build(&);
+   |
+help: disambiguate the associated function for candidate #2
+   |
+23 -     let _query = conn.from::<Counter>().using::<Post>().build();
+23 +     let _query = <DeleteUsingBuilder<'_, '_, TestConnection, Counter<'_>, Post<'_>> as squealy::DeleteUsingQuery>::build(&);
+   |
+help: disambiguate the associated function for candidate #3
+   |
+23 -     let _query = conn.from::<Counter>().using::<Post>().build();
+23 +     let _query = <DeleteUsingBuilder<'_, '_, TestConnection, Counter<'_>, Post<'_>> as squealy::InsertQuery>::build(&);
+   |
+help: disambiguate the associated function for candidate #4
+   |
+23 -     let _query = conn.from::<Counter>().using::<Post>().build();
+23 +     let _query = <DeleteUsingBuilder<'_, '_, TestConnection, Counter<'_>, Post<'_>> as squealy::UpdateFromQuery>::build(&);
+   |
+help: disambiguate the associated function for candidate #5
+   |
+23 -     let _query = conn.from::<Counter>().using::<Post>().build();
+23 +     let _query = <DeleteUsingBuilder<'_, '_, TestConnection, Counter<'_>, Post<'_>> as squealy::UpdateQuery>::build(&);
+   |

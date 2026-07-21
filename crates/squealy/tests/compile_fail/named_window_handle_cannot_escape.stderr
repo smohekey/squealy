@@ -1,0 +1,14 @@
+error[E0521]: borrowed data escapes outside of closure
+  --> tests/compile_fail/named_window_handle_cannot_escape.rs:21:13
+   |
+16 |     let mut leaked: Option<WindowRef<'static>> = None;
+   |         ---------- `leaked` declared here, outside of the closure body
+...
+20 |         .select_over(|(post,), w| {
+   |                                - `w` is a reference that is only valid in the closure body
+21 |             leaked = Some(w);
+   |             ^^^^^^^^^^^^^^^^ `w` escapes the closure body here
+   |
+   = note: requirement occurs because of the type `squealy::WindowRef<'_>`, which makes the generic argument `'_` invariant
+   = note: the struct `squealy::WindowRef<'brand>` is invariant over the parameter `'brand`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance

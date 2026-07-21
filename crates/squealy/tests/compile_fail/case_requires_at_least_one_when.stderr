@@ -1,0 +1,29 @@
+error[E0277]: the trait bound `squealy::CaseNil: squealy::NonEmptyArms` is not satisfied
+ --> tests/compile_fail/case_requires_at_least_one_when.rs:6:34
+  |
+6 |     let _no_arms = case::<i32>().end();
+  |                                  ^^^ the trait `squealy::NonEmptyArms` is not implemented for `squealy::CaseNil`
+  |
+note: required by a bound in `CaseBuilder::<'scope, T, Arms, Null>::end`
+ --> $WORKSPACE/crates/squealy-core/src/expr.rs
+  |
+  |     pub fn end(self) -> Expr<'scope, ScalarNullable<T>, CaseExprAst<Arms, NoElse>>
+  |            --- required by a bound in this associated function
+  |     where
+  |         Arms: NonEmptyArms,
+  |               ^^^^^^^^^^^^ required by this bound in `CaseBuilder::<'scope, T, Arms, Null>::end`
+
+error[E0277]: the trait bound `squealy::CaseNil: squealy::NonEmptyArms` is not satisfied
+ --> tests/compile_fail/case_requires_at_least_one_when.rs:7:39
+  |
+7 |     let _no_arms_else = case::<i32>().otherwise(0);
+  |                                       ^^^^^^^^^ the trait `squealy::NonEmptyArms` is not implemented for `squealy::CaseNil`
+  |
+note: required by a bound in `CaseBuilder::<'scope, T, Arms, Null>::otherwise`
+ --> $WORKSPACE/crates/squealy-core/src/expr.rs
+  |
+  |     pub fn otherwise<E>(
+  |            --------- required by a bound in this associated function
+...
+  |         Arms: NonEmptyArms,
+  |               ^^^^^^^^^^^^ required by this bound in `CaseBuilder::<'scope, T, Arms, Null>::otherwise`

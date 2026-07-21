@@ -1,0 +1,18 @@
+error[E0271]: type mismatch resolving `<Expr<'_, ScalarNullable<LedgerAmount>, ScalarSubqueryExprAst<SubquerySelect<'_, '_, TestConnection, Where<'_, From<'_, '_, TestConnection, HCons<__SquealyLedgerExprsProjection<'_>, HNil>, RootSource<Ledger<'_>>>, EqualsPredicate<LedgerAmount, RuntimeParam<LedgerAmount>>, ComparePredicateAst<ColumnExprAst<LedgerAmount>, ParamExprAst<LedgerAmount>>>, LedgerAmount, ColumnRef<'_, LedgerAmount>>>> as ProjectionParams>::Params == HNil`
+  --> tests/compile_fail/sourceless_select_projection_param_rejected.rs:20:40
+   |
+20 |     let _query = TestConnection.select(scalar_subquery(sq));
+   |                                 ------ ^^^^^^^^^^^^^^^^^^^ expected `HNil`, found `HCons<i32, HNil>`
+   |                                 |
+   |                                 required by a bound introduced by this call
+   |
+   = note: expected struct `HNil`
+              found struct `HCons<i32, HNil>`
+note: required by a bound in `squealy::QueryBuilder::select`
+  --> $WORKSPACE/crates/squealy-core/src/connection.rs
+   |
+   |     fn select<P>(
+   |        ------ required by a bound in this associated function
+...
+   |         P: ReturningProjection<'static> + Projectable + crate::ProjectionParams<Params = HNil>,
+   |                                                                                 ^^^^^^^^^^^^^ required by this bound in `QueryBuilder::select`

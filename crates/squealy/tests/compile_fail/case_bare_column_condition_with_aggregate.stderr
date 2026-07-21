@@ -1,0 +1,24 @@
+error[E0277]: the trait bound `Expr<'_, i64, squealy::CaseExprAst<squealy::CaseWhen<squealy::ComparePredicateAst<squealy::ColumnExprAst<UserId>, squealy::LiteralExprAst<{integer}>>, squealy::AggregateExprAst<squealy::ColumnExprAst<UserId>>, squealy::CaseNil>, squealy::LiteralExprAst<i64>>>: squealy::ProjectionClass` is not satisfied
+  --> tests/compile_fail/case_bare_column_condition_with_aggregate.rs:23:10
+   |
+23 |         .select(|(user,)| case().when(user.id.greater_than(0), user.id.count()).otherwise(0i64));
+   |          ^^^^^^ unsatisfied trait bound
+   |
+   = help: the trait `squealy::ProjectionClass` is not implemented for `Expr<'_, i64, squealy::CaseExprAst<squealy::CaseWhen<squealy::ComparePredicateAst<squealy::ColumnExprAst<UserId>, squealy::LiteralExprAst<{integer}>>, squealy::AggregateExprAst<squealy::ColumnExprAst<UserId>>, squealy::CaseNil>, squealy::LiteralExprAst<i64>>>`
+help: the trait `squealy::ProjectionClass` is implemented for `Expr<'_, K, Ast>`
+  --> $WORKSPACE/crates/squealy-core/src/expr.rs
+   |
+   | / impl<'scope, K, Ast> ProjectionClass for Expr<'scope, K, Ast>
+   | | where
+   | |     Ast: ExprAst + AstProjectionClass,
+   | |     <Ast as AstProjectionClass>::Class: TermProjectionClass,
+   | |____________________________________________________________^
+   = note: required for `Ungrouped` to implement `squealy::ValidSelect<Expr<'_, i64, squealy::CaseExprAst<squealy::CaseWhen<squealy::ComparePredicateAst<squealy::ColumnExprAst<UserId>, squealy::LiteralExprAst<{integer}>>, squealy::AggregateExprAst<squealy::ColumnExprAst<UserId>>, squealy::CaseNil>, squealy::LiteralExprAst<i64>>>, OrderNone>`
+note: required by a bound in `squealy::SourceQuery::select`
+  --> $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   |     fn select<P, Indices>(
+   |        ------ required by a bound in this associated function
+...
+   |             crate::ValidSelect<P, <Self as SelectAst<'conn, 'scope, Conn>>::OrderClass>,
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `SourceQuery::select`

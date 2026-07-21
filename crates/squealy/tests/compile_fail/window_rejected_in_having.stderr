@@ -1,0 +1,27 @@
+error[E0599]: the method `select` exists for struct `squealy::Having<'_, squealy::GroupBy<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyPostExprsProjection<'_>, HNil>, squealy::RootSource<Post<'_>>>, PostUserId, squealy::ColumnExprAst<PostUserId>>, GreaterThanPredicate<i64, i64>, squealy::ComparePredicateAst<squealy::WindowExprAst<squealy::WindowNoArg, squealy::WindowNil, squealy::WindowOrder<squealy::ColumnExprAst<PostId>, squealy::WindowNil>>, squealy::LiteralExprAst<i64>>>`, but its trait bounds were not satisfied
+  --> tests/compile_fail/window_rejected_in_having.rs:22:10
+   |
+14 |       let _query = TestConnection
+   |  __________________-
+15 | |         .from::<Post>()
+16 | |         .group_by(|(post,)| post.user_id)
+17 | |         .having(|(post,)| {
+...  |
+21 | |         })
+22 | |         .select(|(post,)| post.user_id);
+   | |         -^^^^^^ method cannot be called due to unsatisfied trait bounds
+   | |_________|
+   |
+   |
+  ::: $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   |   pub struct Having<'scope, Base, P, PredicateAst>
+   |   ------------------------------------------------ doesn't satisfy `_: SelectAst<'_, '_, _>` or `_: SourceQuery<'_, '_, _>`
+   |
+   = note: the following trait bounds were not satisfied:
+           `squealy::Having<'_, squealy::GroupBy<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyPostExprsProjection<'_>, HNil>, squealy::RootSource<Post<'_>>>, PostUserId, squealy::ColumnExprAst<PostUserId>>, GreaterThanPredicate<i64, i64>, squealy::ComparePredicateAst<squealy::WindowExprAst<squealy::WindowNoArg, squealy::WindowNil, squealy::WindowOrder<squealy::ColumnExprAst<PostId>, squealy::WindowNil>>, squealy::LiteralExprAst<i64>>>: squealy::SelectAst<'_, '_, _>`
+           which is required by `squealy::Having<'_, squealy::GroupBy<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyPostExprsProjection<'_>, HNil>, squealy::RootSource<Post<'_>>>, PostUserId, squealy::ColumnExprAst<PostUserId>>, GreaterThanPredicate<i64, i64>, squealy::ComparePredicateAst<squealy::WindowExprAst<squealy::WindowNoArg, squealy::WindowNil, squealy::WindowOrder<squealy::ColumnExprAst<PostId>, squealy::WindowNil>>, squealy::LiteralExprAst<i64>>>: squealy::SourceQuery<'_, '_, _>`
+           `&squealy::Having<'_, squealy::GroupBy<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyPostExprsProjection<'_>, HNil>, squealy::RootSource<Post<'_>>>, PostUserId, squealy::ColumnExprAst<PostUserId>>, GreaterThanPredicate<i64, i64>, squealy::ComparePredicateAst<squealy::WindowExprAst<squealy::WindowNoArg, squealy::WindowNil, squealy::WindowOrder<squealy::ColumnExprAst<PostId>, squealy::WindowNil>>, squealy::LiteralExprAst<i64>>>: squealy::SelectAst<'_, '_, _>`
+           which is required by `&squealy::Having<'_, squealy::GroupBy<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyPostExprsProjection<'_>, HNil>, squealy::RootSource<Post<'_>>>, PostUserId, squealy::ColumnExprAst<PostUserId>>, GreaterThanPredicate<i64, i64>, squealy::ComparePredicateAst<squealy::WindowExprAst<squealy::WindowNoArg, squealy::WindowNil, squealy::WindowOrder<squealy::ColumnExprAst<PostId>, squealy::WindowNil>>, squealy::LiteralExprAst<i64>>>: squealy::SourceQuery<'_, '_, _>`
+           `&mut squealy::Having<'_, squealy::GroupBy<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyPostExprsProjection<'_>, HNil>, squealy::RootSource<Post<'_>>>, PostUserId, squealy::ColumnExprAst<PostUserId>>, GreaterThanPredicate<i64, i64>, squealy::ComparePredicateAst<squealy::WindowExprAst<squealy::WindowNoArg, squealy::WindowNil, squealy::WindowOrder<squealy::ColumnExprAst<PostId>, squealy::WindowNil>>, squealy::LiteralExprAst<i64>>>: squealy::SelectAst<'_, '_, _>`
+           which is required by `&mut squealy::Having<'_, squealy::GroupBy<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyPostExprsProjection<'_>, HNil>, squealy::RootSource<Post<'_>>>, PostUserId, squealy::ColumnExprAst<PostUserId>>, GreaterThanPredicate<i64, i64>, squealy::ComparePredicateAst<squealy::WindowExprAst<squealy::WindowNoArg, squealy::WindowNil, squealy::WindowOrder<squealy::ColumnExprAst<PostId>, squealy::WindowNil>>, squealy::LiteralExprAst<i64>>>: squealy::SourceQuery<'_, '_, _>`

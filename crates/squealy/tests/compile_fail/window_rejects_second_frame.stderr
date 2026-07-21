@@ -1,0 +1,11 @@
+error[E0599]: no method named `range` found for struct `squealy::Window<'_, squealy::WindowNil, squealy::WindowOrder<squealy::ColumnExprAst<PostId>, squealy::WindowNil>, squealy::FrameSpec>` in the current scope
+  --> tests/compile_fail/window_rejects_second_frame.rs:18:18
+   |
+16 | /             w.order_by(post.id.asc())
+17 | |                 .rows(unbounded_preceding(), current_row())
+18 | |                 .range(preceding(1), following(1))
+   | |                 -^^^^^ method not found in `squealy::Window<'_, squealy::WindowNil, squealy::WindowOrder<squealy::ColumnExprAst<PostId>, squealy::WindowNil>, squealy::FrameSpec>`
+   | |_________________|
+   |
+   |
+   = note: the method was found for `squealy::Window<'scope, Parts, Ords>`

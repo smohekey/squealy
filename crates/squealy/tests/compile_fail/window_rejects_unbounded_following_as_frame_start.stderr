@@ -1,0 +1,16 @@
+error[E0277]: the trait bound `squealy::UnboundedFollowing: FrameStart` is not satisfied
+  --> tests/compile_fail/window_rejects_unbounded_following_as_frame_start.rs:17:54
+   |
+17 |             .over(|w| w.order_by(post.id.asc()).rows(unbounded_following(), current_row()))
+   |                                                 ---- ^^^^^^^^^^^^^^^^^^^^^ the trait `FrameStart` is not implemented for `squealy::UnboundedFollowing`
+   |                                                 |
+   |                                                 required by a bound introduced by this call
+   |
+note: required by a bound in `squealy::Window::<'scope, Parts, Ords>::rows`
+  --> $WORKSPACE/crates/squealy-core/src/expr.rs
+   |
+   |     pub fn rows<S, E>(self, start: S, end: E) -> Window<'scope, Parts, Ords, FrameSpec>
+   |            ---- required by a bound in this associated function
+   |     where
+   |         S: FrameStart,
+   |            ^^^^^^^^^^ required by this bound in `Window::<'scope, Parts, Ords>::rows`

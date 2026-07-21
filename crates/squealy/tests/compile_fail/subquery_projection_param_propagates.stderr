@@ -1,0 +1,19 @@
+error[E0599]: the method `fetch` exists for struct `TestSelect<'_, '_, AccountId, squealy::Where<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyAccountExprsProjection<'_>, HNil>, squealy::RootSource<Account<'_>>>, InPredicate<AccountBalance>, squealy::InSubqueryPredicateAst<squealy::ColumnExprAst<AccountBalance>, squealy::SubquerySelect<'_, '_, TestConnection, squealy::From<'_, '_, TestConnection, HCons<__SquealyLedgerExprsProjection<'_>, HNil>, squealy::RootSource<Ledger<'_>>>, AddExpr<LedgerAmount, RuntimeParam<LedgerAmount>>, Expr<'_, AddExpr<LedgerAmount, RuntimeParam<LedgerAmount>>, squealy::BinaryExprAst<squealy::ColumnExprAst<LedgerAmount>, squealy::ParamExprAst<LedgerAmount>>>>>>, ColumnRef<'_, AccountId>>`, but its trait bounds were not satisfied
+  --> tests/compile_fail/subquery_projection_param_propagates.rs:33:23
+   |
+33 |     let _rows = query.fetch();
+   |                       ^^^^^ method cannot be called due to unsatisfied trait bounds
+   |
+  ::: $WORKSPACE/crates/squealy-core/src/list.rs
+   |
+   | pub struct HCons<Head, Tail> {
+   | ---------------------------- doesn't satisfy `HCons<i32, HNil>: NoRuntimeParams`
+   |
+  ::: $WORKSPACE/crates/squealy-test/src/query.rs
+   |
+   | pub struct TestSelect<'conn, 'scope, Shape, Base, Projection>
+   | ------------------------------------------------------------- doesn't satisfy `_: ExecutableSelectQuery<'_, '_, Where<'_, From<'_, '_, TestConnection, HCons<__SquealyAccountExprsProjection<'_>, HNil>, RootSource<Account<'_>>>, InPredicate<AccountBalance>, InSubqueryPredicateAst<ColumnExprAst<AccountBalance>, SubquerySelect<'_, '_, TestConnection, From<'_, '_, TestConnection, HCons<__SquealyLedgerExprsProjection<'_>, HNil>, RootSource<Ledger<'_>>>, AddExpr<LedgerAmount, RuntimeParam<LedgerAmount>>, Expr<'_, AddExpr<LedgerAmount, RuntimeParam<LedgerAmount>>, BinaryExprAst<ColumnExprAst<LedgerAmount>, ParamExprAst<LedgerAmount>>>>>>, ColumnRef<'_, AccountId>>`
+   |
+   = note: the following trait bounds were not satisfied:
+           `HCons<i32, HNil>: NoRuntimeParams`
+           which is required by `TestSelect<'_, '_, AccountId, squealy::Where<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyAccountExprsProjection<'_>, HNil>, squealy::RootSource<Account<'_>>>, InPredicate<AccountBalance>, squealy::InSubqueryPredicateAst<squealy::ColumnExprAst<AccountBalance>, squealy::SubquerySelect<'_, '_, TestConnection, squealy::From<'_, '_, TestConnection, HCons<__SquealyLedgerExprsProjection<'_>, HNil>, squealy::RootSource<Ledger<'_>>>, AddExpr<LedgerAmount, RuntimeParam<LedgerAmount>>, Expr<'_, AddExpr<LedgerAmount, RuntimeParam<LedgerAmount>>, squealy::BinaryExprAst<squealy::ColumnExprAst<LedgerAmount>, squealy::ParamExprAst<LedgerAmount>>>>>>, ColumnRef<'_, AccountId>>: squealy::ExecutableSelectQuery<'_, '_, squealy::Where<'_, squealy::From<'_, '_, TestConnection, HCons<__SquealyAccountExprsProjection<'_>, HNil>, squealy::RootSource<Account<'_>>>, InPredicate<AccountBalance>, squealy::InSubqueryPredicateAst<squealy::ColumnExprAst<AccountBalance>, squealy::SubquerySelect<'_, '_, TestConnection, squealy::From<'_, '_, TestConnection, HCons<__SquealyLedgerExprsProjection<'_>, HNil>, squealy::RootSource<Ledger<'_>>>, AddExpr<LedgerAmount, RuntimeParam<LedgerAmount>>, Expr<'_, AddExpr<LedgerAmount, RuntimeParam<LedgerAmount>>, squealy::BinaryExprAst<squealy::ColumnExprAst<LedgerAmount>, squealy::ParamExprAst<LedgerAmount>>>>>>, ColumnRef<'_, AccountId>>`

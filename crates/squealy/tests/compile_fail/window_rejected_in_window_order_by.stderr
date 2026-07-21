@@ -1,0 +1,19 @@
+error[E0277]: the trait bound `squealy::WindowExprAst<squealy::WindowNoArg, squealy::WindowNil, squealy::WindowOrder<squealy::ColumnExprAst<PostId>, squealy::WindowNil>>: NonAggregateAst` is not satisfied
+  --> tests/compile_fail/window_rejected_in_window_order_by.rs:17:17
+   |
+16 |               w.order_by(
+   |                 -------- required by a bound introduced by this call
+17 | /                 row_number()
+18 | |                     .over(|inner| inner.order_by(post.id.asc()))
+19 | |                     .asc(),
+   | |__________________________^ unsatisfied trait bound
+   |
+   = help: the trait `NonAggregateAst` is not implemented for `squealy::WindowExprAst<squealy::WindowNoArg, squealy::WindowNil, squealy::WindowOrder<squealy::ColumnExprAst<PostId>, squealy::WindowNil>>`
+note: required by a bound in `squealy::Window::<'scope, Parts, Ords>::order_by`
+  --> $WORKSPACE/crates/squealy-core/src/expr.rs
+   |
+   |     pub fn order_by<K, Ast>(self, order: Order<'scope, K, Ast>) -> Window<'scope, Parts, Ords::Output>
+   |            -------- required by a bound in this associated function
+   |     where
+   |         Ast: ExprAst + NonAggregateAst,
+   |                        ^^^^^^^^^^^^^^^ required by this bound in `Window::<'scope, Parts, Ords>::order_by`

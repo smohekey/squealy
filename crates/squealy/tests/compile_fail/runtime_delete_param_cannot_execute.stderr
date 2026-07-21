@@ -1,0 +1,16 @@
+error[E0277]: the trait bound `HCons<i32, HNil>: NoRuntimeParams` is not satisfied
+  --> tests/compile_fail/runtime_delete_param_cannot_execute.rs:14:10
+   |
+14 |         .delete();
+   |          ^^^^^^ the trait `NoRuntimeParams` is not implemented for `HCons<i32, HNil>`
+   |
+help: the trait `NoRuntimeParams` is implemented for `HNil`
+  --> $WORKSPACE/crates/squealy-core/src/list.rs
+   |
+   | impl NoRuntimeParams for HNil {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `squealy::DeleteSourceQuery::delete::{anon_assoc#0}`
+  --> $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   |         <Self::Filters as PredicateNodes>::Params: NoRuntimeParams,
+   |                                                    ^^^^^^^^^^^^^^^ required by this bound in `DeleteSourceQuery::delete::{anon_assoc#0}`

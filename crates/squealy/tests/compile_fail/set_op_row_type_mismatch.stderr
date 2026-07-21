@@ -1,0 +1,56 @@
+error[E0271]: type mismatch resolving `<TestSelect<'_, '_, (UserId, UserId), From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, RootSource<User<'_>>>, (ColumnRef<'_, UserId>, ColumnRef<'_, UserId>)> as SetOperand<'_, '_, TestConnection>>::Row == (i32, String)`
+  --> tests/compile_fail/set_op_row_type_mismatch.rs:25:16
+   |
+25 |         .union(TestConnection.from::<User>().select(|(u,)| (u.id, u.id)));
+   |          ----- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `(i32, String)`, found `(i32, i32)`
+   |          |
+   |          required by a bound introduced by this call
+   |
+   = note: expected tuple `(i32, std::string::String)`
+              found tuple `(i32, i32)`
+note: required by a bound in `union`
+  --> $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   |     fn union<O>(self, other: O) -> Self::SetSelect<SetNode<Self::Arm, O::Arm>>
+   |        ----- required by a bound in this associated function
+   |     where
+   |         O: SetOperand<'conn, 'scope, Conn, Row = Self::Row>,
+   |                                            ^^^^^^^^^^^^^^^ required by this bound in `SetOperations::union`
+
+error[E0271]: type mismatch resolving `<SetLeaf<'_, '_, TestConnection, From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, RootSource<User<'_>>>, (UserId, UserId), (ColumnRef<'_, UserId>, ColumnRef<'_, UserId>)> as SetArm<'_, '_, TestConnection>>::Row == (i32, String)`
+  --> tests/compile_fail/set_op_row_type_mismatch.rs:25:10
+   |
+25 |         .union(TestConnection.from::<User>().select(|(u,)| (u.id, u.id)));
+   |          ^^^^^ expected `(i32, String)`, found `(i32, i32)`
+   |
+   = note: expected tuple `(i32, std::string::String)`
+              found tuple `(i32, i32)`
+   = note: required for `squealy::SetNode<squealy::SetLeaf<'_, '_, TestConnection, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, (UserId, UserName), (ColumnRef<'_, UserId>, ColumnRef<'_, UserName>)>, squealy::SetLeaf<'_, '_, TestConnection, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, (UserId, UserId), (ColumnRef<'_, UserId>, ColumnRef<'_, UserId>)>>` to implement `SetArm<'_, '_, TestConnection>`
+note: required by a bound in `squealy::SetOperations::SetSelect`
+  --> $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   |     type SetSelect<Tree>
+   |          --------- required by a bound in this associated type
+   |     where
+   |         Tree: SetArm<'conn, 'scope, Conn>;
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `SetOperations::SetSelect`
+
+error[E0271]: type mismatch resolving `<SetLeaf<'_, '_, TestConnection, From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, RootSource<User<'_>>>, (UserId, UserId), (ColumnRef<'_, UserId>, ColumnRef<'_, UserId>)> as SetArm<'_, '_, TestConnection>>::Row == (i32, String)`
+  --> tests/compile_fail/set_op_row_type_mismatch.rs:25:16
+   |
+25 |         .union(TestConnection.from::<User>().select(|(u,)| (u.id, u.id)));
+   |          ----- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `(i32, String)`, found `(i32, i32)`
+   |          |
+   |          required by a bound introduced by this call
+   |
+   = note: expected tuple `(i32, std::string::String)`
+              found tuple `(i32, i32)`
+   = note: required for `squealy::SetNode<squealy::SetLeaf<'_, '_, TestConnection, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, (UserId, UserName), (ColumnRef<'_, UserId>, ColumnRef<'_, UserName>)>, squealy::SetLeaf<'_, '_, TestConnection, squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>, (UserId, UserId), (ColumnRef<'_, UserId>, ColumnRef<'_, UserId>)>>` to implement `SetArm<'_, '_, TestConnection>`
+note: required by a bound in `union`
+  --> $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   |     fn union<O>(self, other: O) -> Self::SetSelect<SetNode<Self::Arm, O::Arm>>
+   |        ----- required by a bound in this associated function
+...
+   |         SetNode<Self::Arm, O::Arm>: SetArm<'conn, 'scope, Conn>,
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `SetOperations::union`

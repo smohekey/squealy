@@ -1,0 +1,19 @@
+error[E0599]: the method `union` exists for struct `TestSelect<'_, '_, UserId, squealy::Locked<squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>>, ColumnRef<'_, UserId>>`, but its trait bounds were not satisfied
+  --> tests/compile_fail/row_lock_rejected_in_set_operation.rs:18:23
+   |
+18 |     let _set = locked.union(other);
+   |                       ^^^^^ method cannot be called due to unsatisfied trait bounds
+   |
+  ::: $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   | pub struct Locked<Base> {
+   | ----------------------- doesn't satisfy `<_ as SelectAst<'_, '_, TestConnection>>::RowLockState = RowUnlocked`
+   |
+  ::: $WORKSPACE/crates/squealy-test/src/query.rs
+   |
+   | pub struct TestSelect<'conn, 'scope, Shape, Base, Projection>
+   | ------------------------------------------------------------- doesn't satisfy `_: SetOperations<'_, '_, TestConnection>`
+   |
+   = note: the following trait bounds were not satisfied:
+           `<squealy::Locked<squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>> as squealy::SelectAst<'_, '_, TestConnection>>::RowLockState = RowUnlocked`
+           which is required by `TestSelect<'_, '_, UserId, squealy::Locked<squealy::From<'_, '_, TestConnection, HCons<__SquealyUserExprsProjection<'_>, HNil>, squealy::RootSource<User<'_>>>>, ColumnRef<'_, UserId>>: squealy::SetOperations<'_, '_, TestConnection>`

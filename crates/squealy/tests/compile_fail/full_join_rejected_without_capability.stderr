@@ -1,0 +1,19 @@
+error[E0277]: the trait bound `TestBackend: SupportsFullJoin` is not satisfied
+  --> tests/compile_fail/full_join_rejected_without_capability.rs:30:10
+   |
+30 |         .full_join::<Post>()
+   |          ^^^^^^^^^ the trait `SupportsFullJoin` is not implemented for `TestBackend`
+   |
+help: the trait `SupportsFullJoin` is implemented for `ModelBackend`
+  --> $WORKSPACE/crates/squealy-core/src/view.rs
+   |
+   | impl crate::SupportsFullJoin for ModelBackend {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `full_join`
+  --> $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   |     fn full_join<S>(self) -> FullJoinTarget<Self, S>
+   |        --------- required by a bound in this associated function
+...
+   |         Conn::Backend: crate::SupportsFullJoin,
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `SourceQuery::full_join`

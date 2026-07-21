@@ -1488,10 +1488,14 @@ dependencies = [
 name = "squealy"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "chrono",
  "squealy-core",
  "squealy-macros",
  "squealy-test",
+ "time",
  "trybuild",
+ "uuid",
 ]
 
 [[package]]

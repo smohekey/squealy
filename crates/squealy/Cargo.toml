@@ -12,15 +12,19 @@ categories.workspace = true
 
 [features]
 default = []
-uuid = ["squealy-core/uuid"]
-bytes = ["squealy-core/bytes"]
+uuid = ["dep:uuid", "squealy-core/uuid"]
+bytes = ["dep:bytes", "squealy-core/bytes"]
 systemtime = ["squealy-core/systemtime"]
-time = ["squealy-core/time"]
-chrono = ["squealy-core/chrono"]
+time = ["dep:time", "squealy-core/time"]
+chrono = ["dep:chrono", "squealy-core/chrono"]
 
 [dependencies]
 squealy-core.workspace = true
 squealy-macros.workspace = true
+uuid = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
+time = { version = "0.3", optional = true, default-features = false }
+chrono = { version = "0.4", optional = true, default-features = false }
 
 [dev-dependencies]
 squealy-test.workspace = true

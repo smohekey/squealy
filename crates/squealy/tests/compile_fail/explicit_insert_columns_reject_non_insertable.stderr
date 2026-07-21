@@ -1,0 +1,19 @@
+error[E0599]: the method `row` exists for struct `ToColumns<'_, TestConnection, GeneratedRecord<'_>, (GeneratedRecordSlug,)>`, but its trait bounds were not satisfied
+  --> tests/compile_fail/explicit_insert_columns_reject_non_insertable.rs:16:10
+   |
+ 4 |   #[derive(Clone, Debug, PartialEq, Table)]
+   |                                     ----- doesn't satisfy `GeneratedRecordSlug: squealy::InsertColumnKey`
+...
+14 |       let _insert = TestConnection
+   |  ___________________-
+15 | |         .to_columns::<GeneratedRecord, (GeneratedRecordSlug,)>()
+16 | |         .row(("not-insertable",))
+   | |_________-^^^
+   |
+   = note: the following trait bounds were not satisfied:
+           `GeneratedRecordSlug: squealy::InsertColumnKey`
+note: the trait `squealy::InsertColumnKey` must be implemented
+  --> $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   | pub trait InsertColumnKey: ColumnKey {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

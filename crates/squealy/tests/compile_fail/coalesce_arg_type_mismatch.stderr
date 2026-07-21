@@ -1,0 +1,16 @@
+error[E0271]: type mismatch resolving `<String as KindNullability>::Value == i32`
+  --> tests/compile_fail/coalesce_arg_type_mismatch.rs:23:53
+   |
+23 |         .select(|(user,)| coalesce(user.id).or_else("nope").end());
+   |                                             ------- ^^^^^^ expected `i32`, found `String`
+   |                                             |
+   |                                             required by a bound introduced by this call
+   |
+note: required by a bound in `CoalesceBuilder::<'scope, T, Args, Null>::or_else`
+  --> $WORKSPACE/crates/squealy-core/src/expr.rs
+   |
+   |     pub fn or_else<E>(
+   |            ------- required by a bound in this associated function
+...
+   |         E::Kind: KindNullability<Value = T>,
+   |                                  ^^^^^^^^^ required by this bound in `CoalesceBuilder::<'scope, T, Args, Null>::or_else`

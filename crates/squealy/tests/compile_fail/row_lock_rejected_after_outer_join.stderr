@@ -1,0 +1,57 @@
+error[E0277]: the trait bound `RowLocked: squealy::RowLockSelectValid<NotDistinct, Ungrouped, OuterJoined, _>` is not satisfied
+  --> tests/compile_fail/row_lock_rejected_after_outer_join.rs:25:10
+   |
+25 |         .select(|(user, _post)| user.id);
+   |          ^^^^^^ the trait `squealy::RowLockSelectValid<NotDistinct, Ungrouped, OuterJoined, _>` is not implemented for `RowLocked`
+   |
+help: the trait `RowLockSelectValid<NotDistinct, Ungrouped, OuterJoined, _>` is not implemented for `RowLocked`
+      but trait `RowLockSelectValid<NotDistinct, Ungrouped, NotOuterJoined, _>` is implemented for it
+  --> $WORKSPACE/crates/squealy-core/src/expr.rs
+   |
+   | / impl<Projection> RowLockSelectValid<NotDistinct, Ungrouped, NotOuterJoined, Projection>
+   | |     for RowLocked
+   | | where
+   | |     Projection: ProjectionClass<Class = ScalarProjection>,
+   | |__________________________________________________________^
+   = help: for that trait implementation, expected `NotOuterJoined`, found `OuterJoined`
+note: the method call chain might not have had the expected associated types
+  --> tests/compile_fail/row_lock_rejected_after_outer_join.rs:21:10
+   |
+20 |     let _query = TestConnection
+   |                  -------------- this expression has type `TestConnection`
+21 |         .from::<User>()
+   |          ^^^^^^^^^^^^^^
+   |          |
+   |          `SelectAst::RowLockState` is `RowUnlocked` here
+   |          `SelectAst::Distinctness` is `NotDistinct` here
+   |          `SelectAst::Grouped` is `Ungrouped` here
+   |          `SelectAst::OuterJoinState` is `NotOuterJoined` here
+22 |         .left_join::<Post>()
+23 |         .on(|(user,), post| post.user_id.equals(user.id))
+   |          ------------------------------------------------
+   |          |
+   |          `SelectAst::RowLockState` is `RowUnlocked` here
+   |          `SelectAst::Distinctness` is `NotDistinct` here
+   |          `SelectAst::Grouped` is `Ungrouped` here
+   |          `SelectAst::OuterJoinState` is `OuterJoined` here
+24 |         .for_update()
+   |          ^^^^^^^^^^^^
+   |          |
+   |          `SelectAst::RowLockState` changed to `RowLocked` here
+   |          `SelectAst::Distinctness` remains `NotDistinct` here
+   |          `SelectAst::Grouped` remains `Ungrouped` here
+   |          `SelectAst::OuterJoinState` remains `OuterJoined` here
+note: required by a bound in `squealy::SourceQuery::select`
+  --> $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   |       fn select<P, Indices>(
+   |          ------ required by a bound in this associated function
+...
+   |           <Self as SelectAst<'conn, 'scope, Conn>>::RowLockState: crate::RowLockSelectValid<
+   |  _________________________________________________________________^
+   | |             <Self as SelectAst<'conn, 'scope, Conn>>::Distinctness,
+   | |             <Self as SelectAst<'conn, 'scope, Conn>>::Grouped,
+   | |             <Self as SelectAst<'conn, 'scope, Conn>>::OuterJoinState,
+   | |             P,
+   | |         >,
+   | |_________^ required by this bound in `SourceQuery::select`

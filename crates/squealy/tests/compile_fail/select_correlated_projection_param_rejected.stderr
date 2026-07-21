@@ -1,0 +1,16 @@
+error[E0271]: type mismatch resolving `<Expr<'_, ScalarNullable<LedgerAmount>, ScalarSubqueryExprAst<SubquerySelect<'_, '_, TestConnection, Where<'_, From<'_, '_, TestConnection, HCons<__SquealyLedgerExprsProjection<'_>, HNil>, RootSource<Ledger<'_>>>, EqualsPredicate<LedgerAmount, RuntimeParam<LedgerAmount>>, ComparePredicateAst<ColumnExprAst<LedgerAmount>, ParamExprAst<LedgerAmount>>>, LedgerAmount, ColumnRef<'_, LedgerAmount>>>> as ProjectionParams>::Params == HNil`
+  --> tests/compile_fail/select_correlated_projection_param_rejected.rs:23:51
+   |
+23 |     let _query = TestConnection.from::<Account>().select_correlated(|(_account,), sub| {
+   |                                                   ^^^^^^^^^^^^^^^^^ expected `HNil`, found `HCons<i32, HNil>`
+   |
+   = note: expected struct `HNil`
+              found struct `HCons<i32, HNil>`
+note: required by a bound in `select_correlated`
+  --> $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   |     fn select_correlated<P, Indices>(
+   |        ----------------- required by a bound in this associated function
+...
+   |         P: ReturningProjection<'scope> + Projectable + crate::ProjectionParams<Params = HNil>,
+   |                                                                                ^^^^^^^^^^^^^ required by this bound in `SourceQuery::select_correlated`
