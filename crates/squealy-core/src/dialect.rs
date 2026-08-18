@@ -8,7 +8,7 @@ use crate::{OrderNulls, RowLock, SqlType, UnaryStringFunc};
 /// the backends squealy targets, so the sink logic is shared and only these hooks vary by dialect.
 /// PostgreSQL and MySQL differ here in exactly three places — bound-parameter placeholders, identifier
 /// quoting, and the type name used inside a `CAST`.
-pub trait Dialect {
+pub trait Dialect: 'static {
 	/// Writes the placeholder for the bound parameter at zero-based position `index`.
 	///
 	/// PostgreSQL numbers parameters positionally (`$1`, `$2`, …); MySQL uses a bare `?`.
@@ -46,9 +46,7 @@ pub trait Dialect {
 	///
 	/// PostgreSQL does integer division (so this is `true`); MySQL's `/` is already floating-point
 	/// division (`false`), and casting would change `DECIMAL` results.
-	fn integer_division_needs_float_cast(&self) -> bool {
-		true
-	}
+	const INTEGER_DIVISION_NEEDS_FLOAT_CAST: bool = true;
 
 	/// The fractional-seconds precision to render on `CURRENT_TIMESTAMP` for a `now()` expression, or
 	/// `None` to render it bare.
@@ -57,9 +55,7 @@ pub trait Dialect {
 	/// `TIMESTAMP(6)`; MySQL's bare `CURRENT_TIMESTAMP` is fsp 0, so a value produced by `now()` would
 	/// lose its sub-seconds unless spelled `CURRENT_TIMESTAMP(6)`. The default is `None` — PostgreSQL's
 	/// `CURRENT_TIMESTAMP` is already microsecond.
-	fn now_fractional_digits(&self) -> Option<u8> {
-		None
-	}
+	const NOW_FRACTIONAL_DIGITS: Option<u8> = None;
 
 	/// The SQL name for a scalar string function. The default is the standard spelling
 	/// ([`UnaryStringFunc::sql_name`], shared by PostgreSQL and MySQL); a backend overrides it where its
@@ -125,9 +121,7 @@ pub trait Dialect {
 	/// with native syntax. The default is `false` (PostgreSQL renders ` NULLS FIRST/LAST`). MySQL has no
 	/// such syntax and overrides this to `true`; the renderer then emits a leading `(<expr> IS NULL)`
 	/// sort key instead.
-	fn emulates_order_nulls(&self) -> bool {
-		false
-	}
+	const EMULATES_ORDER_NULLS: bool = false;
 
 	/// Writes a `SELECT … FOR UPDATE` / `FOR SHARE` row-locking clause (with a leading space).
 	///
@@ -148,9 +142,7 @@ pub trait Dialect {
 	/// MySQL (whose `CONCAT` propagates `NULL`, and whose `||` is logical OR). PostgreSQL overrides
 	/// this to `true` so `||` is used — which also lets it infer a bare parameter's type (its `CONCAT`
 	/// signature is `"any"` and cannot).
-	fn concat_uses_pipe_operator(&self) -> bool {
-		false
-	}
+	const CONCAT_USES_PIPE_OPERATOR: bool = false;
 
 	/// Whether `SUBSTRING(s FROM start FOR len)` needs its `start`/`len` bounds cast to `integer`.
 	///
@@ -159,9 +151,7 @@ pub trait Dialect {
 	/// FOR escape)` overload rather than the positional form, so the bounds must be cast to integer.
 	/// The default is `false` — MySQL binds `?` by value (no inference) and has no regex overload, so
 	/// it needs no cast (and its `CAST` vocabulary has no `INT` target anyway).
-	fn substring_bounds_need_cast(&self) -> bool {
-		false
-	}
+	const SUBSTRING_BOUNDS_NEED_CAST: bool = false;
 
 	/// Whether a bare literal/parameter operand of `EXTRACT`/`date_trunc` must be cast to its timestamp
 	/// type.
@@ -171,9 +161,7 @@ pub trait Dialect {
 	/// resolve the placeholder when preparing the statement. The default is `false` — MySQL binds `?`
 	/// by value (no inference). A *column* operand is already typed, so only bare literals/params
 	/// (`ExprAst::NEEDS_CAST_ANCHOR`) are cast.
-	fn timestamp_operand_needs_cast(&self) -> bool {
-		false
-	}
+	const TIMESTAMP_OPERAND_NEEDS_CAST: bool = false;
 
 	/// Whether fractional-seconds `extract_second` must use the composite `SECOND_MICROSECOND` unit.
 	///
@@ -181,9 +169,7 @@ pub trait Dialect {
 	/// `EXTRACT(SECOND FROM ts)`. MySQL's `EXTRACT(SECOND …)` is integer-only, so it overrides this to
 	/// `true` and the renderer uses `EXTRACT(SECOND_MICROSECOND FROM ts) / 1000000.0` (which references
 	/// the operand once, returning `SSffffff`), matching PostgreSQL's fractional value.
-	fn extract_second_uses_microsecond_unit(&self) -> bool {
-		false
-	}
+	const EXTRACT_SECOND_USES_MICROSECOND_UNIT: bool = false;
 
 	/// Writes a reference to the conflicting (proposed) row's column inside an upsert's `DO UPDATE SET`.
 	///
@@ -237,26 +223,20 @@ pub trait Dialect {
 	/// How `UPDATE … FROM` / `DELETE … USING` render a correlated extra source. PostgreSQL appends the
 	/// source after the `SET`/target with the correlation in `WHERE`; MySQL joins the source before the
 	/// `SET`, with the correlation in the join's `ON`. Defaults to the PostgreSQL form.
-	fn update_from_style(&self) -> UpdateFromStyle {
-		UpdateFromStyle::PgFrom
-	}
+	const UPDATE_FROM_STYLE: UpdateFromStyle = UpdateFromStyle::PgFrom;
 
 	/// How a correlated `DELETE … <source>` renders. The default derives from
-	/// [`update_from_style`](Self::update_from_style), so PostgreSQL/MySQL are unchanged; SQLite
+	/// [`UPDATE_FROM_STYLE`](Self::UPDATE_FROM_STYLE), so PostgreSQL/MySQL are unchanged; SQLite
 	/// overrides it, having no join-delete syntax — it rewrites the correlated delete as
 	/// `DELETE FROM t AS a WHERE EXISTS (SELECT 1 FROM other AS b WHERE <correlation>)`.
-	fn delete_using_style(&self) -> DeleteUsingStyle {
-		match self.update_from_style() {
-			UpdateFromStyle::PgFrom => DeleteUsingStyle::PgUsing,
-			UpdateFromStyle::MysqlJoin => DeleteUsingStyle::MysqlJoin,
-		}
-	}
+	const DELETE_USING_STYLE: DeleteUsingStyle = match Self::UPDATE_FROM_STYLE {
+		UpdateFromStyle::PgFrom => DeleteUsingStyle::PgUsing,
+		UpdateFromStyle::MysqlJoin => DeleteUsingStyle::MysqlJoin,
+	};
 
 	/// Whether a schema/namespace qualifier is emitted before a table name. Defaults to `true`; SQLite
 	/// has no schemas (tables render unqualified/flattened), so it returns `false`.
-	fn qualify_schema(&self) -> bool {
-		true
-	}
+	const QUALIFY_SCHEMA: bool = true;
 
 	/// Whether an `UPDATE`/`DELETE … RETURNING` clause references columns *unqualified* (bare column
 	/// names) rather than qualified by the statement's target-table alias.
@@ -266,33 +246,31 @@ pub trait Dialect {
 	/// cannot resolve that alias (`no such column: q0_0.col`), so it returns `true` and — since an
 	/// `UPDATE`/`DELETE` targets a single table, leaving the columns unambiguous — renders them bare.
 	/// (An `INSERT … RETURNING` has no alias and is always unqualified, independently of this.)
-	fn returning_omits_target_alias(&self) -> bool {
-		false
-	}
+	const RETURNING_OMITS_TARGET_ALIAS: bool = false;
 
 	/// How the operands of a set operation (`UNION`/`INTERSECT`/`EXCEPT`) are wrapped. Defaults to
 	/// [`SetOperandStyle::Parenthesized`] (`(SELECT …)`); SQLite rejects a parenthesized compound
 	/// operand *and* a per-operand `ORDER BY`/`LIMIT`, so it uses [`SetOperandStyle::SubquerySelect`]
 	/// (`SELECT * FROM (SELECT …)`), which stays valid for ordered/limited operands and preserves the
 	/// grouping of a nested compound.
-	fn set_operand_style(&self) -> SetOperandStyle {
-		SetOperandStyle::Parenthesized
-	}
+	const SET_OPERAND_STYLE: SetOperandStyle = SetOperandStyle::Parenthesized;
 
 	/// Whether the dialect supports the `ALL` quantifier on `INTERSECT`/`EXCEPT` (`INTERSECT ALL` /
 	/// `EXCEPT ALL`) in a view body. Defaults to `true`; SQLite allows `ALL` only after `UNION`, so it
-	/// returns `false` and the view renderer rejects an `INTERSECT ALL`/`EXCEPT ALL` set-op body for it
-	/// (mirroring the runtime query API's `SupportsIntersectExceptAll` gate, which SQLite also lacks).
-	fn supports_intersect_except_all(&self) -> bool {
-		true
-	}
+	/// returns `false` and the view renderer rejects an `INTERSECT ALL`/`EXCEPT ALL` set-op body for it.
+	///
+	/// This is the runtime (view/DDL-path) half of the capability; the compile-time (query-path) half
+	/// is the marker [`SupportsIntersectExceptAll`](crate::SupportsIntersectExceptAll). The two must
+	/// agree, and that agreement is *enforced* via the [`HasDialect`](crate::HasDialect) link: a backend
+	/// gating the marker carries a compile-time assertion that this const is `true`
+	/// ([`SupportsIntersectExceptAll::_DIALECT_AGREES`]), and the SQLite crate pins this const to `false`
+	/// with a matching `const _` assertion — so neither channel can drift from the other.
+	const SUPPORTS_INTERSECT_EXCEPT_ALL: bool = true;
 
 	/// Whether `substring` renders as the comma-argument call `substr(s, start, len)` rather than the
 	/// SQL-standard `SUBSTRING(s FROM start FOR len)`. Defaults to `false`; SQLite has no `FROM`/`FOR`
 	/// substring syntax, so it returns `true`.
-	fn substring_uses_function_call(&self) -> bool {
-		false
-	}
+	const SUBSTRING_USES_FUNCTION_CALL: bool = false;
 
 	/// Whether a recursive-CTE arm (`WITH RECURSIVE t AS (<anchor> UNION [ALL] <recursive>)`) may be
 	/// **parenthesized**. A plain, tail-less arm always renders bare; but an arm carrying its own
@@ -302,9 +280,7 @@ pub trait Dialect {
 	/// arm is rejected there (it has no valid rendering). Distinct from [`set_operand_style`](Self::set_operand_style):
 	/// that governs a plain compound's operands, this governs a *recursive-CTE* body's arms, where SQLite
 	/// forbids even the `SELECT * FROM (…)` sub-select wrapping.
-	fn supports_parenthesized_recursive_cte_arm(&self) -> bool {
-		true
-	}
+	const SUPPORTS_PARENTHESIZED_RECURSIVE_CTE_ARM: bool = true;
 }
 
 /// Rejects a **general** `CAST(x AS ty)` whose target type no backend can render faithfully: a 128-bit

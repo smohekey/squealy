@@ -168,6 +168,21 @@ pub trait Backend: Sized {
 	fn render_error(error: io::Error) -> Self::Error;
 }
 
+/// An executable backend paired with its SQL [`Dialect`](crate::Dialect).
+///
+/// This is the type-level link from a runtime backend to the dialect it renders through. It is
+/// implemented by the executable backends (PostgreSQL/MySQL/SQLite and the test backend), and
+/// deliberately **not** by the view-model backend (`ModelBackend`), which has no single dialect — a
+/// view body is rendered to a dialect chosen later, not one it owns.
+///
+/// The link lets a capability that is gated both ways — as a compile-time [`Backend`] marker and as a
+/// runtime [`Dialect`] associated const — assert at compile time that the two agree (see
+/// [`SupportsIntersectExceptAll`](crate::SupportsIntersectExceptAll)).
+pub trait HasDialect: Backend {
+	/// The SQL dialect this backend renders through.
+	type Dialect: crate::Dialect;
+}
+
 /// Marker for backends whose dialect supports a `RETURNING` clause on data-modifying statements
 /// (PostgreSQL). The `insert_returning`/`update_returning`/`delete_returning` builders require it, so
 /// a backend that does not implement it (such as MySQL, which has no `RETURNING`) rejects those

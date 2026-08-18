@@ -1329,7 +1329,7 @@ where
 		Projection: RenderProjectable<Postgres>,
 	{
 		let mut buffer = render::PreparedSql::default();
-		render::render_selected_prepared::<Conn, Base, Shape, Projection>(
+		render::render_selected_prepared::<Conn, Base, Shape, Projection, _>(
 			&PostgresDialect,
 			&self.selected,
 			&mut buffer,
@@ -1343,7 +1343,7 @@ where
 		Projection: RenderProjectable<Postgres>,
 	{
 		let sql = try_rendered_sql(|writer| {
-			render::write_selected_into::<Conn, Base, Shape, Projection, _>(
+			render::write_selected_into::<Conn, Base, Shape, Projection, _, _>(
 				&PostgresDialect,
 				&self.selected,
 				writer,
@@ -1351,7 +1351,7 @@ where
 		})
 		.map_err(PostgresError::Render)?;
 		let params = collect_postgres_params(0, |params| {
-			render::write_selected_params::<Conn, Base, Shape, Projection>(
+			render::write_selected_params::<Conn, Base, Shape, Projection, _>(
 				&PostgresDialect,
 				&self.selected,
 				params,
@@ -1397,7 +1397,7 @@ where
 {
 	fn prepared_sql(&self) -> render::PreparedSql<Postgres> {
 		let mut buffer = render::PreparedSql::default();
-		render::render_set_prepared::<Conn, Tree>(
+		render::render_set_prepared::<Conn, Tree, _>(
 			&PostgresDialect,
 			&self.tree,
 			&self.tail,
@@ -1408,11 +1408,11 @@ where
 
 	fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
 		let sql = try_rendered_sql(|writer| {
-			render::write_set_into::<Conn, Tree, _>(&PostgresDialect, &self.tree, &self.tail, writer)
+			render::write_set_into::<Conn, Tree, _, _>(&PostgresDialect, &self.tree, &self.tail, writer)
 		})
 		.map_err(PostgresError::Render)?;
 		let params = collect_postgres_params(0, |params| {
-			render::write_set_params::<Conn, Tree>(&PostgresDialect, &self.tree, &self.tail, params)
+			render::write_set_params::<Conn, Tree, _>(&PostgresDialect, &self.tree, &self.tail, params)
 		})?;
 		Ok((sql, params))
 	}
@@ -1430,13 +1430,18 @@ where
 
 	/// Stream SQL into caller-provided storage without allocating a SQL string.
 	pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-		render::write_set_into::<Conn, Tree, _>(&PostgresDialect, &self.tree, &self.tail, writer)
+		render::write_set_into::<Conn, Tree, _, _>(&PostgresDialect, &self.tree, &self.tail, writer)
 	}
 
 	/// Collect bind parameters (left-to-right across the whole tree) into a newly allocated vector.
 	pub fn collect_params(&self) -> Result<Vec<PostgresParam>, PostgresError> {
 		let mut params = Vec::new();
-		render::write_set_params::<Conn, Tree>(&PostgresDialect, &self.tree, &self.tail, &mut params)?;
+		render::write_set_params::<Conn, Tree, _>(
+			&PostgresDialect,
+			&self.tree,
+			&self.tail,
+			&mut params,
+		)?;
 		Ok(params)
 	}
 }
@@ -1636,7 +1641,7 @@ where
 	fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
 		let sql = self.try_to_sql()?;
 		let params = collect_postgres_params(0, |params| {
-			render::write_insert_select_params::<S, Conn, _, _>(
+			render::write_insert_select_params::<S, Conn, _, _, _>(
 				&PostgresDialect,
 				&self.columns,
 				&self.source,
@@ -1657,7 +1662,7 @@ where
 	/// [`to_sql`](Self::to_sql).
 	pub fn try_to_sql(&self) -> Result<String, PostgresError> {
 		try_rendered_sql(|writer| {
-			render::write_insert_select::<S, Conn, _, _>(
+			render::write_insert_select::<S, Conn, _, _, _>(
 				&PostgresDialect,
 				&self.columns,
 				&self.source,
@@ -1710,7 +1715,7 @@ where
 	fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
 		let sql = self.try_to_sql()?;
 		let params = collect_postgres_params(0, |params| {
-			render::write_update_from_params::<S, O, Postgres, _, _, _>(
+			render::write_update_from_params::<S, O, Postgres, _, _, _, _>(
 				&PostgresDialect,
 				self.target_alias,
 				self.source_alias,
@@ -1733,7 +1738,7 @@ where
 	/// [`to_sql`](Self::to_sql).
 	pub fn try_to_sql(&self) -> Result<String, PostgresError> {
 		try_rendered_sql(|writer| {
-			render::write_update_from::<S, O, Postgres, _, _, _>(
+			render::write_update_from::<S, O, Postgres, _, _, _, _>(
 				&PostgresDialect,
 				self.target_alias,
 				self.source_alias,
@@ -1749,7 +1754,7 @@ where
 	/// Collect bind parameters into a newly allocated vector.
 	pub fn collect_params(&self) -> Result<Vec<PostgresParam>, PostgresError> {
 		let mut params = Vec::new();
-		render::write_update_from_params::<S, O, Postgres, _, _, _>(
+		render::write_update_from_params::<S, O, Postgres, _, _, _, _>(
 			&PostgresDialect,
 			self.target_alias,
 			self.source_alias,
@@ -1828,7 +1833,7 @@ where
 	fn execution_parts(&self) -> Result<(String, Vec<PostgresParam>), PostgresError> {
 		let sql = self.try_to_sql()?;
 		let params = collect_postgres_params(0, |params| {
-			render::write_delete_using_params::<S, O, Postgres, _, _>(
+			render::write_delete_using_params::<S, O, Postgres, _, _, _>(
 				&PostgresDialect,
 				self.target_alias,
 				self.source_alias,
@@ -1850,7 +1855,7 @@ where
 	/// [`to_sql`](Self::to_sql).
 	pub fn try_to_sql(&self) -> Result<String, PostgresError> {
 		try_rendered_sql(|writer| {
-			render::write_delete_using::<S, O, Postgres, _, _>(
+			render::write_delete_using::<S, O, Postgres, _, _, _>(
 				&PostgresDialect,
 				self.target_alias,
 				self.source_alias,
@@ -1865,7 +1870,7 @@ where
 	/// Collect bind parameters into a newly allocated vector.
 	pub fn collect_params(&self) -> Result<Vec<PostgresParam>, PostgresError> {
 		let mut params = Vec::new();
-		render::write_delete_using_params::<S, O, Postgres, _, _>(
+		render::write_delete_using_params::<S, O, Postgres, _, _, _>(
 			&PostgresDialect,
 			self.target_alias,
 			self.source_alias,
@@ -2032,7 +2037,7 @@ where
 		Returning: RenderProjectable<Postgres>,
 	{
 		let mut buffer = render::PreparedSql::default();
-		render::render_insert_prepared::<S, Postgres, _, _>(
+		render::render_insert_prepared::<S, Postgres, _, _, _>(
 			&PostgresDialect,
 			&self.columns,
 			&self.returning,
@@ -2048,7 +2053,7 @@ where
 		Returning: RenderProjectable<Postgres>,
 	{
 		let sql = try_rendered_sql(|writer| {
-			render::write_insert::<S, Postgres, _, _>(
+			render::write_insert::<S, Postgres, _, _, _>(
 				&PostgresDialect,
 				&self.columns,
 				&self.returning,
@@ -2060,7 +2065,7 @@ where
 		let params = collect_postgres_params(
 			self.columns.first_row_len() * self.columns.len(),
 			|params| {
-				render::write_insert_params::<S, Postgres, _, _>(
+				render::write_insert_params::<S, Postgres, _, _, _>(
 					&PostgresDialect,
 					&self.columns,
 					&self.returning,
@@ -2104,7 +2109,7 @@ where
 		Returning: RenderProjectable<Postgres>,
 	{
 		let mut buffer = render::PreparedSql::default();
-		render::render_delete_prepared::<S, Postgres, _, _>(
+		render::render_delete_prepared::<S, Postgres, _, _, _>(
 			&PostgresDialect,
 			self.alias,
 			&self.filters,
@@ -2120,7 +2125,7 @@ where
 		Returning: RenderProjectable<Postgres>,
 	{
 		let sql = try_rendered_sql(|writer| {
-			render::write_delete::<S, Postgres, _, _>(
+			render::write_delete::<S, Postgres, _, _, _>(
 				&PostgresDialect,
 				self.alias,
 				&self.filters,
@@ -2130,7 +2135,7 @@ where
 		})
 		.map_err(PostgresError::Render)?;
 		let params = collect_postgres_params(self.filters.len(), |params| {
-			render::write_delete_params::<S, Postgres, _, _>(
+			render::write_delete_params::<S, Postgres, _, _, _>(
 				&PostgresDialect,
 				self.alias,
 				&self.filters,
@@ -2177,7 +2182,7 @@ where
 		Returning: RenderProjectable<Postgres>,
 	{
 		let mut buffer = render::PreparedSql::default();
-		render::render_update_prepared::<S, Postgres, _, _, _>(
+		render::render_update_prepared::<S, Postgres, _, _, _, _>(
 			&PostgresDialect,
 			self.alias,
 			&self.columns,
@@ -2195,7 +2200,7 @@ where
 		Returning: RenderProjectable<Postgres>,
 	{
 		let sql = try_rendered_sql(|writer| {
-			render::write_update::<S, Postgres, _, _, _>(
+			render::write_update::<S, Postgres, _, _, _, _>(
 				&PostgresDialect,
 				self.alias,
 				&self.columns,
@@ -2206,7 +2211,7 @@ where
 		})
 		.map_err(PostgresError::Render)?;
 		let params = collect_postgres_params(self.columns.len() + self.filters.len(), |params| {
-			render::write_update_params::<S, Postgres, _, _, _>(
+			render::write_update_params::<S, Postgres, _, _, _, _>(
 				&PostgresDialect,
 				self.alias,
 				&self.columns,
@@ -2738,7 +2743,7 @@ where
 
 	/// Stream SQL into caller-provided storage without allocating a SQL string.
 	pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-		render::write_selected_into::<Conn, Base, Shape, Projection, _>(
+		render::write_selected_into::<Conn, Base, Shape, Projection, _, _>(
 			&PostgresDialect,
 			&self.selected,
 			writer,
@@ -2747,7 +2752,7 @@ where
 
 	/// Write bind parameters into a caller-provided native param vector.
 	pub fn write_params(&self, params: &mut Vec<PostgresParam>) -> Result<(), PostgresError> {
-		render::write_selected_params::<Conn, Base, Shape, Projection>(
+		render::write_selected_params::<Conn, Base, Shape, Projection, _>(
 			&PostgresDialect,
 			&self.selected,
 			params,
@@ -2787,7 +2792,7 @@ where
 
 	/// Stream SQL into caller-provided storage without allocating a SQL string.
 	pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-		render::write_insert::<S, Postgres, _, _>(
+		render::write_insert::<S, Postgres, _, _, _>(
 			&PostgresDialect,
 			&self.columns,
 			&self.returning,
@@ -2798,7 +2803,7 @@ where
 
 	/// Write bind parameters into a caller-provided native param vector.
 	pub fn write_params(&self, params: &mut Vec<PostgresParam>) -> Result<(), PostgresError> {
-		render::write_insert_params::<S, Postgres, _, _>(
+		render::write_insert_params::<S, Postgres, _, _, _>(
 			&PostgresDialect,
 			&self.columns,
 			&self.returning,
@@ -2840,7 +2845,7 @@ where
 
 	/// Stream SQL into caller-provided storage without allocating a SQL string.
 	pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-		render::write_delete::<S, Postgres, _, _>(
+		render::write_delete::<S, Postgres, _, _, _>(
 			&PostgresDialect,
 			self.alias,
 			&self.filters,
@@ -2851,7 +2856,7 @@ where
 
 	/// Write bind parameters into a caller-provided native param vector.
 	pub fn write_params(&self, params: &mut Vec<PostgresParam>) -> Result<(), PostgresError> {
-		render::write_delete_params::<S, Postgres, _, _>(
+		render::write_delete_params::<S, Postgres, _, _, _>(
 			&PostgresDialect,
 			self.alias,
 			&self.filters,
@@ -2895,7 +2900,7 @@ where
 
 	/// Stream SQL into caller-provided storage without allocating a SQL string.
 	pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-		render::write_update::<S, Postgres, _, _, _>(
+		render::write_update::<S, Postgres, _, _, _, _>(
 			&PostgresDialect,
 			self.alias,
 			&self.columns,
@@ -2907,7 +2912,7 @@ where
 
 	/// Write bind parameters into a caller-provided native param vector.
 	pub fn write_params(&self, params: &mut Vec<PostgresParam>) -> Result<(), PostgresError> {
-		render::write_update_params::<S, Postgres, _, _, _>(
+		render::write_update_params::<S, Postgres, _, _, _, _>(
 			&PostgresDialect,
 			self.alias,
 			&self.columns,

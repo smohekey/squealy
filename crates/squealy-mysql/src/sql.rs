@@ -20,7 +20,7 @@ fn write_quoted_ident(value: &str, writer: &mut impl Write) -> io::Result<()> {
 /// target types, and float division (so `/` needs no float cast). The shared core renderer
 /// ([`squealy::render`]) drives MySQL query rendering through this.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct MysqlDialect;
+pub struct MysqlDialect;
 
 impl squealy::Dialect for MysqlDialect {
 	fn write_placeholder(&self, _index: usize, writer: &mut dyn Write) -> io::Result<()> {
@@ -34,9 +34,7 @@ impl squealy::Dialect for MysqlDialect {
 
 	/// MySQL has no `UPDATE … FROM`; a correlated update joins the source before `SET`
 	/// (`UPDATE t JOIN other ON … SET …`).
-	fn update_from_style(&self) -> squealy::UpdateFromStyle {
-		squealy::UpdateFromStyle::MysqlJoin
-	}
+	const UPDATE_FROM_STYLE: squealy::UpdateFromStyle = squealy::UpdateFromStyle::MysqlJoin;
 
 	// --- Upsert (`INSERT … ON DUPLICATE KEY UPDATE`) ---
 
@@ -141,16 +139,12 @@ impl squealy::Dialect for MysqlDialect {
 		self.write_cast_type(ty, writer)
 	}
 
-	fn integer_division_needs_float_cast(&self) -> bool {
-		// MySQL `/` is always floating-point division; `DIV` is the integer form.
-		false
-	}
+	// MySQL `/` is always floating-point division; `DIV` is the integer form.
+	const INTEGER_DIVISION_NEEDS_FLOAT_CAST: bool = false;
 
-	fn now_fractional_digits(&self) -> Option<u8> {
-		// MySQL's bare `CURRENT_TIMESTAMP` is fsp 0; the microsecond `now()` value types feed
-		// `TIMESTAMP(6)` columns, so render `CURRENT_TIMESTAMP(6)` to keep the sub-seconds.
-		Some(6)
-	}
+	// MySQL's bare `CURRENT_TIMESTAMP` is fsp 0; the microsecond `now()` value types feed
+	// `TIMESTAMP(6)` columns, so render `CURRENT_TIMESTAMP(6)` to keep the sub-seconds.
+	const NOW_FRACTIONAL_DIGITS: Option<u8> = Some(6);
 
 	fn write_limit_offset(
 		&self,
@@ -180,14 +174,12 @@ impl squealy::Dialect for MysqlDialect {
 	) -> io::Result<()> {
 		// MySQL has no `NULLS FIRST`/`NULLS LAST` modifier, so a view carrying one drops it here
 		// rather than emitting syntax MySQL rejects. (Query-builder `ORDER BY` instead emulates it via
-		// `emulates_order_nulls` below, which the view-DDL path does not use.)
+		// `EMULATES_ORDER_NULLS` below, which the view-DDL path does not use.)
 		Ok(())
 	}
 
-	fn emulates_order_nulls(&self) -> bool {
-		// MySQL lacks `NULLS FIRST/LAST`; the renderer emits a leading `(<expr> IS NULL)` sort key.
-		true
-	}
+	// MySQL lacks `NULLS FIRST/LAST`; the renderer emits a leading `(<expr> IS NULL)` sort key.
+	const EMULATES_ORDER_NULLS: bool = true;
 
 	fn write_row_lock(&self, lock: squealy::RowLock, writer: &mut dyn Write) -> io::Result<()> {
 		// MySQL spells the shared lock `LOCK IN SHARE MODE` (no `FOR SHARE` keyword).
@@ -197,11 +189,9 @@ impl squealy::Dialect for MysqlDialect {
 		})
 	}
 
-	fn extract_second_uses_microsecond_unit(&self) -> bool {
-		// MySQL's `EXTRACT(SECOND …)` is integer-only; use the composite `SECOND_MICROSECOND` unit to
-		// recover the fractional part.
-		true
-	}
+	// MySQL's `EXTRACT(SECOND …)` is integer-only; use the composite `SECOND_MICROSECOND` unit to
+	// recover the fractional part.
+	const EXTRACT_SECOND_USES_MICROSECOND_UNIT: bool = true;
 }
 
 fn write_delimited(value: &str, delimiter: char, writer: &mut impl Write) -> io::Result<()> {

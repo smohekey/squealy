@@ -18,6 +18,7 @@ pub use query::{
 	PostgresPreparedMutation, PostgresPreparedSelect, PostgresRowReader, PostgresSelect,
 	PostgresSetSelect, PostgresUpdate, PostgresUpdateFrom,
 };
+pub use sql::PostgresDialect;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Postgres;
@@ -27,6 +28,11 @@ impl Postgres {
 	pub fn dialect(&self) -> impl squealy::Dialect {
 		crate::sql::PostgresDialect
 	}
+}
+
+// Postgres renders through `PostgresDialect`.
+impl squealy::HasDialect for Postgres {
+	type Dialect = crate::sql::PostgresDialect;
 }
 
 // Postgres supports `INTERSECT ALL` / `EXCEPT ALL`.

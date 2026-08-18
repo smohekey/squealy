@@ -12,12 +12,18 @@ pub use query::{
 	EmptyRows, TestDelete, TestDeleteUsing, TestInsert, TestParam, TestParamWriter,
 	TestPreparedMutation, TestPreparedSelect, TestRowReader, TestSelect, TestUpdate, TestUpdateFrom,
 };
+pub use sql::TestDialect;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TestConnection;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TestBackend;
+
+// The test backend renders through `TestDialect`.
+impl squealy::HasDialect for TestBackend {
+	type Dialect = crate::sql::TestDialect;
+}
 
 // The test backend renders `FOR UPDATE` / `FOR SHARE`, so the row-lock builders are available.
 impl squealy::RendersRowLock for TestBackend {}

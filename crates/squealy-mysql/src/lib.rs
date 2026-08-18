@@ -16,6 +16,7 @@ mod sql;
 #[cfg(feature = "serde")]
 pub use query::Json;
 pub use query::MysqlRowReader;
+pub use sql::MysqlDialect;
 
 /// The MySQL query backend marker.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -28,6 +29,9 @@ impl Mysql {
 	}
 }
 
+impl squealy::HasDialect for Mysql {
+	type Dialect = crate::sql::MysqlDialect;
+}
 impl squealy::SupportsIntersectExceptAll for Mysql {}
 impl squealy::SupportsColumnlessUpsert for Mysql {}
 impl squealy::SupportsDefaultKeyword for Mysql {}

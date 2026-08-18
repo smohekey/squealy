@@ -1,0 +1,14 @@
+error[E0277]: the trait bound `Sqlite: SupportsIntersectExceptAll` is not satisfied
+  --> tests/compile_fail/intersect_all_requires_capability.rs:27:14
+   |
+27 |             .intersect_all(conn.from::<User>().select(|(user,)| (user.id, user.name)));
+   |              ^^^^^^^^^^^^^ the trait `SupportsIntersectExceptAll` is not implemented for `Sqlite`
+   |
+note: required by a bound in `intersect_all`
+  --> $WORKSPACE/crates/squealy-core/src/query.rs
+   |
+   |     fn intersect_all<O>(self, other: O) -> Self::SetSelect<SetNode<Self::Arm, O::Arm>>
+   |        ------------- required by a bound in this associated function
+...
+   |         Conn::Backend: SupportsIntersectExceptAll,
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `SetOperations::intersect_all`

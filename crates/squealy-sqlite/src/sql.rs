@@ -65,7 +65,7 @@ fn write_delimited(value: &str, delimiter: char, writer: &mut impl Write) -> io:
 /// trait defaults, which already match SQLite (integer-division float cast, `DEFAULT VALUES` empty
 /// inserts, `NULLS FIRST`/`LAST`, `ON CONFLICT` upserts, `UPDATE … FROM`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SqliteDialect;
+pub struct SqliteDialect;
 
 impl squealy::Dialect for SqliteDialect {
 	fn write_placeholder(&self, _index: usize, writer: &mut dyn Write) -> io::Result<()> {
@@ -115,47 +115,31 @@ impl squealy::Dialect for SqliteDialect {
 		}
 	}
 
-	fn qualify_schema(&self) -> bool {
-		// SQLite has no schemas; table names render unqualified (matching the flattened DDL).
-		false
-	}
+	// SQLite has no schemas; table names render unqualified (matching the flattened DDL).
+	const QUALIFY_SCHEMA: bool = false;
 
-	fn returning_omits_target_alias(&self) -> bool {
-		// SQLite's UPDATE/DELETE `RETURNING` cannot resolve the target-table alias (`no such column:
-		// q0_0.col`); a single-table statement is unambiguous, so the columns render bare.
-		true
-	}
+	// SQLite's UPDATE/DELETE `RETURNING` cannot resolve the target-table alias (`no such column:
+	// q0_0.col`); a single-table statement is unambiguous, so the columns render bare.
+	const RETURNING_OMITS_TARGET_ALIAS: bool = true;
 
-	fn set_operand_style(&self) -> squealy::SetOperandStyle {
-		// SQLite rejects a parenthesized compound operand and a per-operand `ORDER BY`/`LIMIT`, so an
-		// operand is wrapped as `SELECT * FROM (SELECT …)` (valid for ordered/limited/nested operands).
-		squealy::SetOperandStyle::SubquerySelect
-	}
+	// SQLite rejects a parenthesized compound operand and a per-operand `ORDER BY`/`LIMIT`, so an
+	// operand is wrapped as `SELECT * FROM (SELECT …)` (valid for ordered/limited/nested operands).
+	const SET_OPERAND_STYLE: squealy::SetOperandStyle = squealy::SetOperandStyle::SubquerySelect;
 
-	fn supports_intersect_except_all(&self) -> bool {
-		// SQLite allows `ALL` only after `UNION`; `INTERSECT ALL`/`EXCEPT ALL` are syntax errors.
-		false
-	}
+	// SQLite allows `ALL` only after `UNION`; `INTERSECT ALL`/`EXCEPT ALL` are syntax errors.
+	const SUPPORTS_INTERSECT_EXCEPT_ALL: bool = false;
 
-	fn substring_uses_function_call(&self) -> bool {
-		// SQLite spells substring as `substr(s, start, len)`, not `SUBSTRING(s FROM start FOR len)`.
-		true
-	}
+	// SQLite spells substring as `substr(s, start, len)`, not `SUBSTRING(s FROM start FOR len)`.
+	const SUBSTRING_USES_FUNCTION_CALL: bool = true;
 
-	fn supports_parenthesized_recursive_cte_arm(&self) -> bool {
-		// SQLite's recursive-CTE grammar rejects any parenthesized recursive arm, so an arm carrying its
-		// own ORDER BY/LIMIT/OFFSET (which needs parens to scope) has no valid rendering and is rejected.
-		false
-	}
+	// SQLite's recursive-CTE grammar rejects any parenthesized recursive arm, so an arm carrying its
+	// own ORDER BY/LIMIT/OFFSET (which needs parens to scope) has no valid rendering and is rejected.
+	const SUPPORTS_PARENTHESIZED_RECURSIVE_CTE_ARM: bool = false;
 
-	fn concat_uses_pipe_operator(&self) -> bool {
-		// SQLite has no null-propagating `CONCAT`; `||` returns NULL if either operand is NULL,
-		// matching squealy's concat expression (nullable iff either operand is nullable).
-		true
-	}
+	// SQLite has no null-propagating `CONCAT`; `||` returns NULL if either operand is NULL,
+	// matching squealy's concat expression (nullable iff either operand is nullable).
+	const CONCAT_USES_PIPE_OPERATOR: bool = true;
 
-	fn delete_using_style(&self) -> squealy::DeleteUsingStyle {
-		// SQLite has no join-delete; a correlated delete becomes `DELETE … WHERE EXISTS (SELECT …)`.
-		squealy::DeleteUsingStyle::SqliteExists
-	}
+	// SQLite has no join-delete; a correlated delete becomes `DELETE … WHERE EXISTS (SELECT …)`.
+	const DELETE_USING_STYLE: squealy::DeleteUsingStyle = squealy::DeleteUsingStyle::SqliteExists;
 }

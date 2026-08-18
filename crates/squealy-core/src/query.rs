@@ -1959,7 +1959,26 @@ where
 /// and `EXCEPT`. Postgres and MySQL do; SQLite only allows `ALL` after `UNION`, so it does **not**
 /// implement this, which makes [`SetOperations::intersect_all`]/[`SetOperations::except_all`] absent
 /// (a compile error) for SQLite rather than rendering SQL that fails to prepare.
-pub trait SupportsIntersectExceptAll {}
+///
+/// This is the compile-time (query-path) half of the `INTERSECT/EXCEPT ALL` capability; the runtime
+/// (view/DDL-path) half is [`Dialect::SUPPORTS_INTERSECT_EXCEPT_ALL`](crate::Dialect::SUPPORTS_INTERSECT_EXCEPT_ALL).
+/// The two must agree — a backend that gates the builder here must also spell the const `true`. That
+/// agreement is *enforced*, not just documented: via the [`HasDialect`](crate::HasDialect) link this
+/// trait carries a compile-time assertion ([`_DIALECT_AGREES`](Self::_DIALECT_AGREES)) that fires when
+/// a supporting backend uses `intersect_all`/`except_all`, and the SQLite crate pins its dialect const
+/// to `false` with a matching `const _` assertion.
+pub trait SupportsIntersectExceptAll: crate::HasDialect {
+	/// Compile-time proof that this backend's dialect agrees with the marker: a backend that claims
+	/// `INTERSECT/EXCEPT ALL` support here must also set its
+	/// [`Dialect::SUPPORTS_INTERSECT_EXCEPT_ALL`](crate::Dialect::SUPPORTS_INTERSECT_EXCEPT_ALL) to
+	/// `true`. Evaluated where `intersect_all`/`except_all` are monomorphized (see their bodies).
+	#[doc(hidden)]
+	const _DIALECT_AGREES: () = assert!(
+		<Self::Dialect as crate::Dialect>::SUPPORTS_INTERSECT_EXCEPT_ALL,
+		"a backend implementing SupportsIntersectExceptAll must set its \
+		 Dialect::SUPPORTS_INTERSECT_EXCEPT_ALL to true",
+	);
+}
 
 /// The set-operation builder methods (`union`/`union_all`/`intersect`/`intersect_all`/`except`/
 /// `except_all`), shared across backends. Implemented per-backend on both the select and set-select
@@ -2011,6 +2030,8 @@ where
 		SetNode<Self::Arm, O::Arm>: SetArm<'conn, 'scope, Conn>,
 		Conn::Backend: SupportsIntersectExceptAll,
 	{
+		// Force the marker⇄dialect-const agreement check at this monomorphization.
+		let () = <Conn::Backend as SupportsIntersectExceptAll>::_DIALECT_AGREES;
 		self.set_op(other, SetOp::IntersectAll)
 	}
 
@@ -2028,6 +2049,8 @@ where
 		SetNode<Self::Arm, O::Arm>: SetArm<'conn, 'scope, Conn>,
 		Conn::Backend: SupportsIntersectExceptAll,
 	{
+		// Force the marker⇄dialect-const agreement check at this monomorphization.
+		let () = <Conn::Backend as SupportsIntersectExceptAll>::_DIALECT_AGREES;
 		self.set_op(other, SetOp::ExceptAll)
 	}
 

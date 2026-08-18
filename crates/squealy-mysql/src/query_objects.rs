@@ -101,7 +101,7 @@ where
         Projection: RenderProjectable<Mysql>,
     {
         let sql = try_rendered_sql(|writer| {
-            render::write_selected_into::<Conn, Base, Shape, Projection, _>(
+            render::write_selected_into::<Conn, Base, Shape, Projection, _, _>(
                 &MysqlDialect,
                 &self.selected,
                 writer,
@@ -109,7 +109,7 @@ where
         })
         .map_err(MysqlError::Render)?;
         let params = collect_mysql_params(0, |params| {
-            render::write_selected_params::<Conn, Base, Shape, Projection>(
+            render::write_selected_params::<Conn, Base, Shape, Projection, _>(
                 &MysqlDialect,
                 &self.selected,
                 params,
@@ -143,7 +143,7 @@ where
         Base: RenderSelectAst<'conn, 'scope, Conn, Mysql>,
         Projection: RenderProjectable<Mysql>,
     {
-        render::write_selected_into::<Conn, Base, Shape, Projection, _>(
+        render::write_selected_into::<Conn, Base, Shape, Projection, _, _>(
             &MysqlDialect,
             &self.selected,
             writer,
@@ -157,7 +157,7 @@ where
         Projection: RenderProjectable<Mysql>,
     {
         let mut params = Vec::new();
-        render::write_selected_params::<Conn, Base, Shape, Projection>(
+        render::write_selected_params::<Conn, Base, Shape, Projection, _>(
             &MysqlDialect,
             &self.selected,
             &mut params,
@@ -207,7 +207,7 @@ where
         Returning: RenderProjectable<Mysql>,
     {
         let sql = try_rendered_sql(|writer| {
-            render::write_insert::<S, Mysql, _, _>(
+            render::write_insert::<S, Mysql, _, _, _>(
                 &MysqlDialect,
                 &self.columns,
                 &self.returning,
@@ -218,7 +218,7 @@ where
         .map_err(MysqlError::Render)?;
         let params =
             collect_mysql_params(self.columns.first_row_len() * self.columns.len(), |params| {
-                render::write_insert_params::<S, Mysql, _, _>(
+                render::write_insert_params::<S, Mysql, _, _, _>(
                     &MysqlDialect,
                     &self.columns,
                     &self.returning,
@@ -246,7 +246,7 @@ where
         Returning: RenderProjectable<Mysql>,
     {
         try_rendered_sql(|writer| {
-            render::write_insert::<S, Mysql, _, _>(
+            render::write_insert::<S, Mysql, _, _, _>(
                 &MysqlDialect,
                 &self.columns,
                 &self.returning,
@@ -288,7 +288,7 @@ where
         Returning: RenderProjectable<Mysql>,
     {
         let sql = try_rendered_sql(|writer| {
-            render::write_delete::<S, Mysql, _, _>(
+            render::write_delete::<S, Mysql, _, _, _>(
                 &MysqlDialect,
                 self.alias,
                 &self.filters,
@@ -298,7 +298,7 @@ where
         })
         .map_err(MysqlError::Render)?;
         let params = collect_mysql_params(self.filters.len(), |params| {
-            render::write_delete_params::<S, Mysql, _, _>(
+            render::write_delete_params::<S, Mysql, _, _, _>(
                 &MysqlDialect,
                 self.alias,
                 &self.filters,
@@ -345,7 +345,7 @@ where
         Returning: RenderProjectable<Mysql>,
     {
         let sql = try_rendered_sql(|writer| {
-            render::write_update::<S, Mysql, _, _, _>(
+            render::write_update::<S, Mysql, _, _, _, _>(
                 &MysqlDialect,
                 self.alias,
                 &self.columns,
@@ -356,7 +356,7 @@ where
         })
         .map_err(MysqlError::Render)?;
         let params = collect_mysql_params(self.columns.len() + self.filters.len(), |params| {
-            render::write_update_params::<S, Mysql, _, _, _>(
+            render::write_update_params::<S, Mysql, _, _, _, _>(
                 &MysqlDialect,
                 self.alias,
                 &self.columns,
@@ -451,11 +451,11 @@ where
 {
     fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError> {
         let sql = try_rendered_sql(|writer| {
-            render::write_set_into::<Conn, Tree, _>(&MysqlDialect, &self.tree, &self.tail, writer)
+            render::write_set_into::<Conn, Tree, _, _>(&MysqlDialect, &self.tree, &self.tail, writer)
         })
         .map_err(MysqlError::Render)?;
         let params = collect_mysql_params(0, |params| {
-            render::write_set_params::<Conn, Tree>(&MysqlDialect, &self.tree, &self.tail, params)
+            render::write_set_params::<Conn, Tree, _>(&MysqlDialect, &self.tree, &self.tail, params)
         })?;
         Ok((sql, params))
     }
@@ -473,13 +473,13 @@ where
 
     /// Streams SQL into caller-provided storage.
     pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-        render::write_set_into::<Conn, Tree, _>(&MysqlDialect, &self.tree, &self.tail, writer)
+        render::write_set_into::<Conn, Tree, _, _>(&MysqlDialect, &self.tree, &self.tail, writer)
     }
 
     /// Collects bind parameters (left-to-right across the whole tree) into a newly allocated vector.
     pub fn collect_params(&self) -> Result<Vec<Value>, MysqlError> {
         let mut params = Vec::new();
-        render::write_set_params::<Conn, Tree>(&MysqlDialect, &self.tree, &self.tail, &mut params)?;
+        render::write_set_params::<Conn, Tree, _>(&MysqlDialect, &self.tree, &self.tail, &mut params)?;
         Ok(params)
     }
 }
@@ -638,7 +638,7 @@ where
 {
     fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError> {
         let sql = try_rendered_sql(|writer| {
-            render::write_insert_select::<S, Conn, _, _>(
+            render::write_insert_select::<S, Conn, _, _, _>(
                 &MysqlDialect,
                 &self.columns,
                 &self.source,
@@ -648,7 +648,7 @@ where
         })
         .map_err(MysqlError::Render)?;
         let params = collect_mysql_params(0, |params| {
-            render::write_insert_select_params::<S, Conn, _, _>(
+            render::write_insert_select_params::<S, Conn, _, _, _>(
                 &MysqlDialect,
                 &self.columns,
                 &self.source,
@@ -669,7 +669,7 @@ where
     /// [`to_sql`](Self::to_sql).
     pub fn try_to_sql(&self) -> Result<String, MysqlError> {
         try_rendered_sql(|writer| {
-            render::write_insert_select::<S, Conn, _, _>(
+            render::write_insert_select::<S, Conn, _, _, _>(
                 &MysqlDialect,
                 &self.columns,
                 &self.source,
@@ -965,7 +965,7 @@ where
     fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError> {
         let sql = self.try_to_sql()?;
         let params = collect_mysql_params(0, |params| {
-            render::write_update_from_params::<S, O, Mysql, _, _, _>(
+            render::write_update_from_params::<S, O, Mysql, _, _, _, _>(
                 &MysqlDialect,
                 self.target_alias,
                 self.source_alias,
@@ -988,7 +988,7 @@ where
     /// [`to_sql`](Self::to_sql).
     pub fn try_to_sql(&self) -> Result<String, MysqlError> {
         try_rendered_sql(|writer| {
-            render::write_update_from::<S, O, Mysql, _, _, _>(
+            render::write_update_from::<S, O, Mysql, _, _, _, _>(
                 &MysqlDialect,
                 self.target_alias,
                 self.source_alias,
@@ -1004,7 +1004,7 @@ where
     /// Collect bind parameters into a newly allocated vector.
     pub fn collect_params(&self) -> Result<Vec<Value>, MysqlError> {
         let mut params = Vec::new();
-        render::write_update_from_params::<S, O, Mysql, _, _, _>(
+        render::write_update_from_params::<S, O, Mysql, _, _, _, _>(
             &MysqlDialect,
             self.target_alias,
             self.source_alias,
@@ -1085,7 +1085,7 @@ where
     fn execution_parts(&self) -> Result<(String, Vec<Value>), MysqlError> {
         let sql = self.try_to_sql()?;
         let params = collect_mysql_params(0, |params| {
-            render::write_delete_using_params::<S, O, Mysql, _, _>(
+            render::write_delete_using_params::<S, O, Mysql, _, _, _>(
                 &MysqlDialect,
                 self.target_alias,
                 self.source_alias,
@@ -1107,7 +1107,7 @@ where
     /// [`to_sql`](Self::to_sql).
     pub fn try_to_sql(&self) -> Result<String, MysqlError> {
         try_rendered_sql(|writer| {
-            render::write_delete_using::<S, O, Mysql, _, _>(
+            render::write_delete_using::<S, O, Mysql, _, _, _>(
                 &MysqlDialect,
                 self.target_alias,
                 self.source_alias,
@@ -1122,7 +1122,7 @@ where
     /// Collect bind parameters into a newly allocated vector.
     pub fn collect_params(&self) -> Result<Vec<Value>, MysqlError> {
         let mut params = Vec::new();
-        render::write_delete_using_params::<S, O, Mysql, _, _>(
+        render::write_delete_using_params::<S, O, Mysql, _, _, _>(
             &MysqlDialect,
             self.target_alias,
             self.source_alias,
