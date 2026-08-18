@@ -27,6 +27,7 @@ time = { version = "0.3", optional = true, default-features = false }
 chrono = { version = "0.4", optional = true, default-features = false }
 
 [dev-dependencies]
+squealy-sqlite.workspace = true
 squealy-test.workspace = true
 trybuild.workspace = true
 

@@ -1492,6 +1492,7 @@ dependencies = [
  "chrono",
  "squealy-core",
  "squealy-macros",
+ "squealy-sqlite",
  "squealy-test",
  "time",
  "trybuild",

@@ -367,7 +367,7 @@ where
 /// The test backend's SQL dialect: bare (unquoted) identifiers and `?` placeholders, matching the
 /// hand-rolled rendering in [`TestSelectSink`]. Only used to render CTE bodies (which go through the
 /// shared [`squealy::view_render`]); the main query is rendered directly by the sink.
-struct TestDialect;
+pub struct TestDialect;
 
 impl Dialect for TestDialect {
 	fn write_placeholder(&self, _index: usize, writer: &mut dyn Write) -> io::Result<()> {
@@ -469,7 +469,7 @@ where
 	Writer: Write,
 {
 	static DIALECT: TestDialect = TestDialect;
-	squealy::render::write_set_into::<crate::TestConnection, Tree, _>(&DIALECT, tree, tail, writer)
+	squealy::render::write_set_into::<crate::TestConnection, Tree, _, _>(&DIALECT, tree, tail, writer)
 }
 
 pub(crate) fn write_set_params<'conn, 'scope, Tree>(
@@ -481,7 +481,7 @@ where
 	Tree: squealy::render::RenderSetArm<'conn, 'scope, crate::TestConnection, crate::TestBackend>,
 {
 	static DIALECT: TestDialect = TestDialect;
-	squealy::render::write_set_params::<crate::TestConnection, Tree>(&DIALECT, tree, tail, params)
+	squealy::render::write_set_params::<crate::TestConnection, Tree, _>(&DIALECT, tree, tail, params)
 }
 
 pub(crate) fn write_insert_select<'conn, 'scope, S, Tree, Returning, Writer>(
@@ -497,7 +497,7 @@ where
 	Writer: Write,
 {
 	static DIALECT: TestDialect = TestDialect;
-	squealy::render::write_insert_select::<S, crate::TestConnection, Tree, Returning>(
+	squealy::render::write_insert_select::<S, crate::TestConnection, Tree, Returning, _>(
 		&DIALECT, columns, source, returning, writer,
 	)
 }
@@ -514,7 +514,7 @@ where
 	Returning: squealy::RenderProjectable<crate::TestBackend>,
 {
 	static DIALECT: TestDialect = TestDialect;
-	squealy::render::write_insert_select_params::<S, crate::TestConnection, Tree, Returning>(
+	squealy::render::write_insert_select_params::<S, crate::TestConnection, Tree, Returning, _>(
 		&DIALECT, columns, source, returning, params,
 	)
 }
@@ -535,7 +535,7 @@ where
 	Returning: RenderProjectable<crate::TestBackend>,
 {
 	static DIALECT: TestDialect = TestDialect;
-	squealy::render::write_update_from::<S, O, crate::TestBackend, Columns, Filters, Returning>(
+	squealy::render::write_update_from::<S, O, crate::TestBackend, Columns, Filters, Returning, _>(
 		&DIALECT,
 		target_alias,
 		source_alias,
@@ -562,7 +562,15 @@ where
 	Returning: RenderProjectable<crate::TestBackend>,
 {
 	static DIALECT: TestDialect = TestDialect;
-	squealy::render::write_update_from_params::<S, O, crate::TestBackend, Columns, Filters, Returning>(
+	squealy::render::write_update_from_params::<
+		S,
+		O,
+		crate::TestBackend,
+		Columns,
+		Filters,
+		Returning,
+		_,
+	>(
 		&DIALECT,
 		target_alias,
 		source_alias,
@@ -587,7 +595,7 @@ where
 	Returning: RenderProjectable<crate::TestBackend>,
 {
 	static DIALECT: TestDialect = TestDialect;
-	squealy::render::write_delete_using::<S, O, crate::TestBackend, Filters, Returning>(
+	squealy::render::write_delete_using::<S, O, crate::TestBackend, Filters, Returning, _>(
 		&DIALECT,
 		target_alias,
 		source_alias,
@@ -611,7 +619,7 @@ where
 	Returning: RenderProjectable<crate::TestBackend>,
 {
 	static DIALECT: TestDialect = TestDialect;
-	squealy::render::write_delete_using_params::<S, O, crate::TestBackend, Filters, Returning>(
+	squealy::render::write_delete_using_params::<S, O, crate::TestBackend, Filters, Returning, _>(
 		&DIALECT,
 		target_alias,
 		source_alias,

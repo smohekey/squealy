@@ -2,7 +2,7 @@
 /// precision` casts. The query renderer routes its dialect-specific output through this so the sink
 /// logic can be shared (see [`squealy::Dialect`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct PostgresDialect;
+pub struct PostgresDialect;
 
 impl squealy::Dialect for PostgresDialect {
 	fn write_placeholder(&self, index: usize, writer: &mut dyn Write) -> io::Result<()> {
@@ -42,23 +42,17 @@ impl squealy::Dialect for PostgresDialect {
 		})
 	}
 
-	fn concat_uses_pipe_operator(&self) -> bool {
-		// `a || b` propagates NULL (matching the builder's nullability model) and lets a bare
-		// parameter's type be inferred, unlike PostgreSQL's NULL-ignoring `CONCAT("any", …)`.
-		true
-	}
+	// `a || b` propagates NULL (matching the builder's nullability model) and lets a bare
+	// parameter's type be inferred, unlike PostgreSQL's NULL-ignoring `CONCAT("any", …)`.
+	const CONCAT_USES_PIPE_OPERATOR: bool = true;
 
-	fn substring_bounds_need_cast(&self) -> bool {
-		// Cast `start`/`len` to integer so a bare parameter is the positional count, not the regex
-		// `substring(text FROM pattern FOR escape)` overload.
-		true
-	}
+	// Cast `start`/`len` to integer so a bare parameter is the positional count, not the regex
+	// `substring(text FROM pattern FOR escape)` overload.
+	const SUBSTRING_BOUNDS_NEED_CAST: bool = true;
 
-	fn timestamp_operand_needs_cast(&self) -> bool {
-		// Cast a bare literal/param operand of EXTRACT/date_trunc to its timestamp type — both are
-		// overloaded, so an untyped placeholder can't be resolved when preparing the statement.
-		true
-	}
+	// Cast a bare literal/param operand of EXTRACT/date_trunc to its timestamp type — both are
+	// overloaded, so an untyped placeholder can't be resolved when preparing the statement.
+	const TIMESTAMP_OPERAND_NEEDS_CAST: bool = true;
 }
 
 fn write_pg_sql_type(ty: &SqlType, writer: &mut impl Write) -> io::Result<()> {

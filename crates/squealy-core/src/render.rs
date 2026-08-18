@@ -40,16 +40,25 @@ fn write_sql_string_literal(writer: &mut dyn Write, value: &str) -> io::Result<(
 /// Threads the active [`Dialect`](crate::Dialect) and the running parameter counters through the
 /// renderer. The dialect is `&'static` (backend dialects are zero-sized unit values), so carrying it
 /// adds no lifetime to the renderer or the rendering structs.
-#[derive(Clone, Copy)]
 #[doc(hidden)]
-pub struct Renderer {
-	dialect: &'static dyn Dialect,
+pub struct Renderer<D: 'static> {
+	dialect: &'static D,
 	next_param: usize,
 	next_runtime_param: usize,
 }
 
-impl Renderer {
-	pub(crate) fn new(dialect: &'static dyn Dialect) -> Self {
+// Manual `Clone`/`Copy` so no `D: Copy` bound is required (the fields — a `&'static D` reference and
+// two `usize` counters — are `Copy` for every `D`).
+impl<D> Clone for Renderer<D> {
+	fn clone(&self) -> Self {
+		*self
+	}
+}
+
+impl<D> Copy for Renderer<D> {}
+
+impl<D: Dialect> Renderer<D> {
+	pub(crate) fn new(dialect: &'static D) -> Self {
 		Self {
 			dialect,
 			next_param: 0,
@@ -296,9 +305,9 @@ impl<B: Backend> SqlWriter<B> for ParamCollector<'_, B> {
 	fn push_runtime_bind(&mut self, _index: usize) {}
 }
 
-struct SelectRenderSink<'writer, 'renderer, B, Writer> {
+struct SelectRenderSink<'writer, 'renderer, B, D: 'static, Writer> {
 	writer: &'writer mut Writer,
-	renderer: &'renderer mut Renderer,
+	renderer: &'renderer mut Renderer<D>,
 	distinct: bool,
 	columns: usize,
 	sources: usize,
@@ -313,7 +322,7 @@ struct SelectRenderSink<'writer, 'renderer, B, Writer> {
 	_backend: PhantomData<B>,
 }
 
-impl<'writer, 'renderer, B, Writer> SelectRenderSink<'writer, 'renderer, B, Writer>
+impl<'writer, 'renderer, B, D: Dialect, Writer> SelectRenderSink<'writer, 'renderer, B, D, Writer>
 where
 	B: Backend,
 	Writer: SqlWriter<B>,
@@ -321,7 +330,7 @@ where
 	/// Open a SELECT sharing the caller's [`Renderer`]. Borrowing (rather than owning) the renderer
 	/// is what lets a nested subquery continue the parent's placeholder numbering instead of
 	/// restarting from zero — see [`RenderExpr`]'s subquery visitor methods.
-	fn new(writer: &'writer mut Writer, renderer: &'renderer mut Renderer) -> io::Result<Self> {
+	fn new(writer: &'writer mut Writer, renderer: &'renderer mut Renderer<D>) -> io::Result<Self> {
 		writer.write_all(b"SELECT ")?;
 		Ok(Self {
 			writer,
@@ -373,11 +382,11 @@ where
 		self.push_source_separator()?;
 		if first_source {
 			self.writer.write_all(b"FROM ")?;
-			write_table_ref::<S>(self.renderer.dialect, self.writer)?;
+			write_table_ref::<S, _>(self.renderer.dialect, self.writer)?;
 			write!(self.writer, " AS {alias}")?;
 		} else {
 			write!(self.writer, "{join} ")?;
-			write_table_ref::<S>(self.renderer.dialect, self.writer)?;
+			write_table_ref::<S, _>(self.renderer.dialect, self.writer)?;
 			write!(self.writer, " AS {alias} ON ")?;
 			write_predicate_value(&on, self.writer, &mut *self.renderer)?;
 		}
@@ -393,7 +402,7 @@ where
 	}
 }
 
-impl<B, Writer> SelectSink for SelectRenderSink<'_, '_, B, Writer>
+impl<B, D: Dialect, Writer> SelectSink for SelectRenderSink<'_, '_, B, D, Writer>
 where
 	B: Backend,
 	Writer: SqlWriter<B>,
@@ -424,7 +433,7 @@ where
 	{
 		self.push_source_separator()?;
 		self.writer.write_all(b"FROM ")?;
-		write_table_ref::<S>(self.renderer.dialect, self.writer)?;
+		write_table_ref::<S, _>(self.renderer.dialect, self.writer)?;
 		write!(self.writer, " AS {alias}")
 	}
 
@@ -493,7 +502,7 @@ where
 		} else {
 			self.writer.write_all(b"CROSS JOIN ")?;
 		}
-		write_table_ref::<S>(self.renderer.dialect, self.writer)?;
+		write_table_ref::<S, _>(self.renderer.dialect, self.writer)?;
 		write!(self.writer, " AS {alias}")
 	}
 
@@ -571,7 +580,7 @@ where
 		}
 		self.windows += 1;
 		write!(self.writer, "{} AS (", crate::named_window_alias(index))?;
-		write_named_window_body::<Parts, Ords, B, _>(
+		write_named_window_body::<Parts, Ords, B, _, _>(
 			partitions,
 			orders,
 			frame,
@@ -597,7 +606,7 @@ where
 	}
 }
 
-impl<B, Writer> ProjectionVisitor for SelectRenderSink<'_, '_, B, Writer>
+impl<B, D: Dialect, Writer> ProjectionVisitor for SelectRenderSink<'_, '_, B, D, Writer>
 where
 	B: Backend,
 	Writer: SqlWriter<B>,
@@ -642,8 +651,8 @@ where
 	}
 }
 
-pub fn render_selected_prepared<'conn, 'scope, Conn, Base, Shape, Projection>(
-	dialect: &'static dyn Dialect,
+pub fn render_selected_prepared<'conn, 'scope, Conn, Base, Shape, Projection, D: Dialect>(
+	dialect: &'static D,
 	selected: &Selected<'scope, Base, Shape, Projection>,
 	buffer: &mut PreparedSql<Conn::Backend>,
 ) where
@@ -664,13 +673,13 @@ pub fn render_selected_prepared<'conn, 'scope, Conn, Base, Shape, Projection>(
 		buffer.error = Some(<Conn::Backend as Backend>::render_error(error));
 		return;
 	}
-	let mut sink = SelectRenderSink::<Conn::Backend, _>::new(buffer, &mut renderer).unwrap();
+	let mut sink = SelectRenderSink::<Conn::Backend, D, _>::new(buffer, &mut renderer).unwrap();
 	selected.lower_into::<Conn, _>(&mut sink).unwrap();
 	sink.finish().unwrap();
 }
 
-pub fn write_selected_into<'conn, 'scope, Conn, Base, Shape, Projection, Writer>(
-	dialect: &'static dyn Dialect,
+pub fn write_selected_into<'conn, 'scope, Conn, Base, Shape, Projection, Writer, D: Dialect>(
+	dialect: &'static D,
 	selected: &Selected<'scope, Base, Shape, Projection>,
 	writer: &mut Writer,
 ) -> io::Result<()>
@@ -688,13 +697,13 @@ where
 		&selected.collect_ctes::<Conn, Conn::Backend>(),
 		&mut writer,
 	)?;
-	let mut sink = SelectRenderSink::<Conn::Backend, _>::new(&mut writer, &mut renderer)?;
+	let mut sink = SelectRenderSink::<Conn::Backend, D, _>::new(&mut writer, &mut renderer)?;
 	selected.lower_into::<Conn, _>(&mut sink)?;
 	sink.finish()
 }
 
-pub fn write_selected_params<'conn, 'scope, Conn, Base, Shape, Projection>(
-	dialect: &'static dyn Dialect,
+pub fn write_selected_params<'conn, 'scope, Conn, Base, Shape, Projection, D: Dialect>(
+	dialect: &'static D,
 	selected: &Selected<'scope, Base, Shape, Projection>,
 	params: &mut Vec<<Conn::Backend as Backend>::Param>,
 ) -> Result<(), <Conn::Backend as Backend>::Error>
@@ -716,7 +725,7 @@ where
 	)
 	.map_err(<Conn::Backend as Backend>::render_error)?;
 	let mut select_sink =
-		SelectRenderSink::<Conn::Backend, _>::new(&mut writer, &mut renderer).unwrap();
+		SelectRenderSink::<Conn::Backend, D, _>::new(&mut writer, &mut renderer).unwrap();
 	selected.lower_into::<Conn, _>(&mut select_sink).unwrap();
 	select_sink.finish().unwrap();
 	writer.finish()
@@ -738,14 +747,22 @@ where
 	B: Backend,
 {
 	/// Render this arm as a parenthesized set operand.
-	fn render_operand<Writer>(&self, writer: &mut Writer, renderer: &mut Renderer) -> io::Result<()>
+	fn render_operand<Writer, D: Dialect>(
+		&self,
+		writer: &mut Writer,
+		renderer: &mut Renderer<D>,
+	) -> io::Result<()>
 	where
 		Writer: SqlWriter<B>;
 
 	/// Render this arm as the outermost set (no enclosing parentheses, so a trailing `ORDER BY`/`LIMIT`
 	/// binds to the whole set). Defaults to [`render_operand`](Self::render_operand); set nodes drop the
 	/// outer parens.
-	fn render_root<Writer>(&self, writer: &mut Writer, renderer: &mut Renderer) -> io::Result<()>
+	fn render_root<Writer, D: Dialect>(
+		&self,
+		writer: &mut Writer,
+		renderer: &mut Renderer<D>,
+	) -> io::Result<()>
 	where
 		Writer: SqlWriter<B>,
 	{
@@ -755,10 +772,10 @@ where
 	/// Render this arm as the source of an `INSERT … <select>`. A single leaf renders bare (no parens —
 	/// `INSERT INTO t (cols) SELECT …`); a set node renders its `UNION`/etc. unparenthesized (defaults
 	/// to [`render_root`](Self::render_root)).
-	fn render_insert_source<Writer>(
+	fn render_insert_source<Writer, D: Dialect>(
 		&self,
 		writer: &mut Writer,
-		renderer: &mut Renderer,
+		renderer: &mut Renderer<D>,
 	) -> io::Result<()>
 	where
 		Writer: SqlWriter<B>,
@@ -779,36 +796,40 @@ where
 	Shape: ProjectionShape,
 	Projection: RenderProjectable<B>,
 {
-	fn render_operand<Writer>(&self, writer: &mut Writer, renderer: &mut Renderer) -> io::Result<()>
+	fn render_operand<Writer, D: Dialect>(
+		&self,
+		writer: &mut Writer,
+		renderer: &mut Renderer<D>,
+	) -> io::Result<()>
 	where
 		Writer: SqlWriter<B>,
 	{
 		// A set operand is wrapped so its `ORDER BY`/`LIMIT` (and, for a nested compound, its grouping)
 		// binds to the operand and not the enclosing set. Postgres/MySQL use `(SELECT …)`; SQLite
 		// rejects a parenthesized compound operand, so it uses `SELECT * FROM (SELECT …)` instead.
-		let (open, close): (&[u8], &[u8]) = match renderer.dialect.set_operand_style() {
+		let (open, close): (&[u8], &[u8]) = match D::SET_OPERAND_STYLE {
 			SetOperandStyle::Parenthesized => (b"(", b")"),
 			SetOperandStyle::SubquerySelect => (b"SELECT * FROM (", b")"),
 		};
 		writer.write_all(open)?;
 		{
-			let mut sink = SelectRenderSink::<B, Writer>::new(writer, renderer)?;
+			let mut sink = SelectRenderSink::<B, D, Writer>::new(writer, renderer)?;
 			self.selected.lower_into::<Conn, _>(&mut sink)?;
 			sink.finish()?;
 		}
 		writer.write_all(close)
 	}
 
-	fn render_insert_source<Writer>(
+	fn render_insert_source<Writer, D: Dialect>(
 		&self,
 		writer: &mut Writer,
-		renderer: &mut Renderer,
+		renderer: &mut Renderer<D>,
 	) -> io::Result<()>
 	where
 		Writer: SqlWriter<B>,
 	{
 		// A bare `SELECT …` (no enclosing parens) for `INSERT INTO t (cols) SELECT …`.
-		let mut sink = SelectRenderSink::<B, Writer>::new(writer, renderer)?;
+		let mut sink = SelectRenderSink::<B, D, Writer>::new(writer, renderer)?;
 		self.selected.lower_into::<Conn, _>(&mut sink)?;
 		sink.finish()
 	}
@@ -827,14 +848,18 @@ where
 	<L as crate::SetArm<'conn, 'scope, Conn>>::Params:
 		crate::HAppend<<R as crate::SetArm<'conn, 'scope, Conn>>::Params>,
 {
-	fn render_operand<Writer>(&self, writer: &mut Writer, renderer: &mut Renderer) -> io::Result<()>
+	fn render_operand<Writer, D: Dialect>(
+		&self,
+		writer: &mut Writer,
+		renderer: &mut Renderer<D>,
+	) -> io::Result<()>
 	where
 		Writer: SqlWriter<B>,
 	{
 		// See `SetLeaf::render_operand`. A nested compound is wrapped so its operators group correctly
 		// under the enclosing set: `(a UNION b)` for Postgres/MySQL, `SELECT * FROM (a UNION b)` for
 		// SQLite (which rejects a parenthesized compound operand).
-		let (open, close): (&[u8], &[u8]) = match renderer.dialect.set_operand_style() {
+		let (open, close): (&[u8], &[u8]) = match D::SET_OPERAND_STYLE {
 			SetOperandStyle::Parenthesized => (b"(", b")"),
 			SetOperandStyle::SubquerySelect => (b"SELECT * FROM (", b")"),
 		};
@@ -843,7 +868,11 @@ where
 		writer.write_all(close)
 	}
 
-	fn render_root<Writer>(&self, writer: &mut Writer, renderer: &mut Renderer) -> io::Result<()>
+	fn render_root<Writer, D: Dialect>(
+		&self,
+		writer: &mut Writer,
+		renderer: &mut Renderer<D>,
+	) -> io::Result<()>
 	where
 		Writer: SqlWriter<B>,
 	{
@@ -864,14 +893,18 @@ where
 	B: Backend,
 	Tree: RenderSetArm<'conn, 'scope, Conn, B>,
 {
-	fn render_operand<Writer>(&self, writer: &mut Writer, renderer: &mut Renderer) -> io::Result<()>
+	fn render_operand<Writer, D: Dialect>(
+		&self,
+		writer: &mut Writer,
+		renderer: &mut Renderer<D>,
+	) -> io::Result<()>
 	where
 		Writer: SqlWriter<B>,
 	{
 		// A nested set renders its trailing modifiers inside its own wrapper, so they bind to this
 		// operand and not the enclosing set. Postgres/MySQL wrap in `(…)`; SQLite rejects a
 		// parenthesized compound operand, so it uses `SELECT * FROM (…)` (see `SetLeaf::render_operand`).
-		let (open, close): (&[u8], &[u8]) = match renderer.dialect.set_operand_style() {
+		let (open, close): (&[u8], &[u8]) = match D::SET_OPERAND_STYLE {
 			SetOperandStyle::Parenthesized => (b"(", b")"),
 			SetOperandStyle::SubquerySelect => (b"SELECT * FROM (", b")"),
 		};
@@ -881,10 +914,10 @@ where
 		writer.write_all(close)
 	}
 
-	fn render_insert_source<Writer>(
+	fn render_insert_source<Writer, D: Dialect>(
 		&self,
 		writer: &mut Writer,
-		renderer: &mut Renderer,
+		renderer: &mut Renderer<D>,
 	) -> io::Result<()>
 	where
 		Writer: SqlWriter<B>,
@@ -926,8 +959,8 @@ fn dedup_set_ctes(ctes: Vec<&'static dyn crate::CteDef>) -> Vec<&'static dyn cra
 
 /// Writes a set's trailing `ORDER BY <output col> [ASC|DESC], … [LIMIT n] [OFFSET n]` (referencing the
 /// set's output column names, not source aliases).
-fn write_set_tail(
-	dialect: &dyn Dialect,
+fn write_set_tail<D: Dialect>(
+	dialect: &D,
 	tail: &crate::SetTail,
 	writer: &mut dyn Write,
 ) -> io::Result<()> {
@@ -947,8 +980,8 @@ fn write_set_tail(
 	dialect.write_limit_offset(tail.limit, tail.offset, writer)
 }
 
-pub fn render_set_prepared<'conn, 'scope, Conn, Tree>(
-	dialect: &'static dyn Dialect,
+pub fn render_set_prepared<'conn, 'scope, Conn, Tree, D: Dialect>(
+	dialect: &'static D,
 	tree: &Tree,
 	tail: &crate::SetTail,
 	buffer: &mut PreparedSql<Conn::Backend>,
@@ -970,8 +1003,8 @@ pub fn render_set_prepared<'conn, 'scope, Conn, Tree>(
 	write_set_tail(dialect, tail, buffer).unwrap();
 }
 
-pub fn write_set_into<'conn, 'scope, Conn, Tree, Writer>(
-	dialect: &'static dyn Dialect,
+pub fn write_set_into<'conn, 'scope, Conn, Tree, Writer, D: Dialect>(
+	dialect: &'static D,
 	tree: &Tree,
 	tail: &crate::SetTail,
 	writer: &mut Writer,
@@ -990,8 +1023,8 @@ where
 	write_set_tail(dialect, tail, &mut writer)
 }
 
-pub fn write_set_params<'conn, 'scope, Conn, Tree>(
-	dialect: &'static dyn Dialect,
+pub fn write_set_params<'conn, 'scope, Conn, Tree, D: Dialect>(
+	dialect: &'static D,
 	tree: &Tree,
 	tail: &crate::SetTail,
 	params: &mut Vec<<Conn::Backend as Backend>::Param>,
@@ -1015,8 +1048,8 @@ where
 /// before the main `SELECT`) — when the select references any CTEs. The defs are already de-duplicated
 /// and ordered by [`Selected::collect_ctes`]; each body is parameter-free (literals only), so it
 /// neither perturbs the main query's placeholder numbering nor contributes bind params.
-fn write_cte_prefix(
-	dialect: &dyn Dialect,
+fn write_cte_prefix<D: Dialect>(
+	dialect: &D,
 	ctes: &[&'static dyn crate::CteDef],
 	writer: &mut dyn Write,
 ) -> io::Result<()> {
@@ -1046,11 +1079,11 @@ fn cte_models(ctes: &[&'static dyn crate::CteDef]) -> Vec<crate::CteModel> {
 		.collect()
 }
 
-fn write_table_ref<S>(dialect: &dyn Dialect, writer: &mut impl Write) -> io::Result<()>
+fn write_table_ref<S, D: Dialect>(dialect: &D, writer: &mut impl Write) -> io::Result<()>
 where
 	S: TableProjection,
 {
-	if dialect.qualify_schema()
+	if D::QUALIFY_SCHEMA
 		&& let Some(schema) = <S as TableProjection>::schema_name()
 	{
 		dialect.write_quoted_ident(schema, writer)?;
@@ -1060,11 +1093,11 @@ where
 }
 
 /// Writes a quoted, schema-qualified reference to a `SchemaTable` model.
-fn write_schema_table_ref<S>(dialect: &dyn Dialect, writer: &mut impl Write) -> io::Result<()>
+fn write_schema_table_ref<S, D: Dialect>(dialect: &D, writer: &mut impl Write) -> io::Result<()>
 where
 	S: SchemaTable,
 {
-	if dialect.qualify_schema()
+	if D::QUALIFY_SCHEMA
 		&& let Some(schema) = <S as SchemaTable>::schema_name()
 	{
 		dialect.write_quoted_ident(schema, writer)?;
@@ -1073,8 +1106,8 @@ where
 	dialect.write_quoted_ident(<S as SchemaTable>::name(), writer)
 }
 
-pub fn write_insert<S, B, Rows, Returning>(
-	dialect: &'static dyn Dialect,
+pub fn write_insert<S, B, Rows, Returning, D: Dialect>(
+	dialect: &'static D,
 	rows: &Rows,
 	returning: &Returning,
 	conflict: Option<&ConflictClause>,
@@ -1087,11 +1120,11 @@ where
 	Returning: RenderProjectable<B>,
 {
 	let mut writer = SqlOnly(writer);
-	write_insert_with_params::<S, B, _, _, _>(dialect, rows, returning, conflict, &mut writer)
+	write_insert_with_params::<S, B, _, _, _, _>(dialect, rows, returning, conflict, &mut writer)
 }
 
-fn write_insert_with_params<S, B, Rows, Returning, Writer>(
-	dialect: &'static dyn Dialect,
+fn write_insert_with_params<S, B, Rows, Returning, Writer, D: Dialect>(
+	dialect: &'static D,
 	rows: &Rows,
 	returning: &Returning,
 	conflict: Option<&ConflictClause>,
@@ -1106,7 +1139,7 @@ where
 {
 	let mut renderer = Renderer::new(dialect);
 	writer.write_all(b"INSERT INTO ")?;
-	write_schema_table_ref::<S>(dialect, writer)?;
+	write_schema_table_ref::<S, _>(dialect, writer)?;
 	if rows.len() == 1 && rows.first_row_len() == 0 {
 		dialect.write_default_row_insert(writer)?;
 	} else {
@@ -1121,19 +1154,19 @@ where
 			Ok::<(), io::Error>(())
 		})?;
 		writer.write_all(b") VALUES ")?;
-		write_insert_rows::<B, _, _>(rows, writer, &mut renderer)?;
+		write_insert_rows::<B, _, _, _>(rows, writer, &mut renderer)?;
 	}
 	if let Some(clause) = conflict {
-		write_conflict_clause::<B, _, _>(clause, rows, dialect, writer)?;
+		write_conflict_clause::<B, _, _, _>(clause, rows, dialect, writer)?;
 	}
-	write_insert_returning::<B, _>(returning, writer, &mut renderer)?;
+	write_insert_returning::<B, _, _>(returning, writer, &mut renderer)?;
 	Ok(())
 }
 
 /// Renders `INSERT INTO t (cols) <select>` — the inserted rows come from a query (`source`, a set-op
 /// arm; a single leaf renders bare). Any CTEs the source references are hoisted into one leading `WITH`.
-fn write_insert_select_with_params<'conn, 'scope, S, Conn, Tree, Returning, Writer>(
-	dialect: &'static dyn Dialect,
+fn write_insert_select_with_params<'conn, 'scope, S, Conn, Tree, Returning, Writer, D: Dialect>(
+	dialect: &'static D,
 	columns: &[&str],
 	source: &Tree,
 	returning: &Returning,
@@ -1148,7 +1181,7 @@ where
 {
 	let mut renderer = Renderer::new(dialect);
 	writer.write_all(b"INSERT INTO ")?;
-	write_schema_table_ref::<S>(dialect, writer)?;
+	write_schema_table_ref::<S, _>(dialect, writer)?;
 	writer.write_all(b" (")?;
 	for (index, column) in columns.iter().enumerate() {
 		if index > 0 {
@@ -1164,12 +1197,12 @@ where
 	source.collect_set_ctes(&mut ctes);
 	write_cte_prefix(dialect, &dedup_set_ctes(ctes), writer)?;
 	source.render_insert_source(writer, &mut renderer)?;
-	write_insert_returning::<Conn::Backend, _>(returning, writer, &mut renderer)
+	write_insert_returning::<Conn::Backend, _, _>(returning, writer, &mut renderer)
 }
 
 /// Renders `INSERT INTO t (cols) <select>` into SQL text (discarding binds).
-pub fn write_insert_select<'conn, 'scope, S, Conn, Tree, Returning>(
-	dialect: &'static dyn Dialect,
+pub fn write_insert_select<'conn, 'scope, S, Conn, Tree, Returning, D: Dialect>(
+	dialect: &'static D,
 	columns: &[&str],
 	source: &Tree,
 	returning: &Returning,
@@ -1182,7 +1215,7 @@ where
 	Returning: RenderProjectable<Conn::Backend>,
 {
 	let mut writer = SqlOnly(writer);
-	write_insert_select_with_params::<S, Conn, _, _, _>(
+	write_insert_select_with_params::<S, Conn, _, _, _, _>(
 		dialect,
 		columns,
 		source,
@@ -1193,8 +1226,8 @@ where
 
 /// Collects the bind parameters of an `INSERT INTO t (cols) <select>` (from the source query), in
 /// render order.
-pub fn write_insert_select_params<'conn, 'scope, S, Conn, Tree, Returning>(
-	dialect: &'static dyn Dialect,
+pub fn write_insert_select_params<'conn, 'scope, S, Conn, Tree, Returning, D: Dialect>(
+	dialect: &'static D,
 	columns: &[&str],
 	source: &Tree,
 	returning: &Returning,
@@ -1209,7 +1242,7 @@ where
 	let mut writer = ParamCollector::<Conn::Backend>::new(params);
 	// The source may be an unrenderable CTE shape (a scoped recursive arm on SQLite); surface that
 	// render reject rather than swallowing it, so `collect_params()` mirrors the select/set params path.
-	write_insert_select_with_params::<S, Conn, _, _, _>(
+	write_insert_select_with_params::<S, Conn, _, _, _, _>(
 		dialect,
 		columns,
 		source,
@@ -1224,10 +1257,10 @@ where
 /// (<target>) DO NOTHING | DO UPDATE SET …` vs MySQL `ON DUPLICATE KEY UPDATE …`) goes through the
 /// [`Dialect`] seams; the replace-all `DO UPDATE` SET list (every inserted column to its excluded value,
 /// no bind parameters) is shared here.
-fn write_conflict_clause<B, Rows, Writer>(
+fn write_conflict_clause<B, Rows, Writer, D: Dialect>(
 	clause: &ConflictClause,
 	rows: &Rows,
-	dialect: &'static dyn Dialect,
+	dialect: &'static D,
 	writer: &mut Writer,
 ) -> io::Result<()>
 where
@@ -1270,15 +1303,15 @@ where
 	Ok(())
 }
 
-struct WriteInsertRows<'writer, 'renderer, B, Writer> {
+struct WriteInsertRows<'writer, 'renderer, B, D: 'static, Writer> {
 	writer: &'writer mut Writer,
-	renderer: &'renderer mut Renderer,
+	renderer: &'renderer mut Renderer<D>,
 	expected_columns: usize,
 	row_index: usize,
 	_backend: PhantomData<B>,
 }
 
-impl<B, Writer> InsertRowVisitor<io::Error> for WriteInsertRows<'_, '_, B, Writer>
+impl<B, D: Dialect, Writer> InsertRowVisitor<io::Error> for WriteInsertRows<'_, '_, B, D, Writer>
 where
 	B: Backend,
 	Writer: SqlWriter<B>,
@@ -1313,14 +1346,14 @@ where
 	}
 }
 
-struct WriteAssignmentValues<'writer, 'renderer, B, Writer> {
+struct WriteAssignmentValues<'writer, 'renderer, B, D: 'static, Writer> {
 	writer: &'writer mut Writer,
-	renderer: &'renderer mut Renderer,
+	renderer: &'renderer mut Renderer<D>,
 	index: usize,
 	_backend: PhantomData<B>,
 }
 
-impl<B, Writer> AssignmentVisitor for WriteAssignmentValues<'_, '_, B, Writer>
+impl<B, D: Dialect, Writer> AssignmentVisitor for WriteAssignmentValues<'_, '_, B, D, Writer>
 where
 	B: Backend,
 	Writer: SqlWriter<B>,
@@ -1340,14 +1373,14 @@ where
 			self.writer.write_all(b", ")?;
 		}
 		self.index += 1;
-		write_assignment_value::<B, _>(value, self.writer, self.renderer)
+		write_assignment_value::<B, _, _>(value, self.writer, self.renderer)
 	}
 }
 
-fn write_insert_rows<B, Rows, Writer>(
+fn write_insert_rows<B, Rows, Writer, D: Dialect>(
 	rows: &Rows,
 	writer: &mut Writer,
-	renderer: &mut Renderer,
+	renderer: &mut Renderer<D>,
 ) -> io::Result<()>
 where
 	B: Backend,
@@ -1364,8 +1397,8 @@ where
 	rows.try_for_each_row(&mut visitor)
 }
 
-pub fn write_update<S, B, Columns, Filters, Returning>(
-	dialect: &'static dyn Dialect,
+pub fn write_update<S, B, Columns, Filters, Returning, D: Dialect>(
+	dialect: &'static D,
 	alias: SourceAlias,
 	columns: &Columns,
 	filters: &Filters,
@@ -1380,7 +1413,7 @@ where
 	Returning: RenderProjectable<B>,
 {
 	let mut writer = SqlOnly(writer);
-	write_update_with_params::<S, B, _, _, _, _>(
+	write_update_with_params::<S, B, _, _, _, _, _>(
 		dialect,
 		alias,
 		columns,
@@ -1390,8 +1423,8 @@ where
 	)
 }
 
-fn write_update_with_params<S, B, Columns, Filters, Returning, Writer>(
-	dialect: &'static dyn Dialect,
+fn write_update_with_params<S, B, Columns, Filters, Returning, Writer, D: Dialect>(
+	dialect: &'static D,
 	alias: SourceAlias,
 	columns: &Columns,
 	filters: &Filters,
@@ -1408,7 +1441,7 @@ where
 {
 	let mut renderer = Renderer::new(dialect);
 	writer.write_all(b"UPDATE ")?;
-	write_schema_table_ref::<S>(renderer.dialect, writer)?;
+	write_schema_table_ref::<S, _>(renderer.dialect, writer)?;
 	write!(writer, " AS {alias} SET ")?;
 	let mut assignments = WriteUpdateAssignments {
 		writer,
@@ -1419,14 +1452,14 @@ where
 		_backend: PhantomData::<B>,
 	};
 	columns.try_visit(&mut assignments)?;
-	write_filters::<B, _>(filters, writer, &mut renderer)?;
-	write_returning::<B, _>(returning, writer, &mut renderer)?;
+	write_filters::<B, _, _>(filters, writer, &mut renderer)?;
+	write_returning::<B, _, _>(returning, writer, &mut renderer)?;
 	Ok(())
 }
 
-struct WriteUpdateAssignments<'writer, 'renderer, B, Writer> {
+struct WriteUpdateAssignments<'writer, 'renderer, B, D: 'static, Writer> {
 	writer: &'writer mut Writer,
-	renderer: &'renderer mut Renderer,
+	renderer: &'renderer mut Renderer<D>,
 	index: usize,
 	/// When set, the assignment target is qualified with this alias (`alias.col = …`). MySQL's
 	/// multi-table `UPDATE … JOIN … SET` resolves a bare column against the whole join list, so the
@@ -1435,7 +1468,7 @@ struct WriteUpdateAssignments<'writer, 'renderer, B, Writer> {
 	_backend: PhantomData<B>,
 }
 
-impl<B, Writer> AssignmentVisitor for WriteUpdateAssignments<'_, '_, B, Writer>
+impl<B, D: Dialect, Writer> AssignmentVisitor for WriteUpdateAssignments<'_, '_, B, D, Writer>
 where
 	B: Backend,
 	Writer: SqlWriter<B>,
@@ -1463,13 +1496,13 @@ where
 			.dialect
 			.write_quoted_ident(column, self.writer)?;
 		self.writer.write_all(b" = ")?;
-		write_assignment_value::<B, _>(value, self.writer, self.renderer)
+		write_assignment_value::<B, _, _>(value, self.writer, self.renderer)
 	}
 }
 
 /// Renders a correlated `UPDATE … <source>` into SQL text (discarding binds).
-pub fn write_update_from<S, O, B, Columns, Filters, Returning>(
-	dialect: &'static dyn Dialect,
+pub fn write_update_from<S, O, B, Columns, Filters, Returning, D: Dialect>(
+	dialect: &'static D,
 	target_alias: SourceAlias,
 	source_alias: SourceAlias,
 	columns: &Columns,
@@ -1486,7 +1519,7 @@ where
 	Returning: RenderProjectable<B>,
 {
 	let mut writer = SqlOnly(writer);
-	write_update_from_with_params::<S, O, B, _, _, _, _>(
+	write_update_from_with_params::<S, O, B, _, _, _, _, _>(
 		dialect,
 		target_alias,
 		source_alias,
@@ -1503,8 +1536,8 @@ where
 /// `FROM other AS b WHERE <predicates>`; MySQL joins `JOIN other AS b ON <predicates>` before `SET`.
 /// (For an inner-join update the join's `ON` and a trailing `WHERE` are equivalent, so the correlation
 /// and any extra filters render as one predicate list.)
-fn write_update_from_with_params<S, O, B, Columns, Filters, Returning, Writer>(
-	dialect: &'static dyn Dialect,
+fn write_update_from_with_params<S, O, B, Columns, Filters, Returning, Writer, D: Dialect>(
+	dialect: &'static D,
 	target_alias: SourceAlias,
 	source_alias: SourceAlias,
 	columns: &Columns,
@@ -1523,21 +1556,21 @@ where
 {
 	let mut renderer = Renderer::new(dialect);
 	writer.write_all(b"UPDATE ")?;
-	write_schema_table_ref::<S>(renderer.dialect, writer)?;
+	write_schema_table_ref::<S, _>(renderer.dialect, writer)?;
 	write!(writer, " AS {target_alias}")?;
-	match dialect.update_from_style() {
+	match D::UPDATE_FROM_STYLE {
 		UpdateFromStyle::PgFrom => {
 			writer.write_all(b" SET ")?;
 			// PostgreSQL forbids qualifying the `SET` target (it is implicitly the updated table).
-			write_update_assignment_list::<B, _, _>(columns, writer, &mut renderer, None)?;
+			write_update_assignment_list::<B, _, _, _>(columns, writer, &mut renderer, None)?;
 			writer.write_all(b" FROM ")?;
-			write_schema_table_ref::<O>(renderer.dialect, writer)?;
+			write_schema_table_ref::<O, _>(renderer.dialect, writer)?;
 			write!(writer, " AS {source_alias}")?;
-			write_filters::<B, _>(filters, writer, &mut renderer)?;
+			write_filters::<B, _, _>(filters, writer, &mut renderer)?;
 		}
 		UpdateFromStyle::MysqlJoin => {
 			writer.write_all(b" JOIN ")?;
-			write_schema_table_ref::<O>(renderer.dialect, writer)?;
+			write_schema_table_ref::<O, _>(renderer.dialect, writer)?;
 			write!(writer, " AS {source_alias} ON ")?;
 			let mut predicates = WritePredicateFilters {
 				writer,
@@ -1550,16 +1583,21 @@ where
 			// MySQL's multi-table `UPDATE … JOIN … SET` resolves a bare column against the whole join
 			// list, so qualify the target with its alias to avoid ambiguity with a same-named source
 			// column.
-			write_update_assignment_list::<B, _, _>(columns, writer, &mut renderer, Some(target_alias))?;
+			write_update_assignment_list::<B, _, _, _>(
+				columns,
+				writer,
+				&mut renderer,
+				Some(target_alias),
+			)?;
 		}
 	}
-	write_returning::<B, _>(returning, writer, &mut renderer)?;
+	write_returning::<B, _, _>(returning, writer, &mut renderer)?;
 	Ok(())
 }
 
 /// Collects the binds of a correlated `UPDATE … <source>` (left-to-right in render order).
-pub fn write_update_from_params<S, O, B, Columns, Filters, Returning>(
-	dialect: &'static dyn Dialect,
+pub fn write_update_from_params<S, O, B, Columns, Filters, Returning, D: Dialect>(
+	dialect: &'static D,
 	target_alias: SourceAlias,
 	source_alias: SourceAlias,
 	columns: &Columns,
@@ -1578,7 +1616,7 @@ where
 	let mut writer = ParamCollector::<B>::new(params);
 	// Propagate a render reject rather than swallowing it (uniform with the other params collectors),
 	// though a correlated-update source is a `SchemaTable` and so carries no unrenderable CTE shape.
-	write_update_from_with_params::<S, O, B, _, _, _, _>(
+	write_update_from_with_params::<S, O, B, _, _, _, _, _>(
 		dialect,
 		target_alias,
 		source_alias,
@@ -1593,10 +1631,10 @@ where
 
 /// Renders a comma-separated `col = <value>` assignment list (shared by `UPDATE` and `UPDATE … FROM`).
 /// `qualify` qualifies each target column with an alias (MySQL `UPDATE … JOIN`); `None` leaves it bare.
-fn write_update_assignment_list<B, Columns, Writer>(
+fn write_update_assignment_list<B, Columns, Writer, D: Dialect>(
 	columns: &Columns,
 	writer: &mut Writer,
-	renderer: &mut Renderer,
+	renderer: &mut Renderer<D>,
 	qualify: Option<SourceAlias>,
 ) -> io::Result<()>
 where
@@ -1613,8 +1651,8 @@ where
 	})
 }
 
-pub fn write_delete<S, B, Filters, Returning>(
-	dialect: &'static dyn Dialect,
+pub fn write_delete<S, B, Filters, Returning, D: Dialect>(
+	dialect: &'static D,
 	alias: SourceAlias,
 	filters: &Filters,
 	returning: &Returning,
@@ -1627,11 +1665,11 @@ where
 	Returning: RenderProjectable<B>,
 {
 	let mut writer = SqlOnly(writer);
-	write_delete_with_params::<S, B, _, _, _>(dialect, alias, filters, returning, &mut writer)
+	write_delete_with_params::<S, B, _, _, _, _>(dialect, alias, filters, returning, &mut writer)
 }
 
-fn write_delete_with_params<S, B, Filters, Returning, Writer>(
-	dialect: &'static dyn Dialect,
+fn write_delete_with_params<S, B, Filters, Returning, Writer, D: Dialect>(
+	dialect: &'static D,
 	alias: SourceAlias,
 	filters: &Filters,
 	returning: &Returning,
@@ -1646,16 +1684,16 @@ where
 {
 	let mut renderer = Renderer::new(dialect);
 	writer.write_all(b"DELETE FROM ")?;
-	write_table_ref::<S>(renderer.dialect, writer)?;
+	write_table_ref::<S, _>(renderer.dialect, writer)?;
 	write!(writer, " AS {alias}")?;
-	write_filters::<B, _>(filters, writer, &mut renderer)?;
-	write_returning::<B, _>(returning, writer, &mut renderer)?;
+	write_filters::<B, _, _>(filters, writer, &mut renderer)?;
+	write_returning::<B, _, _>(returning, writer, &mut renderer)?;
 	Ok(())
 }
 
 /// Renders a correlated `DELETE … <source>` into SQL text (discarding binds).
-pub fn write_delete_using<S, O, B, Filters, Returning>(
-	dialect: &'static dyn Dialect,
+pub fn write_delete_using<S, O, B, Filters, Returning, D: Dialect>(
+	dialect: &'static D,
 	target_alias: SourceAlias,
 	source_alias: SourceAlias,
 	filters: &Filters,
@@ -1670,7 +1708,7 @@ where
 	Returning: RenderProjectable<B>,
 {
 	let mut writer = SqlOnly(writer);
-	write_delete_using_with_params::<S, O, B, _, _, _>(
+	write_delete_using_with_params::<S, O, B, _, _, _, _>(
 		dialect,
 		target_alias,
 		source_alias,
@@ -1685,8 +1723,8 @@ where
 /// ([`Dialect::update_from_style`]): PostgreSQL `DELETE FROM t AS a USING other AS b WHERE <predicates>`;
 /// MySQL `DELETE a FROM t AS a JOIN other AS b ON <predicates>` (the leading alias picks the table whose
 /// rows are deleted).
-fn write_delete_using_with_params<S, O, B, Filters, Returning, Writer>(
-	dialect: &'static dyn Dialect,
+fn write_delete_using_with_params<S, O, B, Filters, Returning, Writer, D: Dialect>(
+	dialect: &'static D,
 	target_alias: SourceAlias,
 	source_alias: SourceAlias,
 	filters: &Filters,
@@ -1702,20 +1740,20 @@ where
 	Writer: SqlWriter<B>,
 {
 	let mut renderer = Renderer::new(dialect);
-	match dialect.delete_using_style() {
+	match D::DELETE_USING_STYLE {
 		DeleteUsingStyle::PgUsing => {
 			writer.write_all(b"DELETE FROM ")?;
-			write_table_ref::<S>(renderer.dialect, writer)?;
+			write_table_ref::<S, _>(renderer.dialect, writer)?;
 			write!(writer, " AS {target_alias} USING ")?;
-			write_table_ref::<O>(renderer.dialect, writer)?;
+			write_table_ref::<O, _>(renderer.dialect, writer)?;
 			write!(writer, " AS {source_alias}")?;
-			write_filters::<B, _>(filters, writer, &mut renderer)?;
+			write_filters::<B, _, _>(filters, writer, &mut renderer)?;
 		}
 		DeleteUsingStyle::MysqlJoin => {
 			write!(writer, "DELETE {target_alias} FROM ")?;
-			write_table_ref::<S>(renderer.dialect, writer)?;
+			write_table_ref::<S, _>(renderer.dialect, writer)?;
 			write!(writer, " AS {target_alias} JOIN ")?;
-			write_table_ref::<O>(renderer.dialect, writer)?;
+			write_table_ref::<O, _>(renderer.dialect, writer)?;
 			write!(writer, " AS {source_alias} ON ")?;
 			let mut predicates = WritePredicateFilters {
 				writer,
@@ -1730,9 +1768,9 @@ where
 			// subquery: `DELETE FROM t AS a WHERE EXISTS (SELECT 1 FROM other AS b WHERE <correlation>)`
 			// (SQLite's `DELETE` target allows an alias, and the subquery may reference it).
 			writer.write_all(b"DELETE FROM ")?;
-			write_table_ref::<S>(renderer.dialect, writer)?;
+			write_table_ref::<S, _>(renderer.dialect, writer)?;
 			write!(writer, " AS {target_alias} WHERE EXISTS (SELECT 1 FROM ")?;
-			write_table_ref::<O>(renderer.dialect, writer)?;
+			write_table_ref::<O, _>(renderer.dialect, writer)?;
 			write!(writer, " AS {source_alias} WHERE ")?;
 			let mut predicates = WritePredicateFilters {
 				writer,
@@ -1744,13 +1782,13 @@ where
 			writer.write_all(b")")?;
 		}
 	}
-	write_returning::<B, _>(returning, writer, &mut renderer)?;
+	write_returning::<B, _, _>(returning, writer, &mut renderer)?;
 	Ok(())
 }
 
 /// Collects the binds of a correlated `DELETE … <source>` (left-to-right in render order).
-pub fn write_delete_using_params<S, O, B, Filters, Returning>(
-	dialect: &'static dyn Dialect,
+pub fn write_delete_using_params<S, O, B, Filters, Returning, D: Dialect>(
+	dialect: &'static D,
 	target_alias: SourceAlias,
 	source_alias: SourceAlias,
 	filters: &Filters,
@@ -1767,7 +1805,7 @@ where
 	let mut writer = ParamCollector::<B>::new(params);
 	// Propagate a render reject rather than swallowing it (uniform with the other params collectors),
 	// though a correlated-delete source is a `TableProjection` and so carries no unrenderable CTE shape.
-	write_delete_using_with_params::<S, O, B, _, _, _>(
+	write_delete_using_with_params::<S, O, B, _, _, _, _>(
 		dialect,
 		target_alias,
 		source_alias,
@@ -1779,10 +1817,10 @@ where
 	writer.finish()
 }
 
-fn write_returning<B, Writer>(
+fn write_returning<B, Writer, D: Dialect>(
 	returning: &impl RenderProjectable<B>,
 	writer: &mut Writer,
-	renderer: &mut Renderer,
+	renderer: &mut Renderer<D>,
 ) -> io::Result<()>
 where
 	B: Backend,
@@ -1790,27 +1828,27 @@ where
 {
 	// An UPDATE/DELETE aliases its target, so its RETURNING columns are alias-qualified by default
 	// (PostgreSQL); SQLite cannot resolve that alias in RETURNING and renders them bare instead.
-	let unqualified = renderer.dialect.returning_omits_target_alias();
-	write_projection::<B, _>(returning, writer, renderer, unqualified)
+	let unqualified = D::RETURNING_OMITS_TARGET_ALIAS;
+	write_projection::<B, _, _>(returning, writer, renderer, unqualified)
 }
 
-fn write_insert_returning<B, Writer>(
+fn write_insert_returning<B, Writer, D: Dialect>(
 	returning: &impl RenderProjectable<B>,
 	writer: &mut Writer,
-	renderer: &mut Renderer,
+	renderer: &mut Renderer<D>,
 ) -> io::Result<()>
 where
 	B: Backend,
 	Writer: SqlWriter<B>,
 {
 	// An INSERT has no target alias, so its RETURNING columns are always unqualified.
-	write_projection::<B, _>(returning, writer, renderer, true)
+	write_projection::<B, _, _>(returning, writer, renderer, true)
 }
 
-fn write_projection<B, Writer>(
+fn write_projection<B, Writer, D: Dialect>(
 	projection: &impl RenderProjectable<B>,
 	writer: &mut Writer,
-	renderer: &mut Renderer,
+	renderer: &mut Renderer<D>,
 	unqualified_returning: bool,
 ) -> io::Result<()>
 where
@@ -1826,15 +1864,15 @@ where
 	})
 }
 
-struct WriteProjection<'writer, 'renderer, B, Writer> {
+struct WriteProjection<'writer, 'renderer, B, D: 'static, Writer> {
 	writer: &'writer mut Writer,
-	renderer: &'renderer mut Renderer,
+	renderer: &'renderer mut Renderer<D>,
 	index: usize,
 	unqualified_returning: bool,
 	_backend: PhantomData<B>,
 }
 
-impl<B, Writer> WriteProjection<'_, '_, B, Writer>
+impl<B, D: Dialect, Writer> WriteProjection<'_, '_, B, D, Writer>
 where
 	B: Backend,
 	Writer: SqlWriter<B>,
@@ -1850,7 +1888,7 @@ where
 	}
 }
 
-impl<B, Writer> ProjectionVisitor for WriteProjection<'_, '_, B, Writer>
+impl<B, D: Dialect, Writer> ProjectionVisitor for WriteProjection<'_, '_, B, D, Writer>
 where
 	B: Backend,
 	Writer: SqlWriter<B>,
@@ -1899,10 +1937,10 @@ where
 	}
 }
 
-fn write_filters<B, Writer>(
+fn write_filters<B, Writer, D: Dialect>(
 	filters: &impl RenderPredicateNodes<B>,
 	writer: &mut Writer,
-	renderer: &mut Renderer,
+	renderer: &mut Renderer<D>,
 ) -> io::Result<()>
 where
 	B: Backend,
@@ -1922,14 +1960,14 @@ where
 	Ok(())
 }
 
-struct WritePredicateFilters<'writer, 'renderer, B, Writer> {
+struct WritePredicateFilters<'writer, 'renderer, B, D: 'static, Writer> {
 	writer: &'writer mut Writer,
-	renderer: &'renderer mut Renderer,
+	renderer: &'renderer mut Renderer<D>,
 	index: usize,
 	_backend: PhantomData<B>,
 }
 
-impl<B, Writer> PredicateVisitor for WritePredicateFilters<'_, '_, B, Writer>
+impl<B, D: Dialect, Writer> PredicateVisitor for WritePredicateFilters<'_, '_, B, D, Writer>
 where
 	B: Backend,
 	Writer: SqlWriter<B>,
@@ -1950,10 +1988,10 @@ where
 	}
 }
 
-pub(crate) fn write_expr_value<K, Ast, B, Writer>(
+pub(crate) fn write_expr_value<K, Ast, B, Writer, D: Dialect>(
 	expr: &Expr<'_, K, Ast>,
 	writer: &mut Writer,
-	renderer: &mut Renderer,
+	renderer: &mut Renderer<D>,
 ) -> io::Result<()>
 where
 	K: ExprKind,
@@ -1964,10 +2002,10 @@ where
 	write_expr_value_node(expr, writer, renderer, false)
 }
 
-pub(crate) fn write_column_value<K, B, Writer>(
+pub(crate) fn write_column_value<K, B, Writer, D: Dialect>(
 	column: ColumnRef<'_, K>,
 	writer: &mut Writer,
-	renderer: &mut Renderer,
+	renderer: &mut Renderer<D>,
 ) -> io::Result<()>
 where
 	K: ExprKind,
@@ -1977,10 +2015,10 @@ where
 	write_column_value_node(column, writer, renderer, false)
 }
 
-fn write_expr_value_node<K, Ast, B, Writer>(
+fn write_expr_value_node<K, Ast, B, Writer, D: Dialect>(
 	expr: &Expr<'_, K, Ast>,
 	writer: &mut Writer,
-	renderer: &mut Renderer,
+	renderer: &mut Renderer<D>,
 	unqualified_returning: bool,
 ) -> io::Result<()>
 where
@@ -1989,15 +2027,15 @@ where
 	B: Backend,
 	Writer: SqlWriter<B>,
 {
-	write_ast::<B, _>(writer, renderer, unqualified_returning, |visitor| {
+	write_ast::<B, _, _>(writer, renderer, unqualified_returning, |visitor| {
 		expr.visit(visitor)
 	})
 }
 
-fn write_column_value_node<K, B, Writer>(
+fn write_column_value_node<K, B, Writer, D: Dialect>(
 	column: ColumnRef<'_, K>,
 	writer: &mut Writer,
-	renderer: &mut Renderer,
+	renderer: &mut Renderer<D>,
 	unqualified_returning: bool,
 ) -> io::Result<()>
 where
@@ -2005,15 +2043,15 @@ where
 	B: Backend,
 	Writer: SqlWriter<B>,
 {
-	write_ast::<B, _>(writer, renderer, unqualified_returning, |visitor| {
+	write_ast::<B, _, _>(writer, renderer, unqualified_returning, |visitor| {
 		column.visit(visitor)
 	})
 }
 
-pub(crate) fn write_predicate_value<K, Ast, B, Writer>(
+pub(crate) fn write_predicate_value<K, Ast, B, Writer, D: Dialect>(
 	predicate: &Predicate<'_, K, Ast>,
 	writer: &mut Writer,
-	renderer: &mut Renderer,
+	renderer: &mut Renderer<D>,
 ) -> io::Result<()>
 where
 	K: PredicateKind,
@@ -2021,30 +2059,30 @@ where
 	B: Backend,
 	Writer: SqlWriter<B>,
 {
-	write_ast::<B, _>(writer, renderer, false, |visitor| predicate.visit(visitor))
+	write_ast::<B, _, _>(writer, renderer, false, |visitor| predicate.visit(visitor))
 }
 
 /// Render an embedded subquery as a nested `SELECT …`, reusing the caller's [`Renderer`] so the
 /// subquery's placeholders continue the parent's numbering instead of restarting at zero.
-fn write_subselect<Sub, B, Writer>(
+fn write_subselect<Sub, B, Writer, D: Dialect>(
 	subquery: &Sub,
 	writer: &mut Writer,
-	renderer: &mut Renderer,
+	renderer: &mut Renderer<D>,
 ) -> io::Result<()>
 where
 	Sub: crate::RenderSubquery<B>,
 	B: Backend,
 	Writer: SqlWriter<B>,
 {
-	let mut sink = SelectRenderSink::<B, Writer>::new(writer, renderer)?;
+	let mut sink = SelectRenderSink::<B, D, Writer>::new(writer, renderer)?;
 	subquery.lower_subquery(&mut sink)?;
 	sink.finish()
 }
 
-pub(crate) fn write_order_value<K, Ast, B, Writer>(
+pub(crate) fn write_order_value<K, Ast, B, Writer, D: Dialect>(
 	order: &Order<'_, K, Ast>,
 	writer: &mut Writer,
-	renderer: &mut Renderer,
+	renderer: &mut Renderer<D>,
 ) -> io::Result<()>
 where
 	K: ExprKind,
@@ -2058,25 +2096,25 @@ where
 		// MySQL has no `NULLS FIRST/LAST`; emulate it with a leading `(<expr> IS NULL)` sort key. The
 		// expr is rendered twice — the param-collection pass runs this same path over a `ParamCollector`
 		// writer, so SQL placeholders and binds stay in lock-step.
-		Some(nulls) if dialect.emulates_order_nulls() => {
+		Some(nulls) if D::EMULATES_ORDER_NULLS => {
 			// `NULLS LAST` => non-nulls (0) before nulls (1) => the IS-NULL key sorts ASC; FIRST => DESC.
 			let nulls_key_direction = match nulls {
 				crate::OrderNulls::Last => "ASC",
 				crate::OrderNulls::First => "DESC",
 			};
 			writer.write_all(b"(")?;
-			write_ast::<B, _>(writer, renderer, false, |visitor| order.visit_expr(visitor))?;
+			write_ast::<B, _, _>(writer, renderer, false, |visitor| order.visit_expr(visitor))?;
 			write!(writer, " IS NULL) {nulls_key_direction}, ")?;
-			write_ast::<B, _>(writer, renderer, false, |visitor| order.visit_expr(visitor))?;
+			write_ast::<B, _, _>(writer, renderer, false, |visitor| order.visit_expr(visitor))?;
 			write!(writer, " {direction}")
 		}
 		Some(nulls) => {
-			write_ast::<B, _>(writer, renderer, false, |visitor| order.visit_expr(visitor))?;
+			write_ast::<B, _, _>(writer, renderer, false, |visitor| order.visit_expr(visitor))?;
 			write!(writer, " {direction}")?;
 			dialect.write_order_nulls(nulls, writer)
 		}
 		None => {
-			write_ast::<B, _>(writer, renderer, false, |visitor| order.visit_expr(visitor))?;
+			write_ast::<B, _, _>(writer, renderer, false, |visitor| order.visit_expr(visitor))?;
 			write!(writer, " {direction}")
 		}
 	}
@@ -2085,12 +2123,12 @@ where
 /// Render a named window definition's interior — `PARTITION BY … ORDER BY … <frame>` — between the
 /// `WINDOW w<n> AS (` and closing `)` written by [`SelectRenderSink::push_named_window`]. Mirrors the
 /// `OVER (…)` body of [`RenderExpr::visit_window`] minus the function call.
-fn write_named_window_body<Parts, Ords, B, Writer>(
+fn write_named_window_body<Parts, Ords, B, Writer, D: Dialect>(
 	partitions: &Parts,
 	orders: &Ords,
 	frame: Option<crate::FrameSpec>,
 	writer: &mut Writer,
-	renderer: &mut Renderer,
+	renderer: &mut Renderer<D>,
 ) -> io::Result<()>
 where
 	Parts: crate::RenderWindowList<B>,
@@ -2098,7 +2136,7 @@ where
 	B: Backend,
 	Writer: SqlWriter<B>,
 {
-	write_ast::<B, _>(writer, renderer, false, |visitor| {
+	write_ast::<B, _, _>(writer, renderer, false, |visitor| {
 		let mut wrote = false;
 		if <Parts as crate::RenderWindowList<B>>::NON_EMPTY {
 			visitor.writer.write_all(b"PARTITION BY ")?;
@@ -2125,10 +2163,10 @@ where
 	})
 }
 
-fn write_assignment_value<B, Value>(
+fn write_assignment_value<B, Value, D: Dialect>(
 	value: &Value,
 	writer: &mut impl SqlWriter<B>,
-	renderer: &mut Renderer,
+	renderer: &mut Renderer<D>,
 ) -> io::Result<()>
 where
 	B: Backend,
@@ -2141,13 +2179,14 @@ where
 	})
 }
 
-struct RenderAssignmentValueVisitor<'writer, 'renderer, B, Writer> {
+struct RenderAssignmentValueVisitor<'writer, 'renderer, B, D: 'static, Writer> {
 	writer: &'writer mut Writer,
-	renderer: &'renderer mut Renderer,
+	renderer: &'renderer mut Renderer<D>,
 	_backend: PhantomData<B>,
 }
 
-impl<B, Writer> AssignmentValueVisitor for RenderAssignmentValueVisitor<'_, '_, B, Writer>
+impl<B, D: Dialect, Writer> AssignmentValueVisitor
+	for RenderAssignmentValueVisitor<'_, '_, B, D, Writer>
 where
 	B: Backend,
 	Writer: SqlWriter<B>,
@@ -2182,11 +2221,11 @@ where
 	}
 }
 
-fn write_ast<B, Writer>(
+fn write_ast<B, Writer, D: Dialect>(
 	writer: &mut Writer,
-	renderer: &mut Renderer,
+	renderer: &mut Renderer<D>,
 	unqualified_returning: bool,
-	render: impl FnOnce(&mut RenderExpr<'_, '_, B, Writer>) -> io::Result<()>,
+	render: impl FnOnce(&mut RenderExpr<'_, '_, B, D, Writer>) -> io::Result<()>,
 ) -> io::Result<()>
 where
 	B: Backend,
@@ -2201,14 +2240,14 @@ where
 	render(&mut visitor)
 }
 
-struct RenderExpr<'writer, 'renderer, B, Writer> {
+struct RenderExpr<'writer, 'renderer, B, D: 'static, Writer> {
 	writer: &'writer mut Writer,
-	renderer: &'renderer mut Renderer,
+	renderer: &'renderer mut Renderer<D>,
 	unqualified_returning: bool,
 	_backend: PhantomData<B>,
 }
 
-impl<B, Writer> ExprVisitor for RenderExpr<'_, '_, B, Writer>
+impl<B, D: Dialect, Writer> ExprVisitor for RenderExpr<'_, '_, B, D, Writer>
 where
 	B: Backend,
 	Writer: SqlWriter<B>,
@@ -2250,7 +2289,7 @@ where
 		L: FnOnce(&mut Self) -> Result<(), Self::Error>,
 		R: FnOnce(&mut Self) -> Result<(), Self::Error>,
 	{
-		if op == ArithmeticOp::Divide && self.renderer.dialect.integer_division_needs_float_cast() {
+		if op == ArithmeticOp::Divide && D::INTEGER_DIVISION_NEEDS_FLOAT_CAST {
 			// Cast operands to float so integer `/` matches the builder's always-fractional division.
 			// Dialects where `/` is already float division (MySQL) skip this and fall through to a
 			// plain `/`.
@@ -2364,7 +2403,7 @@ where
 		Sub: crate::RenderSubquery<B>,
 	{
 		self.writer.write_all(b"(")?;
-		write_subselect::<Sub, B, _>(subquery, &mut *self.writer, &mut *self.renderer)?;
+		write_subselect::<Sub, B, _, _>(subquery, &mut *self.writer, &mut *self.renderer)?;
 		self.writer.write_all(b")")
 	}
 
@@ -2534,7 +2573,7 @@ where
 	{
 		// `||` (PostgreSQL) propagates NULL and infers a bare parameter's type; `CONCAT` (MySQL) also
 		// propagates NULL. Both match the builder's "nullable iff either operand is" model.
-		if self.renderer.dialect.concat_uses_pipe_operator() {
+		if D::CONCAT_USES_PIPE_OPERATOR {
 			self.writer.write_all(b"(")?;
 			left(self)?;
 			self.writer.write_all(b" || ")?;
@@ -2569,7 +2608,7 @@ where
 		// SQLite has no `SUBSTRING(s FROM start FOR len)` syntax — it spells it as the comma-argument
 		// call `substr(s, start, len)` (1-based `start`, same as the standard form), and binds `?` by
 		// value so the bounds need no cast.
-		if self.renderer.dialect.substring_uses_function_call() {
+		if D::SUBSTRING_USES_FUNCTION_CALL {
 			self.writer.write_all(b"substr(")?;
 			string(self)?;
 			self.writer.write_all(b", ")?;
@@ -2578,7 +2617,7 @@ where
 			len(self)?;
 			return self.writer.write_all(b")");
 		}
-		let bound_cast = if self.renderer.dialect.substring_bounds_need_cast() {
+		let bound_cast = if D::SUBSTRING_BOUNDS_NEED_CAST {
 			Some(SqlType::I32)
 		} else {
 			None
@@ -2600,7 +2639,7 @@ where
 		self.writer.write_all(b"CURRENT_TIMESTAMP")?;
 		// MySQL's bare `CURRENT_TIMESTAMP` is fsp 0; render `CURRENT_TIMESTAMP(6)` so a `now()` value
 		// keeps its microseconds into a `TIMESTAMP(6)` column (PostgreSQL's is already microsecond).
-		if let Some(digits) = self.renderer.dialect.now_fractional_digits() {
+		if let Some(digits) = D::NOW_FRACTIONAL_DIGITS {
 			write!(self.writer, "({digits})")?;
 		}
 		Ok(())
@@ -2619,8 +2658,7 @@ where
 	{
 		// A bare literal/param operand is cast to its timestamp type so PostgreSQL can resolve the
 		// overloaded EXTRACT; a column is already typed (`operand_cast` is `None`).
-		let operand_cast =
-			operand_cast.filter(|_| self.renderer.dialect.timestamp_operand_needs_cast());
+		let operand_cast = operand_cast.filter(|_| D::TIMESTAMP_OPERAND_NEEDS_CAST);
 		// `Second` is the whole-seconds component: PostgreSQL's `EXTRACT(SECOND …)` is fractional, so
 		// floor it to match MySQL's integer value (`FLOOR` is a no-op on MySQL's integer). Use
 		// `extract_second` for the fractional part.
@@ -2674,8 +2712,7 @@ where
 	{
 		// A bare literal/param operand is cast to its timestamp type so PostgreSQL can resolve the
 		// overloaded date_trunc; a column is already typed (`operand_cast` is `None`).
-		let operand_cast =
-			operand_cast.filter(|_| self.renderer.dialect.timestamp_operand_needs_cast());
+		let operand_cast = operand_cast.filter(|_| D::TIMESTAMP_OPERAND_NEEDS_CAST);
 		match timezone {
 			// PostgreSQL's 3-argument `date_trunc('unit', ts, 'tz')` (PG 12+) truncates `ts` in `tz`
 			// and returns a `timestamptz` directly. This avoids reinterpreting an ambiguous local wall
@@ -2714,11 +2751,10 @@ where
 	where
 		O: FnOnce(&mut Self) -> Result<(), Self::Error>,
 	{
-		let operand_cast =
-			operand_cast.filter(|_| self.renderer.dialect.timestamp_operand_needs_cast());
+		let operand_cast = operand_cast.filter(|_| D::TIMESTAMP_OPERAND_NEEDS_CAST);
 		// PostgreSQL's `EXTRACT(SECOND …)` is fractional; MySQL's is integer-only, so it uses the
 		// composite `SECOND_MICROSECOND` unit (returns `SSffffff`) divided back to fractional seconds.
-		let micro = self.renderer.dialect.extract_second_uses_microsecond_unit();
+		let micro = D::EXTRACT_SECOND_USES_MICROSECOND_UNIT;
 		self.writer.write_all(b"CAST(EXTRACT(")?;
 		self.writer.write_all(if micro {
 			b"SECOND_MICROSECOND".as_slice()
@@ -2769,7 +2805,7 @@ where
 	}
 }
 
-impl<B, Writer> PredicateAstVisitor for RenderExpr<'_, '_, B, Writer>
+impl<B, D: Dialect, Writer> PredicateAstVisitor for RenderExpr<'_, '_, B, D, Writer>
 where
 	B: Backend,
 	Writer: SqlWriter<B>,
@@ -2942,7 +2978,7 @@ where
 		self
 			.writer
 			.write_all(if negated { b" NOT IN (" } else { b" IN (" })?;
-		write_subselect::<Sub, B, _>(subquery, &mut *self.writer, &mut *self.renderer)?;
+		write_subselect::<Sub, B, _, _>(subquery, &mut *self.writer, &mut *self.renderer)?;
 		self.writer.write_all(b"))")
 	}
 
@@ -2955,7 +2991,7 @@ where
 		} else {
 			b"(EXISTS ("
 		})?;
-		write_subselect::<Sub, B, _>(subquery, &mut *self.writer, &mut *self.renderer)?;
+		write_subselect::<Sub, B, _, _>(subquery, &mut *self.writer, &mut *self.renderer)?;
 		self.writer.write_all(b"))")
 	}
 }
@@ -3010,8 +3046,8 @@ fn render_order_direction(direction: OrderDirection) -> &'static str {
 	}
 }
 
-pub fn render_insert_prepared<S, B, Rows, Returning>(
-	dialect: &'static dyn Dialect,
+pub fn render_insert_prepared<S, B, Rows, Returning, D: Dialect>(
+	dialect: &'static D,
 	rows: &Rows,
 	returning: &Returning,
 	conflict: Option<&ConflictClause>,
@@ -3023,11 +3059,11 @@ pub fn render_insert_prepared<S, B, Rows, Returning>(
 	Returning: RenderProjectable<B>,
 {
 	buffer.clear();
-	write_insert_with_params::<S, B, _, _, _>(dialect, rows, returning, conflict, buffer).unwrap();
+	write_insert_with_params::<S, B, _, _, _, _>(dialect, rows, returning, conflict, buffer).unwrap();
 }
 
-pub fn write_insert_params<S, B, Rows, Returning>(
-	dialect: &'static dyn Dialect,
+pub fn write_insert_params<S, B, Rows, Returning, D: Dialect>(
+	dialect: &'static D,
 	rows: &Rows,
 	returning: &Returning,
 	conflict: Option<&ConflictClause>,
@@ -3040,13 +3076,13 @@ where
 	Returning: RenderProjectable<B>,
 {
 	let mut writer = ParamCollector::<B>::new(params);
-	write_insert_with_params::<S, B, _, _, _>(dialect, rows, returning, conflict, &mut writer)
+	write_insert_with_params::<S, B, _, _, _, _>(dialect, rows, returning, conflict, &mut writer)
 		.unwrap();
 	writer.finish()
 }
 
-pub fn render_delete_prepared<S, B, Filters, Returning>(
-	dialect: &'static dyn Dialect,
+pub fn render_delete_prepared<S, B, Filters, Returning, D: Dialect>(
+	dialect: &'static D,
 	alias: SourceAlias,
 	filters: &Filters,
 	returning: &Returning,
@@ -3058,11 +3094,11 @@ pub fn render_delete_prepared<S, B, Filters, Returning>(
 	Returning: RenderProjectable<B>,
 {
 	buffer.clear();
-	write_delete_with_params::<S, B, _, _, _>(dialect, alias, filters, returning, buffer).unwrap();
+	write_delete_with_params::<S, B, _, _, _, _>(dialect, alias, filters, returning, buffer).unwrap();
 }
 
-pub fn write_delete_params<S, B, Filters, Returning>(
-	dialect: &'static dyn Dialect,
+pub fn write_delete_params<S, B, Filters, Returning, D: Dialect>(
+	dialect: &'static D,
 	alias: SourceAlias,
 	filters: &Filters,
 	returning: &Returning,
@@ -3075,13 +3111,13 @@ where
 	Returning: RenderProjectable<B>,
 {
 	let mut writer = ParamCollector::<B>::new(params);
-	write_delete_with_params::<S, B, _, _, _>(dialect, alias, filters, returning, &mut writer)
+	write_delete_with_params::<S, B, _, _, _, _>(dialect, alias, filters, returning, &mut writer)
 		.unwrap();
 	writer.finish()
 }
 
-pub fn render_update_prepared<S, B, Columns, Filters, Returning>(
-	dialect: &'static dyn Dialect,
+pub fn render_update_prepared<S, B, Columns, Filters, Returning, D: Dialect>(
+	dialect: &'static D,
 	alias: SourceAlias,
 	columns: &Columns,
 	filters: &Filters,
@@ -3095,12 +3131,14 @@ pub fn render_update_prepared<S, B, Columns, Filters, Returning>(
 	Returning: RenderProjectable<B>,
 {
 	buffer.clear();
-	write_update_with_params::<S, B, _, _, _, _>(dialect, alias, columns, filters, returning, buffer)
-		.unwrap();
+	write_update_with_params::<S, B, _, _, _, _, _>(
+		dialect, alias, columns, filters, returning, buffer,
+	)
+	.unwrap();
 }
 
-pub fn write_update_params<S, B, Columns, Filters, Returning>(
-	dialect: &'static dyn Dialect,
+pub fn write_update_params<S, B, Columns, Filters, Returning, D: Dialect>(
+	dialect: &'static D,
 	alias: SourceAlias,
 	columns: &Columns,
 	filters: &Filters,
@@ -3115,7 +3153,7 @@ where
 	Returning: RenderProjectable<B>,
 {
 	let mut writer = ParamCollector::<B>::new(params);
-	write_update_with_params::<S, B, _, _, _, _>(
+	write_update_with_params::<S, B, _, _, _, _, _>(
 		dialect,
 		alias,
 		columns,

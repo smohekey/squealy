@@ -11,6 +11,7 @@ mod query;
 mod sql;
 
 pub use query::{SqliteRowReader, SqliteTransaction, SqliteValue};
+pub use sql::SqliteDialect;
 
 /// The SQLite query backend marker.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -22,6 +23,23 @@ impl Sqlite {
 		crate::sql::SqliteDialect
 	}
 }
+
+// SQLite renders through `SqliteDialect`. (SQLite deliberately does NOT implement
+// `SupportsIntersectExceptAll` — it cannot render `INTERSECT/EXCEPT ALL`.)
+impl squealy::HasDialect for Sqlite {
+	type Dialect = crate::sql::SqliteDialect;
+}
+
+// Enforce the other half of that decision: SQLite's dialect const must stay `false`, mirroring the
+// absent `SupportsIntersectExceptAll` marker. Catches an accidental flip of the const to `true` (which
+// would make the view/DDL renderer emit `INTERSECT/EXCEPT ALL` that SQLite cannot parse). The
+// query-path marker's own `_DIALECT_AGREES` assertion covers the supporting backends; this covers the
+// unsupported one. See `squealy::SupportsIntersectExceptAll`.
+const _: () = assert!(
+	!<<Sqlite as squealy::HasDialect>::Dialect as squealy::Dialect>::SUPPORTS_INTERSECT_EXCEPT_ALL,
+	"SQLite cannot render INTERSECT/EXCEPT ALL: SqliteDialect::SUPPORTS_INTERSECT_EXCEPT_ALL must \
+	 stay false and Sqlite must not implement SupportsIntersectExceptAll",
+);
 
 impl squealy::SupportsNamedWindow for Sqlite {}
 

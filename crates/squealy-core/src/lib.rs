@@ -26,8 +26,8 @@ mod view;
 pub mod view_render;
 
 pub use backend::{
-	Backend, Connect, Decode, DecodeNullable, Encode, ParamWriter, RowReader, SupportsDateTrunc,
-	SupportsExtract, SupportsFullJoin, SupportsNamedWindow, SupportsReturning,
+	Backend, Connect, Decode, DecodeNullable, Encode, HasDialect, ParamWriter, RowReader,
+	SupportsDateTrunc, SupportsExtract, SupportsFullJoin, SupportsNamedWindow, SupportsReturning,
 };
 pub use column::{
 	Column, ColumnDefault, ColumnExpr, ColumnMode, ColumnName, ColumnNullability,

@@ -588,17 +588,11 @@ impl Dialect for SqliteDialect {
 		}
 	}
 
-	fn qualify_schema(&self) -> bool {
-		false
-	}
+	const QUALIFY_SCHEMA: bool = false;
 
-	fn substring_uses_function_call(&self) -> bool {
-		true
-	}
+	const SUBSTRING_USES_FUNCTION_CALL: bool = true;
 
-	fn concat_uses_pipe_operator(&self) -> bool {
-		true
-	}
+	const CONCAT_USES_PIPE_OPERATOR: bool = true;
 }
 
 fn sqlite_affinity(ty: &SqlType) -> &str {

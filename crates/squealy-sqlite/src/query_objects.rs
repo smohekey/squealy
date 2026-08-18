@@ -125,7 +125,7 @@ where
         Base: RenderSelectAst<'conn, 'scope, Conn, Sqlite>,
         Projection: RenderProjectable<Sqlite>,
     {
-        render::write_selected_into::<Conn, Base, Shape, Projection, _>(
+        render::write_selected_into::<Conn, Base, Shape, Projection, _, _>(
             &SqliteDialect,
             &self.selected,
             writer,
@@ -139,7 +139,7 @@ where
         Projection: RenderProjectable<Sqlite>,
     {
         let mut params = Vec::new();
-        render::write_selected_params::<Conn, Base, Shape, Projection>(
+        render::write_selected_params::<Conn, Base, Shape, Projection, _>(
             &SqliteDialect,
             &self.selected,
             &mut params,
@@ -200,7 +200,7 @@ where
         Returning: RenderProjectable<Sqlite>,
     {
         try_rendered_sql(|writer| {
-            render::write_insert::<S, Sqlite, _, _>(
+            render::write_insert::<S, Sqlite, _, _, _>(
                 &SqliteDialect,
                 &self.columns,
                 &self.returning,
@@ -218,7 +218,7 @@ where
         Returning: RenderProjectable<Sqlite>,
     {
         let mut params = Vec::new();
-        render::write_insert_params::<S, Sqlite, _, _>(
+        render::write_insert_params::<S, Sqlite, _, _, _>(
             &SqliteDialect,
             &self.columns,
             &self.returning,
@@ -271,7 +271,7 @@ where
         Returning: RenderProjectable<Sqlite>,
     {
         try_rendered_sql(|writer| {
-            render::write_delete::<S, Sqlite, _, _>(
+            render::write_delete::<S, Sqlite, _, _, _>(
                 &SqliteDialect,
                 self.alias,
                 &self.filters,
@@ -289,7 +289,7 @@ where
         Returning: RenderProjectable<Sqlite>,
     {
         let mut params = Vec::new();
-        render::write_delete_params::<S, Sqlite, _, _>(
+        render::write_delete_params::<S, Sqlite, _, _, _>(
             &SqliteDialect,
             self.alias,
             &self.filters,
@@ -347,7 +347,7 @@ where
         Returning: RenderProjectable<Sqlite>,
     {
         try_rendered_sql(|writer| {
-            render::write_update::<S, Sqlite, _, _, _>(
+            render::write_update::<S, Sqlite, _, _, _, _>(
                 &SqliteDialect,
                 self.alias,
                 &self.columns,
@@ -367,7 +367,7 @@ where
         Returning: RenderProjectable<Sqlite>,
     {
         let mut params = Vec::new();
-        render::write_update_params::<S, Sqlite, _, _, _>(
+        render::write_update_params::<S, Sqlite, _, _, _, _>(
             &SqliteDialect,
             self.alias,
             &self.columns,
@@ -475,13 +475,13 @@ where
 
     /// Streams SQL into caller-provided storage.
     pub fn write_sql(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
-        render::write_set_into::<Conn, Tree, _>(&SqliteDialect, &self.tree, &self.tail, writer)
+        render::write_set_into::<Conn, Tree, _, _>(&SqliteDialect, &self.tree, &self.tail, writer)
     }
 
     /// Collects bind parameters (left-to-right across the whole tree) into a newly allocated vector.
     pub fn collect_params(&self) -> Result<Vec<SqliteValue>, SqliteError> {
         let mut params = Vec::new();
-        render::write_set_params::<Conn, Tree>(&SqliteDialect, &self.tree, &self.tail, &mut params)?;
+        render::write_set_params::<Conn, Tree, _>(&SqliteDialect, &self.tree, &self.tail, &mut params)?;
         Ok(params)
     }
 }
@@ -652,7 +652,7 @@ where
     /// [`to_sql`](Self::to_sql).
     pub fn try_to_sql(&self) -> Result<String, SqliteError> {
         try_rendered_sql(|writer| {
-            render::write_insert_select::<S, Conn, _, _>(
+            render::write_insert_select::<S, Conn, _, _, _>(
                 &SqliteDialect,
                 &self.columns,
                 &self.source,
@@ -666,7 +666,7 @@ where
     /// Collect bind parameters into a newly allocated vector.
     pub fn collect_params(&self) -> Result<Vec<SqliteValue>, SqliteError> {
         let mut params = Vec::new();
-        render::write_insert_select_params::<S, Conn, _, _>(
+        render::write_insert_select_params::<S, Conn, _, _, _>(
             &SqliteDialect,
             &self.columns,
             &self.source,
@@ -990,7 +990,7 @@ where
     /// [`to_sql`](Self::to_sql).
     pub fn try_to_sql(&self) -> Result<String, SqliteError> {
         try_rendered_sql(|writer| {
-            render::write_update_from::<S, O, Sqlite, _, _, _>(
+            render::write_update_from::<S, O, Sqlite, _, _, _, _>(
                 &SqliteDialect,
                 self.target_alias,
                 self.source_alias,
@@ -1006,7 +1006,7 @@ where
     /// Collect bind parameters into a newly allocated vector.
     pub fn collect_params(&self) -> Result<Vec<SqliteValue>, SqliteError> {
         let mut params = Vec::new();
-        render::write_update_from_params::<S, O, Sqlite, _, _, _>(
+        render::write_update_from_params::<S, O, Sqlite, _, _, _, _>(
             &SqliteDialect,
             self.target_alias,
             self.source_alias,
@@ -1098,7 +1098,7 @@ where
     /// [`to_sql`](Self::to_sql).
     pub fn try_to_sql(&self) -> Result<String, SqliteError> {
         try_rendered_sql(|writer| {
-            render::write_delete_using::<S, O, Sqlite, _, _>(
+            render::write_delete_using::<S, O, Sqlite, _, _, _>(
                 &SqliteDialect,
                 self.target_alias,
                 self.source_alias,
@@ -1113,7 +1113,7 @@ where
     /// Collect bind parameters into a newly allocated vector.
     pub fn collect_params(&self) -> Result<Vec<SqliteValue>, SqliteError> {
         let mut params = Vec::new();
-        render::write_delete_using_params::<S, O, Sqlite, _, _>(
+        render::write_delete_using_params::<S, O, Sqlite, _, _, _>(
             &SqliteDialect,
             self.target_alias,
             self.source_alias,

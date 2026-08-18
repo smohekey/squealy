@@ -8,16 +8,16 @@ use crate::{
 	ViewBody, ViewQueryModel, ViewSetOp, WindowFunc,
 };
 
-fn render_qualified(
+fn render_qualified<D: Dialect>(
 	schema: Option<&str>,
 	name: &str,
-	dialect: &dyn Dialect,
+	dialect: &D,
 	writer: &mut dyn Write,
 ) -> io::Result<()> {
 	// A backend without namespaces (SQLite) suppresses the schema qualifier — a qualified name there is
 	// read as `"attached_db"."table"`, not `"schema"."table"`. The query-side `write_table_ref` honors
 	// the same seam, so view sources and query sources render alike.
-	if dialect.qualify_schema()
+	if D::QUALIFY_SCHEMA
 		&& let Some(schema) = schema
 	{
 		dialect.write_quoted_ident(schema, writer)?;
@@ -28,10 +28,10 @@ fn render_qualified(
 
 /// Renders the `SELECT …` body. `alias_projections` emits `AS <name>` per projected expression (used
 /// for subqueries and column-less views); otherwise the enclosing `CREATE VIEW (<cols>)` names them.
-fn render_select(
+fn render_select<D: Dialect>(
 	query: &ViewQueryModel,
 	alias_projections: bool,
-	dialect: &dyn Dialect,
+	dialect: &D,
 	writer: &mut dyn Write,
 ) -> io::Result<()> {
 	writer.write_all(b"SELECT ")?;
@@ -96,11 +96,11 @@ fn render_select(
 
 /// Renders a trailing `ORDER BY … [ASC|DESC] [NULLS …]` then `LIMIT`/`OFFSET`. Shared by a single
 /// `SELECT` body and the whole-set tail of a set operation.
-fn render_order_limit(
+fn render_order_limit<D: Dialect>(
 	order_by: &[OrderItem],
 	limit: Option<usize>,
 	offset: Option<usize>,
-	dialect: &dyn Dialect,
+	dialect: &D,
 	writer: &mut dyn Write,
 ) -> io::Result<()> {
 	for (index, order) in order_by.iter().enumerate() {
@@ -122,10 +122,10 @@ fn render_order_limit(
 /// aliasing each projected expression (used when the view carries no declared column list); for a set
 /// body it applies to the **leftmost** `SELECT` only, since SQL takes a compound's output names from its
 /// first arm.
-fn render_body(
+fn render_body<D: Dialect>(
 	body: &ViewBody,
 	alias_projections: bool,
-	dialect: &dyn Dialect,
+	dialect: &D,
 	writer: &mut dyn Write,
 ) -> io::Result<()> {
 	match body {
@@ -143,7 +143,7 @@ fn render_body(
 			// rejects a parenthesized compound operand and wraps with `SELECT * FROM (…)`. This is the
 			// same [`Dialect::set_operand_style`] seam the runtime set renderer honors, so a set-op *view
 			// body* renders identically to a runtime set query — the reverse parser inverts both wrappings.
-			let (open, close): (&[u8], &[u8]) = match dialect.set_operand_style() {
+			let (open, close): (&[u8], &[u8]) = match D::SET_OPERAND_STYLE {
 				SetOperandStyle::Parenthesized => (b"(", b")"),
 				SetOperandStyle::SubquerySelect => (b"SELECT * FROM (", b")"),
 			};
@@ -191,7 +191,7 @@ enum OperandWrap<'a> {
 /// dialect's [`SetOperandStyle`] delimiters; a recursive-CTE set body (rendered by [`render_with_prefix`])
 /// passes [`OperandWrap::RecursiveArm`] for per-arm bare/parenthesized handling.
 #[allow(clippy::too_many_arguments)]
-fn render_set(
+fn render_set<D: Dialect>(
 	op: ViewSetOp,
 	all: bool,
 	left: &ViewBody,
@@ -200,14 +200,14 @@ fn render_set(
 	limit: Option<usize>,
 	offset: Option<usize>,
 	wrap: OperandWrap,
-	dialect: &dyn Dialect,
+	dialect: &D,
 	writer: &mut dyn Write,
 ) -> io::Result<()> {
 	// `INTERSECT ALL`/`EXCEPT ALL` are unsupported on some dialects (SQLite allows `ALL` only
 	// after `UNION`); reject rather than emit SQL the target cannot run.
 	if all
 		&& matches!(op, ViewSetOp::Intersect | ViewSetOp::Except)
-		&& !dialect.supports_intersect_except_all()
+		&& !D::SUPPORTS_INTERSECT_EXCEPT_ALL
 	{
 		return Err(io::Error::new(
 			io::ErrorKind::Unsupported,
@@ -269,10 +269,10 @@ fn leftmost_select(body: &ViewBody) -> &ViewQueryModel {
 /// wrapped by fixed `open`/`close` delimiters so its own `ORDER BY`/`LIMIT` (and a nested compound's
 /// grouping) binds to the operand and not the enclosing set. For a recursive-CTE body
 /// ([`OperandWrap::RecursiveArm`]) each arm is wrapped per-arm (see [`render_recursive_arm`]).
-fn render_set_operand(
+fn render_set_operand<D: Dialect>(
 	body: &ViewBody,
 	wrap: &OperandWrap,
-	dialect: &dyn Dialect,
+	dialect: &D,
 	writer: &mut dyn Write,
 ) -> io::Result<()> {
 	match wrap {
@@ -291,9 +291,9 @@ fn render_set_operand(
 /// parenthesizing it: rendered `(<arm>)` where the dialect permits a parenthesized recursive arm
 /// ([`Dialect::supports_parenthesized_recursive_cte_arm`]), and rejected where it does not (SQLite — such an
 /// arm has no valid rendering there). Arms are aliased like any set operand.
-fn render_recursive_arm(
+fn render_recursive_arm<D: Dialect>(
 	arm: &ViewBody,
-	dialect: &dyn Dialect,
+	dialect: &D,
 	writer: &mut dyn Write,
 ) -> io::Result<()> {
 	let is_plain_tailless = matches!(
@@ -303,7 +303,7 @@ fn render_recursive_arm(
 	);
 	if is_plain_tailless {
 		render_body(arm, true, dialect, writer)
-	} else if dialect.supports_parenthesized_recursive_cte_arm() {
+	} else if D::SUPPORTS_PARENTHESIZED_RECURSIVE_CTE_ARM {
 		writer.write_all(b"(")?;
 		render_body(arm, true, dialect, writer)?;
 		writer.write_all(b")")
@@ -325,10 +325,10 @@ fn render_recursive_arm(
 /// This is the single shared `WITH`-prefix renderer: both a view body's `WITH` prelude and the runtime
 /// query path (`render.rs::write_cte_prefix`, which builds a `&[CteModel]` from the collected `CteDef`s)
 /// route through it.
-pub fn render_with_prefix(
+pub fn render_with_prefix<D: Dialect>(
 	recursive: bool,
 	ctes: &[CteModel],
-	dialect: &dyn Dialect,
+	dialect: &D,
 	writer: &mut dyn Write,
 ) -> io::Result<()> {
 	if ctes.is_empty() {
@@ -377,10 +377,10 @@ pub fn render_with_prefix(
 /// in scope in its body **only** under `WITH RECURSIVE`: in a plain `WITH`, a body reference to a relation
 /// that merely shares the CTE's bare name (e.g. a schemaless table named like the CTE) is an *outer* table,
 /// not a self-reference, so such a CTE must render as a plain body — never routed to the recursive path.
-fn render_cte_definition_body(
+fn render_cte_definition_body<D: Dialect>(
 	cte: &CteModel,
 	clause_recursive: bool,
-	dialect: &dyn Dialect,
+	dialect: &D,
 	writer: &mut dyn Write,
 ) -> io::Result<()> {
 	if clause_recursive && cte_is_self_referential(cte) {
@@ -400,9 +400,9 @@ fn render_cte_definition_body(
 /// ordinary); the recursive `Set` at the core renders its arms per-arm (see [`render_recursive_arm`]).
 /// A self-referential CTE whose core is not a `Set` cannot be a recursive CTE (which requires a `UNION`),
 /// so it is rejected rather than mis-rendered.
-fn render_recursive_cte_set_body(
+fn render_recursive_cte_set_body<D: Dialect>(
 	body: &ViewBody,
-	dialect: &dyn Dialect,
+	dialect: &D,
 	writer: &mut dyn Write,
 ) -> io::Result<()> {
 	match body {
@@ -518,9 +518,9 @@ fn set_op_keyword(op: ViewSetOp, all: bool) -> &'static str {
 /// renders `(<subquery>) AS <alias>` with its projections aliased so its output columns are named. The
 /// alias is emitted unquoted so it matches the column references inside expressions, which qualify with
 /// the bare alias.
-fn render_source(
+fn render_source<D: Dialect>(
 	source: &SourceItem,
-	dialect: &dyn Dialect,
+	dialect: &D,
 	writer: &mut dyn Write,
 ) -> io::Result<()> {
 	match source {
@@ -542,15 +542,15 @@ fn render_source(
 /// ([`ExprNode::Column`] with `alias: None`), rendered as bare quoted identifiers.
 ///
 /// The same structural renderer is used for every backend dialect.
-pub fn render_scalar_expr(
+pub fn render_scalar_expr<D: Dialect>(
 	node: &ExprNode,
-	dialect: &dyn Dialect,
+	dialect: &D,
 	writer: &mut dyn Write,
 ) -> io::Result<()> {
 	render_expr(node, dialect, writer)
 }
 
-fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -> io::Result<()> {
+fn render_expr<D: Dialect>(node: &ExprNode, dialect: &D, writer: &mut dyn Write) -> io::Result<()> {
 	match node {
 		ExprNode::Column { alias, column } => {
 			write!(writer, "{alias}.")?;
@@ -563,7 +563,7 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
 		// The un-modelable escape hatch: emit the already-rendered dialect SQL verbatim.
 		ExprNode::Raw(text) => writer.write_all(text.as_bytes()),
 		ExprNode::Binary { op, left, right } => {
-			if *op == ArithmeticOp::Divide && dialect.integer_division_needs_float_cast() {
+			if *op == ArithmeticOp::Divide && D::INTEGER_DIVISION_NEEDS_FLOAT_CAST {
 				// Cast operands to float so integer `/` matches the builder's always-fractional
 				// division; dialects whose `/` is already float (MySQL) skip this.
 				writer.write_all(b"(CAST(")?;
@@ -871,7 +871,7 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
 		ExprNode::ScalarFn { func, args } => match func {
 			// `CONCAT` ignores NULL on PostgreSQL, so render concat there as `||` (NULL-propagating),
 			// matching the builder's nullability model.
-			ScalarFunc::Concat if dialect.concat_uses_pipe_operator() => {
+			ScalarFunc::Concat if D::CONCAT_USES_PIPE_OPERATOR => {
 				writer.write_all(b"(")?;
 				for (i, arg) in args.iter().enumerate() {
 					if i > 0 {
@@ -883,7 +883,7 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
 			}
 			// SQLite spells substring as the comma-argument call `substr(s, start, len)` — it has no
 			// `SUBSTRING(s FROM start FOR len)` syntax (same 1-based `start` as the standard form).
-			ScalarFunc::Substring if args.len() == 3 && dialect.substring_uses_function_call() => {
+			ScalarFunc::Substring if args.len() == 3 && D::SUBSTRING_USES_FUNCTION_CALL => {
 				writer.write_all(b"substr(")?;
 				render_expr(&args[0], dialect, writer)?;
 				writer.write_all(b", ")?;
@@ -932,7 +932,7 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
 			// Match the query renderer: MySQL needs `CURRENT_TIMESTAMP(6)` so a `now()` in a view/CTE
 			// body keeps its microseconds (see `Dialect::now_fractional_digits`).
 			writer.write_all(b"CURRENT_TIMESTAMP")?;
-			if let Some(digits) = dialect.now_fractional_digits() {
+			if let Some(digits) = D::NOW_FRACTIONAL_DIGITS {
 				write!(writer, "({digits})")?;
 			}
 			Ok(())
@@ -990,7 +990,7 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
 		ExprNode::ExtractSecond { operand, result } => {
 			// Fractional seconds: PostgreSQL `EXTRACT(SECOND …)` vs MySQL composite
 			// `EXTRACT(SECOND_MICROSECOND …) / 1000000.0` (see `render.rs`).
-			let micro = dialect.extract_second_uses_microsecond_unit();
+			let micro = D::EXTRACT_SECOND_USES_MICROSECOND_UNIT;
 			if result.is_some() {
 				writer.write_all(b"CAST(")?;
 			}
@@ -1018,10 +1018,10 @@ fn render_expr(node: &ExprNode, dialect: &dyn Dialect, writer: &mut dyn Write) -
 
 /// Render an `extract`/`date_trunc` operand, wrapped in `(<operand> AT TIME ZONE '<tz>')` when a
 /// timezone is set (embedded single quotes doubled). PostgreSQL only.
-fn render_operand_at_time_zone(
+fn render_operand_at_time_zone<D: Dialect>(
 	operand: &ExprNode,
 	timezone: Option<&str>,
-	dialect: &dyn Dialect,
+	dialect: &D,
 	writer: &mut dyn Write,
 ) -> io::Result<()> {
 	match timezone {
@@ -1041,7 +1041,7 @@ fn render_operand_at_time_zone(
 /// respells one (e.g. SQLite `Length` -> `length`, not `CHAR_LENGTH`) fixes it once for both paths.
 /// `Concat`/`Substring` reach here only in their default form (a pipe-`||` concat and a function-call
 /// substring are handled by their own seams above), so their standard names suffice.
-fn scalar_func_name(func: ScalarFunc, dialect: &dyn Dialect) -> &'static str {
+fn scalar_func_name<D: Dialect>(func: ScalarFunc, dialect: &D) -> &'static str {
 	match func {
 		ScalarFunc::Lower => dialect.unary_string_fn_name(UnaryStringFunc::Lower),
 		ScalarFunc::Upper => dialect.unary_string_fn_name(UnaryStringFunc::Upper),
@@ -1062,10 +1062,10 @@ fn is_literal(node: &ExprNode) -> bool {
 }
 
 /// Renders a `CASE` branch value, wrapping it in `CAST(… AS <cast>)` when a result cast is set.
-fn render_case_value(
+fn render_case_value<D: Dialect>(
 	value: &ExprNode,
 	cast: Option<&SqlType>,
-	dialect: &dyn Dialect,
+	dialect: &D,
 	writer: &mut dyn Write,
 ) -> io::Result<()> {
 	match cast {
