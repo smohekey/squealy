@@ -98,6 +98,13 @@ The facade and backend crates default to no optional value-type features.
 | `uuid` | `uuid::Uuid` | facade, PostgreSQL, MySQL |
 | `bytes` | `bytes::Bytes` | facade, PostgreSQL, MySQL |
 | `systemtime` | `std::time::SystemTime` | facade, PostgreSQL, MySQL, test backend |
+| `time` | `time::OffsetDateTime` | facade, PostgreSQL, MySQL |
+| `chrono` | `chrono::DateTime<Utc>` | facade, PostgreSQL, MySQL |
+| `serde` | backend JSON wrapper for serde values | PostgreSQL, MySQL |
+
+Enable a value type on both `squealy` and the selected backend. A backend feature forwards the
+matching facade feature, so enabling it on the backend dependency is sufficient when Cargo unifies
+features.
 
 ## SQLite create DDL (opt in)
 
@@ -116,13 +123,6 @@ migrations, schema diffing, introspection, or history tables. `SqliteConnection:
 the driver's batch semantics without adding a transaction, while `list_user_tables` returns stable
 binary-sorted application table names. Rendering is byte-identical for a given renderer version;
 persisted fingerprints should include that version because formatting may change in a future release.
-| `time` | `time::OffsetDateTime` | facade, PostgreSQL, MySQL |
-| `chrono` | `chrono::DateTime<Utc>` | facade, PostgreSQL, MySQL |
-| `serde` | backend JSON wrapper for serde values | PostgreSQL, MySQL |
-
-Enable a value type on both `squealy` and the selected backend. A backend feature forwards the
-matching facade feature, so enabling it on the backend dependency is sufficient when Cargo unifies
-features.
 
 ## Project boundary
 
